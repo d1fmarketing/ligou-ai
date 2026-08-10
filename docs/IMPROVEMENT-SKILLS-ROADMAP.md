@@ -1,5 +1,9 @@
 # Ligou — roadmap de skills para melhorar a landing page
 
+**Status:** registro histórico pré-V3. O contrato `.impeccable.md`, a personificação do
+Ligou e a intervenção V3 já foram implementados; este documento preserva a sequência
+que orientou a rodada, não descreve o estado atual do projeto.
+
 ## Recomendação curta
 
 Para este projeto, a sequência de maior retorno é:
@@ -43,7 +47,7 @@ O Mobbin entra inicialmente em `critique` e `layout`. Os screenshots exemplifica
 - `delight`: usar somente depois de confiança, conversão, robustez e performance; microinterações não podem competir com a demo.
 - `product-design:audit`: usar quando existir o fluxo completo demo → SMS → checkout → onboarding. Para a landing isolada, ainda é prematura.
 
-## 2. Contexto obrigatório antes do redesign
+## 2. Contexto registrado antes da V3
 
 O `impeccable` exige contexto explícito antes do trabalho visual. Já sabemos:
 
@@ -53,7 +57,8 @@ O `impeccable` exige contexto explícito antes do trabalho visual. Já sabemos:
 - ação secundária: contratar;
 - limite de confiança: nenhuma atividade, prova ou cliente fabricado.
 
-Ainda precisamos registrar com RJ:
+As perguntas abaixo orientaram a conversa e foram consolidadas em `.impeccable.md` e
+nos assets de marca aprovados:
 
 1. três palavras de personalidade e a emoção que o Ligou deve provocar;
 2. referências e anti-referências, com o motivo de cada escolha;
@@ -62,7 +67,8 @@ Ainda precisamos registrar com RJ:
 5. o que deve permanecer, pode mudar ou deve desaparecer do baseline;
 6. ativos de marca existentes e limitações técnicas ou comerciais.
 
-Mobbin e a estética atual não preencherão essas decisões por inferência. As respostas devem ser registradas em `.impeccable.md` e confirmadas por RJ.
+Mobbin e a estética anterior não preencheram essas decisões por inferência. As decisões
+registradas vieram da direção de RJ e da aprovação do personagem.
 
 ## 3. Como o Mobbin entra
 
@@ -75,7 +81,7 @@ O primeiro levantamento está documentado em [`MOBBIN-REFERENCE-LOG.md`](MOBBIN-
 
 O levantamento atual não sustenta decisões de `typeset` ou `adapt`: não há evidência de fonte/licença/glifos PT-BR, performance ou pares equivalentes desktop/mobile. Depois do contexto de marca, devemos pesquisar referências adicionais de click-to-call, telefonia/voz, serviços de campo e conversão mobile.
 
-## 4. Sequência prática
+## 4. Sequência prática aplicada (registro histórico)
 
 ### Sessão 1 — ensinar o contexto
 
@@ -91,7 +97,9 @@ Usar `frontend-design` para produzir no máximo duas direções em wireframes/to
 
 ### Sessão 4 — implementar a intervenção aprovada
 
-Usar `layout` e depois `typeset`. A copy v2.1 permanece congelada; reconstrução total só acontece se a crítica demonstrar que ela é necessária.
+Usar `layout` e depois `typeset`. A copy v2.1 permanece congelada como base histórica;
+adições aprovadas entram na fonte V3 separada. Reconstrução total só acontece se a
+crítica demonstrar que ela é necessária.
 
 ### Sessão 5 — adaptar, endurecer e otimizar
 
@@ -114,4 +122,4 @@ A próxima versão visual será melhor se:
 - toda evidência for real, autorizada e verificável;
 - o orçamento de performance definido no baseline for atingido ou tiver desvio explícito;
 - não restarem problemas P0/P1 na reauditoria;
-- a copy pública continuar fiel à v2.1.
+- a copy pública continuar fiel à v2.1 preservada e às adições aprovadas na fonte V3.

@@ -6,7 +6,9 @@
 
 **Fonte de copy:** [`source/LIGOU-COPY-V2.1-FROZEN.md`](source/LIGOU-COPY-V2.1-FROZEN.md). A v1 do texto é somente histórico e foi substituída.
 
-Os arquivos que compõem este snapshot e seus hashes estão registrados em [`BASELINE-MANIFEST.md`](BASELINE-MANIFEST.md). Isso permite verificar o baseline independentemente de commits futuros.
+Os artefatos renderizados que compõem este snapshot e seus hashes estão registrados em
+[`BASELINE-MANIFEST.md`](BASELINE-MANIFEST.md). A documentação de apoio pode evoluir sem
+alterar o snapshot; o manifesto permite verificar o baseline independentemente de commits futuros.
 
 ## 1. Objetivo desta versão
 

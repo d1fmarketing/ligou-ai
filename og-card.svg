@@ -1,61 +1,90 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
-  <rect width="1200" height="630" fill="#fbfcf8" />
-  <circle cx="1130" cy="88" r="176" fill="none" stroke="#dce8e8" stroke-width="2" />
-  <path
-    d="M0 562 C150 562 170 512 320 512s170 78 330 78 177-55 320-55 151 27 250 27"
-    fill="none"
-    stroke="#ff5a36"
-    stroke-width="4"
-  />
+  <defs>
+    <style>
+      @font-face {
+        font-family: "Familjen Grotesk Local";
+        src: url("assets/fonts/familjen-grotesk-600.ttf") format("truetype");
+        font-weight: 600;
+      }
 
-  <g transform="translate(62 48)">
+      @font-face {
+        font-family: "Archivo Local";
+        src: url("assets/fonts/archivo-700.ttf") format("truetype");
+        font-weight: 700;
+      }
+
+      .display {
+        font-family: "Familjen Grotesk Local", sans-serif;
+        font-weight: 600;
+      }
+
+      .label {
+        font-family: "Archivo Local", sans-serif;
+        font-weight: 700;
+        letter-spacing: 2.4px;
+      }
+    </style>
+    <clipPath id="agentCrop">
+      <rect x="722" y="18" width="440" height="592" rx="28" />
+    </clipPath>
+  </defs>
+
+  <rect width="1200" height="630" fill="#fbfcf8" />
+  <circle cx="1005" cy="244" r="230" fill="none" stroke="#dbe7e7" stroke-width="2" />
+  <circle cx="1005" cy="244" r="173" fill="none" stroke="#edf3f1" stroke-width="32" />
+
+  <g transform="translate(62 42)">
     <circle cx="25" cy="25" r="25" fill="#ff5a36" />
     <path
       d="M16.1 12.5c1.1-1.1 2.8-1.2 4-.3l4.2 3.3c1.1.8 1.3 2.4.7 3.5l-2.1 3.7a24.4 24.4 0 0 0 6.7 6.7l3.7-2.1c1.2-.6 2.7-.4 3.5.7l3.3 4.2c.9 1.2.8 2.9-.3 4l-2.2 2.2c-2 2-5 2.7-7.6 1.7a31.7 31.7 0 0 1-18-18c-.9-2.6-.3-5.6 1.7-7.6l2.4-2Z"
       fill="#041d27"
     />
-    <text x="65" y="35" fill="#041d27" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="700" letter-spacing="-2">Ligou</text>
+    <text class="display" x="65" y="36" fill="#041d27" font-size="42" letter-spacing="-2">Ligou</text>
   </g>
 
-  <g transform="translate(62 172)">
-    <text fill="#041d27" font-family="Arial, Helvetica, sans-serif" font-size="104" font-weight="700" letter-spacing="-7">
-      <tspan x="0" y="90">Ligou?</tspan>
-      <tspan x="0" y="188" fill="#b83216">Atendido.</tspan>
+  <g transform="translate(62 148)">
+    <rect x="0" y="0" width="28" height="3" fill="#ff5a36" />
+    <text class="label" x="42" y="5" fill="#0b655a" font-size="13">AGENTE OPERACIONAL BILÍNGUE</text>
+
+    <text class="display" fill="#041d27" font-size="108" letter-spacing="-7">
+      <tspan x="0" y="112">Ligou?</tspan>
+      <tspan x="0" y="210" fill="#b83216">Atendido.</tspan>
     </text>
-    <text fill="#36535d" font-family="Arial, Helvetica, sans-serif" font-size="25" font-weight="400">
-      <tspan x="4" y="250">Seu negócio atende em inglês,</tspan>
-      <tspan x="4" y="287">mesmo quando você não pode.</tspan>
+
+    <text class="display" fill="#082f3d" font-size="32" letter-spacing="-1.2">
+      <tspan x="4" y="278">Você fala com o Ligou.</tspan>
+      <tspan x="4" y="316">O Ligou fala com seus clientes.</tspan>
+    </text>
+
+    <text class="label" x="4" y="395" fill="#0b655a" font-size="11">
+      MEMÓRIA ESPECÍFICA  ·  FERRAMENTAS AUTORIZADAS
+    </text>
+    <text class="label" x="4" y="421" fill="#0b655a" font-size="11">
+      APROVAÇÃO DO DONO  ·  PORTUGUÊS ↔ INGLÊS
     </text>
   </g>
 
-  <g transform="translate(660 100)">
-    <rect width="472" height="420" rx="38" fill="#082f3d" />
-    <path d="M0 92H472M118 0V420M236 0V420M354 0V420" stroke="#174755" stroke-width="1" />
-    <path d="M0 184H472M0 276H472M0 368H472" stroke="#174755" stroke-width="1" />
+  <image
+    href="assets/ligou-agent-v1.webp"
+    x="722"
+    y="18"
+    width="440"
+    height="660"
+    preserveAspectRatio="xMidYMid meet"
+    clip-path="url(#agentCrop)"
+  />
 
-    <circle cx="45" cy="43" r="7" fill="#46c2af" />
-    <text x="62" y="49" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="700" letter-spacing="2">LIGAÇÃO EM ANDAMENTO</text>
-
-    <circle cx="112" cy="196" r="70" fill="#041d27" stroke="#56717a" stroke-width="2" />
-    <text x="112" y="184" text-anchor="middle" fill="#94a8ad" font-family="Arial, Helvetica, sans-serif" font-size="10" font-weight="700" letter-spacing="2">CLIENTE</text>
-    <text x="112" y="224" text-anchor="middle" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="42" font-weight="700">EN</text>
-
-    <g fill="#ff5a36" transform="translate(211 164)">
-      <rect x="0" y="27" width="6" height="18" rx="3" />
-      <rect x="13" y="16" width="6" height="40" rx="3" />
-      <rect x="26" y="4" width="6" height="64" rx="3" />
-      <rect x="39" y="13" width="6" height="46" rx="3" />
-      <rect x="52" y="24" width="6" height="24" rx="3" />
-    </g>
-
-    <circle cx="360" cy="196" r="70" fill="#041d27" stroke="#46c2af" stroke-width="2" />
-    <text x="360" y="184" text-anchor="middle" fill="#94a8ad" font-family="Arial, Helvetica, sans-serif" font-size="10" font-weight="700" letter-spacing="2">VOCÊ</text>
-    <text x="360" y="224" text-anchor="middle" fill="#46c2af" font-family="Arial, Helvetica, sans-serif" font-size="42" font-weight="700">PT</text>
-
-    <rect x="105" y="313" width="262" height="60" rx="30" fill="#174755" stroke="#46c2af" stroke-width="1" />
-    <circle cx="137" cy="343" r="18" fill="#46c2af" />
-    <path d="m129 343 6 6 11-13" fill="none" stroke="#041d27" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
-    <text x="166" y="339" fill="#c9d8d9" font-family="Arial, Helvetica, sans-serif" font-size="8" font-weight="700" letter-spacing="1.5">RESPOSTA CONTROLADA</text>
-    <text x="166" y="355" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700">Somente regras aprovadas</text>
+  <g transform="translate(750 510)">
+    <rect width="380" height="74" rx="18" fill="#082f3d" />
+    <circle cx="30" cy="37" r="7" fill="#46c2af" />
+    <text class="label" x="50" y="31" fill="#46c2af" font-size="10">CONHEÇA O LIGOU</text>
+    <text class="display" x="50" y="54" fill="#ffffff" font-size="20">Competente · calmo · operacional</text>
   </g>
+
+  <path
+    d="M0 602 C150 602 170 552 320 552s170 58 330 58 177-42 320-42 151 34 250 34"
+    fill="none"
+    stroke="#ff5a36"
+    stroke-width="4"
+  />
 </svg>

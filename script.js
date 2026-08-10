@@ -7,26 +7,31 @@ const SITE_CONFIG = Object.freeze({
 });
 
 const header = document.querySelector("[data-header]");
+const headerCta = document.querySelector(".header-cta");
 const notice = document.querySelector("[data-site-notice]");
 const noticeText = document.querySelector("[data-notice-text]");
 const noticeClose = document.querySelector("[data-notice-close]");
 const callDock = document.querySelector("[data-call-dock]");
 const heroSection = document.querySelector("#inicio");
 const pricingSection = document.querySelector("#preco");
+const root = document.documentElement;
+const mobileDockMedia = window.matchMedia("(max-width: 900px)");
 let noticeTimer;
 let dockVisible = false;
+let chromeFrame = 0;
+let collectVisibleReveals = () => [];
 
 function showNotice(message) {
   window.clearTimeout(noticeTimer);
+  notice.toggleAttribute("inert", false);
   noticeText.textContent = message;
   notice.classList.add("is-visible");
-  noticeTimer = window.setTimeout(() => {
-    notice.classList.remove("is-visible");
-  }, 5200);
+  noticeTimer = window.setTimeout(closeNotice, 5200);
 }
 
 function closeNotice() {
   notice.classList.remove("is-visible");
+  notice.toggleAttribute("inert", true);
   window.clearTimeout(noticeTimer);
 }
 
@@ -98,12 +103,15 @@ function configureReveal() {
 
   const revealAll = () => elements.forEach((element) => element.classList.add("is-visible"));
 
-  const revealWithinViewport = () => {
+  collectVisibleReveals = () => {
     const limit = window.innerHeight * 1.15;
-    elements.forEach((element) => {
-      if (element.classList.contains("is-visible")) return;
-      if (element.getBoundingClientRect().top < limit) element.classList.add("is-visible");
-    });
+    return elements
+      .filter((element) => !element.classList.contains("is-visible"))
+      .filter((element) => element.getBoundingClientRect().top < limit);
+  };
+
+  const revealWithinViewport = () => {
+    collectVisibleReveals().forEach((element) => element.classList.add("is-visible"));
   };
 
   document.documentElement.classList.add("reveal-ready");
@@ -143,28 +151,6 @@ function configureReveal() {
 
   // Retorno pelo cache de navegação (bfcache) não reexecuta o script.
   window.addEventListener("pageshow", revealWithinViewport);
-
-  /*
-   * Varredura por rolagem, limitada a um quadro.
-   *
-   * Cobre o caminho do teclado sem depender de evento: ao tabular para um bloco
-   * fora da tela, o navegador rola até ele, e a rolagem fixa a revelação. Sem
-   * isso, um bloco aberto por :focus-within voltaria a sumir no blur caso o
-   * observer ainda não tivesse disparado.
-   */
-  let sweepQueued = false;
-  window.addEventListener(
-    "scroll",
-    () => {
-      if (sweepQueued) return;
-      sweepQueued = true;
-      window.requestAnimationFrame(() => {
-        sweepQueued = false;
-        revealWithinViewport();
-      });
-    },
-    { passive: true },
-  );
 }
 
 function configureFaq() {
@@ -190,39 +176,60 @@ function configureFaq() {
  * A posição é calculada no mesmo handler de scroll em vez de um observer
  * próprio: menos peças, e imune à suspensão de callback que causava tela branca.
  */
-function updateCallDock() {
-  if (!callDock || !heroSection) return;
-
-  const heroPassed = heroSection.getBoundingClientRect().bottom < 80;
-  const pricingInView = pricingSection
-    ? pricingSection.getBoundingClientRect().top < window.innerHeight * 0.85
-    : false;
-  const shouldShow = heroPassed && !pricingInView;
-
+function applyCallDockState(shouldShow) {
   if (shouldShow === dockVisible) return;
   dockVisible = shouldShow;
 
   callDock.classList.toggle("is-visible", shouldShow);
   callDock.toggleAttribute("inert", !shouldShow);
+  root.classList.toggle("dock-visible", shouldShow);
+
+  headerCta?.toggleAttribute("inert", shouldShow);
+  if (shouldShow) {
+    headerCta?.setAttribute("aria-hidden", "true");
+  } else {
+    headerCta?.removeAttribute("aria-hidden");
+  }
 }
 
 function updatePageChrome() {
   const scrollTop = window.scrollY;
-  const scrollableHeight = document.documentElement.scrollHeight - window.innerHeight;
+  const viewportHeight = window.innerHeight;
+  const scrollableHeight = root.scrollHeight - viewportHeight;
   const progress = scrollableHeight > 0 ? Math.min(scrollTop / scrollableHeight, 1) : 0;
+  const heroBottom = heroSection?.getBoundingClientRect().bottom ?? Number.POSITIVE_INFINITY;
+  const pricingTop = pricingSection?.getBoundingClientRect().top ?? Number.POSITIVE_INFINITY;
+  const revealsToShow = collectVisibleReveals();
+  const shouldShowDock =
+    Boolean(callDock && heroSection) &&
+    mobileDockMedia.matches &&
+    heroBottom < 80 &&
+    pricingTop >= viewportHeight * 0.85;
 
   header?.classList.toggle("is-scrolled", scrollTop > 20);
-  document.documentElement.style.setProperty("--scroll-progress", progress.toFixed(4));
-  updateCallDock();
+  root.style.setProperty("--scroll-progress", progress.toFixed(4));
+  applyCallDockState(shouldShowDock);
+  revealsToShow.forEach((element) => element.classList.add("is-visible"));
+}
+
+function schedulePageChromeUpdate() {
+  if (chromeFrame) return;
+
+  chromeFrame = window.requestAnimationFrame(() => {
+    chromeFrame = 0;
+    updatePageChrome();
+  });
 }
 
 noticeClose?.addEventListener("click", closeNotice);
-window.addEventListener("scroll", updatePageChrome, { passive: true });
-window.addEventListener("resize", updatePageChrome, { passive: true });
+window.addEventListener("scroll", schedulePageChromeUpdate, { passive: true });
+window.addEventListener("resize", schedulePageChromeUpdate, { passive: true });
+window.addEventListener("pageshow", schedulePageChromeUpdate);
+mobileDockMedia.addEventListener("change", schedulePageChromeUpdate);
 
 configureCalls();
 configureCheckout();
 configureLegalLinks();
 configureReveal();
 configureFaq();
-updatePageChrome();
+schedulePageChromeUpdate();
