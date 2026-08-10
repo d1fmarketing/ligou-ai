@@ -13,14 +13,36 @@
   --white: #ffffff;
   --line: #c9d8d9;
   --muted: #597079;
+  --confirm-deep: #073f39;
   --display: "Familjen Grotesk", "Arial Narrow", sans-serif;
-  --body: "Instrument Sans", Arial, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --body: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --mono: "Martian Mono", ui-monospace, monospace;
   --container: 1180px;
   --radius-sm: 12px;
   --radius-md: 20px;
   --radius-lg: 32px;
+
+  /* Sombra dura = superfície de ação. Nunca em bloco informativo. */
   --shadow-hard: 8px 8px 0 var(--ink-deep);
+  /* Elevação neutra para peças de conteúdo que precisam descolar do fundo. */
+  --shadow-lift: 0 18px 40px -22px rgba(4, 29, 39, 0.45);
+
+  --space-2xs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+  --space-4xl: 96px;
+
+  /* Ritmo vertical: seção de argumento respira, seção de mecânica é compacta. */
+  --band-open: clamp(96px, 11vw, 150px);
+  --band-tight: clamp(72px, 8vw, 112px);
+
+  --measure: 66ch;
+  --dock-height: 0px;
 }
 
 *,
@@ -307,16 +329,17 @@ blockquote {
   min-width: 0;
 }
 
+/* Rótulo editorial: caixa-alta em Archivo. Mono é reservada a dado de máquina. */
 .eyebrow,
 .section-label {
   display: flex;
   align-items: center;
   gap: 11px;
-  margin-bottom: 22px;
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.11em;
+  margin-bottom: var(--space-lg);
+  font-family: var(--body);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
   line-height: 1.3;
   text-transform: uppercase;
 }
@@ -420,12 +443,15 @@ blockquote {
   letter-spacing: 0.02em;
 }
 
+/* O número é o dado mais importante da página. Mono estreitada para caber inteiro. */
 .demo-label strong {
   overflow: hidden;
   font-family: var(--mono);
-  font-size: clamp(19px, 2.5vw, 27px);
-  letter-spacing: -0.04em;
-  line-height: 1.15;
+  font-size: clamp(18px, 2.3vw, 25px);
+  font-variation-settings: "wdth" 80;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -436,12 +462,11 @@ blockquote {
 }
 
 .demo-note {
-  margin: 19px 0 20px;
-  padding-left: 17px;
-  border-left: 2px solid var(--line);
+  max-width: 52ch;
+  margin: 18px 0 22px;
   color: var(--muted);
   font-size: 14px;
-  line-height: 1.55;
+  line-height: 1.6;
 }
 
 .demo-note strong {
@@ -531,9 +556,10 @@ blockquote {
 .call-status {
   position: relative;
   z-index: 1;
-  font-family: var(--mono);
+  font-family: var(--body);
   font-size: 10px;
-  letter-spacing: 0.08em;
+  font-weight: 700;
+  letter-spacing: 0.15em;
   text-transform: uppercase;
 }
 
@@ -553,9 +579,13 @@ blockquote {
   animation: live-pulse 2s ease-in-out infinite;
 }
 
+/* Dado de máquina: duração real da chamada de exemplo. Mono é literal aqui. */
 .call-time {
   color: var(--confirm-bright);
+  font-family: var(--mono);
   font-size: 12px;
+  font-variation-settings: "wdth" 85;
+  letter-spacing: 0;
 }
 
 .language-route {
@@ -588,10 +618,11 @@ blockquote {
 
 .route-node small,
 .route-kicker {
-  color: rgba(255, 255, 255, 0.62);
-  font-family: var(--mono);
-  font-size: 8px;
-  letter-spacing: 0.11em;
+  color: rgba(255, 255, 255, 0.66);
+  font-family: var(--body);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
 }
 
@@ -695,10 +726,11 @@ blockquote {
 }
 
 .approved-rule span {
-  color: rgba(255, 255, 255, 0.55);
-  font-family: var(--mono);
-  font-size: 7px;
-  letter-spacing: 0.1em;
+  color: rgba(255, 255, 255, 0.6);
+  font-family: var(--body);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
 }
 
 .approved-rule strong {
@@ -721,9 +753,10 @@ blockquote {
 .mini-summary-top {
   margin-bottom: 12px;
   color: var(--muted);
-  font-family: var(--mono);
-  font-size: 8px;
-  letter-spacing: 0.08em;
+  font-family: var(--body);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
 }
 
 .summary-check {
@@ -805,9 +838,29 @@ blockquote {
   background: var(--mist);
 }
 
+/*
+ * Texto claro sobre fundo escuro é lido como mais leve do que é e precisa de
+ * mais entrelinha para não fechar. Mesma copy, mesmo tamanho, leitura melhor.
+ */
+.section-dark p,
+.pricing-intro p,
+.footer-main p {
+  line-height: 1.62;
+}
+
+/* Medida de leitura: nenhuma linha de corpo passa de ~66 caracteres. */
+.learning-copy p,
+.pain-story p,
+.demo-anchor p,
+.step-copy p,
+.faq-answer p,
+.pricing-close > p {
+  max-width: var(--measure);
+}
+
 .difference {
   position: relative;
-  padding: 130px 0;
+  padding: var(--band-open) 0;
   overflow: hidden;
 }
 
@@ -868,13 +921,27 @@ blockquote {
   font-size: clamp(47px, 5vw, 71px);
 }
 
+/*
+ * Ênfase de headline por TOM, não por acento.
+ * A primeira oração recua, a segunda — que é o argumento — fica cheia.
+ * Isso devolve o laranja para as três superfícies de ação da página.
+ */
+.difference h2 {
+  color: rgba(255, 255, 255, 0.55);
+}
+
 .difference h2 em {
-  color: var(--signal);
+  color: var(--white);
   font-style: normal;
 }
 
+.proof h2,
+.pain h2 {
+  color: var(--muted);
+}
+
 .pain h2 em {
-  color: var(--signal-text);
+  color: var(--ink-deep);
   font-style: normal;
 }
 
@@ -898,7 +965,7 @@ blockquote {
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 25px;
   background: var(--paper);
-  box-shadow: 14px 14px 0 var(--signal);
+  box-shadow: 14px 14px 0 rgba(255, 255, 255, 0.08);
   color: var(--ink-deep);
 }
 
@@ -926,10 +993,10 @@ blockquote {
 .plan-label,
 .plan-badge,
 .founder-label {
-  font-family: var(--mono);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
+  font-family: var(--body);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
   text-transform: uppercase;
 }
 
@@ -1021,9 +1088,10 @@ blockquote {
 }
 
 .onboarding-checklist span {
-  color: var(--signal-text);
+  color: var(--confirm-text);
   font-family: var(--mono);
   font-size: 9px;
+  font-variation-settings: "wdth" 80;
 }
 
 .learning-grid {
@@ -1066,6 +1134,7 @@ blockquote {
   color: var(--confirm-bright);
   font-family: var(--mono);
   font-size: 10px;
+  font-variation-settings: "wdth" 80;
 }
 
 .flow-approved .flow-number {
@@ -1106,10 +1175,12 @@ blockquote {
   color: var(--white);
 }
 
+/* Citação de destaque com fios acima e abaixo — a escala já é a ênfase. */
 .learning-copy blockquote {
-  margin: 34px 0 24px;
-  padding: 22px 0 22px 24px;
-  border-left: 4px solid var(--signal);
+  margin: 38px 0 26px;
+  padding: 26px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.22);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.22);
   color: var(--white);
   font-family: var(--display);
   font-size: clamp(25px, 2.4vw, 34px);
@@ -1124,7 +1195,7 @@ blockquote {
 }
 
 .proof {
-  padding: 135px 0;
+  padding: var(--band-tight) 0;
 }
 
 .proof-grid {
@@ -1144,12 +1215,44 @@ blockquote {
 .section-heading h2 span,
 .start-heading h2 span {
   display: block;
-  color: var(--signal-text);
+  color: var(--ink-deep);
+}
+
+/*
+ * Rótulo VISÍVEL de exemplo. O aria-label do <article> resolve para leitor de
+ * tela, mas quem enxerga a notificação precisa saber que ela é ilustrativa.
+ */
+.proof-device {
+  width: min(100%, 520px);
+  margin-inline: auto;
+}
+
+.example-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 var(--space-md);
+  padding: 7px 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.example-chip > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--confirm);
 }
 
 .phone-summary {
   position: relative;
-  width: min(100%, 520px);
+  width: 100%;
   margin-inline: auto;
   padding: 45px 22px 28px;
   border: 3px solid var(--ink-deep);
@@ -1232,15 +1335,16 @@ blockquote {
 }
 
 .notification-title span {
-  padding: 5px 9px;
+  padding: 5px 10px;
   border-radius: 999px;
   background: rgba(255, 90, 54, 0.12);
   color: var(--signal-text);
-  font-family: var(--mono);
-  font-size: 8px;
+  font-family: var(--body);
+  font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .notification-card p {
@@ -1274,7 +1378,7 @@ blockquote {
 }
 
 .pain {
-  padding: 130px 0;
+  padding: var(--band-open) 0;
   background: var(--white);
 }
 
@@ -1315,11 +1419,11 @@ blockquote {
   border: 2px solid var(--ink-deep);
   border-radius: var(--radius-md);
   background: var(--mist);
-  box-shadow: 10px 10px 0 var(--signal);
+  box-shadow: 10px 10px 0 var(--ink-deep);
 }
 
 .math-number {
-  color: var(--signal-text);
+  color: var(--ink-deep);
   font-family: var(--display);
   font-size: clamp(95px, 10vw, 145px);
   font-weight: 650;
@@ -1331,10 +1435,10 @@ blockquote {
   display: block;
   margin-bottom: 12px;
   color: var(--confirm-text);
-  font-family: var(--mono);
-  font-size: 9px;
+  font-family: var(--body);
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.15em;
 }
 
 .missed-call-math p {
@@ -1388,7 +1492,7 @@ blockquote {
 }
 
 .capabilities {
-  padding: 130px 0;
+  padding: var(--band-tight) 0;
 }
 
 .section-heading {
@@ -1400,92 +1504,187 @@ blockquote {
   font-size: clamp(50px, 6vw, 80px);
 }
 
-.capabilities-layout {
-  display: grid;
-  grid-template-columns: 1.25fr 0.75fr;
-  gap: 80px;
-  align-items: start;
-}
-
-.capability-list {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
+/*
+ * Os oito itens são a ligação em ordem cronológica, não uma matriz de features.
+ * A espinha vertical carrega essa direção; a grade 2x4 anterior não carregava.
+ */
+.call-timeline {
+  position: relative;
+  max-width: 1020px;
   margin: 0;
   padding: 0;
-  border-top: 1px solid var(--line);
-  border-left: 1px solid var(--line);
   list-style: none;
 }
 
-.capability-list li {
-  display: flex;
-  gap: 15px;
-  align-items: flex-start;
-  min-height: 102px;
-  padding: 22px;
-  border-right: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.58);
-  font-size: 15px;
+.call-timeline::before {
+  position: absolute;
+  top: 30px;
+  bottom: 30px;
+  left: 55px;
+  width: 1px;
+  background: var(--line);
+  content: "";
 }
 
-.check-icon {
+.call-timeline li {
+  position: relative;
   display: grid;
-  flex: 0 0 27px;
-  width: 27px;
-  height: 27px;
-  place-items: center;
-  border: 1px solid var(--confirm-text);
-  border-radius: 50%;
-  color: var(--confirm-text);
-  font-size: 12px;
-  font-weight: 900;
+  grid-template-columns: 112px 1fr;
+  gap: var(--space-xl);
+  align-items: baseline;
+  padding-block: var(--space-lg);
 }
 
-.unknown-card {
-  position: sticky;
-  top: 120px;
-  padding: 34px;
+.beat-index {
+  position: relative;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-variation-settings: "wdth" 80;
+  font-weight: 600;
+}
+
+/* O ponto na espinha marca a passagem do tempo dentro da mesma ligação. */
+.beat-index::after {
+  position: absolute;
+  top: 50%;
+  left: 50px;
+  width: 11px;
+  height: 11px;
+  transform: translateY(-50%);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--mist);
+  content: "";
+}
+
+/* Verde = garantia. Os dois passos travados por regra do dono são marcados. */
+.beat-guarded .beat-index {
+  color: var(--confirm-text);
+}
+
+.beat-guarded .beat-index::after {
+  border-color: var(--confirm);
+  background: var(--confirm);
+}
+
+.call-timeline p {
+  max-width: 42ch;
+  margin: 0;
+  color: var(--ink-deep);
+  font-size: clamp(21px, 3vw, 37px);
+  font-weight: 450;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+.call-timeline strong {
+  font-weight: 700;
+}
+
+/*
+ * "Ele não inventa" é garantia, não ação — por isso verde, não laranja.
+ * Como banda horizontal, ela interrompe a leitura em vez de virar mais uma coluna.
+ */
+.unknown-band {
+  display: grid;
+  grid-template-columns: auto minmax(0, 0.95fr) minmax(0, 1.05fr);
+  gap: var(--space-2xl);
+  align-items: center;
+  max-width: 1020px;
+  margin-top: var(--space-4xl);
+  padding: var(--space-2xl);
   border: 2px solid var(--ink-deep);
   border-radius: 70px 20px 20px 20px;
-  background: var(--signal);
-  box-shadow: 10px 10px 0 var(--ink-deep);
+  background: var(--confirm-deep);
+  box-shadow: var(--shadow-hard);
+  color: var(--white);
 }
 
 .unknown-icon {
   display: grid;
-  width: 82px;
-  height: 82px;
-  margin-bottom: 55px;
+  width: 92px;
+  height: 92px;
   place-items: center;
   border: 2px solid var(--ink-deep);
   border-radius: 50%;
   background: var(--paper);
+  color: var(--ink-deep);
   font-family: var(--display);
-  font-size: 47px;
+  font-size: 50px;
   font-weight: 700;
 }
 
-.unknown-label {
-  margin-bottom: 8px;
+.unknown-headline {
+  min-width: 0;
 }
 
-.unknown-card h3 {
-  margin-bottom: 10px;
+.unknown-label {
+  margin-bottom: var(--space-sm);
+  color: var(--confirm-bright);
+}
+
+.unknown-band h3 {
+  margin-bottom: var(--space-sm);
   font-family: var(--display);
-  font-size: 44px;
+  font-size: clamp(38px, 4.4vw, 56px);
   font-weight: 650;
   letter-spacing: -0.05em;
   line-height: 1;
 }
 
-.unknown-card > p:last-child {
-  margin-bottom: 0;
+.unknown-note {
+  max-width: 40ch;
+  margin: 0;
+  padding-left: var(--space-2xl);
+  border-left: 1px solid rgba(255, 255, 255, 0.22);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: clamp(17px, 1.5vw, 20px);
+  line-height: 1.55;
+}
+
+/*
+ * Re-âncora da demo. A página é longa por decisão de produto, então a ação
+ * principal reaparece no ponto de maior compreensão — logo depois de o leitor
+ * entender exatamente o que acontece numa ligação.
+ */
+.demo-anchor {
+  padding: var(--band-tight) 0;
+  background: var(--white);
+}
+
+.demo-anchor-inner {
+  display: grid;
+  grid-template-columns: 1fr minmax(400px, 560px);
+  gap: var(--space-3xl);
+  align-items: center;
+}
+
+.demo-anchor h2 {
+  margin-bottom: var(--space-sm);
+  color: var(--ink-deep);
+  font-family: var(--display);
+  font-size: clamp(36px, 4.4vw, 60px);
   font-weight: 600;
+  letter-spacing: -0.05em;
+  line-height: 1;
+}
+
+.demo-anchor p {
+  max-width: 46ch;
+  margin: 0;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1.55;
+}
+
+.demo-button-inline {
+  padding: 19px 22px;
+  box-shadow: var(--shadow-hard);
 }
 
 .audience {
-  padding: 125px 0;
+  padding: var(--band-open) 0;
   overflow: hidden;
 }
 
@@ -1539,20 +1738,21 @@ blockquote {
   margin-top: 75px;
 }
 
+/* Disco laranja de 115px virava mancha; o contorno mantém a cor sem o peso. */
 .work-glove {
   display: grid;
   flex: 0 0 115px;
   width: 115px;
   height: 115px;
   place-items: center;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  border: 1px solid rgba(255, 90, 54, 0.45);
   border-radius: 50%;
-  background: var(--signal);
+  background: transparent;
 }
 
 .work-glove svg {
-  width: 66px;
-  fill: var(--ink-deep);
+  width: 62px;
+  fill: var(--signal);
 }
 
 .audience-close p {
@@ -1569,7 +1769,7 @@ blockquote {
 }
 
 .start {
-  padding: 130px 0;
+  padding: var(--band-tight) 0;
   background: var(--paper);
 }
 
@@ -1603,10 +1803,11 @@ blockquote {
 }
 
 .step-number {
-  color: var(--signal-text);
+  color: var(--muted);
   font-family: var(--mono);
   font-size: 12px;
-  font-weight: 700;
+  font-variation-settings: "wdth" 80;
+  font-weight: 600;
 }
 
 .step-copy h3 {
@@ -1635,7 +1836,7 @@ blockquote {
 }
 
 .faq {
-  padding: 130px 0;
+  padding: var(--band-tight) 0;
 }
 
 .faq-grid {
@@ -1741,16 +1942,19 @@ blockquote {
   margin: 0;
 }
 
+/* A fala em inglês é uma citação literal do produto: bloco próprio, sem tarja. */
 .faq-answer em {
   display: block;
-  margin: 14px 0;
-  padding-left: 15px;
-  border-left: 2px solid var(--signal);
-  color: var(--ink);
+  margin: 16px 0;
+  padding: 14px 18px;
+  border-radius: 10px;
+  background: var(--mist);
+  color: var(--ink-deep);
+  line-height: 1.5;
 }
 
 .pricing {
-  padding: 130px 0;
+  padding: var(--band-open) 0;
   background: var(--ink);
   color: var(--white);
 }
@@ -1776,12 +1980,16 @@ blockquote {
   color: rgba(255, 255, 255, 0.62);
 }
 
+/*
+ * O checkout laranja mora dentro deste cartão. Uma sombra laranja de 12px
+ * competiria com o próprio botão que ela deveria emoldurar.
+ */
 .pricing-card {
   overflow: hidden;
   border: 2px solid var(--ink-deep);
   border-radius: 26px;
   background: var(--paper);
-  box-shadow: 12px 12px 0 var(--signal);
+  box-shadow: 12px 12px 0 var(--ink-deep);
   color: var(--ink-deep);
 }
 
@@ -1837,10 +2045,10 @@ blockquote {
 .includes-label {
   margin-bottom: 12px;
   color: var(--muted);
-  font-family: var(--mono);
+  font-family: var(--body);
   font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-weight: 700;
+  letter-spacing: 0.15em;
   text-transform: uppercase;
 }
 
@@ -2075,10 +2283,11 @@ blockquote {
 .footer-bottom {
   padding-top: 22px;
   border-top: 1px solid rgba(255, 255, 255, 0.13);
-  color: rgba(255, 255, 255, 0.48);
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.05em;
+  color: rgba(255, 255, 255, 0.55);
+  font-family: var(--body);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
@@ -2102,6 +2311,122 @@ blockquote {
 
 .footer-links a:hover {
   color: var(--signal);
+}
+
+/*
+ * A página é longa por decisão de produto. O preço dessa decisão é que a ação
+ * principal precisa estar sempre a um toque de distância no celular.
+ * A dock aparece quando o hero sai da tela e some quando o bloco de preço entra,
+ * para não competir com o checkout.
+ */
+.call-dock {
+  position: fixed;
+  z-index: 60;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: none;
+  grid-template-columns: 1fr auto;
+  gap: var(--space-xs);
+  align-items: center;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
+  transform: translateY(120%);
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(4, 29, 39, 0.96);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  transition: transform 280ms cubic-bezier(0.2, 0.75, 0.2, 1);
+}
+
+.call-dock.is-visible {
+  transform: translateY(0);
+}
+
+.dock-demo {
+  display: flex;
+  min-height: 54px;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 11px;
+  cursor: pointer;
+  background: var(--signal);
+  color: var(--ink-deep);
+  text-align: left;
+}
+
+.dock-icon {
+  display: grid;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--paper);
+}
+
+.dock-icon svg {
+  width: 16px;
+  fill: var(--ink-deep);
+}
+
+.dock-label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.dock-label > span {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.dock-label strong {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 17px;
+  font-variation-settings: "wdth" 78;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-checkout {
+  min-height: 54px;
+  padding: 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 11px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--white);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.call-dock :focus-visible {
+  outline-color: var(--white);
+  outline-offset: 2px;
+}
+
+@media (max-width: 900px) {
+  .call-dock {
+    display: grid;
+  }
+
+  /* Mesmo CTA em cima e embaixo na mesma tela é ruído, não reforço. */
+  html:has(.call-dock.is-visible) .header-cta {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  html:has(.call-dock.is-visible) .site-notice {
+    bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+  }
 }
 
 .site-notice {
@@ -2209,7 +2534,6 @@ blockquote {
   .difference-grid,
   .learning-grid,
   .proof-grid,
-  .capabilities-layout,
   .faq-grid,
   .pricing-shell {
     gap: 55px;
@@ -2249,10 +2573,32 @@ blockquote {
   .difference-grid,
   .learning-grid,
   .proof-grid,
-  .capabilities-layout,
+  .demo-anchor-inner,
   .faq-grid,
   .pricing-shell {
     grid-template-columns: 1fr;
+  }
+
+  .demo-anchor-inner {
+    gap: var(--space-xl);
+    justify-items: start;
+  }
+
+  .unknown-band {
+    grid-template-columns: auto 1fr;
+  }
+
+  .unknown-note {
+    grid-column: 1 / -1;
+    max-width: none;
+    padding-top: var(--space-lg);
+    padding-left: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.22);
+    border-left: 0;
+  }
+
+  .demo-button-inline {
+    width: min(100%, 520px);
   }
 
   .hero-grid {
@@ -2308,15 +2654,10 @@ blockquote {
     margin-top: 45px;
   }
 
-  .unknown-card,
   .faq-heading,
   .pricing-intro {
     position: relative;
     top: auto;
-  }
-
-  .unknown-card {
-    max-width: 520px;
   }
 
   .faq-grid,
@@ -2455,17 +2796,6 @@ blockquote {
     margin-top: 26px;
   }
 
-  .difference,
-  .proof,
-  .pain,
-  .capabilities,
-  .audience,
-  .start,
-  .faq,
-  .pricing {
-    padding: 90px 0;
-  }
-
   .difference h2,
   .proof h2,
   .pain h2,
@@ -2579,25 +2909,48 @@ blockquote {
     margin-bottom: 50px;
   }
 
-  .capability-list,
   .plan-list {
     grid-template-columns: 1fr;
   }
 
-  .capability-list li {
-    min-height: auto;
+  .call-timeline::before {
+    left: 25px;
   }
 
-  .unknown-card {
+  .call-timeline li {
+    grid-template-columns: 52px 1fr;
+    gap: var(--space-md);
+  }
+
+  .beat-index::after {
+    left: 25px;
+  }
+
+  .call-timeline p {
+    max-width: none;
+    font-size: 21px;
+  }
+
+  .unknown-band {
+    grid-template-columns: 1fr;
+    gap: var(--space-lg);
     padding: 28px;
-    border-radius: 55px 18px 18px 18px;
+    border-radius: 48px 18px 18px 18px;
     box-shadow: 7px 7px 0 var(--ink-deep);
   }
 
+  .unknown-note {
+    max-width: none;
+    padding-left: 0;
+    padding-top: var(--space-lg);
+    border-left: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.22);
+  }
+
   .unknown-icon {
-    width: 70px;
-    height: 70px;
-    margin-bottom: 38px;
+    width: 68px;
+    height: 68px;
+    font-size: 38px;
   }
 
   .audience-close {

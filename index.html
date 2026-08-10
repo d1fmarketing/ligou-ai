@@ -50,7 +50,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@500;600&amp;family=Instrument+Sans:wdth,wght@75..100,400..700&amp;display=swap"
+      href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..700&amp;family=Familjen+Grotesk:wght@400;500;600;700&amp;family=Martian+Mono:wdth,wght@75..112.5,400..600&amp;display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="./styles.css" />
@@ -301,7 +301,10 @@
             <h2 id="proof-title">Você liga. O Ligou atende. <span>Você recebe isto no celular:</span></h2>
           </div>
 
-          <article class="phone-summary reveal" aria-label="Exemplo de resumo de uma ligação">
+          <div class="proof-device reveal">
+            <p class="example-chip"><span aria-hidden="true"></span> Exemplo de ligação</p>
+
+            <article class="phone-summary" aria-label="Exemplo de resumo de uma ligação">
             <div class="phone-speaker" aria-hidden="true"></div>
             <div class="phone-header">
               <div class="ligou-mini-mark" aria-hidden="true">
@@ -333,7 +336,8 @@
             </div>
 
             <div class="phone-home" aria-hidden="true"></div>
-          </article>
+            </article>
+          </div>
         </div>
       </section>
 
@@ -382,51 +386,79 @@
             <h2 id="capabilities-title">O que ele faz numa ligação</h2>
           </div>
 
-          <div class="capabilities-layout">
-            <ul class="capability-list reveal">
-              <li>
-                <span class="check-icon" aria-hidden="true">✓</span>
-                <span>Atende em inglês ou português</span>
-              </li>
-              <li>
-                <span class="check-icon" aria-hidden="true">✓</span>
-                <span>Entende qual serviço o cliente procura</span>
-              </li>
-              <li>
-                <span class="check-icon" aria-hidden="true">✓</span>
-                <span>Coleta nome, endereço e detalhes importantes</span>
-              </li>
-              <li>
-                <span class="check-icon" aria-hidden="true">✓</span>
-                <span>Responde <strong>somente</strong> com informações que você aprovou</span>
-              </li>
-              <li>
-                <span class="check-icon" aria-hidden="true">✓</span>
-                <span>Verifica disponibilidade e agenda <strong>dentro das regras que você definiu</strong></span>
-              </li>
-              <li>
-                <span class="check-icon" aria-hidden="true">✓</span>
-                <span>Transfere chamadas urgentes para você</span>
-              </li>
-              <li>
-                <span class="check-icon" aria-hidden="true">✓</span>
-                <span>Envia o resumo em português no seu celular</span>
-              </li>
-              <li>
-                <span class="check-icon" aria-hidden="true">✓</span>
-                <span>Registra tudo para você revisar depois</span>
-              </li>
-            </ul>
+          <ol class="call-timeline reveal">
+            <li>
+              <span class="beat-index" aria-hidden="true">01</span>
+              <p>Atende em inglês ou português</p>
+            </li>
+            <li>
+              <span class="beat-index" aria-hidden="true">02</span>
+              <p>Entende qual serviço o cliente procura</p>
+            </li>
+            <li>
+              <span class="beat-index" aria-hidden="true">03</span>
+              <p>Coleta nome, endereço e detalhes importantes</p>
+            </li>
+            <li class="beat-guarded">
+              <span class="beat-index" aria-hidden="true">04</span>
+              <p>Responde <strong>somente</strong> com informações que você aprovou</p>
+            </li>
+            <li class="beat-guarded">
+              <span class="beat-index" aria-hidden="true">05</span>
+              <p>Verifica disponibilidade e agenda <strong>dentro das regras que você definiu</strong></p>
+            </li>
+            <li>
+              <span class="beat-index" aria-hidden="true">06</span>
+              <p>Transfere chamadas urgentes para você</p>
+            </li>
+            <li>
+              <span class="beat-index" aria-hidden="true">07</span>
+              <p>Envia o resumo em português no seu celular</p>
+            </li>
+            <li>
+              <span class="beat-index" aria-hidden="true">08</span>
+              <p>Registra tudo para você revisar depois</p>
+            </li>
+          </ol>
+        </div>
 
-            <aside class="unknown-card reveal">
-              <div class="unknown-icon" aria-hidden="true">?</div>
+        <div class="container">
+          <aside class="unknown-band reveal">
+            <div class="unknown-icon" aria-hidden="true">?</div>
+            <div class="unknown-headline">
               <p class="unknown-label">E QUANDO ELE NÃO SABE?</p>
               <h3>Ele não inventa.</h3>
-              <p>
-                Coleta as informações, explica que a equipe retorna, e pergunta para você.
-              </p>
-            </aside>
+            </div>
+            <p class="unknown-note">
+              Coleta as informações, explica que a equipe retorna, e pergunta para você.
+            </p>
+          </aside>
+        </div>
+      </section>
+
+      <section class="demo-anchor" aria-labelledby="demo-anchor-title">
+        <div class="container demo-anchor-inner reveal">
+          <div class="demo-anchor-copy">
+            <h2 id="demo-anchor-title">O teste é a conversa.</h2>
+            <p>
+              Não é gravação. Interrompa, mude de assunto, ligue como se fosse cliente.
+            </p>
           </div>
+
+          <button class="demo-button demo-button-inline" type="button" data-demo-action>
+            <span class="demo-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path
+                  d="M7.2 3.2 10 2.5a1.8 1.8 0 0 1 2 1l1.3 3a1.8 1.8 0 0 1-.4 2l-1.6 1.6a13.4 13.4 0 0 0 2.6 2.6l1.6-1.6a1.8 1.8 0 0 1 2-.4l3 1.3a1.8 1.8 0 0 1 1 2l-.7 2.8a3.7 3.7 0 0 1-3.6 2.8A14.8 14.8 0 0 1 4.4 6.8a3.7 3.7 0 0 1 2.8-3.6Z"
+                />
+              </svg>
+            </span>
+            <span class="demo-label">
+              <span>Ligue para a demonstração ao vivo</span>
+              <strong data-demo-phone>(XXX) XXX-XXXX</strong>
+            </span>
+            <span class="demo-arrow" aria-hidden="true">↗</span>
+          </button>
         </div>
       </section>
 
@@ -703,6 +735,26 @@
         </div>
       </div>
     </footer>
+
+    <div class="call-dock" data-call-dock inert>
+      <button class="dock-demo" type="button" data-demo-action>
+        <span class="dock-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path
+              d="M7.2 3.2 10 2.5a1.8 1.8 0 0 1 2 1l1.3 3a1.8 1.8 0 0 1-.4 2l-1.6 1.6a13.4 13.4 0 0 0 2.6 2.6l1.6-1.6a1.8 1.8 0 0 1 2-.4l3 1.3a1.8 1.8 0 0 1 1 2l-.7 2.8a3.7 3.7 0 0 1-3.6 2.8A14.8 14.8 0 0 1 4.4 6.8a3.7 3.7 0 0 1 2.8-3.6Z"
+            />
+          </svg>
+        </span>
+        <span class="dock-label">
+          <span>Ligue na demo</span>
+          <strong data-demo-phone>(XXX) XXX-XXXX</strong>
+        </span>
+      </button>
+
+      <button class="dock-checkout" type="button" data-checkout-action>
+        Assinar
+      </button>
+    </div>
 
     <div class="site-notice" role="status" aria-live="polite" data-site-notice>
       <span data-notice-text></span>

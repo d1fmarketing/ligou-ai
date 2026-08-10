@@ -32,7 +32,9 @@ Enquanto esses campos estiverem vazios, os respectivos controles mostram um avis
 
 ## Documentação do produto
 
-- [`docs/LANDING-PAGE-BASELINE-VISUAL-1.md`](docs/LANDING-PAGE-BASELINE-VISUAL-1.md): registro factual do que este baseline visual contém, o que foi verificado e o que ainda bloqueia publicação;
+- [`.impeccable.md`](.impeccable.md): contrato de design do projeto — público, personalidade, o que está congelado e os cinco princípios que valem para qualquer rodada visual;
+- [`docs/CHANGELOG-VISUAL-2.md`](docs/CHANGELOG-VISUAL-2.md): **rodada atual** — o que mudou, o que foi verificado e o que explicitamente não foi;
+- [`docs/LANDING-PAGE-BASELINE-VISUAL-1.md`](docs/LANDING-PAGE-BASELINE-VISUAL-1.md): registro factual do baseline anterior, o que foi verificado e o que ainda bloqueia publicação;
 - [`docs/IMPROVEMENT-SKILLS-ROADMAP.md`](docs/IMPROVEMENT-SKILLS-ROADMAP.md): sequência recomendada de skills, referências do Mobbin e critérios para a próxima versão visual;
 - [`docs/MOBBIN-REFERENCE-LOG.md`](docs/MOBBIN-REFERENCE-LOG.md): referências observadas, limites da evidência e hipóteses a testar;
 - [`docs/BASELINE-MANIFEST.md`](docs/BASELINE-MANIFEST.md): hashes dos artefatos que formam o snapshot;
