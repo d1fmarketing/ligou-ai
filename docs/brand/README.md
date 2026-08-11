@@ -116,3 +116,35 @@ repositório preserva derivados master em resolução integral, com alpha e WebP
 
 Os WebPs de entrega foram redimensionados e comprimidos separadamente para a página,
 sem redesenhar o personagem.
+
+## Motion — Seedance 2.5 no Browser
+
+**Data:** 10 de agosto de 2026
+
+**Ferramenta:** Higgsfield aberto no Browser interno, modo Unlimited
+
+**Configuração:** Seedance 2.5, 5 s, 3:4, 720p, bitrate High
+
+As poses V4 foram usadas como referências individuais para três coreografias. A
+primeira tentativa de atendimento foi rejeitada por movimento tímido e fundo bege —
+não por deformação de identidade. As gerações aceitas usam ação legível e não retornam
+ao quadro inicial, porque o site controla o tempo diretamente pela rolagem.
+
+| Estado | Job Higgsfield | Entrega | Bytes | SHA-256 |
+| --- | --- | --- | ---: | --- |
+| Atendendo | `c3fcc859-3ef6-42e6-809d-f09313eab712` | `../../assets/ligou-atendendo-motion-v1.mp4` | 1.367.099 | `78462ac089c5ca89a57420329df715587501bd08c4000746bddd66a0985c1f14` |
+| Operando | `b356f72f-647a-4ad5-a6c1-7a31d6f14999` | `../../assets/ligou-operando-motion-v1.mp4` | 1.322.696 | `c5309c90611abb4dddb1cc3bc1549d37953d35e53ddfc251a8fddc83b0c0dd7b` |
+| Aprovação | `314d92f8-025b-47b5-a7c2-e5c53adfd5d8` | `../../assets/ligou-aprovacao-motion-v1.mp4` | 1.655.779 | `37ccec78a0c129ed20e9c6efb6a845e4ec303c5ad60442f5ecff78f0110c9d90` |
+
+Os posters ativos são extrações do frame 0 dos próprios MP4s: Atendendo
+`467668d905485209c2567852ed228fe78a83fde6962dbdbfad6ded3ee4955f26`, Operando
+`c86d371c9df9f7b054993ba42f5158ab533045a9c7d6896cc6f7547a335495c6` e Aprovação
+`ac96b7f6b9a43db1279a2f7831248c423582622858b1e65f9a0bc167a4b2cdcd`.
+Eles substituem somente o fallback renderizado da rodada motion; os WebPs V4 continuam
+preservados e com hashes históricos intactos.
+
+O Seedance entregou fundos com casts diferentes apesar do prompt `#f8f8f5`. Os três
+arquivos finais foram normalizados sobre `#F8F8F5`, recodificados em H.264 `yuv420p`,
+24 fps, sem áudio e com GOP 1 para permitir scrub reversível. URLs de origem, prompts
+completos, tentativa rejeitada, procedimento e QA estão em
+[`../CHANGELOG-HIGGSFIELD-MOTION.md`](../CHANGELOG-HIGGSFIELD-MOTION.md).

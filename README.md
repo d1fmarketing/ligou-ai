@@ -2,19 +2,25 @@
 
 Landing page estática em PT-BR. A base V4 organiza o produto em cinco seções e
 apresenta o Ligou em uma narrativa única: atender, operar e pedir aprovação ao dono.
-A segunda rodada do Claude acrescenta a marca **A Linha** e a hero vertical animada
-`EN → regra → PT`, sem trocar a arquitetura estática.
+A segunda rodada do Claude acrescenta a marca **A Linha**. A rodada Higgsfield Motion
+transforma a hero em uma narrativa de três vídeos controlados pelo scroll:
+`EN entra → suas regras operam → PT volta`, sem trocar a arquitetura estática.
 
-**Estado:** candidato local na branch `codex/ligou-claude-r2`. Não publicar enquanto
-número da demo, checkout, Termos, Privacidade e inventário Founding forem placeholders.
+**Estado:** candidato local na branch `codex/ligou-interactive-motion`. Não publicar
+enquanto número da demo, checkout, Termos, Privacidade e inventário Founding forem
+placeholders.
 
 ## Visualizar localmente
 
 ```bash
-python3 -m http.server 4173
+node dev-server.mjs
 ```
 
-Depois, abra `http://127.0.0.1:4173/`.
+Depois, abra `http://127.0.0.1:4174/`.
+
+Esse servidor mínimo responde a pedidos HTTP Range com `206 Partial Content`. Isso é
+necessário para o scrub confiável dos MP4s; o `python3 -m http.server` testado retornou
+o arquivo inteiro e deixou o `currentTime` congelado no Browser usado no QA.
 
 ## Configuração obrigatória antes de publicar
 
@@ -34,9 +40,12 @@ que a integração existe.
 
 - `index.html`: conteúdo e metadados SEO;
 - `styles.css`: direção visual, responsividade e acessibilidade;
-- `script.js`: configuração dos destinos, abas progressivas, dock e storytelling;
+- `script.js`: configuração dos destinos, abas progressivas, dock e storytelling por scroll;
+- `dev-server.mjs`: preview local estático com suporte a byte ranges para vídeo;
 - `assets/ligou-agent-v1.webp`: retrato V3 preservado como fallback histórico;
 - `assets/ligou-*-v1.webp`: três poses V4 geradas por referência no Higgsfield;
+- `assets/ligou-*-motion-v1.mp4`: três coreografias Seedance 2.5 normalizadas para scrub;
+- `assets/ligou-*-motion-poster-v1.webp`: frame 0 de cada MP4, sem salto de enquadramento;
 - `assets/logo-mark.svg`: marca v2 ativa em header, footer e favicon;
 - `assets/logo-line.svg`: master monocromático da marca v2;
 - `assets/fonts/`: fontes e licenças usadas para regenerar o card social;
@@ -46,6 +55,7 @@ que a integração existe.
 ## Documentação do produto
 
 - [`docs/HANDOFF-NEXT-SESSION.md`](docs/HANDOFF-NEXT-SESSION.md): ponto de entrada da próxima sessão, com estado Git, decisões recentes, conflitos abertos, bloqueios e ordem segura de retomada;
+- [`docs/CHANGELOG-HIGGSFIELD-MOTION.md`](docs/CHANGELOG-HIGGSFIELD-MOTION.md): jobs, prompts, geração rejeitada, normalização, implementação e QA do motion sincronizado ao scroll;
 - [`docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md`](docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md): tese atual do produto — agente operacional, memória por negócio, sistemas, ferramentas, aprovação e estratégia de idiomas;
 - [`docs/brand/LOGO-EXPLORATION-WORKING.md`](docs/brand/LOGO-EXPLORATION-WORKING.md): explorações raster, convergência no Claude R2, hashes da marca A Linha e gates restantes;
 - [`.impeccable.md`](.impeccable.md): contrato de design do projeto — público, personalidade, o que está congelado e os sete princípios que valem para qualquer rodada visual;

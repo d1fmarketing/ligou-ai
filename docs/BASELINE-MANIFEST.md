@@ -13,6 +13,37 @@ reescritos — eles continuam descrevendo o que aquele snapshot era.
 
 ---
 
+## Higgsfield Motion — candidato local
+
+**Data:** 10 de agosto de 2026
+
+**Base Git:** Claude R2 no commit `741a147`
+
+**O que mudou:** ver [`CHANGELOG-HIGGSFIELD-MOTION.md`](CHANGELOG-HIGGSFIELD-MOTION.md)
+
+| Arquivo | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `index.html` | 22.688 | `7f6d0f7010cd8102288bec869e15c141ea5c1d3d95248fa3c23b00f5ef371d47` |
+| `styles.css` | 48.498 | `e559242c078b606f7017170ab93f1e91b672bc5d0d5ae59ff549cb291bbebbd0` |
+| `script.js` | 15.616 | `b03a09a8a6b1f4b9a5644cef957dea9f4e145bd2b8700ecdd3c4dc34b48693c1` |
+| `dev-server.mjs` | 2.655 | `11b4946750153b61eeaf523de0d7f37b215bf1bd3ab0a48991869a1a8a793c53` |
+| `assets/ligou-atendendo-motion-v1.mp4` | 1.367.099 | `78462ac089c5ca89a57420329df715587501bd08c4000746bddd66a0985c1f14` |
+| `assets/ligou-operando-motion-v1.mp4` | 1.322.696 | `c5309c90611abb4dddb1cc3bc1549d37953d35e53ddfc251a8fddc83b0c0dd7b` |
+| `assets/ligou-aprovacao-motion-v1.mp4` | 1.655.779 | `37ccec78a0c129ed20e9c6efb6a845e4ec303c5ad60442f5ecff78f0110c9d90` |
+| `assets/ligou-atendendo-motion-poster-v1.webp` | 14.134 | `467668d905485209c2567852ed228fe78a83fde6962dbdbfad6ded3ee4955f26` |
+| `assets/ligou-operando-motion-poster-v1.webp` | 18.584 | `c86d371c9df9f7b054993ba42f5158ab533045a9c7d6896cc6f7547a335495c6` |
+| `assets/ligou-aprovacao-motion-poster-v1.webp` | 22.350 | `ac96b7f6b9a43db1279a2f7831248c423582622858b1e65f9a0bc167a4b2cdcd` |
+
+Os arquivos de marca, OG, copy e WebPs permanecem identificados no bloco Claude R2
+ou Visual 4. Esta rodada substitui apenas a composição da hero, acrescenta a camada de
+scrub às três cenas operacionais e inclui os derivados de vídeo. Nenhum hash histórico
+foi reescrito.
+
+O snapshot descreve um frontend local verificado, não um deploy. Telefone, checkout,
+Termos, Privacidade, inventário Founding e backend continuam como gates absolutos.
+
+---
+
 ## Claude R2 — candidato local integrado
 
 **Data:** 10 de agosto de 2026

@@ -44,7 +44,7 @@
       href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..700&amp;family=Familjen+Grotesk:wght@400;500;600;700&amp;family=Martian+Mono:wdth,wght@75..112.5,400..600&amp;display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="./styles.css?v=4.2.0" />
+    <link rel="stylesheet" href="./styles.css?v=5.0.0" />
   </head>
 
   <body>
@@ -99,55 +99,51 @@
             </div>
           </div>
 
-          <div class="hero-scene hero-cycle" role="group" aria-label="Exemplo animado: a ligação em inglês desce pela linha, encontra uma regra e vira resumo em português.">
-            <div class="call-rail">
-              <div class="hero-wire" aria-hidden="true">
-                <span class="hero-wire-loop"></span>
-                <span class="hero-wire-packet"></span>
-              </div>
-
-              <div class="hero-stop hero-stop-en">
-                <div class="hero-language">
-                  <strong>EN</strong>
-                  <small>Cliente</small>
-                  <span class="hero-typed">“I need an estimate.”</span>
-                </div>
-                <span class="hero-beats" aria-hidden="true"><i></i><i></i><i></i></span>
-              </div>
-
-              <div class="hero-stop hero-rule-stop">
-                <div class="hero-rule"><span>✓</span> Regra encontrada</div>
-              </div>
-
-              <div class="hero-stop hero-result-stop">
-                <div class="hero-result">
-                  <div class="hero-language-pt">
-                    <small>Você</small>
-                    <strong>PT</strong>
-                  </div>
-                  <p><span>Resumo</span> Pedido de orçamento registrado. Retorno hoje.</p>
-                </div>
-              </div>
+          <div class="hero-scene hero-stage" data-hero-stage data-active-scene="attending" role="group" aria-label="Exemplo interativo controlado pela rolagem: ligação em inglês, operação e pedido de aprovação em português.">
+            <div class="hero-stage-header" aria-hidden="true">
+              <span>EN entra</span>
+              <span>Suas regras operam</span>
+              <span>PT volta</span>
             </div>
 
-            <div class="hero-agent" aria-hidden="true">
-              <img
-                class="hero-pose-a"
-                src="./assets/ligou-atendendo-v1.webp"
-                width="640"
-                height="857"
-                loading="eager"
-                fetchpriority="high"
-                alt=""
-              />
-              <img
-                class="hero-pose-b"
-                src="./assets/ligou-operando-v1.webp"
-                width="640"
-                height="857"
-                loading="eager"
-                alt=""
-              />
+            <div class="hero-stage-media" aria-hidden="true">
+              <figure class="hero-motion-frame" data-hero-frame="attending">
+                <img src="./assets/ligou-atendendo-motion-poster-v1.webp" width="640" height="854" loading="eager" fetchpriority="high" alt="" />
+                <video data-hero-video data-src="./assets/ligou-atendendo-motion-v1.mp4" poster="./assets/ligou-atendendo-motion-poster-v1.webp" muted playsinline preload="none" tabindex="-1"></video>
+              </figure>
+              <figure class="hero-motion-frame" data-hero-frame="operating">
+                <img src="./assets/ligou-operando-motion-poster-v1.webp" width="640" height="854" loading="eager" alt="" />
+                <video data-hero-video data-src="./assets/ligou-operando-motion-v1.mp4" poster="./assets/ligou-operando-motion-poster-v1.webp" muted playsinline preload="none" tabindex="-1"></video>
+              </figure>
+              <figure class="hero-motion-frame" data-hero-frame="approval">
+                <img src="./assets/ligou-aprovacao-motion-poster-v1.webp" width="640" height="854" loading="lazy" alt="" />
+                <video data-hero-video data-src="./assets/ligou-aprovacao-motion-v1.mp4" poster="./assets/ligou-aprovacao-motion-poster-v1.webp" muted playsinline preload="none" tabindex="-1"></video>
+              </figure>
+
+              <div class="hero-live-status"><i></i><span data-hero-live-label>Ligação em andamento</span></div>
+            </div>
+
+            <div class="hero-state-cards">
+              <article data-hero-state="attending">
+                <span>01 · Atende em inglês</span>
+                <strong>“I need an estimate.”</strong>
+                <p>Ele escuta o cliente e entende o pedido.</p>
+              </article>
+              <article data-hero-state="operating">
+                <span>02 · Opera com contexto</span>
+                <strong>Memória + agenda + ferramentas</strong>
+                <p>Ele segue as regras aprovadas do seu negócio.</p>
+              </article>
+              <article data-hero-state="approval">
+                <span>03 · Volta para você em português</span>
+                <strong>“Posso oferecer retorno amanhã?”</strong>
+                <p>Quando falta uma decisão, ele pergunta antes de agir.</p>
+              </article>
+            </div>
+
+            <div class="hero-scroll-progress" aria-hidden="true">
+              <span></span>
+              <i>01</i><i>02</i><i>03</i>
             </div>
           </div>
         </div>
@@ -185,7 +181,8 @@
                   <p>O Ligou escuta, entende o serviço e coleta o contexto sem fazer o cliente repetir tudo. Se o pedido exige avaliação, promete um próximo passo — não um preço inventado.</p>
                 </div>
                 <div class="scene-visual">
-                  <img src="./assets/ligou-atendendo-v1.webp" width="640" height="857" loading="lazy" decoding="async" alt="Ligou levando a mão ao headset enquanto atende." />
+                  <img src="./assets/ligou-atendendo-motion-poster-v1.webp" width="640" height="854" loading="lazy" decoding="async" alt="Ligou levando a mão ao headset enquanto atende." />
+                  <video class="scene-motion" data-scene-video data-src="./assets/ligou-atendendo-motion-v1.mp4" poster="./assets/ligou-atendendo-motion-poster-v1.webp" muted playsinline preload="none" aria-hidden="true" tabindex="-1"></video>
                   <span class="scene-signal" aria-hidden="true">EN</span>
                 </div>
               </article>
@@ -200,7 +197,8 @@
                   </ul>
                 </div>
                 <div class="scene-visual">
-                  <img src="./assets/ligou-operando-v1.webp" width="640" height="857" loading="lazy" decoding="async" alt="Ligou operando com uma ferramenta e um tablet." />
+                  <img src="./assets/ligou-operando-motion-poster-v1.webp" width="640" height="854" loading="lazy" decoding="async" alt="Ligou operando com uma ferramenta e um tablet." />
+                  <video class="scene-motion" data-scene-video data-src="./assets/ligou-operando-motion-v1.mp4" poster="./assets/ligou-operando-motion-poster-v1.webp" muted playsinline preload="none" aria-hidden="true" tabindex="-1"></video>
                   <span class="scene-signal" aria-hidden="true">✓</span>
                 </div>
               </article>
@@ -214,7 +212,8 @@
                   <p class="operation-close">Ele melhora porque conhece melhor as suas regras — não porque inventa as próprias.</p>
                 </div>
                 <div class="scene-visual">
-                  <img src="./assets/ligou-aprovacao-v1.webp" width="640" height="857" loading="lazy" decoding="async" alt="Ligou aguardando a aprovação do dono, com as mãos unidas." />
+                  <img src="./assets/ligou-aprovacao-motion-poster-v1.webp" width="640" height="854" loading="lazy" decoding="async" alt="Ligou aguardando a aprovação do dono, com as mãos unidas." />
+                  <video class="scene-motion" data-scene-video data-src="./assets/ligou-aprovacao-motion-v1.mp4" poster="./assets/ligou-aprovacao-motion-poster-v1.webp" muted playsinline preload="none" aria-hidden="true" tabindex="-1"></video>
                   <span class="scene-signal scene-signal-question" aria-hidden="true">?</span>
                 </div>
               </article>
@@ -388,6 +387,6 @@
       <button type="button" aria-label="Fechar aviso" data-notice-close>×</button>
     </div>
 
-    <script src="./script.js?v=4.2.0" defer></script>
+    <script src="./script.js?v=5.0.0" defer></script>
   </body>
 </html>

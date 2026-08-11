@@ -2,10 +2,11 @@
 
 **Atualizado:** 10 de agosto de 2026
 
-**Estado:** candidato local Claude R2 integrado; nenhuma publicação autorizada
+**Estado:** candidato local Higgsfield Motion integrado; nenhuma publicação autorizada
 
-**Ponto de retomada:** branch `codex/ligou-claude-r2`, checkpoint deste handoff em
-`HEAD`; base V4 imutável no commit `7279041`
+**Ponto de retomada:** branch `codex/ligou-interactive-motion`, checkpoint deste
+handoff em `HEAD`; Claude R2 preservado na branch `codex/ligou-claude-r2` e base V4
+imutável no commit `7279041`
 
 ## Comece por aqui
 
@@ -14,10 +15,11 @@ Leia nesta ordem:
 1. este handoff;
 2. [`source/LIGOU-PRODUCT-BRIEF-WORKING.md`](source/LIGOU-PRODUCT-BRIEF-WORKING.md);
 3. [`.impeccable.md`](../.impeccable.md);
-4. [`CHANGELOG-CLAUDE-R2.md`](CHANGELOG-CLAUDE-R2.md);
-5. [`CHANGELOG-VISUAL-4.md`](CHANGELOG-VISUAL-4.md);
-6. [`source/LIGOU-COPY-V4-WORKING.md`](source/LIGOU-COPY-V4-WORKING.md);
-7. [`brand/LOGO-EXPLORATION-WORKING.md`](brand/LOGO-EXPLORATION-WORKING.md).
+4. [`CHANGELOG-HIGGSFIELD-MOTION.md`](CHANGELOG-HIGGSFIELD-MOTION.md);
+5. [`CHANGELOG-CLAUDE-R2.md`](CHANGELOG-CLAUDE-R2.md);
+6. [`CHANGELOG-VISUAL-4.md`](CHANGELOG-VISUAL-4.md);
+7. [`source/LIGOU-COPY-V4-WORKING.md`](source/LIGOU-COPY-V4-WORKING.md);
+8. [`brand/LOGO-EXPLORATION-WORKING.md`](brand/LOGO-EXPLORATION-WORKING.md).
 
 Não comece reescrevendo a página. Primeiro confirme o estado Git e resolva com RJ as
 decisões abertas de oferta, idioma, vertical inicial, escopo do MVP, demo segura e
@@ -30,12 +32,13 @@ autoridade dos conectores.
 - Checkpoint Claude Visual 2: `checkpoint/claude-visual-2` → `dd6e014`
 - Visual 3: `codex/ligou-agent-v3` → `6963098`
 - Visual 4: `codex/ligou-design-v4` → `7279041`
-- Claude R2: `codex/ligou-claude-r2` → checkpoint atual em `HEAD`
+- Claude R2: `codex/ligou-claude-r2` → `741a147`
+- Higgsfield Motion: `codex/ligou-interactive-motion` → checkpoint atual em `HEAD`
 - A branch V4 estava sincronizada com `origin` antes desta documentação.
 - Não existia pull request da V4 e nenhum PR foi criado para Claude R2.
 - Nenhum deployment público foi comprovado; GitHub Pages respondia 404.
-- O preview `localhost:4173` foi validado durante o merge; não presumir que o processo
-  continue ativo em outra sessão.
+- O preview range-aware `localhost:4174` foi validado nesta rodada; não presumir que o
+  processo continue ativo em outra sessão. Reiniciar com `node dev-server.mjs`.
 
 Depois do checkpoint, a única sobra deliberada deve ser
 `Codex Image Aug 10, 2026, 05_14_43 PM.png`, duplicata não rastreada e byte a byte da
@@ -50,6 +53,7 @@ Não adicionar essa duplicata ao Git e não apagá-la sem autorização de RJ.
 - Visual 3 com o agente operacional;
 - Visual 4 com cinco seções e narrativa `Atendendo → Operando → Pedindo aprovação`;
 - Claude R2 como descendente direto da V4, sem sobrescrever nenhum snapshot anterior;
+- Higgsfield Motion como descendente do Claude R2, em branch própria;
 - copy v2.1 congelada e V3/V4 marcadas como `WORKING`;
 - brand board v1 aprovada;
 - retrato e três poses do personagem com masters e hashes;
@@ -58,7 +62,7 @@ Não adicionar essa duplicata ao Git e não apagá-la sem autorização de RJ.
 Os hashes do bloco Visual 4 continuam válidos. Claude R2 recebeu um bloco próprio no
 manifesto e não reescreve os hashes anteriores.
 
-Esta sessão consolidou e commitou:
+O checkpoint Claude R2 consolidou:
 
 - o handoff, product brief, registro de logo e as duas pranchas de exploração;
 - a nova marca vetorial `assets/logo-mark.svg` e `assets/logo-line.svg`;
@@ -69,6 +73,23 @@ Esta sessão consolidou e commitou:
 `script.js`, a copy V4, as seções abaixo do fold, os WebPs do agente e o OG ficaram
 byte a byte iguais ao Visual 4.
 
+Esta rodada Higgsfield Motion acrescenta:
+
+- três MP4s Seedance 2.5 gerados no Browser interno em modo Unlimited;
+- três posters derivados do frame 0, para o fallback manter o mesmo enquadramento;
+- correção dos três fundos para o mesmo `#F8F8F5` da landing;
+- hero sticky com narrativa `EN entra → regras operam → PT volta` ligada ao scroll;
+- reutilização dos vídeos na seção de operação, também com scrub reversível;
+- mobile sem botão de vídeo, autoplay ou loop: tudo responde à rolagem;
+- `dev-server.mjs` com HTTP Range para o preview local;
+- fallback estático sem JavaScript e remoção dos vídeos em movimento reduzido;
+- fallback não-sticky em viewports com menos de 700 px de altura;
+- changelog e manifesto próprios, sem reescrever hashes históricos.
+
+A primeira geração de atendimento foi rejeitada por movimento sem criatividade e
+fundo bege. Não houve diagnóstico de deformação do robô. Jobs, URLs, prompts e hashes
+estão em `CHANGELOG-HIGGSFIELD-MOTION.md`.
+
 Fonte do merge: `/Users/d1f/Downloads/Ligou Design System.zip`, 3.696.405 bytes,
 SHA-256 `3e4319ddf66eaebe1bf2ea1f6ed30e402fb584c9b48e8342d30a291492374238`.
 O ZIP não foi espalhado pela raiz: ele continha previews atuais junto com resíduos e
@@ -78,10 +99,12 @@ duplicatas de rodadas antigas. O mapa de inclusão/exclusão está no changelog.
 
 - Site estático: `index.html`, `styles.css` e `script.js`.
 - Cinco seções: hero, operação, prova, Founding e FAQ/encerramento.
-- Hero próximo de uma viewport no desktop, com linha vertical, três estados sempre
-  presentes e ênfase animada `EN → regra → PT`.
-- Duas poses do agente alternam entre atendimento e operação; o pacote percorre a
-  linha no ciclo de 12 s.
+- Hero sticky com três vídeos Seedance e progresso `EN → regra → PT` sincronizado ao
+  scroll nos dois sentidos.
+- As três cenas têm coreografias diferentes: sinal de voz e gesto de escuta; rotas de
+  memória/agenda/ferramentas; pulso de decisão incompleta e mão aberta esperando o ok.
+- A mesma mídia aparece na seção “Uma ligação. Três estados”.
+- Não existem botões de vídeo no mobile; o scroll é o único controlador.
 - Fallback completo sem JavaScript e com movimento reduzido.
 - Header, footer e favicon ativo usam a marca v2 **A Linha**.
 - O OG ainda é o arquivo V4 e deve ser regenerado antes de publicar.
@@ -96,8 +119,9 @@ duplicatas de rodadas antigas. O mapa de inclusão/exclusão está no changelog.
 - Sem número real, o CTA abre a prova ilustrativa.
 - Checkout e links legais permanecem deliberadamente bloqueados.
 
-Claude R2 passou por QA responsivo no Browser interno, fallback sem JS, movimento
-reduzido, console, links e integridade. Essa validação cobre o frontend local, não
+Higgsfield Motion passou por QA no Browser interno em 1280 × 720, 390 × 844 e
+320 × 720, incluindo reversão do scroll, Range 206, fallback sem JS, movimento
+reduzido, overflow e mídia sem áudio. Essa validação cobre o frontend local, não
 telefonia, backend, aparelho físico ou produção.
 
 ## Decisão estratégica mais recente
@@ -200,8 +224,8 @@ quais podem escrever; e qual aprovação é exigida para cada classe de ação.
 ## Ordem recomendada para a próxima sessão
 
 1. Verificar branch, status, remotos e os arquivos deste handoff.
-2. Confirmar que `HEAD` contém o checkpoint Claude R2 e que somente a duplicata da
-   brand board permanece fora do Git.
+2. Confirmar que `HEAD` contém o checkpoint Higgsfield Motion e que somente a duplicata
+   da brand board permanece fora do Git.
 3. Fechar com RJ, em formato curto, oferta Founding, formulação pública de idiomas e
    vertical inicial.
 4. Definir o MVP real: canais, memória, CRM/MCP/agenda, ferramentas e quais integrações
@@ -232,10 +256,10 @@ git branch --show-current
 git log --oneline --decorate -8
 git remote -v
 node --check script.js
-python3 -m http.server 4173
+node dev-server.mjs
 ```
 
-Depois, abrir `http://127.0.0.1:4173/` no Browser interno e validar o estado real antes
+Depois, abrir `http://127.0.0.1:4174/` no Browser interno e validar o estado real antes
 de editar.
 
 ## Regras para não perder trabalho

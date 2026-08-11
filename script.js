@@ -14,13 +14,21 @@ const noticeText = document.querySelector("[data-notice-text]");
 const noticeClose = document.querySelector("[data-notice-close]");
 const callDock = document.querySelector("[data-call-dock]");
 const heroSection = document.querySelector("#inicio");
+const heroStage = document.querySelector("[data-hero-stage]");
+const heroVideos = Array.from(document.querySelectorAll("[data-hero-video]"));
 const pricingSection = document.querySelector("#preco");
 const operationScroll = document.querySelector(".operation-scroll");
 const operationSticky = document.querySelector("[data-operation-sticky]");
+const operationScenes = Array.from(document.querySelectorAll("[data-agent-scene]"));
+const sceneVideos = Array.from(document.querySelectorAll("[data-scene-video]"));
+const motionVideos = [...heroVideos, ...sceneVideos];
 
 const mobileDockMedia = window.matchMedia("(max-width: 900px)");
 const storyMedia = window.matchMedia(
   "(min-width: 901px) and (min-height: 700px) and (prefers-reduced-motion: no-preference)",
+);
+const heroStoryMedia = window.matchMedia(
+  "(min-height: 700px) and (prefers-reduced-motion: no-preference)",
 );
 const reducedMotionMedia = window.matchMedia("(prefers-reduced-motion: reduce)");
 
@@ -197,6 +205,163 @@ function applyCallDockState(shouldShow) {
   root.classList.toggle("dock-visible", shouldShow);
 }
 
+function primeSceneVideo(video) {
+  if (video.getAttribute("src") || !video.dataset.src) return;
+
+  video.src = video.dataset.src;
+  video.load();
+}
+
+function resetSceneVideo(video) {
+  if (video.dataset.motionActive !== "true") return;
+
+  video.dataset.motionActive = "false";
+  video.pause();
+  if (Number.isFinite(video.duration)) video.currentTime = 0;
+  video.classList.remove("is-ready");
+}
+
+function seekSceneVideo(video, progress) {
+  if (!video || reducedMotionMedia.matches || document.hidden) return;
+
+  const normalizedProgress = Math.min(Math.max(progress, 0), 1);
+  video.dataset.motionActive = "true";
+  video.dataset.pendingProgress = String(normalizedProgress);
+  primeSceneVideo(video);
+
+  if (video.readyState < 1 || !Number.isFinite(video.duration) || video.duration <= 0) return;
+
+  const targetTime = Math.min(video.duration - 1 / 30, video.duration * normalizedProgress);
+  const needsSeek = Math.abs(video.currentTime - targetTime) > 1 / 60;
+  if (needsSeek) {
+    video.currentTime = targetTime;
+    return;
+  }
+
+  if (video.readyState >= 2 && !video.seeking) video.classList.add("is-ready");
+}
+
+function updateOperationMotion(viewportHeight, storyRect, storyProgress) {
+  if (reducedMotionMedia.matches || document.hidden) {
+    sceneVideos.forEach(resetSceneVideo);
+    return;
+  }
+
+  if (storyEnabled) {
+    const storyVisible = Boolean(storyRect && storyRect.bottom > 0 && storyRect.top < viewportHeight);
+    const ranges = {
+      attending: [0, 0.28],
+      operating: [0.28, 0.62],
+      approval: [0.62, 1],
+    };
+
+    sceneVideos.forEach((video) => {
+      const sceneKey = video.closest("[data-agent-scene]")?.dataset.agentScene;
+      if (!storyVisible || sceneKey !== activeScene) {
+        resetSceneVideo(video);
+        return;
+      }
+
+      const [start, end] = ranges[sceneKey] || [0, 1];
+      seekSceneVideo(video, (storyProgress - start) / Math.max(end - start, 0.001));
+    });
+    return;
+  }
+
+  operationScenes.forEach((scene) => {
+    const video = scene.querySelector("[data-scene-video]");
+    if (!video) return;
+
+    const rect = scene.getBoundingClientRect();
+    const inScrollRange = rect.bottom > 0 && rect.top < viewportHeight;
+    if (!inScrollRange) {
+      resetSceneVideo(video);
+      return;
+    }
+
+    const progress = (viewportHeight - rect.top) / Math.max(viewportHeight + rect.height, 1);
+    seekSceneVideo(video, progress);
+  });
+}
+
+function configureSceneMotion() {
+  const motionAllowed = !reducedMotionMedia.matches;
+
+  motionVideos.forEach((video) => {
+    if (video.dataset.motionReady === "true") return;
+    video.dataset.motionReady = "true";
+
+    video.addEventListener("loadedmetadata", () => {
+      seekSceneVideo(video, Number(video.dataset.pendingProgress || 0));
+    });
+    video.addEventListener("loadeddata", () => {
+      if (video.dataset.motionActive === "true" && !video.seeking) {
+        video.classList.add("is-ready");
+      }
+    });
+    video.addEventListener("seeked", () => {
+      if (video.dataset.motionActive === "true") video.classList.add("is-ready");
+    });
+    video.addEventListener("error", () => video.classList.remove("is-ready"));
+  });
+
+  if (!motionAllowed) {
+    motionVideos.forEach((video) => {
+      video.dataset.motionActive = "true";
+      resetSceneVideo(video);
+      video.removeAttribute("src");
+      video.load();
+    });
+  }
+
+  schedulePageChromeUpdate();
+}
+
+function updateHeroStoryMotion(viewportHeight, heroRect) {
+  const storyReady = root.classList.contains("hero-scroll-ready");
+  const heroVisible = Boolean(heroRect && heroRect.bottom > 0 && heroRect.top < viewportHeight);
+
+  if (!storyReady || !heroVisible || !heroStage) {
+    heroVideos.forEach(resetSceneVideo);
+    return;
+  }
+
+  const range = Math.max(heroRect.height - viewportHeight, 1);
+  const progress = Math.min(Math.max(-heroRect.top / range, 0), 1);
+  const sceneKey = progress < 1 / 3 ? "attending" : progress < 2 / 3 ? "operating" : "approval";
+  const ranges = {
+    attending: [0, 1 / 3],
+    operating: [1 / 3, 2 / 3],
+    approval: [2 / 3, 1],
+  };
+  const liveLabels = {
+    attending: "Ligação em andamento",
+    operating: "Regras em ação",
+    approval: "Aguardando seu ok",
+  };
+
+  heroStage.dataset.activeScene = sceneKey;
+  heroStage.style.setProperty("--hero-stage-progress", progress.toFixed(4));
+  const liveLabel = heroStage.querySelector("[data-hero-live-label]");
+  if (liveLabel) liveLabel.textContent = liveLabels[sceneKey];
+
+  heroVideos.forEach((video) => {
+    const frame = video.closest("[data-hero-frame]");
+    const videoKey = frame?.dataset.heroFrame;
+    if (videoKey !== sceneKey) {
+      resetSceneVideo(video);
+      return;
+    }
+
+    const [start, end] = ranges[sceneKey];
+    const localProgress = Math.min(
+      Math.max((progress - start) / Math.max(end - start, 0.001), 0),
+      1,
+    );
+    seekSceneVideo(video, localProgress);
+  });
+}
+
 function configureStoryMode() {
   storyEnabled = Boolean(operationScroll && operationSticky && storyMedia.matches);
   root.classList.toggle("story-ready", storyEnabled);
@@ -226,11 +391,13 @@ function updatePageChrome() {
 
   let nextProgress = "";
   let nextScene = activeScene;
+  let storyProgress = 0;
 
   if (storyEnabled && storyRect && storyRect.bottom > 0 && storyRect.top < viewportHeight) {
     const range = Math.max(storyRect.height - viewportHeight, 1);
     const progress = Math.min(Math.max(-storyRect.top / range, 0), 1);
     const roundedProgress = Number(progress.toFixed(3));
+    storyProgress = roundedProgress;
     nextProgress = roundedProgress.toFixed(3);
     nextScene =
       roundedProgress < 0.28 ? "attending" : roundedProgress < 0.62 ? "operating" : "approval";
@@ -248,6 +415,9 @@ function updatePageChrome() {
     operationSticky.dataset.activeScene = nextScene;
     activeScene = nextScene;
   }
+
+  updateHeroStoryMotion(viewportHeight, heroRect);
+  updateOperationMotion(viewportHeight, storyRect, storyProgress);
 }
 
 function schedulePageChromeUpdate() {
@@ -260,19 +430,20 @@ function schedulePageChromeUpdate() {
 }
 
 function configureHeroMotion() {
-  if (!reducedMotionMedia.matches) {
+  const heroStoryReady =
+    heroStoryMedia.matches && Boolean(heroSection && heroStage && heroVideos.length === 3);
+
+  root.classList.toggle("hero-scroll-ready", heroStoryReady);
+
+  if (heroStoryReady) {
     window.requestAnimationFrame(() => root.classList.add("motion-ready"));
+  } else {
+    root.classList.remove("motion-ready");
+    heroStage?.style.removeProperty("--hero-stage-progress");
+    heroVideos.forEach(resetSceneVideo);
   }
 
-  if (!("IntersectionObserver" in window) || !heroSection) return;
-
-  const heroObserver = new IntersectionObserver((entries) => {
-    entries.forEach((entry) => {
-      heroSection.classList.toggle("is-offscreen", !entry.isIntersecting);
-    });
-  });
-
-  heroObserver.observe(heroSection);
+  schedulePageChromeUpdate();
 }
 
 noticeClose?.addEventListener("click", closeNotice);
@@ -281,11 +452,29 @@ window.addEventListener("resize", schedulePageChromeUpdate, { passive: true });
 window.addEventListener("pageshow", schedulePageChromeUpdate);
 mobileDockMedia.addEventListener("change", schedulePageChromeUpdate);
 storyMedia.addEventListener("change", configureStoryMode);
+heroStoryMedia.addEventListener("change", configureHeroMotion);
+reducedMotionMedia.addEventListener("change", () => {
+  configureSceneMotion();
+  configureHeroMotion();
+  configureStoryMode();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    motionVideos.forEach((video) => {
+      video.dataset.motionActive = "true";
+      resetSceneVideo(video);
+    });
+    return;
+  }
+
+  schedulePageChromeUpdate();
+});
 
 configureCalls();
 configureCheckout();
 configureLegalLinks();
 configureProofTabs();
+configureSceneMotion();
 configureStoryMode();
 configureHeroMotion();
 schedulePageChromeUpdate();
