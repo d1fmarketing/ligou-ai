@@ -1,7 +1,10 @@
 # Ligou.AI landing page
 
-Landing page estática em PT-BR. A V3 preserva a base da copy v2.1 e apresenta o
-Ligou como agente operacional bilíngue com memória, ferramentas e aprovação do dono.
+Landing page estática em PT-BR. A V4 organiza o produto em cinco seções e apresenta
+o Ligou em uma narrativa única: atender, operar e pedir aprovação ao dono.
+
+**Estado:** candidato local na branch `codex/ligou-design-v4`. Não publicar enquanto
+número da demo, checkout, Termos, Privacidade e inventário Founding forem placeholders.
 
 ## Visualizar localmente
 
@@ -21,14 +24,17 @@ Edite `SITE_CONFIG` no início de `script.js`:
 - `termsUrl`: URL dos Termos;
 - `privacyUrl`: URL da Política de Privacidade.
 
-Enquanto esses campos estiverem vazios, os respectivos controles mostram um aviso de bloqueio em vez de fingir que a integração existe.
+Enquanto o telefone estiver vazio, o CTA abre a prova ilustrativa da própria página.
+Checkout e links legais sem destino mostram um aviso de bloqueio, em vez de fingirem
+que a integração existe.
 
 ## Estrutura
 
 - `index.html`: conteúdo e metadados SEO;
 - `styles.css`: direção visual, responsividade e acessibilidade;
-- `script.js`: configuração dos links, FAQ, revelações e estados de navegação;
-- `assets/ligou-agent-v1.webp`: personagem otimizado usado na página;
+- `script.js`: configuração dos destinos, abas progressivas, dock e storytelling;
+- `assets/ligou-agent-v1.webp`: retrato V3 preservado como fallback histórico;
+- `assets/ligou-*-v1.webp`: três poses V4 geradas por referência no Higgsfield;
 - `assets/fonts/`: fontes e licenças usadas para regenerar o card social;
 - `favicon.svg`: ícone da marca;
 - `og-card.svg` / `og-ligou.png`: fonte editável e imagem social 1200 × 630.
@@ -36,9 +42,11 @@ Enquanto esses campos estiverem vazios, os respectivos controles mostram um avis
 ## Documentação do produto
 
 - [`.impeccable.md`](.impeccable.md): contrato de design do projeto — público, personalidade, o que está congelado e os sete princípios que valem para qualquer rodada visual;
+- [`docs/CHANGELOG-VISUAL-4.md`](docs/CHANGELOG-VISUAL-4.md): arquitetura, motion, assets, QA e bloqueios do candidato atual;
 - [`docs/CHANGELOG-VISUAL-3.md`](docs/CHANGELOG-VISUAL-3.md): mudanças, verificações e bloqueios da rodada do agente;
 - [`docs/CHANGELOG-VISUAL-2.md`](docs/CHANGELOG-VISUAL-2.md): checkpoint histórico da rodada do Claude;
-- [`docs/source/LIGOU-COPY-V3-WORKING.md`](docs/source/LIGOU-COPY-V3-WORKING.md): nova direção de produto e copy ainda não congelada;
+- [`docs/source/LIGOU-COPY-V4-WORKING.md`](docs/source/LIGOU-COPY-V4-WORKING.md): copy do candidato atual, status de promessas e bloqueios locais;
+- [`docs/source/LIGOU-COPY-V3-WORKING.md`](docs/source/LIGOU-COPY-V3-WORKING.md): direção anterior preservada como histórico;
 - [`docs/brand/README.md`](docs/brand/README.md): proveniência, hashes e regras de uso do agente aprovado;
 - [`docs/LANDING-PAGE-BASELINE-VISUAL-1.md`](docs/LANDING-PAGE-BASELINE-VISUAL-1.md): registro factual do baseline anterior, o que foi verificado e o que ainda bloqueia publicação;
 - [`docs/IMPROVEMENT-SKILLS-ROADMAP.md`](docs/IMPROVEMENT-SKILLS-ROADMAP.md): sequência recomendada de skills, referências do Mobbin e critérios para a próxima versão visual;

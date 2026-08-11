@@ -24,9 +24,6 @@
         letter-spacing: 2.4px;
       }
     </style>
-    <clipPath id="agentCrop">
-      <rect x="722" y="18" width="440" height="592" rx="28" />
-    </clipPath>
   </defs>
 
   <rect width="1200" height="630" fill="#fbfcf8" />
@@ -51,38 +48,35 @@
       <tspan x="0" y="210" fill="#b83216">Atendido.</tspan>
     </text>
 
-    <text class="display" fill="#082f3d" font-size="32" letter-spacing="-1.2">
-      <tspan x="4" y="278">Você fala com o Ligou.</tspan>
-      <tspan x="4" y="316">O Ligou fala com seus clientes.</tspan>
+    <text class="display" fill="#082f3d" font-size="30" letter-spacing="-1.2">
+      <tspan x="4" y="278">Atende em inglês.</tspan>
+      <tspan x="4" y="314">Segue as suas regras.</tspan>
+      <tspan x="4" y="350">Resume em português.</tspan>
     </text>
 
-    <text class="label" x="4" y="395" fill="#0b655a" font-size="11">
-      MEMÓRIA ESPECÍFICA  ·  FERRAMENTAS AUTORIZADAS
-    </text>
-    <text class="label" x="4" y="421" fill="#0b655a" font-size="11">
-      APROVAÇÃO DO DONO  ·  PORTUGUÊS ↔ INGLÊS
+    <text class="label" x="4" y="398" fill="#0b655a" font-size="11">
+      MEMÓRIA  ·  FERRAMENTAS  ·  APROVAÇÃO
     </text>
   </g>
 
   <image
-    href="assets/ligou-agent-v1.webp"
-    x="722"
-    y="18"
-    width="440"
-    height="660"
+    href="assets/ligou-atendendo-v1.webp"
+    x="750"
+    y="40"
+    width="380"
+    height="509"
     preserveAspectRatio="xMidYMid meet"
-    clip-path="url(#agentCrop)"
   />
 
-  <g transform="translate(750 510)">
+  <g transform="translate(732 470)">
     <rect width="380" height="74" rx="18" fill="#082f3d" />
     <circle cx="30" cy="37" r="7" fill="#46c2af" />
-    <text class="label" x="50" y="31" fill="#46c2af" font-size="10">CONHEÇA O LIGOU</text>
-    <text class="display" x="50" y="54" fill="#ffffff" font-size="20">Competente · calmo · operacional</text>
+    <text class="label" x="50" y="31" fill="#46c2af" font-size="10">LIGOU EM CENA</text>
+    <text class="display" x="50" y="54" fill="#ffffff" font-size="20">Atende · opera · pede aprovação</text>
   </g>
 
   <path
-    d="M0 602 C150 602 170 552 320 552s170 58 330 58 177-42 320-42 151 34 250 34"
+    d="M0 604 C150 604 170 575 320 575s170 35 330 35 177-25 320-25 151 19 250 19"
     fill="none"
     stroke="#ff5a36"
     stroke-width="4"

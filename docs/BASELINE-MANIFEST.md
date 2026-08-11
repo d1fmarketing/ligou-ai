@@ -13,6 +13,46 @@ reescritos — eles continuam descrevendo o que aquele snapshot era.
 
 ---
 
+## Visual 4 — candidato local
+
+**Data:** 10 de agosto de 2026
+**O que mudou:** ver [`CHANGELOG-VISUAL-4.md`](CHANGELOG-VISUAL-4.md)
+
+| Arquivo | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `index.html` | 20.832 | `053d054b6a4bc6235bd8e2af7bb104ceb389d81b3773b1615e77c03c426358f4` |
+| `styles.css` | 38.647 | `dc0bab151ad6902f066dcad31e9ec9f1c985fd12c14a9a937423ae49cabb6dea` |
+| `script.js` | 9.533 | `85ec7e55bdd89412939bb50eded460953933150cd1824fb6d4173aca20a9845d` |
+| `.impeccable.md` | 7.854 | `33e76f455adafdde630004ed4b01982e20d6f2a80312cef3ed4ae9cf153bedc3` |
+| `favicon.svg` | 399 | `2543c946df078df9df4e668072825595d11c3291c7f50f75971bbb45413dc59f` |
+| `og-card.svg` | 2.881 | `7c86447906209d9c7be8619ffd0db13e9b4002b0b8bbe36a45812d421e2676af` |
+| `og-ligou.png` | 152.576 | `5b7d8aacbd5a8f94d5bee5d5467ba1e52613ff5fafd2f6c553c13604b0ab2987` |
+| `docs/source/LIGOU-COPY-V2.1-FROZEN.md` | 14.381 | `900549bf547fcd9d25270a31d4ff768d47e7e7525ed400d3904828ab52bd129f` |
+| `docs/source/LIGOU-COPY-V3-WORKING.md` | 6.788 | `8d3f9d91da0d30dccb8abdf6305a44fef049809940962a0c18e3445d5c2a9d68` |
+| `docs/source/LIGOU-COPY-V4-WORKING.md` | 7.719 | `c8800c60a188e19fa043a2411d1c18c155d12273ed8476526489f07978811005` |
+| `assets/ligou-agent-v1.webp` | 34.214 | `fb8ea8ad6a61f646a233124a847bbbce14cd1deee6aa2692c20dc32cfd344c03` |
+| `docs/brand/ligou-agent-v1-source.png` | 1.151.876 | `081373ef0c7d4874a482052f2120259f4889037a50084017366f84cbc2ae2046` |
+| `docs/brand/ligou-brand-board-v1-approved.png` | 1.384.413 | `11a023067474e671bf13026f2e8e5f0cf35c06fb47c2cdf54ddb21dffef071da` |
+| `assets/ligou-atendendo-v1.webp` | 29.646 | `8190db2ca191acacf052461522c9fc6b6710a55232eca4b1b1344a8e3db9e336` |
+| `assets/ligou-operando-v1.webp` | 30.684 | `8f9b6661a6fd5837b07b867afb0ca7a58c348293702b8bf8790c5ed9d1d0343e` |
+| `assets/ligou-aprovacao-v1.webp` | 28.412 | `b1a284345e4f6a42abcf8a908d78e5b621397fbc4dd27467ffadf321244a4387` |
+| `docs/brand/masters/ligou-atendendo-v1-master.webp` | 389.006 | `dfdad409b9653449898c0a2b1300caf46ecd58180db90181b133dc9167c8ae92` |
+| `docs/brand/masters/ligou-operando-v1-master.webp` | 417.022 | `6b9bfbd8a6ef3e628264ed5f5a729e8153f8d11c72f1935e3072ead5a1234e51` |
+| `docs/brand/masters/ligou-aprovacao-v1-master.webp` | 380.930 | `0bb5e49bd0f77a94d7e30d86be628a27ffbf0356856f66358fddc76ecac73b34` |
+| `assets/fonts/familjen-grotesk-600.ttf` | 56.520 | `457dcae83d47907c29376aee2480531b3f33c0a3ec97f17a1983a1e8be3bcc94` |
+| `assets/fonts/archivo-700.ttf` | 111.948 | `bed60488c2f5c0b24e01d931760b6f3e9a82619dcd081ed9bff643d9f4fd9e3d` |
+
+A v2.1 continua congelada como fonte pública histórica. V3 e V4 permanecem
+`WORKING`; o snapshot congela a execução visual, não promove a copy candidata a texto
+final. A board aprovada, o retrato anterior e os três masters V4 preservam a linhagem
+visual; os WebPs de 640 × 857 são as entregas efetivamente carregadas pela página.
+
+O gate final registrou Brief 10,0, System 9,2 e Craft 9,1, com `critique` 36,5/40 e
+zero P0/P1. Publicação continua bloqueada até telefone, checkout, Termos, Privacidade,
+inventário Founding, backend e infraestrutura pública serem reais.
+
+---
+
 ## Visual 3 — candidato local
 
 **Data:** 10 de agosto de 2026
@@ -90,13 +130,19 @@ A cópia arquivada no projeto normaliza apenas a quebra de linha no final do arq
 
 ## Como verificar
 
-Para verificar o Visual 3, execute na raiz do projeto:
+Para verificar o Visual 4, execute na raiz do projeto:
 
 ```bash
 shasum -a 256 index.html styles.css script.js .impeccable.md favicon.svg og-card.svg og-ligou.png \
   docs/source/LIGOU-COPY-V2.1-FROZEN.md docs/source/LIGOU-COPY-V3-WORKING.md \
+  docs/source/LIGOU-COPY-V4-WORKING.md \
   assets/ligou-agent-v1.webp docs/brand/ligou-agent-v1-source.png \
-  docs/brand/ligou-brand-board-v1-approved.png assets/fonts/familjen-grotesk-600.ttf \
+  docs/brand/ligou-brand-board-v1-approved.png assets/ligou-atendendo-v1.webp \
+  assets/ligou-operando-v1.webp assets/ligou-aprovacao-v1.webp \
+  docs/brand/masters/ligou-atendendo-v1-master.webp \
+  docs/brand/masters/ligou-operando-v1-master.webp \
+  docs/brand/masters/ligou-aprovacao-v1-master.webp \
+  assets/fonts/familjen-grotesk-600.ttf \
   assets/fonts/archivo-700.ttf
 ```
 
