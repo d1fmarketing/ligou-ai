@@ -1,12 +1,12 @@
 # Ligou — handoff para a próxima sessão
 
-**Atualizado:** 10 de agosto de 2026
+**Atualizado:** 11 de agosto de 2026
 
-**Estado:** candidato local Higgsfield Motion integrado; nenhuma publicação autorizada
+**Estado:** candidato local com demo restaurada e hero reconstruído; nenhuma publicação autorizada
 
-**Ponto de retomada:** branch `codex/ligou-interactive-motion`, checkpoint deste
-handoff em `HEAD`; Claude R2 preservado na branch `codex/ligou-claude-r2` e base V4
-imutável no commit `7279041`
+**Ponto de retomada:** branch `codex/ligou-demo-hero`, checkpoint deste handoff em
+`HEAD`; Higgsfield Motion preservado no commit `ee9f685`, Claude R2 na branch
+`codex/ligou-claude-r2` e base V4 imutável no commit `7279041`
 
 ## Comece por aqui
 
@@ -15,11 +15,12 @@ Leia nesta ordem:
 1. este handoff;
 2. [`source/LIGOU-PRODUCT-BRIEF-WORKING.md`](source/LIGOU-PRODUCT-BRIEF-WORKING.md);
 3. [`.impeccable.md`](../.impeccable.md);
-4. [`CHANGELOG-HIGGSFIELD-MOTION.md`](CHANGELOG-HIGGSFIELD-MOTION.md);
-5. [`CHANGELOG-CLAUDE-R2.md`](CHANGELOG-CLAUDE-R2.md);
-6. [`CHANGELOG-VISUAL-4.md`](CHANGELOG-VISUAL-4.md);
-7. [`source/LIGOU-COPY-V4-WORKING.md`](source/LIGOU-COPY-V4-WORKING.md);
-8. [`brand/LOGO-EXPLORATION-WORKING.md`](brand/LOGO-EXPLORATION-WORKING.md).
+4. [`CHANGELOG-DEMO-HERO-RESTORE.md`](CHANGELOG-DEMO-HERO-RESTORE.md);
+5. [`CHANGELOG-HIGGSFIELD-MOTION.md`](CHANGELOG-HIGGSFIELD-MOTION.md);
+6. [`CHANGELOG-CLAUDE-R2.md`](CHANGELOG-CLAUDE-R2.md);
+7. [`CHANGELOG-VISUAL-4.md`](CHANGELOG-VISUAL-4.md);
+8. [`source/LIGOU-COPY-V4-WORKING.md`](source/LIGOU-COPY-V4-WORKING.md);
+9. [`brand/LOGO-EXPLORATION-WORKING.md`](brand/LOGO-EXPLORATION-WORKING.md).
 
 Não comece reescrevendo a página. Primeiro confirme o estado Git e resolva com RJ as
 decisões abertas de oferta, idioma, vertical inicial, escopo do MVP, demo segura e
@@ -33,7 +34,8 @@ autoridade dos conectores.
 - Visual 3: `codex/ligou-agent-v3` → `6963098`
 - Visual 4: `codex/ligou-design-v4` → `7279041`
 - Claude R2: `codex/ligou-claude-r2` → `741a147`
-- Higgsfield Motion: `codex/ligou-interactive-motion` → checkpoint atual em `HEAD`
+- Higgsfield Motion: `codex/ligou-interactive-motion` → `ee9f685`
+- Demo Hero Restore: `codex/ligou-demo-hero` → checkpoint atual em `HEAD`
 - A branch V4 estava sincronizada com `origin` antes desta documentação.
 - Não existia pull request da V4 e nenhum PR foi criado para Claude R2.
 - Nenhum deployment público foi comprovado; GitHub Pages respondia 404.
@@ -54,6 +56,7 @@ Não adicionar essa duplicata ao Git e não apagá-la sem autorização de RJ.
 - Visual 4 com cinco seções e narrativa `Atendendo → Operando → Pedindo aprovação`;
 - Claude R2 como descendente direto da V4, sem sobrescrever nenhum snapshot anterior;
 - Higgsfield Motion como descendente do Claude R2, em branch própria;
+- Demo Hero Restore como descendente de Higgsfield Motion, sem reescrever o checkpoint rejeitado;
 - copy v2.1 congelada e V3/V4 marcadas como `WORKING`;
 - brand board v1 aprovada;
 - retrato e três poses do personagem com masters e hashes;
@@ -90,6 +93,17 @@ A primeira geração de atendimento foi rejeitada por movimento sem criatividade
 fundo bege. Não houve diagnóstico de deformação do robô. Jobs, URLs, prompts e hashes
 estão em `CHANGELOG-HIGGSFIELD-MOTION.md`.
 
+Esta rodada Demo Hero Restore corrige a regressão sem apagar o trabalho anterior:
+
+- remove os três vídeos e o sticky somente da hero;
+- restaura `Falar com o Ligou` como ação dominante e repete a mesma ação no header;
+- recupera o `tel:` configurável da V1, com bloqueio local explícito enquanto o número
+  real não existe;
+- usa uma única prova `cliente EN → regra → retorno PT` com uma pose de atendimento;
+- preserva os três vídeos na seção operacional sincronizada ao scroll;
+- mantém no mobile a CTA full-width no hero e o dock automático depois da dobra;
+- registra mudanças e QA em `CHANGELOG-DEMO-HERO-RESTORE.md`.
+
 Fonte do merge: `/Users/d1f/Downloads/Ligou Design System.zip`, 3.696.405 bytes,
 SHA-256 `3e4319ddf66eaebe1bf2ea1f6ed30e402fb584c9b48e8342d30a291492374238`.
 O ZIP não foi espalhado pela raiz: ele continha previews atuais junto com resíduos e
@@ -99,11 +113,11 @@ duplicatas de rodadas antigas. O mapa de inclusão/exclusão está no changelog.
 
 - Site estático: `index.html`, `styles.css` e `script.js`.
 - Cinco seções: hero, operação, prova, Founding e FAQ/encerramento.
-- Hero sticky com três vídeos Seedance e progresso `EN → regra → PT` sincronizado ao
-  scroll nos dois sentidos.
+- Hero em fluxo normal, sem vídeos, com uma única prova `EN → regra → PT` e demo de
+  voz como ação principal.
 - As três cenas têm coreografias diferentes: sinal de voz e gesto de escuta; rotas de
   memória/agenda/ferramentas; pulso de decisão incompleta e mão aberta esperando o ok.
-- A mesma mídia aparece na seção “Uma ligação. Três estados”.
+- Os três MP4s aparecem somente na seção “Uma ligação. Três estados”.
 - Não existem botões de vídeo no mobile; o scroll é o único controlador.
 - Fallback completo sem JavaScript e com movimento reduzido.
 - Header, footer e favicon ativo usam a marca v2 **A Linha**.
@@ -116,13 +130,14 @@ duplicatas de rodadas antigas. O mapa de inclusão/exclusão está no changelog.
   - `checkoutUrl`;
   - `termsUrl`;
   - `privacyUrl`.
-- Sem número real, o CTA abre a prova ilustrativa.
+- Sem número real, o CTA mostra bloqueio local explícito; a prova ilustrativa é um
+  link secundário.
 - Checkout e links legais permanecem deliberadamente bloqueados.
 
-Higgsfield Motion passou por QA no Browser interno em 1280 × 720, 390 × 844 e
-320 × 720, incluindo reversão do scroll, Range 206, fallback sem JS, movimento
-reduzido, overflow e mídia sem áudio. Essa validação cobre o frontend local, não
-telefonia, backend, aparelho físico ou produção.
+Demo Hero Restore passou por QA no Browser interno em 1280 × 720, 1366 × 600,
+932 × 430, 390 × 844 e 320 × 720, incluindo clique da demo, dock móvel, três estados
+operacionais, fallback sem JS, movimento reduzido e overflow. Essa validação cobre o
+frontend local, não telefonia, backend, aparelho físico ou produção.
 
 ## Decisão estratégica mais recente
 
@@ -224,7 +239,7 @@ quais podem escrever; e qual aprovação é exigida para cada classe de ação.
 ## Ordem recomendada para a próxima sessão
 
 1. Verificar branch, status, remotos e os arquivos deste handoff.
-2. Confirmar que `HEAD` contém o checkpoint Higgsfield Motion e que somente a duplicata
+2. Confirmar que `HEAD` contém o checkpoint Demo Hero Restore e que somente a duplicata
    da brand board permanece fora do Git.
 3. Fechar com RJ, em formato curto, oferta Founding, formulação pública de idiomas e
    vertical inicial.
@@ -277,7 +292,8 @@ de editar.
 
 > Leia `docs/HANDOFF-NEXT-SESSION.md`,
 > `docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md`, `.impeccable.md`,
-> `docs/CHANGELOG-CLAUDE-R2.md`, `docs/CHANGELOG-VISUAL-4.md` e
+> `docs/CHANGELOG-DEMO-HERO-RESTORE.md`, `docs/CHANGELOG-CLAUDE-R2.md`,
+> `docs/CHANGELOG-VISUAL-4.md` e
 > `docs/brand/LOGO-EXPLORATION-WORKING.md`.
 > Verifique Git e o preview antes de editar. Preserve todos os snapshots anteriores.
 > Primeiro consolide com RJ oferta Founding, formulação de idiomas, vertical inicial,

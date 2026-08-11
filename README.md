@@ -3,10 +3,11 @@
 Landing page estática em PT-BR. A base V4 organiza o produto em cinco seções e
 apresenta o Ligou em uma narrativa única: atender, operar e pedir aprovação ao dono.
 A segunda rodada do Claude acrescenta a marca **A Linha**. A rodada Higgsfield Motion
-transforma a hero em uma narrativa de três vídeos controlados pelo scroll:
-`EN entra → suas regras operam → PT volta`, sem trocar a arquitetura estática.
+preserva três vídeos controlados pelo scroll na seção operacional. O candidato atual
+restaura a conversão da V1: hero curto, uma única prova `cliente EN → regra → retorno
+PT` e a demo de voz como ação dominante.
 
-**Estado:** candidato local na branch `codex/ligou-interactive-motion`. Não publicar
+**Estado:** candidato local na branch `codex/ligou-demo-hero`. Não publicar
 enquanto número da demo, checkout, Termos, Privacidade e inventário Founding forem
 placeholders.
 
@@ -32,15 +33,17 @@ Edite `SITE_CONFIG` no início de `script.js`:
 - `termsUrl`: URL dos Termos;
 - `privacyUrl`: URL da Política de Privacidade.
 
-Enquanto o telefone estiver vazio, o CTA abre a prova ilustrativa da própria página.
-Checkout e links legais sem destino mostram um aviso de bloqueio, em vez de fingirem
-que a integração existe.
+Enquanto o telefone estiver vazio, o CTA de voz continua visível e mostra um aviso
+explícito de bloqueio local. Um link secundário abre a ligação de exemplo. Quando os
+dois campos recebem valores reais, todas as ações da demo mudam automaticamente para
+`tel:`. Checkout e links legais sem destino também mostram um aviso, em vez de
+fingirem que a integração existe.
 
 ## Estrutura
 
 - `index.html`: conteúdo e metadados SEO;
 - `styles.css`: direção visual, responsividade e acessibilidade;
-- `script.js`: configuração dos destinos, abas progressivas, dock e storytelling por scroll;
+- `script.js`: configuração dos destinos, abas progressivas, dock móvel e storytelling operacional por scroll;
 - `dev-server.mjs`: preview local estático com suporte a byte ranges para vídeo;
 - `assets/ligou-agent-v1.webp`: retrato V3 preservado como fallback histórico;
 - `assets/ligou-*-v1.webp`: três poses V4 geradas por referência no Higgsfield;
@@ -55,6 +58,7 @@ que a integração existe.
 ## Documentação do produto
 
 - [`docs/HANDOFF-NEXT-SESSION.md`](docs/HANDOFF-NEXT-SESSION.md): ponto de entrada da próxima sessão, com estado Git, decisões recentes, conflitos abertos, bloqueios e ordem segura de retomada;
+- [`docs/CHANGELOG-DEMO-HERO-RESTORE.md`](docs/CHANGELOG-DEMO-HERO-RESTORE.md): regressão da V1, reconstrução do hero, comportamento da demo e QA desta rodada;
 - [`docs/CHANGELOG-HIGGSFIELD-MOTION.md`](docs/CHANGELOG-HIGGSFIELD-MOTION.md): jobs, prompts, geração rejeitada, normalização, implementação e QA do motion sincronizado ao scroll;
 - [`docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md`](docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md): tese atual do produto — agente operacional, memória por negócio, sistemas, ferramentas, aprovação e estratégia de idiomas;
 - [`docs/brand/LOGO-EXPLORATION-WORKING.md`](docs/brand/LOGO-EXPLORATION-WORKING.md): explorações raster, convergência no Claude R2, hashes da marca A Linha e gates restantes;

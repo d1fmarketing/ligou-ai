@@ -13,6 +13,32 @@ reescritos — eles continuam descrevendo o que aquele snapshot era.
 
 ---
 
+## Demo Hero Restore — candidato local
+
+**Data:** 11 de agosto de 2026
+
+**Base Git:** Higgsfield Motion no commit `ee9f685`
+
+**O que mudou:** ver [`CHANGELOG-DEMO-HERO-RESTORE.md`](CHANGELOG-DEMO-HERO-RESTORE.md)
+
+| Arquivo | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `index.html` | 22.410 | `9345bc119cc181e3fe3185174f071a43192436c960a75d1ca5a50674f0c3f959` |
+| `styles.css` | 38.895 | `cabd2ad3d419ce5b6681b357b84d56914d62e68a83a8df8e4190a7ac24e945fe` |
+| `script.js` | 13.936 | `bff483c7237b0dfcd95a472a06929f269ebe29078671be402c8cc39b7125970d` |
+| `.impeccable.md` | 8.096 | `f2ccc1aac700539af3c2b16d4aea78ea9cdedcff283d2019fb2751342862745c` |
+| `docs/source/LIGOU-COPY-V4-WORKING.md` | 7.857 | `6ae42b42c6774865f09b25537b4cdc3e4c4b121c55d51f5ba58b503955bd5891` |
+
+Os MP4s, posters, logos, fontes e WebPs não foram alterados; continuam identificados
+nos blocos Higgsfield Motion, Claude R2 e Visual 4. Esta rodada remove os vídeos apenas
+da hero, preserva os três na operação e recupera o contrato de demo configurável da
+V1 sem inventar um número ou backend.
+
+O snapshot descreve um frontend local verificado, não um deploy. Telefone, checkout,
+Termos, Privacidade, inventário Founding e backend continuam como gates absolutos.
+
+---
+
 ## Higgsfield Motion — candidato local
 
 **Data:** 10 de agosto de 2026

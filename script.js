@@ -14,21 +14,15 @@ const noticeText = document.querySelector("[data-notice-text]");
 const noticeClose = document.querySelector("[data-notice-close]");
 const callDock = document.querySelector("[data-call-dock]");
 const heroSection = document.querySelector("#inicio");
-const heroStage = document.querySelector("[data-hero-stage]");
-const heroVideos = Array.from(document.querySelectorAll("[data-hero-video]"));
 const pricingSection = document.querySelector("#preco");
 const operationScroll = document.querySelector(".operation-scroll");
 const operationSticky = document.querySelector("[data-operation-sticky]");
 const operationScenes = Array.from(document.querySelectorAll("[data-agent-scene]"));
 const sceneVideos = Array.from(document.querySelectorAll("[data-scene-video]"));
-const motionVideos = [...heroVideos, ...sceneVideos];
 
 const mobileDockMedia = window.matchMedia("(max-width: 900px)");
 const storyMedia = window.matchMedia(
   "(min-width: 901px) and (min-height: 700px) and (prefers-reduced-motion: no-preference)",
-);
-const heroStoryMedia = window.matchMedia(
-  "(min-height: 700px) and (prefers-reduced-motion: no-preference)",
 );
 const reducedMotionMedia = window.matchMedia("(prefers-reduced-motion: reduce)");
 
@@ -61,24 +55,38 @@ function configureCalls() {
   const isLive = Boolean(SITE_CONFIG.demoPhoneHref && SITE_CONFIG.demoPhoneDisplay);
 
   document.querySelectorAll("[data-demo-label]").forEach((element) => {
-    element.textContent = isLive ? "Ligue para a demonstração" : "Ver o Ligou trabalhar";
+    element.textContent = isLive ? "Falar com o Ligou agora" : "Falar com o Ligou";
+  });
+
+  document.querySelectorAll("[data-demo-short-label]").forEach((element) => {
+    element.textContent = isLive ? "Ligar agora" : "Falar com o Ligou";
   });
 
   document.querySelectorAll("[data-demo-value]").forEach((element) => {
-    element.textContent = isLive ? SITE_CONFIG.demoPhoneDisplay : "Acompanhar o fluxo";
+    element.textContent = isLive ? SITE_CONFIG.demoPhoneDisplay : "Demo por voz";
     element.classList.toggle("is-live-value", isLive);
   });
 
   document.querySelectorAll("[data-demo-status]").forEach((element) => {
-    element.textContent = "Ao vivo.";
+    element.textContent = isLive ? "Ao vivo." : "Versão local.";
   });
 
   document.querySelectorAll("[data-demo-note-text]").forEach((element) => {
-    element.textContent = "Interrompa e mude de assunto.";
+    element.textContent = isLive
+      ? "Não é gravação. Interrompa e mude de assunto."
+      : "A chamada ativa automaticamente quando o número real for conectado.";
   });
 
   document.querySelectorAll("[data-demo-note]").forEach((element) => {
-    element.hidden = !isLive;
+    element.hidden = false;
+  });
+
+  document.querySelectorAll("[data-demo-availability]").forEach((element) => {
+    element.textContent = isLive ? "Demo de voz · ao vivo" : "Demo de voz · prévia";
+  });
+
+  document.querySelectorAll("[data-demo-fallback]").forEach((element) => {
+    element.hidden = isLive;
   });
 
   document.querySelectorAll("[data-demo-kicker]").forEach((element) => {
@@ -101,7 +109,13 @@ function configureCalls() {
       return;
     }
 
-    action.href = "#prova";
+    action.href = "#demo";
+    action.addEventListener("click", (event) => {
+      event.preventDefault();
+      showNotice(
+        "A demo de voz ainda não está conectada nesta prévia. Enquanto isso, veja a ligação de exemplo logo abaixo.",
+      );
+    });
   });
 }
 
@@ -287,7 +301,7 @@ function updateOperationMotion(viewportHeight, storyRect, storyProgress) {
 function configureSceneMotion() {
   const motionAllowed = !reducedMotionMedia.matches;
 
-  motionVideos.forEach((video) => {
+  sceneVideos.forEach((video) => {
     if (video.dataset.motionReady === "true") return;
     video.dataset.motionReady = "true";
 
@@ -306,7 +320,7 @@ function configureSceneMotion() {
   });
 
   if (!motionAllowed) {
-    motionVideos.forEach((video) => {
+    sceneVideos.forEach((video) => {
       video.dataset.motionActive = "true";
       resetSceneVideo(video);
       video.removeAttribute("src");
@@ -315,51 +329,6 @@ function configureSceneMotion() {
   }
 
   schedulePageChromeUpdate();
-}
-
-function updateHeroStoryMotion(viewportHeight, heroRect) {
-  const storyReady = root.classList.contains("hero-scroll-ready");
-  const heroVisible = Boolean(heroRect && heroRect.bottom > 0 && heroRect.top < viewportHeight);
-
-  if (!storyReady || !heroVisible || !heroStage) {
-    heroVideos.forEach(resetSceneVideo);
-    return;
-  }
-
-  const range = Math.max(heroRect.height - viewportHeight, 1);
-  const progress = Math.min(Math.max(-heroRect.top / range, 0), 1);
-  const sceneKey = progress < 1 / 3 ? "attending" : progress < 2 / 3 ? "operating" : "approval";
-  const ranges = {
-    attending: [0, 1 / 3],
-    operating: [1 / 3, 2 / 3],
-    approval: [2 / 3, 1],
-  };
-  const liveLabels = {
-    attending: "Ligação em andamento",
-    operating: "Regras em ação",
-    approval: "Aguardando seu ok",
-  };
-
-  heroStage.dataset.activeScene = sceneKey;
-  heroStage.style.setProperty("--hero-stage-progress", progress.toFixed(4));
-  const liveLabel = heroStage.querySelector("[data-hero-live-label]");
-  if (liveLabel) liveLabel.textContent = liveLabels[sceneKey];
-
-  heroVideos.forEach((video) => {
-    const frame = video.closest("[data-hero-frame]");
-    const videoKey = frame?.dataset.heroFrame;
-    if (videoKey !== sceneKey) {
-      resetSceneVideo(video);
-      return;
-    }
-
-    const [start, end] = ranges[sceneKey];
-    const localProgress = Math.min(
-      Math.max((progress - start) / Math.max(end - start, 0.001), 0),
-      1,
-    );
-    seekSceneVideo(video, localProgress);
-  });
 }
 
 function configureStoryMode() {
@@ -416,7 +385,6 @@ function updatePageChrome() {
     activeScene = nextScene;
   }
 
-  updateHeroStoryMotion(viewportHeight, heroRect);
   updateOperationMotion(viewportHeight, storyRect, storyProgress);
 }
 
@@ -429,38 +397,19 @@ function schedulePageChromeUpdate() {
   });
 }
 
-function configureHeroMotion() {
-  const heroStoryReady =
-    heroStoryMedia.matches && Boolean(heroSection && heroStage && heroVideos.length === 3);
-
-  root.classList.toggle("hero-scroll-ready", heroStoryReady);
-
-  if (heroStoryReady) {
-    window.requestAnimationFrame(() => root.classList.add("motion-ready"));
-  } else {
-    root.classList.remove("motion-ready");
-    heroStage?.style.removeProperty("--hero-stage-progress");
-    heroVideos.forEach(resetSceneVideo);
-  }
-
-  schedulePageChromeUpdate();
-}
-
 noticeClose?.addEventListener("click", closeNotice);
 window.addEventListener("scroll", schedulePageChromeUpdate, { passive: true });
 window.addEventListener("resize", schedulePageChromeUpdate, { passive: true });
 window.addEventListener("pageshow", schedulePageChromeUpdate);
 mobileDockMedia.addEventListener("change", schedulePageChromeUpdate);
 storyMedia.addEventListener("change", configureStoryMode);
-heroStoryMedia.addEventListener("change", configureHeroMotion);
 reducedMotionMedia.addEventListener("change", () => {
   configureSceneMotion();
-  configureHeroMotion();
   configureStoryMode();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    motionVideos.forEach((video) => {
+    sceneVideos.forEach((video) => {
       video.dataset.motionActive = "true";
       resetSceneVideo(video);
     });
@@ -476,5 +425,4 @@ configureLegalLinks();
 configureProofTabs();
 configureSceneMotion();
 configureStoryMode();
-configureHeroMotion();
 schedulePageChromeUpdate();

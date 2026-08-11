@@ -44,7 +44,7 @@
       href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..700&amp;family=Familjen+Grotesk:wght@400;500;600;700&amp;family=Martian+Mono:wdth,wght@75..112.5,400..600&amp;display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="./styles.css?v=5.0.0" />
+    <link rel="stylesheet" href="./styles.css?v=6.0.0" />
   </head>
 
   <body>
@@ -66,6 +66,10 @@
           <a href="#faq">FAQ</a>
         </nav>
 
+        <a class="header-demo" href="#prova" data-demo-action>
+          <span class="status-dot" aria-hidden="true"></span>
+          <span data-demo-short-label>Falar com o Ligou</span>
+        </a>
       </div>
     </header>
 
@@ -76,10 +80,10 @@
             <h1 id="hero-title"><span>Ligou?</span> <strong class="hero-answer">Atendido.</strong></h1>
             <p class="eyebrow">Agente operacional bilíngue</p>
             <p class="hero-lead">
-              No lançamento, atende em inglês, segue as regras do seu negócio e te entrega o resumo em português.
+              Atende seus clientes em inglês, segue as regras do seu negócio e te devolve tudo em português.
             </p>
             <p class="hero-relationship">
-              Você fala com o Ligou em português. O Ligou fala com seus clientes — e mantém você no controle.
+              A prova vem antes da compra: ligue como cliente, interrompa e faça uma pergunta inesperada.
             </p>
 
             <div class="hero-action" id="demo">
@@ -90,62 +94,76 @@
                   </svg>
                 </span>
                 <span>
-                  <span data-demo-label>Ver o Ligou trabalhar</span>
-                  <strong data-demo-value>Acompanhar o fluxo</strong>
+                  <span data-demo-label>Falar com o Ligou</span>
+                  <strong data-demo-value>Demo por voz</strong>
                 </span>
                 <span aria-hidden="true">↗</span>
               </a>
-              <p class="demo-note" id="demo-pendente" data-demo-note hidden><strong data-demo-status>Ao vivo.</strong> <span data-demo-note-text>Interrompa e mude de assunto.</span></p>
+              <p class="demo-note" id="demo-pendente" data-demo-note>
+                <strong data-demo-status>Versão local.</strong>
+                <span data-demo-note-text>A chamada ativa automaticamente quando o número real for conectado.</span>
+              </p>
+              <a class="demo-fallback" href="#prova" data-demo-fallback>
+                Veja uma ligação de exemplo <span aria-hidden="true">↓</span>
+              </a>
             </div>
+
+            <ul class="hero-trust" aria-label="O que a demonstração comprova">
+              <li>Atendimento em inglês</li>
+              <li>Regras do seu negócio</li>
+              <li>Retorno em português</li>
+            </ul>
           </div>
 
-          <div class="hero-scene hero-stage" data-hero-stage data-active-scene="attending" role="group" aria-label="Exemplo interativo controlado pela rolagem: ligação em inglês, operação e pedido de aprovação em português.">
-            <div class="hero-stage-header" aria-hidden="true">
-              <span>EN entra</span>
-              <span>Suas regras operam</span>
-              <span>PT volta</span>
+          <aside class="hero-live-panel" aria-label="Exemplo visual de uma ligação atendida pelo Ligou">
+            <div class="hero-live-chrome">
+              <span class="hero-live-label">
+                <i aria-hidden="true"></i>
+                Linha do Ligou
+              </span>
+              <span data-demo-availability>Demo de voz · prévia</span>
             </div>
 
-            <div class="hero-stage-media" aria-hidden="true">
-              <figure class="hero-motion-frame" data-hero-frame="attending">
-                <img src="./assets/ligou-atendendo-motion-poster-v1.webp" width="640" height="854" loading="eager" fetchpriority="high" alt="" />
-                <video data-hero-video data-src="./assets/ligou-atendendo-motion-v1.mp4" poster="./assets/ligou-atendendo-motion-poster-v1.webp" muted playsinline preload="none" tabindex="-1"></video>
-              </figure>
-              <figure class="hero-motion-frame" data-hero-frame="operating">
-                <img src="./assets/ligou-operando-motion-poster-v1.webp" width="640" height="854" loading="eager" alt="" />
-                <video data-hero-video data-src="./assets/ligou-operando-motion-v1.mp4" poster="./assets/ligou-operando-motion-poster-v1.webp" muted playsinline preload="none" tabindex="-1"></video>
-              </figure>
-              <figure class="hero-motion-frame" data-hero-frame="approval">
-                <img src="./assets/ligou-aprovacao-motion-poster-v1.webp" width="640" height="854" loading="lazy" alt="" />
-                <video data-hero-video data-src="./assets/ligou-aprovacao-motion-v1.mp4" poster="./assets/ligou-aprovacao-motion-poster-v1.webp" muted playsinline preload="none" tabindex="-1"></video>
-              </figure>
+            <div class="hero-live-canvas">
+              <div class="hero-agent-zone">
+                <span class="hero-agent-kicker">Exemplo de atendimento</span>
+                <img
+                  src="./assets/ligou-atendendo-v1.webp"
+                  width="640"
+                  height="857"
+                  loading="eager"
+                  fetchpriority="high"
+                  alt="Ligou, o agente operacional, ouvindo uma chamada"
+                />
+                <div class="hero-wave" aria-hidden="true">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+                </div>
+              </div>
 
-              <div class="hero-live-status"><i></i><span data-hero-live-label>Ligação em andamento</span></div>
+              <div class="hero-conversation">
+                <article class="hero-message hero-message-en">
+                  <span>Cliente · EN</span>
+                  <p>“I need an estimate for a roof leak.”</p>
+                </article>
+
+                <div class="hero-rule-check">
+                  <span aria-hidden="true">✓</span>
+                  <p><strong>Segue sua regra.</strong> Coleta endereço e melhor horário.</p>
+                </div>
+
+                <article class="hero-message hero-message-pt">
+                  <span>Para você · PT</span>
+                  <p><strong>Novo pedido de orçamento.</strong> Vazamento no telhado · retorno hoje.</p>
+                </article>
+              </div>
             </div>
 
-            <div class="hero-state-cards">
-              <article data-hero-state="attending">
-                <span>01 · Atende em inglês</span>
-                <strong>“I need an estimate.”</strong>
-                <p>Ele escuta o cliente e entende o pedido.</p>
-              </article>
-              <article data-hero-state="operating">
-                <span>02 · Opera com contexto</span>
-                <strong>Memória + agenda + ferramentas</strong>
-                <p>Ele segue as regras aprovadas do seu negócio.</p>
-              </article>
-              <article data-hero-state="approval">
-                <span>03 · Volta para você em português</span>
-                <strong>“Posso oferecer retorno amanhã?”</strong>
-                <p>Quando falta uma decisão, ele pergunta antes de agir.</p>
-              </article>
+            <div class="hero-live-footer" aria-label="Fluxo da ligação">
+              <span><b>01</b> Cliente fala</span>
+              <span><b>02</b> Ligou resolve</span>
+              <span><b>03</b> Você recebe</span>
             </div>
-
-            <div class="hero-scroll-progress" aria-hidden="true">
-              <span></span>
-              <i>01</i><i>02</i><i>03</i>
-            </div>
-          </div>
+          </aside>
         </div>
 
         <div class="sector-strip" aria-label="Setores atendidos">
@@ -352,7 +370,7 @@
             <span class="demo-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24"><path d="M7.2 3.2 10 2.5a1.8 1.8 0 0 1 2 1l1.3 3a1.8 1.8 0 0 1-.4 2l-1.6 1.6a13.4 13.4 0 0 0 2.6 2.6l1.6-1.6a1.8 1.8 0 0 1 2-.4l3 1.3a1.8 1.8 0 0 1 1 2l-.7 2.8a3.7 3.7 0 0 1-3.6 2.8A14.8 14.8 0 0 1 4.4 6.8a3.7 3.7 0 0 1 2.8-3.6Z" /></svg>
             </span>
-            <span><span data-demo-label>Ver o Ligou trabalhar</span><strong data-demo-value>Acompanhar o fluxo</strong></span>
+            <span><span data-demo-label>Falar com o Ligou</span><strong data-demo-value>Demo por voz</strong></span>
             <span aria-hidden="true">↗</span>
           </a>
         </div>
@@ -378,7 +396,7 @@
 
     <div class="call-dock" data-call-dock inert>
       <a href="#prova" data-demo-action>
-        <span data-demo-label>Ver o Ligou trabalhar</span><strong data-demo-value>Acompanhar o fluxo</strong>
+        <span data-demo-label>Falar com o Ligou</span><strong data-demo-value>Demo por voz</strong>
       </a>
     </div>
 
@@ -387,6 +405,6 @@
       <button type="button" aria-label="Fechar aviso" data-notice-close>×</button>
     </div>
 
-    <script src="./script.js?v=5.0.0" defer></script>
+    <script src="./script.js?v=6.0.0" defer></script>
   </body>
 </html>

@@ -1,7 +1,7 @@
 # Ligou — copy V4 em trabalho
 
 **Status:** candidato local; texto ainda não congelado
-**Data:** 10 de agosto de 2026
+**Data:** 11 de agosto de 2026
 **Base histórica:** `LIGOU-COPY-V2.1-FROZEN.md`
 **Direção anterior:** `LIGOU-COPY-V3-WORKING.md`
 
@@ -53,37 +53,36 @@ publicação, disponibilidade de backend ou inventário Founding em tempo real.
 
 **Lead**
 
-> No lançamento, atende em inglês, segue as regras do seu negócio e te entrega o
-> resumo em português.
+> Atende seus clientes em inglês, segue as regras do seu negócio e te devolve tudo em
+> português.
 
 **Relação**
 
-> Você fala com o Ligou em português. O Ligou fala com seus clientes — e mantém você
-> no controle.
+> A prova vem antes da compra: ligue como cliente, interrompa e faça uma pergunta
+> inesperada.
 
 **CTA**
 
-> Ver o Ligou trabalhar
+> Falar com o Ligou
 
-> Acompanhar o fluxo
+> Demo por voz
 
-No candidato local, essa ação abre a demonstração ilustrativa da própria página. Não
-exibe número ou mensagem de indisponibilidade na hero.
+No candidato local, essa ação permanece visível e informa que a linha ainda não está
+conectada. A ligação de exemplo é oferecida por um link secundário, sem trocar
+silenciosamente a promessa de voz por um mockup.
 
 Quando `demoPhoneHref` e `demoPhoneDisplay` receberem o número real, a ação passa a
-`Ligue para a demonstração`, mostra o telefone e revela a nota:
+`Falar com o Ligou agora`, mostra o telefone e revela a nota:
 
-> Ao vivo. Interrompa e mude de assunto.
+> Ao vivo. Não é gravação. Interrompa e mude de assunto.
 
-**Cena EN → PT**
+**Prova única EN → PT**
 
-> Cliente · EN · “I need an estimate.”
+> Cliente · EN · “I need an estimate for a roof leak.”
 
-> Regra encontrada
+> Segue sua regra. Coleta endereço e melhor horário.
 
-> Você · PT
-
-> Resumo · Pedido de orçamento registrado. Retorno hoje.
+> Para você · PT · Novo pedido de orçamento. Vazamento no telhado · retorno hoje.
 
 **Setores**
 
