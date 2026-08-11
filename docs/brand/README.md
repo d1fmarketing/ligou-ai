@@ -13,6 +13,23 @@ compatível com `--paper`. A tentativa de transparência real foi recusada porqu
 gerador entregou RGB com xadrez embutido; o site usa a versão de fundo sólido, validada
 visualmente, em vez de fingir que existe alpha.
 
+## Claude R2 — marca corporativa A Linha
+
+RJ trabalhou duas rodadas no Claude Design sobre a V4 e autorizou o merge da segunda,
+mais recente. O candidato local usa agora:
+
+| Arquivo | Uso | Bytes | SHA-256 |
+| --- | --- | ---: | --- |
+| `../../assets/logo-mark.svg` | disco laranja; header, footer e favicon | 423 | `7cce8b971bd56d261ef853d3caa77c94e9ec7024d36d01c7788afe8d53d11e71` |
+| `../../assets/logo-line.svg` | master monocromático | 368 | `7a1a424afd3f7379e46dea5e59875f5f67d766b504e55cf76361690cb92c6331` |
+
+Fonte: `/Users/d1f/Downloads/Ligou Design System.zip`, SHA-256
+`3e4319ddf66eaebe1bf2ea1f6ed30e402fb584c9b48e8342d30a291492374238`.
+
+A Linha é a marca corporativa do candidato. O handset no peito das poses V4 permanece
+como badge provisório do canal telefônico. O OG ainda é V4; Brand Board V2, lockups e
+regra final do badge continuam pendentes antes de publicação.
+
 ## Regras de uso
 
 - o personagem representa um agente operacional, não um humano;

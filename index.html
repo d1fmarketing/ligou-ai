@@ -37,14 +37,14 @@
     <meta name="twitter:image" content="https://ligou.ai/og-ligou.png" />
     <meta name="twitter:image:alt" content="Ligou, o agente operacional bilíngue." />
 
-    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="./assets/logo-mark.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..700&amp;family=Familjen+Grotesk:wght@400;500;600;700&amp;family=Martian+Mono:wdth,wght@75..112.5,400..600&amp;display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="./styles.css?v=4.0.1" />
+    <link rel="stylesheet" href="./styles.css?v=4.2.0" />
   </head>
 
   <body>
@@ -54,9 +54,7 @@
       <div class="container header-inner">
         <a class="brand" href="#inicio" aria-label="Ligou — início">
           <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 32 32">
-              <path d="M8.2 5.7c.8-.8 2.1-.9 3-.2l3.2 2.5c.8.6 1 1.8.5 2.7l-1.6 2.8a18.7 18.7 0 0 0 5.2 5.2l2.8-1.6c.9-.5 2-.3 2.7.5l2.5 3.2c.7.9.6 2.2-.2 3l-1.7 1.7c-1.5 1.5-3.8 2-5.8 1.3A24.2 24.2 0 0 1 5.2 13.2c-.7-2-.2-4.3 1.3-5.8l1.7-1.7Z" />
-            </svg>
+            <img src="./assets/logo-mark.svg" width="64" height="64" alt="" />
           </span>
           <span>Ligou</span>
         </a>
@@ -73,12 +71,6 @@
 
     <main id="conteudo">
       <section class="hero" id="inicio" aria-labelledby="hero-title">
-        <div class="hero-phone-line" aria-hidden="true">
-          <span class="phone-line-segment phone-line-segment-a"></span>
-          <span class="phone-line-segment phone-line-segment-b"></span>
-          <span class="phone-line-packet"></span>
-        </div>
-
         <div class="container hero-layout">
           <div class="hero-copy">
             <h1 id="hero-title"><span>Ligou?</span> <strong class="hero-answer">Atendido.</strong></h1>
@@ -107,32 +99,55 @@
             </div>
           </div>
 
-          <div class="hero-scene" role="group" aria-label="Exemplo visual: uma ligação em inglês passa pelo Ligou, encontra uma regra e vira resumo em português.">
-            <div class="hero-language hero-language-en" aria-hidden="true">
-              <small>Cliente</small>
-              <strong>EN</strong>
-              <span>“I need an estimate.”</span>
+          <div class="hero-scene hero-cycle" role="group" aria-label="Exemplo animado: a ligação em inglês desce pela linha, encontra uma regra e vira resumo em português.">
+            <div class="call-rail">
+              <div class="hero-wire" aria-hidden="true">
+                <span class="hero-wire-loop"></span>
+                <span class="hero-wire-packet"></span>
+              </div>
+
+              <div class="hero-stop hero-stop-en">
+                <div class="hero-language">
+                  <strong>EN</strong>
+                  <small>Cliente</small>
+                  <span class="hero-typed">“I need an estimate.”</span>
+                </div>
+                <span class="hero-beats" aria-hidden="true"><i></i><i></i><i></i></span>
+              </div>
+
+              <div class="hero-stop hero-rule-stop">
+                <div class="hero-rule"><span>✓</span> Regra encontrada</div>
+              </div>
+
+              <div class="hero-stop hero-result-stop">
+                <div class="hero-result">
+                  <div class="hero-language-pt">
+                    <small>Você</small>
+                    <strong>PT</strong>
+                  </div>
+                  <p><span>Resumo</span> Pedido de orçamento registrado. Retorno hoje.</p>
+                </div>
+              </div>
             </div>
 
-            <img
-              class="hero-agent"
-              src="./assets/ligou-atendendo-v1.webp"
-              width="640"
-              height="857"
-              loading="eager"
-              fetchpriority="high"
-              alt="Ligou, o agente da marca, atendendo uma ligação."
-            />
-
-            <div class="hero-beats" aria-hidden="true"><i></i><i></i><i></i></div>
-            <div class="hero-rule" aria-hidden="true"><span>✓</span> Regra encontrada</div>
-
-            <div class="hero-result" aria-hidden="true">
-              <div class="hero-language hero-language-pt">
-                <small>Você</small>
-                <strong>PT</strong>
-              </div>
-              <p><span>Resumo</span> Pedido de orçamento registrado. Retorno hoje.</p>
+            <div class="hero-agent" aria-hidden="true">
+              <img
+                class="hero-pose-a"
+                src="./assets/ligou-atendendo-v1.webp"
+                width="640"
+                height="857"
+                loading="eager"
+                fetchpriority="high"
+                alt=""
+              />
+              <img
+                class="hero-pose-b"
+                src="./assets/ligou-operando-v1.webp"
+                width="640"
+                height="857"
+                loading="eager"
+                alt=""
+              />
             </div>
           </div>
         </div>
@@ -349,7 +364,7 @@
       <div class="container footer-main">
         <a class="brand brand-footer" href="#inicio" aria-label="Ligou — voltar ao início">
           <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 32 32"><path d="M8.2 5.7c.8-.8 2.1-.9 3-.2l3.2 2.5c.8.6 1 1.8.5 2.7l-1.6 2.8a18.7 18.7 0 0 0 5.2 5.2l2.8-1.6c.9-.5 2-.3 2.7.5l2.5 3.2c.7.9.6 2.2-.2 3l-1.7 1.7c-1.5 1.5-3.8 2-5.8 1.3A24.2 24.2 0 0 1 5.2 13.2c-.7-2-.2-4.3 1.3-5.8l1.7-1.7Z" /></svg>
+            <img src="./assets/logo-mark.svg" width="64" height="64" alt="" />
           </span>
           <span>Ligou</span>
         </a>
@@ -373,6 +388,6 @@
       <button type="button" aria-label="Fechar aviso" data-notice-close>×</button>
     </div>
 
-    <script src="./script.js?v=4.0.1" defer></script>
+    <script src="./script.js?v=4.2.0" defer></script>
   </body>
 </html>

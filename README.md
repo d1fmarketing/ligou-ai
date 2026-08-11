@@ -1,9 +1,11 @@
 # Ligou.AI landing page
 
-Landing page estática em PT-BR. A V4 organiza o produto em cinco seções e apresenta
-o Ligou em uma narrativa única: atender, operar e pedir aprovação ao dono.
+Landing page estática em PT-BR. A base V4 organiza o produto em cinco seções e
+apresenta o Ligou em uma narrativa única: atender, operar e pedir aprovação ao dono.
+A segunda rodada do Claude acrescenta a marca **A Linha** e a hero vertical animada
+`EN → regra → PT`, sem trocar a arquitetura estática.
 
-**Estado:** candidato local na branch `codex/ligou-design-v4`. Não publicar enquanto
+**Estado:** candidato local na branch `codex/ligou-claude-r2`. Não publicar enquanto
 número da demo, checkout, Termos, Privacidade e inventário Founding forem placeholders.
 
 ## Visualizar localmente
@@ -35,14 +37,20 @@ que a integração existe.
 - `script.js`: configuração dos destinos, abas progressivas, dock e storytelling;
 - `assets/ligou-agent-v1.webp`: retrato V3 preservado como fallback histórico;
 - `assets/ligou-*-v1.webp`: três poses V4 geradas por referência no Higgsfield;
+- `assets/logo-mark.svg`: marca v2 ativa em header, footer e favicon;
+- `assets/logo-line.svg`: master monocromático da marca v2;
 - `assets/fonts/`: fontes e licenças usadas para regenerar o card social;
-- `favicon.svg`: ícone da marca;
+- `favicon.svg`: favicon v1 preservado para os snapshots históricos;
 - `og-card.svg` / `og-ligou.png`: fonte editável e imagem social 1200 × 630.
 
 ## Documentação do produto
 
+- [`docs/HANDOFF-NEXT-SESSION.md`](docs/HANDOFF-NEXT-SESSION.md): ponto de entrada da próxima sessão, com estado Git, decisões recentes, conflitos abertos, bloqueios e ordem segura de retomada;
+- [`docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md`](docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md): tese atual do produto — agente operacional, memória por negócio, sistemas, ferramentas, aprovação e estratégia de idiomas;
+- [`docs/brand/LOGO-EXPLORATION-WORKING.md`](docs/brand/LOGO-EXPLORATION-WORKING.md): explorações raster, convergência no Claude R2, hashes da marca A Linha e gates restantes;
 - [`.impeccable.md`](.impeccable.md): contrato de design do projeto — público, personalidade, o que está congelado e os sete princípios que valem para qualquer rodada visual;
-- [`docs/CHANGELOG-VISUAL-4.md`](docs/CHANGELOG-VISUAL-4.md): arquitetura, motion, assets, QA e bloqueios do candidato atual;
+- [`docs/CHANGELOG-CLAUDE-R2.md`](docs/CHANGELOG-CLAUDE-R2.md): fonte Claude, delta integrado, assets da marca, QA e exclusões deliberadas;
+- [`docs/CHANGELOG-VISUAL-4.md`](docs/CHANGELOG-VISUAL-4.md): arquitetura, motion, assets, QA e bloqueios da base V4 preservada;
 - [`docs/CHANGELOG-VISUAL-3.md`](docs/CHANGELOG-VISUAL-3.md): mudanças, verificações e bloqueios da rodada do agente;
 - [`docs/CHANGELOG-VISUAL-2.md`](docs/CHANGELOG-VISUAL-2.md): checkpoint histórico da rodada do Claude;
 - [`docs/source/LIGOU-COPY-V4-WORKING.md`](docs/source/LIGOU-COPY-V4-WORKING.md): copy do candidato atual, status de promessas e bloqueios locais;

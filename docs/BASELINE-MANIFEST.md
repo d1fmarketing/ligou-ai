@@ -13,6 +13,41 @@ reescritos — eles continuam descrevendo o que aquele snapshot era.
 
 ---
 
+## Claude R2 — candidato local integrado
+
+**Data:** 10 de agosto de 2026
+
+**Base Git:** Visual 4 no commit `7279041`
+
+**O que mudou:** ver [`CHANGELOG-CLAUDE-R2.md`](CHANGELOG-CLAUDE-R2.md)
+
+| Arquivo | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `index.html` | 20.895 | `ac8bc7f563ef13339eed5e2bb5facd016c250fe79f8d38fad4b19b63c1dfecf9` |
+| `styles.css` | 38.489 | `7f575ecf43f647272263862ec879f847a21cca2ee7748ff3fee631d34a0c8f41` |
+| `script.js` | 9.533 | `85ec7e55bdd89412939bb50eded460953933150cd1824fb6d4173aca20a9845d` |
+| `.impeccable.md` | 7.854 | `33e76f455adafdde630004ed4b01982e20d6f2a80312cef3ed4ae9cf153bedc3` |
+| `assets/logo-mark.svg` | 423 | `7cce8b971bd56d261ef853d3caa77c94e9ec7024d36d01c7788afe8d53d11e71` |
+| `assets/logo-line.svg` | 368 | `7a1a424afd3f7379e46dea5e59875f5f67d766b504e55cf76361690cb92c6331` |
+| `og-card.svg` | 2.881 | `7c86447906209d9c7be8619ffd0db13e9b4002b0b8bbe36a45812d421e2676af` |
+| `og-ligou.png` | 152.576 | `5b7d8aacbd5a8f94d5bee5d5467ba1e52613ff5fafd2f6c553c13604b0ab2987` |
+| `docs/source/LIGOU-COPY-V4-WORKING.md` | 7.719 | `c8800c60a188e19fa043a2411d1c18c155d12273ed8476526489f07978811005` |
+| `assets/ligou-atendendo-v1.webp` | 29.646 | `8190db2ca191acacf052461522c9fc6b6710a55232eca4b1b1344a8e3db9e336` |
+| `assets/ligou-operando-v1.webp` | 30.684 | `8f9b6661a6fd5837b07b867afb0ca7a58c348293702b8bf8790c5ed9d1d0343e` |
+
+`script.js`, `.impeccable.md`, OG, copy e poses mantêm os hashes do Visual 4. A nova
+execução modifica somente a composição da hero, a marca ativa e os respectivos
+estilos. Os demais assets necessários para reproduzir as seções abaixo do fold
+continuam identificados no bloco Visual 4.
+
+O recibo externo da fonte Claude R2 é
+`/Users/d1f/Downloads/Ligou Design System.zip`, 3.696.405 bytes, SHA-256
+`3e4319ddf66eaebe1bf2ea1f6ed30e402fb584c9b48e8342d30a291492374238`.
+O ZIP não foi copiado para a raiz porque contém duplicatas e resíduos de rodadas
+anteriores; o changelog registra exatamente o que foi portado e rejeitado.
+
+---
+
 ## Visual 4 — candidato local
 
 **Data:** 10 de agosto de 2026
@@ -130,7 +165,18 @@ A cópia arquivada no projeto normaliza apenas a quebra de linha no final do arq
 
 ## Como verificar
 
-Para verificar o Visual 4, execute na raiz do projeto:
+Para verificar o Claude R2, execute na raiz do projeto:
+
+```bash
+shasum -a 256 index.html styles.css script.js .impeccable.md \
+  assets/logo-mark.svg assets/logo-line.svg og-card.svg og-ligou.png \
+  docs/source/LIGOU-COPY-V4-WORKING.md \
+  assets/ligou-atendendo-v1.webp assets/ligou-operando-v1.webp
+```
+
+Para verificar o Visual 4 histórico, abra um checkout ou worktree isolado do commit
+`7279041` e só então execute o bloco abaixo. No worktree Claude R2, `index.html` e
+`styles.css` são deliberadamente diferentes.
 
 ```bash
 shasum -a 256 index.html styles.css script.js .impeccable.md favicon.svg og-card.svg og-ligou.png \
