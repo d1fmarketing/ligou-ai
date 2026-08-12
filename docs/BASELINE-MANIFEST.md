@@ -13,6 +13,45 @@ reescritos — eles continuam descrevendo o que aquele snapshot era.
 
 ---
 
+## Claude Design v9 — checkpoint Git local
+
+**Data:** 11 de agosto de 2026
+
+**Base Git:** Demo Hero Restore no commit `5d57afb`
+
+**O que mudou:** ver [`CHANGELOG-CLAUDE-V9.md`](CHANGELOG-CLAUDE-V9.md)
+
+| Arquivo | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `index.html` | 45.008 | `b7e7893c55751ac98e2233edaf9c1df1ce530f5d0a2025159ba6ffbc6c6917b5` |
+| `src/claude-v9/Ligou 2026 v9.html` | 43.231 | `a2ee8b06f5921fe93657b08d8bcbda5fd45d0050ef4ae1f5ba5fa22e9a6bf6b8` |
+| `src/claude-v9/ligou-app9.jsx` | 45.594 | `6ed7437c6d26cdb715adc15d52a5e6bf3ed47752f8cdf17e2d7cabe9cf60b613` |
+| `src/claude-v9/ligou-fx2.jsx` | 5.257 | `0a82edda7ab80bd82ca5c2c1df13a363f9c808e6d9019422313e42dcc015f80a` |
+| `assets/js/ligou-app9.js` | 62.780 | `6296433829f7fb79c47aaf48bcf42f7dcab85826e4cd1e49fdf1b588b1baa453` |
+| `assets/js/ligou-fx2.js` | 6.393 | `56b95ec506043816ae448eaa95f97dfbc05c6905e5702b883734b49590c0a66f` |
+| `assets/hero-loop-1080p.mp4` | 2.385.895 | `227a4dc02d235964048154a26acf8b6a141557f678740a4b2604e4f4b342d29b` |
+| `assets/hero-loop-mobile-1080x1920.mp4` | 2.211.665 | `f8a1cb28eefb5cde5ecf977bb071fc80fe5017808fbcd8e6c4c1c6921fbee860` |
+| `assets/hero-poster.png` | 1.732.915 | `5a5e5b42f6b1ec8cd1d6866715e828a45c9417f6dc99b25c1572fcdc86f46b52` |
+| `assets/hero-poster-mobile.png` | 1.574.169 | `e253dee1710399fae65baf07415cc5757ca9f50eafa0662ac77946ecff663a99` |
+| `assets/agent-full.png` | 1.123.296 | `f4381ec64c041794858e0359c239238a06a768d175f18cea6ae380c658259a35` |
+| `docs/CLAUDE-V9-RUNTIME.sha256` | 4.517 | `5157e47d62adcfd0cb0a11de810880e4ae469526d9f288675ad3c8397484c3b4` |
+
+`docs/CLAUDE-V9-RUNTIME.sha256` fixa os 42 arquivos da fonte e do fechamento de
+runtime: HTML, JSX, JavaScript gerado, design system, React production local, fontes,
+agente, recortes, posters e vídeos. `bun run check` reconstitui os JavaScripts e valida
+cada hash.
+
+O recibo externo é `/Users/d1f/Downloads/Ligou 2026 animated page.zip`, 38.242.747
+bytes, SHA-256
+`fef5f9d32b5d8de954e86b995dbb3c582567a892dd4ab028a11a940e2c2837fd`.
+Versões v2–v8, uploads, thumbnail e duplicatas do pacote ficaram fora.
+
+Este snapshot prova a integração visual local e o QA responsivo. Não promove a copy a
+`FROZEN` e não comprova telefonia, backend, checkout, oferta, links legais, push ou
+deploy.
+
+---
+
 ## Demo Hero Restore — candidato local
 
 **Data:** 11 de agosto de 2026

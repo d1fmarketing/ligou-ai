@@ -4,14 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ligou 2026 v9 — Responsive Hero Video</title>
-<link rel="preload" as="image" href="assets/hero-poster.png" media="(min-width:1200px)">
-<link rel="preload" as="image" href="assets/hero-poster-mobile.png" media="(max-width:1199px)">
-<link rel="icon" type="image/png" href="assets/crop-logo-mark.png">
-<meta name="robots" content="noindex, nofollow">
-<meta name="description" content="O Ligou atende seus clientes em inglês fluente, agenda dentro das suas regras e te manda o resumo em português. Veja a demonstração ilustrativa na página.">
+<link rel="preload" as="image" href="assets/hero-art-desktop.png" media="(min-width:768px)">
+<link rel="preload" as="image" href="assets/hero-art-mobile.png" media="(max-width:767px)">
+<meta name="description" content="O Ligou atende seus clientes em inglês fluente, agenda dentro das suas regras e te manda o resumo em português. Ligue na demo ao vivo e teste você mesmo.">
+<link rel="stylesheet" href="_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/tokens/fonts.css">
+<link rel="stylesheet" href="_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/tokens/colors.css">
+<link rel="stylesheet" href="_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/tokens/typography.css">
+<link rel="stylesheet" href="_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/tokens/spacing.css">
+<link rel="stylesheet" href="_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/tokens/effects.css">
+<link rel="stylesheet" href="_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/tokens/base.css">
+<link rel="stylesheet" href="_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/components/components.css">
 <link rel="stylesheet" href="_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/styles.css">
-<script src="assets/vendor/react-18.3.1.production.min.js"></script>
-<script src="assets/vendor/react-dom-18.3.1.production.min.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 <style>
 html{scroll-behavior:smooth}
 body{overflow-x:hidden}
@@ -484,52 +490,12 @@ section{margin-top:64px!important}
 }
 @media (min-width:400px) and (max-width:767px){.lc-shell{max-width:390px}}
 @media (prefers-reduced-motion:reduce){.lc-i{animation:none}}
-#root:empty{display:none}
-noscript{display:block}
-.nojs-v9{min-height:100vh;background:var(--surface-page);color:var(--text-body)}
-.nojs-v9__hero{min-height:70vh;display:flex;align-items:center;background:var(--lg-ink-950);color:var(--lg-paper);padding:72px 24px;margin:0!important}
-.nojs-v9__inner{width:min(100%,900px);margin:0 auto}
-.nojs-v9 h1{font-family:var(--font-display);font-size:clamp(56px,10vw,112px);line-height:.95;letter-spacing:var(--track-display);margin:0}
-.nojs-v9 h1 span{display:block;color:var(--lg-orange-500)}
-.nojs-v9__lede{max-width:640px;font-size:clamp(19px,2.4vw,26px);line-height:1.45;color:rgba(251,252,248,.82);margin:28px 0}
-.nojs-v9__button{display:inline-flex;min-height:48px;align-items:center;padding:0 24px;border-radius:999px;background:var(--lg-orange-500);color:#fff;text-decoration:none;font-family:var(--font-display);font-weight:800}
-.nojs-v9__proof{padding:72px 24px;margin:0!important}
-.nojs-v9__proof h2{font-family:var(--font-display);font-size:clamp(32px,5vw,52px);line-height:1.05;margin:0 0 28px}
-.nojs-v9__flow{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-.nojs-v9__step{padding:22px;border:1px solid var(--border-soft);border-radius:18px;background:#fff;font-weight:700;line-height:1.45}
-.nojs-v9__step b{display:block;color:var(--lg-teal-600);font-size:12px;letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px}
-@media (max-width:767px){.nojs-v9__flow{grid-template-columns:1fr}.nojs-v9__hero{min-height:62vh}}
 </style>
 </head>
 <body>
 <div id="root"></div>
-<noscript>
-  <main class="nojs-v9">
-    <section class="nojs-v9__hero">
-      <div class="nojs-v9__inner">
-        <p>Agente operacional para negócios de serviços</p>
-        <h1>Ligou?<span>Atendido.</span></h1>
-        <p class="nojs-v9__lede">Seu cliente liga. O Ligou consulta suas regras, agenda o trabalho e só te chama quando precisa de aprovação.</p>
-        <a class="nojs-v9__button" href="#nojs-proof">Ver demonstração ilustrativa</a>
-      </div>
-    </section>
-    <section class="nojs-v9__proof" id="nojs-proof">
-      <div class="nojs-v9__inner">
-        <p>Prova do produto · exemplo visual</p>
-        <h2>Dentro das suas regras, ele resolve. Fora delas, ele pergunta.</h2>
-        <div class="nojs-v9__flow">
-          <div class="nojs-v9__step"><b>Cliente · Inglês</b>Pedido urgente de atendimento no mesmo dia.</div>
-          <div class="nojs-v9__step"><b>Ligou · Inglês</b>Explica que precisa consultar a equipe antes de prometer.</div>
-          <div class="nojs-v9__step"><b>Regra e ação</b>Consulta a política e avisa o responsável.</div>
-          <div class="nojs-v9__step"><b>Resumo · Português</b>Entrega a exceção pronta e aguarda a decisão.</div>
-        </div>
-        <p>A demonstração interativa desta versão exige JavaScript; este fallback mantém a narrativa essencial disponível.</p>
-      </div>
-    </section>
-  </main>
-</noscript>
 <script src="_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/_ds_bundle.js"></script>
-<script src="assets/js/ligou-fx2.js"></script>
-<script src="assets/js/ligou-app9.js"></script>
+<script type="text/babel" src="ligou-fx2.jsx"></script>
+<script type="text/babel" src="ligou-app9.jsx"></script>
 </body>
 </html>

@@ -6,7 +6,8 @@
 
 **Responsável pela decisão final:** RJ
 
-**Candidato visual atual:** Claude R2 sobre Visual 4, branch `codex/ligou-claude-r2`
+**Candidato visual atual:** Claude Design v9 integrada como checkpoint Git local;
+direção visual não equivale a copy aprovada, produto implementado ou publicação
 
 Este documento registra a tese atual do Ligou sem promover intenção a funcionalidade
 entregue. Ele complementa a copy V4, que continua `WORKING`, e não altera os snapshots
@@ -191,7 +192,7 @@ Não publicar, criar inventário ou alterar a copy de preço sem uma decisão ex
 
 | Item | Estado em 10/08/2026 |
 | --- | --- |
-| Landing estática Claude R2 | V4 preservada com marca e hero do Claude; não publicada |
+| Landing Claude Design v9 | Checkpoint visual integrado ao Git local; não publicado |
 | Personagem e três poses | Assets aprovados no candidato V4 |
 | Novo logo | A Linha aplicada ao candidato local; Brand Board V2 ainda não congelada |
 | Número de demonstração | Não configurado |
