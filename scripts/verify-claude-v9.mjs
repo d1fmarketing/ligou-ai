@@ -29,6 +29,8 @@ assert(html.includes("position:absolute;top:50%;right:0;width:100%;height:auto;a
 assert(html.includes("#021523 0%,#021523 38%"), "desktop edge-matched background missing");
 assert(html.includes("padding-left:clamp(32px,calc(50vw - 788px),172px)!important"), "wide desktop copy anchor missing");
 assert(html.includes("font-size:clamp(76px,5.4vw,104px)"), "compact desktop headline guard missing");
+assert(html.includes("(min-width:1600px) and (min-aspect-ratio:2/1)"), "ultrawide media query missing");
+assert(html.includes("aspect-ratio:3440/1476"), "ultrawide source geometry missing");
 assert(html.includes("aspect-ratio:4/3"), "landscape tablet frame missing");
 assert(html.includes("aspect-ratio:3/4"), "portrait tablet frame missing");
 
@@ -44,6 +46,7 @@ const applicationSource = await readFile(
 );
 addMatches(applicationSource, /["'](assets\/[^"']+)["']/g);
 for (const expectedMedia of [
+  "hero-loop-ultrawide-3440x1476.mp4",
   "hero-loop-1080p.mp4",
   "hero-loop-tablet-landscape-1440x1080.mp4",
   "hero-loop-tablet-portrait-1080x1440.mp4",

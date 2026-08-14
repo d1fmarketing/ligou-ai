@@ -77,6 +77,12 @@ function Nav() {
 }
 
 const HERO_MEDIA = {
+  ultrawide: {
+    src: 'assets/hero-loop-ultrawide-3440x1476.mp4',
+    poster: 'assets/hero-poster-ultrawide-3440x1476.webp',
+    width: 3440,
+    height: 1476
+  },
   desktop: {
     src: 'assets/hero-loop-1080p.mp4',
     poster: 'assets/hero-poster.png',
@@ -103,11 +109,14 @@ const HERO_MEDIA = {
   }
 };
 
+const HERO_ULTRAWIDE_QUERY = '(min-width: 1600px) and (min-aspect-ratio: 2/1)';
+
 function getHeroMediaKey() {
   if (window.matchMedia('(max-width: 767px)').matches) return 'mobile';
   if (window.matchMedia('(max-width: 1199px)').matches) {
     return window.matchMedia('(orientation: portrait)').matches ? 'tabletPortrait' : 'tabletLandscape';
   }
+  if (window.matchMedia(HERO_ULTRAWIDE_QUERY).matches) return 'ultrawide';
   return 'desktop';
 }
 
@@ -117,7 +126,8 @@ function useHeroMedia() {
     const queries = [
       window.matchMedia('(max-width: 767px)'),
       window.matchMedia('(max-width: 1199px)'),
-      window.matchMedia('(orientation: portrait)')
+      window.matchMedia('(orientation: portrait)'),
+      window.matchMedia(HERO_ULTRAWIDE_QUERY)
     ];
     const refresh = () => setKey(getHeroMediaKey());
     queries.forEach(query => query.addEventListener ? query.addEventListener('change', refresh) : query.addListener(refresh));
@@ -151,6 +161,7 @@ function Hero() {
         <source media="(max-width:767px)" srcSet="assets/hero-poster-mobile.png" width="1080" height="1920"></source>
         <source media="(min-width:768px) and (max-width:1199px) and (orientation:portrait)" srcSet="assets/hero-poster-tablet-portrait-1080x1440.png" width="1080" height="1440"></source>
         <source media="(min-width:768px) and (max-width:1199px)" srcSet="assets/hero-poster-tablet-landscape-1440x1080.png" width="1440" height="1080"></source>
+        <source media={HERO_ULTRAWIDE_QUERY} srcSet="assets/hero-poster-ultrawide-3440x1476.webp" width="3440" height="1476"></source>
         <img src="assets/hero-poster.png" width="1920" height="1080" fetchpriority="high" alt=""/>
       </picture> :
       <HeroVideo/>}

@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ligou 2026 v9 — Responsive Hero Video</title>
-<link rel="preload" as="image" href="assets/hero-poster.png" media="(min-width:1200px)">
+<link rel="preload" as="image" href="assets/hero-poster-ultrawide-3440x1476.webp" media="(min-width:1600px) and (min-aspect-ratio:2/1)">
+<link rel="preload" as="image" href="assets/hero-poster.png" media="(min-width:1200px) and (max-width:1599px), (min-width:1600px) and (max-aspect-ratio:1999/1000)">
 <link rel="preload" as="image" href="assets/hero-poster-tablet-landscape-1440x1080.png" media="(min-width:768px) and (max-width:1199px) and (orientation:landscape)">
 <link rel="preload" as="image" href="assets/hero-poster-tablet-portrait-1080x1440.png" media="(min-width:768px) and (max-width:1199px) and (orientation:portrait)">
 <link rel="preload" as="image" href="assets/hero-poster-mobile.png" media="(max-width:767px)">
@@ -259,6 +260,11 @@ section{margin-top:64px!important}
 .hero4-artlayer::after{inset:auto 0 auto 0;top:50%;width:100%;height:auto;aspect-ratio:16/9;transform:translateY(-50%);box-shadow:none;background:linear-gradient(180deg,#021523 0%,rgba(2,21,35,0) 9%,rgba(12,30,45,0) 91%,#0c1e2d 100%)}
 .hero4 h1{font-size:clamp(76px,5.4vw,104px)}
 .h4-lede,.h4-trust{max-width:min(100%,clamp(350px,23vw,440px))}
+}
+@media (min-width:1600px) and (min-aspect-ratio:2/1){
+.hero4{--h4bg:#041d28;background:linear-gradient(180deg,#031923 0%,#031923 38%,#041d28 50%,#0b242f 62%,#0b242f 100%)}
+.hero4-artlayer img,.hero4-artlayer video{right:0;width:100%;aspect-ratio:3440/1476}
+.hero4-artlayer::after{left:auto;right:0;width:100%;aspect-ratio:3440/1476;background:linear-gradient(90deg,#041d28 0%,rgba(4,29,40,.88) 9%,rgba(4,29,40,0) 20%),linear-gradient(180deg,#031923 0%,rgba(3,25,35,0) 9%,rgba(11,36,47,0) 91%,#0b242f 100%)}
 }
 @media (min-width:768px) and (max-width:1199px){
 .hero4-grid{max-width:1080px!important;padding:16px 36px 24px!important;grid-template-columns:minmax(0,47%) minmax(0,53%);gap:20px;align-items:center;min-height:clamp(560px,calc(100svh - 68px),720px)}

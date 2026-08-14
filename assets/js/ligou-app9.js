@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: af4f4fd687397e8a011b916741f60301e1b456f35e2e0dd4e539edfe48555d49
+ * Source SHA-256: 619bd086b3d75fce932987da4a2db32cc4e2cf72930827643578e93a2288830a
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -194,6 +194,12 @@ function Nav() {
   }, "Quero testar"))));
 }
 const HERO_MEDIA = {
+  ultrawide: {
+    src: "assets/hero-loop-ultrawide-3440x1476.mp4",
+    poster: "assets/hero-poster-ultrawide-3440x1476.webp",
+    width: 3440,
+    height: 1476
+  },
   desktop: {
     src: "assets/hero-loop-1080p.mp4",
     poster: "assets/hero-poster.png",
@@ -219,12 +225,15 @@ const HERO_MEDIA = {
     height: 1920
   }
 };
+const HERO_ULTRAWIDE_QUERY = "(min-width: 1600px) and (min-aspect-ratio: 2/1)";
 function getHeroMediaKey() {
   if (window.matchMedia("(max-width: 767px)").matches)
     return "mobile";
   if (window.matchMedia("(max-width: 1199px)").matches) {
     return window.matchMedia("(orientation: portrait)").matches ? "tabletPortrait" : "tabletLandscape";
   }
+  if (window.matchMedia(HERO_ULTRAWIDE_QUERY).matches)
+    return "ultrawide";
   return "desktop";
 }
 function useHeroMedia() {
@@ -233,7 +242,8 @@ function useHeroMedia() {
     const queries = [
       window.matchMedia("(max-width: 767px)"),
       window.matchMedia("(max-width: 1199px)"),
-      window.matchMedia("(orientation: portrait)")
+      window.matchMedia("(orientation: portrait)"),
+      window.matchMedia(HERO_ULTRAWIDE_QUERY)
     ];
     const refresh = () => setKey(getHeroMediaKey());
     queries.forEach((query) => query.addEventListener ? query.addEventListener("change", refresh) : query.addListener(refresh));
@@ -298,6 +308,11 @@ function Hero() {
     srcSet: "assets/hero-poster-tablet-landscape-1440x1080.png",
     width: "1440",
     height: "1080"
+  }), React.createElement("source", {
+    media: HERO_ULTRAWIDE_QUERY,
+    srcSet: "assets/hero-poster-ultrawide-3440x1476.webp",
+    width: "3440",
+    height: "1476"
   }), React.createElement("img", {
     src: "assets/hero-poster.png",
     width: "1920",

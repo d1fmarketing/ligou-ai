@@ -36,3 +36,17 @@ corte às bordas superior e inferior. As faixas residuais usam as cores amostrad
 master (`#021523`, `#061b2a`, `#0c1e2d`) com fade nas bordas. Em telas largas, a copy
 agora para no mesmo eixo esquerdo aprovado para 1920 px, em vez de continuar se aproximando
 do robô conforme o container centralizado cresce. As regras de tablet e celular não mudaram.
+
+## Adaptação v9.3 — master ultrawide 21:9
+
+O master `hf_20260814_030107_4ef565d2-42a0-442b-9ae0-1f186ea1c80a.mp4`
+(SHA-256 `67e3650c85f36a69a86b7a1e8c4b797c27d3df87b7ce174d2cc2f30ee8e1d182`)
+foi entregue em 4398 × 1886, HEVC Main 10, 24 fps e com áudio. A entrega web usa
+H.264 High, `yuv420p`, 3440 × 1476, 24 fps, 5,04 s, `faststart` e sem áudio, além
+de poster WebP correspondente.
+
+A nova faixa entra somente em `(min-width: 1600px) and (min-aspect-ratio: 2/1)`.
+Nela, a cena 21:9 preserva toda a largura do quadro; o próprio master já contém a zona
+segura da copy. As bordas superior e inferior são fundidas com cores amostradas da nova
+mídia. Desktop 16:9, tablet paisagem, tablet retrato e celular mantêm seus arquivos e
+enquadramentos.
