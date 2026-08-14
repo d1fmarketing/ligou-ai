@@ -31,6 +31,7 @@ assert(html.includes("padding-left:clamp(32px,calc(50vw - 788px),172px)!importan
 assert(html.includes("font-size:clamp(76px,5.4vw,104px)"), "compact desktop headline guard missing");
 assert(html.includes(".hero4-copy .h4-eyebrow{padding-top:8px}"), "hero eyebrow top spacing missing");
 assert(html.includes("@media (min-width:768px){.wavedraw{margin-top:32px!important}}"), "non-mobile proof-divider spacing missing");
+assert(html.includes("inglês, espanhol ou português"), "multilingual metadata and no-JS copy missing");
 assert(html.includes("(min-width:1600px) and (min-aspect-ratio:2/1)"), "ultrawide media query missing");
 assert(html.includes("aspect-ratio:3440/1476"), "ultrawide source geometry missing");
 assert(html.includes("aspect-ratio:4/3"), "landscape tablet frame missing");
@@ -46,6 +47,8 @@ const applicationSource = await readFile(
   path.join(root, "src/runtime/ligou-app9.jsx"),
   "utf8",
 );
+assert(applicationSource.includes("Configurado em português · Atende em inglês, espanhol e português"), "multilingual hero claim missing");
+assert(applicationSource.includes("Preciso falar inglês ou espanhol para configurar?"), "multilingual FAQ missing");
 addMatches(applicationSource, /["'](assets\/[^"']+)["']/g);
 for (const expectedMedia of [
   "hero-loop-ultrawide-3440x1476.mp4",

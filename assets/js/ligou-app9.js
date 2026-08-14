@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 5e330a15ba75fba2d1e50c57cc7588f47313d63d0f373daf1e56dbfc710b70fc
+ * Source SHA-256: ccf1a6f03035e61401a6c3c794a69605767aa02033f1ee5f0e4c737386198326
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -375,7 +375,7 @@ function Hero() {
   }, "Ver uma operação completa")), React.createElement("p", {
     className: "hd h4-trust",
     style: { "--d": "680ms" }
-  }, "Configurado em português · Opera em inglês e português")), React.createElement("div", {
+  }, "Configurado em português · Atende em inglês, espanhol e português")), React.createElement("div", {
     className: "hero4-artslot"
   }, band === "mid" ? art : null)));
 }
@@ -612,7 +612,7 @@ function CallDemo() {
     className: "p7-title"
   }, "Dentro das suas regras, ele resolve.", React.createElement("br", null), "Fora delas, ele pergunta."), React.createElement("p", {
     className: "p7-sub"
-  }, "O Ligou conduz a conversa em inglês, executa o que já está autorizado e chama você somente quando encontra uma exceção."), React.createElement("div", {
+  }, "O Ligou conduz a conversa no idioma do cliente — inglês, espanhol ou português —, executa o que já está autorizado e chama você somente quando encontra uma exceção."), React.createElement("div", {
     className: "p7-cq"
   }, React.createElement("div", {
     className: "p7-board"
@@ -1589,14 +1589,14 @@ function Dor() {
     delay: 320
   }, React.createElement("p", {
     style: { margin: 0, color: "var(--text-secondary)", maxWidth: 640 }
-  }, "E tem o outro lado: você pode ser excelente no que faz e ainda assim não se sentir confortável vendendo pelo telefone em inglês.")), React.createElement(Reveal, {
+  }, "E tem o outro lado: você pode ser excelente no que faz e ainda assim não se sentir confortável vendendo pelo telefone em inglês ou espanhol.")), React.createElement(Reveal, {
     delay: 380
   }, React.createElement("p", {
     style: { margin: 0, fontFamily: "var(--font-display)", fontWeight: 800, fontSize: "var(--size-h3)", letterSpacing: "var(--track-tight)", maxWidth: 640 }
   }, "Você não precisa falar como americano para atender seu cliente como profissional. O Ligou fecha essa distância."))));
 }
 function Faz() {
-  const items = ["Atende em inglês ou português", "Entende qual serviço o cliente procura", "Coleta nome, endereço e detalhes importantes", "Responde somente com informações que você aprovou", "Verifica disponibilidade e agenda dentro das suas regras", "Transfere chamadas urgentes para você", "Envia o resumo em português no seu celular", "Registra tudo para você revisar depois"];
+  const items = ["Atende em inglês, espanhol ou português", "Entende qual serviço o cliente procura", "Coleta nome, endereço e detalhes importantes", "Responde somente com informações que você aprovou", "Verifica disponibilidade e agenda dentro das suas regras", "Transfere chamadas urgentes para você", "Envia o resumo em português no seu celular", "Registra tudo para você revisar depois"];
   return React.createElement("section", {
     "data-screen-label": "O que ele faz",
     style: { marginTop: 116 }
@@ -1651,7 +1651,7 @@ function Faq() {
     ["E se ele não souber responder?", "Ele não chuta. Coleta as informações do cliente, avisa que alguém confirma, e pergunta para você. Você responde uma vez e aprova a resposta — ela vira uma regra do seu negócio até você decidir alterar ou apagar."],
     ["E se o cliente quiser falar comigo?", "Você escolhe: quando transferir na hora, quando só receber aviso, e quando deixar o Ligou concluir sozinho."],
     ["Ele fala que é inteligência artificial?", 'Ele se apresenta como assistente virtual da sua empresa: "Hi, you’ve reached [Your Business]. I’m their virtual assistant — how can I help?" A conversa é natural, mas a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.'],
-    ["Preciso falar inglês para configurar?", "Não. Toda a configuração — a entrevista, os ajustes, os resumos — é em português. O inglês é problema dele, não seu."],
+    ["Preciso falar inglês ou espanhol para configurar?", "Não. Toda a configuração — a entrevista, os ajustes e os resumos — é em português. Inglês e espanhol são problema dele, não seu."],
     ["E se eu quiser cancelar?", "Você cancela pelo painel, sem multa e sem precisar falar com vendedor."]
   ];
   return React.createElement("section", {
@@ -1681,7 +1681,7 @@ function Faq() {
 function Pricing() {
   const [ref, on] = useInView({ threshold: 0.3 });
   const label = { fontSize: 11, fontWeight: 700, letterSpacing: ".16em", textTransform: "uppercase" };
-  const inc = ["Uma empresa, uma localização", "Número do Ligou ou redirecionamento do seu", "Atendimento em inglês e português", "Onboarding por ligação, 100% em português", "Regras personalizadas + integração de agenda", "Resumos em português no seu celular", "Painel com histórico das ligações", "400 minutos/mês · excedente $0.35/min", "Testes e aprovação antes de entrar no ar"];
+  const inc = ["Uma empresa, uma localização", "Número do Ligou ou redirecionamento do seu", "Atendimento em inglês, espanhol e português", "Onboarding por ligação, 100% em português", "Regras personalizadas + integração de agenda", "Resumos em português no seu celular", "Painel com histórico das ligações", "400 minutos/mês · excedente $0.35/min", "Testes e aprovação antes de entrar no ar"];
   return React.createElement("section", {
     id: "preco",
     "data-screen-label": "Preço",
@@ -1764,7 +1764,7 @@ function Cta() {
     style: { position: "relative", zIndex: 1 }
   }, React.createElement(Reveal, null, React.createElement("p", {
     style: { margin: "0 0 26px", color: "var(--lg-teal-400)", fontSize: 12, fontWeight: 700, letterSpacing: ".18em", textTransform: "uppercase" }
-  }, "Seu negócio pode funcionar em inglês sem depender do seu inglês")), React.createElement("h2", {
+  }, "Seu negócio pode atender em inglês e espanhol — mesmo que você fale só português")), React.createElement("h2", {
     className: on ? "wr-on" : "",
     style: { maxWidth: "72%" }
   }, React.createElement("span", {
@@ -1853,7 +1853,7 @@ function App() {
     items: ["Limpeza", "Pintura", "Roofing", "Landscaping", "HVAC", "Junk removal", "Pavers", "Piscinas", "Remodeling", "Elétrica", "Encanamento"]
   }), React.createElement(Marquee, {
     small: true,
-    items: ["Atende em inglês", "Configurado em português", "Agenda dentro das suas regras", "Não inventa preço", "Resume em português", "Pergunta antes de aprender"]
+    items: ["Atende em inglês, espanhol e português", "Configurado em português", "Agenda dentro das suas regras", "Não inventa preço", "Resume em português", "Pergunta antes de aprender"]
   })), React.createElement(Scene, null), React.createElement(WaveDraw, {
     style: { maxWidth: "var(--container)", margin: "0 auto", padding: "0 32px" }
   }), React.createElement(CallDemo, null), React.createElement(Dor, null), React.createElement(Faz, null), React.createElement(Comecar, null), React.createElement(Faq, null), React.createElement(Pricing, null), React.createElement(Cta, null)), React.createElement(Footer, null));

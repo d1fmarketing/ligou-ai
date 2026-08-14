@@ -181,7 +181,7 @@ function Hero() {
           <Button variant="accent" size="lg" href="#prova">Falar com o Ligou</Button>
           <a className="h4-ghostbtn" href="#diferenca">Ver uma operação completa</a>
         </div>
-        <p className="hd h4-trust" style={{'--d': '680ms'}}>Configurado em português · Opera em inglês e português</p>
+        <p className="hd h4-trust" style={{'--d': '680ms'}}>Configurado em português · Atende em inglês, espanhol e português</p>
       </div>
       <div className="hero4-artslot">{band === 'mid' ? art : null}</div>
     </Container>
@@ -269,7 +269,7 @@ function CallDemo() {
     <Container style={{maxWidth: 1500}}>
       <Eyebrow>Prova do produto</Eyebrow>
       <h2 className="p7-title">Dentro das suas regras, ele resolve.<br/>Fora delas, ele pergunta.</h2>
-      <p className="p7-sub">O Ligou conduz a conversa em inglês, executa o que já está autorizado e chama você somente quando encontra uma exceção.</p>
+      <p className="p7-sub">O Ligou conduz a conversa no idioma do cliente — inglês, espanhol ou português —, executa o que já está autorizado e chama você somente quando encontra uma exceção.</p>
       <div className="p7-cq"><div className="p7-board">
         <div className="p7-bar">
           <span className="p7-dot"></span>
@@ -389,14 +389,14 @@ function Dor() {
       <Reveal delay={140}><p style={{margin: 0, fontSize: 'var(--size-body-lg)', color: 'var(--text-secondary)', maxWidth: 640}}>Você estava no telhado. Estava dirigindo. Estava com outro cliente. O telefone tocou e caiu na caixa postal. Para quem ligou, a próxima empresa está a um toque de distância no Google.</p></Reveal>
       <Reveal delay={200}><p className="dorbig" style={{fontSize: 'clamp(24px,2.8vw,38px)'}}>Uma ligação perdida por dia pode virar até <span className="acc">30 conversas</span> que o seu negócio nem chegou a disputar naquele mês.</p></Reveal>
       <Reveal delay={260}><p style={{margin: 0, color: 'var(--text-secondary)', maxWidth: 640}}>Quanto vale uma única ligação que vira orçamento no seu negócio? Num roofing, numa pintura, numa reforma — às vezes vale milhares de dólares. E ela tocou. E ninguém atendeu.</p></Reveal>
-      <Reveal delay={320}><p style={{margin: 0, color: 'var(--text-secondary)', maxWidth: 640}}>E tem o outro lado: você pode ser excelente no que faz e ainda assim não se sentir confortável vendendo pelo telefone em inglês.</p></Reveal>
+      <Reveal delay={320}><p style={{margin: 0, color: 'var(--text-secondary)', maxWidth: 640}}>E tem o outro lado: você pode ser excelente no que faz e ainda assim não se sentir confortável vendendo pelo telefone em inglês ou espanhol.</p></Reveal>
       <Reveal delay={380}><p style={{margin: 0, fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: 'var(--size-h3)', letterSpacing: 'var(--track-tight)', maxWidth: 640}}>Você não precisa falar como americano para atender seu cliente como profissional. O Ligou fecha essa distância.</p></Reveal>
     </Container>
   </section>;
 }
 
 function Faz() {
-  const items = ['Atende em inglês ou português', 'Entende qual serviço o cliente procura', 'Coleta nome, endereço e detalhes importantes', 'Responde somente com informações que você aprovou', 'Verifica disponibilidade e agenda dentro das suas regras', 'Transfere chamadas urgentes para você', 'Envia o resumo em português no seu celular', 'Registra tudo para você revisar depois'];
+  const items = ['Atende em inglês, espanhol ou português', 'Entende qual serviço o cliente procura', 'Coleta nome, endereço e detalhes importantes', 'Responde somente com informações que você aprovou', 'Verifica disponibilidade e agenda dentro das suas regras', 'Transfere chamadas urgentes para você', 'Envia o resumo em português no seu celular', 'Registra tudo para você revisar depois'];
   return <section data-screen-label="O que ele faz" style={{marginTop: 116}}>
     <Container>
       <SectionHead eyebrow="Numa ligação" title="O que ele faz quando o telefone toca."/>
@@ -434,7 +434,7 @@ function Faq() {
     ['E se ele não souber responder?', 'Ele não chuta. Coleta as informações do cliente, avisa que alguém confirma, e pergunta para você. Você responde uma vez e aprova a resposta — ela vira uma regra do seu negócio até você decidir alterar ou apagar.'],
     ['E se o cliente quiser falar comigo?', 'Você escolhe: quando transferir na hora, quando só receber aviso, e quando deixar o Ligou concluir sozinho.'],
     ['Ele fala que é inteligência artificial?', 'Ele se apresenta como assistente virtual da sua empresa: "Hi, you\u2019ve reached [Your Business]. I\u2019m their virtual assistant — how can I help?" A conversa é natural, mas a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.'],
-    ['Preciso falar inglês para configurar?', 'Não. Toda a configuração — a entrevista, os ajustes, os resumos — é em português. O inglês é problema dele, não seu.'],
+    ['Preciso falar inglês ou espanhol para configurar?', 'Não. Toda a configuração — a entrevista, os ajustes e os resumos — é em português. Inglês e espanhol são problema dele, não seu.'],
     ['E se eu quiser cancelar?', 'Você cancela pelo painel, sem multa e sem precisar falar com vendedor.']
   ];
   return <section id="faq" data-screen-label="FAQ" style={{marginTop: 116}}>
@@ -453,7 +453,7 @@ function Faq() {
 function Pricing() {
   const [ref, on] = useInView({threshold: .3});
   const label = {fontSize: 11, fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase'};
-  const inc = ['Uma empresa, uma localização', 'Número do Ligou ou redirecionamento do seu', 'Atendimento em inglês e português', 'Onboarding por ligação, 100% em português', 'Regras personalizadas + integração de agenda', 'Resumos em português no seu celular', 'Painel com histórico das ligações', '400 minutos/mês · excedente $0.35/min', 'Testes e aprovação antes de entrar no ar'];
+  const inc = ['Uma empresa, uma localização', 'Número do Ligou ou redirecionamento do seu', 'Atendimento em inglês, espanhol e português', 'Onboarding por ligação, 100% em português', 'Regras personalizadas + integração de agenda', 'Resumos em português no seu celular', 'Painel com histórico das ligações', '400 minutos/mês · excedente $0.35/min', 'Testes e aprovação antes de entrar no ar'];
   return <section id="preco" data-screen-label="Preço" style={{marginTop: 110, background: 'var(--surface-inverse)', color: 'var(--text-inverse)'}}>
     <Container className="price-ct" style={{padding: '92px 32px 100px'}}>
       <Reveal><span className="pt-cap__label">Ligou Launch</span></Reveal>
@@ -488,7 +488,7 @@ function Cta() {
   const [ref, on] = useInView({threshold: .3});
   return <section ref={ref} className="cta" data-screen-label="CTA final">
     <Container style={{position: 'relative', zIndex: 1}}>
-      <Reveal><p style={{margin: '0 0 26px', color: 'var(--lg-teal-400)', fontSize: 12, fontWeight: 700, letterSpacing: '.18em', textTransform: 'uppercase'}}>Seu negócio pode funcionar em inglês sem depender do seu inglês</p></Reveal>
+      <Reveal><p style={{margin: '0 0 26px', color: 'var(--lg-teal-400)', fontSize: 12, fontWeight: 700, letterSpacing: '.18em', textTransform: 'uppercase'}}>Seu negócio pode atender em inglês e espanhol — mesmo que você fale só português</p></Reveal>
       <h2 className={on ? 'wr-on' : ''} style={{maxWidth: '72%'}}>
         <span className="lmask"><span className="ln" style={{'--d': '60ms'}}>Ligou?</span></span>
         <span className="lmask"><span className="ln acc" style={{'--d': '220ms'}}>Atendido.</span></span>
@@ -532,7 +532,7 @@ function App() {
       <Hero/>
       <div className="mqwrap" aria-hidden="true">
         <Marquee rev items={['Limpeza', 'Pintura', 'Roofing', 'Landscaping', 'HVAC', 'Junk removal', 'Pavers', 'Piscinas', 'Remodeling', 'Elétrica', 'Encanamento']}/>
-        <Marquee small items={['Atende em inglês', 'Configurado em português', 'Agenda dentro das suas regras', 'Não inventa preço', 'Resume em português', 'Pergunta antes de aprender']}/>
+        <Marquee small items={['Atende em inglês, espanhol e português', 'Configurado em português', 'Agenda dentro das suas regras', 'Não inventa preço', 'Resume em português', 'Pergunta antes de aprender']}/>
       </div>
       <Scene/>
       <WaveDraw style={{maxWidth: 'var(--container)', margin: '0 auto', padding: '0 32px'}}/>

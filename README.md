@@ -2,7 +2,8 @@
 
 Checkpoint local da **Claude Design v9** em PT-BR. A página apresenta o Ligou como
 agente operacional para donos brasileiros de negócios de serviços nos Estados Unidos:
-hero `Ligou? Atendido.`, entrevista em português, operação em inglês e prova causal
+hero `Ligou? Atendido.`, entrevista em português, operação multilíngue
+em inglês, espanhol e português, além da prova causal
 `cliente → regra → ação → decisão do dono`.
 
 **Estado:** integrada ao histórico Git local como direção visual. Não houve push, PR ou
