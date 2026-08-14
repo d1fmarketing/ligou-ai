@@ -30,7 +30,7 @@ assert(html.includes("#021523 0%,#021523 38%"), "desktop edge-matched background
 assert(html.includes("padding-left:clamp(32px,calc(50vw - 788px),172px)!important"), "wide desktop copy anchor missing");
 assert(html.includes("font-size:clamp(76px,5.4vw,104px)"), "compact desktop headline guard missing");
 assert(html.includes(".hero4-copy .h4-eyebrow{padding-top:8px}"), "hero eyebrow top spacing missing");
-assert(html.includes("@media (min-width:1200px){.wavedraw{margin-top:32px!important}}"), "desktop proof-divider spacing missing");
+assert(html.includes("@media (min-width:768px){.wavedraw{margin-top:32px!important}}"), "non-mobile proof-divider spacing missing");
 assert(html.includes("(min-width:1600px) and (min-aspect-ratio:2/1)"), "ultrawide media query missing");
 assert(html.includes("aspect-ratio:3440/1476"), "ultrawide source geometry missing");
 assert(html.includes("aspect-ratio:4/3"), "landscape tablet frame missing");
