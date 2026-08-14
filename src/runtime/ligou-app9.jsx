@@ -179,7 +179,7 @@ function Hero() {
         <p className="hd h4-lede" style={{'--d': '440ms'}}>Seu cliente liga. O Ligou consulta suas regras, agenda o trabalho e só te chama quando precisa de aprovação.</p>
         <div className="hd h4-ctas" style={{'--d': '560ms'}}>
           <Button variant="accent" size="lg" href="#prova">Falar com o Ligou</Button>
-          <a className="h4-ghostbtn" href="#diferenca">Ver uma operação completa</a>
+          {band !== 'mobile' && <a className="h4-ghostbtn" href="#diferenca">Ver uma operação completa</a>}
         </div>
         <p className="hd h4-trust" style={{'--d': '680ms'}}>Configurado em português · Atende em inglês, espanhol e português</p>
       </div>

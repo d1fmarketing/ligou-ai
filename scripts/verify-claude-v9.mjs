@@ -51,6 +51,10 @@ assert(applicationSource.includes("Configurado em português · Atende em inglê
 assert(applicationSource.includes("Preciso falar inglês ou espanhol para configurar?"), "multilingual FAQ missing");
 assert(applicationSource.includes("Memória permanente do seu negócio"), "permanent business memory message missing");
 assert(applicationSource.includes("depois que você aprova, a resposta vira uma regra permanente"), "owner-approved learning message missing");
+assert(
+  applicationSource.includes("band !== 'mobile' && <a className=\"h4-ghostbtn\""),
+  "secondary hero CTA must not render on mobile",
+);
 addMatches(applicationSource, /["'](assets\/[^"']+)["']/g);
 for (const expectedMedia of [
   "hero-loop-ultrawide-3440x1476.mp4",

@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 3378396320dfbdf9e4d093a34ea82d925ec717f51dddc66dd75adc5de98cad4e
+ * Source SHA-256: 9bca1daf8316fbf3f71bd2132ce8d9b19aafcd8c8484272e4921cf4482429185
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -369,7 +369,7 @@ function Hero() {
     variant: "accent",
     size: "lg",
     href: "#prova"
-  }, "Falar com o Ligou"), React.createElement("a", {
+  }, "Falar com o Ligou"), band !== "mobile" && React.createElement("a", {
     className: "h4-ghostbtn",
     href: "#diferenca"
   }, "Ver uma operação completa")), React.createElement("p", {

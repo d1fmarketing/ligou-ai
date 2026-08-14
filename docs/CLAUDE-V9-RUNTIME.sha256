@@ -38,7 +38,7 @@ a6c3a614b91458fb807570cc6e3a09f9f649a9aa82d05377160bdf1b2331554d  assets/hero-po
 94decfd40c63e2f0fe10ed0a8427286ddf35852bc562db6621d23a5efceada5b  assets/hero-poster-tablet-portrait-1080x1440.png
 f38b2ad2176bb4e9c68dcc4a3a62961d50c52f77bd96ba24e4cf3c25f5388fa1  assets/hero-poster-ultrawide-3440x1476.webp
 6b8d21997420acefa03f5f810c3a531f249b12010290bcfde7e742984d9beddb  assets/ligou-avatar-v1.png
-be09eff93dc5ce18bd873cc9d254e856c74da2ae6177103df0c5b150faa10a5a  assets/js/ligou-app9.js
+996fb7a4e21d19d26ee455f71dc8922ebf34f4909208820b189bcf9f3f88aa83  assets/js/ligou-app9.js
 56b95ec506043816ae448eaa95f97dfbc05c6905e5702b883734b49590c0a66f  assets/js/ligou-fx2.js
 52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85  assets/vendor/REACT-LICENSE.txt
 d949f1c3687aedadcedac85261865f29b17cd273997e7f6b2bfc53b2f9d4c4dd  assets/vendor/react-18.3.1.production.min.js
@@ -47,4 +47,4 @@ bd6dac774bbb365530342499338b744186192e791ee5bc452b4244f234a698ce  index.html
 a2ee8b06f5921fe93657b08d8bcbda5fd45d0050ef4ae1f5ba5fa22e9a6bf6b8  src/claude-v9/Ligou 2026 v9.html
 6ed7437c6d26cdb715adc15d52a5e6bf3ed47752f8cdf17e2d7cabe9cf60b613  src/claude-v9/ligou-app9.jsx
 0a82edda7ab80bd82ca5c2c1df13a363f9c808e6d9019422313e42dcc015f80a  src/claude-v9/ligou-fx2.jsx
-3378396320dfbdf9e4d093a34ea82d925ec717f51dddc66dd75adc5de98cad4e  src/runtime/ligou-app9.jsx
+9bca1daf8316fbf3f71bd2132ce8d9b19aafcd8c8484272e4921cf4482429185  src/runtime/ligou-app9.jsx
