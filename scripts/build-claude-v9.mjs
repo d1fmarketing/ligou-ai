@@ -4,9 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const sourceDirectory = path.join(root, "src", "claude-v9");
 const outputDirectory = path.join(root, "assets", "js");
-const sources = ["ligou-fx2.jsx", "ligou-app9.jsx"];
+const sources = [
+  { input: "src/claude-v9/ligou-fx2.jsx", output: "ligou-fx2.js" },
+  { input: "src/runtime/ligou-app9.jsx", output: "ligou-app9.js" },
+];
 const transpiler = new Bun.Transpiler({
   loader: "jsx",
   target: "browser",
@@ -15,14 +17,13 @@ const transpiler = new Bun.Transpiler({
 
 await mkdir(outputDirectory, { recursive: true });
 
-for (const filename of sources) {
-  const sourcePath = path.join(sourceDirectory, filename);
+for (const { input, output } of sources) {
+  const sourcePath = path.join(root, input);
   const source = await readFile(sourcePath, "utf8");
   const digest = createHash("sha256").update(source).digest("hex");
-  const outputName = filename.replace(/\.jsx$/, ".js");
   const banner = [
     "/*",
-    ` * Generated from src/claude-v9/${filename}`,
+    ` * Generated from ${input}`,
     ` * Source SHA-256: ${digest}`,
     " * Rebuild with: bun run build",
     " */",
@@ -30,7 +31,7 @@ for (const filename of sources) {
   ].join("\n");
 
   await Bun.write(
-    path.join(outputDirectory, outputName),
+    path.join(outputDirectory, output),
     banner + transpiler.transformSync(source),
   );
 }

@@ -24,6 +24,9 @@ assert(!html.includes("react-dom.development.js"), "production preview must not 
 assert(html.includes('name="robots" content="noindex, nofollow"'), "prototype must stay noindex");
 assert(html.includes("assets/vendor/react-18.3.1.production.min.js"), "local React runtime missing");
 assert(html.includes("assets/js/ligou-app9.js"), "compiled v9 application missing");
+assert(html.includes("object-fit:cover;object-position:center right"), "desktop hero must cover its background");
+assert(html.includes("aspect-ratio:4/3"), "landscape tablet frame missing");
+assert(html.includes("aspect-ratio:3/4"), "portrait tablet frame missing");
 
 const runtimeReferences = new Set();
 const addMatches = (contents, pattern) => {
@@ -32,10 +35,18 @@ const addMatches = (contents, pattern) => {
 
 addMatches(html, /(?:src|href)="((?:assets|_ds)\/[^"#?]+)"/g);
 const applicationSource = await readFile(
-  path.join(root, "src/claude-v9/ligou-app9.jsx"),
+  path.join(root, "src/runtime/ligou-app9.jsx"),
   "utf8",
 );
 addMatches(applicationSource, /["'](assets\/[^"']+)["']/g);
+for (const expectedMedia of [
+  "hero-loop-1080p.mp4",
+  "hero-loop-tablet-landscape-1440x1080.mp4",
+  "hero-loop-tablet-portrait-1080x1440.mp4",
+  "hero-loop-mobile-1080x1920.mp4",
+]) {
+  assert(applicationSource.includes(expectedMedia), `missing responsive hero media: ${expectedMedia}`);
+}
 
 const visitedStylesheets = new Set();
 const collectStylesheetReferences = async (relativePath) => {

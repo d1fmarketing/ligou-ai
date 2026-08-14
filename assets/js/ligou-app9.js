@@ -1,6 +1,6 @@
 /*
- * Generated from src/claude-v9/ligou-app9.jsx
- * Source SHA-256: 6ed7437c6d26cdb715adc15d52a5e6bf3ed47752f8cdf17e2d7cabe9cf60b613
+ * Generated from src/runtime/ligou-app9.jsx
+ * Source SHA-256: af4f4fd687397e8a011b916741f60301e1b456f35e2e0dd4e539edfe48555d49
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -193,25 +193,63 @@ function Nav() {
     style: { whiteSpace: "nowrap" }
   }, "Quero testar"))));
 }
-function HeroVideo() {
-  const [mobile, setMobile] = React.useState(() => window.matchMedia("(max-width: 1199px)").matches);
+const HERO_MEDIA = {
+  desktop: {
+    src: "assets/hero-loop-1080p.mp4",
+    poster: "assets/hero-poster.png",
+    width: 1920,
+    height: 1080
+  },
+  tabletLandscape: {
+    src: "assets/hero-loop-tablet-landscape-1440x1080.mp4",
+    poster: "assets/hero-poster-tablet-landscape-1440x1080.png",
+    width: 1440,
+    height: 1080
+  },
+  tabletPortrait: {
+    src: "assets/hero-loop-tablet-portrait-1080x1440.mp4",
+    poster: "assets/hero-poster-tablet-portrait-1080x1440.png",
+    width: 1080,
+    height: 1440
+  },
+  mobile: {
+    src: "assets/hero-loop-mobile-1080x1920.mp4",
+    poster: "assets/hero-poster-mobile.png",
+    width: 1080,
+    height: 1920
+  }
+};
+function getHeroMediaKey() {
+  if (window.matchMedia("(max-width: 767px)").matches)
+    return "mobile";
+  if (window.matchMedia("(max-width: 1199px)").matches) {
+    return window.matchMedia("(orientation: portrait)").matches ? "tabletPortrait" : "tabletLandscape";
+  }
+  return "desktop";
+}
+function useHeroMedia() {
+  const [key, setKey] = React.useState(getHeroMediaKey);
   React.useEffect(() => {
-    const mq = window.matchMedia("(max-width: 1199px)");
-    const f = (e) => setMobile(e.matches);
-    mq.addEventListener ? mq.addEventListener("change", f) : mq.addListener(f);
-    return () => {
-      mq.removeEventListener ? mq.removeEventListener("change", f) : mq.removeListener(f);
-    };
+    const queries = [
+      window.matchMedia("(max-width: 767px)"),
+      window.matchMedia("(max-width: 1199px)"),
+      window.matchMedia("(orientation: portrait)")
+    ];
+    const refresh = () => setKey(getHeroMediaKey());
+    queries.forEach((query) => query.addEventListener ? query.addEventListener("change", refresh) : query.addListener(refresh));
+    return () => queries.forEach((query) => query.removeEventListener ? query.removeEventListener("change", refresh) : query.removeListener(refresh));
   }, []);
-  const src = mobile ? "assets/hero-loop-mobile-1080x1920.mp4" : "assets/hero-loop-1080p.mp4";
-  const poster = mobile ? "assets/hero-poster-mobile.png" : "assets/hero-poster.png";
-  const w = mobile ? 1080 : 1920, h = mobile ? 1920 : 1080;
+  return [key, HERO_MEDIA[key]];
+}
+function HeroVideo() {
+  const [mediaKey, media] = useHeroMedia();
   return React.createElement("video", {
-    key: src,
-    src,
-    poster,
-    width: w,
-    height: h,
+    "data-hero-media": mediaKey,
+    key: media.src,
+    src: media.src,
+    poster: media.poster,
+    width: media.width,
+    height: media.height,
     autoPlay: true,
     muted: true,
     loop: true,
@@ -246,10 +284,20 @@ function Hero() {
     className: "hero4-artlayer",
     "aria-hidden": "true"
   }, LGFX_REDUCED ? React.createElement("picture", null, React.createElement("source", {
-    media: "(max-width:1199px)",
+    media: "(max-width:767px)",
     srcSet: "assets/hero-poster-mobile.png",
     width: "1080",
     height: "1920"
+  }), React.createElement("source", {
+    media: "(min-width:768px) and (max-width:1199px) and (orientation:portrait)",
+    srcSet: "assets/hero-poster-tablet-portrait-1080x1440.png",
+    width: "1080",
+    height: "1440"
+  }), React.createElement("source", {
+    media: "(min-width:768px) and (max-width:1199px)",
+    srcSet: "assets/hero-poster-tablet-landscape-1440x1080.png",
+    width: "1440",
+    height: "1080"
   }), React.createElement("img", {
     src: "assets/hero-poster.png",
     width: "1920",
