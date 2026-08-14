@@ -24,7 +24,11 @@ assert(!html.includes("react-dom.development.js"), "production preview must not 
 assert(html.includes('name="robots" content="noindex, nofollow"'), "prototype must stay noindex");
 assert(html.includes("assets/vendor/react-18.3.1.production.min.js"), "local React runtime missing");
 assert(html.includes("assets/js/ligou-app9.js"), "compiled v9 application missing");
-assert(html.includes("object-fit:cover;object-position:center right"), "desktop hero must cover its background");
+assert(html.includes("object-fit:contain;object-position:center right"), "desktop source composition must stay uncropped");
+assert(html.includes("position:absolute;top:50%;right:0;width:100%;height:auto;aspect-ratio:16/9"), "desktop hero must use width-fit geometry");
+assert(html.includes("#021523 0%,#021523 38%"), "desktop edge-matched background missing");
+assert(html.includes("padding-left:clamp(32px,calc(50vw - 788px),172px)!important"), "wide desktop copy anchor missing");
+assert(html.includes("font-size:clamp(76px,5.4vw,104px)"), "compact desktop headline guard missing");
 assert(html.includes("aspect-ratio:4/3"), "landscape tablet frame missing");
 assert(html.includes("aspect-ratio:3/4"), "portrait tablet frame missing");
 

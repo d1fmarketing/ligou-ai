@@ -1,6 +1,6 @@
 {
   "name": "ligou-ai-landing",
-  "version": "2026.8.13-v9.1",
+  "version": "2026.8.13-v9.2",
   "private": true,
   "packageManager": "bun@1.2.13",
   "scripts": {

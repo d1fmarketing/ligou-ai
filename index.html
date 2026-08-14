@@ -237,7 +237,7 @@ section{margin-top:64px!important}
 .hero4-artlayer{position:absolute;inset:0;z-index:1}
 .hero4-artlayer picture{display:contents}
 .hero4-artlayer::after{z-index:2}
-.hero4-artlayer img,.hero4-artlayer video{width:100%;height:100%;object-fit:cover;object-position:center right;display:block}
+.hero4-artlayer img,.hero4-artlayer video{width:100%;height:100%;object-fit:contain;object-position:center right;display:block}
 .hero4-artlayer video{pointer-events:none}
 .hero4-artlayer::after{content:"";position:absolute;inset:-2px;pointer-events:none;box-shadow:inset 0 0 70px 45px var(--h4bg)}
 .h4-eyebrow{display:inline-flex;align-items:center;gap:12px;font-size:clamp(10px,.78vw,11.5px);font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#7fc7b9;white-space:nowrap}
@@ -252,6 +252,14 @@ section{margin-top:64px!important}
 .h4-ghostbtn:active{transform:scale(.98)}
 .h4-trust{display:flex;align-items:center;gap:9px;margin:28px 0 0;font-size:13px;font-weight:600;color:rgba(251,252,248,.62)}
 .h4-trust::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--lg-teal-400);flex:none}
+@media (min-width:1200px){
+.hero4{--h4bg:#061b2a;background:linear-gradient(180deg,#021523 0%,#021523 38%,#061b2a 50%,#0c1e2d 62%,#0c1e2d 100%)}
+.hero4-grid{width:100%;max-width:none!important;padding-left:clamp(32px,calc(50vw - 788px),172px)!important;padding-right:32px!important}
+.hero4-artlayer img,.hero4-artlayer video{position:absolute;top:50%;right:0;width:100%;height:auto;aspect-ratio:16/9;object-fit:contain;object-position:center;transform:translateY(-50%)}
+.hero4-artlayer::after{inset:auto 0 auto 0;top:50%;width:100%;height:auto;aspect-ratio:16/9;transform:translateY(-50%);box-shadow:none;background:linear-gradient(180deg,#021523 0%,rgba(2,21,35,0) 9%,rgba(12,30,45,0) 91%,#0c1e2d 100%)}
+.hero4 h1{font-size:clamp(76px,5.4vw,104px)}
+.h4-lede,.h4-trust{max-width:min(100%,clamp(350px,23vw,440px))}
+}
 @media (min-width:768px) and (max-width:1199px){
 .hero4-grid{max-width:1080px!important;padding:16px 36px 24px!important;grid-template-columns:minmax(0,47%) minmax(0,53%);gap:20px;align-items:center;min-height:clamp(560px,calc(100svh - 68px),720px)}
 .hero4-artslot{display:flex;align-items:center;justify-content:flex-end;min-width:0;height:clamp(500px,68svh,680px)}

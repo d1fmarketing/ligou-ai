@@ -26,3 +26,13 @@ Os três arquivos originais de Claude Design em `src/claude-v9/` permanecem byte
 iguais ao checkpoint v9. A adaptação executável vive em `src/runtime/ligou-app9.jsx` e é
 compilada por `bun run build`, mantendo separadas a fonte recebida e a implementação da
 correção responsiva.
+
+## Correção v9.2 — composição desktop
+
+O preenchimento desktop por `cover` foi removido porque cortava a zona vazia intencional
+do master 16:9 e deslocava o robô para baixo da copy em janelas altas. O desktop agora
+mantém sempre 100% da largura do vídeo, centraliza a mídia verticalmente e limita qualquer
+corte às bordas superior e inferior. As faixas residuais usam as cores amostradas do próprio
+master (`#021523`, `#061b2a`, `#0c1e2d`) com fade nas bordas. Em telas largas, a copy
+agora para no mesmo eixo esquerdo aprovado para 1920 px, em vez de continuar se aproximando
+do robô conforme o container centralizado cresce. As regras de tablet e celular não mudaram.
