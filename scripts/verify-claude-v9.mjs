@@ -55,6 +55,20 @@ for (const expectedMedia of [
   assert(applicationSource.includes(expectedMedia), `missing responsive hero media: ${expectedMedia}`);
 }
 
+assert.equal(
+  [...applicationSource.matchAll(/assets\/ligou-avatar-v1\.png/g)].length,
+  5,
+  "all five compact Ligou appearances must use the transparent avatar",
+);
+assert(
+  !applicationSource.includes("iv-av-d") && !applicationSource.includes("iv-av-m"),
+  "legacy breakpoint-specific avatar crops must not return",
+);
+assert(
+  html.includes(".ligou-avatar{width:100%;height:100%;object-fit:cover;object-position:center;display:block}"),
+  "transparent avatar framing is missing",
+);
+
 const visitedStylesheets = new Set();
 const collectStylesheetReferences = async (relativePath) => {
   if (visitedStylesheets.has(relativePath)) return;

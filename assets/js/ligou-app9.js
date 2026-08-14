@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 619bd086b3d75fce932987da4a2db32cc4e2cf72930827643578e93a2288830a
+ * Source SHA-256: 5e330a15ba75fba2d1e50c57cc7588f47313d63d0f373daf1e56dbfc710b70fc
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -469,12 +469,8 @@ function Scene() {
   }, React.createElement("span", {
     className: "iv-avatar"
   }, React.createElement("img", {
-    className: "iv-av-d",
-    src: "assets/crop-robot-head.png",
-    alt: ""
-  }), React.createElement("img", {
-    className: "iv-av-m",
-    src: "assets/agent-full.png",
+    className: "ligou-avatar",
+    src: "assets/ligou-avatar-v1.png",
     alt: ""
   })), React.createElement("span", {
     className: "iv-id"
@@ -529,12 +525,8 @@ function Scene() {
   }, React.createElement("span", {
     className: "iv-avatar iv-avatar--ring"
   }, React.createElement("img", {
-    className: "iv-av-d",
-    src: "assets/crop-robot-head.png",
-    alt: ""
-  }), React.createElement("img", {
-    className: "iv-av-m",
-    src: "assets/agent-full.png",
+    className: "ligou-avatar",
+    src: "assets/ligou-avatar-v1.png",
     alt: ""
   })), React.createElement("span", null, React.createElement("b", {
     className: "iv-readytitle"
@@ -1201,7 +1193,8 @@ function CallDemo() {
   }, React.createElement("span", {
     className: "lc-avatar lc-avatar--head"
   }, React.createElement("img", {
-    src: "assets/agent-full.png",
+    className: "ligou-avatar",
+    src: "assets/ligou-avatar-v1.png",
     alt: ""
   })), React.createElement("span", {
     className: "lc-id"
@@ -1411,7 +1404,8 @@ function CallDemo() {
   }, React.createElement("span", {
     className: "lc-face lc-face--lg"
   }, React.createElement("img", {
-    src: "assets/agent-full.png",
+    className: "ligou-avatar",
+    src: "assets/ligou-avatar-v1.png",
     alt: ""
   })), React.createElement("div", {
     className: "lc-msg"
@@ -1436,7 +1430,8 @@ function CallDemo() {
   }, React.createElement("span", {
     className: "lc-face lc-face--lg"
   }, React.createElement("img", {
-    src: "assets/agent-full.png",
+    className: "ligou-avatar",
+    src: "assets/ligou-avatar-v1.png",
     alt: ""
   })), React.createElement("div", {
     className: "lc-msg"

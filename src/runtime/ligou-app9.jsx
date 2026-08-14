@@ -213,7 +213,7 @@ function Scene() {
           <p className="iv-line">Ele te liga primeiro.</p>
           <div className="iv-card iv-card--dark">
             <div className="iv-idrow">
-              <span className="iv-avatar"><img className="iv-av-d" src="assets/crop-robot-head.png" alt=""/><img className="iv-av-m" src="assets/agent-full.png" alt=""/></span>
+              <span className="iv-avatar"><img className="ligou-avatar" src="assets/ligou-avatar-v1.png" alt=""/></span>
               <span className="iv-id"><b>Ligou</b><i>Agente operacional</i></span>
               <Waveform playing={true}/>
             </div>
@@ -236,7 +236,7 @@ function Scene() {
           <p className="iv-line">Ele atende com suas regras.</p>
           <div className="iv-card iv-card--light">
             <div className="iv-readyhead">
-              <span className="iv-avatar iv-avatar--ring"><img className="iv-av-d" src="assets/crop-robot-head.png" alt=""/><img className="iv-av-m" src="assets/agent-full.png" alt=""/></span>
+              <span className="iv-avatar iv-avatar--ring"><img className="ligou-avatar" src="assets/ligou-avatar-v1.png" alt=""/></span>
               <span>
                 <b className="iv-readytitle">Pronto para atender</b>
                 <span className="wf-teal"><Waveform playing={true}/></span>
@@ -332,7 +332,7 @@ function CallDemo() {
       <div className="p7m" key={mrun}>
         <div className="lc-shell">
           <div className="lc-head lc-i" style={{'--lcd': '0s'}}>
-            <span className="lc-avatar lc-avatar--head"><img src="assets/agent-full.png" alt=""/></span>
+            <span className="lc-avatar lc-avatar--head"><img className="ligou-avatar" src="assets/ligou-avatar-v1.png" alt=""/></span>
             <span className="lc-id"><b>Ligou em chamada</b><span className="lc-idsub"><i className="lc-en">EN</i><svg className="lc-wf" width="120" height="22" viewBox="0 0 120 22" aria-hidden="true"><rect x="0" y="8.5" width="3" height="5" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="6" y="6.5" width="3" height="9" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="12" y="4.5" width="3" height="13" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="18" y="7.5" width="3" height="7" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="24" y="3.5" width="3" height="15" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="30" y="6" width="3" height="10" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="36" y="3" width="3" height="16" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="42" y="8" width="3" height="6" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="48" y="5" width="3" height="12" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="54" y="4" width="3" height="14" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="60" y="8" width="3" height="6" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="66" y="6" width="3" height="10" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="72" y="3.5" width="3" height="15" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="78" y="7" width="3" height="8" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="84" y="8.5" width="3" height="5" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="90" y="5" width="3" height="12" rx="1.5" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="96" y="6.5" width="3" height="9" rx="1.5" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="102" y="4" width="3" height="14" rx="1.5" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="108" y="7.5" width="3" height="7" rx="1.5" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="114" y="5.5" width="3" height="11" rx="1.5" fill="var(--lg-teal-500)" opacity=".45"></rect></svg></span></span>
             <span className="lc-htime">00:12</span>
             <button className="lc-again" type="button" onClick={() => { setMrel(false); setMrun(m => m + 1); }} aria-label="Ver de novo"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"></path></svg></button>
@@ -347,7 +347,7 @@ function CallDemo() {
             </div>
             <div className="lc-ev lc-i" style={{'--lcd': '.55s'}}><span className="lc-evline" aria-hidden="true"></span><i className="lc-evdot" style={{background: 'var(--lg-orange-500)'}}></i><span><b>Urgência identificada</b><em>Possível vazamento ativo · San Rafael, CA</em></span></div>
             <div className="lc-row lc-i" style={{'--lcd': '1s'}}>
-              <span className="lc-face lc-face--lg"><img src="assets/agent-full.png" alt=""/></span>
+              <span className="lc-face lc-face--lg"><img className="ligou-avatar" src="assets/ligou-avatar-v1.png" alt=""/></span>
               <div className="lc-msg">
                 <span className="lc-who">Ligou · Inglês<i className="lc-ts">00:06</i></span>
                 <div className="lc-bub">I can help. Same-day visits need team approval, so I’ll check availability now.</div>
@@ -355,7 +355,7 @@ function CallDemo() {
             </div>
             <div className="lc-ev lc-i" style={{'--lcd': '1.45s'}}><span className="lc-evline" aria-hidden="true"></span><i className="lc-evdot" style={{background: 'var(--lg-teal-400)'}}></i><span><b>Regra consultada</b><em>Mesmo dia exige aprovação · Política v2.4</em></span></div>
             <div className="lc-row lc-i" style={{'--lcd': '1.9s'}}>
-              <span className="lc-face lc-face--lg"><img src="assets/agent-full.png" alt=""/></span>
+              <span className="lc-face lc-face--lg"><img className="ligou-avatar" src="assets/ligou-avatar-v1.png" alt=""/></span>
               <div className="lc-msg">
                 <span className="lc-who">Ligou · Inglês<i className="lc-ts">00:10</i></span>
                 <div className="lc-bub">I’ve sent your request to the team. You’ll receive a text as soon as they confirm.</div>
