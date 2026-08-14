@@ -49,6 +49,8 @@ const applicationSource = await readFile(
 );
 assert(applicationSource.includes("Configurado em português · Atende em inglês, espanhol e português"), "multilingual hero claim missing");
 assert(applicationSource.includes("Preciso falar inglês ou espanhol para configurar?"), "multilingual FAQ missing");
+assert(applicationSource.includes("Memória permanente do seu negócio"), "permanent business memory message missing");
+assert(applicationSource.includes("depois que você aprova, a resposta vira uma regra permanente"), "owner-approved learning message missing");
 addMatches(applicationSource, /["'](assets\/[^"']+)["']/g);
 for (const expectedMedia of [
   "hero-loop-ultrawide-3440x1476.mp4",

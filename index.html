@@ -352,6 +352,13 @@ section{margin-top:64px!important}
 .iv-railitem{display:inline-flex;gap:10px;align-items:baseline;font-size:12.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;white-space:nowrap}
 .iv-railitem b{color:var(--lg-orange-500);font-family:var(--font-display)}
 .iv-dots{flex:1;height:3px;background-image:radial-gradient(circle,rgba(70,194,175,.7) 1.5px,transparent 1.6px);background-size:12px 3px;background-repeat:repeat-x;min-width:30px}
+.iv-memory{margin-top:24px;border-radius:22px;padding:clamp(26px,3vw,40px);display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:clamp(28px,5vw,72px);align-items:center;background:rgba(253,253,250,.97);border:1px solid rgba(4,29,39,.08);box-shadow:0 22px 50px rgba(2,10,18,.18);color:var(--lg-ink-950)}
+.iv-memory__label{display:block;font-size:11px;font-weight:800;letter-spacing:.17em;text-transform:uppercase;color:#0b655a}
+.iv-memory h3{margin:12px 0 0;font-size:clamp(28px,2.6vw,40px);font-weight:800;letter-spacing:var(--track-display);line-height:1.08;color:var(--lg-ink-950)}
+.iv-memory__copy{border-left:3px solid var(--lg-orange-500);padding-left:clamp(20px,2.4vw,32px)}
+.iv-memory__copy p{margin:0;font-size:clamp(15.5px,1.2vw,18px);line-height:1.58;color:var(--text-secondary)}
+.iv-memory__copy p+p{margin-top:12px}
+.iv-memory__copy strong{color:var(--lg-ink-950);font-weight:800}
 @media (max-width:1024px){
 .iv h2{white-space:normal}
 .iv{background:linear-gradient(180deg,#041a2b 0%,#07222f 26%,#40595a 36%,#dfe3d6 46%,#f6f7f0 56%)}
@@ -365,6 +372,7 @@ section{margin-top:64px!important}
 .iv-rail{flex-direction:column;align-items:flex-start;gap:12px}
 .iv-dots{display:none}
 .iv-railitem{white-space:normal}
+.iv-memory{grid-template-columns:1fr;gap:20px;max-width:640px}
 }
 @media (max-width:600px){
 .iv{margin-top:0!important}
@@ -373,6 +381,9 @@ section{margin-top:64px!important}
 .iv-word{font-size:clamp(44px,12vw,58px)}
 .iv-approve{width:100%;justify-content:center;margin-top:6px}
 .iv-owner .iv-own{margin-right:0}
+.iv-memory{margin-top:20px;padding:24px 20px;border-radius:18px}
+.iv-memory h3{font-size:clamp(27px,8vw,34px)}
+.iv-memory__copy{padding-left:18px}
 }
 
 .p7{background:var(--surface-page);padding:54px 0 62px}

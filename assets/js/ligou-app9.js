@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: ccf1a6f03035e61401a6c3c794a69605767aa02033f1ee5f0e4c737386198326
+ * Source SHA-256: 3378396320dfbdf9e4d093a34ea82d925ec717f51dddc66dd75adc5de98cad4e
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -597,7 +597,18 @@ function Scene() {
     "aria-hidden": "true"
   }), React.createElement("span", {
     className: "iv-railitem"
-  }, React.createElement("b", null, "03"), "Ele pergunta antes de aprender")))));
+  }, React.createElement("b", null, "03"), "Ele pergunta antes de aprender"))), React.createElement(Reveal, {
+    delay: 220
+  }, React.createElement("aside", {
+    className: "iv-memory",
+    "aria-label": "Memória operacional do Ligou"
+  }, React.createElement("div", {
+    className: "iv-memory__lead"
+  }, React.createElement("span", {
+    className: "iv-memory__label"
+  }, "Memória permanente do seu negócio"), React.createElement("h3", null, "A cada ligação, ele conhece melhor a sua operação.")), React.createElement("div", {
+    className: "iv-memory__copy"
+  }, React.createElement("p", null, React.createElement("strong", null, "Não é uma secretária eletrônica."), " É um agente com memória operacional permanente."), React.createElement("p", null, "Cada atendimento amplia o histórico do Ligou. Quando aparece uma situação nova, ele pergunta; depois que você aprova, a resposta vira uma regra permanente do seu negócio — até você decidir alterar ou apagar."))))));
 }
 function CallDemo() {
   const [mrun, setMrun] = React.useState(0);

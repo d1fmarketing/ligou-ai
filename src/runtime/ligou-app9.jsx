@@ -258,6 +258,16 @@ function Scene() {
         <span className="iv-railitem"><b>02</b>Ele atende com suas regras</span><span className="iv-dots" aria-hidden="true"></span>
         <span className="iv-railitem"><b>03</b>Ele pergunta antes de aprender</span>
       </div></Reveal>
+      <Reveal delay={220}><aside className="iv-memory" aria-label="Memória operacional do Ligou">
+        <div className="iv-memory__lead">
+          <span className="iv-memory__label">Memória permanente do seu negócio</span>
+          <h3>A cada ligação, ele conhece melhor a sua operação.</h3>
+        </div>
+        <div className="iv-memory__copy">
+          <p><strong>Não é uma secretária eletrônica.</strong> É um agente com memória operacional permanente.</p>
+          <p>Cada atendimento amplia o histórico do Ligou. Quando aparece uma situação nova, ele pergunta; depois que você aprova, a resposta vira uma regra permanente do seu negócio — até você decidir alterar ou apagar.</p>
+        </div>
+      </aside></Reveal>
     </Container>
   </section>;
 }
