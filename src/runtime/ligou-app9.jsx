@@ -1,7 +1,6 @@
 const DS = window.LigouDesignSystem_a33905;
 const {Button, Badge, Tag, Card, Eyebrow, StepBadge, CalloutCapsule} = DS;
 const {useState, useEffect, useRef} = React;
-const DEMO_PHONE = '(XXX) XXX-XXXX';
 
 function Container({style, className = '', children}) {
   return <div className={'ct ' + className} style={{maxWidth: 'var(--container)', margin: '0 auto', padding: '0 32px', ...style}}>{children}</div>;
@@ -69,9 +68,9 @@ function Nav() {
     <Container style={{display: 'flex', alignItems: 'center', gap: 28, height: 68, maxWidth: 1500}}>
       <a href="#top" className="nav4-logo"><AgentNodeMark/><span>Ligou</span></a>
       <nav className="nav-links" style={{display: 'flex', gap: 24, marginLeft: 'auto'}}>
-        <L id="diferenca">Como trabalha</L><L id="faq">Controle</L><L id="prova">Demo</L><L id="preco">Preço</L>
+        <L id="prova">Demo</L><L id="diferenca">Como trabalha</L><L id="faq">Controle</L><L id="preco">Preço</L>
       </nav>
-      <span style={{marginLeft: 'auto'}} className="nav4-cta"><Button size="sm" variant="accent" href="#prova" style={{whiteSpace: 'nowrap'}}>Quero testar</Button></span>
+      <span style={{marginLeft: 'auto'}} className="nav4-cta"><Button size="sm" variant="accent" href="#prova" style={{whiteSpace: 'nowrap'}}>Falar com o Ligou</Button></span>
     </Container>
   </header>;
 }
@@ -181,7 +180,7 @@ function Hero() {
           <Button variant="accent" size="lg" href="#prova">Falar com o Ligou</Button>
           {band !== 'mobile' && <a className="h4-ghostbtn" href="#diferenca">Ver uma operação completa</a>}
         </div>
-        <p className="hd h4-trust" style={{'--d': '680ms'}}>Configurado em português · Atende em inglês, espanhol e português</p>
+        <p className="hd h4-trust" style={{'--d': '680ms'}}>Você ensina em português · Ele atende em inglês, espanhol e português</p>
       </div>
       <div className="hero4-artslot">{band === 'mid' ? art : null}</div>
     </Container>
@@ -205,7 +204,7 @@ function Scene() {
         <Reveal><span className="h4-eyebrow">A diferença</span></Reveal>
         <Reveal delay={80}><h2>O Ligou não é configurado.<br/>Ele é contratado.</h2></Reveal>
         <Reveal delay={150}><p className="iv-sub">Você conversa. O Ligou transforma suas respostas em atendimento.</p></Reveal>
-        <Reveal delay={220}><div className="iv-word">Entrevista.</div></Reveal>
+        <Reveal delay={220}><div className="iv-word">Em português.</div></Reveal>
       </div>
       <div className="iv-steps">
         <Reveal className="iv-col iv-col--1" delay={0}>
@@ -244,7 +243,7 @@ function Scene() {
             </div>
             <span className="iv-pill">Regras ativas e validadas <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="m8.5 12 2.5 2.5 4.5-5"></path></svg></span>
             <div className="iv-divider"></div>
-            <b className="iv-apr">Aprovação do responsável</b>
+            <b className="iv-apr">Aprovação para ativar</b>
             <div className="iv-owner">
               <span className="iv-rav">R</span>
               <span className="iv-own"><b>Roberto Almeida</b><i>Proprietário</i></span>
@@ -264,6 +263,7 @@ function Scene() {
           <h3>A cada ligação, ele conhece melhor a sua operação.</h3>
         </div>
         <div className="iv-memory__copy">
+          <span className="iv-memory__approval">Aprovação de nova regra</span>
           <p><strong>Não é uma secretária eletrônica.</strong> É um agente com memória operacional permanente.</p>
           <p>Cada atendimento amplia o histórico do Ligou. Quando aparece uma situação nova, ele pergunta; depois que você aprova, a resposta vira uma regra permanente do seu negócio — até você decidir alterar ou apagar.</p>
         </div>
@@ -278,8 +278,9 @@ function CallDemo() {
   return <section id="prova" data-screen-label="Prova do produto" className="p7">
     <Container style={{maxWidth: 1500}}>
       <Eyebrow>Prova do produto</Eyebrow>
-      <h2 className="p7-title">Dentro das suas regras, ele resolve.<br/>Fora delas, ele pergunta.</h2>
-      <p className="p7-sub">O Ligou conduz a conversa no idioma do cliente — inglês, espanhol ou português —, executa o que já está autorizado e chama você somente quando encontra uma exceção.</p>
+      <h2 className="p7-title">Quando a regra exige decisão,<br/>ele traz a exceção pronta.</h2>
+      <p className="p7-sub p7-bridge">Quando a regra permite, ele resolve sozinho. Quando não permite, traz o caso pronto para você decidir.</p>
+      <p className="p7-langnote">Este exemplo está em inglês. O Ligou também atende em espanhol.</p>
       <div className="p7-cq"><div className="p7-board">
         <div className="p7-bar">
           <span className="p7-dot"></span>
@@ -335,6 +336,7 @@ function CallDemo() {
           <div className="p7-drow"><span className="p7-dic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3 5 5.8v5.4c0 4.6 3 8 7 9.8 4-1.8 7-5.2 7-9.8V5.8L12 3Z"></path><path d="m9 11.5 2.2 2.2 3.8-4.2"></path></svg></span><span><span className="p7-dlab">Regra aplicada</span><span className="p7-dval">Encaixe no mesmo dia exige aprovação.</span></span></div>
           <div className="p7-drow"><span className="p7-dic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M7 3h7l4 4v14H7V3Z"></path><path d="M14 3v4h4M10 12h5M10 15.5h5"></path></svg></span><span><span className="p7-dlab">Relato do cliente</span><span className="p7-dval p7-dval--sm">Água entrando próxima à chaminé após a chuva. O cliente pediu atendimento hoje. Nenhum horário nem preço foi prometido.</span></span></div>
           <div className="p7-ddiv"></div>
+          <span className="p7-decision">Decisão de exceção</span>
           <p className="p7-darrow">→ Aguardando sua decisão.</p>
           <div className="p7-dbtns"><button className="p7-apr" type="button">Aprovar encaixe</button><button className="p7-adj" type="button">Ajustar resposta</button></div>
         </aside>
@@ -381,12 +383,12 @@ function CallDemo() {
             <div className="lc-drow"><span className="lc-dic"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3 5 5.8v5.4c0 4.6 3 8 7 9.8 4-1.8 7-5.2 7-9.8V5.8L12 3Z"></path><path d="m9 11.5 2.2 2.2 3.8-4.2"></path></svg></span><p>Regra: encaixe no mesmo dia exige aprovação</p></div>
             <button className="lc-rel" type="button" id="lc-rel-toggle" aria-expanded={mrel ? 'true' : 'false'} aria-controls="lc-relato-full" onClick={() => setMrel(r => !r)}>{mrel ? 'Ocultar relato' : 'Ver relato completo'}</button>
             {mrel && <p className="lc-relato" id="lc-relato-full">Água entrando próxima à chaminé após a chuva. O cliente pediu atendimento hoje. Nenhum horário nem preço foi prometido.</p>}
+            <span className="p7-decision">Decisão de exceção</span>
             <p className="lc-darrow">→ Aguardando sua decisão</p>
             <div className="lc-btns"><button className="lc-apr" type="button">Aprovar encaixe</button><button className="lc-adj" type="button">Ajustar resposta</button></div>
           </aside>
         </div>
       </div>
-      <p className="p7-foot">O Ligou resolve o que já está autorizado — e traz a exceção pronta para você decidir.</p>
     </Container>
   </section>;
 }
@@ -396,96 +398,88 @@ function Dor() {
     <Container className="dor-ct" style={{padding: '88px 32px 92px', display: 'flex', flexDirection: 'column', gap: 26}}>
       <Reveal><Eyebrow>A dor</Eyebrow></Reveal>
       <Reveal delay={80}><h2 className="dorbig">A ligação que você não atende <span className="acc">não fica esperando.</span></h2></Reveal>
-      <Reveal delay={140}><p style={{margin: 0, fontSize: 'var(--size-body-lg)', color: 'var(--text-secondary)', maxWidth: 640}}>Você estava no telhado. Estava dirigindo. Estava com outro cliente. O telefone tocou e caiu na caixa postal. Para quem ligou, a próxima empresa está a um toque de distância no Google.</p></Reveal>
-      <Reveal delay={200}><p className="dorbig" style={{fontSize: 'clamp(24px,2.8vw,38px)'}}>Uma ligação perdida por dia pode virar até <span className="acc">30 conversas</span> que o seu negócio nem chegou a disputar naquele mês.</p></Reveal>
-      <Reveal delay={260}><p style={{margin: 0, color: 'var(--text-secondary)', maxWidth: 640}}>Quanto vale uma única ligação que vira orçamento no seu negócio? Num roofing, numa pintura, numa reforma — às vezes vale milhares de dólares. E ela tocou. E ninguém atendeu.</p></Reveal>
-      <Reveal delay={320}><p style={{margin: 0, color: 'var(--text-secondary)', maxWidth: 640}}>E tem o outro lado: você pode ser excelente no que faz e ainda assim não se sentir confortável vendendo pelo telefone em inglês ou espanhol.</p></Reveal>
-      <Reveal delay={380}><p style={{margin: 0, fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: 'var(--size-h3)', letterSpacing: 'var(--track-tight)', maxWidth: 640}}>Você não precisa falar como americano para atender seu cliente como profissional. O Ligou fecha essa distância.</p></Reveal>
+      <Reveal delay={140}><p style={{margin: 0, fontSize: 'var(--size-body-lg)', color: 'var(--text-secondary)', maxWidth: 680}}>Para o brasileiro que toca uma empresa de serviços nos EUA, atender nem sempre cabe no meio do trabalho. Você está no telhado, dirigindo ou com outro cliente — e a ligação cai na caixa postal.</p></Reveal>
+      <Reveal delay={200}><p style={{margin: 0, fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: 'var(--size-h3)', letterSpacing: 'var(--track-tight)', maxWidth: 680}}>Para quem ligou, a próxima empresa está a um toque de distância. Em inglês ou espanhol, essa oportunidade fica ainda mais difícil de disputar.</p></Reveal>
     </Container>
   </section>;
 }
 
 function Faz() {
-  const items = ['Atende em inglês, espanhol ou português', 'Entende qual serviço o cliente procura', 'Coleta nome, endereço e detalhes importantes', 'Responde somente com informações que você aprovou', 'Verifica disponibilidade e agenda dentro das suas regras', 'Transfere chamadas urgentes para você', 'Envia o resumo em português no seu celular', 'Registra tudo para você revisar depois'];
+  const mobile = useHeroBand() === 'mobile';
+  const items = ['Entende o que o cliente precisa e coleta nome, endereço e detalhes importantes', 'Aplica as regras que você definiu sem prometer o que não está autorizado', 'Verifica disponibilidade e agenda dentro das suas regras', 'Transfere urgências ou envia um aviso, conforme você definiu', 'Envia um resumo em português e registra a ligação para você revisar'];
+  const item = t => <div className="checkitem"><b>→</b>{t}</div>;
   return <section data-screen-label="O que ele faz" style={{marginTop: 116}}>
     <Container>
       <SectionHead eyebrow="Numa ligação" title="O que ele faz quando o telefone toca."/>
-      <div className="checklist">
-        {items.map((t, i) => <Reveal key={t} delay={(i % 2) * 70}><div className="checkitem"><b>→</b>{t}</div></Reveal>)}
-      </div>
-      <Reveal delay={120}><p className="dorbig" style={{fontSize: 'clamp(22px,2.6vw,34px)', marginTop: 44}}>E quando ele não sabe? <span className="acc">Ele não inventa.</span> Coleta as informações, explica que a equipe retorna, e te avisa imediatamente.</p></Reveal>
+      {mobile ? <Reveal><div className="checklist">{items.map(t => <React.Fragment key={t}>{item(t)}</React.Fragment>)}</div></Reveal> : <div className="checklist">{items.map((t, i) => <Reveal key={t} delay={(i % 2) * 70}>{item(t)}</Reveal>)}</div>}
     </Container>
   </section>;
 }
 
 function Comecar() {
+  const mobile = useHeroBand() === 'mobile';
   const steps = [
-    ['01', 'Assine', 'Plano mês a mês, sem fidelidade. Cancele quando quiser.'],
-    ['02', 'Atenda a ligação do seu Ligou', 'Ele te entrevista em português por uns 15 minutos. Essa conversa cria a primeira versão do atendimento.'],
-    ['03', 'Teste e aprove', 'Você liga nele, ajusta o que quiser, e só coloca no ar quando estiver satisfeito.'],
-    ['04', 'Divulgue o número ou redirecione o seu', 'Pronto. A próxima ligação não cai na caixa postal.']
+    ['01', 'Fale com o Ligou', 'Comece pela demonstração.'],
+    ['02', 'Contrate o Ligou', 'Plano mês a mês, sem fidelidade.'],
+    ['03', 'Ensine sua operação', 'Em uma conversa curta, ele te entrevista em português e cria a primeira versão do atendimento.'],
+    ['04', 'Teste e aprove', 'Ajuste o que quiser e só aprove quando estiver satisfeito.'],
+    ['05', 'Coloque no ar', 'Use o número do Ligou ou redirecione o seu para começar a atender.']
   ];
+  const card = ([n, t, d]) => <div className="startcard"><span className="sn">{n}</span><b>{t}</b><p>{d}</p></div>;
   return <section id="comecar" data-screen-label="Como começar" style={{marginTop: 116}}>
     <Container>
-      <SectionHead eyebrow="Como começar" title="Sem reunião. Sem formulário. Uma conversa."/>
-      <div className="startgrid">
-        {steps.map(([n, t, d], i) => <Reveal key={n} delay={i * 90}><div className="startcard">
-          <span className="sn">{n}</span><b>{t}</b><p>{d}</p>
-        </div></Reveal>)}
-      </div>
+      <SectionHead eyebrow="Como começar" title="Conheça o Ligou. Ensine sua operação. Só coloque no ar depois de aprovar."/>
+      {mobile ? <Reveal><div className="startgrid">{steps.map(step => <React.Fragment key={step[0]}>{card(step)}</React.Fragment>)}</div></Reveal> : <div className="startgrid">{steps.map((step, i) => <Reveal key={step[0]} delay={i * 70}>{card(step)}</Reveal>)}</div>}
     </Container>
   </section>;
 }
 
 function Faq() {
   const [open, setOpen] = useState(0);
+  const mobile = useHeroBand() === 'mobile';
   const qs = [
-    ['Ele vai inventar preço?', 'Não. O Ligou só informa preços, condições e políticas que você autorizou. Quando o pedido exige avaliação, ele coleta os detalhes e agenda a visita ou o retorno da equipe.'],
-    ['E se ele não souber responder?', 'Ele não chuta. Coleta as informações do cliente, avisa que alguém confirma, e pergunta para você. Você responde uma vez e aprova a resposta — ela vira uma regra do seu negócio até você decidir alterar ou apagar.'],
+    ['Ele pode inventar um preço ou uma resposta?', 'Não. O Ligou só informa preços, condições e políticas que você aprovou. Quando não tem uma resposta autorizada, coleta as informações, avisa que a equipe confirma e pergunta para você. A resposta só vira regra depois da sua aprovação.'],
     ['E se o cliente quiser falar comigo?', 'Você escolhe: quando transferir na hora, quando só receber aviso, e quando deixar o Ligou concluir sozinho.'],
     ['Ele fala que é inteligência artificial?', 'Ele se apresenta como assistente virtual da sua empresa: "Hi, you\u2019ve reached [Your Business]. I\u2019m their virtual assistant — how can I help?" A conversa é natural, mas a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.'],
-    ['Preciso falar inglês ou espanhol para configurar?', 'Não. Toda a configuração — a entrevista, os ajustes e os resumos — é em português. Inglês e espanhol são problema dele, não seu.'],
+    ['Preciso falar inglês ou espanhol para ensinar o Ligou?', 'Não. A entrevista, os ajustes e a aprovação são em português. O Ligou atende em inglês, espanhol ou português e envia o resumo para você em português.'],
     ['E se eu quiser cancelar?', 'Você cancela pelo painel, sem multa e sem precisar falar com vendedor.']
   ];
+  const item = ([q, a], i) => <div className={`faq-item ${open === i ? 'open' : ''}`}>
+    <button className="faq-q" onClick={() => setOpen(open === i ? -1 : i)} aria-expanded={open === i}>{q}<span className="pm">+</span></button>
+    <div className="faq-a"><p>{a}</p></div>
+  </div>;
   return <section id="faq" data-screen-label="FAQ" style={{marginTop: 116}}>
     <Container style={{maxWidth: 880}}>
       <SectionHead eyebrow="Perguntas diretas" title="O que todo dono pergunta."/>
-      <div>
-        {qs.map(([q, a], i) => <Reveal key={q} delay={i * 50}><div className={`faq-item ${open === i ? 'open' : ''}`}>
-          <button className="faq-q" onClick={() => setOpen(open === i ? -1 : i)} aria-expanded={open === i}>{q}<span className="pm">+</span></button>
-          <div className="faq-a"><p>{a}</p></div>
-        </div></Reveal>)}
-      </div>
+      {mobile ? <Reveal><div>{qs.map((qa, i) => <React.Fragment key={qa[0]}>{item(qa, i)}</React.Fragment>)}</div></Reveal> : <div>{qs.map((qa, i) => <Reveal key={qa[0]} delay={i * 50}>{item(qa, i)}</Reveal>)}</div>}
     </Container>
   </section>;
 }
 
 function Pricing() {
-  const [ref, on] = useInView({threshold: .3});
   const label = {fontSize: 11, fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase'};
-  const inc = ['Uma empresa, uma localização', 'Número do Ligou ou redirecionamento do seu', 'Atendimento em inglês, espanhol e português', 'Onboarding por ligação, 100% em português', 'Regras personalizadas + integração de agenda', 'Resumos em português no seu celular', 'Painel com histórico das ligações', '400 minutos/mês · excedente $0.35/min', 'Testes e aprovação antes de entrar no ar'];
+  const inc = ['Uma empresa e uma localização', 'Número do Ligou ou redirecionamento do seu', 'Atendimento em inglês, espanhol e português', 'Onboarding, regras e aprovação em português', 'Integração de agenda, resumos e histórico das ligações', '400 minutos/mês · excedente $0.35/min'];
   return <section id="preco" data-screen-label="Preço" style={{marginTop: 110, background: 'var(--surface-inverse)', color: 'var(--text-inverse)'}}>
     <Container className="price-ct" style={{padding: '92px 32px 100px'}}>
-      <Reveal><span className="pt-cap__label">Ligou Launch</span></Reveal>
-      <Reveal delay={90}><h2 style={{margin: '18px 0 0', fontSize: 'var(--size-display)', fontWeight: 'var(--weight-black)', letterSpacing: 'var(--track-display)', lineHeight: 'var(--leading-display)'}}>O preço oficial é $499.<br/>Os primeiros 25 não pagam isso.</h2></Reveal>
-      <Reveal delay={170}><p style={{margin: '16px 0 0', color: 'var(--text-inverse-secondary)', maxWidth: 520}}>Para empresas de serviços que dependem do telefone para gerar trabalhos. Os 25 primeiros negócios entram como Founding Partners — e ajudam a formar o Ligou.</p></Reveal>
-      <div ref={ref} className="pricegrid">
+      <Reveal><span className="pt-cap__label">Preço</span></Reveal>
+      <Reveal delay={90}><h2 style={{margin: '18px 0 0', fontSize: 'var(--size-display)', fontWeight: 'var(--weight-black)', letterSpacing: 'var(--track-display)', lineHeight: 'var(--leading-display)'}}>Contrate até 31 de dezembro de 2026 por $299/mês.</h2></Reveal>
+      <div className="pricegrid">
         <Reveal delay={120}><Card style={{padding: '36px 36px 40px', display: 'flex', flexDirection: 'column', gap: 16, alignItems: 'flex-start', height: '100%', boxSizing: 'border-box', color: 'var(--text-body)'}}>
-          <Badge variant="orange" style={{whiteSpace: 'nowrap'}}>Founding Partners · 25 vagas</Badge>
+          <Badge variant="orange">Oferta por tempo limitado</Badge>
           <div style={{display: 'flex', alignItems: 'baseline', gap: 6, color: 'var(--lg-ink-950)', fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: 'clamp(56px,6vw,80px)', letterSpacing: 'var(--track-display)', lineHeight: 1, margin: '4px 0 0'}}>
-            <CountUp from={499} to={299} play={on} prefix="$"/><span style={{fontSize: '0.28em', fontWeight: 700, color: 'var(--text-secondary)', letterSpacing: 'var(--track-tight)'}}>/mês</span>
+            <span style={{fontVariantNumeric: 'tabular-nums'}}>$299</span><span style={{fontSize: '0.28em', fontWeight: 700, color: 'var(--text-secondary)', letterSpacing: 'var(--track-tight)'}}>/mês</span>
           </div>
-          <p style={{margin: 0, color: 'var(--text-secondary)', fontSize: 15}}>Enquanto sua assinatura permanecer ativa. Ativação de $499 isenta.</p>
+          <p style={{margin: 0, color: 'var(--text-secondary)', fontSize: 15}}>Ativação isenta. Quem contratar até 31 de dezembro de 2026 mantém o valor base de $299/mês enquanto a assinatura permanecer ativa.</p>
           <div className="inclist">
             {inc.map(t => <div key={t} className="incitem"><b>→</b>{t}</div>)}
           </div>
-          <Button variant="accent" href="#preco" style={{marginTop: 8}}>Quero minha vaga Founding</Button>
+          <p className="price-mobile-normal">Para novas assinaturas após a oferta: $499/mês + ativação de $499.</p>
+          <Button variant="accent" href="#preco" style={{marginTop: 8}}>Quero aproveitar a oferta</Button>
         </Card></Reveal>
-        <Reveal delay={220}><div className="pricecard--ghost" style={{display: 'flex', flexDirection: 'column', gap: 18, alignItems: 'flex-start', justifyContent: 'center', height: '100%', boxSizing: 'border-box'}}>
-          <span style={{...label, color: 'var(--text-inverse-secondary)'}}>Preço oficial</span>
+        <Reveal className="price-regular-reveal" delay={220}><div className="pricecard--ghost" style={{display: 'flex', flexDirection: 'column', gap: 18, alignItems: 'flex-start', justifyContent: 'center', height: '100%', boxSizing: 'border-box'}}>
+          <span style={{...label, color: 'var(--text-inverse-secondary)'}}>Depois da oferta</span>
           <div style={{display: 'flex', alignItems: 'baseline', gap: 6, fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: 'clamp(40px,4vw,52px)', letterSpacing: 'var(--track-display)', lineHeight: 1, color: 'var(--text-inverse)'}}>$499<span style={{fontSize: '0.42em', fontWeight: 700, color: 'var(--text-inverse-secondary)'}}>/mês</span></div>
-          <p style={{margin: 0, color: 'var(--text-inverse-secondary)', fontSize: 15}}>Vale depois das 25 vagas Founding, com ativação de $499.</p>
-          <p style={{margin: 0, color: 'var(--text-inverse-secondary)', fontSize: 15}}>Mesmo produto, mesmas regras, mesmo Ligou.</p>
+          <p style={{margin: 0, color: 'var(--text-inverse-secondary)', fontSize: 15}}>Para novas assinaturas, com ativação de $499.</p>
         </div></Reveal>
       </div>
       <Reveal delay={140}><p style={{margin: '34px 0 0', fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: 'var(--size-h3)', letterSpacing: 'var(--track-tight)', maxWidth: 640}}>Se uma única ligação recuperada vale mais de $499 para o seu negócio, o Ligou pode se pagar com um único trabalho.</p></Reveal>
@@ -504,8 +498,7 @@ function Cta() {
         <span className="lmask"><span className="ln acc" style={{'--d': '220ms'}}>Atendido.</span></span>
       </h2>
       <Reveal delay={380}><div style={{display: 'flex', gap: 12, marginTop: 34, flexWrap: 'wrap'}}>
-        <Button variant="accent" size="lg" href="#prova">Ligue na demo ao vivo · <span className="phonenum">{DEMO_PHONE}</span></Button>
-        <Button variant="inverse" size="lg" href="#preco">Quero o Ligou no meu negócio</Button>
+        <Button variant="accent" size="lg" href="#prova">Falar com o Ligou agora</Button>
       </div></Reveal>
     </Container>
     <img className="cta-robot floaty" src="assets/crop-robot.png" alt=""/>
@@ -516,10 +509,10 @@ function Footer() {
   const a = {color: 'var(--text-inverse-secondary)', textDecoration: 'none'};
   return <footer data-screen-label="Footer" style={{background: 'var(--surface-inverse-deep)', color: 'var(--text-inverse)', borderTop: '1px solid rgba(251,252,248,.1)', overflow: 'hidden'}}>
     <Container style={{padding: '56px 32px 0'}}>
-      <div style={{display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap'}}>
+      <div className="footer-row" style={{display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap'}}>
         <img src="assets/crop-logo-mark.png" alt="" style={{height: 34, borderRadius: '50%'}}/>
         <span style={{fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: 24, letterSpacing: '-0.02em'}}>Ligou</span>
-        <span style={{display: 'flex', gap: 10, flexWrap: 'wrap', marginLeft: 'auto', fontSize: 14, alignItems: 'center'}}>
+        <span className="footer-links" style={{display: 'flex', gap: 10, flexWrap: 'wrap', marginLeft: 'auto', fontSize: 14, alignItems: 'center'}}>
           <a href="https://ligou.ai" style={a}>ligou.ai</a><span style={{opacity: .4}}>·</span>
           <a href="mailto:suporte@ligou.ai" style={a}>suporte@ligou.ai</a><span style={{opacity: .4}}>·</span>
           <a href="#" style={a}>Termos</a><span style={{opacity: .4}}>·</span>
@@ -542,12 +535,12 @@ function App() {
       <Hero/>
       <div className="mqwrap" aria-hidden="true">
         <Marquee rev items={['Limpeza', 'Pintura', 'Roofing', 'Landscaping', 'HVAC', 'Junk removal', 'Pavers', 'Piscinas', 'Remodeling', 'Elétrica', 'Encanamento']}/>
-        <Marquee small items={['Atende em inglês, espanhol e português', 'Configurado em português', 'Agenda dentro das suas regras', 'Não inventa preço', 'Resume em português', 'Pergunta antes de aprender']}/>
+        <div className="mq-claims"><Marquee small items={['Atende em inglês, espanhol e português', 'Você ensina em português', 'Agenda dentro das suas regras', 'Não inventa preço', 'Resume em português', 'Pergunta antes de aprender']}/></div>
       </div>
-      <Scene/>
-      <WaveDraw style={{maxWidth: 'var(--container)', margin: '0 auto', padding: '0 32px'}}/>
-      <CallDemo/>
       <Dor/>
+      <CallDemo/>
+      <WaveDraw style={{maxWidth: 'var(--container)', margin: '0 auto', padding: '0 32px'}}/>
+      <Scene/>
       <Faz/>
       <Comecar/>
       <Faq/>

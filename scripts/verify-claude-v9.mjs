@@ -47,10 +47,20 @@ const applicationSource = await readFile(
   path.join(root, "src/runtime/ligou-app9.jsx"),
   "utf8",
 );
-assert(applicationSource.includes("Configurado em português · Atende em inglês, espanhol e português"), "multilingual hero claim missing");
-assert(applicationSource.includes("Preciso falar inglês ou espanhol para configurar?"), "multilingual FAQ missing");
+assert(applicationSource.includes("Você ensina em português · Ele atende em inglês, espanhol e português"), "owner-taught multilingual hero claim missing");
+assert(applicationSource.includes("Preciso falar inglês ou espanhol para ensinar o Ligou?"), "owner-taught multilingual FAQ missing");
 assert(applicationSource.includes("Memória permanente do seu negócio"), "permanent business memory message missing");
 assert(applicationSource.includes("depois que você aprova, a resposta vira uma regra permanente"), "owner-approved learning message missing");
+assert(applicationSource.includes("Quando a regra permite, ele resolve sozinho. Quando não permite, traz o caso pronto para você decidir."), "autonomy and exception bridge missing");
+assert(applicationSource.includes("Contrate até 31 de dezembro de 2026 por $299/mês."), "dated launch offer missing");
+assert(applicationSource.includes("mantém o valor base de $299/mês enquanto a assinatura permanecer ativa"), "active-subscription base price promise missing");
+assert(applicationSource.includes("Para novas assinaturas após a oferta: $499/mês + ativação de $499."), "post-offer pricing qualifier missing");
+assert(!applicationSource.includes("uns 15 minutos"), "unvalidated onboarding duration must not return");
+assert(!applicationSource.includes("Founding Partners") && !applicationSource.includes("25 vagas"), "retired Founding scarcity copy must not return");
+const painPosition = applicationSource.lastIndexOf("<Dor/>");
+const proofPosition = applicationSource.lastIndexOf("<CallDemo/>");
+const differencePosition = applicationSource.lastIndexOf("<Scene/>");
+assert(painPosition !== -1 && painPosition < proofPosition && proofPosition < differencePosition, "conversion narrative must stay pain -> proof -> difference");
 assert(
   applicationSource.includes("band !== 'mobile' && <a className=\"h4-ghostbtn\""),
   "secondary hero CTA must not render on mobile",

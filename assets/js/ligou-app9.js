@@ -1,12 +1,11 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 9bca1daf8316fbf3f71bd2132ce8d9b19aafcd8c8484272e4921cf4482429185
+ * Source SHA-256: 7a08db897998827f8be2ae95a8c2db79887b4c007daa7a7f7abb7941e8d9654a
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
 const { Button, Badge, Tag, Card, Eyebrow, StepBadge, CalloutCapsule } = DS;
 const { useState, useEffect, useRef } = React;
-const DEMO_PHONE = "(XXX) XXX-XXXX";
 function Container({ style, className = "", children }) {
   return React.createElement("div", {
     className: "ct " + className,
@@ -176,12 +175,12 @@ function Nav() {
     className: "nav-links",
     style: { display: "flex", gap: 24, marginLeft: "auto" }
   }, React.createElement(L, {
+    id: "prova"
+  }, "Demo"), React.createElement(L, {
     id: "diferenca"
   }, "Como trabalha"), React.createElement(L, {
     id: "faq"
   }, "Controle"), React.createElement(L, {
-    id: "prova"
-  }, "Demo"), React.createElement(L, {
     id: "preco"
   }, "Preço")), React.createElement("span", {
     style: { marginLeft: "auto" },
@@ -191,7 +190,7 @@ function Nav() {
     variant: "accent",
     href: "#prova",
     style: { whiteSpace: "nowrap" }
-  }, "Quero testar"))));
+  }, "Falar com o Ligou"))));
 }
 const HERO_MEDIA = {
   ultrawide: {
@@ -375,7 +374,7 @@ function Hero() {
   }, "Ver uma operação completa")), React.createElement("p", {
     className: "hd h4-trust",
     style: { "--d": "680ms" }
-  }, "Configurado em português · Atende em inglês, espanhol e português")), React.createElement("div", {
+  }, "Você ensina em português · Ele atende em inglês, espanhol e português")), React.createElement("div", {
     className: "hero4-artslot"
   }, band === "mid" ? art : null)));
 }
@@ -453,7 +452,7 @@ function Scene() {
     delay: 220
   }, React.createElement("div", {
     className: "iv-word"
-  }, "Entrevista."))), React.createElement("div", {
+  }, "Em português."))), React.createElement("div", {
     className: "iv-steps"
   }, React.createElement(Reveal, {
     className: "iv-col iv-col--1",
@@ -555,7 +554,7 @@ function Scene() {
     className: "iv-divider"
   }), React.createElement("b", {
     className: "iv-apr"
-  }, "Aprovação do responsável"), React.createElement("div", {
+  }, "Aprovação para ativar"), React.createElement("div", {
     className: "iv-owner"
   }, React.createElement("span", {
     className: "iv-rav"
@@ -608,7 +607,9 @@ function Scene() {
     className: "iv-memory__label"
   }, "Memória permanente do seu negócio"), React.createElement("h3", null, "A cada ligação, ele conhece melhor a sua operação.")), React.createElement("div", {
     className: "iv-memory__copy"
-  }, React.createElement("p", null, React.createElement("strong", null, "Não é uma secretária eletrônica."), " É um agente com memória operacional permanente."), React.createElement("p", null, "Cada atendimento amplia o histórico do Ligou. Quando aparece uma situação nova, ele pergunta; depois que você aprova, a resposta vira uma regra permanente do seu negócio — até você decidir alterar ou apagar."))))));
+  }, React.createElement("span", {
+    className: "iv-memory__approval"
+  }, "Aprovação de nova regra"), React.createElement("p", null, React.createElement("strong", null, "Não é uma secretária eletrônica."), " É um agente com memória operacional permanente."), React.createElement("p", null, "Cada atendimento amplia o histórico do Ligou. Quando aparece uma situação nova, ele pergunta; depois que você aprova, a resposta vira uma regra permanente do seu negócio — até você decidir alterar ou apagar."))))));
 }
 function CallDemo() {
   const [mrun, setMrun] = React.useState(0);
@@ -621,9 +622,11 @@ function CallDemo() {
     style: { maxWidth: 1500 }
   }, React.createElement(Eyebrow, null, "Prova do produto"), React.createElement("h2", {
     className: "p7-title"
-  }, "Dentro das suas regras, ele resolve.", React.createElement("br", null), "Fora delas, ele pergunta."), React.createElement("p", {
-    className: "p7-sub"
-  }, "O Ligou conduz a conversa no idioma do cliente — inglês, espanhol ou português —, executa o que já está autorizado e chama você somente quando encontra uma exceção."), React.createElement("div", {
+  }, "Quando a regra exige decisão,", React.createElement("br", null), "ele traz a exceção pronta."), React.createElement("p", {
+    className: "p7-sub p7-bridge"
+  }, "Quando a regra permite, ele resolve sozinho. Quando não permite, traz o caso pronto para você decidir."), React.createElement("p", {
+    className: "p7-langnote"
+  }, "Este exemplo está em inglês. O Ligou também atende em espanhol."), React.createElement("div", {
     className: "p7-cq"
   }, React.createElement("div", {
     className: "p7-board"
@@ -1183,7 +1186,9 @@ function CallDemo() {
     className: "p7-dval p7-dval--sm"
   }, "Água entrando próxima à chaminé após a chuva. O cliente pediu atendimento hoje. Nenhum horário nem preço foi prometido."))), React.createElement("div", {
     className: "p7-ddiv"
-  }), React.createElement("p", {
+  }), React.createElement("span", {
+    className: "p7-decision"
+  }, "Decisão de exceção"), React.createElement("p", {
     className: "p7-darrow"
   }, "→ Aguardando sua decisão."), React.createElement("div", {
     className: "p7-dbtns"
@@ -1554,7 +1559,9 @@ function CallDemo() {
   }, mrel ? "Ocultar relato" : "Ver relato completo"), mrel && React.createElement("p", {
     className: "lc-relato",
     id: "lc-relato-full"
-  }, "Água entrando próxima à chaminé após a chuva. O cliente pediu atendimento hoje. Nenhum horário nem preço foi prometido."), React.createElement("p", {
+  }, "Água entrando próxima à chaminé após a chuva. O cliente pediu atendimento hoje. Nenhum horário nem preço foi prometido."), React.createElement("span", {
+    className: "p7-decision"
+  }, "Decisão de exceção"), React.createElement("p", {
     className: "lc-darrow"
   }, "→ Aguardando sua decisão"), React.createElement("div", {
     className: "lc-btns"
@@ -1564,9 +1571,7 @@ function CallDemo() {
   }, "Aprovar encaixe"), React.createElement("button", {
     className: "lc-adj",
     type: "button"
-  }, "Ajustar resposta"))))), React.createElement("p", {
-    className: "p7-foot"
-  }, "O Ligou resolve o que já está autorizado — e traz a exceção pronta para você decidir.")));
+  }, "Ajustar resposta")))))));
 }
 function Dor() {
   return React.createElement("section", {
@@ -1584,100 +1589,79 @@ function Dor() {
   }, "não fica esperando."))), React.createElement(Reveal, {
     delay: 140
   }, React.createElement("p", {
-    style: { margin: 0, fontSize: "var(--size-body-lg)", color: "var(--text-secondary)", maxWidth: 640 }
-  }, "Você estava no telhado. Estava dirigindo. Estava com outro cliente. O telefone tocou e caiu na caixa postal. Para quem ligou, a próxima empresa está a um toque de distância no Google.")), React.createElement(Reveal, {
+    style: { margin: 0, fontSize: "var(--size-body-lg)", color: "var(--text-secondary)", maxWidth: 680 }
+  }, "Para o brasileiro que toca uma empresa de serviços nos EUA, atender nem sempre cabe no meio do trabalho. Você está no telhado, dirigindo ou com outro cliente — e a ligação cai na caixa postal.")), React.createElement(Reveal, {
     delay: 200
   }, React.createElement("p", {
-    className: "dorbig",
-    style: { fontSize: "clamp(24px,2.8vw,38px)" }
-  }, "Uma ligação perdida por dia pode virar até ", React.createElement("span", {
-    className: "acc"
-  }, "30 conversas"), " que o seu negócio nem chegou a disputar naquele mês.")), React.createElement(Reveal, {
-    delay: 260
-  }, React.createElement("p", {
-    style: { margin: 0, color: "var(--text-secondary)", maxWidth: 640 }
-  }, "Quanto vale uma única ligação que vira orçamento no seu negócio? Num roofing, numa pintura, numa reforma — às vezes vale milhares de dólares. E ela tocou. E ninguém atendeu.")), React.createElement(Reveal, {
-    delay: 320
-  }, React.createElement("p", {
-    style: { margin: 0, color: "var(--text-secondary)", maxWidth: 640 }
-  }, "E tem o outro lado: você pode ser excelente no que faz e ainda assim não se sentir confortável vendendo pelo telefone em inglês ou espanhol.")), React.createElement(Reveal, {
-    delay: 380
-  }, React.createElement("p", {
-    style: { margin: 0, fontFamily: "var(--font-display)", fontWeight: 800, fontSize: "var(--size-h3)", letterSpacing: "var(--track-tight)", maxWidth: 640 }
-  }, "Você não precisa falar como americano para atender seu cliente como profissional. O Ligou fecha essa distância."))));
+    style: { margin: 0, fontFamily: "var(--font-display)", fontWeight: 800, fontSize: "var(--size-h3)", letterSpacing: "var(--track-tight)", maxWidth: 680 }
+  }, "Para quem ligou, a próxima empresa está a um toque de distância. Em inglês ou espanhol, essa oportunidade fica ainda mais difícil de disputar."))));
 }
 function Faz() {
-  const items = ["Atende em inglês, espanhol ou português", "Entende qual serviço o cliente procura", "Coleta nome, endereço e detalhes importantes", "Responde somente com informações que você aprovou", "Verifica disponibilidade e agenda dentro das suas regras", "Transfere chamadas urgentes para você", "Envia o resumo em português no seu celular", "Registra tudo para você revisar depois"];
+  const mobile = useHeroBand() === "mobile";
+  const items = ["Entende o que o cliente precisa e coleta nome, endereço e detalhes importantes", "Aplica as regras que você definiu sem prometer o que não está autorizado", "Verifica disponibilidade e agenda dentro das suas regras", "Transfere urgências ou envia um aviso, conforme você definiu", "Envia um resumo em português e registra a ligação para você revisar"];
+  const item = (t) => React.createElement("div", {
+    className: "checkitem"
+  }, React.createElement("b", null, "→"), t);
   return React.createElement("section", {
     "data-screen-label": "O que ele faz",
     style: { marginTop: 116 }
   }, React.createElement(Container, null, React.createElement(SectionHead, {
     eyebrow: "Numa ligação",
     title: "O que ele faz quando o telefone toca."
-  }), React.createElement("div", {
+  }), mobile ? React.createElement(Reveal, null, React.createElement("div", {
+    className: "checklist"
+  }, items.map((t) => React.createElement(React.Fragment, {
+    key: t
+  }, item(t))))) : React.createElement("div", {
     className: "checklist"
   }, items.map((t, i) => React.createElement(Reveal, {
     key: t,
     delay: i % 2 * 70
-  }, React.createElement("div", {
-    className: "checkitem"
-  }, React.createElement("b", null, "→"), t)))), React.createElement(Reveal, {
-    delay: 120
-  }, React.createElement("p", {
-    className: "dorbig",
-    style: { fontSize: "clamp(22px,2.6vw,34px)", marginTop: 44 }
-  }, "E quando ele não sabe? ", React.createElement("span", {
-    className: "acc"
-  }, "Ele não inventa."), " Coleta as informações, explica que a equipe retorna, e te avisa imediatamente."))));
+  }, item(t))))));
 }
 function Comecar() {
+  const mobile = useHeroBand() === "mobile";
   const steps = [
-    ["01", "Assine", "Plano mês a mês, sem fidelidade. Cancele quando quiser."],
-    ["02", "Atenda a ligação do seu Ligou", "Ele te entrevista em português por uns 15 minutos. Essa conversa cria a primeira versão do atendimento."],
-    ["03", "Teste e aprove", "Você liga nele, ajusta o que quiser, e só coloca no ar quando estiver satisfeito."],
-    ["04", "Divulgue o número ou redirecione o seu", "Pronto. A próxima ligação não cai na caixa postal."]
+    ["01", "Fale com o Ligou", "Comece pela demonstração."],
+    ["02", "Contrate o Ligou", "Plano mês a mês, sem fidelidade."],
+    ["03", "Ensine sua operação", "Em uma conversa curta, ele te entrevista em português e cria a primeira versão do atendimento."],
+    ["04", "Teste e aprove", "Ajuste o que quiser e só aprove quando estiver satisfeito."],
+    ["05", "Coloque no ar", "Use o número do Ligou ou redirecione o seu para começar a atender."]
   ];
+  const card = ([n, t, d]) => React.createElement("div", {
+    className: "startcard"
+  }, React.createElement("span", {
+    className: "sn"
+  }, n), React.createElement("b", null, t), React.createElement("p", null, d));
   return React.createElement("section", {
     id: "comecar",
     "data-screen-label": "Como começar",
     style: { marginTop: 116 }
   }, React.createElement(Container, null, React.createElement(SectionHead, {
     eyebrow: "Como começar",
-    title: "Sem reunião. Sem formulário. Uma conversa."
-  }), React.createElement("div", {
+    title: "Conheça o Ligou. Ensine sua operação. Só coloque no ar depois de aprovar."
+  }), mobile ? React.createElement(Reveal, null, React.createElement("div", {
     className: "startgrid"
-  }, steps.map(([n, t, d], i) => React.createElement(Reveal, {
-    key: n,
-    delay: i * 90
-  }, React.createElement("div", {
-    className: "startcard"
-  }, React.createElement("span", {
-    className: "sn"
-  }, n), React.createElement("b", null, t), React.createElement("p", null, d)))))));
+  }, steps.map((step) => React.createElement(React.Fragment, {
+    key: step[0]
+  }, card(step))))) : React.createElement("div", {
+    className: "startgrid"
+  }, steps.map((step, i) => React.createElement(Reveal, {
+    key: step[0],
+    delay: i * 70
+  }, card(step))))));
 }
 function Faq() {
   const [open, setOpen] = useState(0);
+  const mobile = useHeroBand() === "mobile";
   const qs = [
-    ["Ele vai inventar preço?", "Não. O Ligou só informa preços, condições e políticas que você autorizou. Quando o pedido exige avaliação, ele coleta os detalhes e agenda a visita ou o retorno da equipe."],
-    ["E se ele não souber responder?", "Ele não chuta. Coleta as informações do cliente, avisa que alguém confirma, e pergunta para você. Você responde uma vez e aprova a resposta — ela vira uma regra do seu negócio até você decidir alterar ou apagar."],
+    ["Ele pode inventar um preço ou uma resposta?", "Não. O Ligou só informa preços, condições e políticas que você aprovou. Quando não tem uma resposta autorizada, coleta as informações, avisa que a equipe confirma e pergunta para você. A resposta só vira regra depois da sua aprovação."],
     ["E se o cliente quiser falar comigo?", "Você escolhe: quando transferir na hora, quando só receber aviso, e quando deixar o Ligou concluir sozinho."],
     ["Ele fala que é inteligência artificial?", 'Ele se apresenta como assistente virtual da sua empresa: "Hi, you’ve reached [Your Business]. I’m their virtual assistant — how can I help?" A conversa é natural, mas a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.'],
-    ["Preciso falar inglês ou espanhol para configurar?", "Não. Toda a configuração — a entrevista, os ajustes e os resumos — é em português. Inglês e espanhol são problema dele, não seu."],
+    ["Preciso falar inglês ou espanhol para ensinar o Ligou?", "Não. A entrevista, os ajustes e a aprovação são em português. O Ligou atende em inglês, espanhol ou português e envia o resumo para você em português."],
     ["E se eu quiser cancelar?", "Você cancela pelo painel, sem multa e sem precisar falar com vendedor."]
   ];
-  return React.createElement("section", {
-    id: "faq",
-    "data-screen-label": "FAQ",
-    style: { marginTop: 116 }
-  }, React.createElement(Container, {
-    style: { maxWidth: 880 }
-  }, React.createElement(SectionHead, {
-    eyebrow: "Perguntas diretas",
-    title: "O que todo dono pergunta."
-  }), React.createElement("div", null, qs.map(([q, a], i) => React.createElement(Reveal, {
-    key: q,
-    delay: i * 50
-  }, React.createElement("div", {
+  const item = ([q, a], i) => React.createElement("div", {
     className: `faq-item ${open === i ? "open" : ""}`
   }, React.createElement("button", {
     className: "faq-q",
@@ -1687,12 +1671,26 @@ function Faq() {
     className: "pm"
   }, "+")), React.createElement("div", {
     className: "faq-a"
-  }, React.createElement("p", null, a))))))));
+  }, React.createElement("p", null, a)));
+  return React.createElement("section", {
+    id: "faq",
+    "data-screen-label": "FAQ",
+    style: { marginTop: 116 }
+  }, React.createElement(Container, {
+    style: { maxWidth: 880 }
+  }, React.createElement(SectionHead, {
+    eyebrow: "Perguntas diretas",
+    title: "O que todo dono pergunta."
+  }), mobile ? React.createElement(Reveal, null, React.createElement("div", null, qs.map((qa, i) => React.createElement(React.Fragment, {
+    key: qa[0]
+  }, item(qa, i))))) : React.createElement("div", null, qs.map((qa, i) => React.createElement(Reveal, {
+    key: qa[0],
+    delay: i * 50
+  }, item(qa, i))))));
 }
 function Pricing() {
-  const [ref, on] = useInView({ threshold: 0.3 });
   const label = { fontSize: 11, fontWeight: 700, letterSpacing: ".16em", textTransform: "uppercase" };
-  const inc = ["Uma empresa, uma localização", "Número do Ligou ou redirecionamento do seu", "Atendimento em inglês, espanhol e português", "Onboarding por ligação, 100% em português", "Regras personalizadas + integração de agenda", "Resumos em português no seu celular", "Painel com histórico das ligações", "400 minutos/mês · excedente $0.35/min", "Testes e aprovação antes de entrar no ar"];
+  const inc = ["Uma empresa e uma localização", "Número do Ligou ou redirecionamento do seu", "Atendimento em inglês, espanhol e português", "Onboarding, regras e aprovação em português", "Integração de agenda, resumos e histórico das ligações", "400 minutos/mês · excedente $0.35/min"];
   return React.createElement("section", {
     id: "preco",
     "data-screen-label": "Preço",
@@ -1702,60 +1700,52 @@ function Pricing() {
     style: { padding: "92px 32px 100px" }
   }, React.createElement(Reveal, null, React.createElement("span", {
     className: "pt-cap__label"
-  }, "Ligou Launch")), React.createElement(Reveal, {
+  }, "Preço")), React.createElement(Reveal, {
     delay: 90
   }, React.createElement("h2", {
     style: { margin: "18px 0 0", fontSize: "var(--size-display)", fontWeight: "var(--weight-black)", letterSpacing: "var(--track-display)", lineHeight: "var(--leading-display)" }
-  }, "O preço oficial é $499.", React.createElement("br", null), "Os primeiros 25 não pagam isso.")), React.createElement(Reveal, {
-    delay: 170
-  }, React.createElement("p", {
-    style: { margin: "16px 0 0", color: "var(--text-inverse-secondary)", maxWidth: 520 }
-  }, "Para empresas de serviços que dependem do telefone para gerar trabalhos. Os 25 primeiros negócios entram como Founding Partners — e ajudam a formar o Ligou.")), React.createElement("div", {
-    ref,
+  }, "Contrate até 31 de dezembro de 2026 por $299/mês.")), React.createElement("div", {
     className: "pricegrid"
   }, React.createElement(Reveal, {
     delay: 120
   }, React.createElement(Card, {
     style: { padding: "36px 36px 40px", display: "flex", flexDirection: "column", gap: 16, alignItems: "flex-start", height: "100%", boxSizing: "border-box", color: "var(--text-body)" }
   }, React.createElement(Badge, {
-    variant: "orange",
-    style: { whiteSpace: "nowrap" }
-  }, "Founding Partners · 25 vagas"), React.createElement("div", {
+    variant: "orange"
+  }, "Oferta por tempo limitado"), React.createElement("div", {
     style: { display: "flex", alignItems: "baseline", gap: 6, color: "var(--lg-ink-950)", fontFamily: "var(--font-display)", fontWeight: 800, fontSize: "clamp(56px,6vw,80px)", letterSpacing: "var(--track-display)", lineHeight: 1, margin: "4px 0 0" }
-  }, React.createElement(CountUp, {
-    from: 499,
-    to: 299,
-    play: on,
-    prefix: "$"
-  }), React.createElement("span", {
+  }, React.createElement("span", {
+    style: { fontVariantNumeric: "tabular-nums" }
+  }, "$299"), React.createElement("span", {
     style: { fontSize: "0.28em", fontWeight: 700, color: "var(--text-secondary)", letterSpacing: "var(--track-tight)" }
   }, "/mês")), React.createElement("p", {
     style: { margin: 0, color: "var(--text-secondary)", fontSize: 15 }
-  }, "Enquanto sua assinatura permanecer ativa. Ativação de $499 isenta."), React.createElement("div", {
+  }, "Ativação isenta. Quem contratar até 31 de dezembro de 2026 mantém o valor base de $299/mês enquanto a assinatura permanecer ativa."), React.createElement("div", {
     className: "inclist"
   }, inc.map((t) => React.createElement("div", {
     key: t,
     className: "incitem"
-  }, React.createElement("b", null, "→"), t))), React.createElement(Button, {
+  }, React.createElement("b", null, "→"), t))), React.createElement("p", {
+    className: "price-mobile-normal"
+  }, "Para novas assinaturas após a oferta: $499/mês + ativação de $499."), React.createElement(Button, {
     variant: "accent",
     href: "#preco",
     style: { marginTop: 8 }
-  }, "Quero minha vaga Founding"))), React.createElement(Reveal, {
+  }, "Quero aproveitar a oferta"))), React.createElement(Reveal, {
+    className: "price-regular-reveal",
     delay: 220
   }, React.createElement("div", {
     className: "pricecard--ghost",
     style: { display: "flex", flexDirection: "column", gap: 18, alignItems: "flex-start", justifyContent: "center", height: "100%", boxSizing: "border-box" }
   }, React.createElement("span", {
     style: { ...label, color: "var(--text-inverse-secondary)" }
-  }, "Preço oficial"), React.createElement("div", {
+  }, "Depois da oferta"), React.createElement("div", {
     style: { display: "flex", alignItems: "baseline", gap: 6, fontFamily: "var(--font-display)", fontWeight: 800, fontSize: "clamp(40px,4vw,52px)", letterSpacing: "var(--track-display)", lineHeight: 1, color: "var(--text-inverse)" }
   }, "$499", React.createElement("span", {
     style: { fontSize: "0.42em", fontWeight: 700, color: "var(--text-inverse-secondary)" }
   }, "/mês")), React.createElement("p", {
     style: { margin: 0, color: "var(--text-inverse-secondary)", fontSize: 15 }
-  }, "Vale depois das 25 vagas Founding, com ativação de $499."), React.createElement("p", {
-    style: { margin: 0, color: "var(--text-inverse-secondary)", fontSize: 15 }
-  }, "Mesmo produto, mesmas regras, mesmo Ligou.")))), React.createElement(Reveal, {
+  }, "Para novas assinaturas, com ativação de $499.")))), React.createElement(Reveal, {
     delay: 140
   }, React.createElement("p", {
     style: { margin: "34px 0 0", fontFamily: "var(--font-display)", fontWeight: 800, fontSize: "var(--size-h3)", letterSpacing: "var(--track-tight)", maxWidth: 640 }
@@ -1796,13 +1786,7 @@ function Cta() {
     variant: "accent",
     size: "lg",
     href: "#prova"
-  }, "Ligue na demo ao vivo · ", React.createElement("span", {
-    className: "phonenum"
-  }, DEMO_PHONE)), React.createElement(Button, {
-    variant: "inverse",
-    size: "lg",
-    href: "#preco"
-  }, "Quero o Ligou no meu negócio")))), React.createElement("img", {
+  }, "Falar com o Ligou agora")))), React.createElement("img", {
     className: "cta-robot floaty",
     src: "assets/crop-robot.png",
     alt: ""
@@ -1816,6 +1800,7 @@ function Footer() {
   }, React.createElement(Container, {
     style: { padding: "56px 32px 0" }
   }, React.createElement("div", {
+    className: "footer-row",
     style: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }
   }, React.createElement("img", {
     src: "assets/crop-logo-mark.png",
@@ -1824,6 +1809,7 @@ function Footer() {
   }), React.createElement("span", {
     style: { fontFamily: "var(--font-display)", fontWeight: 800, fontSize: 24, letterSpacing: "-0.02em" }
   }, "Ligou"), React.createElement("span", {
+    className: "footer-links",
     style: { display: "flex", gap: 10, flexWrap: "wrap", marginLeft: "auto", fontSize: 14, alignItems: "center" }
   }, React.createElement("a", {
     href: "https://ligou.ai",
@@ -1862,11 +1848,13 @@ function App() {
   }, React.createElement(Marquee, {
     rev: true,
     items: ["Limpeza", "Pintura", "Roofing", "Landscaping", "HVAC", "Junk removal", "Pavers", "Piscinas", "Remodeling", "Elétrica", "Encanamento"]
-  }), React.createElement(Marquee, {
+  }), React.createElement("div", {
+    className: "mq-claims"
+  }, React.createElement(Marquee, {
     small: true,
-    items: ["Atende em inglês, espanhol e português", "Configurado em português", "Agenda dentro das suas regras", "Não inventa preço", "Resume em português", "Pergunta antes de aprender"]
-  })), React.createElement(Scene, null), React.createElement(WaveDraw, {
+    items: ["Atende em inglês, espanhol e português", "Você ensina em português", "Agenda dentro das suas regras", "Não inventa preço", "Resume em português", "Pergunta antes de aprender"]
+  }))), React.createElement(Dor, null), React.createElement(CallDemo, null), React.createElement(WaveDraw, {
     style: { maxWidth: "var(--container)", margin: "0 auto", padding: "0 32px" }
-  }), React.createElement(CallDemo, null), React.createElement(Dor, null), React.createElement(Faz, null), React.createElement(Comecar, null), React.createElement(Faq, null), React.createElement(Pricing, null), React.createElement(Cta, null)), React.createElement(Footer, null));
+  }), React.createElement(Scene, null), React.createElement(Faz, null), React.createElement(Comecar, null), React.createElement(Faq, null), React.createElement(Pricing, null), React.createElement(Cta, null)), React.createElement(Footer, null));
 }
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App, null));
