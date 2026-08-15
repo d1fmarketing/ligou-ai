@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 7a08db897998827f8be2ae95a8c2db79887b4c007daa7a7f7abb7941e8d9654a
+ * Source SHA-256: 0806269e2e6ddc6b740de5639d1ddef69b6803edf630e02a8ce48caecc4f2f53
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -1575,11 +1575,12 @@ function CallDemo() {
 }
 function Dor() {
   return React.createElement("section", {
+    className: "dor-section",
     "data-screen-label": "A dor",
-    style: { marginTop: 120, background: "var(--surface-sunken)", borderBlock: "1px solid var(--border-soft)" }
+    style: { background: "var(--surface-sunken)", borderBottom: "1px solid var(--border-soft)" }
   }, React.createElement(Container, {
     className: "dor-ct",
-    style: { padding: "88px 32px 92px", display: "flex", flexDirection: "column", gap: 26 }
+    style: { padding: "64px 32px 88px", display: "flex", flexDirection: "column", gap: 26 }
   }, React.createElement(Reveal, null, React.createElement(Eyebrow, null, "A dor")), React.createElement(Reveal, {
     delay: 80
   }, React.createElement("h2", {

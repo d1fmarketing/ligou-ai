@@ -394,8 +394,8 @@ function CallDemo() {
 }
 
 function Dor() {
-  return <section data-screen-label="A dor" style={{marginTop: 120, background: 'var(--surface-sunken)', borderBlock: '1px solid var(--border-soft)'}}>
-    <Container className="dor-ct" style={{padding: '88px 32px 92px', display: 'flex', flexDirection: 'column', gap: 26}}>
+  return <section className="dor-section" data-screen-label="A dor" style={{background: 'var(--surface-sunken)', borderBottom: '1px solid var(--border-soft)'}}>
+    <Container className="dor-ct" style={{padding: '64px 32px 88px', display: 'flex', flexDirection: 'column', gap: 26}}>
       <Reveal><Eyebrow>A dor</Eyebrow></Reveal>
       <Reveal delay={80}><h2 className="dorbig">A ligação que você não atende <span className="acc">não fica esperando.</span></h2></Reveal>
       <Reveal delay={140}><p style={{margin: 0, fontSize: 'var(--size-body-lg)', color: 'var(--text-secondary)', maxWidth: 680}}>Para o brasileiro que toca uma empresa de serviços nos EUA, atender nem sempre cabe no meio do trabalho. Você está no telhado, dirigindo ou com outro cliente — e a ligação cai na caixa postal.</p></Reveal>
