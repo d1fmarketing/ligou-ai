@@ -8,7 +8,7 @@ function Container({style, className = '', children}) {
 
 function SectionHead({eyebrow, title, lede, center}) {
   return <div style={{display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 44, alignItems: center ? 'center' : 'flex-start', textAlign: center ? 'center' : 'left'}}>
-    <Reveal><Eyebrow>{eyebrow}</Eyebrow></Reveal>
+    <Reveal><Eyebrow className={eyebrow ? undefined : 'eyebrow-mark'} aria-hidden={eyebrow ? undefined : true}>{eyebrow}</Eyebrow></Reveal>
     <Reveal delay={90}><h2 style={{fontSize: 'var(--size-display)', fontWeight: 'var(--weight-black)', letterSpacing: 'var(--track-display)', lineHeight: 'var(--leading-display)'}}>{title}</h2></Reveal>
     {lede && <Reveal delay={170}><p style={{margin: 0, fontSize: 'var(--size-body-lg)', color: 'var(--text-secondary)', maxWidth: 620}}>{lede}</p></Reveal>}
   </div>;
@@ -70,7 +70,13 @@ function Nav() {
       <nav className="nav-links" style={{display: 'flex', gap: 24, marginLeft: 'auto'}}>
         <L id="prova">Demo</L><L id="diferenca">Como trabalha</L><L id="faq">Controle</L><L id="preco">Preço</L>
       </nav>
-      <span style={{marginLeft: 'auto'}} className="nav4-cta"><Button size="sm" variant="accent" href="#prova" style={{whiteSpace: 'nowrap'}}>Falar com o Ligou</Button></span>
+      <div className="nav4-actions">
+        <a className="nav4-client" href="/dashboard/" aria-label="Área do cliente">
+          <span className="nav4-client-long">Área do cliente</span>
+          <span className="nav4-client-short" aria-hidden="true">Área</span>
+        </a>
+        <span className="nav4-cta"><Button size="sm" variant="accent" href="#prova" style={{whiteSpace: 'nowrap'}}>Falar com o Ligou</Button></span>
+      </div>
     </Container>
   </header>;
 }
@@ -201,7 +207,7 @@ function Scene() {
   return <section id="diferenca" data-screen-label="A diferença" className="iv">
     <Container style={{maxWidth: 1500}}>
       <div className="iv-head">
-        <Reveal><span className="h4-eyebrow">A diferença</span></Reveal>
+        <Reveal><span className="h4-eyebrow eyebrow-mark" aria-hidden="true"></span></Reveal>
         <Reveal delay={80}><h2>O Ligou não é configurado.<br/>Ele é contratado.</h2></Reveal>
         <Reveal delay={150}><p className="iv-sub">Você conversa. O Ligou transforma suas respostas em atendimento.</p></Reveal>
         <Reveal delay={220}><div className="iv-word">Em português.</div></Reveal>
@@ -277,7 +283,7 @@ function CallDemo() {
   const [mrel, setMrel] = React.useState(false);
   return <section id="prova" data-screen-label="Prova do produto" className="p7">
     <Container style={{maxWidth: 1500}}>
-      <Eyebrow>Prova do produto</Eyebrow>
+      <Eyebrow className="eyebrow-mark" aria-hidden="true"/>
       <h2 className="p7-title">Quando a regra exige decisão,<br/>ele traz a exceção pronta.</h2>
       <p className="p7-sub p7-bridge">Quando a regra permite, ele resolve sozinho. Quando não permite, traz o caso pronto para você decidir.</p>
       <p className="p7-langnote">Este exemplo está em inglês. O Ligou também atende em espanhol.</p>
@@ -396,7 +402,7 @@ function CallDemo() {
 function Dor() {
   return <section className="dor-section" data-screen-label="A dor" style={{background: 'var(--surface-sunken)', borderBottom: '1px solid var(--border-soft)'}}>
     <Container className="dor-ct" style={{padding: '64px 32px 88px', display: 'flex', flexDirection: 'column', gap: 26}}>
-      <Reveal><Eyebrow>A dor</Eyebrow></Reveal>
+      <Reveal><Eyebrow className="eyebrow-mark" aria-hidden="true"/></Reveal>
       <Reveal delay={80}><h2 className="dorbig">A ligação que você não atende <span className="acc">não fica esperando.</span></h2></Reveal>
       <Reveal delay={140}><p style={{margin: 0, fontSize: 'var(--size-body-lg)', color: 'var(--text-secondary)', maxWidth: 680}}>Para o brasileiro que toca uma empresa de serviços nos EUA, atender nem sempre cabe no meio do trabalho. Você está no telhado, dirigindo ou com outro cliente — e a ligação cai na caixa postal.</p></Reveal>
       <Reveal delay={200}><p style={{margin: 0, fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: 'var(--size-h3)', letterSpacing: 'var(--track-tight)', maxWidth: 680}}>Para quem ligou, a próxima empresa está a um toque de distância. Em inglês ou espanhol, essa oportunidade fica ainda mais difícil de disputar.</p></Reveal>
@@ -410,7 +416,7 @@ function Faz() {
   const item = t => <div className="checkitem"><b>→</b>{t}</div>;
   return <section data-screen-label="O que ele faz" style={{marginTop: 116}}>
     <Container>
-      <SectionHead eyebrow="Numa ligação" title="O que ele faz quando o telefone toca."/>
+      <SectionHead title="O que ele faz quando o telefone toca."/>
       {mobile ? <Reveal><div className="checklist">{items.map(t => <React.Fragment key={t}>{item(t)}</React.Fragment>)}</div></Reveal> : <div className="checklist">{items.map((t, i) => <Reveal key={t} delay={(i % 2) * 70}>{item(t)}</Reveal>)}</div>}
     </Container>
   </section>;
@@ -450,7 +456,7 @@ function Faq() {
   </div>;
   return <section id="faq" data-screen-label="FAQ" style={{marginTop: 116}}>
     <Container style={{maxWidth: 880}}>
-      <SectionHead eyebrow="Perguntas diretas" title="O que todo dono pergunta."/>
+      <SectionHead title="O que todo dono pergunta."/>
       {mobile ? <Reveal><div>{qs.map((qa, i) => <React.Fragment key={qa[0]}>{item(qa, i)}</React.Fragment>)}</div></Reveal> : <div>{qs.map((qa, i) => <Reveal key={qa[0]} delay={i * 50}>{item(qa, i)}</Reveal>)}</div>}
     </Container>
   </section>;
@@ -512,7 +518,8 @@ function Footer() {
       <div className="footer-row" style={{display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap'}}>
         <img src="assets/crop-logo-mark.png" alt="" style={{height: 34, borderRadius: '50%'}}/>
         <span style={{fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: 24, letterSpacing: '-0.02em'}}>Ligou</span>
-        <span className="footer-links" style={{display: 'flex', gap: 10, flexWrap: 'wrap', marginLeft: 'auto', fontSize: 14, alignItems: 'center'}}>
+        <a className="footer-client" href="/dashboard/">Área do cliente</a>
+        <span className="footer-links" style={{display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 14, alignItems: 'center'}}>
           <a href="https://ligou.ai" style={a}>ligou.ai</a><span style={{opacity: .4}}>·</span>
           <a href="mailto:suporte@ligou.ai" style={a}>suporte@ligou.ai</a><span style={{opacity: .4}}>·</span>
           <a href="#" style={a}>Termos</a><span style={{opacity: .4}}>·</span>

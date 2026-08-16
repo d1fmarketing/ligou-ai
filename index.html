@@ -72,6 +72,7 @@ body{overflow-x:hidden}
 @keyframes shint{to{top:110%}}
 .mqwrap{margin-top:0;border-block:1px solid var(--border-soft);background:var(--surface-sunken);padding:24px 0;display:flex;flex-direction:column;gap:10px;overflow:hidden}
 .dor-section{margin-top:0!important}
+.eyebrow-mark{min-height:1em}
 .mq{overflow:hidden}
 .mq__track{display:flex;align-items:center;gap:44px;width:max-content;animation:mqmove 40s linear infinite}
 .mq--rev .mq__track{animation-direction:reverse;animation-duration:52s}
@@ -156,6 +157,9 @@ body{overflow-x:hidden}
 .cta h2{font-size:clamp(64px,10vw,150px);font-weight:800;letter-spacing:var(--track-display);line-height:.96}
 .cta .acc{color:var(--lg-orange-500)}
 .cta-robot{position:absolute;right:3%;bottom:-40px;width:min(340px,28vw);aspect-ratio:1/1;object-fit:cover;border-radius:50%;pointer-events:none;box-shadow:var(--shadow-float)}
+.footer-client{display:inline-flex;align-items:center;justify-content:center;min-height:44px;margin-left:auto;padding:0 15px;border:1px solid rgba(251,252,248,.28);border-radius:var(--radius-pill);color:var(--text-inverse);font-size:13px;font-weight:700;line-height:1;text-decoration:none;white-space:nowrap;box-sizing:border-box}
+.footer-client:hover{border-color:var(--lg-teal-400);background:rgba(70,194,175,.08);color:#fff}
+.footer-client:focus-visible{outline:3px solid rgba(70,194,175,.55);outline-offset:2px}
 .bigword{font-family:var(--font-display);font-weight:800;letter-spacing:var(--track-display);font-size:clamp(120px,20vw,290px);line-height:.8;color:rgba(251,252,248,.07);user-select:none;pointer-events:none;text-align:center;margin:56px 0 -0.08em}
 .toastwrap{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:70;animation:bpop .34s var(--ease-out)}
 .wavedraw path{stroke-dasharray:1;stroke-dashoffset:1;transition:stroke-dashoffset 1.6s var(--ease-out) .1s}
@@ -246,6 +250,11 @@ section{margin-top:64px!important}
 .nav4 .nav-link:hover{color:#fff}
 .nav4-logo{display:flex;align-items:center;gap:9px;text-decoration:none;flex:none}
 .nav4-logo span{font-family:var(--font-display);font-weight:800;font-size:22px;letter-spacing:-0.02em;color:var(--lg-paper)}
+.nav4-actions{display:flex;align-items:center;gap:10px;margin-left:auto;flex:none}
+.nav4-client{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border:1px solid rgba(251,252,248,.28);border-radius:var(--radius-pill);color:rgba(251,252,248,.88);font-size:13px;font-weight:700;line-height:1;text-decoration:none;white-space:nowrap;box-sizing:border-box;transition:border-color var(--dur-fast) var(--ease-out),background var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+.nav4-client:hover{border-color:var(--lg-teal-400);background:rgba(70,194,175,.08);color:#fff}
+.nav4-client-short{display:none}
+.nav4-cta .lg-btn{min-height:44px;box-sizing:border-box}
 .nav4 a:focus-visible,.hero4 a:focus-visible{outline:3px solid rgba(70,194,175,.55);outline-offset:2px;border-radius:6px}
 .hero4-grid{position:relative;z-index:2;display:grid;grid-template-columns:minmax(330px,38fr) 62fr;gap:0;align-items:center;min-height:clamp(680px,78svh,840px);padding-top:12px;padding-bottom:24px;box-sizing:border-box}
 .hero4-artlayer{position:absolute;inset:0;z-index:1}
@@ -310,6 +319,17 @@ section{margin-top:64px!important}
 .h4-ctas .lg-btn,.h4-ctas .h4-ghostbtn{width:100%;justify-content:center;box-sizing:border-box;text-align:center;white-space:normal}
 .nav4 .nav4-logo svg{width:28px;height:28px}
 .nav4 .nav4-logo span{font-size:19px}
+}
+@media (max-width:600px){
+.nav .ct{padding-left:14px!important;padding-right:14px!important;gap:10px!important}
+.nav4-actions{gap:6px}
+.nav4-client{padding:0 10px;font-size:12px}
+}
+@media (max-width:399px){
+.nav4-client-long{display:none}
+.nav4-client-short{display:inline}
+.nav4-client{padding-left:9px;padding-right:9px}
+.nav4-cta .lg-btn{padding-left:9px!important;padding-right:9px!important;font-size:11.5px!important}
 }
 
 .iv{position:relative;overflow:hidden;background:linear-gradient(96deg,#041a2b 0%,#062231 40%,#40595a 54%,#d9decf 70%,#f6f7f0 84%);padding:clamp(64px,8vw,104px) 0 clamp(40px,5vw,72px);color:var(--lg-paper)}
@@ -546,12 +566,13 @@ noscript{display:block}
 .nojs-v9 h1 span{display:block;color:var(--lg-orange-500)}
 .nojs-v9__lede{max-width:640px;font-size:clamp(19px,2.4vw,26px);line-height:1.45;color:rgba(251,252,248,.82);margin:28px 0}
 .nojs-v9__button{display:inline-flex;min-height:48px;align-items:center;padding:0 24px;border-radius:999px;background:var(--lg-orange-500);color:#fff;text-decoration:none;font-family:var(--font-display);font-weight:800}
+.nojs-v9__client{display:inline-flex;min-height:48px;align-items:center;margin-left:10px;padding:0 20px;border:1px solid rgba(251,252,248,.4);border-radius:999px;color:#fff;text-decoration:none;font-family:var(--font-display);font-weight:800}
 .nojs-v9__proof{padding:72px 24px;margin:0!important}
 .nojs-v9__proof h2{font-family:var(--font-display);font-size:clamp(32px,5vw,52px);line-height:1.05;margin:0 0 28px}
 .nojs-v9__flow{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 .nojs-v9__step{padding:22px;border:1px solid var(--border-soft);border-radius:18px;background:#fff;font-weight:700;line-height:1.45}
 .nojs-v9__step b{display:block;color:var(--lg-teal-600);font-size:12px;letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px}
-@media (max-width:767px){.nojs-v9__flow{grid-template-columns:1fr}.nojs-v9__hero{min-height:62vh}}
+@media (max-width:767px){.nojs-v9__flow{grid-template-columns:1fr}.nojs-v9__hero{min-height:62vh}.nojs-v9__client{margin-left:0;margin-top:10px}}
 </style>
 </head>
 <body>
@@ -564,11 +585,12 @@ noscript{display:block}
         <h1>Ligou?<span>Atendido.</span></h1>
         <p class="nojs-v9__lede">Seu cliente liga em inglês, espanhol ou português. O Ligou consulta suas regras, agenda o trabalho e só te chama quando precisa de aprovação.</p>
         <a class="nojs-v9__button" href="#nojs-proof">Ver demonstração ilustrativa</a>
+        <a class="nojs-v9__client" href="/dashboard/">Área do cliente</a>
       </div>
     </section>
     <section class="nojs-v9__proof" id="nojs-proof">
       <div class="nojs-v9__inner">
-        <p>Prova do produto · exemplo visual</p>
+        <p>Exemplo visual</p>
         <h2>Quando a regra permite, ele resolve sozinho. Quando não permite, traz o caso pronto para você decidir.</h2>
         <div class="nojs-v9__flow">
           <div class="nojs-v9__step"><b>Cliente · Inglês</b>Pedido urgente de atendimento no mesmo dia.</div>

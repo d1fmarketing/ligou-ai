@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 0806269e2e6ddc6b740de5639d1ddef69b6803edf630e02a8ce48caecc4f2f53
+ * Source SHA-256: 03436d68278bfefa5e4a76baf2a892b893ed50a75d3f72626ad364f9671ae944
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -15,7 +15,10 @@ function Container({ style, className = "", children }) {
 function SectionHead({ eyebrow, title, lede, center }) {
   return React.createElement("div", {
     style: { display: "flex", flexDirection: "column", gap: 14, marginBottom: 44, alignItems: center ? "center" : "flex-start", textAlign: center ? "center" : "left" }
-  }, React.createElement(Reveal, null, React.createElement(Eyebrow, null, eyebrow)), React.createElement(Reveal, {
+  }, React.createElement(Reveal, null, React.createElement(Eyebrow, {
+    className: eyebrow ? undefined : "eyebrow-mark",
+    "aria-hidden": eyebrow ? undefined : true
+  }, eyebrow)), React.createElement(Reveal, {
     delay: 90
   }, React.createElement("h2", {
     style: { fontSize: "var(--size-display)", fontWeight: "var(--weight-black)", letterSpacing: "var(--track-display)", lineHeight: "var(--leading-display)" }
@@ -182,15 +185,25 @@ function Nav() {
     id: "faq"
   }, "Controle"), React.createElement(L, {
     id: "preco"
-  }, "Preço")), React.createElement("span", {
-    style: { marginLeft: "auto" },
+  }, "Preço")), React.createElement("div", {
+    className: "nav4-actions"
+  }, React.createElement("a", {
+    className: "nav4-client",
+    href: "/dashboard/",
+    "aria-label": "Área do cliente"
+  }, React.createElement("span", {
+    className: "nav4-client-long"
+  }, "Área do cliente"), React.createElement("span", {
+    className: "nav4-client-short",
+    "aria-hidden": "true"
+  }, "Área")), React.createElement("span", {
     className: "nav4-cta"
   }, React.createElement(Button, {
     size: "sm",
     variant: "accent",
     href: "#prova",
     style: { whiteSpace: "nowrap" }
-  }, "Falar com o Ligou"))));
+  }, "Falar com o Ligou")))));
 }
 const HERO_MEDIA = {
   ultrawide: {
@@ -441,8 +454,9 @@ function Scene() {
   }, React.createElement("div", {
     className: "iv-head"
   }, React.createElement(Reveal, null, React.createElement("span", {
-    className: "h4-eyebrow"
-  }, "A diferença")), React.createElement(Reveal, {
+    className: "h4-eyebrow eyebrow-mark",
+    "aria-hidden": "true"
+  })), React.createElement(Reveal, {
     delay: 80
   }, React.createElement("h2", null, "O Ligou não é configurado.", React.createElement("br", null), "Ele é contratado.")), React.createElement(Reveal, {
     delay: 150
@@ -620,7 +634,10 @@ function CallDemo() {
     className: "p7"
   }, React.createElement(Container, {
     style: { maxWidth: 1500 }
-  }, React.createElement(Eyebrow, null, "Prova do produto"), React.createElement("h2", {
+  }, React.createElement(Eyebrow, {
+    className: "eyebrow-mark",
+    "aria-hidden": "true"
+  }), React.createElement("h2", {
     className: "p7-title"
   }, "Quando a regra exige decisão,", React.createElement("br", null), "ele traz a exceção pronta."), React.createElement("p", {
     className: "p7-sub p7-bridge"
@@ -1581,7 +1598,10 @@ function Dor() {
   }, React.createElement(Container, {
     className: "dor-ct",
     style: { padding: "64px 32px 88px", display: "flex", flexDirection: "column", gap: 26 }
-  }, React.createElement(Reveal, null, React.createElement(Eyebrow, null, "A dor")), React.createElement(Reveal, {
+  }, React.createElement(Reveal, null, React.createElement(Eyebrow, {
+    className: "eyebrow-mark",
+    "aria-hidden": "true"
+  })), React.createElement(Reveal, {
     delay: 80
   }, React.createElement("h2", {
     className: "dorbig"
@@ -1607,7 +1627,6 @@ function Faz() {
     "data-screen-label": "O que ele faz",
     style: { marginTop: 116 }
   }, React.createElement(Container, null, React.createElement(SectionHead, {
-    eyebrow: "Numa ligação",
     title: "O que ele faz quando o telefone toca."
   }), mobile ? React.createElement(Reveal, null, React.createElement("div", {
     className: "checklist"
@@ -1680,7 +1699,6 @@ function Faq() {
   }, React.createElement(Container, {
     style: { maxWidth: 880 }
   }, React.createElement(SectionHead, {
-    eyebrow: "Perguntas diretas",
     title: "O que todo dono pergunta."
   }), mobile ? React.createElement(Reveal, null, React.createElement("div", null, qs.map((qa, i) => React.createElement(React.Fragment, {
     key: qa[0]
@@ -1809,9 +1827,12 @@ function Footer() {
     style: { height: 34, borderRadius: "50%" }
   }), React.createElement("span", {
     style: { fontFamily: "var(--font-display)", fontWeight: 800, fontSize: 24, letterSpacing: "-0.02em" }
-  }, "Ligou"), React.createElement("span", {
+  }, "Ligou"), React.createElement("a", {
+    className: "footer-client",
+    href: "/dashboard/"
+  }, "Área do cliente"), React.createElement("span", {
     className: "footer-links",
-    style: { display: "flex", gap: 10, flexWrap: "wrap", marginLeft: "auto", fontSize: 14, alignItems: "center" }
+    style: { display: "flex", gap: 10, flexWrap: "wrap", fontSize: 14, alignItems: "center" }
   }, React.createElement("a", {
     href: "https://ligou.ai",
     style: a
