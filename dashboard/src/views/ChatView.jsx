@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  IconArrowRight,
   IconChecks,
   IconClock,
   IconMessageCircle2,
@@ -11,7 +12,15 @@ import {
 } from "@tabler/icons-react";
 import { ApprovalCard } from "../components/ApprovalCard.jsx";
 
-function ChatMessage({ message }) {
+function TimelineAvatar({ className = "" }) {
+  return (
+    <span className={`timeline-avatar-node ${className}`.trim()} aria-hidden="true">
+      <img src="/assets/ligou-avatar-head.png" alt="" />
+    </span>
+  );
+}
+
+function ChatMessage({ message, showAvatar = true }) {
   const role = message.role || "agent";
   if (role === "system") {
     return (
@@ -26,10 +35,9 @@ function ChatMessage({ message }) {
   const isOwner = role === "owner" || role === "user";
   return (
     <div className={`message-row message-row--${isOwner ? "owner" : "agent"}${!isOwner && !message.label ? " message-row--prompt" : ""}`}>
-      {!isOwner ? (
-        <img className="message-avatar" src="/assets/ligou-avatar-head.png" alt="Ligou" />
-      ) : null}
+      {!isOwner && showAvatar ? <TimelineAvatar /> : null}
       <article className="message-bubble">
+        {isOwner || !message.label ? <span className="sr-only">{isOwner ? "Rafael: " : "Ligou: "}</span> : null}
         {!isOwner && message.label ? <span className="message-label">{message.label}</span> : null}
         <p>{message.text}</p>
         {!isOwner ? <time>{message.time}</time> : null}
@@ -60,6 +68,48 @@ function CausalStrip({ context }) {
       <div>
         <span className="causal-icon causal-icon--pending"><IconClock aria-hidden="true" /></span>
         <p><small>Aguardando</small><strong>{["pending", "aguardando"].includes(context?.status) ? "sua decisão" : "decisão registrada"}</strong></p>
+      </div>
+    </div>
+  );
+}
+
+function OperationalTimeline({ messages, context, approval, onApprove, onAdjust, onReject }) {
+  return (
+    <div className="operational-timeline">
+      <span className="timeline-rail" aria-hidden="true" />
+
+      <TimelineAvatar className="timeline-avatar-node--call" />
+      <div className="timeline-content timeline-content--message">
+        {messages[0] ? <ChatMessage message={messages[0]} showAvatar={false} /> : null}
+      </div>
+
+      <span className="timeline-context-node" aria-hidden="true" />
+      <div className="timeline-content timeline-content--context">
+        <CausalStrip context={context} />
+      </div>
+
+      <TimelineAvatar className="timeline-avatar-node--decision" />
+      <div className="timeline-content timeline-content--message timeline-content--prompt">
+        {messages[1] ? <ChatMessage message={messages[1]} showAvatar={false} /> : null}
+      </div>
+
+      <span className="timeline-approval-node" aria-hidden="true" />
+      <div className="timeline-content timeline-content--approval">
+        <div className="mobile-approval">
+          <ApprovalCard
+            approval={approval}
+            onApprove={onApprove}
+            onAdjust={onAdjust}
+            onReject={onReject}
+          />
+          {approval ? <p className="approval-caption">Aprovação necessária para exceção de regra.</p> : null}
+        </div>
+
+        <div className={`desktop-timeline-handoff${approval ? "" : " is-resolved"}`}>
+          <span>{approval ? "Exceção pronta" : "Decisão registrada"}</span>
+          <strong>{approval ? "Decida no painel à direita" : "Nenhuma exceção pendente"}</strong>
+          {approval ? <IconArrowRight aria-hidden="true" /> : <IconChecks aria-hidden="true" />}
+        </div>
       </div>
     </div>
   );
@@ -100,21 +150,14 @@ export function ChatView({
       <div className="conversation" aria-live="polite" aria-relevant="additions text">
         {initialMessages[0] ? <ChatMessage message={initialMessages[0]} /> : null}
 
-        <div className="agent-timeline">
-          {initialMessages[1] ? <ChatMessage message={initialMessages[1]} /> : null}
-          <CausalStrip context={callContext} />
-          {initialMessages[2] ? <ChatMessage message={initialMessages[2]} /> : null}
-
-          <div className="mobile-approval">
-            <ApprovalCard
-              approval={pendingApproval}
-              onApprove={onApprove}
-              onAdjust={onAdjust}
-              onReject={onReject}
-            />
-            {pendingApproval ? <p className="approval-caption">Aprovação necessária para exceção de regra.</p> : null}
-          </div>
-        </div>
+        <OperationalTimeline
+          messages={[initialMessages[1], initialMessages[2]]}
+          context={callContext}
+          approval={pendingApproval}
+          onApprove={onApprove}
+          onAdjust={onAdjust}
+          onReject={onReject}
+        />
 
         {recentMessages.map((message, index) => (
           <ChatMessage key={message.id || `recent-${index}`} message={message} />
@@ -130,7 +173,7 @@ export function ChatView({
           id="chat-input"
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
-          placeholder="Fale com o Ligou em português..."
+          placeholder="Fale com o Ligou..."
           autoComplete="off"
         />
         {draft.trim() ? (

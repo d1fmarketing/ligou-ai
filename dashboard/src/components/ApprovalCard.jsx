@@ -12,7 +12,7 @@ export function ApprovalCard({ approval, onApprove, onAdjust, onReject, compact 
   if (!approval) {
     return (
       <div className="approval-empty">
-        <IconCheck aria-hidden="true" />
+        <IconCircleCheck aria-hidden="true" />
         <strong>Nenhuma decisão pendente</strong>
         <p>O Ligou continua operando dentro das regras já aprovadas.</p>
       </div>
