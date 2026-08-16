@@ -15,7 +15,7 @@ import { ApprovalCard } from "../components/ApprovalCard.jsx";
 function TimelineAvatar({ className = "" }) {
   return (
     <span className={`timeline-avatar-node ${className}`.trim()} aria-hidden="true">
-      <img src="/assets/ligou-avatar-head.png" alt="" />
+      <img src={`${import.meta.env.BASE_URL}assets/ligou-avatar-head.png`} alt="" />
     </span>
   );
 }

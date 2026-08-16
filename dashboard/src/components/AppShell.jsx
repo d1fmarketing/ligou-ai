@@ -17,7 +17,7 @@ const destinations = [
 function Brand() {
   return (
     <div className="brand-lockup" aria-label="Ligou">
-      <img src="/assets/agent-node-mark.svg" alt="" />
+      <img src={`${import.meta.env.BASE_URL}assets/agent-node-mark.svg`} alt="" />
       <strong>Ligou</strong>
     </div>
   );
@@ -35,7 +35,11 @@ function DestinationLink({ destination, active, pendingCount }) {
     >
       <span className="destination-icon">
         {destination.id === "ligou" ? (
-          <img className="destination-brand-mark" src="/assets/agent-node-mark.svg" alt="" />
+          <img
+            className="destination-brand-mark"
+            src={`${import.meta.env.BASE_URL}assets/agent-node-mark.svg`}
+            alt=""
+          />
         ) : (
           <Icon aria-hidden="true" />
         )}

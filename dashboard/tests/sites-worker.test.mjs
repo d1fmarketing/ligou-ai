@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 import worker from "../worker/index.js";
 
@@ -65,4 +65,23 @@ test("emits the files required by Sites packaging", async () => {
   await access(new URL("../dist/client/index.html", import.meta.url));
   await access(new URL("../dist/server/index.js", import.meta.url));
   await access(new URL("../dist/.openai/hosting.json", import.meta.url));
+});
+
+test("builds every dashboard asset under the shared /dashboard route", async () => {
+  const client = new URL("../dist/client/", import.meta.url);
+  const html = await readFile(new URL("index.html", client), "utf8");
+  const assets = await readdir(new URL("assets/", client));
+  const scriptName = assets.find((name) => name.endsWith(".js"));
+  const styleName = assets.find((name) => name.endsWith(".css"));
+
+  assert.ok(scriptName);
+  assert.ok(styleName);
+  assert.match(html, /src="\/dashboard\/assets\/[^\"]+\.js"/);
+  assert.match(html, /href="\/dashboard\/assets\/[^\"]+\.css"/);
+
+  const script = await readFile(new URL(`assets/${scriptName}`, client), "utf8");
+  const style = await readFile(new URL(`assets/${styleName}`, client), "utf8");
+
+  assert.doesNotMatch(script, /["']\/assets\//);
+  assert.match(style, /url\(\/dashboard\/fonts\//);
 });

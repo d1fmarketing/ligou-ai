@@ -121,7 +121,7 @@ export function App() {
   if (loading) {
     return (
       <main className="loading-screen">
-        <img src="/assets/ligou-avatar-v1.png" alt="" />
+        <img src={`${import.meta.env.BASE_URL}assets/ligou-avatar-v1.png`} alt="" />
         <p>Preparando o painel do Ligou…</p>
       </main>
     );
