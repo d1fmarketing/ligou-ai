@@ -13,6 +13,7 @@ inventário Founding e capacidades do backend não forem reais e aprovados.
 ## Verificar e visualizar
 
 ```bash
+bun test
 bun run check
 node dev-server.mjs
 ```
@@ -20,8 +21,10 @@ node dev-server.mjs
 Depois, abra `http://127.0.0.1:4174/`.
 
 O servidor responde a pedidos HTTP Range com `206 Partial Content`, necessário para os
-MP4s. `bun run check` recompila os JSX preservados, verifica sintaxe, hashes da fonte e
-todas as referências locais do runtime.
+MP4s. `bun test` cobre transições responsivas, estado interativo, acessibilidade e os
+fallbacks de movimento reduzido e JavaScript desativado. `bun run check` recompila os
+JSX preservados, executa esses testes e verifica sintaxe, hashes da fonte e todas as
+referências locais do runtime.
 
 ## Estrutura atual
 
@@ -29,6 +32,7 @@ todas as referências locais do runtime.
 - `src/claude-v9/`: HTML e JSX originais do ZIP, preservados byte a byte;
 - `scripts/build-claude-v9.mjs`: transpila os JSX com o runtime embutido do Bun;
 - `scripts/verify-claude-v9.mjs`: fixa proveniência e fecha referências do runtime;
+- `tests/`: contratos do artefato e comportamento do JSX com um harness determinístico;
 - `assets/js/`: JavaScript gerado; não editar manualmente;
 - `assets/vendor/`: React/ReactDOM production locais e licença;
 - `_ds/ligou-design-system-*/`: tokens, componentes e bundle usados pela v9;

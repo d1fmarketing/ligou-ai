@@ -5,6 +5,7 @@
   "packageManager": "bun@1.2.13",
   "scripts": {
     "build": "bun run scripts/build-claude-v9.mjs",
-    "check": "bun run build && node --check assets/js/ligou-fx2.js && node --check assets/js/ligou-app9.js && node --check dev-server.mjs && node scripts/verify-claude-v9.mjs"
+    "test": "bun test",
+    "check": "bun run build && node --check assets/js/ligou-fx2.js && node --check assets/js/ligou-app9.js && node --check dev-server.mjs && bun test && node scripts/verify-claude-v9.mjs"
   }
 }
