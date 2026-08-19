@@ -17,11 +17,16 @@ preview local.
 **Decisão do RJ (escolher uma):**
 
 - **(a) Login próprio da célula** — recomendado. Gera um token só da célula, sem tocar na conta pessoal do Mac.
+  A instância **não tem chave SSH** (acesso é por SSM, mais seguro) — `ssh ligou` NÃO funciona. Use SSM:
   ```bash
-  ssh ligou "docker exec -it ligou-cell-rocha-plumbing hermes auth add openai-codex --type oauth --no-browser"
+  aws ssm start-session --target i-0de12212f9a17dcfc --region us-east-1
   ```
-  Ele imprime uma URL + código; abrir no browser, autorizar, pronto. (Sem SSH configurado, dá pra fazer pelo
-  console da AWS → Session Manager → instância `ligou-host-01`.)
+  e, dentro do shell da EC2:
+  ```bash
+  sudo docker exec -it ligou-cell-rocha-plumbing hermes auth add openai-codex --type oauth --no-browser
+  ```
+  Ele imprime uma URL (`auth.openai.com/codex/device`) + código; abrir no browser e autorizar.
+  **Ou peça à Isa** — ela dispara o fluxo pelo SSM e te entrega o link/código prontos.
 
 - **(b) Reusar o token do Mac** — mais rápido, porém copia a credencial pessoal do RJ para o servidor:
   copiar `~/.codex/auth.json` → `/opt/ligou/hermes-auth/auth.json` na EC2 e montar no container.
