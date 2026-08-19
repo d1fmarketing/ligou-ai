@@ -92,6 +92,11 @@ pública para isso — só o Console ([confirmado na doc](https://developers.goo
 as vias programáticas (`gcloud iap oauth-clients`, `gcloud iam oauth-clients`) servem a IAP e workforce
 federation, não a apps de consumidor.
 
+**Estado (2026-08-19):** a Isa entrou no Console pelo navegador do RJ (conta `d1f.dmarketing`, projeto
+Ligou MVP), abriu o formulário e preencheu o nome do app como **Ligou** — mas o Console é uma SPA pesada e
+travou a automação (`script injection timed out`) no seletor de e-mail de suporte. Os cliques que faltam
+são poucos e estão abaixo. Nada foi criado ainda.
+
 RJ faz uma vez, no projeto **`ligou-mvp-68036`** (o mesmo onde já vive a service account que funciona):
 
 1. Console → APIs & Services → **OAuth consent screen**: External, nome do app **Ligou**, e-mail de suporte,
