@@ -4,6 +4,7 @@ import { AppShell } from "./components/AppShell.jsx";
 import { ApprovalCard } from "./components/ApprovalCard.jsx";
 import { Dialog } from "./components/Dialog.jsx";
 import { dashboardGateway } from "./data/gateway.js";
+import { supabaseGateway } from "./data/gateway.supabase.js";
 import { ApprovalsView } from "./views/ApprovalsView.jsx";
 import { ChatView } from "./views/ChatView.jsx";
 import { MemoryView } from "./views/MemoryView.jsx";
@@ -54,6 +55,8 @@ export function App() {
   return <AppInner />;
 }
 
+const gateway = supabaseConfigured ? supabaseGateway : dashboardGateway;
+
 function AppInner() {
   const [route, setRoute] = useState(routeFromHash);
   const [state, setState] = useState(null);
@@ -66,7 +69,7 @@ function AppInner() {
   const [selectedApprovalId, setSelectedApprovalId] = useState(null);
 
   const refresh = useCallback(async () => {
-    const result = await dashboardGateway.loadState();
+    const result = await gateway.loadState();
     const nextState = unwrapState(result);
     setState(nextState);
     if (result?.warning) setToast({ kind: "warning", text: result.warning });
@@ -79,6 +82,17 @@ function AppInner() {
       setLoading(false);
       setToast({ kind: "warning", text: "Não foi possível carregar os dados locais. A demonstração pode ser restaurada." });
     });
+  }, [refresh]);
+
+  // realtime: cases/rules/calls/notifications mutate -> live refresh (both tabs, no reload)
+  useEffect(() => {
+    if (typeof gateway.subscribe !== "function") return undefined;
+    let timer = null;
+    const unsubscribe = gateway.subscribe(() => {
+      if (timer) return; // debounce bursts
+      timer = window.setTimeout(() => { timer = null; refresh(); }, 300);
+    });
+    return () => { if (timer) window.clearTimeout(timer); unsubscribe?.(); };
   }, [refresh]);
 
   useEffect(() => {
@@ -115,7 +129,7 @@ function AppInner() {
   const sendMessage = async (text) => {
     setSending(true);
     try {
-      await dashboardGateway.sendMessage(text);
+      await gateway.sendMessage(text);
       await refresh();
     } catch (error) {
       setToast({ kind: "warning", text: error?.message || "Não foi possível enviar a mensagem." });
@@ -215,16 +229,16 @@ function AppInner() {
       <DashboardDialog
         dialog={dialog}
         onClose={() => setDialog(null)}
-        onSendVoice={(phrase) => perform(() => dashboardGateway.sendMessage(phrase), "Frase demonstrativa enviada ao Ligou.")}
+        onSendVoice={(phrase) => perform(() => gateway.sendMessage(phrase), "Frase demonstrativa enviada ao Ligou.")}
         onApprove={(id, decision) => perform(
-          () => dashboardGateway.approveApproval(id, decision),
+          () => gateway.approveApproval(id, decision),
           decision.mode === "rule" ? "Decisão aprovada e salva na Memória." : "Decisão aprovada somente para este caso.",
         )}
-        onAdjust={(id, text) => perform(() => dashboardGateway.adjustApproval(id, text), "Proposta ajustada e mantida para sua aprovação.")}
-        onReject={(id) => perform(() => dashboardGateway.rejectApproval(id), "Proposta recusada sem alterar a Memória.")}
-        onUpdateMemory={(id, patch) => perform(() => dashboardGateway.updateMemory(id, patch), "Regra atualizada com uma nova versão.")}
-        onRevokeMemory={(id) => perform(() => dashboardGateway.revokeMemory(id), "Regra retirada da memória ativa. Recibo local preservado.")}
-        onReset={() => perform(() => dashboardGateway.resetPrototype(), "Dados de exemplo restaurados.")}
+        onAdjust={(id, text) => perform(() => gateway.adjustApproval(id, text), "Proposta ajustada e mantida para sua aprovação.")}
+        onReject={(id) => perform(() => gateway.rejectApproval(id), "Proposta recusada sem alterar a Memória.")}
+        onUpdateMemory={(id, patch) => perform(() => gateway.updateMemory(id, patch), "Regra atualizada com uma nova versão.")}
+        onRevokeMemory={(id) => perform(() => gateway.revokeMemory(id), "Regra retirada da memória ativa. Recibo local preservado.")}
+        onReset={() => perform(() => gateway.resetPrototype(), "Dados de exemplo restaurados.")}
       />
 
       <Toast toast={toast} onClose={() => setToast(null)} />
