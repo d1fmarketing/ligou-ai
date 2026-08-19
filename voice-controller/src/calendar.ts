@@ -36,6 +36,35 @@ export interface CalendarPort {
   busy(tenantId: string, fromIso: string, toIso: string): Promise<{ intervals: BusyInterval[]; unknown?: boolean }>;
 }
 
+/** Minutes east of UTC for `tz` at that instant (DST-aware). */
+function tzOffsetMinutes(at: Date, tz: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(at);
+  const g = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? "0");
+  const asUtc = Date.UTC(g("year"), g("month") - 1, g("day"), g("hour") % 24, g("minute"), g("second"));
+  return (asUtc - at.getTime()) / 60_000;
+}
+
+/** Wall-clock in a tenant's zone -> a real instant (ISO with Z).
+ *  Without this, "2026-08-20T08:00:00" is ambiguous: Google's freeBusy rejects it (HTTP 400) and
+ *  Date.parse silently reads it as the SERVER's zone (UTC on the EC2) — a 7-hour error that would offer
+ *  hours already sold. Observed live on 2026-08-19. */
+export function zonedInstantIso(ymd: string, hour: number, tz: string): string {
+  const naiveUtc = Date.parse(`${ymd}T${String(hour).padStart(2, "0")}:00:00Z`);
+  const firstPass = new Date(naiveUtc - tzOffsetMinutes(new Date(naiveUtc), tz) * 60_000);
+  // re-evaluate at the corrected instant so DST transitions land on the right side
+  return new Date(naiveUtc - tzOffsetMinutes(firstPass, tz) * 60_000).toISOString();
+}
+
+/** Human phrasing for the agent to speak, in the tenant's zone (never the server's). */
+export function spokenLocal(iso: string, tz: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  }).format(new Date(iso));
+}
+
 /** Slot is free when it overlaps no busy interval. Half-open [start, end): touching edges do not collide. */
 export function overlapsBusy(startIso: string, endIso: string, busy: BusyInterval[]): boolean {
   const s = Date.parse(startIso), e = Date.parse(endIso);
@@ -234,9 +263,11 @@ export const googleCalendar: CalendarPort = {
     }
   },
 
+  // Every `unknown` path logs WHY. Silence here cost a full debugging round on 2026-08-19: the agent kept
+  // saying "I can't confirm the schedule" while the same call succeeded from a probe, and nothing said why.
   async busy(_tenantId, fromIso, toIso) {
     const cfg = googleCfg();
-    if (!cfg) return { intervals: [], unknown: true };
+    if (!cfg) { console.warn("calendar.busy unknown: not_configured"); return { intervals: [], unknown: true }; }
     try {
       const token = await googleAccessToken(cfg);
       const res = await fetch("https://www.googleapis.com/calendar/v3/freeBusy", {
@@ -244,12 +275,19 @@ export const googleCalendar: CalendarPort = {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ timeMin: fromIso, timeMax: toIso, items: [{ id: cfg.calendarId }] }),
       });
-      if (!res.ok) return { intervals: [], unknown: true };
+      if (!res.ok) {
+        console.warn(`calendar.busy unknown: http_${res.status} window=${fromIso}..${toIso} body=${(await res.text()).slice(0, 220)}`);
+        return { intervals: [], unknown: true };
+      }
       const body = (await res.json()) as any;
       const cal = body?.calendars?.[cfg.calendarId];
-      if (!cal || cal.errors?.length) return { intervals: [], unknown: true };
+      if (!cal || cal.errors?.length) {
+        console.warn(`calendar.busy unknown: calendar_entry ${JSON.stringify(cal?.errors ?? Object.keys(body?.calendars ?? {})).slice(0, 220)}`);
+        return { intervals: [], unknown: true };
+      }
       return { intervals: (cal.busy ?? []).map((b: any) => ({ start: b.start, end: b.end })) };
-    } catch {
+    } catch (e) {
+      console.warn(`calendar.busy unknown: threw ${String(e).slice(0, 220)}`);
       return { intervals: [], unknown: true };
     }
   },

@@ -23,7 +23,7 @@ CMD_ID=$(aws ssm send-command --instance-ids "$INSTANCE" --document-name AWS-Run
     'tar -xzf /tmp/app.tar.gz -C /opt/ligou/app.new',
     'rm -rf /opt/ligou/app.old && (mv /opt/ligou/app /opt/ligou/app.old 2>/dev/null || true) && mv /opt/ligou/app.new /opt/ligou/app',
     ': > /opt/ligou/env && chmod 600 /opt/ligou/env',
-    'for P in \$(aws ssm get-parameters-by-path --path /ligou/ --with-decryption --query \"Parameters[].Name\" --output text --region us-east-1); do K=\$(basename \$P); V=\$(aws ssm get-parameter --name \$P --with-decryption --query Parameter.Value --output text --region us-east-1); echo \"\$K=\$V\" >> /opt/ligou/env; done',
+    'install -m 700 /opt/ligou/app/infra/pull-env.sh /opt/ligou/pull-env.sh && /opt/ligou/pull-env.sh',
     'cd /opt/ligou/app/voice-controller && /usr/local/bin/bun install --production 2>&1 | tail -1',
     'systemctl enable ligou-controller >/dev/null 2>&1 || true',
     'systemctl restart ligou-controller && sleep 2 && systemctl is-active ligou-controller'

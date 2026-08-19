@@ -3,7 +3,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { loadTenant, priceRules, supa } from "./rules.ts";
 import { consultHermes } from "./hermes.ts";
-import { calendarPort, overlapsBusy } from "./calendar.ts";
+import { calendarPort, overlapsBusy, zonedInstantIso, spokenLocal } from "./calendar.ts";
 
 export interface Capability {
   actor: "CALLER";
@@ -213,16 +213,22 @@ export async function runTool(cap: Capability, name: string, args: Record<string
         const tz = tenant.timezone;
         const now = new Date();
         const durH = Math.ceil((match.duration_min ?? 60) / 60);
-        const candidates: Array<{ start: string; end: string; price_usd: number | null }> = [];
+        // Slots must be real instants (ISO/Z) derived from the TENANT's wall clock. A bare local string
+        // ("2026-08-20T08:00:00") is rejected by Google freeBusy (HTTP 400) and is silently read by
+        // Date.parse as the SERVER's zone — on the UTC EC2 that shifts every slot 7h and would offer
+        // hours already sold. Caught live on 2026-08-19.
+        const candidates: Array<{ start: string; end: string; local: string; price_usd: number | null }> = [];
         for (let d = 1; d <= 7 && candidates.length < 12; d++) {
           const day = new Date(now.getTime() + d * 86_400_000);
           if (new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(day) === "Sun") continue;
           const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(day);
           for (const hour of [8, 10, 13, 15]) {
             if (hour + durH > 18) continue; // must finish inside business hours
+            const start = zonedInstantIso(ymd, hour, tz);
             candidates.push({
-              start: `${ymd}T${String(hour).padStart(2, "0")}:00:00`,
-              end: `${ymd}T${String(hour + durH).padStart(2, "0")}:00:00`,
+              start,
+              end: zonedInstantIso(ymd, hour + durH, tz),
+              local: spokenLocal(start, tz), // what the agent says out loud
               price_usd: match.price_target ?? null,
             });
           }
@@ -241,7 +247,7 @@ export async function runTool(cap: Capability, name: string, args: Record<string
         if (!slots.length) {
           return done({ status: "no_slots", timezone: tz, say: "Tell the caller nothing is open in the next few days and offer to have the team call with options." });
         }
-        return done({ status: "ok", timezone: tz, slots, note: "Offer at most two options at a time." });
+        return done({ status: "ok", timezone: tz, slots, note: "Offer at most two options at a time; say the `local` text, and pass the matching `start` to propose_booking." });
       }
       case "create_async_case": {
         const request = String(args.request ?? "").slice(0, 500);
