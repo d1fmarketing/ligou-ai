@@ -21,3 +21,4 @@ output/
 .idea/
 *.swp
 *~
+supabase/.temp/
