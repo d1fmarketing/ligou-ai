@@ -34,13 +34,15 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   }
 
   const ALLOWED_MODELS = new Set(["gpt-realtime", "gpt-realtime-2.1", "gpt-realtime-2.1-mini"]);
-  const model = modelOverride && ALLOWED_MODELS.has(modelOverride) ? modelOverride : config.model;
-  const estCost = model === "gpt-realtime-2.1-mini" ? 0.35 : 1.0;
+  // Primary model, then automatic fallback (RJ 2026-08-19: 2.1 primary, mini as fallback).
+  const primary = modelOverride && ALLOWED_MODELS.has(modelOverride) ? modelOverride : config.model;
+  const chain = primary === config.fallbackModel ? [primary] : [primary, config.fallbackModel];
+  const estCost = primary === "gpt-realtime-2.1-mini" ? 0.35 : 1.0; // reserve for the pricier primary
 
   // call row first (budget RPC references it)
   const { data: call, error: ce } = await supa()
     .from("calls")
-    .insert({ tenant_id: tenant.id, channel: "browser", session_type: sessionType, model, status: "active" })
+    .insert({ tenant_id: tenant.id, channel: "browser", session_type: sessionType, model: primary, status: "active" })
     .select("id")
     .single();
   if (ce || !call) throw new Error(`call_insert_failed: ${ce?.message}`);
@@ -58,48 +60,43 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   const maxMinutes = sessionType === "onboarding" ? 30 : (tenant.session_max_minutes ?? config.sessionMaxMinutes);
   const cap = makeCapability(tenant.slug, tenant.id, call.id, maxMinutes, sessionType);
 
-  // 1) ephemeral client secret embedding the whole session config
-  const secretRes = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config.openaiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      expires_after: { anchor: "created_at", seconds: 120 },
-      session: {
-        type: "realtime",
-        model,
-        instructions,
-        tools: toolSchemas,
-        tool_choice: "auto",
-        audio: { output: { voice: "marin" } },
-      },
-    }),
-  });
-  if (!secretRes.ok) throw new Error(`client_secret_failed: ${secretRes.status} ${await secretRes.text()}`);
-  const ek = ((await secretRes.json()) as any).value as string;
+  // Try each model in the chain: mint an ephemeral client secret, then exchange SDP. Fall back on any failure.
+  let answerSdp = "", openaiCallId = "", usedModel = "", lastErr = "";
+  for (const model of chain) {
+    try {
+      const secretRes = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${config.openaiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expires_after: { anchor: "created_at", seconds: 120 },
+          session: { type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto", audio: { output: { voice: "marin" } } },
+        }),
+      });
+      if (!secretRes.ok) { lastErr = `client_secret ${model}: ${secretRes.status} ${await secretRes.text()}`; continue; }
+      const ek = ((await secretRes.json()) as any).value as string;
 
-  // 2) SDP exchange on behalf of the browser
-  const callRes = await fetch("https://api.openai.com/v1/realtime/calls", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${ek}`, "Content-Type": "application/sdp" },
-    body: sdpOffer,
-  });
-  if (!callRes.ok) throw new Error(`sdp_exchange_failed: ${callRes.status} ${await callRes.text()}`);
-  const answerSdp = await callRes.text();
-  const location = callRes.headers.get("Location") ?? "";
-  const openaiCallId = location.split("/").pop() ?? "";
-  if (!openaiCallId) throw new Error("no_call_id_in_location");
+      const callRes = await fetch("https://api.openai.com/v1/realtime/calls", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ek}`, "Content-Type": "application/sdp" },
+        body: sdpOffer,
+      });
+      if (!callRes.ok) { lastErr = `sdp ${model}: ${callRes.status} ${await callRes.text()}`; continue; }
+      answerSdp = await callRes.text();
+      openaiCallId = (callRes.headers.get("Location") ?? "").split("/").pop() ?? "";
+      if (!openaiCallId) { lastErr = `no_call_id ${model}`; continue; }
+      usedModel = model;
+      break;
+    } catch (e: any) { lastErr = `${model}: ${e?.message}`; }
+  }
+  if (!usedModel) {
+    await supa().from("calls").update({ status: "error", ended_at: new Date().toISOString() }).eq("id", call.id);
+    throw Object.assign(new Error("realtime_unavailable"), { status: 502, detail: lastErr });
+  }
 
-  await supa().from("calls").update({ openai_call_id: openaiCallId }).eq("id", call.id);
+  await supa().from("calls").update({ openai_call_id: openaiCallId, model: usedModel }).eq("id", call.id);
+  attachSideband(cap, openaiCallId, usedModel);
 
-  // 3) authoritative sideband
-  attachSideband(cap, openaiCallId, model);
-
-  return {
-    sdp: answerSdp,
-    call_id: call.id,
-    max_minutes: maxMinutes,
-    model,
-  };
+  return { sdp: answerSdp, call_id: call.id, max_minutes: maxMinutes, model: usedModel, fell_back: usedModel !== primary };
 }
 
 if (import.meta.main) {

@@ -11,7 +11,8 @@ export const config = {
   supabaseSecretKey: need("SUPABASE_SECRET_KEY"),
   supabasePublishableKey: need("SUPABASE_PUBLISHABLE_KEY"),
   openaiKey: process.env.OPENAI_API_KEY ?? "", // empty => live sessions disabled, tools/tests still run
-  model: process.env.LIGOU_MODEL ?? "gpt-realtime-2.1-mini",
+  model: process.env.LIGOU_MODEL ?? "gpt-realtime-2.1",
+  fallbackModel: process.env.LIGOU_FALLBACK_MODEL ?? "gpt-realtime-2.1-mini",
   sessionMaxMinutes: Number(process.env.SESSION_MAX_MINUTES ?? 15),
   estCostPerSessionUsd: Number(process.env.EST_COST_PER_SESSION ?? 1.0),
   hermesUrl: process.env.HERMES_URL ?? "http://127.0.0.1:8642",

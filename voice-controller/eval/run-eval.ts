@@ -30,8 +30,17 @@ async function runScenario(model: string, sc: Scenario) {
   const cap = makeCapability(tenant.slug, tenant.id, call!.id, 15);
   const instructions = buildInstructions(tenant, rules, "customer");
 
+  // Mint an ephemeral client secret (supported auth for newer realtime models over WS) — same path production uses.
+  const secretRes = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${config.openaiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ session: { type: "realtime", model } }),
+  });
+  if (!secretRes.ok) throw new Error(`client_secret ${model}: ${secretRes.status} ${await secretRes.text()}`);
+  const ek = ((await secretRes.json()) as any).value as string;
+
   const ws = new WebSocket(`wss://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
-    headers: { Authorization: `Bearer ${config.openaiKey}` },
+    headers: { Authorization: `Bearer ${ek}` },
   } as any);
 
   const usage = emptyUsage();
