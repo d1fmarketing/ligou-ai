@@ -71,8 +71,15 @@ O adapter (`voice-controller/src/calendar.ts`) **já aceita os dois caminhos** e
 Ou seja: **ligar a agenda real é só popular credencial**, sem tocar na lógica de booking, receipts ou
 idempotência — que já estão provados por teste.
 
-## Bloqueio atual
+## Estado: FUNCIONANDO (2026-08-19)
 
-Falta apenas RJ dizer **em qual projeto Google** o app "Ligou" deve morar (existe um `ligou-mvp-68036`
-na conta dele, que parece o lugar certo). O `gcloud` já está autenticado nesta máquina, então a Isa
-executa o resto sem nenhum login adicional dele.
+O calendário gerenciado (Caso B) está **no ar e provado em ligação real**: o agente ofereceu
+*"Thursday, August 20 at 8:00 AM"* vindo do freeBusy real, o cliente aceitou, e o worker criou o evento
+no Google (receipt `accepted`, read-back `2026-08-20T08:00:00-07:00`). A service account já existia; o
+que faltava eram dois bugs nossos — variável de ambiente partida pela chave PEM multi-linha, e slots sem
+fuso horário. Ambos corrigidos e cobertos por teste (`test/timezone.test.ts`).
+
+**Pendente (Caso A, OAuth do cliente):** criar o app OAuth "Ligou" — precisa RJ dizer em qual projeto
+Google ele mora (existe um `ligou-mvp-68036`). O `gcloud` já está autenticado nesta máquina, então a Isa
+executa o resto sem login adicional. Só então o botão "Conectar Google Calendar" do painel funciona para
+clientes que já usam a própria agenda.
