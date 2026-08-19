@@ -1,0 +1,20 @@
+import { readFileSync } from "node:fs";
+const sa = JSON.parse(readFileSync("/Users/d1f/.config/ligou/google-sa.json", "utf8"));
+process.env.GOOGLE_SA_CLIENT_EMAIL = sa.client_email;
+process.env.GOOGLE_SA_PRIVATE_KEY = sa.private_key;
+process.env.GOOGLE_CALENDAR_ID = "placeholder";
+const { createSign } = await import("node:crypto");
+const b64 = (b: any) => Buffer.from(b).toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+const now = Math.floor(Date.now()/1000);
+const h = b64(JSON.stringify({alg:"RS256",typ:"JWT"}));
+const c = b64(JSON.stringify({iss:sa.client_email,scope:"https://www.googleapis.com/auth/calendar",aud:"https://oauth2.googleapis.com/token",iat:now,exp:now+3600}));
+const s = createSign("RSA-SHA256"); s.update(`${h}.${c}`);
+const jwt = `${h}.${c}.${b64(s.sign(sa.private_key))}`;
+const tr = await fetch("https://oauth2.googleapis.com/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"urn:ietf:params:oauth:grant-type:jwt-bearer",assertion:jwt})});
+if(!tr.ok){ console.log("token FALHOU:", tr.status, (await tr.text()).slice(0,200)); process.exit(1); }
+const token = (await tr.json() as any).access_token;
+console.log("token do robo: OK");
+const lr = await fetch("https://www.googleapis.com/calendar/v3/users/me/calendarList",{headers:{Authorization:`Bearer ${token}`}});
+const items = ((await lr.json() as any).items ?? []);
+console.log(`calendarios compartilhados com o robo: ${items.length}`);
+for (const i of items) console.log(`  - ${i.summary} | acesso: ${i.accessRole} | id: ${i.id}`);

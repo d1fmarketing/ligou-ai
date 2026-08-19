@@ -106,21 +106,69 @@ export const fakeCalendar: CalendarPort = {
   },
 };
 
-// ---------------------------------------------------------------- google adapter (real; ~80 lines, no third-party MCP)
-interface GoogleCfg { clientId: string; clientSecret: string; refreshToken: string; calendarId: string }
+// ---------------------------------------------------------------- google adapter (real; no third-party MCP)
+// Two auth shapes, both ending in an access token:
+//   (a) service account INVITED to a calendar the tenant owns (RJ's choice 2026-08-19) — signed JWT grant.
+//       The robot is a guest with edit rights; the human stays the owner, and nothing expires.
+//   (b) classic user OAuth refresh token — kept for tenants whose own calendar we connect later.
+// No attendees are ever sent (inviting guests would require domain-wide delegation).
+interface GoogleCfg {
+  calendarId: string;
+  sa?: { clientEmail: string; privateKey: string };
+  oauth?: { clientId: string; clientSecret: string; refreshToken: string };
+}
+
 function googleCfg(): GoogleCfg | null {
-  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, GOOGLE_CALENDAR_ID } = process.env;
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN || !GOOGLE_CALENDAR_ID) return null;
-  return { clientId: GOOGLE_CLIENT_ID, clientSecret: GOOGLE_CLIENT_SECRET, refreshToken: GOOGLE_REFRESH_TOKEN, calendarId: GOOGLE_CALENDAR_ID };
+  const { GOOGLE_CALENDAR_ID, GOOGLE_SA_CLIENT_EMAIL, GOOGLE_SA_PRIVATE_KEY,
+          GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN } = process.env;
+  if (!GOOGLE_CALENDAR_ID) return null;
+  if (GOOGLE_SA_CLIENT_EMAIL && GOOGLE_SA_PRIVATE_KEY) {
+    return {
+      calendarId: GOOGLE_CALENDAR_ID,
+      sa: { clientEmail: GOOGLE_SA_CLIENT_EMAIL, privateKey: GOOGLE_SA_PRIVATE_KEY.replace(/\\n/g, "\n") },
+    };
+  }
+  if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN) {
+    return { calendarId: GOOGLE_CALENDAR_ID, oauth: { clientId: GOOGLE_CLIENT_ID, clientSecret: GOOGLE_CLIENT_SECRET, refreshToken: GOOGLE_REFRESH_TOKEN } };
+  }
+  return null;
+}
+
+const b64url = (b: Buffer | string) =>
+  Buffer.from(b as any).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+/** RS256-signed JWT assertion -> access token (service account flow, no user interaction, no expiry). */
+async function saAccessToken(sa: { clientEmail: string; privateKey: string }): Promise<string> {
+  const { createSign } = await import("node:crypto");
+  const now = Math.floor(Date.now() / 1000);
+  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const claims = b64url(JSON.stringify({
+    iss: sa.clientEmail,
+    scope: "https://www.googleapis.com/auth/calendar",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now, exp: now + 3600,
+  }));
+  const signer = createSign("RSA-SHA256");
+  signer.update(`${header}.${claims}`);
+  const signature = b64url(signer.sign(sa.privateKey));
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${header}.${claims}.${signature}` }),
+  });
+  if (!res.ok) throw new Error(`google_sa_token_failed: ${res.status} ${await res.text()}`);
+  return ((await res.json()) as any).access_token;
 }
 
 async function googleAccessToken(cfg: GoogleCfg): Promise<string> {
+  if (cfg.sa) return saAccessToken(cfg.sa);
+  const o = cfg.oauth!;
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_id: cfg.clientId, client_secret: cfg.clientSecret,
-      refresh_token: cfg.refreshToken, grant_type: "refresh_token",
+      client_id: o.clientId, client_secret: o.clientSecret,
+      refresh_token: o.refreshToken, grant_type: "refresh_token",
     }),
   });
   if (!res.ok) throw new Error(`google_token_failed: ${res.status}`);
