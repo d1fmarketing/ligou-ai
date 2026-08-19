@@ -12,7 +12,15 @@ export interface SessionLedger {
   usage: UsageTotals;
   transcript: Array<{ role: "caller" | "agent" | "system"; text: string; at: string }>;
   toolLog: Array<{ name: string; ok: boolean; durationMs: number }>;
-  status: "active" | "ended" | "killed_deadline" | "error";
+  status: "active" | "ended" | "killed_deadline" | "killed_budget" | "error";
+}
+
+/** Plan v4 §8: reserving quota only gates FUTURE sessions — a live session that runs up the bill must be cut.
+ *  Returns the ceiling in USD for one session (reservation-based, overridable per deploy). */
+export function sessionCostCapUsd(model: string): number {
+  const explicit = Number(process.env.SESSION_COST_CAP_USD ?? 0);
+  if (explicit > 0) return explicit;
+  return model === "gpt-realtime-2.1-mini" ? 0.5 : 1.5;
 }
 
 const live = new Map<string, SessionLedger>();
@@ -60,7 +68,7 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
 
   const finalize = async () => {
     clearTimeout(deadline);
-    if (ledger.status === "active") ledger.status = "ended";
+    if (ledger.status === "active") ledger.status = "ended"; // kills (deadline/budget) keep their reason
     live.delete(cap.callId);
     await persistLedger(cap, ledger).catch((e) => console.error("persist failed", e));
   };
@@ -105,6 +113,20 @@ async function handleEvent(cap: Capability, ledger: SessionLedger, ws: WebSocket
         const outDet = u.output_token_details ?? {};
         ledger.usage.textOut += outDet.text_tokens ?? 0;
         ledger.usage.audioOut += outDet.audio_tokens ?? 0;
+      }
+      // COST KILL-SWITCH: measured after every turn, because a long/rich session grows super-linearly.
+      const spent = sessionCostUsd(ledger.model, ledger.usage);
+      const cap = sessionCostCapUsd(ledger.model);
+      if (spent >= cap && ledger.status === "active") {
+        ledger.status = "killed_budget";
+        ledger.transcript.push({
+          role: "system",
+          text: `session ended: cost cap reached ($${spent.toFixed(2)} >= $${cap.toFixed(2)})`,
+          at: new Date().toISOString(),
+        });
+        console.warn(`budget kill: call ${ledger.callId} spent $${spent.toFixed(2)} (cap $${cap.toFixed(2)})`);
+        try { ws.close(); } catch {}
+        void hangup(ledger.openaiCallId);
       }
       break;
     }
