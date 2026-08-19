@@ -25,6 +25,7 @@ CMD_ID=$(aws ssm send-command --instance-ids "$INSTANCE" --document-name AWS-Run
     ': > /opt/ligou/env && chmod 600 /opt/ligou/env',
     'for P in \$(aws ssm get-parameters-by-path --path /ligou/ --with-decryption --query \"Parameters[].Name\" --output text --region us-east-1); do K=\$(basename \$P); V=\$(aws ssm get-parameter --name \$P --with-decryption --query Parameter.Value --output text --region us-east-1); echo \"\$K=\$V\" >> /opt/ligou/env; done',
     'cd /opt/ligou/app/voice-controller && /usr/local/bin/bun install --production 2>&1 | tail -1',
+    'systemctl enable ligou-controller >/dev/null 2>&1 || true',
     'systemctl restart ligou-controller && sleep 2 && systemctl is-active ligou-controller'
   ]" --query Command.CommandId --output text)
 echo "command: $CMD_ID"
