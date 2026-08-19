@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { IconAlertTriangle, IconCheck, IconRefresh, IconSparkles, IconX } from "@tabler/icons-react";
+import { IconAlertTriangle, IconCheck, IconRefresh, IconX } from "@tabler/icons-react";
 import { AppShell } from "./components/AppShell.jsx";
 import { ApprovalCard } from "./components/ApprovalCard.jsx";
 import { Dialog } from "./components/Dialog.jsx";
@@ -7,14 +7,11 @@ import { dashboardGateway } from "./data/gateway.js";
 import { ApprovalsView } from "./views/ApprovalsView.jsx";
 import { ChatView } from "./views/ChatView.jsx";
 import { MemoryView } from "./views/MemoryView.jsx";
+import { Login } from "./auth/Login.jsx";
+import { VoicePanel } from "./voice/VoicePanel.jsx";
+import { supabase, supabaseConfigured } from "./lib/supabase.js";
 
 const ROUTES = new Set(["ligou", "memoria", "aprovacoes"]);
-const VOICE_PHRASES = [
-  "O que aconteceu com o pedido do John Miller?",
-  "Quais decisões estão esperando por mim?",
-  "Mostre as regras para encaixes no mesmo dia.",
-  "O que você resolveu sozinho hoje?",
-];
 
 function routeFromHash() {
   const route = window.location.hash.replace("#", "");
@@ -43,6 +40,21 @@ function Toast({ toast, onClose }) {
 }
 
 export function App() {
+  const [session, setSession] = useState(undefined); // undefined = checking
+  useEffect(() => {
+    if (!supabaseConfigured) { setSession(null); return undefined; }
+    supabase.auth.getSession().then(({ data }) => setSession(data.session ?? null));
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  if (!supabaseConfigured) return <AppInner />; // prototype mode: no env, no auth, no voice
+  if (session === undefined) return null;
+  if (!session) return <Login />;
+  return <AppInner />;
+}
+
+function AppInner() {
   const [route, setRoute] = useState(routeFromHash);
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -248,18 +260,14 @@ function DashboardDialog({
   if (!dialog) return null;
 
   if (dialog.type === "voice") {
-    return (
-      <Dialog open title="Voz · demonstração" description="Nenhum microfone será acessado. Escolha uma frase para simular uma conversa por voz." onClose={onClose}>
-        <div className="voice-phrases">
-          {VOICE_PHRASES.map((phrase) => (
-            <button type="button" key={phrase} onClick={() => onSendVoice(phrase)}>
-              <IconSparkles aria-hidden="true" />
-              <span>{phrase}</span>
-            </button>
-          ))}
-        </div>
-      </Dialog>
-    );
+    if (!supabaseConfigured) {
+      return (
+        <Dialog open title="Voz" description="Configure VITE_SUPABASE_URL e VITE_SUPABASE_PUBLISHABLE_KEY para ativar as chamadas de voz." onClose={onClose}>
+          <p>Ambiente sem Supabase configurado — a chamada real fica indisponível.</p>
+        </Dialog>
+      );
+    }
+    return <VoicePanel onClose={onClose} />;
   }
 
   if (dialog.type === "approve") {

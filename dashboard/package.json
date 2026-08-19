@@ -12,6 +12,7 @@
     "test:sites": "node --test tests/sites-worker.test.mjs"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
     "@tabler/icons-react": "^3.46.0",
     "@vitejs/plugin-react": "5.0.4",
     "react": "19.2.0",

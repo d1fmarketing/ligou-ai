@@ -2767,3 +2767,34 @@ button:disabled {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* ── F1: login + live voice panel ─────────────────────────────── */
+.login-screen { min-height: 100vh; display: grid; place-items: center; background: var(--paper); padding: 24px; }
+.login-card { background: var(--white); border: 1px solid var(--border); border-radius: 20px; box-shadow: var(--shadow-soft); padding: 40px 36px; width: min(400px, 100%); display: grid; gap: 14px; justify-items: center; text-align: center; }
+.login-card h1 { font-size: var(--type-subhead); color: var(--ink-950); margin: 0; }
+.login-card form { display: grid; gap: 10px; width: 100%; text-align: left; }
+.login-card label { font-size: var(--type-small); color: var(--text-secondary); }
+.login-card input { border: 1px solid var(--border-strong); border-radius: 12px; padding: 12px 14px; font: inherit; }
+.login-card button { background: var(--orange); color: var(--white); border: 0; border-radius: 12px; padding: 12px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+.login-card button:disabled { opacity: 0.6; }
+.login-error { color: var(--orange-dark); font-size: var(--type-small); }
+
+.voice-live { display: grid; gap: 16px; }
+.voice-live-start { display: grid; gap: 12px; justify-items: center; padding: 8px 0; }
+.voice-live-start label { display: grid; gap: 6px; font-size: var(--type-small); color: var(--text-secondary); width: 100%; }
+.voice-live-start select { border: 1px solid var(--border-strong); border-radius: 10px; padding: 10px 12px; font: inherit; }
+.voice-live-button { display: inline-flex; align-items: center; gap: 8px; background: var(--teal); color: var(--white); border: 0; border-radius: 999px; padding: 14px 26px; font: inherit; font-weight: 600; cursor: pointer; }
+.voice-live-note, .voice-live-error { font-size: var(--type-small); color: var(--text-muted); }
+.voice-live-error { color: var(--orange-dark); }
+.voice-live-status { font-size: var(--type-small); color: var(--teal); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+.voice-live-transcript { max-height: 240px; overflow-y: auto; display: grid; gap: 8px; background: var(--paper-warm); border: 1px solid var(--border); border-radius: 14px; padding: 14px; font-size: var(--type-chat); }
+.voice-live-transcript .line-agent strong { color: var(--teal); }
+.voice-live-transcript .line-caller strong { color: var(--ink-700); }
+.voice-live-hangup { display: inline-flex; align-items: center; gap: 8px; background: var(--orange-dark); color: var(--white); border: 0; border-radius: 999px; padding: 10px 20px; font: inherit; font-weight: 600; cursor: pointer; justify-self: center; }
+.voice-live-cases { display: grid; gap: 10px; border-top: 1px solid var(--border); padding-top: 14px; }
+.voice-live-cases h3 { margin: 0; font-size: var(--type-small); color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.06em; }
+.voice-live-case { border: 1px solid var(--border); border-left: 3px solid var(--orange); border-radius: 12px; padding: 10px 14px; display: grid; gap: 6px; background: var(--white); }
+.voice-live-case .case-badge { font-size: var(--type-micro); font-weight: 700; color: var(--orange-dark); letter-spacing: 0.08em; }
+.voice-live-case .case-badge.is-urgent { color: #b00020; }
+.voice-live-case p { margin: 0; font-size: var(--type-chat); }
+.voice-live-case .case-price { color: var(--text-secondary); }

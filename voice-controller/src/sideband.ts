@@ -1,0 +1,147 @@
+// Authoritative sideband: the controller owns tools, transcripts, usage, deadline and finalization.
+// The browser only carries audio; it never executes tools and never holds credentials beyond its own mic.
+import { config, emptyUsage, sessionCostUsd, type UsageTotals } from "./config.ts";
+import { runTool, type Capability } from "./tools.ts";
+import { supa } from "./rules.ts";
+
+export interface SessionLedger {
+  callId: string;
+  openaiCallId: string;
+  model: string;
+  startedAt: number;
+  usage: UsageTotals;
+  transcript: Array<{ role: "caller" | "agent" | "system"; text: string; at: string }>;
+  toolLog: Array<{ name: string; ok: boolean; durationMs: number }>;
+  status: "active" | "ended" | "killed_deadline" | "error";
+}
+
+const live = new Map<string, SessionLedger>();
+export const liveSessions = live;
+
+export function attachSideband(cap: Capability, openaiCallId: string, model: string): SessionLedger {
+  const ledger: SessionLedger = {
+    callId: cap.callId,
+    openaiCallId,
+    model,
+    startedAt: Date.now(),
+    usage: emptyUsage(),
+    transcript: [],
+    toolLog: [],
+    status: "active",
+  };
+  live.set(cap.callId, ledger);
+
+  const ws = new WebSocket(`wss://api.openai.com/v1/realtime?call_id=${encodeURIComponent(openaiCallId)}`, {
+    // Bun extension: custom headers on client WebSocket
+    headers: { Authorization: `Bearer ${config.openaiKey}` },
+  } as any);
+
+  const deadlineMs = cap.expiresAt - Date.now();
+  const deadline = setTimeout(() => {
+    ledger.status = "killed_deadline";
+    ledger.transcript.push({ role: "system", text: "session ended: max duration reached", at: new Date().toISOString() });
+    try { ws.close(); } catch {}
+    void hangup(openaiCallId);
+  }, Math.max(deadlineMs, 5_000));
+
+  ws.addEventListener("open", () => {
+    // enable caller transcription; instructions/tools were embedded at client-secret creation
+    ws.send(JSON.stringify({
+      type: "session.update",
+      session: { type: "realtime", audio: { input: { transcription: { model: "gpt-live-transcribe" } } } },
+    }));
+  });
+
+  ws.addEventListener("message", (ev) => {
+    let msg: any;
+    try { msg = JSON.parse(String(ev.data)); } catch { return; }
+    void handleEvent(cap, ledger, ws, msg);
+  });
+
+  const finalize = async () => {
+    clearTimeout(deadline);
+    if (ledger.status === "active") ledger.status = "ended";
+    live.delete(cap.callId);
+    await persistLedger(cap, ledger).catch((e) => console.error("persist failed", e));
+  };
+  ws.addEventListener("close", () => { void finalize(); });
+  ws.addEventListener("error", () => { /* close will follow */ });
+
+  return ledger;
+}
+
+async function handleEvent(cap: Capability, ledger: SessionLedger, ws: WebSocket, msg: any) {
+  switch (msg.type) {
+    case "conversation.item.input_audio_transcription.completed":
+      if (msg.transcript) ledger.transcript.push({ role: "caller", text: msg.transcript, at: new Date().toISOString() });
+      break;
+    case "response.output_audio_transcript.done":
+      if (msg.transcript) ledger.transcript.push({ role: "agent", text: msg.transcript, at: new Date().toISOString() });
+      break;
+    case "response.output_item.done": {
+      const item = msg.item;
+      if (item?.type === "function_call") {
+        let args: Record<string, unknown> = {};
+        try { args = JSON.parse(item.arguments ?? "{}"); } catch {}
+        const result = await runTool(cap, item.name, args);
+        ledger.toolLog.push({ name: item.name, ok: result.ok, durationMs: result.durationMs });
+        ws.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: { type: "function_call_output", call_id: item.call_id, output: JSON.stringify(result.body) },
+        }));
+        ws.send(JSON.stringify({ type: "response.create" }));
+      }
+      break;
+    }
+    case "response.done": {
+      const u = msg.response?.usage;
+      if (u) {
+        const inDet = u.input_token_details ?? {};
+        const cached = inDet.cached_tokens_details ?? {};
+        ledger.usage.textIn += inDet.text_tokens ?? 0;
+        ledger.usage.audioIn += inDet.audio_tokens ?? 0;
+        ledger.usage.textInCached += cached.text_tokens ?? 0;
+        ledger.usage.audioInCached += cached.audio_tokens ?? 0;
+        const outDet = u.output_token_details ?? {};
+        ledger.usage.textOut += outDet.text_tokens ?? 0;
+        ledger.usage.audioOut += outDet.audio_tokens ?? 0;
+      }
+      break;
+    }
+    case "error":
+      ledger.transcript.push({ role: "system", text: `openai error: ${msg.error?.message ?? "?"}`, at: new Date().toISOString() });
+      break;
+  }
+}
+
+async function hangup(openaiCallId: string) {
+  try {
+    await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(openaiCallId)}/hangup`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${config.openaiKey}` },
+    });
+  } catch {}
+}
+
+async function persistLedger(cap: Capability, ledger: SessionLedger) {
+  const durationS = Math.round((Date.now() - ledger.startedAt) / 1000);
+  const cost = sessionCostUsd(ledger.model, ledger.usage);
+  const s = supa();
+  await s.from("calls").update({
+    status: ledger.status,
+    ended_at: new Date().toISOString(),
+    duration_seconds: durationS,
+    transcript: ledger.transcript,
+    usage_tokens: ledger.usage as any,
+    cost_estimate_usd: Number(cost.toFixed(4)),
+    summary_status: "pending_ingest",
+  }).eq("id", cap.callId);
+  await s.from("usage_ledger").insert({
+    tenant_id: cap.tenantId,
+    call_id: cap.callId,
+    kind: "usage",
+    minutes: Number((durationS / 60).toFixed(2)),
+    cost_usd: Number(cost.toFixed(4)),
+    detail: { tools: ledger.toolLog, model: ledger.model },
+  });
+}

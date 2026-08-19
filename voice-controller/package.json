@@ -1,0 +1,13 @@
+{
+  "name": "ligou-voice-controller",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/server.ts",
+    "test": "bun test",
+    "eval": "bun run eval/run-eval.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.55.0"
+  }
+}
