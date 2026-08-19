@@ -23,7 +23,7 @@ export function Login() {
   return (
     <div className="login-screen">
       <div className="login-card">
-        <img src="/assets/ligou-avatar-head.png" alt="" width="56" height="56" />
+        <img src={`${import.meta.env.BASE_URL}assets/ligou-avatar-head.png`} alt="" width="56" height="56" />
         <h1>Ligou · Painel</h1>
         {sent ? (
           <p>Link enviado para <strong>{email}</strong>. Abra o e-mail neste dispositivo para entrar.</p>

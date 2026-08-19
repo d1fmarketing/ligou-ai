@@ -1,6 +1,9 @@
 // Browser side of a voice session: microphone + WebRTC only.
 // All authority (tools, budget, deadline, transcript of record) lives in the voice-controller.
 const CONTROLLER_URL = import.meta.env.VITE_CONTROLLER_URL || "http://127.0.0.1:8790";
+// Remote mode (production): a public Supabase Edge Function bootstraps the session and the EC2 controller
+// (zero inbound ports) services it via Realtime. Set VITE_SESSION_URL to the function URL to enable.
+const SESSION_URL = import.meta.env.VITE_SESSION_URL || `${CONTROLLER_URL}/session`;
 
 export async function startVoiceSession({ accessToken, sessionType = "owner_browser", model, onEvent, onEnd }) {
   const media = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -24,7 +27,7 @@ export async function startVoiceSession({ accessToken, sessionType = "owner_brow
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  const res = await fetch(`${CONTROLLER_URL}/session`, {
+  const res = await fetch(SESSION_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
     body: JSON.stringify({ sdp: offer.sdp, session_type: sessionType, model }),

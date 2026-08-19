@@ -104,6 +104,8 @@ if (import.meta.main) {
   startWorkerLoop();
   const { startPhoneListener } = await import("./phone.ts");
   startPhoneListener();
+  const { startBrowserRequestListener } = await import("./browser-requests.ts");
+  startBrowserRequestListener(startSession);
   Bun.serve({
     port: config.port,
     idleTimeout: 60,
