@@ -184,14 +184,35 @@ export const googleCalendar: CalendarPort = {
     try {
       const token = await googleAccessToken(cfg);
       const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cfg.calendarId)}/events`;
+
+      // IDEMPOTENCY IS A QUERY, NOT A COMMENT: the key lives in extendedProperties and is looked up BEFORE
+      // any insert — a retry (tool re-fire, timeout, barge-in double-submit) must find the existing event,
+      // never create a twin. (First E2E proof caught exactly this: the key was only written into the
+      // description, so a same-key retry duplicated the booking.)
+      const lookup = await fetch(
+        `${base}?privateExtendedProperty=${encodeURIComponent(`ligouKey=${input.idempotencyKey}`)}&maxResults=1&showDeleted=false`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      if (lookup.ok) {
+        const existing = ((await lookup.json()) as any).items?.[0];
+        if (existing?.id && existing.status !== "cancelled") {
+          return {
+            outcome: "accepted", externalId: existing.id,
+            readback: { id: existing.id, start: existing.start, status: existing.status, reused: true },
+            payloadHash: hash, latencyMs: Date.now() - started,
+          };
+        }
+      }
+
       const res = await fetch(base, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           summary: input.summary,
-          description: `${input.description}\n[ligou:${input.idempotencyKey}]`,
+          description: input.description,
           start: { dateTime: input.startIso },
           end: { dateTime: input.endIso },
+          extendedProperties: { private: { ligouKey: input.idempotencyKey } },
           // no attendees in MVP (invites require DWD)
         }),
       });
