@@ -115,6 +115,23 @@ if (import.meta.main) {
         return Response.json({ ok: true, live_sessions: liveSessions.size, model: config.model, openai: Boolean(config.openaiKey) }, { headers: CORS });
       }
 
+      // Server-side tenant claim: trusted code (secret key) binds the unclaimed seed tenant to the
+      // authenticated owner. RLS stays strict owner-only; this is provisioning, not an RLS relaxation.
+      if (url.pathname === "/claim" && req.method === "POST") {
+        try {
+          const owner = await verifyOwner(req.headers.get("authorization"));
+          if (!owner) return Response.json({ error: "unauthorized" }, { status: 401, headers: CORS });
+          const { data: t } = await supa().from("tenants").select("id,owner_user_id").eq("slug", config.defaultTenantSlug).single();
+          if (t && !t.owner_user_id) {
+            await supa().from("tenants").update({ owner_user_id: owner.userId }).eq("id", t.id).is("owner_user_id", null);
+          }
+          const claimed = t?.owner_user_id === owner.userId || !t?.owner_user_id;
+          return Response.json({ tenant: config.defaultTenantSlug, owner: claimed }, { headers: CORS });
+        } catch (e: any) {
+          return Response.json({ error: e?.message ?? "internal" }, { status: e?.status ?? 500, headers: CORS });
+        }
+      }
+
       if (url.pathname === "/session" && req.method === "POST") {
         try {
           const owner = await verifyOwner(req.headers.get("authorization"));

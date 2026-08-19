@@ -45,8 +45,13 @@ export function App() {
   const [session, setSession] = useState(undefined); // undefined = checking
   useEffect(() => {
     if (!supabaseConfigured) { setSession(null); return undefined; }
-    supabase.auth.getSession().then(({ data }) => setSession(data.session ?? null));
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    const claim = (s) => {
+      if (!s?.access_token) return;
+      const url = import.meta.env.VITE_CONTROLLER_URL || "http://127.0.0.1:8790";
+      fetch(`${url}/claim`, { method: "POST", headers: { Authorization: `Bearer ${s.access_token}` } }).catch(() => {});
+    };
+    supabase.auth.getSession().then(({ data }) => { setSession(data.session ?? null); claim(data.session); });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => { setSession(s); claim(s); });
     return () => sub.subscription.unsubscribe();
   }, []);
 
