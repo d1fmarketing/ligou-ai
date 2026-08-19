@@ -33,8 +33,9 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
     throw Object.assign(new Error("not_tenant_owner"), { status: 403 });
   }
 
-  const model = modelOverride === "gpt-realtime-2.1" ? "gpt-realtime-2.1" : config.model;
-  const estCost = model === "gpt-realtime-2.1" ? 1.0 : 0.35;
+  const ALLOWED_MODELS = new Set(["gpt-realtime", "gpt-realtime-2.1", "gpt-realtime-2.1-mini"]);
+  const model = modelOverride && ALLOWED_MODELS.has(modelOverride) ? modelOverride : config.model;
+  const estCost = model === "gpt-realtime-2.1-mini" ? 0.35 : 1.0;
 
   // call row first (budget RPC references it)
   const { data: call, error: ce } = await supa()

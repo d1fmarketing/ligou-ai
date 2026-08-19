@@ -10,7 +10,7 @@ export function VoicePanel({ onClose }) {
   const [error, setError] = useState(null);
   const [lines, setLines] = useState([]);
   const [liveCases, setLiveCases] = useState([]);
-  const [model, setModel] = useState("gpt-realtime-2.1-mini");
+  const [model, setModel] = useState("gpt-realtime");
   const [sessionType, setSessionType] = useState("owner_browser");
   const sessionRef = useRef(null);
 
@@ -69,8 +69,9 @@ export function VoicePanel({ onClose }) {
             <label>
               Modelo
               <select value={model} onChange={(e) => setModel(e.target.value)}>
-                <option value="gpt-realtime-2.1-mini">gpt-realtime-2.1-mini (padrão)</option>
-                <option value="gpt-realtime-2.1">gpt-realtime-2.1 (comparação)</option>
+                <option value="gpt-realtime">gpt-realtime (disponível no projeto)</option>
+                <option value="gpt-realtime-2.1-mini">gpt-realtime-2.1-mini (requer liberar no projeto OpenAI)</option>
+                <option value="gpt-realtime-2.1">gpt-realtime-2.1 (requer liberar no projeto OpenAI)</option>
               </select>
             </label>
             <button type="button" className="voice-live-button" onClick={begin}>

@@ -21,6 +21,7 @@ export const config = {
 
 // $ per 1M tokens — official pricing 2026-08 (developers.openai.com/api/docs/pricing)
 export const PRICING: Record<string, { audioIn: number; audioInCached: number; audioOut: number; textIn: number; textInCached: number; textOut: number }> = {
+  "gpt-realtime": { audioIn: 32, audioInCached: 0.4, audioOut: 64, textIn: 4, textInCached: 0.4, textOut: 16 },
   "gpt-realtime-2.1": { audioIn: 32, audioInCached: 0.4, audioOut: 64, textIn: 4, textInCached: 0.4, textOut: 24 },
   "gpt-realtime-2.1-mini": { audioIn: 10, audioInCached: 0.3, audioOut: 20, textIn: 0.6, textInCached: 0.06, textOut: 2.4 },
 };
