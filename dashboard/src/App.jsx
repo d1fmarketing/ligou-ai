@@ -9,6 +9,7 @@ import { ApprovalsView } from "./views/ApprovalsView.jsx";
 import { ChatView } from "./views/ChatView.jsx";
 import { MemoryView } from "./views/MemoryView.jsx";
 import { PowersView } from "./views/PowersView.jsx";
+import { CalendarConnection } from "./views/CalendarConnection.jsx";
 import { Login } from "./auth/Login.jsx";
 import { VoicePanel } from "./voice/VoicePanel.jsx";
 import { supabase, supabaseConfigured } from "./lib/supabase.js";
@@ -221,7 +222,10 @@ function AppInner() {
           />
         ) : null}
         {route === "poderes" && supabaseConfigured ? (
-          <PowersView onToast={setToast} />
+          <>
+            <CalendarConnection onToast={setToast} />
+            <PowersView onToast={setToast} />
+          </>
         ) : null}
         {route === "aprovacoes" ? (
           <ApprovalsView

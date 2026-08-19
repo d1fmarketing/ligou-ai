@@ -163,6 +163,37 @@ function googleCfg(): GoogleCfg | null {
   return null;
 }
 
+/** The tenant's OWN calendar, if they connected one ("Connect Google Calendar" in the dashboard).
+ *  A connected system owns its domain: when this exists it wins over the Ligou-managed calendar.
+ *  Cached briefly so a live call never pays a database round-trip per tool. */
+const connCache = new Map<string, { cfg: GoogleCfg | null; at: number }>();
+const CONN_TTL_MS = 60_000;
+
+async function tenantCfg(tenantId: string): Promise<GoogleCfg | null> {
+  const hit = connCache.get(tenantId);
+  if (hit && Date.now() - hit.at < CONN_TTL_MS) return hit.cfg;
+
+  let cfg: GoogleCfg | null = null;
+  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID, clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+  if (clientId && clientSecret) {
+    const { data } = await supa()
+      .from("connector_accounts")
+      .select("refresh_token,calendar_id")
+      .eq("tenant_id", tenantId).eq("provider", "google_calendar").eq("status", "active")
+      .maybeSingle();
+    if (data?.refresh_token) {
+      cfg = { calendarId: data.calendar_id || "primary", oauth: { clientId, clientSecret, refreshToken: data.refresh_token } };
+    }
+  }
+  connCache.set(tenantId, { cfg, at: Date.now() });
+  return cfg;
+}
+
+/** Tenant's own calendar first, Ligou-managed calendar second. */
+async function cfgFor(tenantId: string): Promise<GoogleCfg | null> {
+  return (await tenantCfg(tenantId).catch(() => null)) ?? googleCfg();
+}
+
 const b64url = (b: Buffer | string) =>
   Buffer.from(b as any).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
@@ -207,7 +238,7 @@ async function googleAccessToken(cfg: GoogleCfg): Promise<string> {
 export const googleCalendar: CalendarPort = {
   async book(input) {
     const started = Date.now();
-    const cfg = googleCfg();
+    const cfg = await cfgFor(input.tenantId);
     if (!cfg) return { outcome: "failed", error: "google_not_configured", latencyMs: 0 };
     const hash = payloadHash(input);
     try {
@@ -265,8 +296,8 @@ export const googleCalendar: CalendarPort = {
 
   // Every `unknown` path logs WHY. Silence here cost a full debugging round on 2026-08-19: the agent kept
   // saying "I can't confirm the schedule" while the same call succeeded from a probe, and nothing said why.
-  async busy(_tenantId, fromIso, toIso) {
-    const cfg = googleCfg();
+  async busy(tenantId, fromIso, toIso) {
+    const cfg = await cfgFor(tenantId);
     if (!cfg) { console.warn("calendar.busy unknown: not_configured"); return { intervals: [], unknown: true }; }
     try {
       const token = await googleAccessToken(cfg);

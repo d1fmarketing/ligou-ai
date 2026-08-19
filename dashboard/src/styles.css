@@ -2813,3 +2813,12 @@ button:disabled {
 .power-desc { margin: 0; font-size: var(--type-body); }
 .power-cond { margin: 0; font-size: var(--type-small); color: var(--text-muted); }
 .powers-revoked { display: grid; gap: 10px; }
+
+/* calendar connection (Caso A) */
+.calendar-connection{padding:1rem 0 1.5rem;border-bottom:1px solid var(--line,#e7e5e4)}
+.calendar-connection h2{font-size:1rem;margin:0 0 .5rem}
+.calendar-note{color:#57534e;font-size:.875rem;line-height:1.5;margin:.25rem 0}
+.calendar-connected{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;color:#166534;font-size:.9rem}
+.calendar-connected .calendar-note{flex-basis:100%;color:#57534e}
+.calendar-connect{display:inline-flex;align-items:center;gap:.45rem;margin-top:.6rem;padding:.55rem .9rem;border:0;border-radius:.6rem;background:#e2703a;color:#fff;font-weight:600;cursor:pointer}
+.calendar-connect:disabled{opacity:.6;cursor:default}

@@ -79,7 +79,23 @@ no Google (receipt `accepted`, read-back `2026-08-20T08:00:00-07:00`). A service
 que faltava eram dois bugs nossos — variável de ambiente partida pela chave PEM multi-linha, e slots sem
 fuso horário. Ambos corrigidos e cobertos por teste (`test/timezone.test.ts`).
 
-**Pendente (Caso A, OAuth do cliente):** criar o app OAuth "Ligou" — precisa RJ dizer em qual projeto
-Google ele mora (existe um `ligou-mvp-68036`). O `gcloud` já está autenticado nesta máquina, então a Isa
-executa o resto sem login adicional. Só então o botão "Conectar Google Calendar" do painel funciona para
-clientes que já usam a própria agenda.
+### Caso A (agenda do próprio cliente): código 100% pronto, faltam 2 strings
+
+Tudo está no ar e testado: botão **"Conectar Google Calendar"** no painel, Edge Functions `google-connect`
+(gera o consentimento) e `google-callback` (troca o código por refresh token e guarda por tenant), tabela
+`connector_accounts` com RLS que **não expõe o token nem ao dono**, e o adapter passou a **preferir a agenda
+do cliente** quando existe, caindo na gerenciada quando não. Sem o app OAuth, o botão degrada honesto
+(`oauth_app_not_configured`) e nada quebra.
+
+**O único passo que o Google não deixa automatizar:** criar o OAuth Client "Web application". Não existe API
+pública para isso — só o Console ([confirmado na doc](https://developers.google.com/identity/protocols/oauth2));
+as vias programáticas (`gcloud iap oauth-clients`, `gcloud iam oauth-clients`) servem a IAP e workforce
+federation, não a apps de consumidor.
+
+RJ faz uma vez, no projeto **`ligou-mvp-68036`** (o mesmo onde já vive a service account que funciona):
+
+1. Console → APIs & Services → **OAuth consent screen**: External, nome do app **Ligou**, e-mail de suporte,
+   escopo `.../auth/calendar.events`, e **publicar em Production** (senão o acesso do cliente morre a cada 7 dias).
+2. **Credentials → Create credentials → OAuth client ID → Web application**, com o redirect autorizado:
+   `https://ixpbqquvxirvuevjhmrq.supabase.co/functions/v1/google-callback`
+3. Mandar o **Client ID** e o **Client secret** para a Isa — ela grava nos secrets e o botão liga na hora.
