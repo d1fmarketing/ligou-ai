@@ -60,25 +60,19 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   const maxMinutes = sessionType === "onboarding" ? 30 : (tenant.session_max_minutes ?? config.sessionMaxMinutes);
   const cap = makeCapability(tenant.slug, tenant.id, call.id, maxMinutes, sessionType);
 
-  // Try each model in the chain: mint an ephemeral client secret, then exchange SDP. Fall back on any failure.
+  // Unified interface (official server flow): ONE multipart POST with the STANDARD key. No ephemeral ek_ —
+  // we proxy the SDP ourselves, and calls created under an ek_ are invisible to the standard-key sideband
+  // (404 call_id_not_found), which killed tools mid-call on 2026-08-19. Fall back through the model chain.
   let answerSdp = "", openaiCallId = "", usedModel = "", lastErr = "";
   for (const model of chain) {
     try {
-      const secretRes = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${config.openaiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          expires_after: { anchor: "created_at", seconds: 120 },
-          session: { type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto", audio: { output: { voice: "marin" } } },
-        }),
-      });
-      if (!secretRes.ok) { lastErr = `client_secret ${model}: ${secretRes.status} ${await secretRes.text()}`; continue; }
-      const ek = ((await secretRes.json()) as any).value as string;
-
+      const form = new FormData();
+      form.set("sdp", sdpOffer);
+      form.set("session", JSON.stringify({ type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto", audio: { output: { voice: "marin" } } }));
       const callRes = await fetch("https://api.openai.com/v1/realtime/calls", {
         method: "POST",
-        headers: { Authorization: `Bearer ${ek}`, "Content-Type": "application/sdp" },
-        body: sdpOffer,
+        headers: { Authorization: `Bearer ${config.openaiKey}` },
+        body: form,
       });
       if (!callRes.ok) { lastErr = `sdp ${model}: ${callRes.status} ${await callRes.text()}`; continue; }
       answerSdp = await callRes.text();

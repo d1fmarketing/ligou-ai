@@ -39,42 +39,77 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
   };
   live.set(cap.callId, ledger);
 
-  const ws = new WebSocket(`wss://api.openai.com/v1/realtime?call_id=${encodeURIComponent(openaiCallId)}`, {
-    // Bun extension: custom headers on client WebSocket
-    headers: { Authorization: `Bearer ${config.openaiKey}` },
-  } as any);
+  // Root-cause discipline (2026-08-19 incident): a WS close is NOT the end of the call — the WebRTC leg
+  // lives independently. We finalize only on terminal states (deadline/budget kill, or retries exhausted);
+  // any other close triggers a reattach, because the call may still be in progress with live tools.
+  const MAX_ATTACHES = 6;
+  let attaches = 0;
+  let everOpened = false;
+  let terminal = false;
+  let ws: WebSocket | null = null;
 
-  const deadlineMs = cap.expiresAt - Date.now();
-  const deadline = setTimeout(() => {
-    ledger.status = "killed_deadline";
-    ledger.transcript.push({ role: "system", text: "session ended: max duration reached", at: new Date().toISOString() });
-    try { ws.close(); } catch {}
-    void hangup(openaiCallId);
-  }, Math.max(deadlineMs, 5_000));
-
-  ws.addEventListener("open", () => {
-    // enable caller transcription; instructions/tools were embedded at client-secret creation
-    ws.send(JSON.stringify({
-      type: "session.update",
-      session: { type: "realtime", audio: { input: { transcription: { model: "gpt-live-transcribe" } } } },
-    }));
-  });
-
-  ws.addEventListener("message", (ev) => {
-    let msg: any;
-    try { msg = JSON.parse(String(ev.data)); } catch { return; }
-    void handleEvent(cap, ledger, ws, msg);
-  });
-
-  const finalize = async () => {
-    clearTimeout(deadline);
-    if (ledger.status === "active") ledger.status = "ended"; // kills (deadline/budget) keep their reason
+  const finalize = async (reason: string) => {
+    if (!live.has(cap.callId)) return; // already finalized
+    console.log(`sideband finalize call=${cap.callId.slice(0, 8)} reason=${reason} status=${ledger.status} tools=${ledger.toolLog.length}`);
+    if (ledger.status === "active") ledger.status = reason === "retries_exhausted" ? "error" : "ended";
     live.delete(cap.callId);
     await persistLedger(cap, ledger).catch((e) => console.error("persist failed", e));
   };
-  ws.addEventListener("close", () => { void finalize(); });
-  ws.addEventListener("error", () => { /* close will follow */ });
 
+  const deadlineMs = cap.expiresAt - Date.now();
+  const deadline = setTimeout(() => {
+    terminal = true;
+    ledger.status = "killed_deadline";
+    ledger.transcript.push({ role: "system", text: "session ended: max duration reached", at: new Date().toISOString() });
+    try { ws?.close(); } catch {}
+    void hangup(openaiCallId);
+    void finalize("deadline");
+  }, Math.max(deadlineMs, 5_000));
+
+  const connect = () => {
+    attaches += 1;
+    const attempt = attaches;
+    let openedThisAttempt = false;
+    const sock = new WebSocket(`wss://api.openai.com/v1/realtime?call_id=${encodeURIComponent(openaiCallId)}`, {
+      // Bun extension: custom headers on client WebSocket
+      headers: { Authorization: `Bearer ${config.openaiKey}` },
+    } as any);
+    ws = sock;
+
+    sock.addEventListener("open", () => {
+      openedThisAttempt = true;
+      everOpened = true;
+      console.log(`sideband OPEN call=${cap.callId.slice(0, 8)} rtc=${openaiCallId} attempt=${attempt}`);
+      sock.send(JSON.stringify({
+        type: "session.update",
+        session: { type: "realtime", audio: { input: { transcription: { model: "gpt-live-transcribe" } } } },
+      }));
+    });
+
+    sock.addEventListener("message", (ev) => {
+      let msg: any;
+      try { msg = JSON.parse(String(ev.data)); } catch { return; }
+      void handleEvent(cap, ledger, sock, msg);
+    });
+
+    sock.addEventListener("close", (ev: any) => {
+      console.log(`sideband CLOSE call=${cap.callId.slice(0, 8)} code=${ev?.code} attempt=${attempt} opened=${openedThisAttempt} terminal=${terminal}`);
+      if (terminal || ledger.status !== "active") { clearTimeout(deadline); void finalize("terminal_close"); return; }
+      if (attaches >= MAX_ATTACHES) {
+        clearTimeout(deadline);
+        ledger.transcript.push({ role: "system", text: `sideband lost after ${attaches} attaches (last close ${ev?.code})`, at: new Date().toISOString() });
+        void hangup(openaiCallId); // no tools without sideband -> better to end the call than let it flail
+        void finalize(everOpened ? "reattach_exhausted" : "retries_exhausted");
+        return;
+      }
+      // call not visible yet (peer still connecting) or transient drop -> retry with backoff
+      const delay = openedThisAttempt ? 500 : Math.min(1_000 * 2 ** (attempt - 1), 8_000);
+      setTimeout(() => { if (!terminal && live.has(cap.callId)) connect(); }, delay);
+    });
+    sock.addEventListener("error", () => { /* close follows */ });
+  };
+
+  connect();
   return ledger;
 }
 
