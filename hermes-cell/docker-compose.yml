@@ -25,7 +25,8 @@ services:
     volumes:
       - hermes-state:/opt/data                                  # cell-owned state (memory, skills, sessions)
       - ./projected-rules:/opt/projected-rules:ro               # derived rulebook, written by the worker, read-only here
-      - ./config/cli-config.yaml:/opt/data/cli-config.yaml:ro   # pinned config (model + gates ON)
+      - ./config/config.yaml:/opt/data/config.yaml:ro          # THE config hermes reads (model+provider+gates)
+      - ./config/cli-config.yaml:/opt/data/cli-config.yaml:ro   # CLI-side pin (kept in sync)
     ports:
       - "127.0.0.1:8642:8642"                                   # loopback only — never exposed publicly
     networks: [cell]

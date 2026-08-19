@@ -1,0 +1,12 @@
+# Ligou cell — brain on the ChatGPT SUBSCRIPTION via Codex OAuth (RJ 2026-08-19). No API key here.
+model:
+  base_url:
+  default: gpt-5.6-sol
+  provider: openai-codex
+providers: {}
+fallback_providers: []
+memory:
+  write_approval: true
+skills:
+  write_approval: true
+  guard_agent_created: true
