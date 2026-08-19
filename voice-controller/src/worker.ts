@@ -133,6 +133,7 @@ export function startWorkerLoop() {
   const loop = async () => {
     try { await tickIntents(); } catch (e) { console.error("intents", e); }
     try { await tickSummaries(); } catch (e) { console.error("summaries", e); }
+    try { const { tickLearning } = await import("./learning.ts"); await tickLearning(); } catch (e) { console.error("learning", e); }
   };
   setInterval(loop, 1_000);
   setInterval(() => tickUsageAlerts().catch((e) => console.error("usage", e)), 60_000);

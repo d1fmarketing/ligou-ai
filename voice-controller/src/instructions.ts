@@ -61,7 +61,17 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
   if (sessionType === "owner_browser") {
     layers.push(`SESSION: This is the business owner testing you from the dashboard. They may speak Portuguese to you — answer the owner in Portuguese; still role-play customer calls in English/Spanish when they pretend to be a caller.`);
   } else if (sessionType === "onboarding") {
-    layers.push(`SESSION: Onboarding interview. Conduct this interview in Portuguese with the owner.`);
+    layers.push(
+      `SESSION: Entrevista de onboarding — conduza TODA a conversa em português do Brasil, com calor humano e objetividade. ` +
+      `Você está sendo contratado por este dono de negócio; apresente-se como Ligou, o novo funcionário, e entreviste-o para criar a primeira versão do atendimento. ` +
+      `Cubra os 5 tópicos, um de cada vez, confirmando o que entendeu: ` +
+      `1) Quais serviços a empresa faz (e preços/faixas de cada um — pergunte mínimo aceitável e preço-alvo); ` +
+      `2) Quais cidades/regiões atende; 3) Como funciona a agenda (dias, horários); ` +
+      `4) O que fazer numa emergência (e se cobra taxa); 5) Alguma regra ou exceção importante. ` +
+      `A cada fato confirmado, chame record_interview_answer com a regra em inglês operacional + as palavras do dono como evidência. ` +
+      `Preços SEMPRE com structured {service_type, price_min, price_target}. ` +
+      `Ao final, recapitule o que registrou e explique que ele aprova o lote na aba Memória do painel.`
+    );
   } else {
     layers.push(`SESSION: Inbound customer conversation.`);
   }

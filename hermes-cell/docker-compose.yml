@@ -1,0 +1,35 @@
+# Ligou cell — one CONTAINED Hermes per tenant. The cell has NO business credentials (no Google, Supabase,
+# Twilio, AWS). It receives redacted evidence and returns advice/proposals; the controller holds all authority.
+# Pin discipline: replace the tag below with the immutable digest after the first pull
+#   docker inspect --format='{{index .RepoDigests 0}}' nousresearch/hermes-agent:v2026.8.18
+services:
+  hermes:
+    image: nousresearch/hermes-agent:v2026.8.18
+    container_name: ligou-cell-${TENANT_SLUG:-rocha-plumbing}
+    restart: unless-stopped
+    read_only: false                      # hermes writes its own state under /opt/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: "1.5"
+    environment:
+      API_SERVER_ENABLED: "true"
+      API_SERVER_KEY: ${HERMES_API_KEY:?set in .env}
+      # the cell's own model credential (budget-capped project key) — its ONLY external credential
+      OPENAI_API_KEY: ${CELL_OPENAI_API_KEY:?set in .env}
+    volumes:
+      - hermes-state:/opt/data                                  # cell-owned state (memory, skills, sessions)
+      - ./projected-rules:/opt/projected-rules:ro               # derived rulebook, written by the worker, read-only here
+      - ./config/config.yaml:/opt/data/config.yaml:ro           # pinned config (gates ON, dangerous tools OFF)
+    ports:
+      - "127.0.0.1:8642:8642"                                   # loopback only — never exposed publicly
+    networks: [cell]
+
+networks:
+  cell:
+    driver: bridge
+
+volumes:
+  hermes-state:

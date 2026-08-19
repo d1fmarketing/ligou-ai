@@ -14,7 +14,10 @@ export interface Capability {
   allowedTools: string[];
 }
 
-export function makeCapability(tenantSlug: string, tenantId: string, callId: string, maxMinutes: number): Capability {
+export function makeCapability(tenantSlug: string, tenantId: string, callId: string, maxMinutes: number, sessionType: "customer" | "owner_browser" | "onboarding" = "customer"): Capability {
+  const allowedTools = sessionType === "onboarding"
+    ? ["get_business_info", "record_interview_answer"]
+    : ["get_business_info", "quote_price", "check_availability", "create_async_case", "consult_hermes", "propose_booking", "close_deal"];
   return {
     actor: "CALLER",
     tenantSlug,
@@ -22,7 +25,7 @@ export function makeCapability(tenantSlug: string, tenantId: string, callId: str
     callId,
     jti: randomUUID(),
     expiresAt: Date.now() + maxMinutes * 60_000,
-    allowedTools: ["get_business_info", "quote_price", "check_availability", "create_async_case", "consult_hermes", "propose_booking", "close_deal"],
+    allowedTools,
   };
 }
 
@@ -110,6 +113,21 @@ export const toolSchemas = [
   },
   {
     type: "function",
+    name: "record_interview_answer",
+    description: "ONBOARDING ONLY: records one answer from the owner interview as a suggested rule (topic + the rule in clear text + structured data when it is a price). Call once per fact learned; the owner approves the batch later in the dashboard.",
+    parameters: {
+      type: "object",
+      properties: {
+        topic: { type: "string", enum: ["servicos", "area", "precos", "agenda", "emergencia", "outro"] },
+        rule_text: { type: "string", description: "the rule in clear operational language (English)" },
+        structured: { type: "object", description: "for prices: {service_type, price_min, price_target, duration_min}" },
+        owner_words: { type: "string", description: "the owner's exact words (Portuguese), as evidence" },
+      },
+      required: ["topic", "rule_text"],
+    },
+  },
+  {
+    type: "function",
     name: "consult_ligou_brain",
     description: "Consult the business brain for strategy on complex situations (unusual jobs, tricky negotiation). Say a short bridge phrase like 'let me check that for you' before using it.",
     parameters: {
@@ -129,6 +147,14 @@ const CAP_NAME: Record<string, string> = {
   consult_ligou_brain: "consult_hermes",
   propose_booking: "propose_booking",
   close_deal: "close_deal",
+  record_interview_answer: "record_interview_answer",
+};
+
+const TOPIC_CATEGORY: Record<string, string> = {
+  servicos: "preco", precos: "preco", area: "area", agenda: "agenda", emergencia: "emergencia", outro: "geral",
+};
+const TOPIC_ESCOPO: Record<string, string> = {
+  servicos: "servico", precos: "servico", area: "localizacao", agenda: "geral", emergencia: "geral", outro: "geral",
 };
 
 export interface ToolResult { ok: boolean; body: Record<string, unknown>; durationMs: number }
@@ -229,6 +255,24 @@ export async function runTool(cap: Capability, name: string, args: Record<string
       case "close_deal": {
         const { closeDeal } = await import("./booking.ts");
         return done(await closeDeal(cap, args) as Record<string, unknown>);
+      }
+      case "record_interview_answer": {
+        const topic = String(args.topic ?? "outro");
+        const ruleText = String(args.rule_text ?? "").slice(0, 600);
+        if (!ruleText) return done({ error: "rule_text_required" }, false);
+        const { data, error } = await supa().from("rules").insert({
+          tenant_id: cap.tenantId,
+          origem: "onboarding",
+          escopo: TOPIC_ESCOPO[topic] ?? "geral",
+          status: "sugerido",
+          category: TOPIC_CATEGORY[topic] ?? "geral",
+          text: ruleText,
+          structured: (args.structured as Record<string, unknown>) ?? null,
+          evidence_quote: args.owner_words ? String(args.owner_words).slice(0, 1000) : null,
+          related_call_id: cap.callId,
+        }).select("id").single();
+        if (error) return done({ status: "unknown", error: error.message }, false);
+        return done({ status: "recorded", rule_id: data.id, note: "Suggested rule saved; the owner approves the batch in the dashboard." });
       }
       case "consult_ligou_brain": {
         const advice = await consultHermes(cap.tenantSlug, String(args.question ?? ""), String(args.context ?? "").slice(0, 1500));

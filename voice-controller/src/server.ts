@@ -54,7 +54,8 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   if (!config.openaiKey) throw Object.assign(new Error("openai_key_missing"), { status: 503 });
 
   const instructions = buildInstructions(tenant, rules, sessionType);
-  const cap = makeCapability(tenant.slug, tenant.id, call.id, tenant.session_max_minutes ?? config.sessionMaxMinutes);
+  const maxMinutes = sessionType === "onboarding" ? 30 : (tenant.session_max_minutes ?? config.sessionMaxMinutes);
+  const cap = makeCapability(tenant.slug, tenant.id, call.id, maxMinutes, sessionType);
 
   // 1) ephemeral client secret embedding the whole session config
   const secretRes = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
@@ -95,7 +96,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   return {
     sdp: answerSdp,
     call_id: call.id,
-    max_minutes: tenant.session_max_minutes ?? config.sessionMaxMinutes,
+    max_minutes: maxMinutes,
     model,
   };
 }
@@ -103,6 +104,8 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
 if (import.meta.main) {
   const { startWorkerLoop } = await import("./worker.ts");
   startWorkerLoop();
+  const { startPhoneListener } = await import("./phone.ts");
+  startPhoneListener();
   Bun.serve({
     port: config.port,
     idleTimeout: 60,

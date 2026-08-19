@@ -11,6 +11,7 @@ export function VoicePanel({ onClose }) {
   const [lines, setLines] = useState([]);
   const [liveCases, setLiveCases] = useState([]);
   const [model, setModel] = useState("gpt-realtime-2.1-mini");
+  const [sessionType, setSessionType] = useState("owner_browser");
   const sessionRef = useRef(null);
 
   useEffect(() => {
@@ -37,6 +38,7 @@ export function VoicePanel({ onClose }) {
       sessionRef.current = await startVoiceSession({
         accessToken: token,
         model,
+        sessionType,
         onEvent: (ev) => setLines((prev) => [...prev.slice(-30), ev]),
         onEnd: (reason) => setStatus(reason === "deadline" ? "ended" : "ended"),
       });
@@ -57,6 +59,13 @@ export function VoicePanel({ onClose }) {
       <div className="voice-live">
         {status === "idle" || status === "error" || status === "ended" ? (
           <div className="voice-live-start">
+            <label>
+              Tipo de conversa
+              <select value={sessionType} onChange={(e) => setSessionType(e.target.value)}>
+                <option value="owner_browser">Testar como cliente (EN/ES)</option>
+                <option value="onboarding">Entrevista de onboarding (PT)</option>
+              </select>
+            </label>
             <label>
               Modelo
               <select value={model} onChange={(e) => setModel(e.target.value)}>
