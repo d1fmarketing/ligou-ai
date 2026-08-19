@@ -27,8 +27,22 @@ export function payloadHash(input: CalendarEventInput): string {
     .digest("hex");
 }
 
+export interface BusyInterval { start: string; end: string }
+
 export interface CalendarPort {
   book(input: CalendarEventInput): Promise<CalendarWriteResult>;
+  /** Busy intervals overlapping [fromIso, toIso). Never throws: on failure returns `unknown: true` so the
+   *  caller degrades honestly (offer fewer/no slots) instead of selling an hour that is already booked. */
+  busy(tenantId: string, fromIso: string, toIso: string): Promise<{ intervals: BusyInterval[]; unknown?: boolean }>;
+}
+
+/** Slot is free when it overlaps no busy interval. Half-open [start, end): touching edges do not collide. */
+export function overlapsBusy(startIso: string, endIso: string, busy: BusyInterval[]): boolean {
+  const s = Date.parse(startIso), e = Date.parse(endIso);
+  return busy.some((b) => {
+    const bs = Date.parse(b.start), be = Date.parse(b.end);
+    return Number.isFinite(bs) && Number.isFinite(be) && s < be && bs < e;
+  });
 }
 
 // ---------------------------------------------------------------- fake adapter (deterministic, persisted)
@@ -72,6 +86,22 @@ export const fakeCalendar: CalendarPort = {
       return { outcome: "accepted", externalId: id, readback, payloadHash: hash, latencyMs: Date.now() - started };
     } catch (e) {
       return { outcome: "unknown", error: String(e), latencyMs: Date.now() - started };
+    }
+  },
+
+  async busy(tenantId, fromIso, toIso) {
+    try {
+      // overlap test: event starts before the window ends AND ends after it starts
+      const { data, error } = await supa()
+        .from("fake_calendar_events")
+        .select("start_iso,end_iso")
+        .eq("tenant_id", tenantId)
+        .lt("start_iso", toIso)
+        .gt("end_iso", fromIso);
+      if (error) return { intervals: [], unknown: true };
+      return { intervals: (data ?? []).map((r: any) => ({ start: r.start_iso, end: r.end_iso })) };
+    } catch {
+      return { intervals: [], unknown: true };
     }
   },
 };
@@ -132,6 +162,26 @@ export const googleCalendar: CalendarPort = {
         : { outcome: "failed", externalId: event.id, readback, error: "readback_invalid", latencyMs: Date.now() - started };
     } catch (e) {
       return { outcome: "unknown", error: String(e), latencyMs: Date.now() - started };
+    }
+  },
+
+  async busy(_tenantId, fromIso, toIso) {
+    const cfg = googleCfg();
+    if (!cfg) return { intervals: [], unknown: true };
+    try {
+      const token = await googleAccessToken(cfg);
+      const res = await fetch("https://www.googleapis.com/calendar/v3/freeBusy", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ timeMin: fromIso, timeMax: toIso, items: [{ id: cfg.calendarId }] }),
+      });
+      if (!res.ok) return { intervals: [], unknown: true };
+      const body = (await res.json()) as any;
+      const cal = body?.calendars?.[cfg.calendarId];
+      if (!cal || cal.errors?.length) return { intervals: [], unknown: true };
+      return { intervals: (cal.busy ?? []).map((b: any) => ({ start: b.start, end: b.end })) };
+    } catch {
+      return { intervals: [], unknown: true };
     }
   },
 };

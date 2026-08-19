@@ -3,6 +3,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { loadTenant, priceRules, supa } from "./rules.ts";
 import { consultHermes } from "./hermes.ts";
+import { calendarPort, overlapsBusy } from "./calendar.ts";
 
 export interface Capability {
   actor: "CALLER";
@@ -206,19 +207,39 @@ export async function runTool(cap: Capability, name: string, args: Record<string
         const svc = String(args.service_type ?? "").toLowerCase().trim();
         const match = priceRules(rules).find((s) => s.service_type === svc);
         if (!match) return done({ status: "needs_owner", reason: "service_not_in_approved_list" });
-        // F1: deterministic mock slots inside business hours (calendar real chega na F2)
-        const slots: Array<{ start: string; end: string; price_usd: number | null }> = [];
+        // Candidate slots inside business hours, then filtered against the calendar: never offer an hour
+        // that is already sold. If the calendar can't be read, say so instead of guessing (rulebook: no
+        // invented availability).
         const tz = tenant.timezone;
         const now = new Date();
-        for (let d = 1; slots.length < 3 && d <= 7; d++) {
+        const durH = Math.ceil((match.duration_min ?? 60) / 60);
+        const candidates: Array<{ start: string; end: string; price_usd: number | null }> = [];
+        for (let d = 1; d <= 7 && candidates.length < 12; d++) {
           const day = new Date(now.getTime() + d * 86_400_000);
-          const dow = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(day) !== "Sun");
-          if (!dow) continue;
-          for (const hour of [10, 14]) {
-            if (slots.length >= 3) break;
-            const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(day);
-            slots.push({ start: `${ymd}T${String(hour).padStart(2, "0")}:00:00`, end: `${ymd}T${String(hour + Math.ceil((match.duration_min ?? 60) / 60)).padStart(2, "0")}:00:00`, price_usd: match.price_target ?? null });
+          if (new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(day) === "Sun") continue;
+          const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(day);
+          for (const hour of [8, 10, 13, 15]) {
+            if (hour + durH > 18) continue; // must finish inside business hours
+            candidates.push({
+              start: `${ymd}T${String(hour).padStart(2, "0")}:00:00`,
+              end: `${ymd}T${String(hour + durH).padStart(2, "0")}:00:00`,
+              price_usd: match.price_target ?? null,
+            });
           }
+        }
+        const windowFrom = candidates[0]?.start ?? new Date().toISOString();
+        const windowTo = candidates[candidates.length - 1]?.end ?? new Date(Date.now() + 7 * 86_400_000).toISOString();
+        const { intervals, unknown } = await calendarPort().busy(cap.tenantId, windowFrom, windowTo);
+        if (unknown) {
+          return done({
+            status: "unavailable",
+            reason: "calendar_unreadable",
+            say: "Tell the caller you can't confirm the schedule right now, take their preferred time and contact, and let them know the team will confirm.",
+          });
+        }
+        const slots = candidates.filter((c) => !overlapsBusy(c.start, c.end, intervals)).slice(0, 3);
+        if (!slots.length) {
+          return done({ status: "no_slots", timezone: tz, say: "Tell the caller nothing is open in the next few days and offer to have the team call with options." });
         }
         return done({ status: "ok", timezone: tz, slots, note: "Offer at most two options at a time." });
       }

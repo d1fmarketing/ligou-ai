@@ -2,6 +2,7 @@
 import { describe, expect, test, beforeEach, afterAll } from "bun:test";
 import { _setClient } from "../src/rules.ts";
 import { makeCapability, runTool } from "../src/tools.ts";
+import { overlapsBusy } from "../src/calendar.ts";
 import { buildInstructions } from "../src/instructions.ts";
 
 const TENANT = {
@@ -19,6 +20,8 @@ const RULES = [
 ];
 
 let inserted: any[] = [];
+let busyEvents: Array<{ start_iso: string; end_iso: string }> = [];
+let calendarFails = false;
 
 function mockSupabase() {
   const single = async () => ({ data: { id: "case-1", status: "pendente" }, error: null });
@@ -31,6 +34,15 @@ function mockSupabase() {
               return {
                 eq(_c2: string, _v2: string) { return Promise.resolve({ data: RULES, error: null }); },
                 single: async () => ({ data: TENANT, error: null }),
+                // fakeCalendar.busy(): .eq(tenant_id).lt(start_iso).gt(end_iso)
+                lt(_c2: string, _v2: string) {
+                  return {
+                    gt: async (_c3: string, _v3: string) =>
+                      calendarFails
+                        ? { data: null, error: { message: "calendar unreadable" } }
+                        : { data: busyEvents, error: null },
+                  };
+                },
               };
             },
           };
@@ -49,6 +61,8 @@ function mockSupabase() {
 
 beforeEach(() => {
   inserted = [];
+  busyEvents = [];
+  calendarFails = false;
   _setClient(mockSupabase());
 });
 
@@ -89,6 +103,39 @@ describe("check_availability", () => {
   test("unknown service does not fabricate slots", async () => {
     const r = await runTool(cap(), "check_availability", { service_type: "pool_install" });
     expect(r.body.status).toBe("needs_owner");
+  });
+
+  test("never offers an hour that is already booked", async () => {
+    const free = await runTool(cap(), "check_availability", { service_type: "drain_cleaning" });
+    const taken = (free.body.slots as any[])[0];
+    // the calendar now reports that exact hour as busy
+    busyEvents = [{ start_iso: taken.start, end_iso: taken.end }];
+    const after = await runTool(cap(), "check_availability", { service_type: "drain_cleaning" });
+    expect(after.body.status).toBe("ok");
+    const offered = (after.body.slots as any[]).map((s) => s.start);
+    expect(offered).not.toContain(taken.start);
+  });
+
+  test("degrades honestly when the calendar cannot be read (no invented availability)", async () => {
+    calendarFails = true;
+    const r = await runTool(cap(), "check_availability", { service_type: "drain_cleaning" });
+    expect(r.body.status).toBe("unavailable");
+    expect(r.body.reason).toBe("calendar_unreadable");
+    expect(String(r.body.say)).toMatch(/team will confirm/i);
+  });
+});
+
+describe("overlapsBusy", () => {
+  const busy = [{ start: "2026-08-20T10:00:00Z", end: "2026-08-20T11:00:00Z" }];
+  test("detects a real overlap", () => {
+    expect(overlapsBusy("2026-08-20T10:30:00Z", "2026-08-20T11:30:00Z", busy)).toBe(true);
+  });
+  test("touching edges do not collide (half-open interval)", () => {
+    expect(overlapsBusy("2026-08-20T11:00:00Z", "2026-08-20T12:00:00Z", busy)).toBe(false);
+    expect(overlapsBusy("2026-08-20T09:00:00Z", "2026-08-20T10:00:00Z", busy)).toBe(false);
+  });
+  test("ignores malformed intervals instead of throwing", () => {
+    expect(overlapsBusy("2026-08-20T10:30:00Z", "2026-08-20T11:30:00Z", [{ start: "nope", end: "nope" }])).toBe(false);
   });
 });
 
