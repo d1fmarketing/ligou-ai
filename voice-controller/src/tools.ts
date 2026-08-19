@@ -22,7 +22,7 @@ export function makeCapability(tenantSlug: string, tenantId: string, callId: str
     callId,
     jti: randomUUID(),
     expiresAt: Date.now() + maxMinutes * 60_000,
-    allowedTools: ["get_business_info", "quote_price", "check_availability", "create_async_case", "consult_hermes"],
+    allowedTools: ["get_business_info", "quote_price", "check_availability", "create_async_case", "consult_hermes", "propose_booking", "close_deal"],
   };
 }
 
@@ -80,6 +80,36 @@ export const toolSchemas = [
   },
   {
     type: "function",
+    name: "propose_booking",
+    description: "Registers a booking proposal after the caller picked a slot and you agreed on a price within your band. Within policy it returns 'proposed' (then confirm details out loud and call close_deal). Out of policy it opens a team case — tell the caller the team will confirm; never keep them waiting.",
+    parameters: {
+      type: "object",
+      properties: {
+        service_type: { type: "string" },
+        slot_start: { type: "string", description: "ISO datetime chosen from check_availability" },
+        slot_end: { type: "string" },
+        price: { type: "number", description: "price agreed with the caller" },
+        client_name: { type: "string" },
+        contact: { type: "string", description: "phone or email for confirmation" },
+      },
+      required: ["service_type", "slot_start", "price"],
+    },
+  },
+  {
+    type: "function",
+    name: "close_deal",
+    description: "Finalizes a proposed booking. ONLY if the result says status 'confirmed' may you tell the caller it is booked (repeat date, time, price). 'processing' means: say they'll receive a confirmation text shortly — never claim it is booked.",
+    parameters: {
+      type: "object",
+      properties: {
+        booking_id: { type: "string" },
+        confirmed_price: { type: "number" },
+      },
+      required: ["booking_id", "confirmed_price"],
+    },
+  },
+  {
+    type: "function",
     name: "consult_ligou_brain",
     description: "Consult the business brain for strategy on complex situations (unusual jobs, tricky negotiation). Say a short bridge phrase like 'let me check that for you' before using it.",
     parameters: {
@@ -97,6 +127,8 @@ const CAP_NAME: Record<string, string> = {
   check_availability: "check_availability",
   create_async_case: "create_async_case",
   consult_ligou_brain: "consult_hermes",
+  propose_booking: "propose_booking",
+  close_deal: "close_deal",
 };
 
 export interface ToolResult { ok: boolean; body: Record<string, unknown>; durationMs: number }
@@ -189,6 +221,14 @@ export async function runTool(cap: Capability, name: string, args: Record<string
           .single();
         if (error) return done({ status: "unknown", say: "Tell the caller the team will get back to them shortly.", error: error.message }, false);
         return done({ status: "pendente", case_id: data.id, say: "Tell the caller: the team will confirm shortly, you'll receive a text or call back." });
+      }
+      case "propose_booking": {
+        const { proposeBooking } = await import("./booking.ts");
+        return done(await proposeBooking(cap, args) as Record<string, unknown>);
+      }
+      case "close_deal": {
+        const { closeDeal } = await import("./booking.ts");
+        return done(await closeDeal(cap, args) as Record<string, unknown>);
       }
       case "consult_ligou_brain": {
         const advice = await consultHermes(cap.tenantSlug, String(args.question ?? ""), String(args.context ?? "").slice(0, 1500));

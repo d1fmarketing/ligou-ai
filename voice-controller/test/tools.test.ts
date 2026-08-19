@@ -1,5 +1,5 @@
 // Tool contract tests — run against a mocked Supabase client; no audio, no network, $0.
-import { describe, expect, test, beforeEach } from "bun:test";
+import { describe, expect, test, beforeEach, afterAll } from "bun:test";
 import { _setClient } from "../src/rules.ts";
 import { makeCapability, runTool } from "../src/tools.ts";
 import { buildInstructions } from "../src/instructions.ts";
@@ -50,6 +50,10 @@ function mockSupabase() {
 beforeEach(() => {
   inserted = [];
   _setClient(mockSupabase());
+});
+
+afterAll(() => {
+  _setClient(null); // never leak the mock into other suites (bun shares the module registry)
 });
 
 const cap = () => makeCapability("rocha-plumbing", "t-1", "call-1", 15);

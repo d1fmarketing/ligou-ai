@@ -1,0 +1,141 @@
+// CalendarPort — the only hands that touch a calendar. Every write is followed by a READ-BACK: an external id alone
+// is never proof (receipts require readback + payload hash). Two adapters: fake (Supabase-backed, default until
+// Google Workspace creds exist) and google (googleapis REST, enabled via GOOGLE_* env).
+import { createHash } from "node:crypto";
+import { supa } from "./rules.ts";
+
+export interface CalendarEventInput {
+  tenantId: string;
+  summary: string;
+  description: string;
+  startIso: string;
+  endIso: string;
+  idempotencyKey: string;
+}
+export interface CalendarWriteResult {
+  outcome: "accepted" | "failed" | "unknown";
+  externalId?: string;
+  readback?: Record<string, unknown>;
+  payloadHash?: string;
+  error?: string;
+  latencyMs: number;
+}
+
+export function payloadHash(input: CalendarEventInput): string {
+  return createHash("sha256")
+    .update(`${input.tenantId}|${input.summary}|${input.startIso}|${input.endIso}|${input.idempotencyKey}`)
+    .digest("hex");
+}
+
+export interface CalendarPort {
+  book(input: CalendarEventInput): Promise<CalendarWriteResult>;
+}
+
+// ---------------------------------------------------------------- fake adapter (deterministic, persisted)
+export const fakeCalendar: CalendarPort = {
+  async book(input) {
+    const started = Date.now();
+    const hash = payloadHash(input);
+    try {
+      // idempotent insert keyed by the server-issued key
+      const { data: existing } = await supa()
+        .from("fake_calendar_events")
+        .select("id,summary,start_iso,end_iso")
+        .eq("idempotency_key", input.idempotencyKey)
+        .maybeSingle();
+      let id = existing?.id as string | undefined;
+      if (!id) {
+        const { data, error } = await supa()
+          .from("fake_calendar_events")
+          .insert({
+            tenant_id: input.tenantId,
+            summary: input.summary,
+            description: input.description,
+            start_iso: input.startIso,
+            end_iso: input.endIso,
+            idempotency_key: input.idempotencyKey,
+          })
+          .select("id")
+          .single();
+        if (error) return { outcome: "unknown", error: error.message, latencyMs: Date.now() - started };
+        id = data.id;
+      }
+      // READ-BACK: fetch what the "provider" actually stored
+      const { data: readback, error: re } = await supa()
+        .from("fake_calendar_events")
+        .select("id,summary,start_iso,end_iso,created_at")
+        .eq("id", id!)
+        .single();
+      if (re || !readback) return { outcome: "unknown", externalId: id, error: re?.message, latencyMs: Date.now() - started };
+      const matches = readback.start_iso === input.startIso && readback.summary === input.summary;
+      if (!matches) return { outcome: "failed", externalId: id, readback, error: "readback_mismatch", latencyMs: Date.now() - started };
+      return { outcome: "accepted", externalId: id, readback, payloadHash: hash, latencyMs: Date.now() - started };
+    } catch (e) {
+      return { outcome: "unknown", error: String(e), latencyMs: Date.now() - started };
+    }
+  },
+};
+
+// ---------------------------------------------------------------- google adapter (real; ~80 lines, no third-party MCP)
+interface GoogleCfg { clientId: string; clientSecret: string; refreshToken: string; calendarId: string }
+function googleCfg(): GoogleCfg | null {
+  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, GOOGLE_CALENDAR_ID } = process.env;
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN || !GOOGLE_CALENDAR_ID) return null;
+  return { clientId: GOOGLE_CLIENT_ID, clientSecret: GOOGLE_CLIENT_SECRET, refreshToken: GOOGLE_REFRESH_TOKEN, calendarId: GOOGLE_CALENDAR_ID };
+}
+
+async function googleAccessToken(cfg: GoogleCfg): Promise<string> {
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: cfg.clientId, client_secret: cfg.clientSecret,
+      refresh_token: cfg.refreshToken, grant_type: "refresh_token",
+    }),
+  });
+  if (!res.ok) throw new Error(`google_token_failed: ${res.status}`);
+  return ((await res.json()) as any).access_token;
+}
+
+export const googleCalendar: CalendarPort = {
+  async book(input) {
+    const started = Date.now();
+    const cfg = googleCfg();
+    if (!cfg) return { outcome: "failed", error: "google_not_configured", latencyMs: 0 };
+    const hash = payloadHash(input);
+    try {
+      const token = await googleAccessToken(cfg);
+      const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cfg.calendarId)}/events`;
+      const res = await fetch(base, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          summary: input.summary,
+          description: `${input.description}\n[ligou:${input.idempotencyKey}]`,
+          start: { dateTime: input.startIso },
+          end: { dateTime: input.endIso },
+          // no attendees in MVP (invites require DWD)
+        }),
+      });
+      if (!res.ok) {
+        const outcome = res.status >= 500 ? "unknown" : "failed";
+        return { outcome, error: `google_insert_${res.status}`, latencyMs: Date.now() - started };
+      }
+      const event = (await res.json()) as any;
+      // READ-BACK
+      const rb = await fetch(`${base}/${encodeURIComponent(event.id)}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!rb.ok) return { outcome: "unknown", externalId: event.id, error: `readback_${rb.status}`, latencyMs: Date.now() - started };
+      const readback = (await rb.json()) as any;
+      const ok = readback?.status !== "cancelled" && readback?.start?.dateTime;
+      return ok
+        ? { outcome: "accepted", externalId: event.id, readback: { id: readback.id, start: readback.start, status: readback.status }, payloadHash: hash, latencyMs: Date.now() - started }
+        : { outcome: "failed", externalId: event.id, readback, error: "readback_invalid", latencyMs: Date.now() - started };
+    } catch (e) {
+      return { outcome: "unknown", error: String(e), latencyMs: Date.now() - started };
+    }
+  },
+};
+
+export function calendarPort(): CalendarPort {
+  return googleCfg() ? googleCalendar : fakeCalendar;
+}

@@ -101,6 +101,8 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
 }
 
 if (import.meta.main) {
+  const { startWorkerLoop } = await import("./worker.ts");
+  startWorkerLoop();
   Bun.serve({
     port: config.port,
     idleTimeout: 60,
