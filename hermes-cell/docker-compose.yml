@@ -6,23 +6,26 @@ services:
   hermes:
     image: nousresearch/hermes-agent:v2026.8.18
     container_name: ligou-cell-${TENANT_SLUG:-rocha-plumbing}
+    command: gateway run                  # persistent service, never the interactive CLI
     restart: unless-stopped
     read_only: false                      # hermes writes its own state under /opt/data
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]   # mínimo p/ s6-overlay preparar /opt/data
     pids_limit: 256
     mem_limit: 2g
     cpus: "1.5"
     environment:
       API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0            # container-internal; host publish is loopback-only below
       API_SERVER_KEY: ${HERMES_API_KEY:?set in .env}
       # the cell's own model credential (budget-capped project key) — its ONLY external credential
       OPENAI_API_KEY: ${CELL_OPENAI_API_KEY:?set in .env}
     volumes:
       - hermes-state:/opt/data                                  # cell-owned state (memory, skills, sessions)
       - ./projected-rules:/opt/projected-rules:ro               # derived rulebook, written by the worker, read-only here
-      - ./config/config.yaml:/opt/data/config.yaml:ro           # pinned config (gates ON, dangerous tools OFF)
+      - ./config/cli-config.yaml:/opt/data/cli-config.yaml:ro   # pinned config (model + gates ON)
     ports:
       - "127.0.0.1:8642:8642"                                   # loopback only — never exposed publicly
     networks: [cell]
