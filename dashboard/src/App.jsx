@@ -8,11 +8,12 @@ import { supabaseGateway } from "./data/gateway.supabase.js";
 import { ApprovalsView } from "./views/ApprovalsView.jsx";
 import { ChatView } from "./views/ChatView.jsx";
 import { MemoryView } from "./views/MemoryView.jsx";
+import { PowersView } from "./views/PowersView.jsx";
 import { Login } from "./auth/Login.jsx";
 import { VoicePanel } from "./voice/VoicePanel.jsx";
 import { supabase, supabaseConfigured } from "./lib/supabase.js";
 
-const ROUTES = new Set(["ligou", "memoria", "aprovacoes"]);
+const ROUTES = new Set(["ligou", "memoria", "aprovacoes", "poderes"]);
 
 function routeFromHash() {
   const route = window.location.hash.replace("#", "");
@@ -213,6 +214,9 @@ function AppInner() {
             onEdit={openMemoryEdit}
             onRevoke={openMemoryRevoke}
           />
+        ) : null}
+        {route === "poderes" && supabaseConfigured ? (
+          <PowersView onToast={setToast} />
         ) : null}
         {route === "aprovacoes" ? (
           <ApprovalsView

@@ -2798,3 +2798,18 @@ button:disabled {
 .voice-live-case .case-badge.is-urgent { color: #b00020; }
 .voice-live-case p { margin: 0; font-size: var(--type-chat); }
 .voice-live-case .case-price { color: var(--text-secondary); }
+
+/* powers view */
+.powers-view { display: grid; gap: 18px; padding: 8px 0; }
+.powers-list { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.power-card { border: 1px solid var(--border); border-radius: 14px; padding: 16px; background: var(--white); display: grid; gap: 8px; }
+.power-card.power-azul { border-left: 3px solid var(--teal); }
+.power-card.power-verde { border-left: 3px solid #3f9d3f; }
+.power-card.is-revoked { opacity: 0.7; }
+.power-head { display: flex; align-items: center; gap: 10px; }
+.power-tag { font-size: var(--type-micro); font-weight: 800; letter-spacing: 0.1em; padding: 2px 8px; border-radius: 999px; }
+.power-tag.power-azul { background: var(--teal-soft); color: var(--teal); }
+.power-tag.power-verde { background: #e8f5e8; color: #2e7d32; }
+.power-desc { margin: 0; font-size: var(--type-body); }
+.power-cond { margin: 0; font-size: var(--type-small); color: var(--text-muted); }
+.powers-revoked { display: grid; gap: 10px; }

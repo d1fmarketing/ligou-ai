@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   IconBrain,
+  IconShieldBolt,
   IconChevronDown,
   IconCircleCheck,
   IconRefresh,
@@ -12,6 +13,7 @@ const destinations = [
   { id: "ligou", label: "Ligou", icon: IconRobot },
   { id: "memoria", label: "Memória", icon: IconBrain },
   { id: "aprovacoes", label: "Aprovações", icon: IconCircleCheck },
+  { id: "poderes", label: "Poderes", icon: IconShieldBolt },
 ];
 
 function Brand() {
