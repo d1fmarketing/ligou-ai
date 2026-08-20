@@ -13,6 +13,8 @@ let rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
 let ownerUserId: string | null = "owner-1";
 let callInserts = 0;
 let fetchUrls: string[] = [];
+let callUpdates: any[] = [];
+let budgetUpdates: any[] = [];
 const originalFetch = globalThis.fetch;
 const originalWebSocket = globalThis.WebSocket;
 const originalEstimate = config.estCostPerSessionUsd;
@@ -22,7 +24,11 @@ function client() {
     from(table: string) {
       const api: any = {
         select() { return api; }, eq() { return api; }, lt() { return api; }, limit() { return api; },
-        update() { return api; },
+        update(row: any) {
+          if (table === "calls") callUpdates.push(row);
+          if (table === "budget_reservations") budgetUpdates.push(row);
+          return api;
+        },
         insert() { if (table === "calls") callInserts += 1; return api; },
         single: async () => table === "tenants"
           ? { data: { ...TENANT, owner_user_id: ownerUserId }, error: null }
@@ -51,6 +57,8 @@ beforeEach(() => {
   ownerUserId = "owner-1";
   callInserts = 0;
   fetchUrls = [];
+  callUpdates = [];
+  budgetUpdates = [];
   config.estCostPerSessionUsd = originalEstimate;
   globalThis.fetch = originalFetch;
   globalThis.WebSocket = originalWebSocket;
@@ -68,6 +76,12 @@ afterAll(() => _setClient(null));
 const row = { id: "event-1", openai_call_id: "rtc-1" };
 
 describe("phone startup budget lifecycle", () => {
+  const expectUsageUnresolved = () => {
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
+    expect(callUpdates.some((row) => row.provider_usage_state === "unknown")).toBe(true);
+    expect(budgetUpdates.some((row) => String(row.reconcile_last_error).includes("provider_usage_unresolved"))).toBe(true);
+  };
+
   test("an unprovisioned tenant is rejected before call creation or reservation", async () => {
     ownerUserId = null;
     globalThis.fetch = async () => new Response(null, { status: 200 });
@@ -81,7 +95,7 @@ describe("phone startup budget lifecycle", () => {
     expect(rpcCalls).toEqual([]);
   });
 
-  test("uses the configured estimate and settles only after reject is confirmed", async () => {
+  test("ambiguous accept failure confirms reject but keeps usage unresolved", async () => {
     config.estCostPerSessionUsd = 2.25;
     globalThis.fetch = async (input) => {
       fetchUrls.push(String(input));
@@ -94,11 +108,10 @@ describe("phone startup budget lifecycle", () => {
 
     expect(rpcCalls.find((call) => call.name === "reserve_call_budget")?.args.p_est_cost).toBe(2.25);
     expect(fetchUrls.some((url) => url.endsWith("/reject"))).toBe(true);
-    const settlement = rpcCalls.find((call) => call.name === "settle_call_budget");
-    expect(settlement?.args).toMatchObject({ p_call: "call-1", p_outcome: "startup_error", p_actual_cost: 0 });
+    expectUsageUnresolved();
   });
 
-  test("accepted-call attach failure hangs up before zero settlement", async () => {
+  test("accepted-call attach failure hangs up but keeps usage unresolved", async () => {
     globalThis.fetch = async (input) => {
       fetchUrls.push(String(input));
       return new Response(null, { status: 200 });
@@ -110,9 +123,7 @@ describe("phone startup budget lifecycle", () => {
     await expect(handleIncoming(row)).rejects.toThrow("websocket unavailable");
 
     expect(fetchUrls.some((url) => url.endsWith("/hangup"))).toBe(true);
-    const settlements = rpcCalls.filter((call) => call.name === "settle_call_budget");
-    expect(settlements).toHaveLength(1);
-    expect(settlements[0]?.args.p_outcome).toBe("startup_error");
+    expectUsageUnresolved();
   });
 
   test("termination transport failure leaves the reservation active", async () => {
@@ -131,7 +142,7 @@ describe("phone startup budget lifecycle", () => {
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
   });
 
-  test("accept transport unknown confirms reject before settlement", async () => {
+  test("accept transport unknown confirms reject but keeps usage unresolved", async () => {
     globalThis.fetch = async (input) => {
       fetchUrls.push(String(input));
       if (fetchUrls.length === 1) throw new Error("accept transport unknown");
@@ -141,6 +152,6 @@ describe("phone startup budget lifecycle", () => {
     await expect(handleIncoming(row)).rejects.toThrow("accept transport unknown");
 
     expect(fetchUrls.some((url) => url.endsWith("/reject"))).toBe(true);
-    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(1);
+    expectUsageUnresolved();
   });
 });

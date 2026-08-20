@@ -209,6 +209,7 @@ export async function persistLedger(cap: Capability, ledger: SessionLedger, fetc
     provider_termination_state: providerNeedsTermination ? "active" : "confirmed",
     provider_termination_mode: "hangup",
     provider_termination_reason: providerNeedsTermination ? `sideband_${ledger.status}` : "caller_hung_up",
+    provider_usage_state: "resolved",
   }).eq("id", cap.callId);
   if (terminalWrite.error) return false;
   const outcome: BudgetOutcome = ledger.status === "ended"
@@ -229,5 +230,6 @@ export async function persistLedger(cap: Capability, ledger: SessionLedger, fetc
       ? { openaiCallId: ledger.openaiCallId, mode: "hangup", reason: `sideband_${ledger.status}` }
       : undefined,
     fetchImpl,
+    usageResolved: true,
   });
 }

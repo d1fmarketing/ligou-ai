@@ -112,9 +112,11 @@ describe("session budget lifecycle", () => {
 
   const assertUnknownProviderRemainsDiscoverable = () => {
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
-    expect(callUpdates.some((row) => row.status === "error" && row.provider_termination_state === "unknown")).toBe(true);
+    expect(callUpdates.some((row) => row.status === "error" && row.provider_usage_state === "unknown")).toBe(true);
     expect(budgetUpdates.some((row) => row.reconcile_lease_until === null && row.reconcile_last_error)).toBe(true);
   };
+
+  const providerCreationRequests = () => fetchUrls.filter((url) => url.endsWith("/v1/realtime/calls"));
 
   test("first transport exception stops fallback and leaves the reservation active", async () => {
     config.openaiKey = "synthetic-openai-key";
@@ -128,7 +130,7 @@ describe("session budget lifecycle", () => {
       status: 502,
     });
 
-    expect(fetchUrls).toHaveLength(1);
+    expect(providerCreationRequests()).toHaveLength(1);
     assertUnknownProviderRemainsDiscoverable();
   });
 
@@ -146,7 +148,7 @@ describe("session budget lifecycle", () => {
       status: 502,
     });
 
-    expect(fetchUrls).toHaveLength(1);
+    expect(providerCreationRequests()).toHaveLength(1);
     assertUnknownProviderRemainsDiscoverable();
   });
 
@@ -164,7 +166,71 @@ describe("session budget lifecycle", () => {
       status: 502,
     });
 
-    expect(fetchUrls).toHaveLength(1);
+    expect(providerCreationRequests()).toHaveLength(1);
+    assertUnknownProviderRemainsDiscoverable();
+  });
+
+  test("5xx with Location confirms hangup but keeps usage unresolved", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      return fetchUrls.length === 1
+        ? new Response("provider internal error", { status: 503, headers: { Location: "/v1/realtime/calls/rtc-ambiguous" } })
+        : new Response(null, { status: 200 });
+    };
+
+    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+      message: "provider_outcome_unknown",
+      status: 502,
+    });
+
+    expect(providerCreationRequests()).toHaveLength(1);
+    expect(fetchUrls.some((url) => url.endsWith("/rtc-ambiguous/hangup"))).toBe(true);
+    expect(callUpdates.some((row) => row.provider_termination_state === "confirmed")).toBe(true);
+    assertUnknownProviderRemainsDiscoverable();
+  });
+
+  test("body read failure after Location hangs up but keeps usage unresolved", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      if (fetchUrls.length === 1) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ Location: "/v1/realtime/calls/rtc-body-failed" }),
+          text: async () => { throw new Error("SDP body transport failed"); },
+        } as Response;
+      }
+      return new Response(null, { status: 200 });
+    };
+
+    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+      message: "provider_outcome_unknown",
+      status: 502,
+    });
+
+    expect(providerCreationRequests()).toHaveLength(1);
+    expect(fetchUrls.some((url) => url.endsWith("/rtc-body-failed/hangup"))).toBe(true);
+    assertUnknownProviderRemainsDiscoverable();
+  });
+
+  test("empty SDP after Location is ambiguous and cannot fall back or settle", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      return fetchUrls.length === 1
+        ? new Response("   \n", { status: 200, headers: { Location: "/v1/realtime/calls/rtc-empty-sdp" } })
+        : new Response(null, { status: 200 });
+    };
+
+    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+      message: "provider_outcome_unknown",
+      status: 502,
+    });
+
+    expect(providerCreationRequests()).toHaveLength(1);
+    expect(fetchUrls.some((url) => url.endsWith("/rtc-empty-sdp/hangup"))).toBe(true);
     assertUnknownProviderRemainsDiscoverable();
   });
 
@@ -191,7 +257,7 @@ describe("session budget lifecycle", () => {
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
   });
 
-  test("accepted browser call attach failure confirms hangup before zero settlement", async () => {
+  test("accepted browser call attach failure confirms hangup but keeps unknown usage active", async () => {
     config.openaiKey = "synthetic-openai-key";
     globalThis.fetch = async (input) => {
       fetchUrls.push(String(input));
@@ -205,7 +271,7 @@ describe("session budget lifecycle", () => {
     await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toThrow("sideband attach failed");
 
     expect(fetchUrls.some((url) => url.endsWith("/rtc-1/hangup"))).toBe(true);
-    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(1);
+    assertUnknownProviderRemainsDiscoverable();
   });
 
   test("browser hangup transport failure keeps the reservation active", async () => {
