@@ -1,16 +1,22 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   lstatSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HARD_MAX_FILES = 10_000;
+const HARD_MAX_FILE_BYTES = 64 * 1024 * 1024;
 const HARD_MAX_EXPANDED_BYTES = 512 * 1024 * 1024;
 const EOCD_SIGNATURE = 0x06054b50;
 const CENTRAL_SIGNATURE = 0x02014b50;
@@ -76,6 +82,7 @@ export function inspectArchive(archive) {
     fail("archive_required");
   }
   const maxFiles = configuredLimit("LIGOU_ARCHIVE_MAX_FILES", HARD_MAX_FILES);
+  const maxFileBytes = configuredLimit("LIGOU_ARCHIVE_MAX_FILE_BYTES", HARD_MAX_FILE_BYTES);
   const maxExpandedBytes = configuredLimit("LIGOU_ARCHIVE_MAX_EXPANDED_BYTES", HARD_MAX_EXPANDED_BYTES);
   const eocd = endOfCentralDirectory(bytes);
   const disk = bytes.readUInt16LE(eocd + 4);
@@ -89,8 +96,9 @@ export function inspectArchive(archive) {
     || centralOffset + centralSize > eocd) fail("archive_directory_invalid");
 
   let offset = centralOffset;
-  let files = 0;
+  let fileCount = 0;
   let expanded = 0;
+  const fileProofs = [];
   const names = new Set();
   for (let index = 0; index < entryCount; index += 1) {
     if (offset + 46 > bytes.length || bytes.readUInt32LE(offset) !== CENTRAL_SIGNATURE) fail("archive_directory_invalid");
@@ -106,6 +114,7 @@ export function inspectArchive(archive) {
     const name = bytes.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
     if (name.includes("\ufffd") || forbiddenEntry(name)) fail("archive_forbidden_path");
     const normalized = name.replace(/\/$/, "");
+    if (normalized !== "cognitive" && !normalized.startsWith("cognitive/")) fail("archive_cognitive_root_required");
     if (names.has(normalized)) fail("archive_duplicate_entry");
     names.add(normalized);
     const type = classifyEntry(versionMadeBy, externalAttributes, name);
@@ -119,29 +128,54 @@ export function inspectArchive(archive) {
     }
     if (type !== "file" && type !== "directory") fail("archive_non_regular_entry");
     if (type === "file") {
-      files += 1;
+      fileCount += 1;
       expanded += uncompressedSize;
-      if (files > maxFiles) fail("archive_file_limit_exceeded");
+      if (fileCount > maxFiles) fail("archive_file_limit_exceeded");
+      if (uncompressedSize > maxFileBytes) fail("archive_file_size_limit_exceeded");
       if (expanded > maxExpandedBytes) fail("archive_expanded_size_limit_exceeded");
+      const content = spawnSync("unzip", ["-p", archive, name], { encoding: null, maxBuffer: maxFileBytes + 1 });
+      if (content.status !== 0 || !Buffer.isBuffer(content.stdout) || content.stdout.length !== uncompressedSize) fail("archive_entry_read_failed");
+      fileProofs.push({
+        path: name,
+        size_bytes: uncompressedSize,
+        sha256: createHash("sha256").update(content.stdout).digest("hex"),
+      });
     }
     offset = end;
   }
-  if (offset !== centralOffset + centralSize || files === 0) fail("archive_directory_invalid");
+  if (offset !== centralOffset + centralSize || fileCount === 0) fail("archive_directory_invalid");
+  fileProofs.sort((left, right) => left.path.localeCompare(right.path));
+  const database = fileProofs.find((file) => file.path === "cognitive/state.db");
+  if (!database) fail("archive_sqlite_state_required");
+  const sqliteBytes = spawnSync("unzip", ["-p", archive, database.path], { encoding: null, maxBuffer: maxFileBytes + 1 });
+  if (sqliteBytes.status !== 0 || !Buffer.isBuffer(sqliteBytes.stdout)) fail("archive_sqlite_integrity_failed");
+  const sqliteDirectory = mkdtempSync(path.join(os.tmpdir(), "ligou-sqlite-check."));
+  const sqliteScratch = path.join(sqliteDirectory, "state.db");
+  try {
+    writeFileSync(sqliteScratch, sqliteBytes.stdout, { mode: 0o600, flag: "wx" });
+    const quickCheck = spawnSync("sqlite3", [sqliteScratch, "pragma quick_check;"], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+    if (quickCheck.status !== 0 || quickCheck.stdout.trim() !== "ok") fail("archive_sqlite_integrity_failed");
+  } finally {
+    try { rmSync(sqliteDirectory, { recursive: true, force: true }); } catch {}
+  }
   return {
-    file_count: files,
+    file_count: fileCount,
     expanded_size_bytes: expanded,
-    limits: { max_files: maxFiles, max_expanded_bytes: maxExpandedBytes },
+    files: fileProofs,
+    limits: { max_files: maxFiles, max_file_bytes: maxFileBytes, max_expanded_bytes: maxExpandedBytes },
   };
 }
 
 export function extractAndScan(archive, destination) {
   const expected = inspectArchive(archive);
   mkdirSync(destination, { recursive: false, mode: 0o700 });
-  const extracted = spawnSync("unzip", ["-qq", archive, "-d", destination], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+  const extractBin = process.env.LIGOU_ARCHIVE_EXTRACT_BIN ?? "unzip";
+  const extracted = spawnSync(extractBin, ["-qq", archive, "-d", destination], { encoding: "utf8", maxBuffer: 1024 * 1024 });
   if (extracted.status !== 0) fail("archive_extraction_failed");
   const root = realpathSync(destination);
-  let files = 0;
+  let fileCount = 0;
   let expanded = 0;
+  const fileProofs = [];
   const walk = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolute = path.join(directory, entry.name);
@@ -151,15 +185,25 @@ export function extractAndScan(archive, destination) {
       if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile()) || (stat.isFile() && stat.nlink > 1)) fail("archive_extracted_entry_invalid");
       if (stat.isDirectory()) walk(absolute);
       else {
-        files += 1;
+        fileCount += 1;
         expanded += stat.size;
-        if (files > expected.limits.max_files) fail("archive_file_limit_exceeded");
+        if (fileCount > expected.limits.max_files) fail("archive_file_limit_exceeded");
+        if (stat.size > expected.limits.max_file_bytes) fail("archive_file_size_limit_exceeded");
         if (expanded > expected.limits.max_expanded_bytes) fail("archive_expanded_size_limit_exceeded");
+        fileProofs.push({
+          path: path.relative(root, absolute).split(path.sep).join("/"),
+          size_bytes: stat.size,
+          sha256: createHash("sha256").update(readFileSync(absolute)).digest("hex"),
+        });
       }
     }
   };
   walk(root);
-  if (files !== expected.file_count || expanded !== expected.expanded_size_bytes) fail("archive_extracted_content_mismatch");
+  fileProofs.sort((left, right) => left.path.localeCompare(right.path));
+  if (fileCount !== expected.file_count || expanded !== expected.expanded_size_bytes
+    || JSON.stringify(fileProofs) !== JSON.stringify(expected.files)) fail("archive_extracted_content_mismatch");
+  const quickCheck = spawnSync("sqlite3", [path.join(root, "cognitive/state.db"), "pragma quick_check;"], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+  if (quickCheck.status !== 0 || quickCheck.stdout.trim() !== "ok") fail("archive_sqlite_integrity_failed");
   return expected;
 }
 

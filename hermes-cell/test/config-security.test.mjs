@@ -103,6 +103,37 @@ test("locked persistent registry resolves a forced preferred-port collision with
   }
 });
 
+test("locked registry atomically activates one tenant staged cognitive volume with compare-and-swap", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-tenant-cognitive-"));
+  const registry = path.join(fixture, "registry.json");
+  const env = {
+    ...process.env,
+    LIGOU_TENANT_REGISTRY: registry,
+    LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
+  };
+  const resolve = (tenant) => spawnSync(process.execPath, [tenantIdentity, "--tenant", tenant, "--json"], { encoding: "utf8", env });
+  try {
+    const alphaBefore = JSON.parse(resolve("alpha-plumbing").stdout);
+    const betaBefore = JSON.parse(resolve("beta-plumbing").stdout);
+    const staged = `${alphaBefore.cognitive_volume}-stage-${"a".repeat(64)}`;
+    const activated = spawnSync(process.execPath, [tenantIdentity, "--tenant", "alpha-plumbing",
+      "--activate-cognitive", staged, "--expected", alphaBefore.cognitive_volume, "--json"], { encoding: "utf8", env });
+    assert.equal(activated.status, 0, activated.stderr);
+    assert.equal(JSON.parse(activated.stdout).cognitive_volume, staged);
+    assert.equal(JSON.parse(resolve("alpha-plumbing").stdout).cognitive_volume, staged);
+    assert.equal(JSON.parse(resolve("beta-plumbing").stdout).cognitive_volume, betaBefore.cognitive_volume);
+
+    const stale = spawnSync(process.execPath, [tenantIdentity, "--tenant", "alpha-plumbing",
+      "--activate-cognitive", `${alphaBefore.cognitive_volume}-stage-${"b".repeat(64)}`,
+      "--expected", alphaBefore.cognitive_volume, "--json"], { encoding: "utf8", env });
+    assert.notEqual(stale.status, 0);
+    assert.match(stale.stderr, /tenant_cognitive_compare_failed/);
+    assert.equal(JSON.parse(resolve("alpha-plumbing").stdout).cognitive_volume, staged);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("config validator rejects missing and tag-only Hermes image release inputs", () => {
   for (const image of ["", "nousresearch/hermes-agent:v2026.8.18"]) {
     const result = spawnSync(process.execPath, [validator, "--root", repoRoot, "--json"], {

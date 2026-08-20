@@ -22,6 +22,7 @@ const RELEASE_ID = /^[a-f0-9]{40}-[a-f0-9]{64}$/;
 const DIGEST_IMAGE = /^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/;
 const PINNED_TOOLCHAIN = {
   node: "22.22.3",
+  application_version: "0.1.0",
   bun: "1.2.13",
   deno: "2.9.4",
   supabase_cli: "2.115.0",
@@ -127,6 +128,7 @@ function runtimeEvidence(artifact, hermesImage) {
     || packageJson.packageManager !== `bun@${PINNED_TOOLCHAIN.bun}`) fail("release_runtime_evidence_invalid");
   const lockfile = artifactFile(artifact, "voice-controller/bun.lock");
   return {
+    application: { version: PINNED_TOOLCHAIN.application_version },
     node: { version: PINNED_TOOLCHAIN.node },
     bun: { version: PINNED_TOOLCHAIN.bun },
     deno: { version: PINNED_TOOLCHAIN.deno },

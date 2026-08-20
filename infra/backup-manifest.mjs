@@ -16,7 +16,8 @@ const EXCLUSIONS = [
 const TENANT = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const DIGEST_IMAGE = /^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/;
-const APPROVED_HERMES_IMAGE = JSON.parse(readFileSync(new URL("./toolchain.json", import.meta.url), "utf8")).hermes_image;
+const TOOLCHAIN = JSON.parse(readFileSync(new URL("./toolchain.json", import.meta.url), "utf8"));
+const APPROVED_HERMES_IMAGE = TOOLCHAIN.hermes_image;
 
 function fail(code) {
   process.stderr.write(String(code) + "\n");
@@ -83,19 +84,26 @@ function createManifest(args) {
   const proof = archiveProof(args.archive);
   const body = {
     schema: "ligou.hermes.backup-manifest",
-    version: 2,
+    version: 3,
     tenant: args.tenant,
     source: { identity: args.source },
     archive: {
       name: path.basename(args.archive),
       format: "hermes-cognitive-zip",
+      id: proof.sha256,
       sha256: proof.sha256,
       size_bytes: proof.size,
       expanded_size_bytes: inspection.expanded_size_bytes,
       file_count: inspection.file_count,
+      cognitive_root: "cognitive/",
     },
+    files: inspection.files,
     limits: inspection.limits,
-    runtime: { hermes_image: args.hermes_image },
+    runtime: {
+      application_version: TOOLCHAIN.application_version,
+      cognitive_schema_version: "v1",
+      hermes_image: args.hermes_image,
+    },
     exclusions: EXCLUSIONS,
     created_at: args.created,
   };
@@ -122,7 +130,7 @@ function verifyManifest(args) {
   let manifest;
   try { manifest = JSON.parse(readFileSync(args.manifest, "utf8")); }
   catch { fail("manifest_required"); }
-  exactKeys(manifest, ["schema", "version", "tenant", "source", "archive", "limits", "runtime", "exclusions", "created_at", "signature"], "manifest_schema_invalid");
+  exactKeys(manifest, ["schema", "version", "tenant", "source", "archive", "files", "limits", "runtime", "exclusions", "created_at", "signature"], "manifest_schema_invalid");
   exactKeys(manifest.signature, ["algorithm", "key_id", "value"], "manifest_signature_invalid");
   const { signature, ...body } = manifest;
   const signatureMetadata = { algorithm: signature.algorithm, key_id: signature.key_id };
@@ -132,14 +140,22 @@ function verifyManifest(args) {
     fail("manifest_signature_invalid");
   }
   exactKeys(manifest.source, ["identity"], "manifest_schema_invalid");
-  exactKeys(manifest.archive, ["name", "format", "sha256", "size_bytes", "expanded_size_bytes", "file_count"], "manifest_schema_invalid");
-  exactKeys(manifest.limits, ["max_files", "max_expanded_bytes"], "manifest_schema_invalid");
-  exactKeys(manifest.runtime, ["hermes_image"], "manifest_schema_invalid");
-  if (manifest.schema !== "ligou.hermes.backup-manifest" || manifest.version !== 2
+  exactKeys(manifest.archive, ["name", "format", "id", "sha256", "size_bytes", "expanded_size_bytes", "file_count", "cognitive_root"], "manifest_schema_invalid");
+  exactKeys(manifest.limits, ["max_files", "max_file_bytes", "max_expanded_bytes"], "manifest_schema_invalid");
+  exactKeys(manifest.runtime, ["application_version", "cognitive_schema_version", "hermes_image"], "manifest_schema_invalid");
+  if (!Array.isArray(manifest.files) || manifest.files.some((file) => {
+    try { exactKeys(file, ["path", "size_bytes", "sha256"], "manifest_schema_invalid"); return false; }
+    catch { return true; }
+  })) fail("manifest_schema_invalid");
+  if (manifest.schema !== "ligou.hermes.backup-manifest" || manifest.version !== 3
     || manifest.tenant !== args.tenant || !IDENTITY.test(manifest.source.identity)
     || manifest.archive.name !== path.basename(args.archive)
     || manifest.archive.format !== "hermes-cognitive-zip"
+    || manifest.archive.id !== manifest.archive.sha256
+    || manifest.archive.cognitive_root !== "cognitive/"
     || manifest.runtime.hermes_image !== args.hermes_image
+    || manifest.runtime.application_version !== TOOLCHAIN.application_version
+    || manifest.runtime.cognitive_schema_version !== "v1"
     || new Date(manifest.created_at).toISOString() !== manifest.created_at
     || canonical(manifest.exclusions) !== canonical(EXCLUSIONS)) {
     fail("manifest_binding_invalid");
@@ -152,7 +168,8 @@ function verifyManifest(args) {
   catch (error) { fail(error instanceof Error ? error.message : "archive_validation_failed"); }
   if (manifest.archive.expanded_size_bytes !== inspection.expanded_size_bytes
     || manifest.archive.file_count !== inspection.file_count
-    || canonical(manifest.limits) !== canonical(inspection.limits)) fail("archive_limits_mismatch");
+    || canonical(manifest.limits) !== canonical(inspection.limits)
+    || canonical(manifest.files) !== canonical(inspection.files)) fail("archive_limits_mismatch");
   process.stdout.write(JSON.stringify({ ok: true, tenant: args.tenant, archive: manifest.archive.name }) + "\n");
 }
 

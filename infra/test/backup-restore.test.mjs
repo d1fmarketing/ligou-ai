@@ -19,18 +19,24 @@ function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: "utf8", ...options });
 }
 
-async function makeArchive(base, { forbidden = false } = {}) {
+async function makeArchive(base, { forbidden = false, corruptSqlite = false } = {}) {
   const payload = path.join(base, "payload");
-  await mkdir(path.join(payload, "memory"), { recursive: true });
-  await mkdir(path.join(payload, "skills"), { recursive: true });
-  await mkdir(path.join(payload, "sessions"), { recursive: true });
-  await writeFile(path.join(payload, "state.db"), "synthetic-state-db");
-  await writeFile(path.join(payload, "memory/index.json"), "[]");
-  await writeFile(path.join(payload, "skills/index.json"), "[]");
-  await writeFile(path.join(payload, "sessions/index.json"), "[]");
+  const cognitive = path.join(payload, "cognitive");
+  await mkdir(path.join(cognitive, "memory"), { recursive: true });
+  await mkdir(path.join(cognitive, "skills"), { recursive: true });
+  await mkdir(path.join(cognitive, "sessions"), { recursive: true });
+  const database = path.join(cognitive, "state.db");
+  if (corruptSqlite) await writeFile(database, "not-a-sqlite-database");
+  else {
+    const created = run("sqlite3", [database, "create table state (id integer primary key, value text); insert into state(value) values ('synthetic');"]);
+    assert.equal(created.status, 0, created.stderr);
+  }
+  await writeFile(path.join(cognitive, "memory/index.json"), "[]");
+  await writeFile(path.join(cognitive, "skills/index.json"), "[]");
+  await writeFile(path.join(cognitive, "sessions/index.json"), "[]");
   if (forbidden) {
-    await mkdir(path.join(payload, ".hermes"), { recursive: true });
-    await writeFile(path.join(payload, ".hermes/auth.json"), '{"access_token":"forbidden"}');
+    await mkdir(path.join(cognitive, ".hermes"), { recursive: true });
+    await writeFile(path.join(cognitive, ".hermes/auth.json"), '{"access_token":"forbidden"}');
   }
   const archive = path.join(base, "hermes-test-tenant-20260820T120000Z.zip");
   const zipped = run("zip", ["-qr", archive, "."], { cwd: payload });
@@ -55,7 +61,7 @@ test("authenticated manifest carries mandatory identity, archive proof, exclusio
     assert.equal(created.status, 0, created.stderr);
     const parsed = JSON.parse(await readFile(manifest, "utf8"));
     assert.deepEqual({ schema: parsed.schema, version: parsed.version, tenant: parsed.tenant }, {
-      schema: "ligou.hermes.backup-manifest", version: 2, tenant: TENANT,
+      schema: "ligou.hermes.backup-manifest", version: 3, tenant: TENANT,
     });
     assert.equal(parsed.source.identity, "ec2:i-test");
     assert.equal(parsed.archive.name, path.basename(archive));
@@ -64,8 +70,16 @@ test("authenticated manifest carries mandatory identity, archive proof, exclusio
     assert.equal(parsed.archive.format, "hermes-cognitive-zip");
     assert.ok(parsed.archive.expanded_size_bytes > 0);
     assert.ok(parsed.archive.file_count >= 4);
-    assert.deepEqual(parsed.limits, { max_files: 10_000, max_expanded_bytes: 536_870_912 });
-    assert.deepEqual(parsed.runtime, { hermes_image: IMAGE });
+    assert.deepEqual(parsed.limits, { max_files: 10_000, max_file_bytes: 67_108_864, max_expanded_bytes: 536_870_912 });
+    assert.deepEqual(parsed.runtime, {
+      application_version: "0.1.0",
+      cognitive_schema_version: "v1",
+      hermes_image: IMAGE,
+    });
+    assert.equal(parsed.archive.cognitive_root, "cognitive/");
+    assert.equal(parsed.archive.id, parsed.archive.sha256);
+    assert.ok(parsed.files.some((file) => file.path === "cognitive/state.db" && file.size_bytes > 0 && /^[a-f0-9]{64}$/.test(file.sha256)));
+    assert.equal(parsed.files.length, parsed.archive.file_count);
     assert.ok(parsed.exclusions.includes("**/.hermes/**"));
     assert.equal(parsed.created_at, "2026-08-20T12:00:00.000Z");
     assert.deepEqual(Object.keys(parsed.signature).sort(), ["algorithm", "key_id", "value"]);
@@ -76,6 +90,33 @@ test("authenticated manifest carries mandatory identity, archive proof, exclusio
       env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY },
     });
     assert.equal(verified.status, 0, verified.stderr);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("corrupt cognitive SQLite state is rejected before a manifest can be signed", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-corrupt-sqlite-"));
+  try {
+    const archive = await makeArchive(fixture, { corruptSqlite: true });
+    const result = createManifest(archive, `${archive}.manifest.json`);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /archive_sqlite_integrity_failed/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("archive with an unexpected top-level root is rejected", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-root-"));
+  try {
+    const database = path.join(fixture, "state.db");
+    assert.equal(run("sqlite3", [database, "create table state(id integer);"]).status, 0);
+    const archive = path.join(fixture, "hermes-test-tenant-20260820T120000Z.zip");
+    assert.equal(run("zip", ["-q", archive, "state.db"], { cwd: fixture }).status, 0);
+    const result = createManifest(archive, `${archive}.manifest.json`);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /archive_cognitive_root_required/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -147,9 +188,10 @@ test("real zip symlinks with unsafe targets are rejected as non-regular entries"
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-symlink-"));
   try {
     const payload = path.join(fixture, "payload");
-    await mkdir(path.join(payload, "memory"), { recursive: true });
-    await writeFile(path.join(payload, "memory/state.json"), "{}\n");
-    await symlink("../../outside-secret", path.join(payload, "memory/current"));
+    await mkdir(path.join(payload, "cognitive/memory"), { recursive: true });
+    assert.equal(run("sqlite3", [path.join(payload, "cognitive/state.db"), "create table state(id integer);"]).status, 0);
+    await writeFile(path.join(payload, "cognitive/memory/state.json"), "{}\n");
+    await symlink("../../../outside-secret", path.join(payload, "cognitive/memory/current"));
     const archive = path.join(fixture, "hermes-test-tenant-20260820T120000Z.zip");
     const zipped = run("zip", ["-qry", archive, "."], { cwd: payload });
     assert.equal(zipped.status, 0, zipped.stderr);
@@ -165,10 +207,11 @@ test("real archive expanded file count is bounded before signing", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-file-limit-"));
   try {
     const payload = path.join(fixture, "payload");
-    await mkdir(payload);
-    for (let index = 0; index < 4; index += 1) await writeFile(path.join(payload, `state-${index}.json`), "{}\n");
+    await mkdir(path.join(payload, "cognitive"), { recursive: true });
+    assert.equal(run("sqlite3", [path.join(payload, "cognitive/state.db"), "create table state(id integer);"]).status, 0);
+    for (let index = 0; index < 4; index += 1) await writeFile(path.join(payload, `cognitive/state-${index}.json`), "{}\n");
     const archive = path.join(fixture, "hermes-test-tenant-20260820T120000Z.zip");
-    const zipped = run("zip", ["-q", archive, ...Array.from({ length: 4 }, (_, index) => `state-${index}.json`)], { cwd: payload });
+    const zipped = run("zip", ["-qr", archive, "cognitive"], { cwd: payload });
     assert.equal(zipped.status, 0, zipped.stderr);
     const result = createManifest(archive, `${archive}.manifest.json`, { LIGOU_ARCHIVE_MAX_FILES: "3" });
     assert.notEqual(result.status, 0);
@@ -182,14 +225,32 @@ test("real archive expanded bytes are bounded before signing", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-size-limit-"));
   try {
     const payload = path.join(fixture, "payload");
-    await mkdir(payload);
-    await writeFile(path.join(payload, "state.json"), "12345678");
+    await mkdir(path.join(payload, "cognitive"), { recursive: true });
+    assert.equal(run("sqlite3", [path.join(payload, "cognitive/state.db"), "create table state(id integer);"]).status, 0);
+    await writeFile(path.join(payload, "cognitive/state.json"), "12345678");
     const archive = path.join(fixture, "hermes-test-tenant-20260820T120000Z.zip");
-    const zipped = run("zip", ["-q", archive, "state.json"], { cwd: payload });
+    const zipped = run("zip", ["-qr", archive, "cognitive"], { cwd: payload });
     assert.equal(zipped.status, 0, zipped.stderr);
     const result = createManifest(archive, `${archive}.manifest.json`, { LIGOU_ARCHIVE_MAX_EXPANDED_BYTES: "7" });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /archive_expanded_size_limit_exceeded/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("real archive enforces the 64 MiB per-file containment limit", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-per-file-limit-"));
+  try {
+    const payload = path.join(fixture, "payload");
+    await mkdir(path.join(payload, "cognitive"), { recursive: true });
+    assert.equal(run("sqlite3", [path.join(payload, "cognitive/state.db"), "create table state(id integer);"]).status, 0);
+    await writeFile(path.join(payload, "cognitive/oversize.bin"), "12345678");
+    const archive = path.join(fixture, "hermes-test-tenant-20260820T120000Z.zip");
+    assert.equal(run("zip", ["-qr", archive, "cognitive"], { cwd: payload }).status, 0);
+    const result = createManifest(archive, `${archive}.manifest.json`, { LIGOU_ARCHIVE_MAX_FILE_BYTES: "7" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /archive_file_size_limit_exceeded/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -200,16 +261,16 @@ test("extracted filesystem lstat and realpath scan rejects a link escape before 
   try {
     const payload = path.join(fixture, "payload");
     const bin = path.join(fixture, "bin");
-    await mkdir(payload);
+    await mkdir(path.join(payload, "cognitive"), { recursive: true });
     await mkdir(bin);
-    await writeFile(path.join(payload, "state.json"), "0123456789");
+    assert.equal(run("sqlite3", [path.join(payload, "cognitive/state.db"), "create table state(id integer);"]).status, 0);
     const archive = path.join(fixture, "hermes-test-tenant-20260820T120000Z.zip");
-    const zipped = run("zip", ["-q", archive, "state.json"], { cwd: payload });
+    const zipped = run("zip", ["-qr", archive, "cognitive"], { cwd: payload });
     assert.equal(zipped.status, 0, zipped.stderr);
-    await writeFile(path.join(bin, "unzip"), "#!/bin/sh\n/bin/mkdir -p \"$4\"\n/bin/ln -s /etc/hosts \"$4/state.json\"\n");
+    await writeFile(path.join(bin, "unzip"), "#!/bin/sh\n/bin/mkdir -p \"$4/cognitive\"\n/bin/ln -s /etc/hosts \"$4/cognitive/state.db\"\n");
     await chmod(path.join(bin, "unzip"), 0o755);
     const result = run(process.execPath, [archiveTool, "extract", archive, path.join(fixture, "extracted")], {
-      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+      env: { ...process.env, PATH: "/usr/bin:/bin", LIGOU_ARCHIVE_EXTRACT_BIN: path.join(bin, "unzip") },
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /archive_extracted_(?:path_escape|entry_invalid)/);
@@ -296,7 +357,7 @@ async function stubCommands(fixture) {
   const curl = path.join(bin, "curl");
   const aws = path.join(bin, "aws");
   const sleep = path.join(bin, "sleep");
-  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"authenticated":true}' ;;\nesac\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-check-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
+  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"volume inspect"*) exit 1 ;;\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"authenticated":true}' ;;\nesac\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
   await writeFile(curl, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\nif [ "\${CURL_MODE:-ok}" = fail ]; then printf '%s\\n' '{"ok":false}'; elif [ -n "\${CURL_FAIL_ONCE_MARKER:-}" ] && [ ! -e "$CURL_FAIL_ONCE_MARKER" ]; then : > "$CURL_FAIL_ONCE_MARKER"; printf '%s\\n' '{"ok":false}'; else printf '%s\\n' '{"ok":true}'; fi\n`);
   await writeFile(aws, "#!/bin/sh\nprintf '%s\\n' 'unexpected aws call' >&2\nexit 99\n");
   await writeFile(sleep, "#!/bin/sh\nexit 0\n");
@@ -314,6 +375,7 @@ function restoreEnv(fixture, bin, extra = {}) {
     LIGOU_BACKUP_MANIFEST_KEY: KEY,
     LIGOU_NODE_BIN: process.execPath,
     HERMES_IMAGE: IMAGE,
+    HERMES_API_KEY: "synthetic-local-key",
     DOCKER_LOG: path.join(fixture, "docker.log"),
     CURL_LOG: path.join(fixture, "curl.log"),
     ...extra,
@@ -366,6 +428,31 @@ test("disposable smoke failure never reaches the live cell", async () => {
   }
 });
 
+test("apply promotes a validated tenant-staged volume without importing into the live volume", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-staged-apply-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture);
+    const manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const archiveId = JSON.parse(await readFile(manifest, "utf8")).archive.id;
+    const bin = await stubCommands(fixture);
+    const env = restoreEnv(fixture, bin);
+    const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env });
+    assert.equal(result.status, 0, result.stderr);
+    const log = await readFile(path.join(fixture, "docker.log"), "utf8");
+    assert.doesNotMatch(log, /ligou-cell-test-tenant hermes (?:backup|import)/);
+    assert.match(log, /compose --project-name ligou-test-tenant .* up -d --force-recreate/);
+    const staged = `ligou-test-tenant-hermes-cognitive-stage-${archiveId}`;
+    assert.match(log, new RegExp(`source=${staged},target=/opt/data`));
+    assert.doesNotMatch(log, new RegExp(`volume rm ${staged}`));
+    const registry = JSON.parse(await readFile(env.LIGOU_TENANT_REGISTRY, "utf8"));
+    assert.equal(registry.tenants[TENANT].cognitive_volume, staged);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("live health failure labels rollback applied only after recovered live smoke passes", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-rollback-"));
   try {
@@ -380,11 +467,10 @@ test("live health failure labels rollback applied only after recovered live smok
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /restore_health_failed_rollback_applied/);
     const log = await readFile(path.join(fixture, "docker.log"), "utf8");
-    assert.match(log, /hermes backup -o \/tmp\/rollback-test-tenant-/);
-    const liveImports = log.split("\n").filter((line) => line.includes("ligou-cell-test-tenant hermes import"));
-    assert.equal(liveImports.length, 2, log);
-    assert.match(liveImports[1], /rollback-test-tenant-/);
-    assert.equal(log.split("\n").filter((line) => line.includes("inspect --format") && line.includes("ligou-cell-test-tenant")).length, 2);
+    assert.doesNotMatch(log, /ligou-cell-test-tenant hermes (?:backup|import)/);
+    assert.equal(log.split("\n").filter((line) => line.includes("compose --project-name ligou-test-tenant")).length, 2);
+    const registry = JSON.parse(await readFile(path.join(fixture, "tenant-registry.json"), "utf8"));
+    assert.equal(registry.tenants[TENANT].cognitive_volume, "ligou-test-tenant-hermes-cognitive");
     const curlCalls = (await readFile(path.join(fixture, "curl.log"), "utf8")).trim().split("\n");
     assert.equal(curlCalls.length, 2, "new state and recovered rollback must each pass a live probe");
   } finally {
