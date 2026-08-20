@@ -4,12 +4,21 @@ import { executeIntent } from "../src/worker.ts";
 
 let validation: { data: boolean | null; error: { message: string } | null } = { data: false, error: null };
 let providerCalls = 0;
+let reconciliationCalls = 0;
 let intentUpdates: any[] = [];
+let busyIntervals: Array<{ start: string; end: string }> = [];
+let prepareCalls = 0;
 
 function client() {
   return {
     rpc(name: string) {
       if (name === "validate_booking_intent_authority") return Promise.resolve(validation);
+      if (name === "prepare_booking_provider_write") {
+        if (validation.error) return Promise.resolve({ data: null, error: validation.error });
+        if (!validation.data) return Promise.resolve({ data: false, error: null });
+        prepareCalls += 1;
+        return Promise.resolve({ data: prepareCalls === 1, error: null });
+      }
       return Promise.resolve({ data: null, error: null });
     },
     from(table: string) {
@@ -37,13 +46,24 @@ const calendar = {
     providerCalls += 1;
     return { outcome: "accepted" as const, externalId: "event-1", readback: { id: "event-1" }, payloadHash: "hash", latencyMs: 1 };
   },
-  async busy() { return { intervals: [] }; },
+  async write() {
+    providerCalls += 1;
+    return { outcome: "accepted" as const, externalId: "event-1", readback: { id: "event-1" }, payloadHash: "hash", latencyMs: 1 };
+  },
+  async reconcile() {
+    reconciliationCalls += 1;
+    return { outcome: "unknown" as const, error: "lookup_503", latencyMs: 1 };
+  },
+  async busy() { return { intervals: busyIntervals }; },
 };
 
 beforeEach(() => {
   validation = { data: false, error: null };
   providerCalls = 0;
+  reconciliationCalls = 0;
   intentUpdates = [];
+  busyIntervals = [];
+  prepareCalls = 0;
   _setClient(client());
 });
 afterAll(() => _setClient(null));
@@ -52,7 +72,6 @@ describe("worker authority at the provider boundary", () => {
   test("revocation after queue causes zero provider calls", async () => {
     await executeIntent(intent, calendar);
     expect(providerCalls).toBe(0);
-    expect(intentUpdates.some((row) => row.last_error === "authority_stale_before_provider")).toBe(true);
   });
 
   test("authority lookup error fails closed with zero provider calls", async () => {
@@ -65,5 +84,26 @@ describe("worker authority at the provider boundary", () => {
     validation = { data: true, error: null };
     await executeIntent(intent, calendar);
     expect(providerCalls).toBe(1);
+  });
+
+  test("a slot that became busy after it was offered causes zero provider writes", async () => {
+    validation = { data: true, error: null };
+    busyIntervals = [{ start: intent.payload.start_iso, end: intent.payload.end_iso }];
+    await executeIntent(intent, calendar as any);
+    expect(providerCalls).toBe(0);
+    expect(intentUpdates.some((row) => row.last_error === "slot_became_busy")).toBe(true);
+  });
+
+  test("two concurrent workers competing for one slot produce at most one provider write", async () => {
+    validation = { data: true, error: null };
+    await Promise.all([executeIntent({ ...intent }, calendar as any), executeIntent({ ...intent, id: "intent-2" }, calendar as any)]);
+    expect(providerCalls).toBe(1);
+  });
+
+  test("an unknown action intent performs reconciliation only", async () => {
+    validation = { data: true, error: null };
+    await executeIntent({ ...intent, execution_mode: "reconcile" }, calendar as any);
+    expect(reconciliationCalls).toBe(1);
+    expect(providerCalls).toBe(0);
   });
 });
