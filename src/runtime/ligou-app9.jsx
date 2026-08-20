@@ -332,7 +332,7 @@ function CallDemo() {
         </div>
         <div className="p7-brow p7-b1"><span className="p7-bub p7-bub--mint"><span className="p7-blbl">Cliente · Inglês</span>Hi, water is coming in near the chimney in San Rafael.<br/>Is there any chance someone can come today?</span><span className="p7-ts">00:02</span></div>
         <div className="p7-brow p7-b2"><span className="p7-bub"><span className="p7-blbl">Ligou · Inglês</span>I can help. Same-day visits need team approval,<br/>so I’ll check availability now.</span><span className="p7-ts">00:06</span></div>
-        <div className="p7-brow p7-b3"><span className="p7-bub"><span className="p7-blbl">Ligou · Inglês</span>I’ve sent your request to the team.<br/>You’ll receive a text as soon as they confirm.</span><span className="p7-ts">00:10</span></div>
+        <div className="p7-brow p7-b3"><span className="p7-bub"><span className="p7-blbl">Ligou · Inglês</span>I’ve sent your request to the team.<br/>The team will contact you as soon as they confirm.</span><span className="p7-ts">00:10</span></div>
         <aside className="p7-drawer">
           <span className="p7-tab" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m9 5 7 7-7 7"></path></svg></span>
           <div className="p7-dhead"><span className="p7-dot"></span>Resumo em português</div>
@@ -376,7 +376,7 @@ function CallDemo() {
               <span className="lc-face lc-face--lg"><img className="ligou-avatar" src="assets/ligou-avatar-v1.png" alt=""/></span>
               <div className="lc-msg">
                 <span className="lc-who">Ligou · Inglês<i className="lc-ts">00:10</i></span>
-                <div className="lc-bub">I’ve sent your request to the team. You’ll receive a text as soon as they confirm.</div>
+                <div className="lc-bub">I’ve sent your request to the team. The team will contact you as soon as they confirm.</div>
               </div>
             </div>
             <div className="lc-ev lc-i" style={{'--lcd': '2.35s'}}><span className="lc-evline" aria-hidden="true"></span><i className="lc-evdot" style={{background: 'var(--lg-orange-500)'}}></i><span><b>Responsável avisado</b><em>Pedido urgente enviado · Aguardando decisão</em></span></div>

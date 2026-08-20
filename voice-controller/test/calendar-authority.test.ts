@@ -74,8 +74,7 @@ afterAll(() => {
 });
 
 async function write(input = INPUT) {
-  const adapter = googleCalendar as any;
-  return adapter.write ? adapter.write(input) : adapter.book(input);
+  return googleCalendar.write(input as any);
 }
 
 describe("canonical calendar commitment", () => {
@@ -133,5 +132,15 @@ describe("canonical calendar commitment", () => {
     expect(result.outcome).toBe("unknown");
     expect(result.error).toBe("lookup_503");
     expect(requests.filter((request) => request.method === "POST" && request.url.includes("/events"))).toHaveLength(0);
+  });
+
+  test("repeating the exact write reuses one event instead of posting a twin", async () => {
+    lookupResponse = { ok: true, status: 200, body: { items: [] } };
+    const first = await write();
+    lookupResponse = { ok: true, status: 200, body: { items: [exactEvent()] } };
+    const second = await write();
+    expect(first.outcome).toBe("accepted");
+    expect(second.outcome).toBe("accepted");
+    expect(requests.filter((request) => request.method === "POST" && request.url.includes("/events"))).toHaveLength(1);
   });
 });

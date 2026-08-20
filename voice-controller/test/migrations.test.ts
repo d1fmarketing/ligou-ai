@@ -244,6 +244,12 @@ describe("booking commit lease and reconciliation migration contract", () => {
     expect(sql).toContain("status in ('authorized','queued','unknown')");
   });
 
+  test("repeated exact commitment is constrained to one receipt per intent", () => {
+    const sql = migrationSql("booking_commit_leases");
+    expect(sql).toContain("create unique index receipts_one_booking_per_intent");
+    expect(sql).toContain("on public.receipts (intent_id) where kind = 'booking'");
+  });
+
   test("lease RPCs are service-role-only", () => {
     const sql = migrationSql("booking_commit_leases");
     for (const signature of [
@@ -254,5 +260,15 @@ describe("booking commit lease and reconciliation migration contract", () => {
       expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated`);
       expect(sql).toContain(`grant execute on function ${signature} to service_role`);
     }
+  });
+});
+
+describe("private pricing policy guard migration contract", () => {
+  test("a slot offer cannot be issued without a private server policy", () => {
+    const sql = migrationSql("private_pricing_policy_guard");
+    expect(sql).toContain("function public.enforce_slot_offer_private_policy");
+    expect(sql).toContain("er.structured ? 'price_min'");
+    expect(sql).toContain("new.public_quote >= (er.structured->>'price_min')::numeric");
+    expect(sql).toContain("before insert on public.slot_offers");
   });
 });

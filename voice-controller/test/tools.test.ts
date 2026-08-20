@@ -1,7 +1,7 @@
 // Tool contract tests — run against a mocked Supabase client; no audio, no network, $0.
 import { describe, expect, test, beforeEach, afterAll } from "bun:test";
 import { _setClient, invalidateTenant } from "../src/rules.ts";
-import { makeCapability, runTool } from "../src/tools.ts";
+import { makeCapability, runTool, toolSchemas } from "../src/tools.ts";
 import { overlapsBusy } from "../src/calendar.ts";
 import { buildInstructions } from "../src/instructions.ts";
 
@@ -13,6 +13,8 @@ const TENANT = {
 const RULES = [
   { id: "r-price-drain", category: "preco", escopo: "servico", text: "Drain cleaning: $149–$225.", structured: { service_type: "drain_cleaning", price_min: 149, price_target: 225, duration_min: 60, grant: "AZUL" } },
   { id: "r-price-diag", category: "preco", escopo: "servico", text: "Diagnostic: $89–$129.", structured: { service_type: "plumbing_diagnostic", price_min: 89, price_target: 129, duration_min: 45, grant: "AZUL" } },
+  { id: "r-price-public", category: "preco", escopo: "servico", text: "Public quote only.", structured: { service_type: "public_only", price_target: 300, duration_min: 60, grant: "AZUL" } },
+  { id: "r-price-fixed", category: "preco", escopo: "servico", text: "Fixed public quote.", structured: { service_type: "fixed_price", price_min: 200, price_target: 200, duration_min: 60, grant: "AZUL" } },
   { id: "r-emerg-fee", category: "preco", escopo: "servico", text: "Emergency callout +$150.", structured: { service_type: "emergency_callout", surcharge: 150, grant: "AMARELO" } },
   { id: "r-area", category: "area", escopo: "localizacao", text: "Orange County only: Anaheim, Santa Ana, Irvine, Orange, Tustin, Costa Mesa.", structured: { cities: ["Anaheim", "Santa Ana", "Irvine", "Orange", "Tustin", "Costa Mesa"] } },
   { id: "r-hours", category: "agenda", escopo: "geral", text: "Mon–Sat 08:00–18:00 Pacific.", structured: null },
@@ -134,6 +136,22 @@ describe("evaluate_offer", () => {
     expect(result.body.status).toBe("needs_owner");
     expect(result.body.public_price_usd).toBeUndefined();
   });
+
+  test("a rule without a private server floor cannot authorize negotiation", async () => {
+    const quoted = await runTool(cap(), "quote_price", { service_type: "public_only" });
+    const result = await runTool(cap(), "evaluate_offer", {
+      service_type: "public_only", offered_price: 250, quote_id: quoted.body.quote_id,
+    });
+    expect(result.body).toEqual({ status: "needs_owner" });
+  });
+
+  test("a fixed-price counter never exceeds its public target", async () => {
+    const quoted = await runTool(cap(), "quote_price", { service_type: "fixed_price" });
+    const result = await runTool(cap(), "evaluate_offer", {
+      service_type: "fixed_price", offered_price: 100, quote_id: quoted.body.quote_id,
+    });
+    expect(result.body).toMatchObject({ status: "counter", public_price_usd: 200 });
+  });
 });
 
 describe("check_availability", () => {
@@ -216,6 +234,12 @@ describe("create_async_case", () => {
     const keys = inserted.filter((i) => i.table === "approval_cases").map((i) => i.row.idempotency_key);
     expect(keys[0]).toBe(keys[1]);
   });
+
+  test("pending customer language promises no unavailable messaging channel", async () => {
+    const result = await runTool(cap(), "create_async_case", { request: "Needs review" });
+    expect(String(result.body.say)).toMatch(/team will (?:confirm|contact)/i);
+    expect(String(result.body.say)).not.toMatch(/\b(?:sms|text|message)\b/i);
+  });
 });
 
 describe("capability boundary", () => {
@@ -280,5 +304,20 @@ describe("instructions builder", () => {
     expect(t).not.toContain("$149");
     expect(t.toLowerCase()).not.toContain("minimum");
     expect(t.toLowerCase()).not.toContain("floor");
+  });
+
+  test("Realtime prompt and tool snapshot contain neither SMS promises nor private pricing limits", () => {
+    const snapshot = `${buildInstructions(TENANT as any, RULES as any, "customer")}\n${JSON.stringify(toolSchemas)}`;
+    expect(snapshot).not.toMatch(/\b(?:sms|text message|confirmation text|receive a text)\b/i);
+    expect(snapshot).not.toContain("$149");
+    expect(snapshot).not.toMatch(/\b(?:floor|minimum|price_min)\b/i);
+  });
+
+  test("no Realtime session type receives the private floor", () => {
+    for (const sessionType of ["customer", "owner_browser", "onboarding"] as const) {
+      const snapshot = buildInstructions(TENANT as any, RULES as any, sessionType);
+      expect(snapshot, sessionType).not.toMatch(/\b(?:price_min|minimum acceptable|private floor)\b/i);
+      expect(snapshot, sessionType).not.toContain("$149");
+    }
   });
 });

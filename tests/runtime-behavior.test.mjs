@@ -120,6 +120,14 @@ describe("responsive hero behavior", () => {
 });
 
 describe("interactive and accessible state", () => {
+  test("customer demo promises only truthful team contact", async () => {
+    const harness = await createRuntimeHarness();
+    const demo = harness.render(harness.bindings.CallDemo);
+    const visible = textContent(demo);
+    expect(visible).toContain("The team will contact you as soon as they confirm.");
+    expect(visible).not.toMatch(/\b(?:sms|text message|receive a text)\b/i);
+  });
+
   test("opens one FAQ item at a time and preserves the choice across the mobile breakpoint", async () => {
     const harness = await createRuntimeHarness({ width: 1200, height: 800 });
     const { Faq } = harness.bindings;
