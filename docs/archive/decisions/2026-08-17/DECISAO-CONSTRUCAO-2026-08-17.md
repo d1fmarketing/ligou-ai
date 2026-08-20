@@ -1,20 +1,28 @@
 # DECISÃO DE CONSTRUÇÃO — LIGOU
 **Para:** RJ (Board Chair) · **De:** Isa, arquiteta-chefe · **Data:** 17/08/2026
-**Base:** inventário de disco + pesquisa externa, ambos já passados por refutação adversarial.
+**Base:** inventário técnico do Ligou + pesquisa externa, ambos já passados por refutação adversarial.
 
 > **SUPERSEDIDO:** este documento foi refeito do zero, com o produto no centro
 > (funcionário de IA, não atendimento telefônico) e a decisão no topo. O vigente é
 > [`DECISAO-FINAL-O-FUNCIONARIO-2026-08-17.md`](DECISAO-FINAL-O-FUNCIONARIO-2026-08-17.md).
-> Este arquivo permanece como histórico e como fonte das evidências detalhadas
-> (inventário completo, refutações, itens não verificados).
+> Este arquivo permanece como histórico das conclusões técnicas e refutações. O
+> inventário bruto que sustentou a análise permanece no dossiê privado.
 
 ---
 
 ## 1. O que nós JÁ temos
 
-**O "core de voz 80% pronto" não existe. Zero linhas.** Não há um byte de telefonia, voz, STT/TTS ou backend em nenhum repo, worktree, SSD ou pasta deste Mac. A busca foi feita por *conteúdo* (não por nome de arquivo) em `~/Desktop`, `~/Downloads`, `~/Documents`, `~/.codex/worktrees` e `/Volumes/PortableSSD`, por `twilio`, `livekit`, `vapi`, `retell`, `deepgram`, `gpt-realtime`, `webrtc`, `sip`, `getUserMedia`: zero ocorrências ligadas ao Ligou. O universo completo de arquivos já commitados em **qualquer branch** do repo Ligou.AI (`git log --all --diff-filter=A`) é: uma landing, um design system, e um protótipo de dashboard. Nenhuma rota, nenhum servidor, nenhuma migration, nenhum cliente de modelo.
+**O "core de voz 80% pronto" não existia no Ligou auditado.** A busca por conteúdo
+e a história Git encontraram landing, design system e protótipo de dashboard, mas
+nenhuma rota de telefonia, servidor de voz, migration ou cliente de modelo. A
+topologia e os locais examinados ficam registrados somente no dossiê privado.
 
-O número "80%" foi rastreado até a origem: é uma frase que **você digitou num chat com o Grok em 13/08/2026, 17:44 UTC**, registrada por gravação de tela — e o mesmo registro diz que nenhum comando, edição, build, teste ou deploy foi visível naquela janela. O Grok então revisou a avaliação para positiva de forma **condicional** ("*if* the infrastructure was mostly ready"). Sua própria documentação, escrita **três dias antes**, já dizia o contrário: `docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md` lista "Telefonia real: Não comprovada neste repositório" e "Memória operacional: backend não comprovado".
+A origem do número "80%" foi um registro conversacional privado em que a avaliação
+dependia da hipótese de a infraestrutura já estar pronta. A inspeção técnica não
+corroborou essa hipótese. A própria documentação do produto já registrava
+"Telefonia real: Não comprovada neste repositório" e "Memória operacional: backend
+não comprovado" em `docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md`. Metadados da
+evidência original permanecem apenas no dossiê privado.
 
 Isso não é uma crítica. É o número que vai dimensionar prazo e dinheiro, e ele precisa ser real.
 
@@ -23,36 +31,36 @@ Isso não é uma crítica. É o número que vai dimensionar prazo e dinheiro, e 
 | Componente | Onde vive | Maturidade | Reaproveitar |
 |---|---|---|---|
 | Landing v9 (React 19, build determinístico) | `origin/main = 161e8e8` — ponta canônica, idêntica a `codex/frontend-test-coverage` | **Produção** — 29 testes em 4 suítes, todos passam sem instalar nada | **Sim** |
-| `verify-claude-v9.mjs` (136 linhas) | `scripts/` do checkout auditado | **Produção** — 3 hashes de fonte, 50 hashes fixados, 39 refs de asset, asserts de copy comercial. Rodei: passa | **Sim** — é lint de contrato de produto, não só de código |
-| Pipeline de build (Bun.Transpiler, 37 linhas, zero deps) | mesmo worktree, `scripts/build-claude-v9.mjs` | **Produção** | **Sim** |
+| `verify-claude-v9.mjs` (136 linhas) | `scripts/` do repositório auditado | **Produção** — 3 hashes de fonte, 50 hashes fixados, 39 refs de asset, asserts de copy comercial. Rodei: passa | **Sim** — é lint de contrato de produto, não só de código |
+| Pipeline de build (Bun.Transpiler, 37 linhas, zero deps) | `scripts/build-claude-v9.mjs` | **Produção** | **Sim** |
 | Design system `_ds` empacotado (1.518 linhas) | `_ds/ligou-design-system-a33905fc.../` | **Produção** — React local, sem CDN | **Sim** |
-| Deploy real (Sites + Workers) | checkout de publicação separado, então sem remote | **Funcional** — `public/v9/index.html` bate byte a byte com o `main` | **Sim**, com backup urgente |
-| Corpus de docs (3.363 linhas, 20 arquivos) | `.../47cc/Ligou.AI/docs/` | **Produção** — o ativo mais denso do projeto; nunca promove intenção a entrega | **Sim** |
-| Mídia da hero (5 MP4 responsivos + posters, 22 MB) | `.../47cc/Ligou.AI/assets/` | **Produção** | **Sim** — mas 22 MB é peso real em 4G, nunca medido |
+| Snapshot histórico de publicação (Sites + Workers) | registro restrito de publicação | **Funcional na auditoria** — `public/v9/index.html` batia byte a byte com o `main` | **Sim**, como evidência histórica |
+| Corpus de docs (3.363 linhas, 20 arquivos) | `docs/` | **Produção** — o ativo mais denso do projeto; nunca promove intenção a entrega | **Sim** |
+| Mídia da hero (5 MP4 responsivos + posters, 22 MB) | `assets/` | **Produção** | **Sim** — mas 22 MB é peso real em 4G, nunca medido |
 
 ### Protótipo (não confundir com plataforma)
 
 | Componente | Onde vive | Maturidade | Reaproveitar |
 |---|---|---|---|
-| Dashboard do cliente (5.565 linhas, React 19 + Vite) | branch `codex/ligou-dashboard`, ausente de `origin` | **Protótipo** — 16 testes passam, mas persistência é `localStorage` e o "agente" é regex | **Parcial** |
-| `model.js` (516 linhas): aprovação "só este caso" vs "virar regra", versionamento, receipt de revogação | mesmo worktree, `src/data/model.js` | **Protótipo** | **Sim, como contrato de vocabulário** — é a melhor especificação escrita do passo 7 |
-| `gateway.js` (257 linhas) | mesmo worktree | **Protótipo** — zero `fetch`. O próprio código confessa: *"não há telefonia, integrações ou backend conectados"* | **Parcial** — a assinatura da API é boa fronteira; a implementação é descartável |
+| Dashboard do cliente (5.565 linhas, React 19 + Vite) | branch `codex/ligou-dashboard` | **Protótipo** — 16 testes passam, mas persistência é `localStorage` e o "agente" é regex | **Parcial** |
+| `model.js` (516 linhas): aprovação "só este caso" vs "virar regra", versionamento, receipt de revogação | `src/data/model.js` da branch do dashboard | **Protótipo** | **Sim, como contrato de vocabulário** — é a melhor especificação escrita do passo 7 |
+| `gateway.js` (257 linhas) | branch do dashboard | **Protótipo** — zero `fetch`. O próprio código confessa: *"não há telefonia, integrações ou backend conectados"* | **Parcial** — a assinatura da API é boa fronteira; a implementação é descartável |
 | `SITE_CONFIG` com `demoPhoneHref` (contrato de demo configurável) | snapshot ancestral, apagado no v9 | **Morto**, mas recuperável por `git show` | **Sim** — é o único design de ativação de voz já escrito, e o v9 o perdeu |
 
-### Ativos de outros projetos seus que valem COPIAR (não "inspirar")
+### Padrões técnicos previamente validados
 
-| Componente | Onde vive | O que resolve do Ligou | Reaproveitar |
+| Componente | Proveniência | O que resolve do Ligou | Reaproveitar |
 |---|---|---|---|
-| `schema.ts` (306 linhas de DDL SQLite) | `~/Desktop/ZenithZenn/methylia-agency-runtime/server/agency-runtime/persistence/` | `risk_level` com CHECK, status de aprovação com 6 estados, `idempotency_key UNIQUE`, `dead_lettered_at`, `decision_hash`, `content_hash` de revisão, receipts append-only com TRIGGER de imutabilidade, eventos de quarentena = kill switch auditável | **Sim** — quase 1:1 com a lista de "código próprio" |
-| `consumeApproval` (~120 linhas úteis) | mesmo repo, `persistence/store.ts` | Aprovação de **uso único com expiração** — cobre "revalidação após espera" | **Sim** |
-| `memory-ledger.ts` + `authorization.ts` (2.080 linhas) | `~/Desktop/shellhouse-site/control-plane/src/` | propose/accept/reject com idempotency digest, contentHash, receipts; `TenantAuthorizer` deny-by-default com `authEpoch` | **Sim** — mas ver risco de git na seção 7 |
-| `delivery.ts` (**82 linhas**) | `~/Desktop/BUZZ APP/cockpit/src/domain/` | `accepted` só com decisão positiva **e** ID concreto; `failed` só com rejeição explícita; **`unknown` em todo o resto, e `unknown` nunca reenvia** | **Sim, copiar literal** — é a resposta ao "o Google Calendar deu timeout, agendou ou não?" |
+| Ledger de aprovação e risco | registro técnico restrito | `risk_level` validado, idempotência, hashes de decisão/revisão, receipts imutáveis e quarentena auditável | **Sim**, como padrão a reimplementar no Ligou |
+| Aprovação de uso único | registro técnico restrito | Aprovação com expiração e revalidação após espera | **Sim**, como invariante |
+| Ledger de memória e autorização | registro técnico restrito | propose/accept/reject, digest idempotente, receipts e autorização deny-by-default | **Sim**, como padrão a reimplementar |
+| Entrega tri-estado | registro técnico restrito | `accepted` só com decisão positiva e ID concreto; `failed` só com rejeição explícita; `unknown` nunca reenvia | **Sim**, como contrato de resultado |
 
-### Contas e serviços já pagos
+### Serviços necessários
 
-As contas e credenciais observadas durante a auditoria ficam em inventário restrito e
-não são reproduzidas neste arquivo. O uso comprovado da conta de telefonia era **100%
-SMS**; não havia endpoint de voz implementado no checkout auditado.
+O inventário de contas, credenciais e estado comercial fica no dossiê privado. Para
+esta decisão basta o fato verificável no código: não havia endpoint de voz
+implementado no repositório auditado.
 
 **Correção de premissa que muda toda a conta:** o preço no ar não é $499. O artefato publicado (`src/runtime/ligou-app9.jsx`, linhas 467–488, travado por **duas suítes de teste em dois repositórios**) diz: **$299/mês para quem contratar até 31/12/2026, ativação ISENTA, valor travado enquanto a assinatura estiver ativa**; 400 min/mês, excedente $0.35/min. Os $499 + $499 são só o preço pós-oferta, num cartão secundário. A linhagem ancestral usa outra formulação ("$299 para os 25 primeiros"), mas ela é ancestral git superada pelo main — **o contrato é o que está no ar. Não há nada para reconciliar.**
 
@@ -64,16 +72,16 @@ SMS**; não havia endpoint de voz implementado no checkout auditado.
 
 1. **Runtime de voz.** Nada. Nem cliente, nem sessão, nem áudio.
 2. **Plano de controle da chamada.** Webhook `realtime.call.incoming`, `/accept`, `/reject`, `/refer`, `/hangup`, WebSocket sideband. Zero linhas.
-3. **Número US local por cliente.** O único número que existe é toll-free e é do **Brasas do Brasil** — número errado (presença local vende em serviços residenciais; toll-free inbound custa 3,8× mais) e conta errada.
+3. **Número US local por cliente.** O Ligou ainda precisava de numeração dedicada por tenant; presença local vende melhor em serviços residenciais e evita compartilhar fronteiras de compliance.
 4. **Twilio Business Primary Customer Profile aprovado.** Conta nova sem PCP fica em **2 chamadas simultâneas** em Elastic SIP Trunking, somando *todos* os tenants. Dois clientes ligando ao mesmo tempo já estoura. Isso é gate de vetting, igual ao A2P.
 5. **Aviso legal de gravação/transcrição.** Não é copy de landing, é requisito de engenharia: string fixa, tocada até o fim, verificada por evento, em toda chamada. CIPA §631 pega **transcrição**, não só gravação, e alcança quem "aids" — a Ligou tem exposição própria. §637.2 dá **$5.000 por violação sem exigir dano real**, e cada chamada é uma violação.
 
 **Bloqueio de entrega (a chamada acontece mas o produto não existe):**
 
-6. **Banco de dados.** Nenhum. `d1: null`, `drizzle/meta/_journal.json` com `entries: []`, todo `DATABASE_URL` do disco aponta para `localhost`.
+6. **Banco de dados.** Nenhum backend persistente ou migration do Ligou foi encontrado no repositório auditado.
 7. **Isolamento multi-tenant.** Um negócio hardcoded (`business-costa-home-services`). Nenhum `tenant_id`, nenhuma RLS, nenhuma partição de memória.
 8. **Máquina de estados `prepared → pending_approval → authorized → committed → verified`.** O que existe é `pendente/aprovada/recusada` em JavaScript de cliente. Faltam exatamente os três estados que representam **execução real**.
-9. **Classificação de risco, hash da proposta, versão da regra, idempotência, receipt de integração, kill switch.** Todos ausentes do Ligou (existem, prontos, em outros repos seus — ver seção 1).
+9. **Classificação de risco, hash da proposta, versão da regra, idempotência, receipt de integração, kill switch.** Todos ausentes do Ligou; a seção 1 registra apenas os invariantes técnicos reaproveitáveis.
 10. **Canal de saída em português.** WhatsApp exige **Meta business verification (semanas)** + **template aprovado** — um resumo de texto livre não pode ser enviado fora da janela de 24h (erro 63016). SMS exige A2P 10DLC Standard Brand.
 11. **Memória operacional por empresa** (passos 2 e 7). Não existe onde persistir.
 
@@ -187,8 +195,8 @@ export interface VoiceSession {
 
 1. **`commitmentGate = 'pre_utterance'`.** Nenhuma frase que contenha compromisso (horário, preço, prazo) sai da boca do agente enquanto o estado não for `authorized`. O guardrail nativo de output roda sobre a transcrição de texto com `debounceTextLength` **default 100 caracteres** — ele corta *depois* que o áudio já foi falado. É rede de segurança e telemetria, **não** é o mecanismo do "Ele não inventa". O que sustenta o "Ele não inventa" é: tool-calling restrito + `tool input guardrails` (que rodam **antes** da execução da tool, e antes até do pedido de aprovação) + a máquina de estados.
 2. **`intent_settled` deriva de fronteira de tool call + confirmação explícita do caller — nunca de VAD.** Assim a máquina de estados não depende da arquitetura de turno do modelo.
-3. **Assimetria (roubada do `rails.py` do ALPACA, o melhor texto de arquitetura do seu disco):** `kill`, `hangup`, `transferTo` e "escalar para o dono" **nunca** são bloqueados pelas mesmas regras que bloqueiam criar compromisso novo. Desfazer sempre passa.
-4. **Receipt tri-estado (`delivery.ts` do BUZZ):** `accepted` só com decisão positiva **e** ID concreto; `failed` só com rejeição explícita; `unknown` em todo o resto — e **`unknown` nunca reenvia**, exige reconciliação humana. É isso que impede agendar o mesmo cliente duas vezes.
+3. **Assimetria de segurança:** `kill`, `hangup`, `transferTo` e "escalar para o dono" **nunca** são bloqueados pelas mesmas regras que bloqueiam criar compromisso novo. Desfazer sempre passa.
+4. **Receipt tri-estado:** `accepted` só com decisão positiva **e** ID concreto; `failed` só com rejeição explícita; `unknown` em todo o resto — e **`unknown` nunca reenvia**, exige reconciliação humana. É isso que impede agendar o mesmo cliente duas vezes.
 
 ### Dados
 
@@ -295,7 +303,7 @@ A variável que decide a margem não é escolher `mini` vs `2.1` (fator ~3×). �
 **Correção 17/08 — RJ apontou, o site confirma.** A primeira versão deste documento errou aqui em dois pontos, e os dois estão retirados:
 
 1. **O onboarding é o próprio agente — é o diferencial anunciado na landing.** O site no ar diz: *"Em uma conversa curta, ele te entrevista em português e cria a primeira versão do atendimento"* (`src/runtime/ligou-app9.jsx:430`). Ativar um cliente custa a ligação de entrevista (~30–60 min de agente em PT-BR ≈ $1–3 no piso) + número local ($1.15/mês) + chamadas de teste. **A ativação isenta custa dólares, não dias.** A consequência do erro é de engenharia, não de margem: o agente entrevistador outbound em PT-BR faz parte do MVP (Fase 2b) — sem ele, a promessa central da página é falsa.
-2. **Despesas de outros projetos não entram na economia unitária do Ligou.** Assinaturas de IA e SportMonks/Betano são portfólio pessoal, não COGS deste produto. Fora da conta.
+2. **Despesas de outros projetos não entram na economia unitária do Ligou.** Custos externos ao produto ficam fora do COGS.
 3. **400 min/mês são ~100 chamadas de 4 min, ou ~3,3 chamadas/dia.** Para um negócio de serviços residenciais funcionando, isso é *baixo*. O excedente provavelmente vira a norma, não a exceção — o que é **bom** se a margem de $0.35/min se confirmar, e **ruim** se o cliente sentir que o preço anunciado não é o preço real. Isso é decisão de produto, não de custo.
 
 **Onde quebra:** não em minutos nem em onboarding. Os dois riscos reais que sobram: **(a) falha silenciosa de redirecionamento** — o telefone do cliente toca, ninguém atende, nenhum log; **(b) custo real por minuto nunca medido** (higiene de cache, fator 6×). Os dois já têm resposta no plano: health check diário (Fase 5) e as 10 chamadas medidas (Fase 2).
@@ -304,14 +312,13 @@ A variável que decide a margem não é escolher `mini` vs `2.1` (fator ~3×). �
 
 ## 6. Plano em fases
 
-### Fase 0 — Parar de perder o que já existe (3 dias, antes de qualquer código)
+### Fase 0 — Preservar o que já existe (antes de qualquer código)
 
-- `git push origin codex/ligou-dashboard` (5.565 linhas existem em **um** disco)
-- Dar remote ao checkout de publicação separado (15 commits, único caminho de publicação, **zero backup**)
-- Decidir e executar sobre `shellhouse-site/control-plane` — 66.400 linhas de TS com 507 testes verdes, **inteiramente untracked** (`git status` → `?? control-plane/`). Um `git clean -fdx` apaga o ativo técnico mais valioso do disco
-- Corrigir `docs/HANDOFF-NEXT-SESSION.md`, factualmente errado em dois pontos que ele declara como verdade operacional
+- Preservar refs, checkouts e artefatos de publicação não publicados em arquivo privado.
+- Verificar backups Git sem divulgar a topologia local ou o inventário de outros projetos.
+- Corrigir `docs/HANDOFF-NEXT-SESSION.md` onde ele promove hipótese a verdade operacional.
 
-**Critério de saída:** `git ls-remote` mostra as três refs no GitHub; `git status` do shellhouse limpo.
+**Critério de saída:** evidência privada de backup verificável e árvore do Ligou conhecida.
 
 ### Fase 1 — Abrir os gates de vetting (semana 1, em paralelo, zero código)
 
@@ -343,7 +350,7 @@ Twilio ESIPT → OpenAI SIP → nosso processo de controle. Aviso verbatim. Mem�
 1. Teste pgTAP em CI provando que leitura cross-tenant retorna **zero linhas**, com o app na role não-owner.
 2. Teste provando que nenhum fragmento de memória do tenant B entra no prompt montado do tenant A (gate de contexto, não RLS).
 3. Lint que proíbe `set_config(..., false)` — brecha de um caractere que vaza tenant em pooler modo transaction e que **não se pega em code review humano**.
-4. Kill switch por tenant **e** global, durável em banco (modelo do Betano, não do ALPACA — o do ALPACA é in-process e se desarma sozinho no próximo deploy).
+4. Kill switch por tenant **e** global, durável em banco; um bloqueio apenas in-process não sobrevive ao próximo deploy.
 
 ### Fase 4 — Evals e CI (semanas 6–9, paralelo)
 
@@ -397,13 +404,13 @@ Segunda operadora (Telnyx) com runbook de failover **escrito antes do incidente*
 - Estabilidade de API do `ScriptedRealtimeTransport` (existe no artefato, sem doc em prosa).
 - Se o tracing/Langfuse cobre spans de sessão Realtime com a mesma fidelidade que texto.
 - O que a promptfoo faz com o texto enviado para geração remota de áudio (retenção, logging, região). Página silenciosa.
-- Ociosidade real dos VPS. "Existe host" ≠ "tem folga para áudio em tempo real".
+- Capacidade efetiva dos hosts candidatos. "Existe host" ≠ "tem folga para áudio em tempo real".
 - Se `origin/main` do Ligou reflete a mesma copy de preço da linhagem ancestral — as duas divergem.
-- **Nota metodológica que vale mais que qualquer item acima:** durante esta pesquisa, buscas retornaram vazio para `ScriptedRealtimeTransport`, `realtime_fallback_adapter.py`, `livekit-durable` e o waitlist do GPT-Live. **Os quatro existem.** O comando `timeout` não existe neste Mac e anulou silenciosamente varreduras inteiras; `rg -E` significa `--encoding`, não regex estendida. Resultado vazio nunca vira afirmação — **em nenhuma direção.**
+- **Nota metodológica que vale mais que qualquer item acima:** buscas iniciais retornaram vazio para artefatos que depois foram confirmados. Um resultado vazio só vale após validar a ferramenta, o escopo e o código de saída — nunca vira afirmação por si só.
 
 ---
 
-## 8. Decisões — tomadas com o que o site e o disco já respondem
+## 8. Decisões — tomadas com o que o site e o inventário técnico respondem
 
 *(A primeira versão desta seção fazia 12 perguntas. RJ apontou, com razão, que a maioria já estava respondida no próprio site. Ficaram decisões, com o default aplicado — me corrija se alguma estiver errada.)*
 
@@ -411,9 +418,9 @@ Segunda operadora (Telnyx) com runbook de failover **escrito antes do incidente*
 
 2. **Onboarding:** feito pelo próprio agente, como a página anuncia — *"ele te entrevista em português e cria a primeira versão do atendimento"*. Entrevistador PT-BR outbound entra no MVP (Fase 2b). Custo marginal de ativação: dólares, não dias.
 
-3. **Lista de ações de risco:** nasce da entrevista de onboarding. Os cinco tópicos que a página promete — serviços, cidades, preços autorizados, agenda, emergências — são as categorias; template default meu, personalizado por tenant na entrevista. Não copiar o classificador de shell do Methylia.
+3. **Lista de ações de risco:** nasce da entrevista de onboarding. Os cinco tópicos que a página promete — serviços, cidades, preços autorizados, agenda, emergências — são as categorias; template default meu, personalizado por tenant na entrevista. Não copiar classificadores de risco de outro domínio.
 
-4. **Conta Twilio:** subconta separada da do Brasas desde o dia 1. Compliance do Ligou nunca pode encostar no número que sustenta a renda primária.
+4. **Conta Twilio:** subconta dedicada ao Ligou desde o dia 1. Compliance e numeração não podem compartilhar fronteiras com outra operação.
 
 5. **Canal do resumo:** WhatsApp principal, SMS A2P fallback; os dois relógios de vetting abrem na semana 1 em paralelo.
 
@@ -425,7 +432,7 @@ Segunda operadora (Telnyx) com runbook de failover **escrito antes do incidente*
 
 9. **Publicação:** a landing só vai ao ar com número atendendo — regra que já era sua nos docs ("gates absolutos"). Nota de engenharia: o v9 perdeu o `SITE_CONFIG.demoPhoneHref` da linhagem anterior; religar um número real hoje exige editar JSX e rebuildar — restaurar esse contrato entra na Fase 2.
 
-10. **Fase 0 (backups):** executa sem cerimônia — push do dashboard, remote no Ligou.AI-Sites, resolver o `control-plane` untracked do shellhouse. Sobre proveniência: extrair **padrões** (máquina de estados, receipts, deny-by-default) para pacote limpo do Ligou; não importar serviços inteiros nem arrastar código de fork com upstream Apache-2.0 para dentro de produto pago.
+10. **Fase 0 (backups):** preservar refs, artefatos e checkouts não publicados em arquivo privado. Sobre proveniência: extrair **padrões** (máquina de estados, receipts, deny-by-default) para pacote limpo do Ligou; não importar serviços inteiros nem arrastar código de fork com upstream Apache-2.0 para dentro de produto pago.
 
 ---
 

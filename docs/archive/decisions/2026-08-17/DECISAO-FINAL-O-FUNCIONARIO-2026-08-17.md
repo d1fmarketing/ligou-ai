@@ -45,15 +45,15 @@ Do `.impeccable.md` e do site no ar:
               AUTHORITY PLANE (nosso — o fosso)
      prepared → pending_approval → authorized → committed → verified
                           │
-              SUPABASE (já pago): Postgres + RLS + auth
+              SUPABASE: Postgres + RLS + auth
               memória por tenant · regras · receipts · kill switch
 ```
 
 **Invariantes — valem mais que qualquer linha de código:**
 
 1. **Commitment gate em dois caminhos:** dentro de regra aprovada → o authority engine autoriza automaticamente via `needsApproval` (milissegundos) e o agente executa e fala. Fora de regra → **nunca** segura o cliente na linha: fala determinística ("a equipe confirma"), caso pendente criado, decisão do dono assíncrona — e a resposta aprovada vira regra para a próxima situação equivalente. Nenhuma frase com compromisso sai antes de `authorized`, e nenhum cliente espera por causa disso.
-2. **Assimetria (padrão do `rails.py` do ALPACA):** `kill`, desligar, transferir e escalar para o dono **nunca** são bloqueados pelos gates que bloqueiam criar compromisso. Desfazer sempre passa.
-3. **Receipt tri-estado (padrão do `delivery.ts` do BUZZ, 82 linhas, copiar literal):** `accepted` só com decisão positiva + ID concreto; `failed` só com rejeição explícita; `unknown` em todo o resto — e `unknown` **nunca reenvia**, exige reconciliação. É o que impede agendar o mesmo cliente duas vezes.
+2. **Assimetria de segurança:** `kill`, desligar, transferir e escalar para o dono **nunca** são bloqueados pelos gates que bloqueiam criar compromisso. Desfazer sempre passa.
+3. **Receipt tri-estado:** `accepted` só com decisão positiva + ID concreto; `failed` só com rejeição explícita; `unknown` em todo o resto — e `unknown` **nunca reenvia**, exige reconciliação. É o que impede agendar o mesmo cliente duas vezes.
 4. **Memória só promove pós-aprovação.** E RLS protege o banco, **não o prompt**: a montagem de contexto tem gate próprio com teste próprio — nenhum fragmento do tenant B entra no prompt do tenant A.
 5. **Capabilities negociadas, não assumidas:** o adaptador de voz expõe o que o modelo do momento sabe fazer (truncar fala? dono do turno?). É o hedge contra o GPT‑Live sem escrever contra um protocolo imaginado.
 
@@ -67,8 +67,8 @@ Do `.impeccable.md` e do site no ar:
 |---|---|---|
 | `openai-agents-js` (MIT) | runtime do agente: voz + texto + MCP + aprovação nativa | `needsApproval`/`approve()` no código-fonte; `MCPServers` nas docs; exemplo oficial `realtime-twilio-sip` |
 | `gpt-realtime-2.1-mini` (padrão) / `2.1` (escalonamento) | modelo de voz | preços por token verificados dígito a dígito, fonte oficial |
-| Twilio — **subconta Ligou separada do Brasas** | SIP inbound/outbound, WhatsApp, A2P fallback | conta existente é do Brasas (renda primária) — nunca compartilhar compliance |
-| Supabase (já pago) | Postgres + RLS + auth + storage | inventário; a disciplina RLS (FORCE, role não-owner, `set_config(...,true)`) é nossa de configurar |
+| Twilio — **subconta dedicada ao Ligou** | SIP inbound/outbound, WhatsApp, A2P fallback | nunca compartilhar fronteira de compliance ou numeração com outra operação |
+| Supabase | Postgres + RLS + auth + storage | a disciplina RLS (FORCE, role não-owner, `set_config(...,true)`) é nossa de configurar |
 | Drizzle ORM | schema tipado + `pgPolicy`/RLS | verificado no pacote |
 | `ScriptedRealtimeTransport` | testes offline do agente, custo zero por execução | confirmado no tarball npm |
 | `openai-cookbook/realtime_evals` | replay determinístico G.711 μ-law 8 kHz | confirmado em código; portar para `2.1` (default do repo é legacy) |
@@ -124,9 +124,10 @@ Onboarding: a entrevista custa ~$1–3 de voz + $1.15/mês de número. Ativaçã
 
 ## 6. Fases — cada uma com saída verificável
 
-**Fase 0 — hoje, antes de código (parar de perder o que existe):**
-`git push origin codex/ligou-dashboard` (5.565 linhas em um disco só) · dar remote ao `Ligou.AI-Sites` (15 commits, caminho de publicação, zero backup) · resolver `shellhouse-site/control-plane` untracked (66.400 linhas fora do git) · criar subconta Twilio Ligou.
-*Saída:* `git ls-remote` mostra as refs; subconta existe.
+**Fase 0 — hoje, antes de código (preservar o que existe):**
+preservar refs, checkouts e artefatos não publicados em arquivo privado; verificar os
+backups Git do Ligou; preparar uma subconta dedicada de telefonia.
+*Saída:* evidência privada de backup verificável e fronteira dedicada para o Ligou.
 
 **Fase 1 — semana 1, paralelo, zero código (relógios que correm sem nós):**
 Twilio Business PCP (sem ele: 2 chamadas simultâneas no total) · A2P 10DLC Standard Brand da Ligou ($46+$15+$10/mês, um só) · Meta business verification + template WhatsApp ("several weeks", palavra da Twilio).
@@ -157,8 +158,8 @@ App web do dono (protótipo do dashboard religado ao Supabase real, com login) �
 |---|---|---|
 | Landing v9 (`origin/main = 161e8e8`) | produção, 29 testes, build determinístico, verificador de hashes | continua; ligar número real quando existir (o v9 perdeu o `SITE_CONFIG` — restaurar o contrato na Fase 2d) |
 | Dashboard protótipo (5.565 linhas) | localStorage, sem backend | vira o app web do dono na Fase 5; o `model.js` (aprovação "só este caso" vs "virar regra", versionamento, revogação) é o melhor vocabulário escrito do passo 7 |
-| `delivery.ts` (BUZZ), `schema.ts`/`consumeApproval` (Methylia), `memory-ledger.ts` (shellhouse) | prontos em outros repos | **padrões**, extraídos limpos — não importar serviços nem arrastar código de fork |
-| Contas e credenciais de provedores | inventário restrito; estado comercial verificado na época | não reproduzir nesta branch de organização |
+| Receipts tri-estado, aprovação de uso único e ledger de memória/autorização | proveniência técnica restrita | **padrões**, extraídos limpos — não importar serviços nem arrastar código de fork |
+| Inventário de provedores | dossiê privado | não reproduzir contas, credenciais ou estado comercial nesta branch de organização |
 
 ---
 

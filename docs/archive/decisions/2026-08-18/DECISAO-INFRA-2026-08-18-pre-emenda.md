@@ -4,14 +4,14 @@
 > **“CANÔNICO”** no texto-fonte abaixo descreve seu estado histórico e não é a
 > decisão vigente. Consulte o documento emendado atual em
 > [`docs/DECISAO-INFRA-2026-08-18.md`](../../../DECISAO-INFRA-2026-08-18.md).
-> O texto-fonte original começa sem alteração após este banner.
+> O conteúdo histórico foi preservado abaixo com dados operacionais sanitizados.
 
 ---
 
 # LIGOU — Infraestrutura decidida
 
-**Data:** 18/08/2026 · **Status:** CANÔNICO após aprovação de RJ. Supersede `DECISAO-FINAL-O-FUNCIONARIO-2026-08-17.md` (parte de stack) e demove o pacote do Codex (worktree `ligou-architecture`) a **rulebook de segurança** — deixa de ser blueprint de plataforma.
-**Princípio (decisão de RJ, 2026-08-17/18):** produtizar o padrão Melora/Molusco/Betano. Frota de células de agente single-tenant. Não construir plataforma antes de vender o agente.
+**Data:** 18/08/2026 · **Status:** CANÔNICO após aprovação de RJ. Supersede `DECISAO-FINAL-O-FUNCIONARIO-2026-08-17.md` (parte de stack) e demove o pacote histórico de arquitetura a **rulebook de segurança** — deixa de ser blueprint de plataforma.
+**Princípio (decisão de RJ, 2026-08-17/18):** produtizar um padrão de células de agente single-tenant já validado internamente. Não construir plataforma antes de vender o agente.
 
 ---
 
@@ -19,14 +19,14 @@
 
 | Camada | Escolha | Custo (por cliente, 400 min) | Por quê |
 |---|---|---|---|
-| **Modelo** | Frota de células: 1 container de agente completo e isolado por empresa | — | Padrão já provado 3× (Molusco, Melora, Betano). "Cell per tenant, host per batch" |
+| **Modelo** | Frota de células: 1 container de agente completo e isolado por empresa | — | Padrão interno previamente validado. "Cell per tenant, host per batch" |
 | **Infra** | AWS **EC2** desde o dia 1. Piloto: 1× `t3.xlarge` (4 vCPU/16 GB, ~$120/mês) hospeda 3–5 células em Docker | ~$25–40 | Decisão de RJ. Isolamento por container+volume+usuário; EC2 dedicada só como tier premium futuro |
 | **Runtime da célula** | **Hermes Agent** como cérebro (decisão de RJ, 18/08) **+ VoiceEdge próprio** para o telefone (ver §2) | — | Self-improvement é o produto; Hermes não atende telefone nativamente, então a voz vive FORA da célula por arquitetura |
 | **Idiomas do atendimento** | **EN + ES desde o dia 1** (decisão de RJ) — o `gpt-realtime` é nativamente multilíngue; controle por instructions com language-lock, nunca por auto-detecção solta | ~$0 | Não é limitação técnica; era só escopo de eval herdado do Codex. Casos ES entram no conjunto de testes |
 | **Voz** | OpenAI **`gpt-realtime-2.1`** via SIP, atrás de adaptador trocável | ~$14–16 | GPT-Live-1 NÃO tem API (verificado 18/08); quando sair, é troca de motor, não de carro |
-| **Telefonia** | **Twilio** (SIP/Media Streams inbound) — **conta própria da Ligou a criar** (a conta existente é de outro projeto, só SMS) | ~$3.40 + $1.15/número | Decisão mantida por RJ mesmo sem conta ainda. Telnyx só se Twilio falhar no piloto |
+| **Telefonia** | **Twilio** (SIP/Media Streams inbound) — conta dedicada ao Ligou | ~$3.40 + $1.15/número | Isolamento de compliance e numeração; Telnyx só se Twilio falhar no piloto |
 | **Calendário** | Google Calendar: 1 secondary calendar por tenant sob usuário Workspace da Ligou (`scheduler@`), OAuth padrão, mapping server-side | ~$0 | Cliente NÃO precisa logar no Google pra começar. Modelo nunca vê `calendar_id` |
-| **Banco do manager** | **Supabase** (já pago): auth do dashboard, billing, lista de tenants, health, casos de aprovação | ~$0 (já pago) | Encerra a guerra Supabase×RDS: estado do AGENTE vive NA célula (SQLite+arquivos); Supabase é só a camada de gestão |
+| **Banco do manager** | **Supabase**: auth do dashboard, billing, lista de tenants, health, casos de aprovação | custo conforme contrato vigente | Encerra a guerra Supabase×RDS: estado do AGENTE vive NA célula (SQLite+arquivos); Supabase é só a camada de gestão |
 | **Estado do agente** | Dentro da célula: SQLite + workspace do runtime, em volume **EBS criptografado** | incluído | O agente É o produto; o estado dele não sai da fronteira do tenant |
 | **Backup** | Snapshot EBS diário + export da célula → **S3** por tenant (restaurável individualmente) | ~$1–2 | A EC2 pode morrer; o Ligou daquele cliente volta |
 | **Secrets** | AWS Secrets Manager, um namespace por tenant | ~$1 | Credencial de um cliente nunca montada na célula de outro |
@@ -40,7 +40,7 @@ Estes invariantes são inegociáveis, independente do runtime:
 
 1. **Nunca misturar tenants** — célula, volume, secrets, banco, telefone e calendário próprios. Zero montagem cruzada, zero docker socket na célula.
 2. **Modelo nunca vê ID/token bruto** — `calendar_id`, refresh tokens e SIDs vivem no manager; a célula recebe capabilities (`schedule_for_tenant`).
-3. **Receipt tri-estado** — `accepted` só com decisão positiva + ID concreto; `failed` só com rejeição explícita; `unknown` em todo o resto, e `unknown` NUNCA reenvia (copiar literal `delivery.ts` do BUZZ, 82 linhas).
+3. **Receipt tri-estado** — `accepted` só com decisão positiva + ID concreto; `failed` só com rejeição explícita; `unknown` em todo o resto, e `unknown` NUNCA reenvia.
 4. **Aprovação assíncrona** — fora de regra: fala determinístico ("a equipe confirma"), cria caso, nunca segura o cliente na linha. Dashboard é a ÚNICA autoridade; SMS/WhatsApp só notificam com deep link.
 5. **Exceção pontual ≠ regra permanente** — virar regra exige confirmação reforçada e versionamento.
 6. **Aprendizado ≠ autoridade** — self-improvement é feature (fatos, procedimentos, preferências); preço, policy, credencial, permissão e área NUNCA mudam por fala de caller nem por aprendizado automático.
@@ -57,7 +57,7 @@ Registro histórico da verificação (7 agentes, fonte primária, mesma data) �
 - **OpenClaw ENTREGA o canal nº1**: plugin first-party `@openclaw/voice-call` (in-tree), Twilio/Telnyx/Plivo, **inbound** com política (allowlist/pairing/open), realtime **full-duplex com provider OpenAI e Gemini Live bundled**, verificação de assinatura de webhook, `sessionScope per-call` recomendado na doc para "reception, booking, IVR" — o caso Ligou em uma frase. Sem rótulo experimental.
 - **Cell-per-tenant é a recomendação OFICIAL do OpenClaw** ("one cell per tenant"); no Hermes é só o que sobra de um multi-tenant estruturalmente quebrado (#34352 aberto sem resposta, #30585 perfis não isolados).
 - **O trunfo do Hermes (learning gates) está quebrado nas próprias issues**: `memory/skills.write_approval` com default FALSE, `/memory approve` falhando com workaround oficial de DESLIGAR o gate (#47941), não-admin desligando gate global (#55147), bypass por shell admitido em doc. O **Skill Workshop do OpenClaw** (agente propõe, humano aprova) é o encaixe mais literal do rulebook §1.6.
-- **Realidade operacional**: 100% da frota de RJ em produção é OpenClaw (Molusco, Melora, Betano vivo em VPS); OpenClaw 2026.7.1 instalado e ativo neste Mac; Hermes 0.15.1 dormante desde jun/2026. Existe `openclaw migrate hermes` (memórias+skills) — a porta não se fecha.
+- **Experiência operacional sanitizada**: runtimes de agente já haviam sido operados em ambientes isolados, o que sustentou o padrão de células. Inventário de frota, hosts, projetos e versões permanece no dossiê privado. A existência de caminhos de migração mantém a porta de fallback aberta.
 
 ### Condições vinculantes da escolha Hermes (riscos precificados)
 

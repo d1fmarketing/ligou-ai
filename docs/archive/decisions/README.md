@@ -10,5 +10,7 @@ o contexto de decisões anteriores, mas não substituem documentos canônicos na
   à emenda; o documento emendado em `docs/DECISAO-INFRA-2026-08-18.md` continua atual.
 
 Os dossiês brutos de evidência são restritos/privados e não são versionados nesta
-branch de organização. Este arquivo não reproduz caminhos locais, endereços de rede,
-inventário de credenciais nem outros detalhes operacionais sensíveis.
+branch de organização. Os resumos abaixo foram sanitizados: preservam decisões e
+invariantes, mas omitem topologia de filesystem, nomes e inventários de outros
+projetos, estado de contas/frota e detalhes de ativos locais não publicados. Esses
+dados permanecem somente no arquivo privado de evidência.

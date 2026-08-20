@@ -1,29 +1,30 @@
 # Mapa de branches — 20 de agosto de 2026
 
 Inventário das famílias locais/remotas que fundamentaram a consolidação V0.1.
-Nenhuma ref Git foi removida. `ancestral` é o primeiro pai do tip; nomes repetidos no
+Nenhuma ref Git foi removida. `base/proveniência` registra o primeiro pai quando
+isso é relevante ou, no caso de uma integração, suas fontes. Nomes repetidos no
 mesmo tip são aliases, não trabalho independente. A disposição descreve o papel da
 ref nesta consolidação, não uma autorização para apagar ou publicar nada.
 
 ## Âncora e tip ativo
 
 - **Base-fonte do MVP:** `8fb71b1`.
-- **Consolidação sanitizada:** a branch ativa é um único merge limpo cujos pais são
-  `8fb71b1` (MVP) e `db7d9c3` (QA/tipografia Claude). O tip é identificado
-  simbolicamente para não registrar um SHA autocontraditório dentro dele próprio.
+- **Âncora sanitizada:** `ee04ee4` é o merge limpo cujos pais são `8fb71b1` (MVP)
+  e `db7d9c3` (QA/tipografia Claude). Ela fixa a proveniência da consolidação sem
+  alcançar os blobs excluídos da história intermediária.
 - **Integração ativa:** `codex/ligou-v0.1` é identificada simbolicamente como a branch
-  atual e o commit que contém este documento. `git rev-parse codex/ligou-v0.1` é o
-  tip vivo; não se fixa aqui um SHA autocontraditório que ficará obsoleto ao próximo
-  commit da própria integração.
+  atual. `git rev-parse codex/ligou-v0.1` é o tip vivo e pode conter correções
+  exclusivamente documentais posteriores à âncora; não se fixa aqui um SHA que
+  ficará obsoleto ao próximo commit da própria integração.
 - **Exclusão explícita:** `codex/ligou-v0.1-hardening-wip@b69e5df` não integra esta
   consolidação e não é candidato a merge nesta rodada.
 - **História intermediária preservada:** `codex/ligou-v0.1-organized-history-wip`
   guarda localmente os commits de curadoria anteriores à reconstrução sanitizada.
   Ela contém blobs removidos e não pode ser publicada nem mergeada.
 
-| Família / refs | Tip | Ancestral | Conteúdo único no tip | Disposição |
+| Família / refs | Tip | Base/proveniência | Conteúdo único no tip | Disposição |
 | --- | --- | --- | --- | --- |
-| V0.1: `codex/ligou-v0.1` | tip vivo: `git rev-parse codex/ligou-v0.1` | primeiro pai `8fb71b1`; segunda fonte `db7d9c3` | integração ativa da landing + dashboard unificados e da consolidação | branch atual; preservar e avançar por commits |
+| V0.1: `codex/ligou-v0.1` | tip vivo: `git rev-parse codex/ligou-v0.1` | âncora `ee04ee4`, pais `8fb71b1` e `db7d9c3` | integração ativa da landing + dashboard unificados e da consolidação | branch atual; preservar e avançar por commits documentais até a decisão de merge |
 | MVP: `codex/ligou-mvp`, `origin/codex/ligou-mvp` | `8fb71b1` | `4bd563a4` | mesmo MVP unificado | preservar como alias da base |
 | V9 local: `main` | `08dd9bbf` | anterior a `161e8e8` | estado local anterior à cobertura mais recente | preservar como histórico local; não confundir com `origin/main` |
 | V9 remoto: `origin/main`, `origin/HEAD`, `origin/codex/frontend-test-coverage`, `codex/frontend-test-coverage`, `codex/ligou-architecture` | `161e8e8` | `08dd9bbf` | cobertura do frontend v9 | histórico de origem, já integrado ao MVP |

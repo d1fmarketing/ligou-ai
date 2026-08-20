@@ -1,6 +1,6 @@
 # QA v9.4 — 20 de agosto de 2026
 
-**Commit auditado:** `161e8e8` (`test: cover v9 frontend behavior`, head de `main`)
+**Commit auditado:** `161e8e8` (`test: cover v9 frontend behavior`, head de `origin/main`)
 **Ambiente:** Chromium headless 1194 via Playwright, contra `dev-server.mjs` local
 (`http://127.0.0.1:4174/`). Sessão remota Claude Code; não é o Browser interno do Mac.
 **Escopo provado:** apresentação do frontend local. Este QA **não** prova telefonia,

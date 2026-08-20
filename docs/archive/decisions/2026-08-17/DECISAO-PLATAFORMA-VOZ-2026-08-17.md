@@ -32,7 +32,7 @@ Vapi é a única finalista com os 4 claims load-bearing confirmados em fonte pri
 
 Nenhum veredito adversarial derrubou finalista — os três saíram "viable". A ordem se manteve pelo critério dominante: Vapi (11/12 confirmados, turnkey), ElevenLabs (11/12, mas treina nos dados por padrão no self-serve e sem caminho Realtime), Twilio ConversationRelay (mais barato e menor lock-in, mas exige construir o loop LLM — mais que "só o authority plane", e o esforço "em dias" ficou **unproven**). Retell foi eliminada por falha confirmada: não existe desligar gravação de áudio mantendo transcrição.
 
-**Twilio ConversationRelay é o fallback estrutural** se os gates da semana 1 da Vapi falharem (ver seção 7) — já temos a conta, e o custo é o menor da mesa.
+**Twilio ConversationRelay é o fallback estrutural** se os gates da semana 1 da Vapi falharem (ver seção 7); na comparação histórica, apresentava o menor custo da mesa.
 
 ---
 
@@ -72,7 +72,7 @@ A Vapi cobre, com fonte primária confirmada:
 
 ## 4. O que construímos
 
-**Só o authority plane** — um webhook em Vercel/Cloudflare + Supabase (tudo já pago):
+**Só o authority plane** — um webhook em Vercel/Cloudflare + Supabase:
 
 1. **Regras por tenant** — Supabase guarda as regras aprovadas pelo dono (horários, preços, o que pode agendar)
 2. **Aprovar/negar síncrono** — toda ação sensível (agendar, falar preço) chega como tool call e só executa/fala com nossa resposta
