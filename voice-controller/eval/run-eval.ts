@@ -27,7 +27,10 @@ async function runScenario(model: string, sc: Scenario) {
   const { data: call } = await supa().from("calls")
     .insert({ tenant_id: tenant.id, channel: "eval", session_type: "customer", model, status: "active" })
     .select("id").single();
-  const cap = makeCapability(tenant.slug, tenant.id, call!.id, 15);
+  const cap = makeCapability(tenant.slug, tenant.id, call!.id, 15, "customer", {
+    authEpoch: tenant.auth_epoch,
+    policyEpoch: tenant.policy_epoch,
+  });
   const instructions = buildInstructions(tenant, rules, "customer");
 
   // Mint an ephemeral client secret (supported auth for newer realtime models over WS) — same path production uses.

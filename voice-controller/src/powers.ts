@@ -15,14 +15,71 @@ export interface PowerContext {
   amountUsd?: number;
   /** city / service area the action touches */
   geography?: string;
+  city?: string;
   channel?: string;
   purpose?: string;
-  /** evaluation instant — defaults to now; tests pass a fixed one */
+  /** current evaluation instant (expiry / communications) */
   at?: Date;
+  /** appointment instant for a future scheduled action */
+  appointmentAt?: Date;
   timezone?: string;
+  /** epoch carried by an already-issued capability */
+  expectedAuthEpoch?: number;
+  priorConsent?: boolean;
 }
 
-const DAY_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+export type PowerDay = "sun" | "mon" | "tue" | "wed" | "thu" | "fri" | "sat";
+
+export interface PowerConditions {
+  geography?: string[];
+  allowed_hours?: { days: PowerDay[]; start: string; end: string };
+  channel?: string[];
+  purpose?: string[];
+  frequency?: { max: number; per_days: number };
+  max_body_chars?: number;
+  quiet_hours_respect?: boolean;
+  requires_prior_consent?: boolean;
+}
+
+const DAY_KEYS: PowerDay[] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const HHMM = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+const stringList = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim().length > 0);
+
+export function normalizeGeography(value: string): string {
+  return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim().replace(/\s+/g, " ");
+}
+
+function parseConditions(value: unknown): PowerConditions | null {
+  if (!isRecord(value)) return null;
+  const allowedKeys = new Set([
+    "geography", "allowed_hours", "channel", "purpose", "frequency", "max_body_chars",
+    "quiet_hours_respect", "requires_prior_consent",
+  ]);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) return null;
+  if (value.geography !== undefined && !stringList(value.geography)) return null;
+  if (value.channel !== undefined && !stringList(value.channel)) return null;
+  if (value.purpose !== undefined && !stringList(value.purpose)) return null;
+  if (value.allowed_hours !== undefined) {
+    if (!isRecord(value.allowed_hours)) return null;
+    const { days, start, end } = value.allowed_hours;
+    if (!Array.isArray(days) || !days.length || !days.every((day) => DAY_KEYS.includes(day as PowerDay))) return null;
+    if (typeof start !== "string" || typeof end !== "string" || !HHMM.test(start) || !HHMM.test(end) || start >= end) return null;
+  }
+  if (value.frequency !== undefined) {
+    if (!isRecord(value.frequency)) return null;
+    const { max, per_days: perDays } = value.frequency;
+    if (!Number.isInteger(max) || Number(max) <= 0 || !Number.isInteger(perDays) || Number(perDays) <= 0) return null;
+  }
+  if (value.max_body_chars !== undefined && (!Number.isInteger(value.max_body_chars) || Number(value.max_body_chars) <= 0)) return null;
+  if (value.quiet_hours_respect !== undefined && typeof value.quiet_hours_respect !== "boolean") return null;
+  if (value.requires_prior_consent !== undefined && typeof value.requires_prior_consent !== "boolean") return null;
+  return value as PowerConditions;
+}
 
 /** Local wall-clock "HH:MM" and weekday key for a tenant timezone. */
 function localParts(at: Date, timezone: string): { hhmm: string; day: string } {
@@ -33,27 +90,46 @@ function localParts(at: Date, timezone: string): { hhmm: string; day: string } {
 
 /** Returns a denial reason when the grant's conditions do not allow this action, or null when they do. */
 export function conditionsDeny(conditions: any, ctx: PowerContext, timezone: string): string | null {
-  if (!conditions || typeof conditions !== "object") return null;
-  const at = ctx.at ?? new Date();
+  const parsed = parseConditions(conditions);
+  if (!parsed) return "malformed_conditions";
 
-  const hours = conditions.allowed_hours;
-  if (hours?.start && hours?.end) {
-    const { hhmm, day } = localParts(at, ctx.timezone ?? timezone);
-    if (Array.isArray(hours.days) && hours.days.length && !hours.days.includes(day)) return "outside_allowed_days";
-    if (hhmm < String(hours.start) || hhmm >= String(hours.end)) return "outside_allowed_hours";
+  const hours = parsed.allowed_hours;
+  if (hours) {
+    const at = ctx.appointmentAt ?? ctx.at ?? new Date();
+    if (!(at instanceof Date) || Number.isNaN(at.getTime())) return "appointment_time_invalid";
+    let local;
+    try { local = localParts(at, ctx.timezone ?? timezone); }
+    catch { return "timezone_invalid"; }
+    if (!hours.days.includes(local.day as PowerDay)) return "outside_allowed_days";
+    if (local.hhmm < hours.start || local.hhmm >= hours.end) return "outside_allowed_hours";
   }
 
-  const geo = conditions.geography;
-  if (Array.isArray(geo) && geo.length && ctx.geography) {
-    const wanted = ctx.geography.toLowerCase().trim();
-    if (!geo.some((g: string) => String(g).toLowerCase().trim() === wanted)) return "outside_allowed_geography";
+  const geo = parsed.geography;
+  if (geo?.length) {
+    const contextGeography = ctx.geography ?? ctx.city;
+    if (!contextGeography?.trim()) return "geography_required";
+    const wanted = normalizeGeography(contextGeography);
+    if (!geo.some((value) => normalizeGeography(value) === wanted)) return "outside_allowed_geography";
   }
 
-  const ch = conditions.channel;
-  if (Array.isArray(ch) && ch.length && ctx.channel && !ch.includes(ctx.channel)) return "channel_not_granted";
+  const channel = parsed.channel;
+  if (channel?.length) {
+    if (!ctx.channel?.trim()) return "channel_required";
+    const wanted = ctx.channel.toLowerCase().trim();
+    if (!channel.some((value) => value.toLowerCase().trim() === wanted)) return "channel_not_granted";
+  }
 
-  const pu = conditions.purpose;
-  if (Array.isArray(pu) && pu.length && ctx.purpose && !pu.includes(ctx.purpose)) return "purpose_not_granted";
+  const purpose = parsed.purpose;
+  if (purpose?.length) {
+    if (!ctx.purpose?.trim()) return "purpose_required";
+    const wanted = ctx.purpose.toLowerCase().trim();
+    if (!purpose.some((value) => value.toLowerCase().trim() === wanted)) return "purpose_not_granted";
+  }
+
+  if (parsed.requires_prior_consent) {
+    if (ctx.priorConsent === undefined) return "prior_consent_required";
+    if (!ctx.priorConsent) return "prior_consent_not_granted";
+  }
 
   return null;
 }
@@ -66,8 +142,15 @@ export async function checkPower(
   amountOrCtx?: number | PowerContext
 ): Promise<PowerCheck> {
   const ctx: PowerContext = typeof amountOrCtx === "number" ? { amountUsd: amountOrCtx } : (amountOrCtx ?? {});
-  const { data: tenant } = await supa().from("tenants").select("auth_epoch,timezone").eq("id", tenantId).single();
+  const { data: tenant, error: tenantError } = await supa().from("tenants").select("auth_epoch,timezone").eq("id", tenantId).single();
+  if (tenantError || !tenant || !Number.isInteger(tenant.auth_epoch)) {
+    return { granted: false, reason: `tenant_authority_lookup_failed: ${tenantError?.message ?? "invalid_epoch"}` };
+  }
   const tz = ctx.timezone ?? tenant?.timezone ?? "America/Los_Angeles";
+  const authEpoch = Number(tenant?.auth_epoch);
+  if (ctx.expectedAuthEpoch != null && ctx.expectedAuthEpoch !== authEpoch) {
+    return { granted: false, reason: "authorization_epoch_stale", authEpoch };
+  }
   const { data: powers, error } = await supa()
     .from("powers")
     .select("id,resource,monetary_limit,expires_at,conditions")
@@ -83,13 +166,14 @@ export async function checkPower(
     if (p.resource !== "*" && p.resource !== resource) continue;
     if (p.expires_at && new Date(p.expires_at).getTime() < now) { lastReason = "grant_expired"; continue; }
     if (ctx.amountUsd != null && p.monetary_limit != null && ctx.amountUsd > Number(p.monetary_limit)) {
-      return { granted: false, powerId: p.id, reason: "monetary_limit_exceeded", authEpoch: tenant?.auth_epoch };
+      lastReason = "monetary_limit_exceeded";
+      continue;
     }
     const denied = conditionsDeny(p.conditions, ctx, tz);
     if (denied) { lastReason = denied; continue; } // another grant may still allow it
-    return { granted: true, powerId: p.id, authEpoch: tenant?.auth_epoch };
+    return { granted: true, powerId: p.id, authEpoch };
   }
-  return { granted: false, reason: lastReason, authEpoch: tenant?.auth_epoch };
+  return { granted: false, reason: lastReason, authEpoch };
 }
 
 // ---------------------------------------------------------------- communication gate (plan v4 §12)
@@ -115,12 +199,13 @@ export interface CommGateResult {
  *  frequency cap + content limits. Denials are logged as blocked so the owner can see what was withheld. */
 export async function checkCommunication(args: {
   tenantId: string; contact: string; channel: string; purpose: string; body: string;
-  at?: Date; timezone?: string;
+  at?: Date; timezone?: string; priorConsent?: boolean;
 }): Promise<CommGateResult> {
   const hash = contactHash(args.contact);
 
   const power = await checkPower(args.tenantId, "hermes", "follow_up_message", args.channel, {
     channel: args.channel, purpose: args.purpose, at: args.at, timezone: args.timezone,
+    priorConsent: args.priorConsent,
   });
   if (!power.granted) return { allowed: false, reason: power.reason === "outside_allowed_hours" ? "outside_allowed_hours" : (power.reason ?? "no_grant") };
 

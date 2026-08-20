@@ -45,7 +45,10 @@ try {
   if (error || !tenant) throw new Error(`seed_failed: ${error?.message}`);
 
   const { data: call } = await s.from("calls").insert({ tenant_id: tenant.id, channel: "onboarding", session_type: "onboarding", model: config.model, status: "active" }).select("id").single();
-  const cap = makeCapability(SLUG, tenant.id, call!.id, 30, "onboarding");
+  const cap = makeCapability(SLUG, tenant.id, call!.id, 30, "onboarding", {
+    authEpoch: tenant.auth_epoch,
+    policyEpoch: tenant.policy_epoch,
+  });
   const instructions = buildInstructions(tenant as any, [], "onboarding");
 
   const secretRes = await fetch("https://api.openai.com/v1/realtime/client_secrets", {

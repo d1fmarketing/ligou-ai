@@ -41,12 +41,31 @@ describe("conditionsDeny (grant conditions are real, not decoration)", () => {
   test("empty conditions never block", () => {
     expect(conditionsDeny({}, { at: THU_3AM }, TZ)).toBeNull();
   });
+  test("malformed conditions fail closed", () => {
+    expect(conditionsDeny(null, { at: THU_10AM }, TZ)).toBe("malformed_conditions");
+    expect(conditionsDeny({ allowed_hours: { days: "mon-sat", open: "08:00", close: "18:00" } }, { at: THU_10AM }, TZ)).toBe("malformed_conditions");
+    expect(conditionsDeny({ unrecognized_constraint: true }, { at: THU_10AM }, TZ)).toBe("malformed_conditions");
+  });
+  test("configured fields require their matching authority context", () => {
+    expect(conditionsDeny({ geography: ["Irvine"] }, {}, TZ)).toBe("geography_required");
+    expect(conditionsDeny({ channel: ["voice"] }, {}, TZ)).toBe("channel_required");
+    expect(conditionsDeny({ purpose: ["booking"] }, {}, TZ)).toBe("purpose_required");
+  });
+  test("normalizes geography and evaluates the appointment instant", () => {
+    const conditions = {
+      geography: ["São Paulo"],
+      allowed_hours: { days: ["mon", "tue", "wed", "thu", "fri", "sat"], start: "08:00", end: "18:00" },
+    };
+    expect(conditionsDeny(conditions, { geography: "  SAO   PAULO ", appointmentAt: THU_10AM }, TZ)).toBeNull();
+    expect(conditionsDeny(conditions, { geography: "sao paulo", appointmentAt: SUN_10AM }, TZ)).toBe("outside_allowed_days");
+  });
 });
 
 // ---------------------------------------------------------------- mocked ledger
 let powersRows: any[] = [];
 let optOutRows: any[] = [];
 let sentRows: any[] = [];
+let tenantLookupFails = false;
 
 function mockSupabase() {
   return {
@@ -60,7 +79,9 @@ function mockSupabase() {
         limit: async () => ({ data: table === "contact_opt_outs" ? optOutRows : [], error: null }),
         single: async () =>
           table === "tenants"
-            ? { data: { auth_epoch: 1, timezone: TZ }, error: null }
+            ? tenantLookupFails
+              ? { data: null, error: { message: "tenant lookup failed" } }
+              : { data: { auth_epoch: 1, timezone: TZ }, error: null }
             : { data: powersRows[0] ?? null, error: null },
         then(res: any) { // awaited without a terminal method (powers / communications lookups)
           const data = table === "powers" ? powersRows : table === "communications" ? sentRows : [];
@@ -76,6 +97,7 @@ beforeEach(() => {
   powersRows = [{ id: "p-1", resource: "sms", monetary_limit: null, expires_at: null, conditions: BUSINESS_HOURS }];
   optOutRows = [];
   sentRows = [];
+  tenantLookupFails = false;
   _setClient(mockSupabase());
 });
 afterAll(() => _setClient(null));
@@ -90,10 +112,36 @@ describe("checkPower enforces conditions", () => {
     expect(r.granted).toBe(false);
     expect(r.reason).toBe("outside_allowed_hours");
   });
+  test("inspects every matching grant before denying on a monetary limit", async () => {
+    powersRows = [
+      { id: "p-low", resource: "sms", monetary_limit: 100, expires_at: null, conditions: BUSINESS_HOURS },
+      { id: "p-high", resource: "sms", monetary_limit: 500, expires_at: null, conditions: BUSINESS_HOURS },
+    ];
+    const r = await checkPower("t-1", "hermes", "follow_up_message", "sms", {
+      amountUsd: 250, at: THU_10AM, channel: "sms", purpose: "follow_up",
+    });
+    expect(r.granted).toBe(true);
+    expect(r.powerId).toBe("p-high");
+  });
+  test("rejects a capability issued under an older authorization epoch", async () => {
+    const r = await checkPower("t-1", "hermes", "follow_up_message", "sms", {
+      at: THU_10AM, channel: "sms", purpose: "follow_up", expectedAuthEpoch: 0,
+    });
+    expect(r.granted).toBe(false);
+    expect(r.reason).toBe("authorization_epoch_stale");
+  });
+  test("fails closed when the tenant epoch cannot be loaded", async () => {
+    tenantLookupFails = true;
+    const r = await checkPower("t-1", "hermes", "follow_up_message", "sms", {
+      at: THU_10AM, channel: "sms", purpose: "follow_up",
+    });
+    expect(r.granted).toBe(false);
+    expect(r.reason).toContain("tenant_authority_lookup_failed");
+  });
 });
 
 describe("checkCommunication (complete grant, plan v4 §12)", () => {
-  const base = { tenantId: "t-1", contact: "+1 949 555 0101", channel: "sms", purpose: "follow_up", body: "Hi! Following up on your drain cleaning quote." };
+  const base = { tenantId: "t-1", contact: "+1 949 555 0101", channel: "sms", purpose: "follow_up", body: "Hi! Following up on your drain cleaning quote.", priorConsent: true };
 
   test("allows a granted follow-up in business hours", async () => {
     const r = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
@@ -109,6 +157,13 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
     const r = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
     expect(r.allowed).toBe(false);
     expect(r.reason).toBe("opt_out");
+  });
+  test("fails closed when a consent-bound grant has no consent context", async () => {
+    powersRows = [{ ...powersRows[0], conditions: { ...BUSINESS_HOURS, requires_prior_consent: true } }];
+    const { priorConsent: _omitted, ...withoutConsent } = base;
+    const r = await checkCommunication({ ...withoutConsent, at: THU_10AM, timezone: TZ });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toBe("prior_consent_required");
   });
   test("respects the frequency cap (2 per 7 days)", async () => {
     sentRows = [{ id: "c-1" }, { id: "c-2" }];

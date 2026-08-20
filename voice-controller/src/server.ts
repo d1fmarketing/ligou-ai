@@ -55,7 +55,10 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
 
   const instructions = buildInstructions(tenant, rules, sessionType);
   const maxMinutes = sessionType === "onboarding" ? 30 : (tenant.session_max_minutes ?? config.sessionMaxMinutes);
-  const cap = makeCapability(tenant.slug, tenant.id, call.id, maxMinutes, sessionType);
+  const cap = makeCapability(tenant.slug, tenant.id, call.id, maxMinutes, sessionType, {
+    authEpoch: tenant.auth_epoch,
+    policyEpoch: tenant.policy_epoch,
+  });
 
   // Unified interface (official server flow): ONE multipart POST with the STANDARD key. No ephemeral ek_ —
   // we proxy the SDP ourselves, and calls created under an ek_ are invisible to the standard-key sideband
