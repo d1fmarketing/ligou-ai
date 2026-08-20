@@ -47,6 +47,7 @@ export async function handleIncoming(row: any) {
     .insert({
       tenant_id: tenant.id, channel: "phone", session_type: "customer", model, status: "active",
       openai_call_id: row.openai_call_id, provider_termination_state: "active", provider_termination_mode: "reject",
+      provider_usage_state: "unknown",
     })
     .select("id").single();
   try {
@@ -59,16 +60,18 @@ export async function handleIncoming(row: any) {
     return;
   }
 
-  const failStartup = async (reason: string, mode: "reject" | "hangup") => {
+  const failStartup = async (reason: string, mode: "reject" | "hangup", usageResolved: boolean) => {
     const terminalWrite = await supa().from("calls").update({
       status: "error", ended_at: new Date().toISOString(), duration_seconds: 0, cost_estimate_usd: 0,
       provider_termination_state: "active", provider_termination_mode: mode, provider_termination_reason: reason,
+      provider_usage_state: usageResolved ? "resolved" : "unknown",
     }).eq("id", call!.id);
     if (terminalWrite.error) return false;
     return await finalizeTerminalBudget({
       tenantId: tenant.id, callId: call!.id, actualCostUsd: 0, minutes: 0,
       outcome: "startup_error", detail: { reason },
       provider: { openaiCallId: row.openai_call_id, mode, reason },
+      usageResolved,
     });
   };
 
@@ -82,16 +85,18 @@ export async function handleIncoming(row: any) {
     });
   } catch (error) {
     await supa().from("phone_events").update({ status: "error" }).eq("id", row.id);
-    await failStartup("phone_accept_transport_unknown", "reject");
+    await failStartup("phone_accept_transport_unknown", "reject", false);
     throw error;
   }
   if (!accept.ok) {
     await supa().from("phone_events").update({ status: "error" }).eq("id", row.id);
-    await failStartup("phone_accept_failed", "reject");
+    await failStartup("phone_accept_failed", "reject", accept.status >= 400 && accept.status < 500);
     throw new Error(`accept_failed: ${accept.status} ${await accept.text()}`);
   }
   await supa().from("phone_events").update({ tenant_id: tenant.id, call_id: call!.id }).eq("id", row.id);
-  await supa().from("calls").update({ provider_termination_state: "active", provider_termination_mode: "hangup" }).eq("id", call!.id);
+  await supa().from("calls").update({
+    provider_termination_state: "active", provider_termination_mode: "hangup", provider_usage_state: "unknown",
+  }).eq("id", call!.id);
 
   const cap = makeCapability(tenant.slug, tenant.id, call!.id, tenant.session_max_minutes ?? config.sessionMaxMinutes, "customer", {
     authEpoch: tenant.auth_epoch,
@@ -100,7 +105,7 @@ export async function handleIncoming(row: any) {
   try {
     attachSideband(cap, row.openai_call_id, model);
   } catch (error) {
-    await failStartup("sideband_attach_failed", "hangup");
+    await failStartup("sideband_attach_failed", "hangup", false);
     throw error;
   }
 }

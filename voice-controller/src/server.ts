@@ -56,6 +56,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   const settleStartupFailure = async (
     reason: string,
     provider?: { openaiCallId: string | null; mode: "hangup" | "reject" },
+    usageResolved = true,
   ) => {
     const terminalWrite = await supa().from("calls").update({
       status: "error",
@@ -65,6 +66,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
       provider_termination_state: provider ? (provider.openaiCallId ? "active" : "unknown") : "not_required",
       provider_termination_mode: provider?.mode ?? null,
       provider_termination_reason: reason,
+      provider_usage_state: usageResolved ? (provider ? "resolved" : "not_applicable") : "unknown",
     }).eq("id", call.id);
     if (terminalWrite.error) return false;
     return await finalizeTerminalBudget({
@@ -75,6 +77,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
       outcome: "startup_error",
       detail: { reason },
       provider: provider ? { ...provider, reason } : undefined,
+      usageResolved,
     });
   };
 
@@ -123,6 +126,10 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
         break;
       }
       const candidateAnswerSdp = await callRes.text();
+      if (!candidateAnswerSdp.trim()) {
+        ambiguousProvider = { detail: `empty_sdp ${model}`, openaiCallId: candidateCallId };
+        break;
+      }
       answerSdp = candidateAnswerSdp;
       openaiCallId = candidateCallId;
       usedModel = model;
@@ -136,7 +143,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
     await settleStartupFailure("provider_outcome_unknown", {
       openaiCallId: ambiguousProvider.openaiCallId,
       mode: "hangup",
-    });
+    }, false);
     throw Object.assign(new Error("provider_outcome_unknown"), {
       status: 502,
       detail: ambiguousProvider.detail,
@@ -152,11 +159,12 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
     model: usedModel,
     provider_termination_state: "active",
     provider_termination_mode: "hangup",
+    provider_usage_state: "unknown",
   }).eq("id", call.id);
   try {
     attachSideband(cap, openaiCallId, usedModel);
   } catch (error) {
-    await settleStartupFailure("sideband_attach_failed", { openaiCallId, mode: "hangup" });
+    await settleStartupFailure("sideband_attach_failed", { openaiCallId, mode: "hangup" }, false);
     throw error;
   }
 

@@ -150,3 +150,18 @@ describe("durable provider settlement corrective migration contract", () => {
     }
   });
 });
+
+describe("ambiguous provider usage resolution migration contract", () => {
+  test("tracks usage separately from confirmed provider termination", () => {
+    const sql = migrationSql("ambiguous_provider_usage_resolution");
+    expect(sql).toContain("provider_usage_state");
+    expect(sql).toContain("'provider_usage_state', v_call.provider_usage_state");
+    expect(sql).toContain("'provider_terminated_at', v_call.provider_terminated_at");
+  });
+
+  test("replacement reconciliation claim remains service-role-only", () => {
+    const sql = migrationSql("ambiguous_provider_usage_resolution");
+    expect(sql).toContain("revoke all on function public.claim_budget_reconciliation(text) from public, anon, authenticated");
+    expect(sql).toContain("grant execute on function public.claim_budget_reconciliation(text) to service_role");
+  });
+});

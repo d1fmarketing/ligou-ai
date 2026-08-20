@@ -55,6 +55,7 @@ export async function finalizeTerminalBudget(args: {
   detail?: Record<string, unknown>;
   provider?: { openaiCallId: string | null; mode: ProviderTerminationMode; reason: string };
   fetchImpl?: FetchLike;
+  usageResolved?: boolean;
 }): Promise<boolean> {
   if (args.provider) {
     const termination = await terminateProviderCall({
@@ -68,6 +69,10 @@ export async function finalizeTerminalBudget(args: {
       await deferBudgetReconciliation(args.callId, termination.error ?? "provider_termination_unknown");
       return false;
     }
+  }
+  if (args.usageResolved === false) {
+    await deferBudgetReconciliation(args.callId, "provider_usage_unresolved");
+    return false;
   }
   try {
     await settleCallBudget(args);
@@ -86,6 +91,7 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
 
   const row = claim as any;
   const providerState = String(row.provider_termination_state ?? "not_required");
+  const providerUsageState = String(row.provider_usage_state ?? "not_applicable");
   const needsTermination = ["active", "pending", "unknown"].includes(providerState);
   const provider = needsTermination
     ? {
@@ -104,5 +110,6 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
     detail: { reconciled: true, reservation_id: row.reservation_id },
     provider,
     fetchImpl,
+    usageResolved: providerUsageState === "resolved" || providerUsageState === "not_applicable",
   }) ? 1 : 0;
 }
