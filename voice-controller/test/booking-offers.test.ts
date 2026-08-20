@@ -83,6 +83,7 @@ describe("booking proposals consume only server-issued offers", () => {
 
       expect(result.status).toBe("invalid_offer");
       expect(result.error).toBe(error);
+      expect(String(result.say)).not.toMatch(/\b(?:sms|text|message)\b/i);
     });
   }
 

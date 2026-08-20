@@ -12,6 +12,7 @@ const RULES = [{
   id: "rule-1", rule_group_id: "group-1", version: 1, category: "preco", escopo: "servico",
   text: "Drain cleaning", structured: { service_type: "drain_cleaning", price_min: 149, price_target: 225 },
 }];
+let activeRules = RULES;
 const POWERS = [{
   id: "power-1", resource: "drain_cleaning", monetary_limit: 225, expires_at: null,
   conditions: {
@@ -43,7 +44,7 @@ function client() {
           return { data: null, error: null };
         },
         then(resolve: (value: unknown) => unknown) {
-          const data = table === "effective_rules" ? RULES : table === "powers" ? POWERS : [];
+          const data = table === "effective_rules" ? activeRules : table === "powers" ? POWERS : [];
           return Promise.resolve({ data, error: null }).then(resolve);
         },
       };
@@ -66,6 +67,7 @@ beforeEach(() => {
   inserted = [];
   rpcCalls = [];
   authorizeError = null;
+  activeRules = RULES;
   invalidateTenant("rocha-plumbing");
   _setClient(client());
 });
@@ -107,5 +109,13 @@ describe("booking passes the complete power context", () => {
     expect(result.status).toBe("pending_approval");
     expect(rpcCalls.filter((call) => call.name === "authorize_booking_intent")).toHaveLength(1);
     expect(inserted.some((entry) => entry.table === "action_intents")).toBe(false);
+  });
+
+  test("close fails closed when the current rule has no private server floor", async () => {
+    activeRules = [{ ...RULES[0], structured: { service_type: "drain_cleaning", price_target: 225 } }];
+    invalidateTenant("rocha-plumbing");
+    const result = await closeDeal(capability(), { booking_id: "booking-1" });
+    expect(result.status).toBe("pending_approval");
+    expect(rpcCalls.some((call) => call.name === "authorize_booking_intent")).toBe(false);
   });
 });

@@ -6,6 +6,7 @@ import { consultHermes } from "./hermes.ts";
 import { calendarPort, overlapsBusy, zonedInstantIso, spokenLocal } from "./calendar.ts";
 import { checkPower, normalizeGeography } from "./powers.ts";
 import { issueQuote, issueSlotOffers, readQuote } from "./offers.ts";
+import { CUSTOMER_OUTCOME } from "./customer-language.ts";
 
 export interface Capability {
   actor: "CALLER";
@@ -128,7 +129,7 @@ export const toolSchemas = [
   {
     type: "function",
     name: "close_deal",
-    description: "Finalizes a proposed booking. ONLY if the result says status 'confirmed' may you tell the caller it is booked (repeat date, time, price). 'processing' means: say they'll receive a confirmation text shortly — never claim it is booked.",
+    description: "Finalizes a proposed booking. Only status confirmed authorizes booked language. Processing means the team is confirming and will contact the caller; never claim it is booked.",
     parameters: {
       type: "object",
       properties: {
@@ -146,7 +147,7 @@ export const toolSchemas = [
       properties: {
         topic: { type: "string", enum: ["servicos", "area", "precos", "agenda", "emergencia", "outro"] },
         rule_text: { type: "string", description: "the rule in clear operational language (English)" },
-        structured: { type: "object", description: "for prices: {service_type, price_min, price_target, duration_min}" },
+        structured: { type: "object", description: "structured service and pricing details captured during onboarding" },
         owner_words: { type: "string", description: "the owner's exact words (Portuguese), as evidence" },
       },
       required: ["topic", "rule_text"],
@@ -243,7 +244,10 @@ export async function runTool(cap: Capability, name: string, args: Record<string
         const svc = String(args.service_type ?? "").toLowerCase().trim();
         const offered = Number(args.offered_price ?? NaN);
         const match = priceRules(rules).find((s) => s.service_type === svc);
-        if (!match || !Number.isFinite(offered) || match.surcharge != null) return done({ status: "needs_owner" });
+        if (!match || !Number.isFinite(offered) || match.surcharge != null
+          || match.price_min == null || !Number.isFinite(Number(match.price_min))) {
+          return done({ status: "needs_owner" });
+        }
         const source = await readQuote({
           quoteId: String(args.quote_id ?? ""), tenantId: cap.tenantId, callId: cap.callId,
           serviceType: svc, policyEpoch: cap.policyEpoch,
@@ -254,7 +258,9 @@ export async function runTool(cap: Capability, name: string, args: Record<string
         const accepted = offered >= privateMinimum;
         const publicPrice = accepted
           ? Math.min(offered, target)
-          : Math.max(privateMinimum + 1, Math.ceil((privateMinimum + target) / 2));
+          : privateMinimum < target
+            ? Math.min(target, Math.max(privateMinimum + 1, Math.ceil((privateMinimum + target) / 2)))
+            : target;
         const issued = await issueQuote({
           tenantId: cap.tenantId, callId: cap.callId, serviceType: svc,
           publicQuote: publicPrice, ruleId: match.rule_id, policyEpoch: cap.policyEpoch,
@@ -265,6 +271,9 @@ export async function runTool(cap: Capability, name: string, args: Record<string
         const svc = String(args.service_type ?? "").toLowerCase().trim();
         const match = priceRules(rules).find((s) => s.service_type === svc);
         if (!match) return done({ status: "needs_owner", reason: "service_not_in_approved_list" });
+        if (match.price_min == null || !Number.isFinite(Number(match.price_min))) {
+          return done({ status: "needs_owner", reason: "pricing_policy_incomplete" });
+        }
         const geography = normalizeGeography(String(args.service_city ?? ""));
         if (!geography) return done({ status: "needs_owner", reason: "geography_required" });
         const quote = await readQuote({
@@ -305,7 +314,7 @@ export async function runTool(cap: Capability, name: string, args: Record<string
           return done({
             status: "unavailable",
             reason: "calendar_unreadable",
-            say: "Tell the caller you can't confirm the schedule right now, take their preferred time and contact, and let them know the team will confirm.",
+            say: CUSTOMER_OUTCOME.scheduleUnreadable,
           });
         }
         const freeCandidates = candidates.filter((c) => !overlapsBusy(c.start, c.end, intervals));
@@ -319,7 +328,7 @@ export async function runTool(cap: Capability, name: string, args: Record<string
           if (authorized.length === 3) break;
         }
         if (!authorized.length) {
-          return done({ status: "no_slots", timezone: tz, say: "Tell the caller nothing is open in the next few days and offer to have the team call with options." });
+          return done({ status: "no_slots", timezone: tz, say: CUSTOMER_OUTCOME.noSlots });
         }
         const slots = await issueSlotOffers({
           tenantId: cap.tenantId, callId: cap.callId, serviceType: svc, geography,
@@ -351,7 +360,7 @@ export async function runTool(cap: Capability, name: string, args: Record<string
           .select("id,status")
           .single();
         if (error) return done({ status: "unknown", say: "Tell the caller the team will get back to them shortly.", error: error.message }, false);
-        return done({ status: "pendente", case_id: data.id, say: "Tell the caller: the team will confirm shortly, you'll receive a text or call back." });
+        return done({ status: "pendente", case_id: data.id, say: CUSTOMER_OUTCOME.needsTeam });
       }
       case "propose_booking": {
         const { proposeBooking } = await import("./booking.ts");

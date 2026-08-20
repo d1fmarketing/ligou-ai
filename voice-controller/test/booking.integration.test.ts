@@ -6,7 +6,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 const HAVE_ENV = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY);
 const d = HAVE_ENV ? describe : describe.skip;
 
-let supa: any, proposeBooking: any, closeDeal: any, tickIntents: any, makeCapability: any;
+let supa: any, proposeBooking: any, closeDeal: any, tickIntents: any, makeCapability: any, runTool: any;
 let TENANT_ID = "";
 const SLUG = `test-tenant-${Date.now()}`;
 
@@ -17,7 +17,7 @@ beforeAll(async () => {
   ({ supa } = rules);
   ({ proposeBooking, closeDeal } = await import("../src/booking.ts"));
   ({ tickIntents } = await import("../src/worker.ts"));
-  ({ makeCapability } = await import("../src/tools.ts"));
+  ({ makeCapability, runTool } = await import("../src/tools.ts"));
 
   const { data: tenant, error } = await supa().from("tenants")
     .insert({ slug: SLUG, name: "Test Plumbing", vertical: "plumbing", status: "active" })
@@ -53,12 +53,35 @@ async function cap() {
   });
 }
 
+async function offeredBooking(c: any, publicPrice = 225) {
+  const quoted = await runTool(c, "quote_price", { service_type: "drain_cleaning" });
+  let quoteId = quoted.body.quote_id;
+  if (publicPrice !== 225) {
+    const evaluated = await runTool(c, "evaluate_offer", {
+      service_type: "drain_cleaning", offered_price: publicPrice, quote_id: quoteId,
+    });
+    expect(evaluated.body.status).toBe("accept");
+    quoteId = evaluated.body.quote_id;
+  }
+  const availability = await runTool(c, "check_availability", {
+    service_type: "drain_cleaning", service_city: "Irvine", quote_id: quoteId,
+  });
+  expect(availability.body.status).toBe("ok");
+  return proposeBooking(c, {
+    slot_token: availability.body.slots[0].slot_token,
+    client_name: "Integration Customer", contact: "+15555550100",
+  });
+}
+
 d("booking end-to-end (fake calendar)", () => {
   test("floor is enforced server-side: below-minimum close -> pending_approval case, never a calendar event", async () => {
     const c = await cap();
-    const prop = await proposeBooking(c, { service_type: "drain_cleaning", slot_start: "2026-08-25T10:00:00-07:00", price: 200, client_name: "Low Baller" });
+    const prop = await offeredBooking(c, 200);
     expect(prop.status).toBe("proposed");
-    const closed = await closeDeal(c, { booking_id: prop.booking_id, confirmed_price: 120 }); // below 149
+    // Simulate a compromised internal caller changing persisted price; close
+    // still reads current private policy and refuses before intent creation.
+    await supa().from("bookings").update({ price_agreed: 120 }).eq("id", prop.booking_id);
+    const closed = await closeDeal(c, { booking_id: prop.booking_id });
     expect(closed.status).toBe("pending_approval");
     expect(closed.say).toContain("team");
     const { data: events } = await supa().from("fake_calendar_events").select("id").eq("tenant_id", TENANT_ID);
@@ -67,10 +90,10 @@ d("booking end-to-end (fake calendar)", () => {
 
   test("within-band close -> intent -> worker -> accepted receipt with read-back -> booking confirmed", async () => {
     const c = await cap();
-    const prop = await proposeBooking(c, { service_type: "drain_cleaning", slot_start: "2026-08-26T10:00:00-07:00", price: 200, client_name: "Good Customer", contact: "+15555550100" });
+    const prop = await offeredBooking(c, 200);
     expect(prop.status).toBe("proposed");
 
-    const closing = closeDeal(c, { booking_id: prop.booking_id, confirmed_price: 200 });
+    const closing = closeDeal(c, { booking_id: prop.booking_id });
     // drive the worker while close_deal waits
     const driver = (async () => { for (let i = 0; i < 10; i++) { await tickIntents(); await new Promise((r) => setTimeout(r, 120)); } })();
     const closed = await closing; await driver;
@@ -90,9 +113,9 @@ d("booking end-to-end (fake calendar)", () => {
     // two full close cycles against a us-east-1 DB — generous timeout
 
     const c = await cap();
-    const prop = await proposeBooking(c, { service_type: "drain_cleaning", slot_start: "2026-08-27T14:00:00-07:00", price: 210 });
+    const prop = await offeredBooking(c, 210);
     const run = async () => {
-      const p = closeDeal(c, { booking_id: prop.booking_id, confirmed_price: 210 });
+      const p = closeDeal(c, { booking_id: prop.booking_id });
       for (let i = 0; i < 8; i++) { await tickIntents(); await new Promise((r) => setTimeout(r, 100)); }
       return p;
     };
@@ -106,12 +129,12 @@ d("booking end-to-end (fake calendar)", () => {
     expect(intents.length).toBe(1);
   }, 25000);
 
-  test("no grant -> pending_approval (powers ledger is the authority)", async () => {
+  test("an arbitrary offer token creates no booking or provider intent", async () => {
     const c = await cap();
-    const prop = await proposeBooking(c, { service_type: "drain_cleaning", slot_start: "2026-08-28T10:00:00-07:00", price: 500 });
-    // 500 > monetary_limit 225 -> denied at proposal time
-    expect(prop.status).toBe("pending_approval");
-    expect(prop.case_id).toBeTruthy();
+    const prop = await proposeBooking(c, { slot_token: "model-invented-token" });
+    expect(prop.status).toBe("invalid_offer");
+    const { data: intents } = await supa().from("action_intents").select("id").eq("call_id", c.callId);
+    expect(intents).toHaveLength(0);
   });
 
   test("receipts table refuses accepted without read-back proof (DB constraint)", async () => {

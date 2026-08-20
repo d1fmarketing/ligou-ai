@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 03436d68278bfefa5e4a76baf2a892b893ed50a75d3f72626ad364f9671ae944
+ * Source SHA-256: f2fa1df919673191334ced01506e8897b1667371e2d44ec104821b91d4b77b09
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -1066,7 +1066,7 @@ function CallDemo() {
     className: "p7-bub"
   }, React.createElement("span", {
     className: "p7-blbl"
-  }, "Ligou · Inglês"), "I’ve sent your request to the team.", React.createElement("br", null), "You’ll receive a text as soon as they confirm."), React.createElement("span", {
+  }, "Ligou · Inglês"), "I’ve sent your request to the team.", React.createElement("br", null), "The team will contact you as soon as they confirm."), React.createElement("span", {
     className: "p7-ts"
   }, "00:10")), React.createElement("aside", {
     className: "p7-drawer"
@@ -1474,7 +1474,7 @@ function CallDemo() {
     className: "lc-ts"
   }, "00:10")), React.createElement("div", {
     className: "lc-bub"
-  }, "I’ve sent your request to the team. You’ll receive a text as soon as they confirm."))), React.createElement("div", {
+  }, "I’ve sent your request to the team. The team will contact you as soon as they confirm."))), React.createElement("div", {
     className: "lc-ev lc-i",
     style: { "--lcd": "2.35s" }
   }, React.createElement("span", {

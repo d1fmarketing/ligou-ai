@@ -5,9 +5,10 @@ import { loadTenant, priceRules, supa } from "./rules.ts";
 import { checkPower, normalizeGeography } from "./powers.ts";
 import type { Capability } from "./tools.ts";
 import { opaqueTokenHash } from "./offers.ts";
+import { CUSTOMER_OUTCOME } from "./customer-language.ts";
 
-const DENY_SAY = "Tell the caller: that specific request needs a quick confirmation from the team, and someone will get back to them shortly. Do not promise a text message — SMS is not connected yet.";
-const PENDING_SAY = "Tell the caller the request went through and the team will confirm the time shortly. Do NOT say it is booked yet, and do NOT promise a text message — SMS is not connected yet.";
+const DENY_SAY = CUSTOMER_OUTCOME.needsTeam;
+const PENDING_SAY = CUSTOMER_OUTCOME.bookingPending;
 
 export async function proposeBooking(cap: Capability, args: Record<string, unknown>) {
   const { tenant } = await loadTenant(cap.tenantSlug);
@@ -45,7 +46,7 @@ export async function closeDeal(cap: Capability, args: Record<string, unknown>) 
   if (!Number.isFinite(confirmed)) return { status: "invalid", error: "booking_price_missing" };
   if (tenant.auth_epoch !== cap.authEpoch) return { status: "denied", error: "authorization_epoch_stale" };
   if (tenant.policy_epoch !== cap.policyEpoch) return { status: "denied", error: "policy_epoch_stale" };
-  if (booking.status === "confirmed") return { status: "confirmed", receipt: "accepted", say: "Already booked — you can tell the caller it is confirmed." };
+  if (booking.status === "confirmed") return { status: "confirmed", receipt: "accepted", say: CUSTOMER_OUTCOME.bookingAlreadyConfirmed };
   if (booking.status === "pending_approval") return { status: "pending_approval", say: DENY_SAY };
   if (booking.status !== "proposed") return { status: booking.status, say: PENDING_SAY };
 
@@ -61,7 +62,8 @@ export async function closeDeal(cap: Capability, args: Record<string, unknown>) 
     appointmentAt,
     expectedAuthEpoch: cap.authEpoch,
   });
-  if (!band || (band.price_min != null && confirmed < Number(band.price_min)) || !power.granted) {
+  if (!band || band.price_min == null || !Number.isFinite(Number(band.price_min))
+      || confirmed < Number(band.price_min) || !power.granted) {
     const caseIdem = createHash("sha256").update(`${cap.callId}:close-case:${bookingId}:${confirmed}`).digest("hex");
     const { data: kase } = await supa().from("approval_cases").upsert({
       tenant_id: tenant.id, call_id: cap.callId,
@@ -110,7 +112,7 @@ export async function closeDeal(cap: Capability, args: Record<string, unknown>) 
   while (Date.now() < deadline) {
     const { data: b } = await supa().from("bookings").select("status,calendar_event_id").eq("id", bookingId).single();
     if (b?.status === "confirmed") {
-      return { status: "confirmed", receipt: "accepted", calendar_event_id: b.calendar_event_id, say: "You can now tell the caller it is booked and repeat date, time and price." };
+      return { status: "confirmed", receipt: "accepted", calendar_event_id: b.calendar_event_id, say: CUSTOMER_OUTCOME.bookingConfirmed };
     }
     if (b?.status === "failed") return { status: "failed", receipt: "failed", say: "Apologize, say the time slot could not be secured, and offer another slot." };
     await new Promise((r) => setTimeout(r, 200));
