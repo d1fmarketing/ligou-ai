@@ -3,6 +3,8 @@
 // Deploy: supabase functions deploy accept-call --no-verify-jwt
 // Secrets: supabase secrets set OPENAI_WEBHOOK_SECRET=whsec_... SERVICE_KEY=sb_secret_...
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { hashCanonicalContact } from "../_shared/privacy.ts";
+import { extractAllowedSipHeaders } from "../_shared/sip-headers.ts";
 
 const enc = new TextEncoder();
 
@@ -23,11 +25,6 @@ async function verifySignature(req: Request, rawBody: string, secret: string): P
   }
 }
 
-async function sha256hex(s: string): Promise<string> {
-  const d = await crypto.subtle.digest("SHA-256", enc.encode(s));
-  return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 Deno.serve(async (req) => {
   const secret = Deno.env.get("OPENAI_WEBHOOK_SECRET") ?? "";
   const raw = await req.text();
@@ -38,13 +35,20 @@ Deno.serve(async (req) => {
   if (event.type !== "realtime.call.incoming") return Response.json({ ignored: true });
 
   const supa = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SERVICE_KEY")!, { auth: { persistSession: false } });
-  const headers: Record<string, string> = {};
-  for (const h of event.data?.sip_headers ?? []) headers[h.name?.toLowerCase() ?? ""] = h.value ?? "";
+  const headers = extractAllowedSipHeaders(event.data?.sip_headers ?? []);
+  let callerHash: string | null = null;
+  if (headers.callerContact) {
+    try {
+      callerHash = await hashCanonicalContact(headers.callerContact, Deno.env.get("CONTACT_HASH_KEY") ?? "");
+    } catch {
+      return Response.json({ error: "contact_hash_unavailable" }, { status: 503 });
+    }
+  }
   await supa.from("phone_events").upsert({
     openai_call_id: event.data?.call_id,
-    called_number: headers["to"] ?? null,
-    caller_number_hash: headers["from"] ? await sha256hex(headers["from"]) : null,
-    sip_headers: headers,
+    called_number: headers.calledNumber,
+    caller_number_hash: callerHash,
+    sip_headers: headers.storedHeaders,
   }, { onConflict: "openai_call_id", ignoreDuplicates: true });
 
   return Response.json({ received: true });

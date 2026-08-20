@@ -25,6 +25,7 @@ export const unitTestFiles = [
   "test/tools.test.ts",
   "test/hermes-privacy.test.ts",
   "test/oauth-security.test.ts",
+  "test/privacy.test.ts",
   "test/learning.test.ts",
   "test/skills.test.ts",
   "test/unit-runner.test.ts",
@@ -43,6 +44,7 @@ export function createUnitTestEnvironment() {
     GOOGLE_OAUTH_CLIENT_ID: "synthetic-unit-test-client",
     GOOGLE_OAUTH_CLIENT_SECRET: "synthetic-unit-test-key",
     GOOGLE_REFRESH_TOKEN: "synthetic-unit-test-token",
+    CONTACT_HASH_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
     CALENDAR_PROVIDER: "fake",
   };
 }

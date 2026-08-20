@@ -6,6 +6,7 @@ import { calendarPort, overlapsBusy, zonedInstantIso, spokenLocal } from "./cale
 import { checkPower, normalizeGeography } from "./powers.ts";
 import { issueQuote, issueSlotOffers, readQuote } from "./offers.ts";
 import { CUSTOMER_OUTCOME } from "./customer-language.ts";
+import { buildTrustedHermesContext, consultHermes, HERMES_TOPICS } from "./hermes.ts";
 
 export interface Capability {
   actor: "CALLER";
@@ -29,7 +30,7 @@ export function makeCapability(
 ): Capability {
   const allowedTools = sessionType === "onboarding"
     ? ["get_business_info", "record_interview_answer"]
-    : ["get_business_info", "quote_price", "evaluate_offer", "check_availability", "create_async_case", "propose_booking", "close_deal"];
+    : ["get_business_info", "quote_price", "evaluate_offer", "check_availability", "create_async_case", "consult_ligou_brain", "propose_booking", "close_deal"];
   return {
     actor: "CALLER",
     tenantSlug,
@@ -139,6 +140,20 @@ export const toolSchemas = [
   },
   {
     type: "function",
+    name: "consult_ligou_brain",
+    description: "Requests one safe operational action for a known service. Pass only the topic enum and approved service identifier; never pass caller text, contact details, an address, or pricing.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        topic: { type: "string", enum: HERMES_TOPICS },
+        service_id: { type: "string", description: "Approved service identifier returned by get_business_info" },
+      },
+      required: ["topic", "service_id"],
+    },
+  },
+  {
+    type: "function",
     name: "record_interview_answer",
     description: "ONBOARDING ONLY: records one answer from the owner interview as a suggested rule (topic + the rule in clear text + structured data when it is a price). Call once per fact learned; the owner approves the batch later in the dashboard.",
     parameters: {
@@ -163,6 +178,7 @@ const CAP_NAME: Record<string, string> = {
   create_async_case: "create_async_case",
   propose_booking: "propose_booking",
   close_deal: "close_deal",
+  consult_ligou_brain: "consult_ligou_brain",
   record_interview_answer: "record_interview_answer",
 };
 
@@ -178,12 +194,6 @@ export interface ToolResult { ok: boolean; body: Record<string, unknown>; durati
 export async function runTool(cap: Capability, name: string, args: Record<string, unknown>): Promise<ToolResult> {
   const started = Date.now();
   const done = (body: Record<string, unknown>, ok = true): ToolResult => ({ ok, body, durationMs: Date.now() - started });
-
-  // Existing Realtime sessions may still emit a call from an older schema. Fail closed before tenant loading,
-  // capability checks, or any network path; Task 5 owns any future structured Hermes interface.
-  if (name === "consult_ligou_brain") {
-    return done({ status: "unavailable", reason: "tool_disabled" }, false);
-  }
 
   const capName = CAP_NAME[name];
   if (!capName || !cap.allowedTools.includes(capName)) return done({ error: "tool_not_allowed" }, false);
@@ -355,6 +365,21 @@ export async function runTool(cap: Capability, name: string, args: Record<string
           .single();
         if (error) return done({ status: "unknown", say: "Tell the caller the team will get back to them shortly.", error: error.message }, false);
         return done({ status: "pendente", case_id: data.id, say: CUSTOMER_OUTCOME.needsTeam });
+      }
+      case "consult_ligou_brain": {
+        let context;
+        try {
+          context = buildTrustedHermesContext(
+            String(args.topic ?? ""),
+            String(args.service_id ?? ""),
+            tenant,
+            rules,
+          );
+        } catch {
+          return done({ status: "unavailable", reason: "invalid_structured_request" }, false);
+        }
+        const advice = await consultHermes(cap.tenantSlug, context);
+        return done(advice, advice.status === "ok");
       }
       case "propose_booking": {
         const { proposeBooking } = await import("./booking.ts");

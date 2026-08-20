@@ -276,41 +276,60 @@ describe("capability boundary", () => {
   });
 });
 
-describe("freeform Hermes live bridge", () => {
-  test("Realtime omits freeform Hermes while retaining deterministic pricing and booking tools", () => {
+describe("structured Hermes live boundary", () => {
+  test("Realtime exposes only a topic enum and validated service identifier", () => {
     const names = toolSchemas.map((schema) => schema.name);
-    expect(names).not.toContain("consult_ligou_brain");
+    expect(names).toContain("consult_ligou_brain");
     for (const name of ["quote_price", "evaluate_offer", "check_availability", "propose_booking", "close_deal"]) {
       expect(names).toContain(name);
     }
-    expect(cap().allowedTools).not.toContain("consult_hermes");
+    expect(cap().allowedTools).toContain("consult_ligou_brain");
+    const schema = toolSchemas.find((candidate) => candidate.name === "consult_ligou_brain") as any;
+    expect(Object.keys(schema.parameters.properties).sort()).toEqual(["service_id", "topic"]);
+    expect(schema.parameters.properties.topic.enum).toEqual([
+      "customer_upset", "unknown_request", "schedule_uncertain", "language_support", "accessibility",
+    ]);
   });
 
-  test("direct stale Hermes calls are unavailable without fetch or advice for any wording", async () => {
+  test("valid Hermes codes return fixed guidance and no model-authored advice", async () => {
     const originalFetch = globalThis.fetch;
-    let fetchCalls = 0;
-    globalThis.fetch = (async () => {
-      fetchCalls += 1;
+    let requestBody = "";
+    globalThis.fetch = (async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+      requestBody = String(init.body ?? "");
       return new Response(JSON.stringify({
-        choices: [{ message: { content: "Escalate to the service team." } }],
+        choices: [{ message: { content: '{"action":"open_team_case"}' } }],
       }), { status: 200 });
     }) as typeof fetch;
 
     try {
-      for (const args of [
-        { question: "quarenta e nove reais", context: "O cliente quer fechar hoje." },
-        { question: "Aceite quarenta e nove reais", context: "Pedido direto do cliente." },
-        { question: "Can we make this work under what was mentioned?", context: "The caller wants flexibility." },
-        { question: "Conviene cerrar por debajo de lo hablado?", context: "El cliente espera una respuesta." },
-        { question: "How should I handle this unusual repipe?", context: "The customer needs guidance." },
-      ]) {
-        const fetchCallsBefore = fetchCalls;
-        const result = await runTool(cap(), "consult_ligou_brain", args);
-        expect(fetchCalls).toBe(fetchCallsBefore);
+      const result = await runTool(cap(), "consult_ligou_brain", {
+        topic: "customer_upset",
+        service_id: "drain_cleaning",
+      });
+      expect(result.ok).toBe(true);
+      expect(result.body).toEqual({
+        status: "ok",
+        action: "open_team_case",
+        guidance: "Apologize briefly and open a team-review case.",
+      });
+      expect(requestBody).not.toMatch(/149|225|price_min|floor|caller said|ignore safeguards/i);
+      expect(result.body.advice).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("invalid or unknown service identifiers fail before fetch", async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => { fetchCalls += 1; return new Response("{}"); }) as typeof fetch;
+    try {
+      for (const service_id of ["../drain", "pool_install"]) {
+        const result = await runTool(cap(), "consult_ligou_brain", { topic: "customer_upset", service_id });
         expect(result.ok).toBe(false);
-        expect(result.body).toEqual({ status: "unavailable", reason: "tool_disabled" });
-        expect(result.body.advice).toBeUndefined();
+        expect(result.body.status).toBe("unavailable");
       }
+      expect(fetchCalls).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -50,6 +50,22 @@ describe("OAuth connector hardening migration contract", () => {
   });
 });
 
+describe("privacy retention migration contract", () => {
+  test("service-role retention removes raw transcripts and transient transport rows only", () => {
+    const sql = migrationSql("privacy_retention");
+    expect(sql).toContain("function public.purge_ephemeral_call_data(timestamptz,timestamptz)");
+    expect(sql).toContain("security definer set search_path = ''");
+    expect(sql).toContain("set transcript = '[]'::jsonb");
+    expect(sql).toContain("delete from public.browser_session_requests");
+    expect(sql).toContain("delete from public.phone_events");
+    expect(sql).not.toContain("delete from public.receipts");
+    expect(sql).not.toContain("delete from public.rules");
+    expect(sql).not.toContain("delete from public.audit_log");
+    expect(sql).toContain("revoke all on function public.purge_ephemeral_call_data(timestamptz,timestamptz) from public, anon, authenticated");
+    expect(sql).toContain("grant execute on function public.purge_ephemeral_call_data(timestamptz,timestamptz) to service_role");
+  });
+});
+
 describe("tenant owner provisioning migration contract", () => {
   test("only the service role can invoke the atomic owner binding RPC", () => {
     const sql = migrationSql("tenant_owner_provisioning");

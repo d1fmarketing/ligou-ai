@@ -1,8 +1,8 @@
 // Powers check — the grant ledger is the authority; colors are just product language derived from grants.
 // Plan v4 §3: a grant carries conditions (geography, allowed_hours, channel, purpose...). Those conditions are
 // ENFORCED here — a grant that says "mon-sat 08:00-18:00" must not authorize an action at 3am.
-import { createHash } from "node:crypto";
 import { supa } from "./rules.ts";
+import { canonicalContact, hashCanonicalContact } from "../../supabase/functions/_shared/privacy.ts";
 
 export interface PowerCheck {
   granted: boolean;
@@ -213,15 +213,8 @@ export async function checkPower(
 // ---------------------------------------------------------------- communication gate (plan v4 §12)
 /** Normalize before hashing so the SAME person always yields the SAME hash — otherwise "+1 (949) 555-0101"
  *  and "+19495550101" would look like two people and an opt-out could be dodged by reformatting. */
-export function normalizeContact(contact: string): string {
-  const raw = contact.trim().toLowerCase();
-  if (raw.includes("@")) return raw.replace(/\s+/g, "");            // email
-  const digits = raw.replace(/\D/g, "");                             // phone: digits only
-  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits; // drop US country code
-}
-
-export const contactHash = (contact: string): string =>
-  createHash("sha256").update(normalizeContact(contact)).digest("hex");
+export const normalizeContact = canonicalContact;
+export const contactHash = hashCanonicalContact;
 
 export interface CommGateResult {
   allowed: boolean;
@@ -235,7 +228,7 @@ export async function checkCommunication(args: {
   tenantId: string; contact: string; channel: string; purpose: string; body: string;
   at?: Date; timezone?: string; priorConsent?: boolean;
 }): Promise<CommGateResult> {
-  const hash = contactHash(args.contact);
+  const hash = await contactHash(args.contact);
 
   const power = await checkPower(args.tenantId, "hermes", "follow_up_message", args.channel, {
     channel: args.channel, purpose: args.purpose, at: args.at, timezone: args.timezone,

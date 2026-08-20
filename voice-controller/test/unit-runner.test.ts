@@ -17,6 +17,8 @@ test("unit runner uses only synthetic configuration and excludes live integratio
   expect(unitTestFiles).not.toContain("test/booking.integration.test.ts");
   expect(unitTestFiles).toContain("test/unit-runner.test.ts");
   expect(unitTestFiles).toContain("test/oauth-security.test.ts");
+  expect(unitTestFiles).toContain("test/privacy.test.ts");
+  expect(environment.CONTACT_HASH_KEY).toBe("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=");
 });
 
 test("unit runner starts every unit file in its own Bun process", () => {
