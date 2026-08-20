@@ -20,7 +20,7 @@ const BUSINESS_HOURS = {
 
 describe("conditionsDeny (grant conditions are real, not decoration)", () => {
   test("allows an action inside the granted window", () => {
-    expect(conditionsDeny(BUSINESS_HOURS, { at: THU_10AM, channel: "sms", purpose: "follow_up" }, TZ)).toBeNull();
+    expect(conditionsDeny(BUSINESS_HOURS, { at: THU_10AM, channel: "sms", purpose: "follow_up", body: "hi", recentCommunicationCount: 0 }, TZ)).toBeNull();
   });
   test("blocks 3am — the quiet-hours case that would wake a customer", () => {
     expect(conditionsDeny(BUSINESS_HOURS, { at: THU_3AM, channel: "sms" }, TZ)).toBe("outside_allowed_hours");
@@ -45,6 +45,9 @@ describe("conditionsDeny (grant conditions are real, not decoration)", () => {
     expect(conditionsDeny(null, { at: THU_10AM }, TZ)).toBe("malformed_conditions");
     expect(conditionsDeny({ allowed_hours: { days: "mon-sat", open: "08:00", close: "18:00" } }, { at: THU_10AM }, TZ)).toBe("malformed_conditions");
     expect(conditionsDeny({ unrecognized_constraint: true }, { at: THU_10AM }, TZ)).toBe("malformed_conditions");
+    expect(conditionsDeny({ allowed_hours: { ...BUSINESS_HOURS.allowed_hours, unexpected: true } }, { at: THU_10AM }, TZ)).toBe("malformed_conditions");
+    expect(conditionsDeny({ frequency: { max: 2, per_days: 7, unexpected: true } }, {}, TZ)).toBe("malformed_conditions");
+    expect(conditionsDeny({ quiet_hours_respect: true }, { at: THU_10AM }, TZ)).toBe("malformed_conditions");
   });
   test("configured fields require their matching authority context", () => {
     expect(conditionsDeny({ geography: ["Irvine"] }, {}, TZ)).toBe("geography_required");
@@ -66,6 +69,7 @@ let powersRows: any[] = [];
 let optOutRows: any[] = [];
 let sentRows: any[] = [];
 let tenantLookupFails = false;
+let communicationsLookupError: { message: string } | null = null;
 
 function mockSupabase() {
   return {
@@ -85,7 +89,8 @@ function mockSupabase() {
             : { data: powersRows[0] ?? null, error: null },
         then(res: any) { // awaited without a terminal method (powers / communications lookups)
           const data = table === "powers" ? powersRows : table === "communications" ? sentRows : [];
-          return Promise.resolve({ data, error: null }).then(res);
+          const error = table === "communications" ? communicationsLookupError : null;
+          return Promise.resolve({ data: error ? null : data, error }).then(res);
         },
       };
       return api;
@@ -98,13 +103,14 @@ beforeEach(() => {
   optOutRows = [];
   sentRows = [];
   tenantLookupFails = false;
+  communicationsLookupError = null;
   _setClient(mockSupabase());
 });
 afterAll(() => _setClient(null));
 
 describe("checkPower enforces conditions", () => {
   test("grants inside the window", async () => {
-    const r = await checkPower("t-1", "hermes", "follow_up_message", "sms", { at: THU_10AM, channel: "sms", purpose: "follow_up" });
+    const r = await checkPower("t-1", "hermes", "follow_up_message", "sms", { at: THU_10AM, channel: "sms", purpose: "follow_up", body: "hi", contactHash: "contact-1" });
     expect(r.granted).toBe(true);
   });
   test("denies at 3am even though the capability is granted", async () => {
@@ -118,7 +124,7 @@ describe("checkPower enforces conditions", () => {
       { id: "p-high", resource: "sms", monetary_limit: 500, expires_at: null, conditions: BUSINESS_HOURS },
     ];
     const r = await checkPower("t-1", "hermes", "follow_up_message", "sms", {
-      amountUsd: 250, at: THU_10AM, channel: "sms", purpose: "follow_up",
+      amountUsd: 250, at: THU_10AM, channel: "sms", purpose: "follow_up", body: "hi", contactHash: "contact-1",
     });
     expect(r.granted).toBe(true);
     expect(r.powerId).toBe("p-high");
@@ -164,6 +170,31 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
     const r = await checkCommunication({ ...withoutConsent, at: THU_10AM, timezone: TZ });
     expect(r.allowed).toBe(false);
     expect(r.reason).toBe("prior_consent_required");
+  });
+  test("a restrictive body grant cannot mask a later matching grant", async () => {
+    powersRows = [
+      { ...powersRows[0], id: "body-short", conditions: { ...BUSINESS_HOURS, max_body_chars: 10 } },
+      { ...powersRows[0], id: "body-long", conditions: { ...BUSINESS_HOURS, max_body_chars: 320 } },
+    ];
+    const r = await checkCommunication({ ...base, body: "A legitimate follow-up longer than ten chars.", at: THU_10AM, timezone: TZ });
+    expect(r.allowed).toBe(true);
+    expect(r.powerId).toBe("body-long");
+  });
+  test("a frequency-capped grant cannot mask a later matching grant", async () => {
+    sentRows = [{ id: "c-1" }, { id: "c-2" }];
+    powersRows = [
+      { ...powersRows[0], id: "freq-capped", conditions: BUSINESS_HOURS },
+      { ...powersRows[0], id: "freq-open", conditions: { ...BUSINESS_HOURS, frequency: undefined } },
+    ];
+    const r = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
+    expect(r.allowed).toBe(true);
+    expect(r.powerId).toBe("freq-open");
+  });
+  test("a frequency lookup error denies instead of substituting empty history", async () => {
+    communicationsLookupError = { message: "communications unavailable" };
+    const r = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toContain("condition_lookup_failed");
   });
   test("respects the frequency cap (2 per 7 days)", async () => {
     sentRows = [{ id: "c-1" }, { id: "c-2" }];
