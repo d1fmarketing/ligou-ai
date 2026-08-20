@@ -1,11 +1,12 @@
 # Ligou cell — one CONTAINED Hermes per tenant. The cell has NO business credentials (no Google, Supabase,
 # Twilio, AWS). Reasoning authenticates only through Codex OAuth on a separate model-auth volume.
-# Pin discipline: replace the tag below with the immutable digest after the first pull
-#   docker inspect --format='{{index .RepoDigests 0}}' nousresearch/hermes-agent:v2026.8.18
+# The tenant-compose launcher supplies every tenant-qualified runtime name and rejects tag-only images.
+name: ${LIGOU_COMPOSE_PROJECT:?launch with node tenant-compose.mjs}
+
 services:
   hermes:
-    image: nousresearch/hermes-agent:v2026.8.18
-    container_name: ligou-cell-${TENANT_SLUG:-rocha-plumbing}
+    image: ${HERMES_IMAGE:?set an immutable repository@sha256 digest}
+    container_name: ${HERMES_CONTAINER_NAME:?launch with node tenant-compose.mjs}
     command: gateway run                  # persistent service, never the interactive CLI
     restart: unless-stopped
     read_only: false                      # hermes writes its own state under /opt/data
@@ -27,13 +28,16 @@ services:
       - ./config/config.yaml:/opt/data/config.yaml:ro          # THE config hermes reads (model+provider+gates)
       - ./config/cli-config.yaml:/opt/data/cli-config.yaml:ro   # CLI-side pin (kept in sync)
     ports:
-      - "127.0.0.1:8642:8642"                                   # loopback only — never exposed publicly
+      - "127.0.0.1:${HERMES_HOST_PORT:?launch with node tenant-compose.mjs}:8642" # tenant route, loopback only
     networks: [cell]
 
 networks:
   cell:
+    name: ${HERMES_NETWORK:?launch with node tenant-compose.mjs}
     driver: bridge
 
 volumes:
   hermes-cognitive:
+    name: ${HERMES_COGNITIVE_VOLUME:?launch with node tenant-compose.mjs}
   hermes-model-auth:
+    name: ${HERMES_MODEL_AUTH_VOLUME:?launch with node tenant-compose.mjs}

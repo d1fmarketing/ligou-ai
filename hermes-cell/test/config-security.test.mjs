@@ -9,17 +9,54 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const validator = path.join(repoRoot, "hermes-cell/validate-config.mjs");
 const health = path.join(repoRoot, "hermes-cell/health-state.sh");
+const tenantCompose = path.join(repoRoot, "hermes-cell/tenant-compose.mjs");
+const IMAGE = "example.invalid/hermes@sha256:" + "a".repeat(64);
 
 test("repository Hermes config is OAuth-only with separate cognitive and model-auth volumes", () => {
-  const result = spawnSync(process.execPath, [validator, "--root", repoRoot, "--json"], { encoding: "utf8" });
+  const result = spawnSync(process.execPath, [validator, "--root", repoRoot, "--json"], {
+    encoding: "utf8",
+    env: { ...process.env, HERMES_IMAGE: IMAGE },
+  });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), {
     ok: true,
     provider: "openai-codex",
     oauth_only: true,
-    volumes: { cognitive: "hermes-cognitive", model_auth: "hermes-model-auth" },
+    tenant_isolation: true,
+    image: IMAGE,
+    image_immutable: true,
+    volumes: { cognitive: "HERMES_COGNITIVE_VOLUME", model_auth: "HERMES_MODEL_AUTH_VOLUME" },
     cognitive_backup_excludes_model_auth: true,
   });
+});
+
+test("normal tenant launcher gives two tenants isolated project, volumes, network, container, and route", () => {
+  const launch = (tenant) => {
+    const result = spawnSync(process.execPath, [tenantCompose, "--print-runtime"], {
+      encoding: "utf8",
+      env: { ...process.env, TENANT_SLUG: tenant, HERMES_API_KEY: "synthetic-local-key", HERMES_IMAGE: IMAGE },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const alpha = launch("alpha-plumbing");
+  const beta = launch("beta-plumbing");
+  for (const field of ["compose_project", "container_name", "cognitive_volume", "model_auth_volume", "network", "host_port", "hermes_url"]) {
+    assert.notEqual(alpha[field], beta[field], `${field} must not be shared`);
+  }
+  assert.equal(alpha.image, IMAGE);
+  assert.equal(beta.image, IMAGE);
+});
+
+test("config validator rejects missing and tag-only Hermes image release inputs", () => {
+  for (const image of ["", "nousresearch/hermes-agent:v2026.8.18"]) {
+    const result = spawnSync(process.execPath, [validator, "--root", repoRoot, "--json"], {
+      encoding: "utf8",
+      env: { ...process.env, HERMES_IMAGE: image },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /hermes_image_digest_required/);
+  }
 });
 
 test("config validator rejects an API-key reasoning credential", async () => {
@@ -60,7 +97,7 @@ test("token-free health wrapper returns state only and never forwards or prints 
 
     const result = spawnSync("bash", [health], {
       encoding: "utf8",
-      env: { PATH: `${bin}:/usr/bin:/bin`, TENANT_SLUG: "test-tenant" },
+      env: { PATH: `${bin}:/usr/bin:/bin`, TENANT_SLUG: "test-tenant", LIGOU_NODE_BIN: process.execPath },
     });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), '{"ok":true,"provider":"openai-codex","auth":"ready","api":"ready"}');

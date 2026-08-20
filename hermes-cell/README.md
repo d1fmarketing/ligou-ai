@@ -9,11 +9,17 @@ controller→API server; não é credencial de modelo.
 
 ```bash
 cd hermes-cell
-cp .env.example .env  # TENANT_SLUG + HERMES_API_KEY interno
-docker compose up -d
+cp .env.example .env  # TENANT_SLUG + HERMES_API_KEY interno + HERMES_IMAGE repository@sha256:...
+set -a; . ./.env; set +a
+node tenant-compose.mjs up -d
 docker exec -it "ligou-cell-$TENANT_SLUG" hermes auth add openai-codex --type oauth --no-browser
-TENANT_SLUG="$TENANT_SLUG" bash health-state.sh
+bash health-state.sh
 ```
+
+`tenant-compose.mjs` é o caminho normal e obrigatório: ele deriva do slug um projeto Compose, container,
+volumes cognitivo/auth, rede e porta loopback distintos. Para configurar o controller da mesma empresa,
+use o `hermes_url` retornado por `node tenant-compose.mjs --print-runtime`; não reutilize a URL de outra
+empresa. O Compose direto falha fechado porque esses nomes qualificados não têm defaults.
 
 O estado cognitivo fica em `hermes-cognitive:/opt/data`. O OAuth fica separadamente em
 `hermes-model-auth:/root/.hermes`; nunca copie `auth.json` para `/opt/data` e nunca inclua o volume de auth
@@ -26,8 +32,9 @@ Antes de subir ou empacotar:
 node validate-config.mjs --root .. --json
 ```
 
-Após o primeiro pull, fixe o digest imutável da imagem no Compose. O tag documentado é apenas o ponto de
-partida para descobrir esse digest.
+`HERMES_IMAGE` aceita somente uma referência imutável `repository@sha256:<64 hex>`. A imagem é uma entrada
+de release: ausência e tag sem digest falham antes de Compose, restore ou ativação. Descubra e aprove o
+digest fora deste runbook; nunca substitua por um valor inventado.
 
 ## Fronteira da consulta ao vivo
 

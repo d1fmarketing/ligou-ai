@@ -32,8 +32,10 @@ function runtimeContactKey(): string {
 
 export function canonicalContact(contact: string): string {
   const raw = String(contact ?? "").normalize("NFKC").trim().toLowerCase();
-  if (raw.includes("@")) return raw.replace(/\s+/g, "");
-  const digits = raw.replace(/\D/g, "");
+  const uriIdentity = raw.match(/(?:sips?|tel):\s*([^@;>]+)/i)?.[1]?.trim();
+  const candidate = uriIdentity ?? raw;
+  if (!uriIdentity && raw.includes("@")) return raw.replace(/\s+/g, "");
+  const digits = candidate.replace(/\D/g, "");
   return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
 }
 
