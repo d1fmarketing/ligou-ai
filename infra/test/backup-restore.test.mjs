@@ -1,0 +1,276 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const manifestTool = path.join(repoRoot, "infra/backup-manifest.mjs");
+const restoreScript = path.join(repoRoot, "infra/restore.sh");
+const backupScript = path.join(repoRoot, "infra/backup.sh");
+const KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+const TENANT = "test-tenant";
+
+function run(command, args, options = {}) {
+  return spawnSync(command, args, { encoding: "utf8", ...options });
+}
+
+async function makeArchive(base, { forbidden = false } = {}) {
+  const payload = path.join(base, "payload");
+  await mkdir(path.join(payload, "memory"), { recursive: true });
+  await mkdir(path.join(payload, "skills"), { recursive: true });
+  await mkdir(path.join(payload, "sessions"), { recursive: true });
+  await writeFile(path.join(payload, "state.db"), "synthetic-state-db");
+  await writeFile(path.join(payload, "memory/index.json"), "[]");
+  await writeFile(path.join(payload, "skills/index.json"), "[]");
+  await writeFile(path.join(payload, "sessions/index.json"), "[]");
+  if (forbidden) {
+    await mkdir(path.join(payload, ".hermes"), { recursive: true });
+    await writeFile(path.join(payload, ".hermes/auth.json"), '{"access_token":"forbidden"}');
+  }
+  const archive = path.join(base, "hermes-test-tenant-20260820T120000Z.zip");
+  const zipped = run("zip", ["-qr", archive, "."], { cwd: payload });
+  assert.equal(zipped.status, 0, zipped.stderr);
+  return archive;
+}
+
+function createManifest(archive, manifest) {
+  return run(process.execPath, [manifestTool, "create", "--archive", archive, "--manifest", manifest,
+    "--tenant", TENANT, "--source", "ec2:i-test", "--created", "2026-08-20T12:00:00.000Z"], {
+    env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY, LIGOU_BACKUP_MANIFEST_KEY_ID: "test-v1" },
+  });
+}
+
+test("authenticated manifest carries mandatory identity, archive proof, exclusions, and creation time", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-manifest-"));
+  try {
+    const archive = await makeArchive(fixture);
+    const manifest = `${archive}.manifest.json`;
+    const created = createManifest(archive, manifest);
+    assert.equal(created.status, 0, created.stderr);
+    const parsed = JSON.parse(await readFile(manifest, "utf8"));
+    assert.deepEqual({ schema: parsed.schema, version: parsed.version, tenant: parsed.tenant }, {
+      schema: "ligou.hermes.backup-manifest", version: 1, tenant: TENANT,
+    });
+    assert.equal(parsed.source.identity, "ec2:i-test");
+    assert.equal(parsed.archive.name, path.basename(archive));
+    assert.match(parsed.archive.sha256, /^[a-f0-9]{64}$/);
+    assert.ok(parsed.archive.size_bytes > 0);
+    assert.equal(parsed.archive.format, "hermes-cognitive-zip");
+    assert.ok(parsed.exclusions.includes("**/.hermes/**"));
+    assert.equal(parsed.created_at, "2026-08-20T12:00:00.000Z");
+    assert.deepEqual(Object.keys(parsed.signature).sort(), ["algorithm", "key_id", "value"]);
+    assert.doesNotMatch(JSON.stringify(parsed), new RegExp(KEY));
+
+    const verified = run(process.execPath, [manifestTool, "verify", "--archive", archive,
+      "--manifest", manifest, "--tenant", TENANT], {
+      env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY },
+    });
+    assert.equal(verified.status, 0, verified.stderr);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("missing/tampered manifest and tampered archive are rejected before restore commands", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-tamper-"));
+  try {
+    const archive = await makeArchive(fixture);
+    const manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+
+    const missing = run("bash", [restoreScript, "--archive", archive, "--manifest", `${manifest}.missing`], {
+      env: { PATH: "/usr/bin:/bin", TENANT_SLUG: TENANT, LIGOU_BACKUP_MANIFEST_KEY: KEY, LIGOU_NODE_BIN: process.execPath },
+    });
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /manifest_required/);
+
+    const parsed = JSON.parse(await readFile(manifest, "utf8"));
+    parsed.source.identity = "ec2:attacker";
+    await writeFile(manifest, `${JSON.stringify(parsed)}\n`);
+    const badSignature = run(process.execPath, [manifestTool, "verify", "--archive", archive,
+      "--manifest", manifest, "--tenant", TENANT], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
+    assert.notEqual(badSignature.status, 0);
+    assert.match(badSignature.stderr, /manifest_signature_invalid/);
+
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const keyIdTamper = JSON.parse(await readFile(manifest, "utf8"));
+    keyIdTamper.signature.key_id = "attacker-key";
+    await writeFile(manifest, `${JSON.stringify(keyIdTamper)}\n`);
+    const badKeyId = run(process.execPath, [manifestTool, "verify", "--archive", archive,
+      "--manifest", manifest, "--tenant", TENANT], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
+    assert.notEqual(badKeyId.status, 0);
+    assert.match(badKeyId.stderr, /manifest_signature_invalid/);
+
+    assert.equal(createManifest(archive, manifest).status, 0);
+    await writeFile(archive, "tamper", { flag: "a" });
+    const badArchive = run(process.execPath, [manifestTool, "verify", "--archive", archive,
+      "--manifest", manifest, "--tenant", TENANT], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
+    assert.notEqual(badArchive.status, 0);
+    assert.match(badArchive.stderr, /archive_(?:size|checksum)_mismatch/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("backup creation rejects credential and model-auth paths", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-forbidden-"));
+  try {
+    const archive = await makeArchive(fixture, { forbidden: true });
+    const result = createManifest(archive, `${archive}.manifest.json`);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /archive_forbidden_path/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("backup script creates and uploads only the cognitive archive plus authenticated manifest", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-script-"));
+  try {
+    const sourceArchive = await makeArchive(fixture);
+    const bin = path.join(fixture, "bin");
+    const work = path.join(fixture, "work");
+    const dockerLog = path.join(fixture, "docker.log");
+    const awsLog = path.join(fixture, "aws.log");
+    await mkdir(bin);
+    await mkdir(work);
+    const docker = path.join(bin, "docker");
+    const aws = path.join(bin, "aws");
+    await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\nif [ "$1" = inspect ]; then printf '%s\\n' true; exit 0; fi\nif [ "$1" = ps ]; then printf '%s\\n' 'ligou-cell-test-tenant'; exit 0; fi\nif [ "$1" = cp ]; then cp "$STUB_ARCHIVE" "$3"; exit 0; fi\nexit 0\n`);
+    await writeFile(aws, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AWS_LOG\"\nexit 0\n");
+    await chmod(docker, 0o755);
+    await chmod(aws, 0o755);
+
+    const result = run("bash", [backupScript], {
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`,
+        TENANT_SLUG: TENANT,
+        LIGOU_BACKUP_BUCKET: "unit-backups",
+        LIGOU_BACKUP_SOURCE_ID: "ec2:i-test",
+        LIGOU_BACKUP_MANIFEST_KEY: KEY,
+        LIGOU_BACKUP_MANIFEST_KEY_ID: "test-v1",
+        LIGOU_BACKUP_WORK_DIR: work,
+        LIGOU_NODE_BIN: process.execPath,
+        DOCKER_LOG: dockerLog,
+        AWS_LOG: awsLog,
+        STUB_ARCHIVE: sourceArchive,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const names = (await readdir(work)).sort();
+    assert.equal(names.filter((name) => name.endsWith(".zip")).length, 1);
+    assert.equal(names.filter((name) => name.endsWith(".manifest.json")).length, 1);
+    assert.equal(names.some((name) => name.endsWith(".sha256")), false);
+    const archive = path.join(work, names.find((name) => name.endsWith(".zip")));
+    const manifest = path.join(work, names.find((name) => name.endsWith(".manifest.json")));
+    const verified = run(process.execPath, [manifestTool, "verify", "--archive", archive,
+      "--manifest", manifest, "--tenant", TENANT], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
+    assert.equal(verified.status, 0, verified.stderr);
+    const uploads = await readFile(awsLog, "utf8");
+    assert.equal(uploads.split("\n").filter((line) => line.includes("s3 cp")).length, 2);
+    assert.match(uploads, /[.]zip[.]manifest[.]json/);
+    assert.doesNotMatch(await readFile(dockerLog, "utf8"), /model-auth|auth[.]json|[.]env/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+async function stubCommands(fixture) {
+  const bin = path.join(fixture, "bin");
+  await mkdir(bin, { recursive: true });
+  const docker = path.join(bin, "docker");
+  const curl = path.join(bin, "curl");
+  const aws = path.join(bin, "aws");
+  const sleep = path.join(bin, "sleep");
+  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"auth status openai-codex"*) printf '%s\\n' '{"authenticated":true}' ;;\nesac\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-check-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
+  await writeFile(curl, `#!/bin/sh\nif [ "\${CURL_MODE:-ok}" = fail ]; then printf '%s\\n' '{"ok":false}'; else printf '%s\\n' '{"ok":true}'; fi\n`);
+  await writeFile(aws, "#!/bin/sh\nprintf '%s\\n' 'unexpected aws call' >&2\nexit 99\n");
+  await writeFile(sleep, "#!/bin/sh\nexit 0\n");
+  for (const command of [docker, curl, aws, sleep]) await chmod(command, 0o755);
+  return bin;
+}
+
+function restoreEnv(fixture, bin, extra = {}) {
+  return {
+    PATH: `${bin}:/usr/bin:/bin`,
+    TMPDIR: path.join(fixture, "tmp"),
+    TENANT_SLUG: TENANT,
+    LIGOU_BACKUP_MANIFEST_KEY: KEY,
+    LIGOU_NODE_BIN: process.execPath,
+    HERMES_IMAGE: "example.invalid/hermes@sha256:0123456789abcdef",
+    DOCKER_LOG: path.join(fixture, "docker.log"),
+    ...extra,
+  };
+}
+
+test("restore imports into a disposable no-network/no-auth volume and runs all smoke checks", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-disposable-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture);
+    const manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const bin = await stubCommands(fixture);
+    const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest], {
+      env: restoreEnv(fixture, bin),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const log = await readFile(path.join(fixture, "docker.log"), "utf8");
+    assert.match(log, /--network none/);
+    assert.doesNotMatch(log, /--env-file|hermes-model-auth|\/root\/\.hermes:|GOOGLE_|SUPABASE_|AWS_/);
+    assert.match(log, /memory list --json/);
+    assert.match(log, /skills list --json/);
+    assert.match(log, /sessions list --json/);
+    assert.match(log, /test ! -e \/root\/\.hermes\/auth\.json/);
+    assert.match(log, /rm -f restore-check-/);
+    assert.match(log, /volume rm/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("disposable smoke failure never reaches the live cell", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-smoke-fail-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture);
+    const manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const bin = await stubCommands(fixture);
+    const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], {
+      env: restoreEnv(fixture, bin, { FAIL_DISPOSABLE_SESSIONS: "1" }),
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /disposable_smoke_failed/);
+    const log = await readFile(path.join(fixture, "docker.log"), "utf8");
+    assert.doesNotMatch(log, /ligou-cell-test-tenant hermes backup|ligou-cell-test-tenant hermes import/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("live health failure automatically imports the pre-apply rollback snapshot", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-rollback-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture);
+    const manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const bin = await stubCommands(fixture);
+    const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], {
+      env: restoreEnv(fixture, bin, { CURL_MODE: "fail" }),
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /restore_health_failed_rollback_applied/);
+    const log = await readFile(path.join(fixture, "docker.log"), "utf8");
+    assert.match(log, /hermes backup -o \/tmp\/rollback-test-tenant-/);
+    const liveImports = log.split("\n").filter((line) => line.includes("ligou-cell-test-tenant hermes import"));
+    assert.equal(liveImports.length, 2, log);
+    assert.match(liveImports[1], /rollback-test-tenant-/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});

@@ -1,47 +1,61 @@
 #!/usr/bin/env bash
-# Plan v4 §4 — the cell's cognitive state is part of the AgentSpace, not a disposable cache.
-# An EBS snapshot taken while SQLite is live can capture a torn database, so the real backup uses
-# `hermes backup` (consistent archive of config, skills, sessions and state.db) + checksum + S3 per tenant.
-# EBS snapshots stay as disaster recovery for the whole host.
-#
-# Runs ON the EC2 (invoked by the ligou-backup systemd timer). Restore: infra/restore.sh
+# Consistent cognitive-state backup with an authenticated manifest. The separate Hermes model-auth
+# volume is never mounted at /opt/data and is forbidden by the manifest scanner.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+NODE_BIN="${LIGOU_NODE_BIN:-node}"
+MANIFEST_TOOL="${ROOT}/infra/backup-manifest.mjs"
 TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
-CELL="ligou-cell-${TENANT}"
 BUCKET="${LIGOU_BACKUP_BUCKET:?set LIGOU_BACKUP_BUCKET}"
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-WORK="/opt/ligou/backups"
-NAME="hermes-${TENANT}-${STAMP}.zip"
+SOURCE_ID="${LIGOU_BACKUP_SOURCE_ID:?set LIGOU_BACKUP_SOURCE_ID}"
+WORK="${LIGOU_BACKUP_WORK_DIR:-/opt/ligou/backups}"
 RETENTION_DAYS="${LIGOU_BACKUP_RETENTION_DAYS:-30}"
 
+[[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] || { echo "tenant_invalid" >&2; exit 2; }
+[[ "$BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { echo "backup_bucket_invalid" >&2; exit 2; }
+[[ "$SOURCE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ ]] || { echo "backup_source_invalid" >&2; exit 2; }
+[[ "$WORK" = /* && "$WORK" != "/" && "$WORK" != "/opt" && "$WORK" != "/opt/ligou" ]] \
+  || { echo "backup_work_dir_invalid" >&2; exit 2; }
+[[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] && [ "$RETENTION_DAYS" -ge 1 ] && [ "$RETENTION_DAYS" -le 3650 ] \
+  || { echo "backup_retention_invalid" >&2; exit 2; }
+[ -n "${LIGOU_BACKUP_MANIFEST_KEY:-}" ] || { echo "manifest_key_required" >&2; exit 1; }
+command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "node_required" >&2; exit 1; }
+
+CELL="ligou-cell-${TENANT}"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+NAME="hermes-${TENANT}-${STAMP}.zip"
+MANIFEST_NAME="${NAME}.manifest.json"
+REMOTE_ARCHIVE="/tmp/${NAME}"
+LOCAL_ARCHIVE="${WORK}/${NAME}"
+LOCAL_MANIFEST="${WORK}/${MANIFEST_NAME}"
+
 mkdir -p "$WORK"
+RUNNING="$(docker inspect --format '{{.State.Running}}' "$CELL" 2>/dev/null || true)"
+[ "$RUNNING" = "true" ] || { echo "backup_cell_unavailable" >&2; exit 1; }
 
-if ! docker ps --format '{{.Names}}' | grep -qx "$CELL"; then
-  echo "backup: cell $CELL is not running — nothing to back up" >&2
-  exit 1
-fi
+cleanup_remote() {
+  docker exec "$CELL" rm -f "$REMOTE_ARCHIVE" >/dev/null 2>&1 || true
+}
+trap cleanup_remote EXIT
 
-# 1) consistent archive produced INSIDE the container (hermes owns the SQLite handles)
-# NOTE: -q makes an internal state-snapshot instead of the archive; the full mode is what honours -o
-docker exec "$CELL" hermes backup -o "/tmp/${NAME}" >/dev/null
-docker cp "${CELL}:/tmp/${NAME}" "${WORK}/${NAME}"
-docker exec "$CELL" rm -f "/tmp/${NAME}"
+docker exec "$CELL" hermes backup -o "$REMOTE_ARCHIVE" >/dev/null
+docker cp "${CELL}:${REMOTE_ARCHIVE}" "$LOCAL_ARCHIVE" >/dev/null
+cleanup_remote
+trap - EXIT
 
-# 2) integrity proof travels with the artifact
-SHA="$(sha256sum "${WORK}/${NAME}" | awk '{print $1}')"
-SIZE="$(stat -c%s "${WORK}/${NAME}")"
-if [ "$SIZE" -lt 1024 ]; then
-  echo "backup: archive suspiciously small (${SIZE} bytes) — refusing to upload" >&2
-  exit 1
-fi
-echo "${SHA}  ${NAME}" > "${WORK}/${NAME}.sha256"
+"$NODE_BIN" "$MANIFEST_TOOL" create \
+  --archive "$LOCAL_ARCHIVE" \
+  --manifest "$LOCAL_MANIFEST" \
+  --tenant "$TENANT" \
+  --source "$SOURCE_ID" \
+  --created "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >/dev/null
 
-# 3) upload per tenant (SSE-S3 at rest; bucket is private)
-aws s3 cp "${WORK}/${NAME}" "s3://${BUCKET}/cells/${TENANT}/${NAME}" --sse AES256 --only-show-errors
-aws s3 cp "${WORK}/${NAME}.sha256" "s3://${BUCKET}/cells/${TENANT}/${NAME}.sha256" --sse AES256 --only-show-errors
+aws s3 cp "$LOCAL_ARCHIVE" "s3://${BUCKET}/cells/${TENANT}/${NAME}" --sse AES256 --only-show-errors
+aws s3 cp "$LOCAL_MANIFEST" "s3://${BUCKET}/cells/${TENANT}/${MANIFEST_NAME}" --sse AES256 --only-show-errors
 
-# 4) local retention (S3 lifecycle handles the remote side)
-find "$WORK" -name "hermes-${TENANT}-*.zip*" -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
+# Bounded local cleanup only. Remote retention is an S3 lifecycle policy.
+find "$WORK" -type f \( -name "hermes-${TENANT}-*.zip" -o -name "hermes-${TENANT}-*.zip.manifest.json" \) \
+  -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
 
-echo "backup ok: ${NAME} (${SIZE} bytes, sha256 ${SHA:0:12}…) -> s3://${BUCKET}/cells/${TENANT}/"
+printf '{"ok":true,"tenant":"%s","archive":"%s","manifest":true}\n' "$TENANT" "$NAME"
