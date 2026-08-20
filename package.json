@@ -11,6 +11,7 @@
     "secrets:scan": "node scripts/scan-secrets.mjs",
     "test:security": "node scripts/test-security.mjs",
     "test:hermes-config": "node --test hermes-cell/test/config-security.test.mjs",
-    "test:backup-restore": "node --test infra/test/backup-restore.test.mjs"
+    "test:backup-restore": "node --test infra/test/backup-restore.test.mjs",
+    "test:deploy-release": "node --test infra/test/deploy-release.test.mjs"
   }
 }

@@ -42,7 +42,9 @@ Management API (`session_replication_role=replica`).
 ## F3 — Infrastructure — LIVE
 AWS account `330140023537`, us-east-1. EC2 `ligou-host-01` provisioned (bun, docker); `ligou-controller`
 systemd service active with latest code; Hermes cell `ligou-cell-rocha-plumbing` Up (health 200);
-deploy via `infra/deploy.sh` (tar→S3→SSM, zero inbound ports); secrets in SSM `/ligou/*`; daily EBS snapshots.
+deploy via `infra/deploy.sh` (commit limpo → pacote filtrado + manifesto HMAC → S3 → SSM, zero inbound
+ports); o host verifica hash/commit, ativa diretório imutável, roda health funcional controller/Supabase/Hermes
+e faz rollback automático. Secrets permanecem em SSM `/ligou/*`; daily EBS snapshots.
 
 ## Credential/decision-gated (require RJ; not code gaps)
 1. **F1 audio** — speak into the mic (pipe already proven).
