@@ -1,7 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { inspectArchive } from "./archive-safety.mjs";
 
 const EXCLUSIONS = [
   "**/.env*",
@@ -15,6 +15,7 @@ const EXCLUSIONS = [
 ];
 const TENANT = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const DIGEST_IMAGE = /^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/;
 
 function fail(code) {
   process.stderr.write(String(code) + "\n");
@@ -66,41 +67,21 @@ function archiveProof(archive) {
   return { sha256: createHash("sha256").update(bytes).digest("hex"), size: stat.size };
 }
 
-function forbiddenEntry(entry) {
-  if (!entry || /[\u0000-\u001f\u007f]/.test(entry) || entry.startsWith("/") || entry.includes("\\")) return true;
-  const segments = entry.split("/").filter(Boolean);
-  if (segments.some((segment) => segment === "..")) return true;
-  const lower = segments.map((segment) => segment.toLowerCase());
-  const basename = lower.at(-1) ?? "";
-  if (lower.some((segment) => [".hermes", ".codex", ".ssh", "hermes-model-auth", "model-auth", "credentials", "secrets", "tokens"].includes(segment))) return true;
-  if (lower.some((segment) => segment === ".env" || segment.startsWith(".env."))) return true;
-  if (["auth.json", "credentials.json", "id_rsa", "id_ed25519", "docker.sock"].includes(basename)) return true;
-  if (lower.some((segment) => /credential|secret|access[_-]?token|refresh[_-]?token/.test(segment))) return true;
-  if (/\.(?:zip|tar|tgz|gz|7z|rar)$/.test(basename)) return true;
-  return false;
-}
-
-function validateArchiveEntries(archive) {
-  const listed = spawnSync("unzip", ["-Z1", archive], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
-  if (listed.status !== 0) fail("archive_listing_failed");
-  const entries = listed.stdout.split("\n").filter(Boolean);
-  if (!entries.length) fail("archive_empty");
-  if (entries.some(forbiddenEntry)) fail("archive_forbidden_path");
-}
-
 function sign(body, key) {
   return createHmac("sha256", key).update(canonical(body)).digest("base64url");
 }
 
 function createManifest(args) {
-  if (!args.archive || !args.manifest || !args.tenant || !args.source || !args.created) fail("manifest_arguments_missing");
-  if (!TENANT.test(args.tenant) || !IDENTITY.test(args.source)) fail("manifest_identity_invalid");
+  if (!args.archive || !args.manifest || !args.tenant || !args.source || !args.created || !args.hermes_image) fail("manifest_arguments_missing");
+  if (!TENANT.test(args.tenant) || !IDENTITY.test(args.source) || !DIGEST_IMAGE.test(args.hermes_image)) fail("manifest_identity_invalid");
   if (new Date(args.created).toISOString() !== args.created) fail("manifest_created_at_invalid");
-  validateArchiveEntries(args.archive);
+  let inspection;
+  try { inspection = inspectArchive(args.archive); }
+  catch (error) { fail(error instanceof Error ? error.message : "archive_validation_failed"); }
   const proof = archiveProof(args.archive);
   const body = {
     schema: "ligou.hermes.backup-manifest",
-    version: 1,
+    version: 2,
     tenant: args.tenant,
     source: { identity: args.source },
     archive: {
@@ -108,7 +89,11 @@ function createManifest(args) {
       format: "hermes-cognitive-zip",
       sha256: proof.sha256,
       size_bytes: proof.size,
+      expanded_size_bytes: inspection.expanded_size_bytes,
+      file_count: inspection.file_count,
     },
+    limits: inspection.limits,
+    runtime: { hermes_image: args.hermes_image },
     exclusions: EXCLUSIONS,
     created_at: args.created,
   };
@@ -129,12 +114,12 @@ function createManifest(args) {
 }
 
 function verifyManifest(args) {
-  if (!args.archive || !args.manifest || !args.tenant) fail("manifest_arguments_missing");
-  if (!TENANT.test(args.tenant)) fail("manifest_identity_invalid");
+  if (!args.archive || !args.manifest || !args.tenant || !args.hermes_image) fail("manifest_arguments_missing");
+  if (!TENANT.test(args.tenant) || !DIGEST_IMAGE.test(args.hermes_image)) fail("manifest_identity_invalid");
   let manifest;
   try { manifest = JSON.parse(readFileSync(args.manifest, "utf8")); }
   catch { fail("manifest_required"); }
-  exactKeys(manifest, ["schema", "version", "tenant", "source", "archive", "exclusions", "created_at", "signature"], "manifest_schema_invalid");
+  exactKeys(manifest, ["schema", "version", "tenant", "source", "archive", "limits", "runtime", "exclusions", "created_at", "signature"], "manifest_schema_invalid");
   exactKeys(manifest.signature, ["algorithm", "key_id", "value"], "manifest_signature_invalid");
   const { signature, ...body } = manifest;
   const signatureMetadata = { algorithm: signature.algorithm, key_id: signature.key_id };
@@ -144,11 +129,14 @@ function verifyManifest(args) {
     fail("manifest_signature_invalid");
   }
   exactKeys(manifest.source, ["identity"], "manifest_schema_invalid");
-  exactKeys(manifest.archive, ["name", "format", "sha256", "size_bytes"], "manifest_schema_invalid");
-  if (manifest.schema !== "ligou.hermes.backup-manifest" || manifest.version !== 1
+  exactKeys(manifest.archive, ["name", "format", "sha256", "size_bytes", "expanded_size_bytes", "file_count"], "manifest_schema_invalid");
+  exactKeys(manifest.limits, ["max_files", "max_expanded_bytes"], "manifest_schema_invalid");
+  exactKeys(manifest.runtime, ["hermes_image"], "manifest_schema_invalid");
+  if (manifest.schema !== "ligou.hermes.backup-manifest" || manifest.version !== 2
     || manifest.tenant !== args.tenant || !IDENTITY.test(manifest.source.identity)
     || manifest.archive.name !== path.basename(args.archive)
     || manifest.archive.format !== "hermes-cognitive-zip"
+    || manifest.runtime.hermes_image !== args.hermes_image
     || new Date(manifest.created_at).toISOString() !== manifest.created_at
     || canonical(manifest.exclusions) !== canonical(EXCLUSIONS)) {
     fail("manifest_binding_invalid");
@@ -156,7 +144,12 @@ function verifyManifest(args) {
   const proof = archiveProof(args.archive);
   if (manifest.archive.size_bytes !== proof.size) fail("archive_size_mismatch");
   if (manifest.archive.sha256 !== proof.sha256) fail("archive_checksum_mismatch");
-  validateArchiveEntries(args.archive);
+  let inspection;
+  try { inspection = inspectArchive(args.archive); }
+  catch (error) { fail(error instanceof Error ? error.message : "archive_validation_failed"); }
+  if (manifest.archive.expanded_size_bytes !== inspection.expanded_size_bytes
+    || manifest.archive.file_count !== inspection.file_count
+    || canonical(manifest.limits) !== canonical(inspection.limits)) fail("archive_limits_mismatch");
   process.stdout.write(JSON.stringify({ ok: true, tenant: args.tenant, archive: manifest.archive.name }) + "\n");
 }
 

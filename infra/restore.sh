@@ -6,9 +6,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NODE_BIN="${LIGOU_NODE_BIN:-node}"
 MANIFEST_TOOL="${ROOT}/infra/backup-manifest.mjs"
+ARCHIVE_TOOL="${ROOT}/infra/archive-safety.mjs"
 HEALTH_TOOL="${ROOT}/hermes-cell/health-state.sh"
 TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
-IMAGE="${HERMES_IMAGE:-nousresearch/hermes-agent:v2026.8.18}"
+IMAGE="${HERMES_IMAGE:?set immutable HERMES_IMAGE digest}"
 APPLY=0
 KEY=""
 LOCAL_ARCHIVE=""
@@ -27,6 +28,7 @@ done
 [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] || { echo "tenant_invalid" >&2; exit 2; }
 command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "node_required" >&2; exit 1; }
 [ -n "${LIGOU_BACKUP_MANIFEST_KEY:-}" ] || { echo "manifest_key_required" >&2; exit 1; }
+[[ "$IMAGE" =~ ^[^[:space:]@]+(:[^[:space:]@]+)?@sha256:[a-f0-9]{64}$ ]] || { echo "hermes_image_digest_required" >&2; exit 1; }
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/ligou-restore.XXXXXX")"
 CHECK_CELL="restore-check-${TENANT}-$$"
@@ -61,7 +63,8 @@ else
   aws s3 cp "s3://${BUCKET}/cells/${TENANT}/${KEY}.manifest.json" "$MANIFEST" --only-show-errors
 fi
 
-"$NODE_BIN" "$MANIFEST_TOOL" verify --archive "$ARCHIVE" --manifest "$MANIFEST" --tenant "$TENANT" >/dev/null
+"$NODE_BIN" "$MANIFEST_TOOL" verify --archive "$ARCHIVE" --manifest "$MANIFEST" --tenant "$TENANT" --hermes-image "$IMAGE" >/dev/null
+"$NODE_BIN" "$ARCHIVE_TOOL" extract "$ARCHIVE" "${SCRATCH}/validated" >/dev/null
 
 docker volume create "$CHECK_VOLUME" >/dev/null
 CHECK_CREATED=1
@@ -118,10 +121,23 @@ if ! docker exec "$CELL" hermes backup -o "/tmp/${ROLLBACK_NAME}" >/dev/null \
   exit 1
 fi
 
+cell_active() {
+  [ "$(docker inspect --format '{{.State.Running}}' "$CELL" 2>/dev/null || true)" = "true" ]
+}
+
+live_smoke() {
+  cell_active \
+    && docker exec "$CELL" hermes memory list --json >/dev/null \
+    && docker exec "$CELL" hermes skills list --json >/dev/null \
+    && docker exec "$CELL" hermes sessions list --json >/dev/null \
+    && TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$HEALTH_TOOL" >/dev/null
+}
+
 apply_rollback() {
   docker cp "$ROLLBACK_LOCAL" "${CELL}:/tmp/${ROLLBACK_NAME}" >/dev/null \
     && docker exec "$CELL" hermes import "/tmp/${ROLLBACK_NAME}" --yes >/dev/null \
-    && docker restart "$CELL" >/dev/null
+    && docker restart "$CELL" >/dev/null \
+    && live_smoke
 }
 
 if ! docker cp "$ARCHIVE" "${CELL}:/tmp/${TARGET_NAME}" >/dev/null \
@@ -134,13 +150,6 @@ if ! docker cp "$ARCHIVE" "${CELL}:/tmp/${TARGET_NAME}" >/dev/null \
   fi
   exit 1
 fi
-
-live_smoke() {
-  docker exec "$CELL" hermes memory list --json >/dev/null \
-    && docker exec "$CELL" hermes skills list --json >/dev/null \
-    && docker exec "$CELL" hermes sessions list --json >/dev/null \
-    && TENANT_SLUG="$TENANT" "$HEALTH_TOOL" >/dev/null
-}
 
 if ! live_smoke; then
   if apply_rollback; then
