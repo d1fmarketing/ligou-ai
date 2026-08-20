@@ -310,12 +310,17 @@ describe("booking delivery authority corrective migration contract", () => {
   test("all pre-write defer/fail/release transitions require the current claim token", () => {
     const sql = migrationSql("booking_delivery_authority");
     expect(sql).toContain("function public.transition_claimed_intent");
+    expect(sql).toContain("v_intent.claim_token is null or p_claim_token is null");
     expect(sql).toContain("v_intent.claim_token is distinct from p_claim_token");
     expect(sql).toContain("v_intent.provider_write_started_at is not null");
     expect(sql).toContain("delete from public.booking_slot_leases l");
     expect(sql).toContain("revoke execute on function public.release_booking_slot_lease(uuid) from service_role");
     expect(sql).toContain("revoke execute on function public.prepare_booking_provider_write(uuid) from service_role");
     expect(sql).toContain("revoke execute on function public.validate_booking_intent_authority(uuid) from service_role");
+    const transitionAt = sql.indexOf("function public.transition_claimed_intent");
+    const transitionEnd = sql.indexOf("revoke all on function public.transition_claimed_intent", transitionAt);
+    const transitionSql = sql.slice(transitionAt, transitionEnd);
+    expect(transitionSql.indexOf("update public.action_intents ai set")).toBeLessThan(transitionSql.indexOf("delete from public.booking_slot_leases l"));
   });
 
   test("provider input and lease are exactly reconstructed from locked booking state", () => {

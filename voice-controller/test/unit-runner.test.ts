@@ -13,6 +13,7 @@ test("unit runner uses only synthetic configuration and excludes live integratio
   expect(environment.OPENAI_API_KEY).toBe("synthetic-unit-test-key");
   expect(environment.SUPABASE_SECRET_KEY).toBe("synthetic-unit-test-key");
   expect(environment.SUPABASE_PUBLISHABLE_KEY).toBe("synthetic-unit-test-key");
+  expect(environment.CALENDAR_PROVIDER).toBe("fake");
   expect(unitTestFiles).not.toContain("test/booking.integration.test.ts");
   expect(unitTestFiles).toContain("test/unit-runner.test.ts");
 });

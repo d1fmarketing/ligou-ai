@@ -273,12 +273,10 @@ begin
   if p_transition not in ('defer','fail') then raise exception 'invalid_claim_transition'; end if;
   select ai.* into v_intent from public.action_intents ai where ai.id = p_intent for update;
   if v_intent.id is null or v_intent.status <> 'running'
+     or v_intent.claim_token is null or p_claim_token is null
      or v_intent.claim_token is distinct from p_claim_token
      or v_intent.lease_until is null or v_intent.lease_until <= now()
      or v_intent.provider_write_started_at is not null then return false; end if;
-
-  delete from public.booking_slot_leases l
-  where l.intent_id = p_intent and l.state = 'held';
 
   if p_transition = 'defer' then
     update public.action_intents ai set
@@ -292,13 +290,21 @@ begin
       finished_at = now(), lease_until = null
     where ai.id = p_intent and ai.claim_token = p_claim_token and ai.status = 'running';
     get diagnostics v_rows = row_count;
+  end if;
+
+  if v_rows <> 1 then return false; end if;
+
+  delete from public.booking_slot_leases l
+  where l.intent_id = p_intent and l.state = 'held';
+
+  if p_transition = 'fail' then
     if v_intent.booking_id is not null then
       update public.bookings b set status = 'failed'
       where b.id = v_intent.booking_id and b.tenant_id = v_intent.tenant_id
         and b.call_id = v_intent.call_id and b.status in ('proposed','unknown');
     end if;
   end if;
-  return v_rows = 1;
+  return true;
 end;
 $$;
 

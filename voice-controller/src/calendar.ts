@@ -305,12 +305,7 @@ function googleCfg(): GoogleCfg | null {
   return null;
 }
 
-const connCache = new Map<string, { cfg: GoogleCfg | null; at: number }>();
-const CONN_TTL_MS = 60_000;
-
 async function tenantCfg(tenantId: string): Promise<GoogleCfg | null> {
-  const hit = connCache.get(tenantId);
-  if (hit && Date.now() - hit.at < CONN_TTL_MS) return hit.cfg;
   let cfg: GoogleCfg | null = null;
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID, clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
   const { data, error } = await supa().from("connector_accounts")
@@ -327,7 +322,6 @@ async function tenantCfg(tenantId: string): Promise<GoogleCfg | null> {
       oauth: { clientId, clientSecret, refreshToken: data.refresh_token },
     };
   }
-  connCache.set(tenantId, { cfg, at: Date.now() });
   return cfg;
 }
 
@@ -400,8 +394,10 @@ export function createGoogleCalendar(dependencies: GoogleDependencies = {}): Cal
     if (!body || typeof body !== "object" || !Array.isArray(body.items)) {
       return { base, error: "lookup_malformed_items" };
     }
-    if (Object.prototype.hasOwnProperty.call(body, "nextPageToken") && typeof body.nextPageToken !== "string") {
-      return { base, error: "lookup_malformed_pagination" };
+    if (Object.prototype.hasOwnProperty.call(body, "nextPageToken")) {
+      if (typeof body.nextPageToken !== "string" || body.nextPageToken.length === 0) {
+        return { base, error: "lookup_malformed_pagination" };
+      }
     }
     const items = body.items;
     if (items.length > 1 || body.nextPageToken) {
@@ -492,5 +488,5 @@ export function createGoogleCalendar(dependencies: GoogleDependencies = {}): Cal
 export const googleCalendar = createGoogleCalendar();
 
 export function calendarPort(): CalendarPort {
-  return googleCfg() ? googleCalendar : fakeCalendar;
+  return process.env.CALENDAR_PROVIDER === "fake" ? fakeCalendar : googleCalendar;
 }

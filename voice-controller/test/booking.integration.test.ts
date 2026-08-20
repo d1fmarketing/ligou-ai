@@ -12,6 +12,7 @@ const SLUG = `test-tenant-${Date.now()}`;
 
 beforeAll(async () => {
   if (!HAVE_ENV) return;
+  process.env.CALENDAR_PROVIDER = "fake";
   const rules = await import("../src/rules.ts");
   rules._setClient(null); // unit tests may have injected a mock into the shared module registry
   ({ supa } = rules);

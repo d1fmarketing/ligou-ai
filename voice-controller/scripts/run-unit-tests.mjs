@@ -42,6 +42,7 @@ export function createUnitTestEnvironment() {
     GOOGLE_OAUTH_CLIENT_ID: "synthetic-unit-test-client",
     GOOGLE_OAUTH_CLIENT_SECRET: "synthetic-unit-test-key",
     GOOGLE_REFRESH_TOKEN: "synthetic-unit-test-token",
+    CALENDAR_PROVIDER: "fake",
   };
 }
 
