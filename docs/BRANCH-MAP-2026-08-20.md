@@ -17,6 +17,9 @@ ref nesta consolidação, não uma autorização para apagar ou publicar nada.
   commit da própria integração.
 - **Exclusão explícita:** `codex/ligou-v0.1-hardening-wip@b69e5df` não integra esta
   consolidação e não é candidato a merge nesta rodada.
+- **História intermediária preservada:** `codex/ligou-v0.1-organized-history-wip`
+  guarda localmente os commits de curadoria anteriores à reconstrução sanitizada.
+  Ela contém blobs removidos e não pode ser publicada nem mergeada.
 
 | Família / refs | Tip | Ancestral | Conteúdo único no tip | Disposição |
 | --- | --- | --- | --- | --- |
@@ -43,6 +46,7 @@ ref nesta consolidação, não uma autorização para apagar ou publicar nada.
 | Memória: `codex/ligou-memory-copy` | `4f8f971d` | `4b5436cd` | memória permanente do negócio | preservado na linha v9 |
 | CTA mobile: `codex/ligou-v9-mobile-cta` | `9f9710ed` | `4f8f971d` | remove CTA secundária mobile | preservado na linha v9 |
 | Hardening WIP: `codex/ligou-v0.1-hardening-wip` | `b69e5df` | `678730a` | trabalho posterior de hardening | preservar isolado; excluído desta consolidação |
+| História de organização WIP: `codex/ligou-v0.1-organized-history-wip` | tip local: `git rev-parse codex/ligou-v0.1-organized-history-wip` | primeiro pai: consultar a ref local com `^` | curadoria intermediária que ainda alcança blobs removidos | preservar somente como evidência local; nunca publicar ou mergear |
 
 ## Regra de leitura
 
