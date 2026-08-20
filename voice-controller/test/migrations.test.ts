@@ -51,15 +51,27 @@ describe("OAuth connector hardening migration contract", () => {
 });
 
 describe("forward-only connector plaintext retirement migration contract", () => {
-  test("quarantines remaining legacy rows before clearing and removing the plaintext column", () => {
+  test("quarantines remaining legacy rows and keeps plaintext available only for the guarded converter", () => {
     const sql = migrationSql("connector_plaintext_retirement");
     const quarantineAt = sql.indexOf("status = 'reconnect_required'");
-    const clearAt = sql.indexOf("set refresh_token = null");
-    const dropAt = sql.indexOf("drop column if exists refresh_token");
     expect(quarantineAt).toBeGreaterThan(-1);
-    expect(clearAt).toBeGreaterThan(quarantineAt);
-    expect(dropAt).toBeGreaterThan(clearAt);
     expect(sql).toContain("legacy_plaintext_reconnect_required");
+    expect(sql).toContain("connector_accounts_plaintext_quarantined_check");
+    expect(sql).not.toContain("set refresh_token = null");
+    expect(sql).not.toContain("drop column if exists refresh_token");
+    expect(sql).toContain("revoke all on table public.connector_accounts from public, anon, authenticated");
+    expect(sql).toContain("grant select, insert, update, delete on table public.connector_accounts to service_role");
+  });
+});
+
+describe("connector plaintext invariant migration contract", () => {
+  test("fails closed if conversion is incomplete before removing the legacy column", () => {
+    const sql = migrationSql("connector_plaintext_invariant");
+    const guardAt = sql.indexOf("legacy_connector_plaintext_remaining");
+    const dropAt = sql.indexOf("drop column if exists refresh_token");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(dropAt).toBeGreaterThan(guardAt);
+    expect(sql).toContain("if exists ( select 1 from public.connector_accounts where refresh_token is not null )");
     expect(sql).toContain("revoke all on table public.connector_accounts from public, anon, authenticated");
     expect(sql).toContain("grant select, insert, update, delete on table public.connector_accounts to service_role");
   });
