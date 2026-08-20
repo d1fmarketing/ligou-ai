@@ -1,5 +1,5 @@
--- Forward-only retirement of the legacy connector plaintext credential surface.
--- The preceding hardening migration quarantined these rows; this migration destroys the bytes and column.
+-- Forward-only guard for the one-time tenant converter. This migration is local and unapplied.
+-- Plaintext stays quarantined and unusable until the converter verifies AES-GCM and clears it atomically.
 
 update public.connector_accounts
 set status = 'reconnect_required',
@@ -7,12 +7,11 @@ set status = 'reconnect_required',
     updated_at = clock_timestamp()
 where refresh_token is not null;
 
-update public.connector_accounts
-set refresh_token = null
-where refresh_token is not null;
-
 alter table public.connector_accounts
-  drop column if exists refresh_token;
+  drop constraint if exists connector_accounts_plaintext_quarantined_check;
+alter table public.connector_accounts
+  add constraint connector_accounts_plaintext_quarantined_check
+  check (refresh_token is null or status = 'reconnect_required');
 
 revoke all on table public.connector_accounts from public, anon, authenticated;
 grant select, insert, update, delete on table public.connector_accounts to service_role;

@@ -120,7 +120,6 @@ Deno.serve(async (req) => {
   const { error: storeError } = await supa.from("connector_accounts").upsert({
     tenant_id: proof.tenantId,
     provider: "google_calendar",
-    refresh_token: null,
     refresh_token_ciphertext: wire.ciphertext,
     refresh_token_iv: wire.iv,
     token_key_version: wire.keyVersion,
