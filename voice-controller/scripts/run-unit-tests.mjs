@@ -1,5 +1,10 @@
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const syntheticPath = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin";
 
 export const unitTestFiles = [
   "test/powers.test.ts",
@@ -10,10 +15,10 @@ export const unitTestFiles = [
   "test/unit-runner.test.ts",
 ];
 
-export function createUnitTestEnvironment(parent = process.env) {
+export function createUnitTestEnvironment() {
   return {
-    PATH: parent.PATH,
-    TMPDIR: parent.TMPDIR,
+    PATH: syntheticPath,
+    TMPDIR: "/tmp",
     NODE_ENV: "test",
     OPENAI_API_KEY: "synthetic-unit-test-key",
     HERMES_API_KEY: "synthetic-unit-test-key",
@@ -26,15 +31,33 @@ export function createUnitTestEnvironment(parent = process.env) {
   };
 }
 
-export function runUnitTests(run = execFileSync) {
-  for (const file of unitTestFiles) {
-    run("bun", ["test", file], {
-      stdio: "inherit",
-      env: createUnitTestEnvironment(),
-    });
+function absoluteTestPath(file) {
+  return path.isAbsolute(file) ? file : path.join(projectRoot, file);
+}
+
+export function runUnitTests(run = execFileSync, files = unitTestFiles) {
+  const isolatedCwd = mkdtempSync("/tmp/ligou-unit-test-");
+  try {
+    for (const file of files) {
+      run(process.execPath, ["test", absoluteTestPath(file)], {
+        cwd: isolatedCwd,
+        stdio: "inherit",
+        env: { ...createUnitTestEnvironment(), TMPDIR: isolatedCwd },
+      });
+    }
+  } finally {
+    rmSync(isolatedCwd, { recursive: true, force: true });
   }
 }
 
+function cliFiles(arguments_) {
+  if (arguments_.length === 0) return unitTestFiles;
+  if (arguments_.length === 2 && arguments_[0] === "--file" && path.isAbsolute(arguments_[1])) {
+    return [arguments_[1]];
+  }
+  throw new Error("usage: bun scripts/run-unit-tests.mjs [--file /absolute/path/to/test.ts]");
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  runUnitTests();
+  runUnitTests(execFileSync, cliFiles(process.argv.slice(2)));
 }

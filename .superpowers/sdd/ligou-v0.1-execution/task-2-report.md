@@ -80,3 +80,106 @@ rewriter; it only scans current tracked repository content and relies on its nar
 incident still requires the operator rotation checklist and provider-side verification. The known monolithic
 voice-test registry/environment collision is documented as diagnostic-only rather than treated as a release
 gate.
+
+## Review fix round — deterministic proof and scanner hardening
+
+### Original issues and outcome
+
+1. The production proof previously read `dist/client` regardless of the build output selection and only read
+   selected files. It now uses the test-owned `dist/security-containment` tree, writes a deliberately stale
+   forbidden text marker before build, relies on the build's output cleanup, and recursively scans every
+   emitted non-binary text asset. The marker is absent after rebuild; the original stale/wrong-tree issue no
+   longer reproduces.
+2. `voice-controller`'s default `test` command now delegates to `test:unit`; the old monolithic `bun test`
+   discovery is available only as `test:diagnostic`. Booking integration remains the separately named
+   `test:integration` command and skips without live configuration.
+3. Unit children now run via the current Bun executable from a newly created empty `/tmp` cwd, with absolute
+   test paths and a fixed synthetic environment. The runner does not read or copy its invoker environment.
+   A real Bun regression probe starts the runner from a directory containing a dotenv sentinel and proves the
+   sentinel is absent in the child process.
+4. The scanner uses `lstat` and scans only regular tracked files, skipping symlinks before reading any target.
+5. Scanner coverage now includes credential-bearing database URLs, YAML/JSON client and service fields,
+   common GitHub and Supabase token/JWT shapes, and PEM private-key material. Every tracked `.env.example` is
+   validated for blank-only assignments; root, dashboard, and voice examples were added with names only.
+   Scanner enforcement is part of `bun run check`.
+
+The normal Supabase `signInWithOtp` magic-link behavior remains in the generated production output. The
+removed URL-fragment/password path remains absent from the recursively inspected build.
+
+### RED evidence
+
+```text
+$ LIGOU_SITE_OUTPUT_DIR=security-containment node --test tests/security-containment.test.mjs
+not ok ... ENOENT: scandir '.../dist/security-containment'
+
+$ node --test tests/secret-scanner.test.mjs
+SyntaxError: ... does not provide an export named 'validateEnvExamples'
+
+$ cd voice-controller && bun test test/unit-runner.test.ts
+fail: expected fixed synthetic PATH, received inherited PATH
+fail: expected absolute Bun child paths, received relative paths
+fail: dotenv probe marker was absent because --file was not supported
+
+$ node --test tests/secret-scanner.test.mjs
+fail: no finding was emitted for config.json structured secrets
+```
+
+### GREEN evidence
+
+```text
+$ node --test tests/secret-scanner.test.mjs
+# pass 5 / fail 0
+
+$ cd voice-controller && bun test test/unit-runner.test.ts
+# pass 3 / fail 0
+# dotenv sentinel stays out
+
+$ bun run test:security
+Site build ready: .../dist/security-containment
+# tests 6 / pass 6 / fail 0
+stale-output marker removed
+
+$ bun run secrets:scan
+Secret scan clean: 271 tracked files scanned.
+```
+
+### Fix-round self-review and remaining limitation
+
+The output proof is now tied to the exact build invocation and exercises cleanup with a stale forbidden asset.
+The dotenv probe is behavioral: it invokes Bun from a cwd containing a local dotenv candidate and asserts the
+actual child process cannot see its sentinel. Scanner findings remain masked. The scanner intentionally still
+does not perform full entropy analysis or rewrite Git history; it scans current tracked regular files only.
+
+### Final verification after staging
+
+```text
+$ bun run secrets:scan
+Secret scan clean: 271 tracked files scanned.
+
+$ bun run test:security
+Site build ready: .../dist/security-containment
+# tests 6 / pass 6 / fail 0 / skipped 0
+
+$ cd dashboard && npm test
+# dashboard tests 11 / pass 11
+# Sites tests 5 / pass 5
+
+$ cd voice-controller && npm test
+# isolated unit tests 63 / pass 63 / fail 0
+
+$ cd voice-controller && npm run test:unit
+# isolated unit tests 63 / pass 63 / fail 0
+
+$ cd voice-controller && npm run test:integration
+# pass 0 / skip 6 / fail 0
+
+$ bun run check
+# landing tests 10 / pass 10; secret scan clean; runtime checkpoint passed
+
+$ bun run site:build
+Site build ready: .../dist/client
+
+$ bash -n infra/deploy.sh infra/backup.sh infra/restore.sh
+$ git diff --cached --check
+# both exited 0
+```
