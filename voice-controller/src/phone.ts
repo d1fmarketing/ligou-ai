@@ -6,6 +6,7 @@ import { buildInstructions } from "./instructions.ts";
 import { loadTenant, supa } from "./rules.ts";
 import { makeCapability, toolSchemas } from "./tools.ts";
 import { attachSideband } from "./sideband.ts";
+import { reserveCallBudget, settleCallBudget } from "./budget.ts";
 
 export function startPhoneListener() {
   if (!config.openaiKey) return;
@@ -24,7 +25,7 @@ export function startPhoneListener() {
   console.log("phone listener active (realtime + poll)");
 }
 
-async function handleIncoming(row: any) {
+export async function handleIncoming(row: any) {
   // claim the row (race-safe against the poll/realtime double path)
   const { data: claimed } = await supa().from("phone_events")
     .update({ status: "accepted", handled_at: new Date().toISOString() })
@@ -34,12 +35,20 @@ async function handleIncoming(row: any) {
   // tenant by called number (single-tenant F6 start: default slug)
   const { tenant, rules } = await loadTenant(config.defaultTenantSlug);
   const model = config.model;
+  if (!tenant.owner_user_id) {
+    await supa().from("phone_events").update({ status: "rejected" }).eq("id", row.id);
+    await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(row.openai_call_id)}/reject`, {
+      method: "POST", headers: { Authorization: `Bearer ${config.openaiKey}` },
+    }).catch(() => {});
+    throw Object.assign(new Error("tenant_provisioning_required"), { status: 409 });
+  }
 
   const { data: call } = await supa().from("calls")
     .insert({ tenant_id: tenant.id, channel: "phone", session_type: "customer", model, status: "active", openai_call_id: row.openai_call_id })
     .select("id").single();
-  const { error: be } = await supa().rpc("reserve_call_budget", { p_tenant: tenant.id, p_call: call!.id, p_est_cost: 0.35 });
-  if (be) {
+  try {
+    await reserveCallBudget(tenant.id, call!.id, config.estCostPerSessionUsd);
+  } catch {
     await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(row.openai_call_id)}/reject`, {
       method: "POST", headers: { Authorization: `Bearer ${config.openaiKey}` },
     }).catch(() => {});
@@ -56,6 +65,10 @@ async function handleIncoming(row: any) {
   if (!accept.ok) {
     await supa().from("phone_events").update({ status: "error" }).eq("id", row.id);
     await supa().from("calls").update({ status: "error", ended_at: new Date().toISOString() }).eq("id", call!.id);
+    await settleCallBudget({
+      tenantId: tenant.id, callId: call!.id, actualCostUsd: 0, minutes: 0,
+      outcome: "startup_error", detail: { reason: "phone_accept_failed", status: accept.status },
+    });
     throw new Error(`accept_failed: ${accept.status} ${await accept.text()}`);
   }
   await supa().from("phone_events").update({ tenant_id: tenant.id, call_id: call!.id }).eq("id", row.id);
@@ -64,5 +77,14 @@ async function handleIncoming(row: any) {
     authEpoch: tenant.auth_epoch,
     policyEpoch: tenant.policy_epoch,
   });
-  attachSideband(cap, row.openai_call_id, model);
+  try {
+    attachSideband(cap, row.openai_call_id, model);
+  } catch (error) {
+    await supa().from("calls").update({ status: "error", ended_at: new Date().toISOString() }).eq("id", call!.id);
+    await settleCallBudget({
+      tenantId: tenant.id, callId: call!.id, actualCostUsd: 0, minutes: 0,
+      outcome: "startup_error", detail: { reason: "sideband_attach_failed" },
+    });
+    throw error;
+  }
 }

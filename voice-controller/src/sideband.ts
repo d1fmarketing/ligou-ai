@@ -3,6 +3,7 @@
 import { config, emptyUsage, sessionCostUsd, type UsageTotals } from "./config.ts";
 import { runTool, type Capability } from "./tools.ts";
 import { supa } from "./rules.ts";
+import { settleCallBudget, type BudgetOutcome } from "./budget.ts";
 
 export interface SessionLedger {
   callId: string;
@@ -187,7 +188,7 @@ async function hangup(openaiCallId: string) {
   } catch {}
 }
 
-async function persistLedger(cap: Capability, ledger: SessionLedger) {
+export async function persistLedger(cap: Capability, ledger: SessionLedger) {
   const durationS = Math.round((Date.now() - ledger.startedAt) / 1000);
   const cost = sessionCostUsd(ledger.model, ledger.usage);
   const s = supa();
@@ -200,12 +201,19 @@ async function persistLedger(cap: Capability, ledger: SessionLedger) {
     cost_estimate_usd: Number(cost.toFixed(4)),
     summary_status: "pending_ingest",
   }).eq("id", cap.callId);
-  await s.from("usage_ledger").insert({
-    tenant_id: cap.tenantId,
-    call_id: cap.callId,
-    kind: "usage",
+  const outcome: BudgetOutcome = ledger.status === "ended"
+    ? "ended"
+    : ledger.status === "killed_deadline"
+      ? "killed_deadline"
+      : ledger.status === "killed_budget"
+        ? "killed_budget"
+        : "error";
+  await settleCallBudget({
+    tenantId: cap.tenantId,
+    callId: cap.callId,
+    actualCostUsd: Number(cost.toFixed(4)),
     minutes: Number((durationS / 60).toFixed(2)),
-    cost_usd: Number(cost.toFixed(4)),
+    outcome,
     detail: { tools: ledger.toolLog, model: ledger.model },
   });
 }

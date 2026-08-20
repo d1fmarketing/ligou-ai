@@ -7,6 +7,7 @@ import { loadTenant, supa } from "./rules.ts";
 import { makeCapability, toolSchemas } from "./tools.ts";
 import { attachSideband, liveSessions } from "./sideband.ts";
 import { requireTenantOwner } from "../../shared/tenant-ownership.ts";
+import { reserveCallBudget, settleCallBudget } from "./budget.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -34,7 +35,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   // Primary model, then automatic fallback (RJ 2026-08-19: 2.1 primary, mini as fallback).
   const primary = modelOverride && ALLOWED_MODELS.has(modelOverride) ? modelOverride : config.model;
   const chain = primary === config.fallbackModel ? [primary] : [primary, config.fallbackModel];
-  const estCost = primary === "gpt-realtime-2.1-mini" ? 0.35 : 1.0; // reserve for the pricier primary
+  const estCost = config.estCostPerSessionUsd;
 
   // call row first (budget RPC references it)
   const { data: call, error: ce } = await supa()
@@ -45,13 +46,29 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   if (ce || !call) throw new Error(`call_insert_failed: ${ce?.message}`);
 
   // atomic budget reservation — hard gate
-  const { error: be } = await supa().rpc("reserve_call_budget", { p_tenant: tenant.id, p_call: call.id, p_est_cost: estCost });
-  if (be) {
+  try {
+    await reserveCallBudget(tenant.id, call.id, estCost);
+  } catch (error: any) {
     await supa().from("calls").update({ status: "killed_budget", ended_at: new Date().toISOString() }).eq("id", call.id);
-    throw Object.assign(new Error(`budget_exceeded`), { status: 402, detail: be.message });
+    throw error;
   }
 
-  if (!config.openaiKey) throw Object.assign(new Error("openai_key_missing"), { status: 503 });
+  const settleStartupFailure = async (reason: string) => {
+    await supa().from("calls").update({ status: "error", ended_at: new Date().toISOString() }).eq("id", call.id);
+    await settleCallBudget({
+      tenantId: tenant.id,
+      callId: call.id,
+      actualCostUsd: 0,
+      minutes: 0,
+      outcome: "startup_error",
+      detail: { reason },
+    });
+  };
+
+  if (!config.openaiKey) {
+    await settleStartupFailure("openai_key_missing");
+    throw Object.assign(new Error("openai_key_missing"), { status: 503 });
+  }
 
   const instructions = buildInstructions(tenant, rules, sessionType);
   const maxMinutes = sessionType === "onboarding" ? 30 : (tenant.session_max_minutes ?? config.sessionMaxMinutes);
@@ -83,12 +100,17 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
     } catch (e: any) { lastErr = `${model}: ${e?.message}`; }
   }
   if (!usedModel) {
-    await supa().from("calls").update({ status: "error", ended_at: new Date().toISOString() }).eq("id", call.id);
+    await settleStartupFailure("realtime_unavailable");
     throw Object.assign(new Error("realtime_unavailable"), { status: 502, detail: lastErr });
   }
 
   await supa().from("calls").update({ openai_call_id: openaiCallId, model: usedModel }).eq("id", call.id);
-  attachSideband(cap, openaiCallId, usedModel);
+  try {
+    attachSideband(cap, openaiCallId, usedModel);
+  } catch (error) {
+    await settleStartupFailure("sideband_attach_failed");
+    throw error;
+  }
 
   return { sdp: answerSdp, call_id: call.id, max_minutes: maxMinutes, model: usedModel, fell_back: usedModel !== primary };
 }
