@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveTenantIdentity } from "./tenant-identity.mjs";
 
 const TENANT = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
 const DIGEST_IMAGE = /^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/;
@@ -14,18 +14,8 @@ function fail(code) {
 }
 
 export function tenantRuntime(tenant, image = "") {
-  if (!TENANT.test(tenant)) throw new Error("tenant_invalid");
-  const portSeed = createHash("sha256").update(`ligou-hermes:${tenant}`).digest().readUInt32BE(0);
-  const prefix = `ligou-${tenant}`;
   return {
-    tenant,
-    compose_project: prefix,
-    container_name: `ligou-cell-${tenant}`,
-    cognitive_volume: `${prefix}-hermes-cognitive`,
-    model_auth_volume: `${prefix}-hermes-model-auth`,
-    network: `${prefix}-cell`,
-    host_port: 20_000 + (portSeed % 20_000),
-    hermes_url: `http://127.0.0.1:${20_000 + (portSeed % 20_000)}`,
+    ...resolveTenantIdentity(tenant),
     image,
   };
 }
@@ -63,6 +53,7 @@ if (isMain) {
       HERMES_MODEL_AUTH_VOLUME: runtime.model_auth_volume,
       HERMES_NETWORK: runtime.network,
       HERMES_HOST_PORT: String(runtime.host_port),
+      HERMES_PROJECTED_RULES_PATH: runtime.projected_rules_path,
     },
   });
   process.exit(result.status ?? 1);

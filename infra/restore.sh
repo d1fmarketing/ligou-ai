@@ -8,6 +8,7 @@ NODE_BIN="${LIGOU_NODE_BIN:-node}"
 MANIFEST_TOOL="${ROOT}/infra/backup-manifest.mjs"
 ARCHIVE_TOOL="${ROOT}/infra/archive-safety.mjs"
 HEALTH_TOOL="${ROOT}/hermes-cell/health-state.sh"
+IDENTITY_TOOL="${ROOT}/hermes-cell/tenant-identity.mjs"
 TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
 IMAGE="${HERMES_IMAGE:?set immutable HERMES_IMAGE digest}"
 APPLY=0
@@ -30,9 +31,18 @@ command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "node_required" >&2; exit 1; }
 [ -n "${LIGOU_BACKUP_MANIFEST_KEY:-}" ] || { echo "manifest_key_required" >&2; exit 1; }
 [[ "$IMAGE" =~ ^[^[:space:]@]+(:[^[:space:]@]+)?@sha256:[a-f0-9]{64}$ ]] || { echo "hermes_image_digest_required" >&2; exit 1; }
 
-SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/ligou-restore.XXXXXX")"
-CHECK_CELL="restore-check-${TENANT}-$$"
-CHECK_VOLUME="restore-check-${TENANT}-$$"
+IDENTITY_JSON="$("$NODE_BIN" "$IDENTITY_TOOL" --tenant "$TENANT" --json)"
+identity_field() {
+  "$NODE_BIN" -e 'const value=JSON.parse(process.argv[1]);const field=process.argv[2];if(!Object.hasOwn(value,field))process.exit(1);process.stdout.write(String(value[field]));' "$IDENTITY_JSON" "$1"
+}
+RESTORE_WORK="$(identity_field restore_work_dir)"
+CELL="$(identity_field container_name)"
+ARCHIVE_PREFIX="$(identity_field archive_prefix)"
+mkdir -p "$RESTORE_WORK"
+chmod 700 "$RESTORE_WORK"
+SCRATCH="$(mktemp -d "${RESTORE_WORK}/run.XXXXXX")"
+CHECK_CELL="${ARCHIVE_PREFIX}-restore-check-$$"
+CHECK_VOLUME="${ARCHIVE_PREFIX}-restore-check-$$"
 CHECK_CREATED=0
 CHECK_STARTED=0
 
@@ -53,10 +63,10 @@ else
   BUCKET="${LIGOU_BACKUP_BUCKET:?set LIGOU_BACKUP_BUCKET}"
   if [ -z "$KEY" ]; then
     KEY="$(aws s3 ls "s3://${BUCKET}/cells/${TENANT}/" \
-      | awk '{print $4}' | grep -E "^hermes-${TENANT}-[0-9]{8}T[0-9]{6}Z[.]zip$" | sort | tail -1)"
+      | awk '{print $4}' | grep -E "^${ARCHIVE_PREFIX}-[0-9]{8}T[0-9]{6}Z[.]zip$" | sort | tail -1)"
     [ -n "$KEY" ] || { echo "backup_not_found" >&2; exit 1; }
   fi
-  [[ "$KEY" =~ ^hermes-${TENANT}-[0-9]{8}T[0-9]{6}Z[.]zip$ ]] || { echo "backup_key_invalid" >&2; exit 2; }
+  [[ "$KEY" =~ ^${ARCHIVE_PREFIX}-[0-9]{8}T[0-9]{6}Z[.]zip$ ]] || { echo "backup_key_invalid" >&2; exit 2; }
   ARCHIVE="${SCRATCH}/${KEY}"
   MANIFEST="${SCRATCH}/${KEY}.manifest.json"
   aws s3 cp "s3://${BUCKET}/cells/${TENANT}/${KEY}" "$ARCHIVE" --only-show-errors
@@ -108,7 +118,6 @@ if [ "$APPLY" -eq 0 ]; then
   exit 0
 fi
 
-CELL="ligou-cell-${TENANT}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ROLLBACK_NAME="rollback-${TENANT}-${STAMP}.zip"
 ROLLBACK_LOCAL="${SCRATCH}/${ROLLBACK_NAME}"

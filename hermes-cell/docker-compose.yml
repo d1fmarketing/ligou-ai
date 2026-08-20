@@ -24,7 +24,7 @@ services:
     volumes:
       - hermes-cognitive:/opt/data                              # memory, skills, sessions; cognitive backup scope
       - hermes-model-auth:/root/.hermes                         # Codex OAuth only; never part of cognitive backups
-      - ./projected-rules:/opt/projected-rules:ro               # derived rulebook, written by the worker, read-only here
+      - ${HERMES_PROJECTED_RULES_PATH:?launch with node tenant-compose.mjs}:/opt/projected-rules:ro
       - ./config/config.yaml:/opt/data/config.yaml:ro          # THE config hermes reads (model+provider+gates)
       - ./config/cli-config.yaml:/opt/data/cli-config.yaml:ro   # CLI-side pin (kept in sync)
     ports:

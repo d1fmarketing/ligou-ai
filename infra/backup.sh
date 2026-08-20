@@ -6,27 +6,32 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NODE_BIN="${LIGOU_NODE_BIN:-node}"
 MANIFEST_TOOL="${ROOT}/infra/backup-manifest.mjs"
+IDENTITY_TOOL="${ROOT}/hermes-cell/tenant-identity.mjs"
 TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
 BUCKET="${LIGOU_BACKUP_BUCKET:?set LIGOU_BACKUP_BUCKET}"
 SOURCE_ID="${LIGOU_BACKUP_SOURCE_ID:?set LIGOU_BACKUP_SOURCE_ID}"
 IMAGE="${HERMES_IMAGE:?set immutable HERMES_IMAGE digest}"
-WORK="${LIGOU_BACKUP_WORK_DIR:-/opt/ligou/backups}"
 RETENTION_DAYS="${LIGOU_BACKUP_RETENTION_DAYS:-30}"
 
 [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] || { echo "tenant_invalid" >&2; exit 2; }
 [[ "$BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { echo "backup_bucket_invalid" >&2; exit 2; }
 [[ "$SOURCE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ ]] || { echo "backup_source_invalid" >&2; exit 2; }
-[[ "$WORK" = /* && "$WORK" != "/" && "$WORK" != "/opt" && "$WORK" != "/opt/ligou" ]] \
-  || { echo "backup_work_dir_invalid" >&2; exit 2; }
 [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] && [ "$RETENTION_DAYS" -ge 1 ] && [ "$RETENTION_DAYS" -le 3650 ] \
   || { echo "backup_retention_invalid" >&2; exit 2; }
 [ -n "${LIGOU_BACKUP_MANIFEST_KEY:-}" ] || { echo "manifest_key_required" >&2; exit 1; }
 [[ "$IMAGE" =~ ^[^[:space:]@]+(:[^[:space:]@]+)?@sha256:[a-f0-9]{64}$ ]] || { echo "hermes_image_digest_required" >&2; exit 1; }
 command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "node_required" >&2; exit 1; }
 
-CELL="ligou-cell-${TENANT}"
+IDENTITY_JSON="$("$NODE_BIN" "$IDENTITY_TOOL" --tenant "$TENANT" --json)"
+identity_field() {
+  "$NODE_BIN" -e 'const value=JSON.parse(process.argv[1]);const field=process.argv[2];if(!Object.hasOwn(value,field))process.exit(1);process.stdout.write(String(value[field]));' "$IDENTITY_JSON" "$1"
+}
+WORK="$(identity_field backup_work_dir)"
+CELL="$(identity_field container_name)"
+ARCHIVE_PREFIX="$(identity_field archive_prefix)"
+
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-NAME="hermes-${TENANT}-${STAMP}.zip"
+NAME="${ARCHIVE_PREFIX}-${STAMP}.zip"
 MANIFEST_NAME="${NAME}.manifest.json"
 REMOTE_ARCHIVE="/tmp/${NAME}"
 LOCAL_ARCHIVE="${WORK}/${NAME}"

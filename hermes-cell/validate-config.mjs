@@ -42,6 +42,7 @@ if (image !== toolchain.hermes_image) fail("hermes_image_not_approved");
 for (const required of [
   "LIGOU_COMPOSE_PROJECT", "HERMES_CONTAINER_NAME", "HERMES_COGNITIVE_VOLUME",
   "HERMES_MODEL_AUTH_VOLUME", "HERMES_NETWORK", "HERMES_HOST_PORT",
+  "HERMES_PROJECTED_RULES_PATH",
 ]) {
   if (!compose.includes("${" + required + ":?")) fail("tenant_isolation_required");
 }
