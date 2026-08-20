@@ -6,6 +6,7 @@ import { buildInstructions, type SessionType } from "./instructions.ts";
 import { loadTenant, supa } from "./rules.ts";
 import { makeCapability, toolSchemas } from "./tools.ts";
 import { attachSideband, liveSessions } from "./sideband.ts";
+import { requireTenantOwner } from "../../shared/tenant-ownership.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -24,14 +25,10 @@ async function verifyOwner(authHeader: string | null): Promise<{ userId: string 
 }
 
 export async function startSession(userId: string, sessionType: SessionType, sdpOffer: string, modelOverride?: string) {
+  const ownedTenant = await requireTenantOwner(supa(), config.defaultTenantSlug, userId);
   const { tenant, rules } = await loadTenant(config.defaultTenantSlug);
-
-  // first authenticated user claims the seed tenant (single-tenant F1)
-  if (!tenant.owner_user_id) {
-    await supa().from("tenants").update({ owner_user_id: userId }).eq("id", tenant.id).is("owner_user_id", null);
-  } else if (tenant.owner_user_id !== userId) {
-    throw Object.assign(new Error("not_tenant_owner"), { status: 403 });
-  }
+  // The ownership read is intentionally fresh and occurs before any call or reservation write.
+  tenant.owner_user_id = ownedTenant.owner_user_id;
 
   const ALLOWED_MODELS = new Set(["gpt-realtime", "gpt-realtime-2.1", "gpt-realtime-2.1-mini"]);
   // Primary model, then automatic fallback (RJ 2026-08-19: 2.1 primary, mini as fallback).
@@ -111,18 +108,13 @@ if (import.meta.main) {
         return Response.json({ ok: true, live_sessions: liveSessions.size, model: config.model, openai: Boolean(config.openaiKey) }, { headers: CORS });
       }
 
-      // Server-side tenant claim: trusted code (secret key) binds the unclaimed seed tenant to the
-      // authenticated owner. RLS stays strict owner-only; this is provisioning, not an RLS relaxation.
+      // Compatibility endpoint: verifies the explicit binding. Provisioning is an operator-only SQL RPC.
       if (url.pathname === "/claim" && req.method === "POST") {
         try {
           const owner = await verifyOwner(req.headers.get("authorization"));
           if (!owner) return Response.json({ error: "unauthorized" }, { status: 401, headers: CORS });
-          const { data: t } = await supa().from("tenants").select("id,owner_user_id").eq("slug", config.defaultTenantSlug).single();
-          if (t && !t.owner_user_id) {
-            await supa().from("tenants").update({ owner_user_id: owner.userId }).eq("id", t.id).is("owner_user_id", null);
-          }
-          const claimed = t?.owner_user_id === owner.userId || !t?.owner_user_id;
-          return Response.json({ tenant: config.defaultTenantSlug, owner: claimed }, { headers: CORS });
+          await requireTenantOwner(supa(), config.defaultTenantSlug, owner.userId);
+          return Response.json({ tenant: config.defaultTenantSlug, owner: true }, { headers: CORS });
         } catch (e: any) {
           return Response.json({ error: e?.message ?? "internal" }, { status: e?.status ?? 500, headers: CORS });
         }

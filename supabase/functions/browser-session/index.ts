@@ -1,11 +1,12 @@
 // Public session bootstrap for the dashboard — works from anywhere, while the EC2 keeps ZERO inbound ports.
-// Flow: verify owner JWT -> claim/verify tenant -> insert browser_session_requests(pending) -> the controller
+// Flow: verify owner JWT -> verify provisioned tenant -> insert browser_session_requests(pending) -> the controller
 // (outbound-only) picks it up via Realtime, runs the canonical startSession (budget, ek_, SDP exchange,
 // sideband) and writes the answer -> this function returns it to the browser. Same response contract as the
 // local controller's POST /session, so the dashboard just points here in remote mode.
 // Deploy: supabase functions deploy browser-session --no-verify-jwt   (JWT is verified explicitly below)
 // Secrets: SERVICE_KEY=sb_secret_...  (SUPABASE_URL is injected by the platform)
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { requireTenantOwner } from "../../../shared/tenant-ownership.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -32,13 +33,12 @@ Deno.serve(async (req) => {
   const body = await req.json().catch(() => ({}));
   if (!body.sdp) return Response.json({ error: "sdp_required" }, { status: 400, headers: CORS });
 
-  // 2) claim-or-verify tenant (trusted provisioning, RLS stays owner-only)
-  const { data: tenant } = await supa.from("tenants").select("id,owner_user_id").eq("slug", DEFAULT_TENANT).single();
-  if (!tenant) return Response.json({ error: "tenant_not_found" }, { status: 404, headers: CORS });
-  if (!tenant.owner_user_id) {
-    await supa.from("tenants").update({ owner_user_id: user.id }).eq("id", tenant.id).is("owner_user_id", null);
-  } else if (tenant.owner_user_id !== user.id) {
-    return Response.json({ error: "not_tenant_owner" }, { status: 403, headers: CORS });
+  // 2) read-only ownership verification. The operator RPC is the only owner-assignment authority.
+  let tenant;
+  try {
+    tenant = await requireTenantOwner(supa, DEFAULT_TENANT, user.id);
+  } catch (error: any) {
+    return Response.json({ error: error?.message ?? "ownership_check_failed" }, { status: error?.status ?? 500, headers: CORS });
   }
 
   // 3) enqueue the request; the controller does the rest
