@@ -36,8 +36,9 @@ test("placeholder and label-cleanup boundaries stay explicit", () => {
   expect(noScript).not.toMatch(/>\s*(?:A dor|Prova do produto)\s*</);
 });
 
-test("display typography maps its real Familjen files to their supplied weights", () => {
+test("display typography maps static Familjen files to their exact weights", () => {
   expect(fontFaces).toContain("font-weight:600;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-600.ttf')");
-  expect(fontFaces).toContain("font-weight:700 900;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-700.ttf')");
+  expect(fontFaces).toContain("font-weight:700;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-700.ttf')");
   expect(fontFaces).not.toContain("font-weight:400 900;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-600.ttf')");
+  expect(fontFaces).not.toContain("font-weight:700 900;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-700.ttf')");
 });

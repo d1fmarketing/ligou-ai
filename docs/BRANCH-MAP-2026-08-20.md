@@ -1,13 +1,23 @@
 # Mapa de branches — 20 de agosto de 2026
 
-Inventário local e remoto antes da consolidação V0.1. Nenhuma ref foi removida.
-`ancestral` é o primeiro pai do tip; nomes repetidos no mesmo tip são aliases, não
-trabalho independente. A disposição descreve o papel da ref nesta consolidação,
-não uma autorização para apagar ou publicar nada.
+Inventário das famílias locais/remotas que fundamentaram a consolidação V0.1.
+Nenhuma ref foi removida. `ancestral` é o primeiro pai do tip; nomes repetidos no
+mesmo tip são aliases, não trabalho independente. A disposição descreve o papel da
+ref nesta consolidação, não uma autorização para apagar ou publicar nada.
+
+## Âncora e tip ativo
+
+- **Base-fonte do MVP:** `8fb71b1`.
+- **Âncora da consolidação:** `5df68a9` (`chore: consolidate V0.1 sources and typography`),
+  merge de `8fb71b1` com `db7d9c3`.
+- **Integração ativa:** `codex/ligou-v0.1` é identificada simbolicamente como a branch
+  atual e o commit que contém este documento. `git rev-parse codex/ligou-v0.1` é o
+  tip vivo; não se fixa aqui um SHA autocontraditório que ficará obsoleto ao próximo
+  commit da própria integração.
 
 | Família / refs | Tip | Ancestral | Conteúdo único no tip | Disposição |
 | --- | --- | --- | --- | --- |
-| V0.1: `codex/ligou-v0.1` | `8fb71b1` | `4bd563a4` | MVP unificado: landing + dashboard no mesmo deploy | base desta consolidação |
+| V0.1: `codex/ligou-v0.1` | tip vivo: `git rev-parse codex/ligou-v0.1` | base-fonte `8fb71b1`; âncora `5df68a9` | integração ativa da landing + dashboard unificados e da consolidação | branch atual; preservar e avançar por commits |
 | MVP: `codex/ligou-mvp`, `origin/codex/ligou-mvp` | `8fb71b1` | `4bd563a4` | mesmo MVP unificado | preservar como alias da base |
 | V9: `main`, `codex/frontend-test-coverage`, `codex/ligou-architecture`, `origin/main`, `origin/HEAD`, `origin/codex/frontend-test-coverage` | `161e8e8` | `08dd9bbf` | cobertura do frontend v9 | histórico de origem, já integrado ao MVP |
 | Dashboard: `codex/ligou-dashboard`, `origin/codex/ligou-dashboard` | `278457f3` | `7f05e0c3` | dashboard na rota compartilhada | preservar; MVP é a integração selecionada |

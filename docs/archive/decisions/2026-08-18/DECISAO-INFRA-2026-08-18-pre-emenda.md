@@ -1,3 +1,13 @@
+> ## ARQUIVO HISTÓRICO — NÃO CANÔNICO
+>
+> Esta é a cópia do overlay anterior à emenda de 18/08/2026. O rótulo
+> **“CANÔNICO”** no texto-fonte abaixo descreve seu estado histórico e não é a
+> decisão vigente. Consulte o documento emendado atual em
+> [`docs/DECISAO-INFRA-2026-08-18.md`](../../../DECISAO-INFRA-2026-08-18.md).
+> O texto-fonte original começa sem alteração após este banner.
+
+---
+
 # LIGOU — Infraestrutura decidida
 
 **Data:** 18/08/2026 · **Status:** CANÔNICO após aprovação de RJ. Supersede `DECISAO-FINAL-O-FUNCIONARIO-2026-08-17.md` (parte de stack) e demove o pacote do Codex (worktree `ligou-architecture`) a **rulebook de segurança** — deixa de ser blueprint de plataforma.

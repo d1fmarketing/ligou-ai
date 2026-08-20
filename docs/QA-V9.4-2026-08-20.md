@@ -72,16 +72,17 @@ foi registrada como deliberada em nenhum changelog.
 Grotesk no token `--font-display`, com Archivo como fallback. Execução:
 
 - `@font-face` para Familjen Grotesk 600 (arquivo que já estava no repo) e 700
-  (baixado dos arquivos oficiais do Google Fonts, v11); a face 700 é declarada com
-  `font-weight: 700 900` para servir os pedidos de peso 800 do display sem bold
-  sintético;
+  (baixado dos arquivos oficiais do Google Fonts, v11); cada arquivo estático é
+  declarado apenas no seu peso real (`600` e `700`, respectivamente). O runtime
+  não declara uma face física 800/900 que não possui;
 - `--font-display` agora é `'Familjen Grotesk','Archivo',system-ui,sans-serif`;
   `--font-body` permanece Archivo;
 - manifesto `CLAUDE-V9-RUNTIME.sha256` atualizado (52 arquivos pinados, 41
   referências de runtime); export em `src/claude-v9/` intocado;
-- re-QA da matriz completa de 10 viewports após a troca: zero overflow, vídeos
-  corretos, H1 na primeira tela, zero erros; `document.fonts.check('800 …')`
-  confirma a face Familjen ativa no peso do display.
+- a matriz original de 10 viewports registrou zero overflow, vídeos corretos, H1 na
+  primeira tela e zero erros. A correção V0.1 da declaração estática de pesos não
+  reivindica uma face física 800/900; uma futura QA tipográfica deve medir essa face
+  somente se o arquivo correspondente for adicionado.
 
 Martian Mono para dado de máquina continua ausente do runtime v9 — segue aberto,
 sem elemento de texto de dado na página atual que o exija.
