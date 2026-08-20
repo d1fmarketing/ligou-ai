@@ -127,12 +127,23 @@ export function resolveTenantIdentity(tenant, options = {}) {
   const lockPath = `${registryPath}.lock`;
   const lockFd = acquireLock(lockPath);
   let hostPort;
+  let cognitiveVolume;
   const preferred = preferredPort(tenant, portBase, portBuckets);
   try {
     const registry = loadRegistry(registryPath, portBase, portBuckets);
     const allocation = allocatePort(registry, tenant, preferred, portBase, portBuckets);
     hostPort = allocation.hostPort;
-    if (allocation.changed) persistRegistry(registryPath, registry);
+    let changed = allocation.changed;
+    const defaultCognitive = `ligou-${tenant}-hermes-cognitive`;
+    if (!registry.tenants[tenant].cognitive_volume) {
+      registry.tenants[tenant].cognitive_volume = defaultCognitive;
+      changed = true;
+    }
+    cognitiveVolume = registry.tenants[tenant].cognitive_volume;
+    if (typeof cognitiveVolume !== "string" || !new RegExp(`^ligou-${tenant}-hermes-cognitive(?:-stage-[a-f0-9]{64})?$`).test(cognitiveVolume)) {
+      fail("tenant_cognitive_volume_invalid");
+    }
+    if (changed) persistRegistry(registryPath, registry);
   } finally {
     releaseLock(lockPath, lockFd);
   }
@@ -142,7 +153,7 @@ export function resolveTenantIdentity(tenant, options = {}) {
     tenant,
     compose_project: prefix,
     container_name: `ligou-cell-${tenant}`,
-    cognitive_volume: `${prefix}-hermes-cognitive`,
+    cognitive_volume: cognitiveVolume,
     model_auth_volume: `${prefix}-hermes-model-auth`,
     network: `${prefix}-cell`,
     host_port: hostPort,
@@ -156,18 +167,51 @@ export function resolveTenantIdentity(tenant, options = {}) {
   };
 }
 
+export function activateTenantCognitiveVolume(tenant, nextVolume, expectedVolume, options = {}) {
+  if (!TENANT.test(tenant)) fail("tenant_invalid");
+  const allowed = new RegExp(`^ligou-${tenant}-hermes-cognitive(?:-stage-[a-f0-9]{64})?$`);
+  if (!allowed.test(nextVolume) || !allowed.test(expectedVolume)) fail("tenant_cognitive_volume_invalid");
+  const registryPath = absoluteScopedPath(options.registryPath ?? process.env.LIGOU_TENANT_REGISTRY ?? "/opt/ligou/tenant-runtime-registry.json", "tenant_registry_path_invalid");
+  const portBase = numericSetting("LIGOU_TENANT_PORT_BASE", PORT_BASE, 60_000);
+  const portBuckets = numericSetting("LIGOU_TENANT_PORT_BUCKETS", PORT_BUCKETS, 40_000);
+  const lockPath = `${registryPath}.lock`;
+  const lockFd = acquireLock(lockPath);
+  try {
+    const registry = loadRegistry(registryPath, portBase, portBuckets);
+    const record = registry.tenants[tenant];
+    if (!record || record.cognitive_volume !== expectedVolume) fail("tenant_cognitive_compare_failed");
+    record.cognitive_volume = nextVolume;
+    persistRegistry(registryPath, registry);
+  } finally {
+    releaseLock(lockPath, lockFd);
+  }
+  return resolveTenantIdentity(tenant, options);
+}
+
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   try {
     const args = process.argv.slice(2);
     const tenantAt = args.indexOf("--tenant");
     if (tenantAt < 0 || !args[tenantAt + 1]) fail("usage: tenant-identity.mjs --tenant <slug> <--json|--field name>");
-    const identity = resolveTenantIdentity(args[tenantAt + 1]);
-    if (args.includes("--json") && args.length === 3) process.stdout.write(`${JSON.stringify(identity)}\n`);
+    let identity;
+    const activateAt = args.indexOf("--activate-cognitive");
+    if (activateAt >= 0) {
+      const expectedAt = args.indexOf("--expected");
+      if (activateAt !== 2 || expectedAt !== 4 || !args[3] || !args[5] || args[6] !== "--json" || args.length !== 7) {
+        fail("tenant_cognitive_arguments_invalid");
+      }
+      resolveTenantIdentity(args[tenantAt + 1]);
+      identity = activateTenantCognitiveVolume(args[tenantAt + 1], args[3], args[5]);
+      process.stdout.write(`${JSON.stringify(identity)}\n`);
+    } else {
+      identity = resolveTenantIdentity(args[tenantAt + 1]);
+      if (args.includes("--json") && args.length === 3) process.stdout.write(`${JSON.stringify(identity)}\n`);
     else {
       const fieldAt = args.indexOf("--field");
       if (fieldAt < 0 || !Object.hasOwn(identity, args[fieldAt + 1]) || args.length !== 4) fail("tenant_identity_field_invalid");
       process.stdout.write(`${identity[args[fieldAt + 1]]}\n`);
+    }
     }
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : "tenant_identity_failed"}\n`);

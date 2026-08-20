@@ -46,7 +46,7 @@ async function gitFixture(base) {
     "supabase/.temp/project-ref": "forbidden temp\n",
     "infra/good.sh": "#!/bin/sh\nexit 0\n",
     "infra/toolchain.json": JSON.stringify({
-      node: "22.22.3", bun: "1.2.13", deno: "2.9.4", supabase_cli: "2.115.0", hermes_image: IMAGE,
+      node: "22.22.3", application_version: "0.1.0", bun: "1.2.13", deno: "2.9.4", supabase_cli: "2.115.0", hermes_image: IMAGE,
       dependencies: { supabase_js: "2.112.3", postgres: "3.4.9" },
     }) + "\n",
     "infra/._deploy": "forbidden apple double\n",
@@ -91,6 +91,7 @@ test("packaging exact commit excludes contamination and emits a signed immutable
     assert.ok(body.exclusions.includes("**/._*"));
     assert.ok(body.exclusions.includes("supabase/.temp/**"));
     assert.deepEqual(body.runtime, {
+      application: { version: "0.1.0" },
       node: { version: "22.22.3" },
       bun: { version: "1.2.13" },
       deno: { version: "2.9.4" },
@@ -239,7 +240,7 @@ async function runnableArtifact(fixture, commit, { healthScript = '#!/bin/sh\nex
     "infra/release-health.sh": healthScript,
     "infra/release-marker": "safe\n",
     "infra/toolchain.json": JSON.stringify({
-      node: "22.22.3", bun: "1.2.13", deno: "2.9.4", supabase_cli: "2.115.0", hermes_image: IMAGE,
+      node: "22.22.3", application_version: "0.1.0", bun: "1.2.13", deno: "2.9.4", supabase_cli: "2.115.0", hermes_image: IMAGE,
       dependencies: { supabase_js: "2.112.3", postgres: "3.4.9" },
     }) + "\n",
   });

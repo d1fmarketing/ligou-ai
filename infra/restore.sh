@@ -9,6 +9,7 @@ MANIFEST_TOOL="${ROOT}/infra/backup-manifest.mjs"
 ARCHIVE_TOOL="${ROOT}/infra/archive-safety.mjs"
 HEALTH_TOOL="${ROOT}/hermes-cell/health-state.sh"
 IDENTITY_TOOL="${ROOT}/hermes-cell/tenant-identity.mjs"
+TENANT_COMPOSE="${ROOT}/hermes-cell/tenant-compose.mjs"
 TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
 IMAGE="${HERMES_IMAGE:?set immutable HERMES_IMAGE digest}"
 APPLY=0
@@ -38,11 +39,12 @@ identity_field() {
 RESTORE_WORK="$(identity_field restore_work_dir)"
 CELL="$(identity_field container_name)"
 ARCHIVE_PREFIX="$(identity_field archive_prefix)"
+ACTIVE_COGNITIVE="$(identity_field cognitive_volume)"
 mkdir -p "$RESTORE_WORK"
 chmod 700 "$RESTORE_WORK"
 SCRATCH="$(mktemp -d "${RESTORE_WORK}/run.XXXXXX")"
-CHECK_CELL="${ARCHIVE_PREFIX}-restore-check-$$"
-CHECK_VOLUME="${ARCHIVE_PREFIX}-restore-check-$$"
+CHECK_CELL=""
+CHECK_VOLUME=""
 CHECK_CREATED=0
 CHECK_STARTED=0
 
@@ -75,6 +77,20 @@ fi
 
 "$NODE_BIN" "$MANIFEST_TOOL" verify --archive "$ARCHIVE" --manifest "$MANIFEST" --tenant "$TENANT" --hermes-image "$IMAGE" >/dev/null
 "$NODE_BIN" "$ARCHIVE_TOOL" extract "$ARCHIVE" "${SCRATCH}/validated" >/dev/null
+ARCHIVE_ID="$("$NODE_BIN" -e 'const fs=require("node:fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(value.archive?.id||""));' "$MANIFEST")"
+[[ "$ARCHIVE_ID" =~ ^[a-f0-9]{64}$ ]] || { echo "archive_identity_invalid" >&2; exit 1; }
+if [ "$APPLY" -eq 1 ]; then
+  CHECK_VOLUME="ligou-${TENANT}-hermes-cognitive-stage-${ARCHIVE_ID}"
+  CHECK_CELL="${ARCHIVE_PREFIX}-restore-stage-${ARCHIVE_ID}"
+else
+  CHECK_VOLUME="${ARCHIVE_PREFIX}-restore-check-$$"
+  CHECK_CELL="${ARCHIVE_PREFIX}-restore-check-$$"
+fi
+
+if docker volume inspect "$CHECK_VOLUME" >/dev/null 2>&1; then
+  echo "restore_stage_volume_exists" >&2
+  exit 1
+fi
 
 docker volume create "$CHECK_VOLUME" >/dev/null
 CHECK_CREATED=1
@@ -118,17 +134,8 @@ if [ "$APPLY" -eq 0 ]; then
   exit 0
 fi
 
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-ROLLBACK_NAME="rollback-${TENANT}-${STAMP}.zip"
-ROLLBACK_LOCAL="${SCRATCH}/${ROLLBACK_NAME}"
-TARGET_NAME="restore-${TENANT}-${STAMP}.zip"
-
-if ! docker exec "$CELL" hermes backup -o "/tmp/${ROLLBACK_NAME}" >/dev/null \
-  || ! docker cp "${CELL}:/tmp/${ROLLBACK_NAME}" "$ROLLBACK_LOCAL" >/dev/null \
-  || ! docker exec "$CELL" rm -f "/tmp/${ROLLBACK_NAME}" >/dev/null; then
-  echo "rollback_snapshot_failed" >&2
-  exit 1
-fi
+docker rm -f "$CHECK_CELL" >/dev/null
+CHECK_STARTED=0
 
 cell_active() {
   [ "$(docker inspect --format '{{.State.Running}}' "$CELL" 2>/dev/null || true)" = "true" ]
@@ -142,26 +149,41 @@ live_smoke() {
     && TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$HEALTH_TOOL" >/dev/null
 }
 
-apply_rollback() {
-  docker cp "$ROLLBACK_LOCAL" "${CELL}:/tmp/${ROLLBACK_NAME}" >/dev/null \
-    && docker exec "$CELL" hermes import "/tmp/${ROLLBACK_NAME}" --yes >/dev/null \
-    && docker restart "$CELL" >/dev/null \
+activate_volume() {
+  local next="$1" expected="$2"
+  "$NODE_BIN" "$IDENTITY_TOOL" --tenant "$TENANT" --activate-cognitive "$next" --expected "$expected" --json >/dev/null
+}
+
+recreate_cell() {
+  TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$NODE_BIN" "$TENANT_COMPOSE" up -d --force-recreate >/dev/null
+}
+
+rollback_activation() {
+  activate_volume "$ACTIVE_COGNITIVE" "$CHECK_VOLUME" \
+    && recreate_cell \
     && live_smoke
 }
 
-if ! docker cp "$ARCHIVE" "${CELL}:/tmp/${TARGET_NAME}" >/dev/null \
-  || ! docker exec "$CELL" hermes import "/tmp/${TARGET_NAME}" --yes >/dev/null \
-  || ! docker restart "$CELL" >/dev/null; then
-  if apply_rollback; then
-    echo "restore_import_failed_rollback_applied" >&2
+if ! activate_volume "$CHECK_VOLUME" "$ACTIVE_COGNITIVE"; then
+  echo "restore_stage_activation_failed" >&2
+  exit 1
+fi
+
+if ! recreate_cell; then
+  if rollback_activation; then
+    docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
+    CHECK_CREATED=0
+    echo "restore_activation_failed_rollback_applied" >&2
   else
-    echo "restore_import_failed_rollback_failed" >&2
+    echo "restore_activation_failed_rollback_failed" >&2
   fi
   exit 1
 fi
 
 if ! live_smoke; then
-  if apply_rollback; then
+  if rollback_activation; then
+    docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
+    CHECK_CREATED=0
     echo "restore_health_failed_rollback_applied" >&2
   else
     echo "restore_health_failed_rollback_failed" >&2
@@ -169,5 +191,5 @@ if ! live_smoke; then
   exit 1
 fi
 
-docker exec "$CELL" rm -f "/tmp/${TARGET_NAME}" "/tmp/${ROLLBACK_NAME}" >/dev/null 2>&1 || true
-printf '%s\n' '{"ok":true,"mode":"apply","disposable":true,"rollback_snapshot":true}'
+CHECK_CREATED=0
+printf '{"ok":true,"mode":"apply","disposable":true,"staged_volume":true,"archive_id":"%s"}\n' "$ARCHIVE_ID"
