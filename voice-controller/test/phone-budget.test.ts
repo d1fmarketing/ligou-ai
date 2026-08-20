@@ -78,7 +78,7 @@ const row = { id: "event-1", openai_call_id: "rtc-1" };
 describe("phone startup budget lifecycle", () => {
   const expectUsageUnresolved = () => {
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
-    expect(callUpdates.some((row) => row.provider_usage_state === "unknown")).toBe(true);
+    expect(callUpdates.some((row) => row.provider_usage_state === "unknown" && row.cost_estimate_usd === null)).toBe(true);
     expect(budgetUpdates.some((row) => String(row.reconcile_last_error).includes("provider_usage_unresolved"))).toBe(true);
   };
 
@@ -109,6 +109,22 @@ describe("phone startup budget lifecycle", () => {
     expect(rpcCalls.find((call) => call.name === "reserve_call_budget")?.args.p_est_cost).toBe(2.25);
     expect(fetchUrls.some((url) => url.endsWith("/reject"))).toBe(true);
     expectUsageUnresolved();
+  });
+
+  test("a definitive phone 4xx rejection resolves authoritative zero usage", async () => {
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      return fetchUrls.length === 1
+        ? new Response("definitively rejected", { status: 400 })
+        : new Response(null, { status: 200 });
+    };
+
+    await expect(handleIncoming(row)).rejects.toThrow("accept_failed");
+
+    expect(fetchUrls.some((url) => url.endsWith("/reject"))).toBe(true);
+    expect(callUpdates.some((update) => update.provider_usage_state === "resolved"
+      && update.cost_estimate_usd === 0)).toBe(true);
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(1);
   });
 
   test("accepted-call attach failure hangs up but keeps usage unresolved", async () => {

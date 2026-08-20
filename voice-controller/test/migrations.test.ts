@@ -165,3 +165,39 @@ describe("ambiguous provider usage resolution migration contract", () => {
     expect(sql).toContain("grant execute on function public.claim_budget_reconciliation(text) to service_role");
   });
 });
+
+describe("usage settlement authority corrective migration contract", () => {
+  test("backfills ambiguous no-ID calls to unknown and makes unknown the default", () => {
+    const sql = migrationSql("usage_settlement_authority");
+    expect(sql).toContain("alter column provider_usage_state set default 'unknown'");
+    expect(sql).toContain("provider_usage_evidence jsonb");
+    expect(sql).toContain("c.openai_call_id is null and c.provider_termination_reason = 'openai_key_missing'");
+    expect(sql).toContain("then 'not_applicable' else 'unknown'");
+    expect(sql).not.toContain("when c.openai_call_id is null then 'not_applicable'");
+  });
+
+  test("settlement locks durable state and rejects every state except resolved or not applicable", () => {
+    const sql = migrationSql("usage_settlement_authority");
+    const reservationLockAt = sql.indexOf("from public.budget_reservations br");
+    const callLockAt = sql.indexOf("from public.calls c");
+    const reservationForUpdateAt = sql.indexOf("for update", reservationLockAt);
+    const callForUpdateAt = sql.indexOf("for update", callLockAt);
+    const usageGateAt = sql.indexOf("coalesce(v_call.provider_usage_state, 'unknown') not in ('resolved','not_applicable')");
+    const settledReturnAt = sql.indexOf("if v_reservation.status = 'settled' then return v_reservation.id");
+    expect(reservationLockAt).toBeGreaterThan(-1);
+    expect(callLockAt).toBeGreaterThan(reservationLockAt);
+    expect(reservationForUpdateAt).toBeGreaterThan(reservationLockAt);
+    expect(reservationForUpdateAt).toBeLessThan(callLockAt);
+    expect(callForUpdateAt).toBeGreaterThan(callLockAt);
+    expect(usageGateAt).toBeGreaterThan(callForUpdateAt);
+    expect(settledReturnAt).toBeGreaterThan(usageGateAt);
+    expect(sql).toContain("provider_usage_unresolved");
+  });
+
+  test("the replacement settlement RPC remains service-role-only", () => {
+    const sql = migrationSql("usage_settlement_authority");
+    const signature = "public.settle_call_budget(uuid,uuid,numeric,numeric,text,jsonb)";
+    expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated`);
+    expect(sql).toContain(`grant execute on function ${signature} to service_role`);
+  });
+});

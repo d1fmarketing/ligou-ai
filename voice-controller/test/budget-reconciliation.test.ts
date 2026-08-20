@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { reconcileBudgetReservations } from "../src/budget.ts";
+import { finalizeTerminalBudget, reconcileBudgetReservations } from "../src/budget.ts";
 import { _setClient } from "../src/rules.ts";
 
 let settleAttempts = 0;
@@ -45,6 +45,20 @@ beforeEach(() => {
 afterAll(() => _setClient(null));
 
 describe("durable budget reconciliation", () => {
+  test("omitting the runtime usage-resolution flag cannot settle", async () => {
+    const settled = await finalizeTerminalBudget({
+      tenantId: "tenant-1",
+      callId: "call-1",
+      actualCostUsd: 0,
+      minutes: 0,
+      outcome: "startup_error",
+    } as any);
+
+    expect(settled).toBe(false);
+    expect(settleAttempts).toBe(0);
+    expect(deferred.some((row) => String(row.reconcile_last_error).includes("provider_usage_unresolved"))).toBe(true);
+  });
+
   test("a failed first settlement stays discoverable and the second pass settles", async () => {
     expect(await reconcileBudgetReservations()).toBe(0);
     expect(deferred.some((row) => String(row.reconcile_last_error).includes("temporary database error"))).toBe(true);
@@ -65,5 +79,23 @@ describe("durable budget reconciliation", () => {
     expect(await reconcileBudgetReservations()).toBe(0);
     expect(settleAttempts).toBe(0);
     expect(deferred.some((row) => String(row.reconcile_last_error).includes("provider_usage_unresolved"))).toBe(true);
+  });
+
+  test("missing, null, or malformed usage state defers instead of settling", async () => {
+    for (const providerUsageState of [undefined, null, "resolved ", "bogus", 1, {}]) {
+      settleAttempts = 0;
+      deferred = [];
+      claimRow = {
+        reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
+        actual_cost_usd: 0, minutes: 0, outcome: "startup_error",
+        provider_termination_state: "not_required", provider_termination_mode: null,
+        openai_call_id: null,
+      };
+      if (providerUsageState !== undefined) claimRow.provider_usage_state = providerUsageState;
+
+      expect(await reconcileBudgetReservations()).toBe(0);
+      expect(settleAttempts).toBe(0);
+      expect(deferred.some((row) => String(row.reconcile_last_error).includes("provider_usage"))).toBe(true);
+    }
   });
 });

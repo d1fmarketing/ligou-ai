@@ -12,6 +12,11 @@ export interface SessionLedger {
   model: string;
   startedAt: number;
   usage: UsageTotals;
+  providerUsageEvidence: {
+    eventCount: number;
+    lastResponseId: string | null;
+    lastReceivedAt: string | null;
+  };
   transcript: Array<{ role: "caller" | "agent" | "system"; text: string; at: string }>;
   toolLog: Array<{ name: string; ok: boolean; durationMs: number }>;
   status: "active" | "ended" | "killed_deadline" | "killed_budget" | "error";
@@ -43,6 +48,7 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
     model,
     startedAt: Date.now(),
     usage: emptyUsage(),
+    providerUsageEvidence: { eventCount: 0, lastResponseId: null, lastReceivedAt: null },
     transcript: [],
     toolLog: [],
     status: "active",
@@ -158,17 +164,19 @@ export async function handleEvent(cap: Capability, ledger: SessionLedger, ws: We
       break;
     }
     case "response.done": {
-      const u = msg.response?.usage;
-      if (u) {
-        const inDet = u.input_token_details ?? {};
-        const cached = inDet.cached_tokens_details ?? {};
-        ledger.usage.textIn += inDet.text_tokens ?? 0;
-        ledger.usage.audioIn += inDet.audio_tokens ?? 0;
-        ledger.usage.textInCached += cached.text_tokens ?? 0;
-        ledger.usage.audioInCached += cached.audio_tokens ?? 0;
-        const outDet = u.output_token_details ?? {};
-        ledger.usage.textOut += outDet.text_tokens ?? 0;
-        ledger.usage.audioOut += outDet.audio_tokens ?? 0;
+      const usage = validatedProviderUsage(msg.response?.usage);
+      if (usage) {
+        ledger.usage.textIn += usage.textIn;
+        ledger.usage.audioIn += usage.audioIn;
+        ledger.usage.textInCached += usage.textInCached;
+        ledger.usage.audioInCached += usage.audioInCached;
+        ledger.usage.textOut += usage.textOut;
+        ledger.usage.audioOut += usage.audioOut;
+        ledger.providerUsageEvidence.eventCount += 1;
+        ledger.providerUsageEvidence.lastResponseId = typeof msg.response?.id === "string" && msg.response.id.trim()
+          ? msg.response.id
+          : null;
+        ledger.providerUsageEvidence.lastReceivedAt = new Date().toISOString();
       }
       // COST KILL-SWITCH: measured after every turn, because a long/rich session grows super-linearly.
       const spent = sessionCostUsd(ledger.model, ledger.usage);
@@ -193,9 +201,47 @@ export async function handleEvent(cap: Capability, ledger: SessionLedger, ws: We
   }
 }
 
+function validatedProviderUsage(value: unknown): UsageTotals | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const usage = value as Record<string, unknown>;
+  const input = usage.input_token_details;
+  const output = usage.output_token_details;
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || !output || typeof output !== "object" || Array.isArray(output)) return null;
+  const inputDetails = input as Record<string, unknown>;
+  const outputDetails = output as Record<string, unknown>;
+  const cached = inputDetails.cached_tokens_details;
+  if (!cached || typeof cached !== "object" || Array.isArray(cached)) return null;
+  const cachedDetails = cached as Record<string, unknown>;
+
+  const token = (candidate: unknown): number | null => (
+    typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0 ? candidate : null
+  );
+  const inputTokens = token(usage.input_tokens);
+  const outputTokens = token(usage.output_tokens);
+  const totalTokens = token(usage.total_tokens);
+  const textIn = token(inputDetails.text_tokens);
+  const audioIn = token(inputDetails.audio_tokens);
+  const cachedTotal = token(inputDetails.cached_tokens);
+  const textInCached = token(cachedDetails.text_tokens);
+  const audioInCached = token(cachedDetails.audio_tokens);
+  const textOut = token(outputDetails.text_tokens);
+  const audioOut = token(outputDetails.audio_tokens);
+  if ([inputTokens, outputTokens, totalTokens, textIn, audioIn, cachedTotal,
+    textInCached, audioInCached, textOut, audioOut].some((part) => part === null)) return null;
+  if (inputTokens !== textIn! + audioIn!
+    || outputTokens !== textOut! + audioOut!
+    || totalTokens !== inputTokens! + outputTokens!
+    || cachedTotal !== textInCached! + audioInCached!
+    || textInCached! > textIn!
+    || audioInCached! > audioIn!) return null;
+  return { textIn: textIn!, audioIn: audioIn!, textInCached: textInCached!, audioInCached: audioInCached!, textOut: textOut!, audioOut: audioOut! };
+}
+
 export async function persistLedger(cap: Capability, ledger: SessionLedger, fetchImpl?: FetchLike) {
   const durationS = Math.round((Date.now() - ledger.startedAt) / 1000);
-  const cost = sessionCostUsd(ledger.model, ledger.usage);
+  const usageResolved = ledger.providerUsageEvidence.eventCount > 0;
+  const cost = usageResolved ? Number(sessionCostUsd(ledger.model, ledger.usage).toFixed(4)) : null;
   const s = supa();
   const providerNeedsTermination = ledger.status !== "ended";
   const terminalWrite = await s.from("calls").update({
@@ -203,13 +249,19 @@ export async function persistLedger(cap: Capability, ledger: SessionLedger, fetc
     ended_at: new Date().toISOString(),
     duration_seconds: durationS,
     transcript: ledger.transcript,
-    usage_tokens: ledger.usage as any,
-    cost_estimate_usd: Number(cost.toFixed(4)),
+    usage_tokens: usageResolved ? ledger.usage as any : null,
+    cost_estimate_usd: cost,
     summary_status: "pending_ingest",
     provider_termination_state: providerNeedsTermination ? "active" : "confirmed",
     provider_termination_mode: "hangup",
     provider_termination_reason: providerNeedsTermination ? `sideband_${ledger.status}` : "caller_hung_up",
-    provider_usage_state: "resolved",
+    provider_usage_state: usageResolved ? "resolved" : "unknown",
+    provider_usage_evidence: usageResolved ? {
+      source: "response.done.usage",
+      event_count: ledger.providerUsageEvidence.eventCount,
+      last_response_id: ledger.providerUsageEvidence.lastResponseId,
+      last_received_at: ledger.providerUsageEvidence.lastReceivedAt,
+    } : null,
   }).eq("id", cap.callId);
   if (terminalWrite.error) return false;
   const outcome: BudgetOutcome = ledger.status === "ended"
@@ -222,7 +274,7 @@ export async function persistLedger(cap: Capability, ledger: SessionLedger, fetc
   return await finalizeTerminalBudget({
     tenantId: cap.tenantId,
     callId: cap.callId,
-    actualCostUsd: Number(cost.toFixed(4)),
+    actualCostUsd: cost ?? 0,
     minutes: Number((durationS / 60).toFixed(2)),
     outcome,
     detail: { tools: ledger.toolLog, model: ledger.model },
@@ -230,6 +282,6 @@ export async function persistLedger(cap: Capability, ledger: SessionLedger, fetc
       ? { openaiCallId: ledger.openaiCallId, mode: "hangup", reason: `sideband_${ledger.status}` }
       : undefined,
     fetchImpl,
-    usageResolved: true,
+    usageResolved,
   });
 }
