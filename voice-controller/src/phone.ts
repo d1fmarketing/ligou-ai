@@ -6,7 +6,7 @@ import { buildInstructions } from "./instructions.ts";
 import { loadTenant, supa } from "./rules.ts";
 import { makeCapability, toolSchemas } from "./tools.ts";
 import { attachSideband } from "./sideband.ts";
-import { reserveCallBudget, settleCallBudget } from "./budget.ts";
+import { finalizeTerminalBudget, reserveCallBudget } from "./budget.ts";
 
 export function startPhoneListener() {
   if (!config.openaiKey) return;
@@ -44,7 +44,10 @@ export async function handleIncoming(row: any) {
   }
 
   const { data: call } = await supa().from("calls")
-    .insert({ tenant_id: tenant.id, channel: "phone", session_type: "customer", model, status: "active", openai_call_id: row.openai_call_id })
+    .insert({
+      tenant_id: tenant.id, channel: "phone", session_type: "customer", model, status: "active",
+      openai_call_id: row.openai_call_id, provider_termination_state: "active", provider_termination_mode: "reject",
+    })
     .select("id").single();
   try {
     await reserveCallBudget(tenant.id, call!.id, config.estCostPerSessionUsd);
@@ -56,22 +59,39 @@ export async function handleIncoming(row: any) {
     return;
   }
 
+  const failStartup = async (reason: string, mode: "reject" | "hangup") => {
+    const terminalWrite = await supa().from("calls").update({
+      status: "error", ended_at: new Date().toISOString(), duration_seconds: 0, cost_estimate_usd: 0,
+      provider_termination_state: "active", provider_termination_mode: mode, provider_termination_reason: reason,
+    }).eq("id", call!.id);
+    if (terminalWrite.error) return false;
+    return await finalizeTerminalBudget({
+      tenantId: tenant.id, callId: call!.id, actualCostUsd: 0, minutes: 0,
+      outcome: "startup_error", detail: { reason },
+      provider: { openaiCallId: row.openai_call_id, mode, reason },
+    });
+  };
+
   const instructions = buildInstructions(tenant, rules, "customer");
-  const accept = await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(row.openai_call_id)}/accept`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config.openaiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto", audio: { output: { voice: config.voice } } }),
-  });
+  let accept: Response;
+  try {
+    accept = await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(row.openai_call_id)}/accept`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${config.openaiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto", audio: { output: { voice: config.voice } } }),
+    });
+  } catch (error) {
+    await supa().from("phone_events").update({ status: "error" }).eq("id", row.id);
+    await failStartup("phone_accept_transport_unknown", "reject");
+    throw error;
+  }
   if (!accept.ok) {
     await supa().from("phone_events").update({ status: "error" }).eq("id", row.id);
-    await supa().from("calls").update({ status: "error", ended_at: new Date().toISOString() }).eq("id", call!.id);
-    await settleCallBudget({
-      tenantId: tenant.id, callId: call!.id, actualCostUsd: 0, minutes: 0,
-      outcome: "startup_error", detail: { reason: "phone_accept_failed", status: accept.status },
-    });
+    await failStartup("phone_accept_failed", "reject");
     throw new Error(`accept_failed: ${accept.status} ${await accept.text()}`);
   }
   await supa().from("phone_events").update({ tenant_id: tenant.id, call_id: call!.id }).eq("id", row.id);
+  await supa().from("calls").update({ provider_termination_state: "active", provider_termination_mode: "hangup" }).eq("id", call!.id);
 
   const cap = makeCapability(tenant.slug, tenant.id, call!.id, tenant.session_max_minutes ?? config.sessionMaxMinutes, "customer", {
     authEpoch: tenant.auth_epoch,
@@ -80,11 +100,7 @@ export async function handleIncoming(row: any) {
   try {
     attachSideband(cap, row.openai_call_id, model);
   } catch (error) {
-    await supa().from("calls").update({ status: "error", ended_at: new Date().toISOString() }).eq("id", call!.id);
-    await settleCallBudget({
-      tenantId: tenant.id, callId: call!.id, actualCostUsd: 0, minutes: 0,
-      outcome: "startup_error", detail: { reason: "sideband_attach_failed" },
-    });
+    await failStartup("sideband_attach_failed", "hangup");
     throw error;
   }
 }

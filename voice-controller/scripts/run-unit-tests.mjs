@@ -13,6 +13,7 @@ export const unitTestFiles = [
   "test/booking-authority.test.ts",
   "test/budget-settlement.test.ts",
   "test/budget-sql-fixture.test.ts",
+  "test/budget-reconciliation.test.ts",
   "test/sideband-settlement.test.ts",
   "test/phone-budget.test.ts",
   "test/worker-authority.test.ts",

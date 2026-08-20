@@ -117,3 +117,36 @@ describe("side-effect authority revalidation migration contract", () => {
     }
   });
 });
+
+describe("durable provider settlement corrective migration contract", () => {
+  test("persists provider termination and leases active terminal reservations for retry", () => {
+    const sql = migrationSql("durable_provider_settlement");
+    expect(sql).toContain("provider_termination_state");
+    expect(sql).toContain("reconcile_lease_until");
+    expect(sql).toContain("function public.claim_budget_reconciliation");
+    expect(sql).toContain("for update of br skip locked");
+  });
+
+  test("error and killed call states win over legacy usage when correcting outcomes", () => {
+    const sql = migrationSql("durable_provider_settlement");
+    expect(sql).toContain("when c.status = 'error' then 'error'");
+    expect(sql).toContain("when c.status = 'killed_deadline' then 'killed_deadline'");
+    expect(sql).toContain("when c.status = 'killed_budget' then 'killed_budget'");
+  });
+
+  test("replacement reserve function reads the clock only after locking the tenant", () => {
+    const sql = migrationSql("durable_provider_settlement");
+    const lockAt = sql.indexOf("from public.tenants t where t.id = p_tenant for update");
+    const clockAt = sql.indexOf("v_now := clock_timestamp()");
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(clockAt).toBeGreaterThan(lockAt);
+  });
+
+  test("corrective service RPCs remain service-role-only", () => {
+    const sql = migrationSql("durable_provider_settlement");
+    for (const signature of ["public.claim_budget_reconciliation(text)", "public.reserve_call_budget(uuid,uuid,numeric)"]) {
+      expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated`);
+      expect(sql).toContain(`grant execute on function ${signature} to service_role`);
+    }
+  });
+});

@@ -7,7 +7,7 @@ import { loadTenant, supa } from "./rules.ts";
 import { makeCapability, toolSchemas } from "./tools.ts";
 import { attachSideband, liveSessions } from "./sideband.ts";
 import { requireTenantOwner } from "../../supabase/functions/_shared/tenant-ownership.ts";
-import { reserveCallBudget, settleCallBudget } from "./budget.ts";
+import { finalizeTerminalBudget, reserveCallBudget } from "./budget.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -53,15 +53,28 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
     throw error;
   }
 
-  const settleStartupFailure = async (reason: string) => {
-    await supa().from("calls").update({ status: "error", ended_at: new Date().toISOString() }).eq("id", call.id);
-    await settleCallBudget({
+  const settleStartupFailure = async (
+    reason: string,
+    provider?: { openaiCallId: string | null; mode: "hangup" | "reject" },
+  ) => {
+    const terminalWrite = await supa().from("calls").update({
+      status: "error",
+      ended_at: new Date().toISOString(),
+      duration_seconds: 0,
+      cost_estimate_usd: 0,
+      provider_termination_state: provider ? (provider.openaiCallId ? "active" : "unknown") : "not_required",
+      provider_termination_mode: provider?.mode ?? null,
+      provider_termination_reason: reason,
+    }).eq("id", call.id);
+    if (terminalWrite.error) return false;
+    return await finalizeTerminalBudget({
       tenantId: tenant.id,
       callId: call.id,
       actualCostUsd: 0,
       minutes: 0,
       outcome: "startup_error",
       detail: { reason },
+      provider: provider ? { ...provider, reason } : undefined,
     });
   };
 
@@ -80,7 +93,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   // Unified interface (official server flow): ONE multipart POST with the STANDARD key. No ephemeral ek_ —
   // we proxy the SDP ourselves, and calls created under an ek_ are invisible to the standard-key sideband
   // (404 call_id_not_found), which killed tools mid-call on 2026-08-19. Fall back through the model chain.
-  let answerSdp = "", openaiCallId = "", usedModel = "", lastErr = "";
+  let answerSdp = "", openaiCallId = "", usedModel = "", lastErr = "", providerStateUnknown = false;
   for (const model of chain) {
     try {
       const form = new FormData();
@@ -94,21 +107,29 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
       if (!callRes.ok) { lastErr = `sdp ${model}: ${callRes.status} ${await callRes.text()}`; continue; }
       answerSdp = await callRes.text();
       openaiCallId = (callRes.headers.get("Location") ?? "").split("/").pop() ?? "";
-      if (!openaiCallId) { lastErr = `no_call_id ${model}`; continue; }
+      if (!openaiCallId) { providerStateUnknown = true; lastErr = `no_call_id ${model}`; continue; }
       usedModel = model;
       break;
     } catch (e: any) { lastErr = `${model}: ${e?.message}`; }
   }
   if (!usedModel) {
-    await settleStartupFailure("realtime_unavailable");
+    await settleStartupFailure(
+      "realtime_unavailable",
+      providerStateUnknown ? { openaiCallId: null, mode: "hangup" } : undefined,
+    );
     throw Object.assign(new Error("realtime_unavailable"), { status: 502, detail: lastErr });
   }
 
-  await supa().from("calls").update({ openai_call_id: openaiCallId, model: usedModel }).eq("id", call.id);
+  await supa().from("calls").update({
+    openai_call_id: openaiCallId,
+    model: usedModel,
+    provider_termination_state: "active",
+    provider_termination_mode: "hangup",
+  }).eq("id", call.id);
   try {
     attachSideband(cap, openaiCallId, usedModel);
   } catch (error) {
-    await settleStartupFailure("sideband_attach_failed");
+    await settleStartupFailure("sideband_attach_failed", { openaiCallId, mode: "hangup" });
     throw error;
   }
 
