@@ -6,7 +6,7 @@
 // Deploy: supabase functions deploy browser-session --no-verify-jwt   (JWT is verified explicitly below)
 // Secrets: SERVICE_KEY=sb_secret_...  (SUPABASE_URL is injected by the platform)
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { requireTenantOwner } from "../../../shared/tenant-ownership.ts";
+import { requireTenantOwner } from "../_shared/tenant-ownership.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",

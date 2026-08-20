@@ -6,7 +6,7 @@ import { buildInstructions, type SessionType } from "./instructions.ts";
 import { loadTenant, supa } from "./rules.ts";
 import { makeCapability, toolSchemas } from "./tools.ts";
 import { attachSideband, liveSessions } from "./sideband.ts";
-import { requireTenantOwner } from "../../shared/tenant-ownership.ts";
+import { requireTenantOwner } from "../../supabase/functions/_shared/tenant-ownership.ts";
 import { reserveCallBudget, settleCallBudget } from "./budget.ts";
 
 const CORS = {

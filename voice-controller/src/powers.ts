@@ -26,6 +26,9 @@ export interface PowerContext {
   /** epoch carried by an already-issued capability */
   expectedAuthEpoch?: number;
   priorConsent?: boolean;
+  body?: string;
+  contactHash?: string;
+  recentCommunicationCount?: number;
 }
 
 export type PowerDay = "sun" | "mon" | "tue" | "wed" | "thu" | "fri" | "sat";
@@ -66,18 +69,21 @@ function parseConditions(value: unknown): PowerConditions | null {
   if (value.purpose !== undefined && !stringList(value.purpose)) return null;
   if (value.allowed_hours !== undefined) {
     if (!isRecord(value.allowed_hours)) return null;
+    if (Object.keys(value.allowed_hours).some((key) => !new Set(["days", "start", "end"]).has(key))) return null;
     const { days, start, end } = value.allowed_hours;
     if (!Array.isArray(days) || !days.length || !days.every((day) => DAY_KEYS.includes(day as PowerDay))) return null;
     if (typeof start !== "string" || typeof end !== "string" || !HHMM.test(start) || !HHMM.test(end) || start >= end) return null;
   }
   if (value.frequency !== undefined) {
     if (!isRecord(value.frequency)) return null;
+    if (Object.keys(value.frequency).some((key) => !new Set(["max", "per_days"]).has(key))) return null;
     const { max, per_days: perDays } = value.frequency;
     if (!Number.isInteger(max) || Number(max) <= 0 || !Number.isInteger(perDays) || Number(perDays) <= 0) return null;
   }
   if (value.max_body_chars !== undefined && (!Number.isInteger(value.max_body_chars) || Number(value.max_body_chars) <= 0)) return null;
   if (value.quiet_hours_respect !== undefined && typeof value.quiet_hours_respect !== "boolean") return null;
   if (value.requires_prior_consent !== undefined && typeof value.requires_prior_consent !== "boolean") return null;
+  if (value.quiet_hours_respect === true && value.allowed_hours === undefined) return null;
   return value as PowerConditions;
 }
 
@@ -131,6 +137,16 @@ export function conditionsDeny(conditions: any, ctx: PowerContext, timezone: str
     if (!ctx.priorConsent) return "prior_consent_not_granted";
   }
 
+  if (parsed.max_body_chars !== undefined) {
+    if (ctx.body === undefined) return "body_context_required";
+    if (ctx.body.length > parsed.max_body_chars) return "body_too_long";
+  }
+
+  if (parsed.frequency) {
+    if (ctx.recentCommunicationCount === undefined) return "frequency_context_required";
+    if (ctx.recentCommunicationCount >= parsed.frequency.max) return "frequency_cap";
+  }
+
   return null;
 }
 
@@ -169,7 +185,25 @@ export async function checkPower(
       lastReason = "monetary_limit_exceeded";
       continue;
     }
-    const denied = conditionsDeny(p.conditions, ctx, tz);
+    const parsed = parseConditions(p.conditions);
+    if (!parsed) { lastReason = "malformed_conditions"; continue; }
+    const structuralContext = parsed.frequency ? { ...ctx, recentCommunicationCount: 0 } : ctx;
+    const structuralDenial = conditionsDeny(parsed, structuralContext, tz);
+    if (structuralDenial) { lastReason = structuralDenial; continue; }
+    let grantContext = ctx;
+    if (parsed.frequency) {
+      if (!ctx.contactHash) { lastReason = "contact_context_required"; continue; }
+      const since = new Date((ctx.at ?? new Date()).getTime() - parsed.frequency.per_days * 86_400_000).toISOString();
+      const { data: recent, error: conditionError } = await supa()
+        .from("communications").select("id")
+        .eq("tenant_id", tenantId).eq("contact_hash", ctx.contactHash).eq("status", "sent").gte("created_at", since);
+      if (conditionError) {
+        lastReason = `condition_lookup_failed: ${conditionError.message}`;
+        continue;
+      }
+      grantContext = { ...ctx, recentCommunicationCount: recent?.length ?? 0 };
+    }
+    const denied = conditionsDeny(parsed, grantContext, tz);
     if (denied) { lastReason = denied; continue; } // another grant may still allow it
     return { granted: true, powerId: p.id, authEpoch };
   }
@@ -205,30 +239,15 @@ export async function checkCommunication(args: {
 
   const power = await checkPower(args.tenantId, "hermes", "follow_up_message", args.channel, {
     channel: args.channel, purpose: args.purpose, at: args.at, timezone: args.timezone,
-    priorConsent: args.priorConsent,
+    priorConsent: args.priorConsent, body: args.body, contactHash: hash,
   });
   if (!power.granted) return { allowed: false, reason: power.reason === "outside_allowed_hours" ? "outside_allowed_hours" : (power.reason ?? "no_grant") };
 
-  const { data: grant } = await supa().from("powers").select("conditions").eq("id", power.powerId!).single();
-  const cond = (grant?.conditions ?? {}) as any;
-
-  if (cond.max_body_chars && args.body.length > Number(cond.max_body_chars)) {
-    return { allowed: false, reason: "body_too_long", powerId: power.powerId };
-  }
-
-  const { data: optOut } = await supa()
+  const { data: optOut, error: optOutError } = await supa()
     .from("contact_opt_outs").select("id")
     .eq("tenant_id", args.tenantId).eq("contact_hash", hash).in("channel", ["*", args.channel]).limit(1);
+  if (optOutError) return { allowed: false, reason: `condition_lookup_failed: ${optOutError.message}`, powerId: power.powerId };
   if (optOut?.length) return { allowed: false, reason: "opt_out", powerId: power.powerId };
-
-  const freq = cond.frequency;
-  if (freq?.max && freq?.per_days) {
-    const since = new Date((args.at ?? new Date()).getTime() - Number(freq.per_days) * 86_400_000).toISOString();
-    const { data: recent } = await supa()
-      .from("communications").select("id")
-      .eq("tenant_id", args.tenantId).eq("contact_hash", hash).eq("status", "sent").gte("created_at", since);
-    if ((recent?.length ?? 0) >= Number(freq.max)) return { allowed: false, reason: "frequency_cap", powerId: power.powerId };
-  }
 
   return { allowed: true, powerId: power.powerId };
 }
