@@ -110,3 +110,32 @@ check` passed with 11 frontend tests, secret scan, and the 52-file runtime manif
 (16 tests). Six credentialed booking integration tests were parsed and intentionally skipped in a clean
 environment. Real PostgreSQL exclusion/transaction execution and live Google behavior remain unproved because
 this workspace has no local PostgreSQL/Docker gate and live credentials/provider calls were prohibited.
+
+## Run 2 Task 4 corrective review round
+
+Two Critical and five Important review findings were corrected with two additional forward migrations; the
+three original Task 4 migrations remain byte-unchanged.
+
+- Delivery attempts are append-safe and carry unique attempt keys. One separate accepted-receipt authority map
+  controls confirmation. `record_booking_delivery` atomically verifies exact expected/readback proof, inserts or
+  reuses the canonical accepted receipt, commits the slot lease, succeeds the intent, confirms the booking, and
+  emits the notification. Any database error leaves the booking unconfirmed.
+- Worker claims now carry unique claim tokens/versions. A fenced `begin_provider_write` transition can happen
+  once and irreversibly switches the intent to reconciliation-only before `CalendarPort.write`. Reclaimed
+  running intents never write again, even when the prior worker lease expired.
+- Provider input is reconstructed from locked booking state. A trigger and the fenced begin transition reject
+  corrupt intent payloads; the internal exclusion must match the same booking interval.
+- `close_deal` is call-scoped and reports confirmed only through `get_booking_confirmation`, which joins the
+  booking, canonical accepted mapping, and exact accepted receipt.
+- Connector lookup error is distinct from confirmed absence. Managed-calendar fallback requires explicit
+  `GOOGLE_MANAGED_CALENDAR_FALLBACK=enabled`. Duplicate `ligouKey` matches are manual conflicts for write and
+  reconciliation.
+- Hermes sanitizes question and context, including quoted/JSON and alternate private-pricing phrases, removes
+  monetary values, and rejects monetary/pricing advice.
+- Existing pre-authority accepted receipt history is preserved and quarantined. It cannot become confirmation
+  authority automatically; explicit manual policy is required.
+
+Corrective local verification: 192 isolated voice tests, 33 migration contracts, both controller bundles, root
+11-test/check/secret/runtime-manifest gate, and dashboard 16-test/build gate passed. Six credentialed integration
+tests still skip in a clean environment. The Docker CLI exists, but its daemon/local PostgreSQL is unavailable;
+real transaction/exclusion execution and live Google remain blocked and unclaimed.
