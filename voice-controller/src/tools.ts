@@ -4,6 +4,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { loadTenant, priceRules, supa } from "./rules.ts";
 import { consultHermes } from "./hermes.ts";
 import { calendarPort, overlapsBusy, zonedInstantIso, spokenLocal } from "./calendar.ts";
+import { checkPower, normalizeGeography } from "./powers.ts";
+import { issueQuote, issueSlotOffers, readQuote } from "./offers.ts";
 
 export interface Capability {
   actor: "CALLER";
@@ -27,7 +29,7 @@ export function makeCapability(
 ): Capability {
   const allowedTools = sessionType === "onboarding"
     ? ["get_business_info", "record_interview_answer"]
-    : ["get_business_info", "quote_price", "check_availability", "create_async_case", "consult_hermes", "propose_booking", "close_deal"];
+    : ["get_business_info", "quote_price", "evaluate_offer", "check_availability", "create_async_case", "consult_hermes", "propose_booking", "close_deal"];
   return {
     actor: "CALLER",
     tenantSlug,
@@ -52,7 +54,7 @@ export const toolSchemas = [
   {
     type: "function",
     name: "quote_price",
-    description: "The ONLY source of prices. Returns the approved quote/band for a service. If the service is not approved, returns needs_owner — never invent a price.",
+    description: "The ONLY source of prices. Returns one public server-bound quote for a service. If the service is not approved, returns needs_owner — never invent a price.",
     parameters: {
       type: "object",
       properties: {
@@ -64,15 +66,31 @@ export const toolSchemas = [
   },
   {
     type: "function",
+    name: "evaluate_offer",
+    description: "Evaluates a caller's offer against private server policy. Use the returned public price and quote_id exactly; never infer or describe internal limits.",
+    parameters: {
+      type: "object",
+      properties: {
+        service_type: { type: "string" },
+        offered_price: { type: "number" },
+        quote_id: { type: "string", description: "Opaque quote_id returned by quote_price or a prior evaluate_offer" },
+      },
+      required: ["service_type", "offered_price", "quote_id"],
+    },
+  },
+  {
+    type: "function",
     name: "check_availability",
     description: "Available appointment slots for a service, already including the quoted price.",
     parameters: {
       type: "object",
       properties: {
         service_type: { type: "string" },
+        quote_id: { type: "string", description: "Opaque quote_id returned by quote_price or evaluate_offer" },
+        service_city: { type: "string", description: "City where service will occur" },
         date_preference: { type: "string", description: "caller preference in natural language, optional" },
       },
-      required: ["service_type"],
+      required: ["service_type", "quote_id", "service_city"],
     },
   },
   {
@@ -96,19 +114,15 @@ export const toolSchemas = [
   {
     type: "function",
     name: "propose_booking",
-    description: "Registers a booking proposal after the caller picked a slot and you agreed on a price within your band. Within policy it returns 'proposed' (then confirm details out loud and call close_deal). Out of policy it opens a team case — tell the caller the team will confirm; never keep them waiting.",
+    description: "Consumes the exact opaque slot offer selected by the caller. Pass only the slot_token from check_availability plus customer details; times, service, geography, and price come from the server-bound offer.",
     parameters: {
       type: "object",
       properties: {
-        service_type: { type: "string" },
-        slot_start: { type: "string", description: "ISO datetime chosen from check_availability" },
-        slot_end: { type: "string" },
-        price: { type: "number", description: "price agreed with the caller" },
+        slot_token: { type: "string", description: "Opaque token returned by check_availability" },
         client_name: { type: "string" },
         contact: { type: "string", description: "phone or email for confirmation" },
-        service_city: { type: "string", description: "city where service will occur; required for geographic authority" },
       },
-      required: ["service_type", "slot_start", "price", "service_city"],
+      required: ["slot_token"],
     },
   },
   {
@@ -119,9 +133,8 @@ export const toolSchemas = [
       type: "object",
       properties: {
         booking_id: { type: "string" },
-        confirmed_price: { type: "number" },
       },
-      required: ["booking_id", "confirmed_price"],
+      required: ["booking_id"],
     },
   },
   {
@@ -155,6 +168,7 @@ export const toolSchemas = [
 const CAP_NAME: Record<string, string> = {
   get_business_info: "get_business_info",
   quote_price: "quote_price",
+  evaluate_offer: "evaluate_offer",
   check_availability: "check_availability",
   create_async_case: "create_async_case",
   consult_ligou_brain: "consult_hermes",
@@ -208,19 +222,56 @@ export async function runTool(cap: Capability, name: string, args: Record<string
         if (match.surcharge != null) {
           return done({ status: "surcharge", service_type: svc, surcharge_usd: match.surcharge, requires_team_confirmation: true });
         }
+        const issued = await issueQuote({
+          tenantId: cap.tenantId,
+          callId: cap.callId,
+          serviceType: svc,
+          publicQuote: Number(match.price_target),
+          ruleId: match.rule_id,
+          policyEpoch: cap.policyEpoch,
+        });
         return done({
           status: "quoted",
           service_type: svc,
           quote_usd: match.price_target,
-          negotiable_note: "You may negotiate below the quote if the caller pushes back, within your approved band.",
-          floor_usd_internal: match.price_min, // never spoken; server enforces in F2 close_deal as well
+          quote_id: issued.quoteId,
+          negotiable_note: "If the caller makes another offer, use evaluate_offer. Never choose a negotiated price yourself.",
           duration_min: match.duration_min ?? null,
         });
+      }
+      case "evaluate_offer": {
+        const svc = String(args.service_type ?? "").toLowerCase().trim();
+        const offered = Number(args.offered_price ?? NaN);
+        const match = priceRules(rules).find((s) => s.service_type === svc);
+        if (!match || !Number.isFinite(offered) || match.surcharge != null) return done({ status: "needs_owner" });
+        const source = await readQuote({
+          quoteId: String(args.quote_id ?? ""), tenantId: cap.tenantId, callId: cap.callId,
+          serviceType: svc, policyEpoch: cap.policyEpoch,
+        });
+        if (!source || source.rule_id !== match.rule_id) return done({ status: "needs_owner" });
+        const target = Number(match.price_target);
+        const privateMinimum = Number(match.price_min);
+        const accepted = offered >= privateMinimum;
+        const publicPrice = accepted
+          ? Math.min(offered, target)
+          : Math.max(privateMinimum + 1, Math.ceil((privateMinimum + target) / 2));
+        const issued = await issueQuote({
+          tenantId: cap.tenantId, callId: cap.callId, serviceType: svc,
+          publicQuote: publicPrice, ruleId: match.rule_id, policyEpoch: cap.policyEpoch,
+        });
+        return done({ status: accepted ? "accept" : "counter", service_type: svc, public_price_usd: publicPrice, quote_id: issued.quoteId });
       }
       case "check_availability": {
         const svc = String(args.service_type ?? "").toLowerCase().trim();
         const match = priceRules(rules).find((s) => s.service_type === svc);
         if (!match) return done({ status: "needs_owner", reason: "service_not_in_approved_list" });
+        const geography = normalizeGeography(String(args.service_city ?? ""));
+        if (!geography) return done({ status: "needs_owner", reason: "geography_required" });
+        const quote = await readQuote({
+          quoteId: String(args.quote_id ?? ""), tenantId: cap.tenantId, callId: cap.callId,
+          serviceType: svc, policyEpoch: cap.policyEpoch,
+        });
+        if (!quote || quote.rule_id !== match.rule_id) return done({ status: "needs_owner", reason: "quote_invalid" });
         // Candidate slots inside business hours, then filtered against the calendar: never offer an hour
         // that is already sold. If the calendar can't be read, say so instead of guessing (rulebook: no
         // invented availability).
@@ -257,11 +308,24 @@ export async function runTool(cap: Capability, name: string, args: Record<string
             say: "Tell the caller you can't confirm the schedule right now, take their preferred time and contact, and let them know the team will confirm.",
           });
         }
-        const slots = candidates.filter((c) => !overlapsBusy(c.start, c.end, intervals)).slice(0, 3);
-        if (!slots.length) {
+        const freeCandidates = candidates.filter((c) => !overlapsBusy(c.start, c.end, intervals));
+        const authorized: Array<{ start: string; end: string; local: string; powerId: string }> = [];
+        for (const candidate of freeCandidates) {
+          const power = await checkPower(cap.tenantId, "voice_agent", "create_booking", svc, {
+            amountUsd: Number(quote.public_quote), geography, channel: "voice", purpose: "booking",
+            appointmentAt: new Date(candidate.start), expectedAuthEpoch: cap.authEpoch,
+          });
+          if (power.granted && power.powerId) authorized.push({ ...candidate, powerId: power.powerId });
+          if (authorized.length === 3) break;
+        }
+        if (!authorized.length) {
           return done({ status: "no_slots", timezone: tz, say: "Tell the caller nothing is open in the next few days and offer to have the team call with options." });
         }
-        return done({ status: "ok", timezone: tz, slots, note: "Offer at most two options at a time; say the `local` text, and pass the matching `start` to propose_booking." });
+        const slots = await issueSlotOffers({
+          tenantId: cap.tenantId, callId: cap.callId, serviceType: svc, geography,
+          quote, candidates: authorized,
+        });
+        return done({ status: "ok", timezone: tz, slots, note: "Offer at most two options at a time; say the local text and pass only the matching slot_token to propose_booking." });
       }
       case "create_async_case": {
         const request = String(args.request ?? "").slice(0, 500);

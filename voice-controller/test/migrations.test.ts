@@ -201,3 +201,26 @@ describe("usage settlement authority corrective migration contract", () => {
     expect(sql).toContain(`grant execute on function ${signature} to service_role`);
   });
 });
+
+describe("opaque booking offers migration contract", () => {
+  test("stores only hashes and atomically consumes an exact scoped current offer", () => {
+    const sql = migrationSql("booking_offers");
+    expect(sql).toContain("create table public.booking_quotes");
+    expect(sql).toContain("create table public.slot_offers");
+    expect(sql).toContain("token_hash text not null unique");
+    expect(sql).not.toContain("slot_token text");
+    expect(sql).toContain("function public.consume_slot_offer");
+    expect(sql).toContain("for update");
+    expect(sql).toContain("v_offer.tenant_id <> p_tenant or v_offer.call_id <> p_call");
+    expect(sql).toContain("v_offer.expires_at <= now()");
+    expect(sql).toContain("v_offer.consumed_at is not null");
+    expect(sql).toContain("v_tenant.policy_epoch <> v_offer.policy_epoch");
+  });
+
+  test("offer consumption is service-role-only", () => {
+    const sql = migrationSql("booking_offers");
+    const signature = "public.consume_slot_offer(uuid,uuid,text,integer,integer,text,text)";
+    expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated`);
+    expect(sql).toContain(`grant execute on function ${signature} to service_role`);
+  });
+});

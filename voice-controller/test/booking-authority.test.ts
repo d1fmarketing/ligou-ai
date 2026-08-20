@@ -54,6 +54,9 @@ function client() {
       if (name === "authorize_booking_intent") {
         return Promise.resolve({ data: authorizeError ? null : { id: "intent-1", status: "queued" }, error: authorizeError });
       }
+      if (name === "consume_slot_offer") {
+        return Promise.resolve({ data: { booking_id: "booking-1" }, error: null });
+      }
       return Promise.resolve({ data: null, error: null });
     },
   } as any;
@@ -74,38 +77,32 @@ const capability = () => makeCapability("rocha-plumbing", TENANT.id, "call-1", 1
 });
 
 describe("booking passes the complete power context", () => {
-  test("missing service city fails closed when the grant is geographic", async () => {
+  test("proposal delegates exact offer validation to the atomic consumer", async () => {
     const result = await proposeBooking(capability(), {
-      service_type: "drain_cleaning",
-      slot_start: "2026-08-21T17:00:00Z",
-      price: 225,
-    });
-
-    expect(result.status).toBe("pending_approval");
-    expect(result.reason).toBe("geography_required");
-  });
-
-  test("stores the normalized authority context used by a matching grant", async () => {
-    const result = await proposeBooking(capability(), {
-      service_type: "drain_cleaning",
-      slot_start: "2026-08-21T17:00:00Z",
-      price: 225,
-      service_city: "  IRVINE ",
+      slot_token: "opaque-offer",
     });
 
     expect(result.status).toBe("proposed");
-    const booking = inserted.find((entry) => entry.table === "bookings")?.row;
-    expect(booking.authority_context).toEqual({
-      geography: "irvine",
-      channel: "voice",
-      purpose: "booking",
-      appointment_at: "2026-08-21T17:00:00.000Z",
+    const call = rpcCalls.find((entry) => entry.name === "consume_slot_offer")!;
+    expect(call.args).toMatchObject({
+      p_tenant: TENANT.id,
+      p_call: "call-1",
+      p_expected_auth_epoch: TENANT.auth_epoch,
+      p_expected_policy_epoch: TENANT.policy_epoch,
     });
+  });
+
+  test("model-supplied close price cannot override the server-bound booking price", async () => {
+    const result = await closeDeal(capability(), { booking_id: "booking-1", confirmed_price: 1 });
+
+    expect(result.status).toBe("processing");
+    const call = rpcCalls.find((entry) => entry.name === "authorize_booking_intent")!;
+    expect(call.args.p_confirmed_price).toBe(225);
   });
 
   test("auth/policy TOCTOU before enqueue creates no direct intent", async () => {
     authorizeError = { message: "authority_epoch_stale" };
-    const result = await closeDeal(capability(), { booking_id: "booking-1", confirmed_price: 225 });
+    const result = await closeDeal(capability(), { booking_id: "booking-1" });
 
     expect(result.status).toBe("pending_approval");
     expect(rpcCalls.filter((call) => call.name === "authorize_booking_intent")).toHaveLength(1);
