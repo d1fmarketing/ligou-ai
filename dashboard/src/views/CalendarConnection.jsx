@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { IconCalendarCheck, IconCalendarPlus } from "@tabler/icons-react";
 import { supabase } from "../lib/supabase.js";
+import { loadConnectorStatus } from "../data/connectors.js";
 
 const FN = import.meta.env.VITE_SUPABASE_FUNCTIONS_URL || "";
 
@@ -12,9 +13,13 @@ export function CalendarConnection({ onToast }) {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const { data } = await supabase.from("connector_status").select("*").maybeSingle();
-    setStatus(data ?? false);
-  }, []);
+    try {
+      setStatus((await loadConnectorStatus(supabase)) ?? false);
+    } catch {
+      setStatus(false);
+      onToast?.({ kind: "warning", text: "Não foi possível verificar a conexão da agenda." });
+    }
+  }, [onToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -22,9 +27,10 @@ export function CalendarConnection({ onToast }) {
     setBusy(true);
     try {
       const { data: sess } = await supabase.auth.getSession();
+      if (!sess?.session?.access_token) throw new Error("Entre novamente para conectar a agenda.");
       const res = await fetch(`${FN}/google-connect`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${sess?.session?.access_token}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${sess.session.access_token}` },
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error === "oauth_app_not_configured"

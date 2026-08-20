@@ -12,6 +12,44 @@ function migrationSql(suffix: string): string {
   return readFileSync(path.join(migrationsDir, names[0]!), "utf8").replace(/\s+/g, " ").trim();
 }
 
+describe("OAuth connector hardening migration contract", () => {
+  test("state consumption is atomic, short-lived, fully bound, and service-role-only", () => {
+    const sql = migrationSql("connector_oauth_hardening");
+    expect(sql).toContain("function public.consume_oauth_state(text,text,uuid,uuid,text)");
+    expect(sql).toContain("security definer set search_path = ''");
+    expect(sql).toContain("for update");
+    expect(sql).toContain("expires_at <= clock_timestamp()");
+    expect(sql).toContain("nonce_hash is distinct from p_nonce_hash");
+    expect(sql).toContain("tenant_id is distinct from p_tenant");
+    expect(sql).toContain("user_id is distinct from p_user");
+    expect(sql).toContain("redirect_uri is distinct from p_redirect");
+    expect(sql).toContain("revoke all on function public.consume_oauth_state(text,text,uuid,uuid,text) from public, anon, authenticated");
+    expect(sql).toContain("grant execute on function public.consume_oauth_state(text,text,uuid,uuid,text) to service_role");
+  });
+
+  test("owner status RPC exposes metadata only and cannot be invoked anonymously", () => {
+    const sql = migrationSql("connector_oauth_hardening");
+    expect(sql).toContain("function public.get_connector_status()");
+    expect(sql).toContain("security definer set search_path = ''");
+    expect(sql).toContain("auth.uid()");
+    expect(sql).toContain("t.owner_user_id");
+    expect(sql).not.toContain("returns table (refresh_token");
+    expect(sql).toContain("drop view if exists public.connector_status");
+    expect(sql).toContain("revoke all on function public.get_connector_status() from public, anon");
+    expect(sql).toContain("grant execute on function public.get_connector_status() to authenticated");
+  });
+
+  test("encrypted token columns quarantine legacy plaintext without rewriting it", () => {
+    const sql = migrationSql("connector_oauth_hardening");
+    expect(sql).toContain("refresh_token_ciphertext");
+    expect(sql).toContain("refresh_token_iv");
+    expect(sql).toContain("token_key_version");
+    expect(sql).toContain("token_account_ref");
+    expect(sql).toContain("status = 'reconnect_required'");
+    expect(sql).not.toContain("set refresh_token =");
+  });
+});
+
 describe("tenant owner provisioning migration contract", () => {
   test("only the service role can invoke the atomic owner binding RPC", () => {
     const sql = migrationSql("tenant_owner_provisioning");

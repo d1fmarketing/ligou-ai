@@ -2,6 +2,7 @@
 // Nothing is stored yet — only a single-use state tying the callback to this tenant.
 // Deploy: supabase functions deploy google-connect --no-verify-jwt  (JWT verified explicitly below)
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { buildOAuthState } from "../_shared/oauth-state.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -32,18 +33,33 @@ Deno.serve(async (req) => {
     return Response.json({ error: "not_tenant_owner" }, { status: 403, headers: CORS });
   }
 
-  const state = crypto.randomUUID();
-  await supa.from("oauth_states").insert({ state, tenant_id: tenant.id, user_id: user.id });
+  const oauthState = await buildOAuthState({
+    stateId: crypto.randomUUID(),
+    tenantId: tenant.id,
+    userId: user.id,
+    redirectUri: redirect,
+  });
+  const { error: stateError } = await supa.from("oauth_states").insert({
+    state: oauthState.record.stateId,
+    tenant_id: oauthState.record.tenantId,
+    user_id: oauthState.record.userId,
+    nonce_hash: oauthState.record.nonceHash,
+    redirect_uri: oauthState.record.redirectUri,
+    expires_at: oauthState.record.expiresAt,
+  });
+  if (stateError) {
+    return Response.json({ error: "oauth_state_unavailable" }, { status: 503, headers: CORS });
+  }
 
   const consent = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   consent.searchParams.set("client_id", clientId);
-  consent.searchParams.set("redirect_uri", redirect);
+  consent.searchParams.set("redirect_uri", oauthState.record.redirectUri);
   consent.searchParams.set("response_type", "code");
   // narrowest scope that still lets us read free/busy and write the appointment
   consent.searchParams.set("scope", "https://www.googleapis.com/auth/calendar.events");
   consent.searchParams.set("access_type", "offline");
   consent.searchParams.set("prompt", "consent");   // force a refresh token even on re-connect
-  consent.searchParams.set("state", state);
+  consent.searchParams.set("state", oauthState.publicState);
 
   return Response.json({ url: consent.toString() }, { headers: CORS });
 });

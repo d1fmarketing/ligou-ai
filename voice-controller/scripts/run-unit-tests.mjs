@@ -24,6 +24,7 @@ export const unitTestFiles = [
   "test/timezone.test.ts",
   "test/tools.test.ts",
   "test/hermes-privacy.test.ts",
+  "test/oauth-security.test.ts",
   "test/learning.test.ts",
   "test/skills.test.ts",
   "test/unit-runner.test.ts",

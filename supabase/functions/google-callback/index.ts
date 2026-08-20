@@ -1,71 +1,143 @@
-// Step 2 of "Connect Google Calendar": Google redirects the owner back here with a code.
-// We exchange it for a refresh token, store it against the tenant, and show a plain confirmation page.
-// The token never travels to the browser.
-// Deploy: supabase functions deploy google-callback --no-verify-jwt   (Google calls this, not the app)
+// Google OAuth callback. The callback carries no user JWT: authority comes from the authenticated start
+// binding plus the atomic, short-lived, one-time state proof consumed below.
+// Deploy: supabase functions deploy google-callback --no-verify-jwt
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { encryptConnectorToken } from "../_shared/connector-crypto.ts";
+import { renderCallbackPage } from "../_shared/callback-page.ts";
+import { parseOAuthState } from "../_shared/oauth-state.ts";
 
-const page = (title: string, body: string, ok = true) =>
-  new Response(
-    `<!doctype html><meta charset="utf-8"><title>${title}</title>` +
-    `<style>body{font-family:system-ui;margin:0;display:grid;place-items:center;height:100vh;background:#faf9f7;color:#1c1917}` +
-    `.c{max-width:28rem;padding:2rem;border-radius:1rem;background:#fff;box-shadow:0 1px 3px #0001;text-align:center}` +
-    `h1{font-size:1.25rem;margin:0 0 .5rem}p{color:#57534e;line-height:1.5}` +
-    `.b{display:inline-block;margin-top:1rem;padding:.6rem 1rem;border-radius:.6rem;background:#e2703a;color:#fff;text-decoration:none}</style>` +
-    `<div class="c"><h1>${ok ? "✅" : "⚠️"} ${title}</h1><p>${body}</p>` +
-    `<a class="b" href="${Deno.env.get("LIGOU_DASHBOARD_URL") ?? "/"}">Voltar ao painel</a></div>`,
-    { status: ok ? 200 : 400, headers: { "Content-Type": "text/html; charset=utf-8" } },
-  );
+function page(title: string, body: string, ok = true): Response {
+  return new Response(renderCallbackPage({
+    title,
+    body,
+    ok,
+    returnUrl: Deno.env.get("LIGOU_DASHBOARD_URL") ?? "/",
+  }), {
+    status: ok ? 200 : 400,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
+}
+
+function safeEmail(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().toLowerCase();
+  return /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/.test(trimmed) ? trimmed.slice(0, 254) : null;
+}
 
 Deno.serve(async (req) => {
-  const u = new URL(req.url);
-  const code = u.searchParams.get("code");
-  const state = u.searchParams.get("state");
-  if (u.searchParams.get("error")) return page("Conexão cancelada", "Nenhuma agenda foi conectada.", false);
-  if (!code || !state) return page("Link inválido", "Faltam parâmetros do Google.", false);
+  const requestUrl = new URL(req.url);
+  const code = requestUrl.searchParams.get("code");
+  const publicState = requestUrl.searchParams.get("state");
+  if (requestUrl.searchParams.has("error")) {
+    return page("Conexão cancelada", "Nenhuma agenda foi conectada.", false);
+  }
+  if (!code || !publicState) return page("Link inválido", "Faltam parâmetros da conexão.", false);
 
-  const url = Deno.env.get("SUPABASE_URL")!;
-  const supa = createClient(url, Deno.env.get("SERVICE_KEY")!, { auth: { persistSession: false } });
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const serviceKey = Deno.env.get("SERVICE_KEY");
+  const clientId = Deno.env.get("GOOGLE_OAUTH_CLIENT_ID");
+  const clientSecret = Deno.env.get("GOOGLE_OAUTH_CLIENT_SECRET");
+  const configuredRedirect = Deno.env.get("GOOGLE_OAUTH_REDIRECT");
+  const encryptionKey = Deno.env.get("CONNECTOR_TOKEN_ENCRYPTION_KEY");
+  if (!supabaseUrl || !serviceKey || !clientId || !clientSecret || !configuredRedirect || !encryptionKey) {
+    return page("Conexão indisponível", "A configuração segura da agenda está incompleta.", false);
+  }
 
-  // single-use state
-  const { data: st } = await supa.from("oauth_states")
-    .update({ consumed_at: new Date().toISOString() })
-    .eq("state", state).is("consumed_at", null).select("tenant_id").maybeSingle();
-  if (!st) return page("Link expirado", "Peça a conexão novamente no painel.", false);
+  let proof;
+  try {
+    proof = await parseOAuthState(publicState, configuredRedirect);
+  } catch {
+    return page("Link expirado", "Peça a conexão novamente no painel.", false);
+  }
 
-  const body = new URLSearchParams({
-    code,
-    client_id: Deno.env.get("GOOGLE_OAUTH_CLIENT_ID")!,
-    client_secret: Deno.env.get("GOOGLE_OAUTH_CLIENT_SECRET")!,
-    redirect_uri: Deno.env.get("GOOGLE_OAUTH_REDIRECT")!,
-    grant_type: "authorization_code",
-  });
-  const tok = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body,
-  });
-  if (!tok.ok) return page("Não deu para conectar", `O Google recusou a troca (${tok.status}).`, false);
-  const t = await tok.json();
-  if (!t.refresh_token) {
+  const supa = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } });
+  const { data: consumed, error: consumeError } = await supa.rpc("consume_oauth_state", {
+    p_state: proof.stateId,
+    p_nonce_hash: proof.nonceHash,
+    p_tenant: proof.tenantId,
+    p_user: proof.userId,
+    p_redirect: proof.redirectUri,
+  }).single();
+  const consumedState = consumed as { tenant_id?: string; user_id?: string; redirect_uri?: string } | null;
+  if (consumeError || !consumedState
+    || consumedState.tenant_id !== proof.tenantId
+    || consumedState.user_id !== proof.userId
+    || consumedState.redirect_uri !== proof.redirectUri) {
+    return page("Link expirado", "Peça a conexão novamente no painel.", false);
+  }
+
+  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: proof.redirectUri,
+      grant_type: "authorization_code",
+    }),
+  }).catch(() => null);
+  if (!tokenResponse?.ok) {
+    return page("Não deu para conectar", "O Google não concluiu a autorização. Tente novamente.", false);
+  }
+
+  const tokenBody = await tokenResponse.json().catch(() => null) as Record<string, unknown> | null;
+  const refreshToken = typeof tokenBody?.refresh_token === "string"
+    ? tokenBody.refresh_token.slice(0, 16_384)
+    : "";
+  const accessToken = typeof tokenBody?.access_token === "string"
+    ? tokenBody.access_token.slice(0, 16_384)
+    : "";
+  if (!refreshToken) {
     return page("Faltou a permissão contínua", "O Google não devolveu acesso permanente. Tente de novo.", false);
   }
 
-  // whose calendar is it? (nice to show in the dashboard)
   let email: string | null = null;
+  if (accessToken) {
+    try {
+      const identity = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (identity.ok) email = safeEmail((await identity.json()).email);
+    } catch {
+      // Identity metadata is cosmetic. Token storage remains bound to a non-secret account reference.
+    }
+  }
+  const accountRef = email ?? "google-calendar-primary";
+  let wire;
   try {
-    const me = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", { headers: { Authorization: `Bearer ${t.access_token}` } });
-    if (me.ok) email = (await me.json()).email ?? null;
-  } catch { /* cosmetic only */ }
+    wire = await encryptConnectorToken(refreshToken, {
+      tenantId: proof.tenantId,
+      provider: "google_calendar",
+      accountRef,
+      keyVersion: 1,
+    }, encryptionKey);
+  } catch {
+    return page("Conexão indisponível", "Não foi possível proteger a credencial da agenda.", false);
+  }
 
-  await supa.from("connector_accounts").upsert({
-    tenant_id: st.tenant_id,
+  const now = new Date().toISOString();
+  const { error: storeError } = await supa.from("connector_accounts").upsert({
+    tenant_id: proof.tenantId,
     provider: "google_calendar",
-    refresh_token: t.refresh_token,
+    refresh_token: null,
+    refresh_token_ciphertext: wire.ciphertext,
+    refresh_token_iv: wire.iv,
+    token_key_version: wire.keyVersion,
+    token_account_ref: accountRef,
     calendar_id: "primary",
     account_email: email,
-    scopes: t.scope ?? null,
+    scopes: typeof tokenBody?.scope === "string" ? tokenBody.scope.slice(0, 2_000) : null,
     status: "active",
     last_error: null,
-    updated_at: new Date().toISOString(),
+    connected_at: now,
+    updated_at: now,
   }, { onConflict: "tenant_id,provider" });
+  if (storeError) {
+    return page("Conexão indisponível", "Não foi possível salvar a conexão com segurança.", false);
+  }
 
-  return page("Agenda conectada", `O Ligou agora usa ${email ?? "sua agenda do Google"} para ver horários e marcar serviços.`);
+  return page("Agenda conectada", email
+    ? `O Ligou agora usa ${email} para consultar horários e marcar serviços.`
+    : "O Ligou agora usa sua agenda do Google para consultar horários e marcar serviços.");
 });
