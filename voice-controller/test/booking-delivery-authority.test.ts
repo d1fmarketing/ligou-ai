@@ -67,6 +67,7 @@ let claimedStatus = "running";
 let currentClaimToken = "claim-a";
 let busyResult: any = { intervals: [] };
 let busyHook: (() => void) | null = null;
+let transitionOrder: string[] = [];
 
 function accepted() {
   return {
@@ -104,9 +105,13 @@ function client() {
         return Promise.resolve({ data: null, error: null });
       }
       if (name === "transition_claimed_intent") {
-        if (args.p_claim_token !== currentClaimToken) return Promise.resolve({ data: false, error: null });
-        leaseHeld = false;
+        if (currentClaimToken === null || args.p_claim_token === null || args.p_claim_token !== currentClaimToken) {
+          return Promise.resolve({ data: false, error: null });
+        }
         claimedStatus = args.p_transition === "defer" ? "queued" : "failed";
+        transitionOrder.push("status");
+        leaseHeld = false;
+        transitionOrder.push("lease");
         return Promise.resolve({ data: true, error: null });
       }
       return Promise.resolve({ data: null, error: null });
@@ -161,6 +166,7 @@ beforeEach(() => {
   currentClaimToken = "claim-a";
   busyResult = { intervals: [] };
   busyHook = null;
+  transitionOrder = [];
   _setClient(client());
 });
 afterAll(() => _setClient(null));
@@ -227,5 +233,22 @@ describe("booking delivery authority", () => {
     await executeIntent(intent("claim-current"), calendar as any);
     expect(leaseHeld).toBe(false);
     expect(claimedStatus).toBe("queued");
+    expect(transitionOrder).toEqual(["status", "lease"]);
+  });
+
+  test("NULL stored and NULL input claim tokens mutate nothing", async () => {
+    currentClaimToken = null as any;
+    busyResult = { intervals: [], unknown: true };
+    await executeIntent(intent(null as any), calendar as any);
+    expect(leaseHeld).toBe(true);
+    expect(claimedStatus).toBe("running");
+  });
+
+  test("NULL stored token rejects a non-NULL input token", async () => {
+    currentClaimToken = null as any;
+    busyResult = { intervals: [], unknown: true };
+    await executeIntent(intent("claim-input"), calendar as any);
+    expect(leaseHeld).toBe(true);
+    expect(claimedStatus).toBe("running");
   });
 });

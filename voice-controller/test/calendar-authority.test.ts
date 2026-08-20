@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { _setClient } from "../src/rules.ts";
-import { googleCalendar, payloadHash } from "../src/calendar.ts";
+import { calendarPort, googleCalendar, payloadHash } from "../src/calendar.ts";
 
 const INPUT = {
   tenantId: "tenant-1",
@@ -35,6 +35,7 @@ let requests: Array<{ url: string; method: string; body?: any }> = [];
 let lookupResponse: { ok: boolean; status: number; body: any };
 let connectorError: { message: string } | null = null;
 let connectorData: any = null;
+let queriedTables: string[] = [];
 
 function response(value: { ok: boolean; status: number; body: any }): Response {
   return new Response(JSON.stringify(value.body), { status: value.status });
@@ -44,15 +45,18 @@ beforeEach(() => {
   process.env.GOOGLE_CALENDAR_ID = "calendar-1";
   process.env.GOOGLE_CLIENT_ID = "synthetic-unit-test-client";
   process.env.GOOGLE_CLIENT_SECRET = "synthetic-unit-test-key";
+  process.env.GOOGLE_REFRESH_TOKEN = "synthetic-unit-test-token";
   process.env.GOOGLE_OAUTH_CLIENT_ID = "synthetic-oauth-client";
   process.env.GOOGLE_OAUTH_CLIENT_SECRET = "synthetic-oauth-secret";
   process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK = "enabled";
   requests = [];
   connectorError = null;
   connectorData = null;
+  queriedTables = [];
   lookupResponse = { ok: true, status: 200, body: { items: [exactEvent()] } };
   _setClient({
-    from() {
+    from(table: string) {
+      queriedTables.push(table);
       const api: any = {
         select() { return api; }, eq() { return api; },
         maybeSingle: async () => ({ data: connectorData, error: connectorError }),
@@ -79,6 +83,7 @@ afterAll(() => {
   delete process.env.GOOGLE_CALENDAR_ID;
   delete process.env.GOOGLE_CLIENT_ID;
   delete process.env.GOOGLE_CLIENT_SECRET;
+  delete process.env.GOOGLE_REFRESH_TOKEN;
   delete process.env.GOOGLE_OAUTH_CLIENT_ID;
   delete process.env.GOOGLE_OAUTH_CLIENT_SECRET;
   delete process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK;
@@ -229,6 +234,56 @@ describe("canonical calendar commitment", () => {
     expect(result.outcome).toBe("unknown");
     expect(result.error).toBe("lookup_malformed_pagination");
     expect(requests.filter((request) => request.method === "POST" && request.url.includes("/events"))).toHaveLength(0);
+  });
+
+  test("explicit empty pagination token is malformed rather than zero-match", async () => {
+    lookupResponse = { ok: true, status: 200, body: { items: [], nextPageToken: "" } };
+    const result = await write();
+    expect(result.outcome).toBe("unknown");
+    expect(result.error).toBe("lookup_malformed_pagination");
+    expect(requests.filter((request) => request.method === "POST" && request.url.includes("/events"))).toHaveLength(0);
+  });
+
+  test("connector state is re-read after an active row becomes revoked", async () => {
+    const tenantId = "tenant-cache-revoked";
+    connectorData = {
+      status: "active", refresh_token: "tenant-refresh",
+      calendar_id: "calendar-tenant", account_email: "owner@example.com",
+    };
+    await write({ ...INPUT, tenantId });
+    const requestCount = requests.length;
+    connectorData = { ...connectorData, status: "revoked" };
+    const result = await write({ ...INPUT, tenantId });
+    expect(result.outcome).toBe("unknown");
+    expect(result.error).toContain("connector_inactive:revoked");
+    expect(requests).toHaveLength(requestCount);
+  });
+
+  test("confirmed absence is re-read and a second-call DB error cannot use cached fallback", async () => {
+    const tenantId = "tenant-cache-db-error";
+    connectorData = null;
+    await write({ ...INPUT, tenantId });
+    const requestCount = requests.length;
+    connectorError = { message: "connector database unavailable" };
+    const result = await write({ ...INPUT, tenantId });
+    expect(result.outcome).toBe("unknown");
+    expect(result.error).toContain("connector_lookup_failed");
+    expect(requests).toHaveLength(requestCount);
+  });
+
+  test("default calendar port still queries tenant connector without any Google env", async () => {
+    delete process.env.CALENDAR_PROVIDER;
+    delete process.env.GOOGLE_CALENDAR_ID;
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
+    delete process.env.GOOGLE_REFRESH_TOKEN;
+    delete process.env.GOOGLE_OAUTH_CLIENT_ID;
+    delete process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+    connectorError = { message: "connector database unavailable" };
+    const result = await calendarPort().write({ ...INPUT, tenantId: "tenant-port-no-google-env" } as any);
+    expect(result.outcome).toBe("unknown");
+    expect(result.error).toContain("connector_lookup_failed");
+    expect(queriedTables).toContain("connector_accounts");
   });
 
   for (const method of ["write", "reconcile"] as const) {
