@@ -19,29 +19,40 @@ const RULES = [
   { id: "r-nego", category: "negociacao", escopo: "geral", text: "Negotiate between min and target, never below min.", structured: { max_discount_pct: 10 } },
   { id: "r-emerg", category: "emergencia", escopo: "geral", text: "Gas smell: leave property, call 911.", structured: null },
 ];
+const POWERS = [{ id: "power-1", resource: "drain_cleaning", monetary_limit: 225, expires_at: null, conditions: {} }];
 
 let inserted: any[] = [];
 let busyEvents: Array<{ start_iso: string; end_iso: string }> = [];
 let calendarFails = false;
+let quoteRows: any[] = [];
 
 function mockSupabase() {
   return {
     from(table: string) {
+      const filters: Record<string, unknown> = {};
       const api: any = {
         select() { return api; },
-        eq() { return api; },
+        eq(column: string, value: unknown) { filters[column] = value; return api; },
+        is() { return api; },
         lt() { return api; },
         gt: async () => calendarFails
           ? { data: null, error: { message: "calendar unreadable" } }
           : { data: busyEvents, error: null },
+        maybeSingle: async () => table === "booking_quotes"
+          ? { data: quoteRows.find((row) => row.token_hash === filters.token_hash) ?? null, error: null }
+          : { data: null, error: null },
         single: async () => table === "tenants"
           ? { data: TENANT, error: null }
           : { data: { id: "case-1", status: "pendente" }, error: null },
         upsert(row: any) { inserted.push({ table, row }); return api; },
         update() { return api; },
-        insert(row: any) { inserted.push({ table, row }); return api; },
+        insert(row: any) {
+          inserted.push({ table, row });
+          if (table === "booking_quotes") quoteRows.push({ id: `quote-${quoteRows.length + 1}`, ...row });
+          return api;
+        },
         then(resolve: (value: unknown) => unknown) {
-          return Promise.resolve({ data: table === "effective_rules" ? RULES : [], error: null }).then(resolve);
+          return Promise.resolve({ data: table === "effective_rules" ? RULES : table === "powers" ? POWERS : [], error: null }).then(resolve);
         },
       };
       return api;
@@ -54,6 +65,7 @@ beforeEach(() => {
   inserted = [];
   busyEvents = [];
   calendarFails = false;
+  quoteRows = [];
   invalidateTenant("rocha-plumbing");
   _setClient(mockSupabase());
 });
@@ -70,7 +82,8 @@ describe("quote_price", () => {
     expect(r.ok).toBe(true);
     expect(r.body.status).toBe("quoted");
     expect(r.body.quote_usd).toBe(225);
-    expect(r.body.floor_usd_internal).toBe(149);
+    expect(String(r.body.quote_id)).toMatch(/^[A-Za-z0-9_-]{32,}$/);
+    expect(r.body.floor_usd_internal).toBeUndefined();
   });
   test("never invents a price for unknown services", async () => {
     const r = await runTool(cap(), "quote_price", { service_type: "pool_install" });
@@ -84,13 +97,61 @@ describe("quote_price", () => {
   });
 });
 
+describe("evaluate_offer", () => {
+  test("accepts an in-policy offer with a new server-bound quote and no private floor", async () => {
+    const quoted = await runTool(cap(), "quote_price", { service_type: "drain_cleaning" });
+    const result = await runTool(cap(), "evaluate_offer", {
+      service_type: "drain_cleaning",
+      offered_price: 180,
+      quote_id: quoted.body.quote_id,
+    });
+
+    expect(result.body).toMatchObject({ status: "accept", public_price_usd: 180 });
+    expect(String(result.body.quote_id)).toMatch(/^[A-Za-z0-9_-]{32,}$/);
+    expect(JSON.stringify(result.body).toLowerCase()).not.toContain("floor");
+  });
+
+  test("counters a below-policy offer without revealing the private floor", async () => {
+    const quoted = await runTool(cap(), "quote_price", { service_type: "drain_cleaning" });
+    const result = await runTool(cap(), "evaluate_offer", {
+      service_type: "drain_cleaning",
+      offered_price: 20,
+      quote_id: quoted.body.quote_id,
+    });
+
+    expect(result.body.status).toBe("counter");
+    expect(Number(result.body.public_price_usd)).toBeGreaterThan(149);
+    expect(JSON.stringify(result.body).toLowerCase()).not.toContain("floor");
+  });
+
+  test("returns needs_owner when the quote is not bound to this call", async () => {
+    const result = await runTool(cap(), "evaluate_offer", {
+      service_type: "drain_cleaning",
+      offered_price: 180,
+      quote_id: "arbitrary-model-quote",
+    });
+
+    expect(result.body.status).toBe("needs_owner");
+    expect(result.body.public_price_usd).toBeUndefined();
+  });
+});
+
 describe("check_availability", () => {
-  test("returns slots with price included (fat tool)", async () => {
-    const r = await runTool(cap(), "check_availability", { service_type: "drain_cleaning" });
+  test("returns only opaque server-bound slot offers with truthful local display", async () => {
+    const quoted = await runTool(cap(), "quote_price", { service_type: "drain_cleaning" });
+    const r = await runTool(cap(), "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "Irvine",
+      quote_id: quoted.body.quote_id,
+    });
     expect(r.body.status).toBe("ok");
     const slots = r.body.slots as any[];
     expect(slots.length).toBeGreaterThan(0);
     expect(slots[0].price_usd).toBe(225);
+    expect(String(slots[0].slot_token)).toMatch(/^[A-Za-z0-9_-]{32,}$/);
+    expect(slots[0].local).toBeTruthy();
+    expect(slots[0].start).toBeUndefined();
+    expect(slots[0].end).toBeUndefined();
   });
   test("unknown service does not fabricate slots", async () => {
     const r = await runTool(cap(), "check_availability", { service_type: "pool_install" });
@@ -98,19 +159,22 @@ describe("check_availability", () => {
   });
 
   test("never offers an hour that is already booked", async () => {
-    const free = await runTool(cap(), "check_availability", { service_type: "drain_cleaning" });
-    const taken = (free.body.slots as any[])[0];
+    const firstQuote = await runTool(cap(), "quote_price", { service_type: "drain_cleaning" });
+    await runTool(cap(), "check_availability", { service_type: "drain_cleaning", service_city: "Irvine", quote_id: firstQuote.body.quote_id });
+    const issued = inserted.find((row) => row.table === "slot_offers")!.row[0];
     // the calendar now reports that exact hour as busy
-    busyEvents = [{ start_iso: taken.start, end_iso: taken.end }];
-    const after = await runTool(cap(), "check_availability", { service_type: "drain_cleaning" });
+    busyEvents = [{ start_iso: issued.slot_start, end_iso: issued.slot_end }];
+    const secondQuote = await runTool(cap(), "quote_price", { service_type: "drain_cleaning" });
+    const after = await runTool(cap(), "check_availability", { service_type: "drain_cleaning", service_city: "Irvine", quote_id: secondQuote.body.quote_id });
     expect(after.body.status).toBe("ok");
-    const offered = (after.body.slots as any[]).map((s) => s.start);
-    expect(offered).not.toContain(taken.start);
+    const nextIssued = inserted.filter((row) => row.table === "slot_offers").at(-1)!.row;
+    expect(nextIssued.map((slot: any) => slot.slot_start)).not.toContain(issued.slot_start);
   });
 
   test("degrades honestly when the calendar cannot be read (no invented availability)", async () => {
     calendarFails = true;
-    const r = await runTool(cap(), "check_availability", { service_type: "drain_cleaning" });
+    const quoted = await runTool(cap(), "quote_price", { service_type: "drain_cleaning" });
+    const r = await runTool(cap(), "check_availability", { service_type: "drain_cleaning", service_city: "Irvine", quote_id: quoted.body.quote_id });
     expect(r.body.status).toBe("unavailable");
     expect(r.body.reason).toBe("calendar_unreadable");
     expect(String(r.body.say)).toMatch(/team will confirm/i);
@@ -213,6 +277,8 @@ describe("instructions builder", () => {
   test("bands appear for negotiation but floor exposure is instructed against", () => {
     const t = buildInstructions(TENANT as any, RULES as any, "customer");
     expect(t).toContain("drain_cleaning");
-    expect(t).toContain("NEVER below it");
+    expect(t).not.toContain("$149");
+    expect(t.toLowerCase()).not.toContain("minimum");
+    expect(t.toLowerCase()).not.toContain("floor");
   });
 });

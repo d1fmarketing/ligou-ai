@@ -4,83 +4,31 @@ import { createHash } from "node:crypto";
 import { loadTenant, priceRules, supa } from "./rules.ts";
 import { checkPower, normalizeGeography } from "./powers.ts";
 import type { Capability } from "./tools.ts";
+import { opaqueTokenHash } from "./offers.ts";
 
 const DENY_SAY = "Tell the caller: that specific request needs a quick confirmation from the team, and someone will get back to them shortly. Do not promise a text message — SMS is not connected yet.";
 const PENDING_SAY = "Tell the caller the request went through and the team will confirm the time shortly. Do NOT say it is booked yet, and do NOT promise a text message — SMS is not connected yet.";
 
 export async function proposeBooking(cap: Capability, args: Record<string, unknown>) {
-  const { tenant, rules } = await loadTenant(cap.tenantSlug);
-  const svc = String(args.service_type ?? "").toLowerCase().trim();
-  const slotStart = String(args.slot_start ?? "");
-  const price = Number(args.price ?? NaN);
+  const { tenant } = await loadTenant(cap.tenantSlug);
+  const slotToken = String(args.slot_token ?? "");
   const clientName = args.client_name ? String(args.client_name).slice(0, 120) : null;
   const contact = args.contact ? String(args.contact).slice(0, 120) : null;
-  if (!svc || !slotStart || Number.isNaN(price)) return { status: "invalid", error: "service_type, slot_start and price are required" };
-
-  const band = priceRules(rules).find((s) => s.service_type === svc);
-  const idem = createHash("sha256").update(`${tenant.id}|booking|${svc}|${slotStart}|${cap.callId}`).digest("hex");
+  if (!slotToken) return { status: "invalid_offer", error: "slot_token_required" };
   if (tenant.auth_epoch !== cap.authEpoch) return { status: "denied", error: "authorization_epoch_stale" };
   if (tenant.policy_epoch !== cap.policyEpoch) return { status: "denied", error: "policy_epoch_stale" };
-  const appointmentAt = new Date(slotStart);
-  if (Number.isNaN(appointmentAt.getTime())) return { status: "invalid", error: "slot_start_invalid" };
-  const geography = args.service_city ? normalizeGeography(String(args.service_city)) : undefined;
-  const authorityContext = {
-    geography,
-    channel: "voice",
-    purpose: "booking",
-    appointment_at: appointmentAt.toISOString(),
-  };
-
-  // out-of-policy paths → async case, caller never waits
-  const power = await checkPower(tenant.id, "voice_agent", "create_booking", svc, {
-    amountUsd: price,
-    geography,
-    channel: authorityContext.channel,
-    purpose: authorityContext.purpose,
-    appointmentAt,
-    expectedAuthEpoch: cap.authEpoch,
+  const { data: consumed, error } = await supa().rpc("consume_slot_offer", {
+    p_tenant: tenant.id,
+    p_call: cap.callId,
+    p_token_hash: opaqueTokenHash(slotToken),
+    p_expected_auth_epoch: cap.authEpoch,
+    p_expected_policy_epoch: cap.policyEpoch,
+    p_client_name: clientName,
+    p_contact: contact,
   });
-  const belowFloor = band && band.price_min != null && price < Number(band.price_min);
-  const unknownService = !band;
-  if (unknownService || belowFloor || !power.granted) {
-    const reason = unknownService ? "service_not_approved" : belowFloor ? "price_below_minimum" : power.reason;
-    const caseIdem = createHash("sha256").update(`${cap.callId}:booking-case:${idem}`).digest("hex");
-    const { data: kase } = await supa()
-      .from("approval_cases")
-      .upsert({
-        tenant_id: tenant.id, call_id: cap.callId,
-        request: `Booking request outside policy (${reason}): ${svc} at ${slotStart} for $${price}`,
-        proposed_action: `Book ${svc} at ${slotStart} for $${price}`,
-        client_name: clientName, contact, price_quoted: price,
-        urgency: "normal", idempotency_key: caseIdem,
-      }, { onConflict: "idempotency_key" })
-      .select("id").single();
-    const { data: booking } = await supa()
-      .from("bookings")
-      .upsert({
-        tenant_id: tenant.id, call_id: cap.callId, case_id: kase?.id ?? null,
-        client_name: clientName, contact, service_type: svc, price_agreed: price,
-        slot_start: slotStart, status: "pending_approval", idempotency_key: idem,
-        authority_context: authorityContext,
-      }, { onConflict: "idempotency_key" })
-      .select("id").single();
-    return { status: "pending_approval", booking_id: booking?.id, case_id: kase?.id, reason, say: DENY_SAY };
-  }
-
-  const { data: booking, error } = await supa()
-    .from("bookings")
-    .upsert({
-      tenant_id: tenant.id, call_id: cap.callId,
-      client_name: clientName, contact, service_type: svc, price_agreed: price,
-      slot_start: slotStart,
-      slot_end: args.slot_end ? String(args.slot_end) : null,
-      authority_context: authorityContext,
-      status: "proposed", idempotency_key: idem,
-    }, { onConflict: "idempotency_key" })
-    .select("id,status").single();
-  if (error || !booking) return { status: "unknown", say: PENDING_SAY, error: error?.message };
+  if (error || !consumed) return { status: "invalid_offer", error: error?.message ?? "slot_offer_not_found", say: DENY_SAY };
   return {
-    status: "proposed", booking_id: booking.id,
+    status: "proposed", booking_id: consumed.booking_id,
     say: "Confirm the details out loud with the caller (service, time, price), then use close_deal to finalize.",
   };
 }
@@ -88,12 +36,13 @@ export async function proposeBooking(cap: Capability, args: Record<string, unkno
 export async function closeDeal(cap: Capability, args: Record<string, unknown>) {
   const { tenant, rules } = await loadTenant(cap.tenantSlug);
   const bookingId = String(args.booking_id ?? "");
-  const confirmed = Number(args.confirmed_price ?? NaN);
-  if (!bookingId || Number.isNaN(confirmed)) return { status: "invalid", error: "booking_id and confirmed_price required" };
+  if (!bookingId) return { status: "invalid", error: "booking_id required" };
 
   const { data: booking } = await supa()
     .from("bookings").select("*").eq("id", bookingId).eq("tenant_id", tenant.id).single();
   if (!booking) return { status: "invalid", error: "booking_not_found" };
+  const confirmed = Number(booking.price_agreed ?? NaN);
+  if (!Number.isFinite(confirmed)) return { status: "invalid", error: "booking_price_missing" };
   if (tenant.auth_epoch !== cap.authEpoch) return { status: "denied", error: "authorization_epoch_stale" };
   if (tenant.policy_epoch !== cap.policyEpoch) return { status: "denied", error: "policy_epoch_stale" };
   if (booking.status === "confirmed") return { status: "confirmed", receipt: "accepted", say: "Already booked — you can tell the caller it is confirmed." };

@@ -10,6 +10,7 @@ export const unitTestFiles = [
   "test/ownership.test.ts",
   "test/migrations.test.ts",
   "test/rules.test.ts",
+  "test/booking-offers.test.ts",
   "test/booking-authority.test.ts",
   "test/budget-settlement.test.ts",
   "test/budget-sql-fixture.test.ts",
