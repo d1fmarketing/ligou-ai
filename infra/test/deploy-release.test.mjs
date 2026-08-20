@@ -43,6 +43,7 @@ async function gitFixture(base) {
     "hermes-cell/config/cli-config.yaml": "model:\n  provider: openai-codex\n",
     "hermes-cell/docker-compose.yml": "services: {}\n",
     "supabase/functions/good/index.ts": "export {};\n",
+    "supabase/deno.lock": "fixture-deno-lock\n",
     "supabase/.temp/project-ref": "forbidden temp\n",
     "infra/good.sh": "#!/bin/sh\nexit 0\n",
     "infra/toolchain.json": JSON.stringify({
@@ -100,6 +101,8 @@ test("packaging exact commit excludes contamination and emits a signed immutable
         lockfile_path: "voice-controller/bun.lock",
         lockfile_sha256: "b636fb14b47b7d83c9f26513d1341f630f18c8960192897a73e885e4303162dc",
         evidence_scope: "lockfile-integrity-only",
+        deno_lock_path: "supabase/deno.lock",
+        deno_lock_sha256: "a6bdca4284f70d2bbcb73089ab1431aba2c1b94dc3b48fb6b5b3134517cb606e",
         supabase_js: "2.112.3",
         postgres: "3.4.9",
       },
@@ -239,6 +242,7 @@ async function runnableArtifact(fixture, commit, { healthScript = '#!/bin/sh\nex
     "hermes-cell/validate-config.mjs": "process.exit(0);\n",
     "infra/release-health.sh": healthScript,
     "infra/release-marker": "safe\n",
+    "supabase/deno.lock": "fixture-deno-lock\n",
     "infra/toolchain.json": JSON.stringify({
       node: "22.22.3", application_version: "0.1.0", bun: "1.2.13", deno: "2.9.4", supabase_cli: "2.115.0", hermes_image: IMAGE,
       dependencies: { supabase_js: "2.112.3", postgres: "3.4.9" },

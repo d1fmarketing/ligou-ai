@@ -1,7 +1,7 @@
 // Step 1 of "Connect Google Calendar": the owner clicks the button, we hand back the consent URL.
 // Nothing is stored yet — only a single-use state tying the callback to this tenant.
 // Deploy: supabase functions deploy google-connect --no-verify-jwt  (JWT verified explicitly below)
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { createClient } from "@supabase/supabase-js";
 import { buildOAuthState } from "../_shared/oauth-state.ts";
 
 const CORS = {

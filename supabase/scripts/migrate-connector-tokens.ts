@@ -1,4 +1,4 @@
-import postgres from "npm:postgres@3.4.9";
+import postgres from "postgres";
 import {
   migrateTenantConnectorTokens,
   type ConnectorMigrationTransaction,
@@ -28,8 +28,9 @@ try {
     encodedKey,
     apply,
     store: {
-      transaction: (operation) => sql.begin(async (transactionSql) => {
-        const transaction: ConnectorMigrationTransaction = {
+      async transaction<T>(operation: (transaction: ConnectorMigrationTransaction) => Promise<T>): Promise<T> {
+        const result = await sql.begin(async (transactionSql) => {
+          const transaction: ConnectorMigrationTransaction = {
           async lockLegacyRows(lockedTenant) {
             return await transactionSql`
               select id, tenant_id, provider, account_email, token_account_ref, refresh_token
@@ -67,9 +68,11 @@ try {
             `;
             return rows.length === 1 ? rows[0] : null;
           },
-        };
-        return operation(transaction);
-      }),
+          };
+          return operation(transaction);
+        });
+        return result as unknown as T;
+      },
     },
   });
   console.log(JSON.stringify(result));

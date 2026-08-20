@@ -127,6 +127,7 @@ function runtimeEvidence(artifact, hermesImage) {
   if (canonical(toolchain) !== canonical(PINNED_TOOLCHAIN)
     || packageJson.packageManager !== `bun@${PINNED_TOOLCHAIN.bun}`) fail("release_runtime_evidence_invalid");
   const lockfile = artifactFile(artifact, "voice-controller/bun.lock");
+  const denoLock = artifactFile(artifact, "supabase/deno.lock");
   return {
     application: { version: PINNED_TOOLCHAIN.application_version },
     node: { version: PINNED_TOOLCHAIN.node },
@@ -137,6 +138,8 @@ function runtimeEvidence(artifact, hermesImage) {
       lockfile_path: "voice-controller/bun.lock",
       lockfile_sha256: createHash("sha256").update(lockfile).digest("hex"),
       evidence_scope: "lockfile-integrity-only",
+      deno_lock_path: "supabase/deno.lock",
+      deno_lock_sha256: createHash("sha256").update(denoLock).digest("hex"),
       supabase_js: PINNED_TOOLCHAIN.dependencies.supabase_js,
       postgres: PINNED_TOOLCHAIN.dependencies.postgres,
     },

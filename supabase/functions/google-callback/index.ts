@@ -1,7 +1,7 @@
 // Google OAuth callback. The callback carries no user JWT: authority comes from the authenticated start
 // binding plus the atomic, short-lived, one-time state proof consumed below.
 // Deploy: supabase functions deploy google-callback --no-verify-jwt
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { createClient } from "@supabase/supabase-js";
 import { encryptConnectorToken } from "../_shared/connector-crypto.ts";
 import { renderCallbackPage } from "../_shared/callback-page.ts";
 import { parseOAuthState } from "../_shared/oauth-state.ts";
