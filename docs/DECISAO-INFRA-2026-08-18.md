@@ -3,12 +3,12 @@
 > ## EMENDA (18/08/2026, noite) — Plano MVP v4 APROVADO por RJ
 > O documento abaixo permanece como histórico da decisão de stack. As cláusulas seguintes foram **substituídas** pelo [PLANO-MVP-2026-08-18](PLANO-MVP-2026-08-18.md) (aprovado após 3 rodadas de revisão), que é o documento de execução vigente:
 >
-> 1. **Hermes é o cérebro operacional persistente desde a F1** — planeja, pesquisa, aprende, cria skills, coordena tarefas e participa seletivamente da ligação via `consult_hermes` (não é "worker pós-chamada"). Realtime = ouvido/voz/reflexo.
+> 1. **Hermes é o cérebro operacional persistente desde a F1** — planeja, pesquisa, aprende e cria skills. Na ligação participa somente via `consult_ligou_brain` estruturado (tópico enum + serviço validado → código de ação → orientação fixa); a ponte de texto/advice livre está aposentada. Realtime = ouvido/voz/reflexo.
 > 2. **Supabase é o ledger autoritativo** (identidade, poderes concedidos, políticas, casos, outbox, compromissos, receipts, audit) — assumido como AgentCore, não "manager". O estado cognitivo do Hermes (working memory, skills, procedimentos) é parte REAL do AgentSpace, com backup/export/restore próprios — não cache descartável.
 > 3. **Autoridade graduada por grants granulares** (subject/capability/resource/limites/allowed_hours/`auth_epoch`; cores VERDE→PRETO derivadas; revogação invalida tokens na hora). O dono concede PODERES, não aprova cada ação.
 > 4. **Aprovação no piloto é estritamente assíncrona** (same-call approval = escalação futura).
 > 5. **Receipts**: `accepted` exige external_id + read-back/reconciliação + hash de payload + tenant/mapping + provider request — não só ID.
-> 6. **Capabilities, não chaveiro**: Hermes tem credencial de modelo + chave do API server + tokens de capability estreitos/temporários; nunca credenciais brutas de Google/Twilio/Supabase-service-role/AWS.
+> 6. **Capabilities, não chaveiro**: Hermes usa exclusivamente Codex OAuth da assinatura em volume separado + chave local do API server + tokens de capability estreitos/temporários; nunca API key de raciocínio nem credenciais brutas de Google/Twilio/Supabase-service-role/AWS.
 > 7. **Modelo de voz**: `gpt-realtime-2.1-mini` default (2.1 comparado em F1 e usado só por decisão explícita). **EC2**: `t3.large` no MVP (resize quando vier a 2ª célula).
 > 8. **Pin do Hermes**: release `v2026.8.18` + commit SHA + digest imutável de imagem Docker + hash de config (nunca tag mutável).
 > 9. **Empresa sintética do MVP**: Rocha Plumbing ([fixtures](fixtures/rocha-plumbing.md)); tenant real escolhido por RJ na F5.
@@ -53,7 +53,7 @@ Estes invariantes são inegociáveis, independente do runtime:
 
 ## 2. Runtime da célula — DECIDIDO POR RJ: Hermes + VoiceEdge próprio (18/08)
 
-**Decisão final de RJ:** o cérebro da célula é o **Hermes Agent**. Como o Hermes não atende telefone em tempo real (doc oficial verbatim), a arquitetura é a que a própria verificação apontou como o cenário viável para o Hermes: **a voz vive FORA da célula** — VoiceEdge nosso: Twilio Media Streams/SIP → `gpt-realtime-2.1` → Hermes via API server OpenAI-compatível (`/v1/chat/completions` com `X-Hermes-Session-Key` para escopo de memória por tenant). O Hermes fica com o que ele faz melhor: memória, skills, self-improvement, MCP (Google Calendar), trabalho pós-chamada.
+**Decisão final de RJ:** o cérebro da célula é o **Hermes Agent**. Como o Hermes não atende telefone em tempo real (doc oficial verbatim), a voz vive FORA da célula — VoiceEdge nosso: Twilio SIP → `gpt-realtime-2.1` → controller. O controller consulta o API server Hermes somente com contexto estruturado mínimo e recebe um código de ação em schema fechado; `X-Hermes-Session-Key` mantém o escopo do tenant. Prosa do Hermes nunca retorna diretamente à chamada.
 
 Registro histórico da verificação (7 agentes, fonte primária, mesma data) — fica como evidência, não como veto:
 
@@ -69,7 +69,7 @@ Registro histórico da verificação (7 agentes, fonte primária, mesma data) �
 2. **Gates de aprovação do Hermes são conveniência, não fronteira:** `memory.write_approval` e `skills.write_approval` LIGADOS na config, mas com os bugs conhecidos (#47941 approve quebrado, #55147 não-admin desliga gate, bypass por shell admitido em doc) a garantia real é externa: preço/policy em mount read-only, credenciais fora da célula (Secrets Manager), aprovação só no dashboard do dono.
 3. **Célula = container Docker single-tenant** (postura oficialmente suportada pelo Hermes: "separate agent instances"; multi-tenant intra-processo é quebrado — #34352/#30585 — e NUNCA será usado).
 4. **Cadência de update:** projeto 0.x com ~3.650 commits/minor e regressões P1 — pin de versão por célula, update quinzenal testado em célula-canário antes da frota.
-5. **Cérebro a preço de API OpenAI** (o VoiceEdge já é OpenAI; manter um provider primário simplifica custo e eval).
+5. **Cérebro na assinatura via `openai-codex` OAuth**, nunca chave de API; somente a voz Realtime usa a API OpenAI no controller.
 6. **Skills executam Python arbitrário no import:** skill nova criada pelo agente só ativa após revisão (staged em `pending/`), e a célula roda com filesystem mínimo e egress allowlist.
 
 OpenClaw fica como fallback documentado do cérebro (migração `hermes→openclaw` e vice-versa existem nos dois projetos); a decisão de RJ prevalece — self-improvement é o produto, e o telefone é resolvido por arquitetura, não pelo runtime.

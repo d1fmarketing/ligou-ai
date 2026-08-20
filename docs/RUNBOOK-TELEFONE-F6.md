@@ -14,7 +14,8 @@ Zero A2P/toll-free (isso é só SMS). Zero porta de entrada em qualquer lugar. F
    `sip:proj_<OPENAI_PROJECT_ID>@sip.api.openai.com;transport=tls` e apontar o número pro trunk.
 3. No projeto OpenAI: registrar webhook `realtime.call.incoming` →
    `https://ixpbqquvxirvuevjhmrq.supabase.co/functions/v1/accept-call` e guardar o `whsec_` nos secrets da função:
-   `supabase secrets set OPENAI_WEBHOOK_SECRET=... SERVICE_KEY=...` + `supabase functions deploy accept-call --no-verify-jwt`.
+   `OPENAI_WEBHOOK_SECRET`, `SERVICE_KEY` e `CONTACT_HASH_KEY` (base64, 32 bytes) nos secrets da função. A mesma
+   `CONTACT_HASH_KEY` vai ao controller para opt-out/frequência. Depois, deploy de `accept-call --no-verify-jwt`.
 4. Teste de aceite: ligar do celular → mesmo agente do dashboard; caso fora-de-regra aparece ao vivo;
    custo da chamada no ledger (`select * from calls where channel='phone'`).
 

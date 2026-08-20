@@ -9,6 +9,7 @@
     "check": "bun run build && node --check assets/js/ligou-fx2.js && node --check assets/js/ligou-app9.js && node --check dev-server.mjs && bun test tests/frontend-contract.test.mjs tests/runtime-behavior.test.mjs && bun run secrets:scan && node scripts/verify-claude-v9.mjs",
     "site:build": "node scripts/build-site.mjs",
     "secrets:scan": "node scripts/scan-secrets.mjs",
-    "test:security": "node scripts/test-security.mjs"
+    "test:security": "node scripts/test-security.mjs",
+    "test:hermes-config": "node --test hermes-cell/test/config-security.test.mjs"
   }
 }

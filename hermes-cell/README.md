@@ -1,32 +1,44 @@
 # Célula Hermes — runbook
 
-Uma célula por empresa. Contida: zero credenciais de negócio; única credencial externa = chave OpenAI própria
-(projeto separado com teto de gasto). Autoridade real vive no Supabase + controller.
+Uma célula por empresa. A célula não recebe credenciais de Google, Supabase, Twilio ou AWS. O único
+credencial de raciocínio é o OAuth do provedor `openai-codex`, vinculado à assinatura ChatGPT. Não existe
+`OPENAI_API_KEY` na configuração do Hermes. `HERMES_API_KEY` autentica apenas o tráfego local
+controller→API server; não é credencial de modelo.
 
-## Subir (local ou EC2)
+## Subir e autenticar
 
 ```bash
 cd hermes-cell
-cp .env.example .env   # preencha HERMES_API_KEY (gere: openssl rand -hex 24) e CELL_OPENAI_API_KEY
+cp .env.example .env  # TENANT_SLUG + HERMES_API_KEY interno
 docker compose up -d
-curl -s -H "Authorization: Bearer $HERMES_API_KEY" http://127.0.0.1:8642/v1/models   # sanity
+docker exec -it "ligou-cell-$TENANT_SLUG" hermes auth add openai-codex --type oauth --no-browser
+TENANT_SLUG="$TENANT_SLUG" bash health-state.sh
 ```
 
-Após o primeiro pull, PINE O DIGEST no compose:
-`docker inspect --format='{{index .RepoDigests 0}}' nousresearch/hermes-agent:v2026.8.18`
+O estado cognitivo fica em `hermes-cognitive:/opt/data`. O OAuth fica separadamente em
+`hermes-model-auth:/root/.hermes`; nunca copie `auth.json` para `/opt/data` e nunca inclua o volume de auth
+num backup cognitivo. `health-state.sh` consome o status bruto localmente e retorna somente estados
+`ready/unavailable`, sem token, identidade ou detalhe do modelo.
 
-## Verificações obrigatórias no primeiro boot (config keys podem divergir entre releases)
-1. Gates ativos: `/memory pending` responde; escrita direta fica staged.
-2. Terminal/browser/web DESLIGADOS: pedir ao agente para rodar um comando deve falhar.
-3. `X-Hermes-Session-Key: tenant:<slug>` isola memória entre chaves diferentes (testar com 2 chaves).
-4. Nenhum volume compartilhado com outro container; porta 8642 só em loopback.
+Antes de subir ou empacotar:
 
-## Backup/restore (consistente com SQLite — plano §4)
 ```bash
-docker exec ligou-cell-<slug> hermes backup /opt/data/backup.tar.gz   # ou sqlite3 .backup se o CLI não expuser
-docker cp ligou-cell-<slug>:/opt/data/backup.tar.gz ./backups/<slug>-$(date +%F).tar.gz
-sha256sum backups/<slug>-*.tar.gz > backups/checksums.txt
-aws s3 cp backups/ s3://ligou-backups/<slug>/ --recursive   # bucket criptografado por tenant
+node validate-config.mjs --root .. --json
 ```
-Restore prova: memória + skills + sessões voltam num volume NOVO, sem restaurar credenciais antigas
-(`.env` nunca entra no backup).
+
+Após o primeiro pull, fixe o digest imutável da imagem no Compose. O tag documentado é apenas o ponto de
+partida para descobrir esse digest.
+
+## Fronteira da consulta ao vivo
+
+`consult_ligou_brain` não é uma ponte de texto livre. Realtime fornece somente um `topic` enumerado e um
+`service_id` validado. O controller reconstrói contexto estruturado das regras efetivas, sem contato,
+transcript, endereço, instruções do caller ou piso privado. Hermes devolve apenas um pequeno código de ação
+JSON; o controller converte o código em orientação fixa. Prosa, campos extras, números e valores monetários
+falham como `unavailable`.
+
+## Backup/restore
+
+Use `infra/backup.sh` e `infra/restore.sh`. O artefato cognitivo inclui memória, skills e sessões sob
+`/opt/data`, mas exclui OAuth/model-auth e credenciais de negócio. Restore sempre valida o manifesto assinado,
+checksum e conteúdo numa célula descartável antes de qualquer aplicação ao volume ativo.

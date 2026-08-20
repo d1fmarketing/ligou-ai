@@ -1,5 +1,5 @@
 # Ligou cell — one CONTAINED Hermes per tenant. The cell has NO business credentials (no Google, Supabase,
-# Twilio, AWS). It receives redacted evidence and returns advice/proposals; the controller holds all authority.
+# Twilio, AWS). Reasoning authenticates only through Codex OAuth on a separate model-auth volume.
 # Pin discipline: replace the tag below with the immutable digest after the first pull
 #   docker inspect --format='{{index .RepoDigests 0}}' nousresearch/hermes-agent:v2026.8.18
 services:
@@ -20,10 +20,9 @@ services:
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: 0.0.0.0            # container-internal; host publish is loopback-only below
       API_SERVER_KEY: ${HERMES_API_KEY:?set in .env}
-      # the cell's own model credential (budget-capped project key) — its ONLY external credential
-      OPENAI_API_KEY: ${CELL_OPENAI_API_KEY:?set in .env}
     volumes:
-      - hermes-state:/opt/data                                  # cell-owned state (memory, skills, sessions)
+      - hermes-cognitive:/opt/data                              # memory, skills, sessions; cognitive backup scope
+      - hermes-model-auth:/root/.hermes                         # Codex OAuth only; never part of cognitive backups
       - ./projected-rules:/opt/projected-rules:ro               # derived rulebook, written by the worker, read-only here
       - ./config/config.yaml:/opt/data/config.yaml:ro          # THE config hermes reads (model+provider+gates)
       - ./config/cli-config.yaml:/opt/data/cli-config.yaml:ro   # CLI-side pin (kept in sync)
@@ -36,4 +35,5 @@ networks:
     driver: bridge
 
 volumes:
-  hermes-state:
+  hermes-cognitive:
+  hermes-model-auth:

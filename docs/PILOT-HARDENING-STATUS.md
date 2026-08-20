@@ -31,6 +31,16 @@ release command.
 The dashboard accepts normal Supabase magic-link sign-in only. A URL fragment, browser storage, or a
 build-time variable must never supply a password or cause a password sign-in.
 
+## Run 3 superseding Hermes invariant
+
+The Run 2 notes below describe historical defenses around a now-retired interface; they do not authorize its
+return. Live Hermes is no longer given a model-authored question, freeform context, transcript excerpt, caller
+instruction, contact/address field, or private pricing state, and no natural-language Hermes response returns
+to Realtime. The only live contract is `consult_ligou_brain(topic enum, service_id)`: the server rebuilds a
+small trusted context, Hermes returns one exact JSON action code, and the server maps that code to fixed
+guidance. Invalid JSON, prose, extra fields, unknown actions, digits, and monetary output are unavailable.
+Reasoning uses `openai-codex` OAuth in its own model-auth volume; cognitive backup excludes that volume.
+
 ## Run 1 Task 3 — ownership, effective authority, and budget settlement
 
 Implemented locally on `codex/ligou-v0.1`; no migration was applied and no deployment was performed.
@@ -130,8 +140,8 @@ three original Task 4 migrations remain byte-unchanged.
 - Connector lookup error is distinct from confirmed absence. Managed-calendar fallback requires explicit
   `GOOGLE_MANAGED_CALENDAR_FALLBACK=enabled`. Duplicate `ligouKey` matches are manual conflicts for write and
   reconciliation.
-- Hermes sanitizes question and context, including quoted/JSON and alternate private-pricing phrases, removes
-  monetary values, and rejects monetary/pricing advice.
+- Historical only: Run 2 sanitized a freeform Hermes question/context. Run 3 removed that interface entirely;
+  do not restore it from this note.
 - Existing pre-authority accepted receipt history is preserved and quarantined. It cannot become confirmation
   authority automatically; explicit manual policy is required.
 
@@ -156,8 +166,8 @@ removed from the final migration sequence.
   missing token, or incomplete OAuth configuration is unknown and never falls back. Only confirmed row absence,
   explicit fallback enablement, and complete global configuration may use the managed calendar. Malformed event
   list/pagination bodies are unknown with zero POST.
-- Hermes removes every digit sequence from question/context and rejects advice containing digits, currency, or
-  pricing/threshold language.
+- Historical only: Run 2 filtered digits from freeform question/context. Run 3 removed question/context/advice
+  inputs and outputs entirely in favor of the closed action-code contract above.
 - The final receipt-authority migration quarantines every legacy accepted booking receipt before confirmation
   authority is defined, never auto-maps legacy proof, preserves all audit rows, removes booking-ID uniqueness from
   the accepted mapping, and checks quarantine in the first confirmation function. No quarantine-resolution
@@ -176,10 +186,8 @@ tests remain intentionally skipped. Real PostgreSQL apply/concurrency and live G
   performs a current connector-table lookup, so revocation, inactivation, row change, or database failure takes
   effect on the next operation. Fake calendar requires explicit `CALENDAR_PROVIDER=fake`; production defaults to
   current Google connector resolution. A present empty pagination token is malformed/unknown.
-- Hermes classifies pricing/negotiation intent in both question and context before any network call, including
-  offer/accept/deal/lower/counter/discount/price/quote/minimum/floor/rate/cost/money/currency terms, English/
-  Spanish/Portuguese equivalents, and spelled-out number phrases. Advice with pricing/decision language, digits,
-  or currency is unavailable; non-pricing operational advice remains permitted.
+- Historical only: Run 2 classified freeform pricing/negotiation wording. Run 3 no longer permits any freeform
+  question, context, or model advice; only strict action codes can cross the boundary.
 
 Round-3 local verification: 233 isolated voice tests, 34 migration contracts, both controller bundles, root
 11-test/check/secret/runtime-manifest gate, and dashboard 16-test/build gate passed. Six credentialed integration
