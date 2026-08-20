@@ -16,9 +16,13 @@ const read = (relative) => {
   try { return readFileSync(path.join(root, relative), "utf8"); }
   catch { fail("required_config_missing:" + relative); }
 };
+const readOptional = (relative) => {
+  try { return readFileSync(path.join(root, relative), "utf8"); }
+  catch { return ""; }
+};
 
 const compose = read("hermes-cell/docker-compose.yml");
-const environmentExample = read("hermes-cell/.env.example");
+const environmentExample = readOptional("hermes-cell/.env.example");
 const runtimeConfig = read("hermes-cell/config/config.yaml");
 const cliConfig = read("hermes-cell/config/cli-config.yaml");
 const backup = read("infra/backup.sh");
