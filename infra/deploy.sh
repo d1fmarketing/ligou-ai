@@ -1,10 +1,10 @@
 #!/bin/bash
-# Deploy do Ligou para a EC2 (ligou-host-01) — sem porta de entrada: tarball via S3 + comando via SSM.
-# Uso: infra/deploy.sh [instance-id]
+# Deploy do Ligou para uma EC2 sem porta de entrada: tarball via S3 + comando via SSM.
+# Uso: LIGOU_DEPLOY_BUCKET=... LIGOU_INSTANCE_ID=... infra/deploy.sh
 set -euo pipefail
-export AWS_DEFAULT_REGION=us-east-1
-INSTANCE="${1:-$(aws ec2 describe-instances --filters Name=tag:Name,Values=ligou-host-01 Name=instance-state-name,Values=running --query 'Reservations[0].Instances[0].InstanceId' --output text)}"
-BUCKET=ligou-deploy-330140023537
+export AWS_DEFAULT_REGION="${LIGOU_AWS_REGION:?set LIGOU_AWS_REGION}"
+INSTANCE="${LIGOU_INSTANCE_ID:?set LIGOU_INSTANCE_ID}"
+BUCKET="${LIGOU_DEPLOY_BUCKET:?set LIGOU_DEPLOY_BUCKET}"
 STAMP=$(date +%Y%m%d-%H%M%S)
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 

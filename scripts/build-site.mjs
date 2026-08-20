@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 // Assembles the single-domain site: landing at "/" and the dashboard SPA at "/dashboard/".
-// Output folder must stay named "client" — `vercel deploy` links it by name to the existing
-// Vercel project ("client", https://client-nine-taupe-24.vercel.app).
+// Output folder name is configured by LIGOU_SITE_OUTPUT_DIR for the deployment target.
 import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const out = path.join(root, "dist", "client");
+const outputDir = process.env.LIGOU_SITE_OUTPUT_DIR ?? "client";
+if (!/^[A-Za-z0-9_-]+$/.test(outputDir)) {
+  throw new Error("LIGOU_SITE_OUTPUT_DIR must be a simple directory name");
+}
+const out = path.join(root, "dist", outputDir);
 
 execFileSync("bun", ["run", "check"], { cwd: root, stdio: "inherit" });
 execFileSync("npm", ["run", "build"], {
