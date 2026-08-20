@@ -8,6 +8,12 @@ let reconciliationCalls = 0;
 let intentUpdates: any[] = [];
 let busyIntervals: Array<{ start: string; end: string }> = [];
 let prepareCalls = 0;
+let beginCalls = 0;
+
+const providerInput = {
+  tenantId: "tenant-1", bookingId: "booking-1", summary: "Drain cleaning", description: "Test",
+  startIso: "2026-08-21T17:00:00Z", endIso: "2026-08-21T18:00:00Z", idempotencyKey: "idem-1",
+};
 
 function client() {
   return {
@@ -17,8 +23,14 @@ function client() {
         if (validation.error) return Promise.resolve({ data: null, error: validation.error });
         if (!validation.data) return Promise.resolve({ data: false, error: null });
         prepareCalls += 1;
-        return Promise.resolve({ data: prepareCalls === 1, error: null });
+        return Promise.resolve({ data: prepareCalls === 1 ? { ready: true, provider_input: providerInput } : null, error: null });
       }
+      if (name === "begin_provider_write") {
+        beginCalls += 1;
+        return Promise.resolve({ data: beginCalls === 1 ? { authorized: true, provider_input: providerInput } : null, error: null });
+      }
+      if (name === "get_booking_provider_input") return Promise.resolve({ data: providerInput, error: null });
+      if (name === "record_booking_delivery") return Promise.resolve({ data: { authoritative: true, receipt_id: "receipt-1" }, error: null });
       return Promise.resolve({ data: null, error: null });
     },
     from(table: string) {
@@ -38,6 +50,7 @@ function client() {
 const intent = {
   id: "intent-1", tenant_id: "tenant-1", call_id: "call-1", booking_id: "booking-1",
   kind: "calendar_book", idempotency_key: "idem-1",
+  claim_token: "claim-1",
   payload: { summary: "Drain cleaning", description: "Test", start_iso: "2026-08-21T17:00:00Z", end_iso: "2026-08-21T18:00:00Z" },
 };
 
@@ -64,6 +77,7 @@ beforeEach(() => {
   intentUpdates = [];
   busyIntervals = [];
   prepareCalls = 0;
+  beginCalls = 0;
   _setClient(client());
 });
 afterAll(() => _setClient(null));

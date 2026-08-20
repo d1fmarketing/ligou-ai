@@ -25,19 +25,26 @@ const POWERS = [{
 let inserted: Array<{ table: string; row: any }> = [];
 let rpcCalls: Array<{ name: string; args: any }> = [];
 let authorizeError: { message: string } | null = null;
+let bookingStatus = "proposed";
+let bookingCallId = "call-1";
+let confirmation: any = null;
 
 function client() {
   return {
     from(table: string) {
+      const filters: Record<string, unknown> = {};
       const api: any = {
-        select() { return api; }, eq() { return api; }, is() { return api; },
+        select() { return api; }, eq(column: string, value: unknown) { filters[column] = value; return api; }, is() { return api; },
         upsert(row: any) { inserted.push({ table, row }); return api; },
         update(row: any) { inserted.push({ table: `${table}:update`, row }); return api; },
         single: async () => {
           if (table === "tenants") return { data: TENANT, error: null };
-          if (table === "bookings") return { data: {
-            id: "booking-1", tenant_id: TENANT.id, status: "proposed", service_type: "drain_cleaning",
+          if (table === "bookings") return filters.call_id && filters.call_id !== bookingCallId
+            ? { data: null, error: { message: "not found" } }
+            : { data: {
+            id: "booking-1", tenant_id: TENANT.id, call_id: bookingCallId, status: bookingStatus, service_type: "drain_cleaning",
             price_agreed: 225, slot_start: "2026-08-21T17:00:00Z", slot_end: "2026-08-21T18:00:00Z",
+            receipt_id: bookingStatus === "confirmed" ? "receipt-1" : null,
             authority_context: { geography: "irvine", channel: "voice", purpose: "booking", appointment_at: "2026-08-21T17:00:00.000Z" },
           }, error: null };
           if (table === "approval_cases") return { data: { id: "case-1" }, error: null };
@@ -58,6 +65,9 @@ function client() {
       if (name === "consume_slot_offer") {
         return Promise.resolve({ data: { booking_id: "booking-1" }, error: null });
       }
+      if (name === "get_booking_confirmation") {
+        return Promise.resolve({ data: confirmation, error: null });
+      }
       return Promise.resolve({ data: null, error: null });
     },
   } as any;
@@ -68,6 +78,9 @@ beforeEach(() => {
   rpcCalls = [];
   authorizeError = null;
   activeRules = RULES;
+  bookingStatus = "proposed";
+  bookingCallId = "call-1";
+  confirmation = null;
   invalidateTenant("rocha-plumbing");
   _setClient(client());
 });
@@ -117,5 +130,21 @@ describe("booking passes the complete power context", () => {
     const result = await closeDeal(capability(), { booking_id: "booking-1" });
     expect(result.status).toBe("pending_approval");
     expect(rpcCalls.some((call) => call.name === "authorize_booking_intent")).toBe(false);
+  });
+
+  test("cross-call booking id is invalid before every early return or mutation", async () => {
+    bookingCallId = "other-call";
+    const result = await closeDeal(capability(), { booking_id: "booking-1" });
+    expect(result).toEqual({ status: "invalid", error: "booking_not_found" });
+    expect(rpcCalls).toHaveLength(0);
+    expect(inserted).toHaveLength(0);
+  });
+
+  test("confirmed status without an authoritative accepted receipt stays unconfirmed", async () => {
+    bookingStatus = "confirmed";
+    confirmation = { confirmed: false };
+    const result = await closeDeal(capability(), { booking_id: "booking-1" });
+    expect(result.status).not.toBe("confirmed");
+    expect(result.receipt).not.toBe("accepted");
   });
 });

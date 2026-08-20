@@ -22,6 +22,7 @@ const exactEvent = () => ({
   status: "confirmed",
   extendedProperties: { private: {
     ligouKey: INPUT.idempotencyKey,
+    ligouProvider: "google_calendar",
     ligouTenantId: INPUT.tenantId,
     ligouBookingId: INPUT.bookingId,
     ligouCalendarId: "calendar-1",
@@ -32,6 +33,7 @@ const exactEvent = () => ({
 
 let requests: Array<{ url: string; method: string; body?: any }> = [];
 let lookupResponse: { ok: boolean; status: number; body: any };
+let connectorError: { message: string } | null = null;
 
 function response(value: { ok: boolean; status: number; body: any }): Response {
   return new Response(JSON.stringify(value.body), { status: value.status });
@@ -41,13 +43,15 @@ beforeEach(() => {
   process.env.GOOGLE_CALENDAR_ID = "calendar-1";
   process.env.GOOGLE_CLIENT_ID = "synthetic-unit-test-client";
   process.env.GOOGLE_CLIENT_SECRET = "synthetic-unit-test-key";
+  process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK = "enabled";
   requests = [];
+  connectorError = null;
   lookupResponse = { ok: true, status: 200, body: { items: [exactEvent()] } };
   _setClient({
     from() {
       const api: any = {
         select() { return api; }, eq() { return api; },
-        maybeSingle: async () => ({ data: null, error: null }),
+        maybeSingle: async () => ({ data: null, error: connectorError }),
       };
       return api;
     },
@@ -71,6 +75,7 @@ afterAll(() => {
   delete process.env.GOOGLE_CALENDAR_ID;
   delete process.env.GOOGLE_CLIENT_ID;
   delete process.env.GOOGLE_CLIENT_SECRET;
+  delete process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK;
 });
 
 async function write(input = INPUT) {
@@ -102,6 +107,7 @@ describe("canonical calendar commitment", () => {
       ["end", (event) => { event.end.dateTime = "2026-08-21T18:30:00.000Z"; }],
       ["status", (event) => { event.status = "tentative"; }],
       ["idempotency", (event) => { event.extendedProperties.private.ligouKey = "wrong"; }],
+      ["provider", (event) => { event.extendedProperties.private.ligouProvider = "fake_calendar"; }],
       ["tenant", (event) => { event.extendedProperties.private.ligouTenantId = "tenant-2"; }],
       ["booking", (event) => { event.extendedProperties.private.ligouBookingId = "booking-2"; }],
       ["calendar", (event) => { event.extendedProperties.private.ligouCalendarId = "calendar-2"; }],
@@ -143,4 +149,37 @@ describe("canonical calendar commitment", () => {
     expect(second.outcome).toBe("accepted");
     expect(requests.filter((request) => request.method === "POST" && request.url.includes("/events"))).toHaveLength(1);
   });
+
+  test("connector lookup error is unknown and never falls back to global credentials", async () => {
+    connectorError = { message: "connector database unavailable" };
+    const result = await write({ ...INPUT, tenantId: "tenant-connector-error" });
+    expect(result.outcome).toBe("unknown");
+    expect(result.error).toContain("connector_lookup_failed");
+    expect(requests).toHaveLength(0);
+  });
+
+  test("confirmed connector absence uses no managed fallback unless explicitly enabled", async () => {
+    delete process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK;
+    const result = await write({ ...INPUT, tenantId: "tenant-no-fallback" });
+    expect(result.outcome).toBe("failed");
+    expect(result.error).toBe("google_not_configured");
+    expect(requests).toHaveLength(0);
+  });
+
+  test("explicit managed fallback follows confirmed connector absence", async () => {
+    const result = await write();
+    expect(result.outcome).toBe("accepted");
+  });
+
+  for (const method of ["write", "reconcile"] as const) {
+    test(`${method} treats duplicate ligouKey matches as manual conflict`, async () => {
+      const wrong = exactEvent();
+      wrong.extendedProperties.private.ligouBookingId = "wrong-booking";
+      lookupResponse = { ok: true, status: 200, body: { items: [wrong, exactEvent()] } };
+      const result = await googleCalendar[method](INPUT as any);
+      expect(result.outcome).toBe("unknown");
+      expect(result.error).toBe("lookup_ambiguous:2");
+      expect(requests.filter((request) => request.method === "POST" && request.url.includes("/events"))).toHaveLength(0);
+    });
+  }
 });

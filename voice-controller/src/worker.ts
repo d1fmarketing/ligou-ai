@@ -4,6 +4,7 @@ import { config } from "./config.ts";
 import { supa } from "./rules.ts";
 import { calendarPort } from "./calendar.ts";
 import { reconcileBudgetReservations } from "./budget.ts";
+import { randomUUID } from "node:crypto";
 
 const WORKER_ID = `worker-${process.pid}`;
 
@@ -19,25 +20,18 @@ export async function executeIntent(intent: any, calendar = calendarPort()) {
     await supa().from("action_intents").update({ status: "failed", last_error: "unsupported_kind", finished_at: new Date().toISOString() }).eq("id", intent.id);
     return;
   }
-  const p = intent.payload ?? {};
-  const calendarInput = {
-    tenantId: intent.tenant_id,
-    bookingId: String(intent.booking_id ?? ""),
-    summary: String(p.summary ?? "Ligou booking"),
-    description: String(p.description ?? ""),
-    startIso: String(p.start_iso ?? ""),
-    endIso: String(p.end_iso ?? p.start_iso ?? ""),
-    idempotencyKey: intent.idempotency_key,
-  };
-
   let result;
   if (intent.execution_mode === "reconcile") {
+    const { data: providerInput, error: inputError } = await supa()
+      .rpc("get_booking_provider_input", { p_intent: intent.id });
+    if (inputError || !providerInput) return;
+    const calendarInput = providerInput;
     result = await calendar.reconcile(calendarInput);
   } else {
     // Task 3's exact power/rule/epoch validator runs inside this preparation
     // transaction before the tenant/time-window exclusion is acquired.
     const { data: prepared, error: prepareError } = await supa()
-      .rpc("prepare_booking_provider_write", { p_intent: intent.id });
+      .rpc("prepare_booking_provider_write", { p_intent: intent.id, p_claim_token: intent.claim_token });
     if (prepareError) {
       await supa().from("action_intents").update({
         status: "queued", last_error: `provider_write_prepare_failed: ${prepareError.message}`,
@@ -45,7 +39,7 @@ export async function executeIntent(intent: any, calendar = calendarPort()) {
       }).eq("id", intent.id);
       return;
     }
-    if (!prepared) {
+    if (!prepared?.ready || !prepared.provider_input) {
       // The atomic RPC records either Task 3's authority-stale result or the
       // slot-exclusion conflict while it still owns the relevant row locks.
       return;
@@ -53,7 +47,8 @@ export async function executeIntent(intent: any, calendar = calendarPort()) {
 
     // An offer is not a reservation. Recheck provider free/busy after the
     // internal exclusion and immediately before the only write method.
-    const availability = await calendar.busy(intent.tenant_id, calendarInput.startIso, calendarInput.endIso);
+    const preparedInput = prepared.provider_input;
+    const availability = await calendar.busy(intent.tenant_id, preparedInput.startIso, preparedInput.endIso);
     if (availability.unknown) {
       await supa().rpc("release_booking_slot_lease", { p_intent: intent.id });
       await supa().from("action_intents").update({
@@ -63,7 +58,7 @@ export async function executeIntent(intent: any, calendar = calendarPort()) {
       return;
     }
     if (availability.intervals.some((busy) => {
-      const start = Date.parse(calendarInput.startIso), end = Date.parse(calendarInput.endIso);
+      const start = Date.parse(preparedInput.startIso), end = Date.parse(preparedInput.endIso);
       return start < Date.parse(busy.end) && Date.parse(busy.start) < end;
     })) {
       await supa().rpc("release_booking_slot_lease", { p_intent: intent.id });
@@ -73,46 +68,28 @@ export async function executeIntent(intent: any, calendar = calendarPort()) {
       if (intent.booking_id) await supa().from("bookings").update({ status: "failed" }).eq("id", intent.booking_id).in("status", ["proposed"]);
       return;
     }
-    result = await calendar.write(calendarInput);
+    const { data: begun, error: beginError } = await supa()
+      .rpc("begin_provider_write", { p_intent: intent.id, p_claim_token: intent.claim_token });
+    if (beginError || !begun?.authorized || !begun.provider_input) return;
+    result = await calendar.write(begun.provider_input);
   }
 
-  const { data: receipt } = await supa().from("receipts").insert({
-    tenant_id: intent.tenant_id,
-    intent_id: intent.id,
-    call_id: intent.call_id,
-    kind: "booking",
-    outcome: result.outcome,
-    external_id: result.externalId ?? null,
-    readback: result.readback ?? null,
-    payload_hash: result.payloadHash ?? null,
-    provider_request: { latency_ms: result.latencyMs, at: new Date().toISOString() },
-    detail: result.error ? { error: result.error } : null,
-  }).select("id").single();
-
-  if (result.outcome === "accepted") {
-    await supa().rpc("commit_booking_slot_lease", { p_intent: intent.id });
-    await supa().from("action_intents").update({ status: "succeeded", finished_at: new Date().toISOString() }).eq("id", intent.id);
-    if (intent.booking_id) {
-      await supa().from("bookings")
-        .update({ status: "confirmed", calendar_event_id: result.externalId, receipt_id: receipt?.id })
-        .eq("id", intent.booking_id)
-        .in("status", ["proposed", "unknown"]);
-      await supa().from("notifications").insert({
-        tenant_id: intent.tenant_id, kind: "booking_confirmed",
-        payload: { booking_id: intent.booking_id, event_id: result.externalId },
-      });
-    }
-  } else if (result.outcome === "failed") {
-    await supa().from("action_intents").update({ status: "failed", last_error: result.error ?? "failed", finished_at: new Date().toISOString() }).eq("id", intent.id);
-    if (intent.booking_id) await supa().from("bookings").update({ status: "failed" }).eq("id", intent.booking_id).in("status", ["proposed"]);
-  } else {
-    // UNKNOWN: reconcile before any retry — schedule a delayed reconciliation attempt, never an immediate resend
-    await supa().from("action_intents").update({
-      status: "unknown", execution_mode: "reconcile", last_error: result.error ?? "unknown",
-      next_attempt_at: new Date(Date.now() + 60_000).toISOString(),
-    }).eq("id", intent.id);
-    if (intent.booking_id) await supa().from("bookings").update({ status: "unknown" }).eq("id", intent.booking_id).in("status", ["proposed"]);
-  }
+  const { data: delivery, error: deliveryError } = await supa().rpc("record_booking_delivery", {
+    p_intent: intent.id,
+    p_attempt_key: randomUUID(),
+    p_outcome: result.outcome,
+    p_external_id: result.externalId ?? null,
+    p_readback: result.readback ?? null,
+    p_payload_hash: result.payloadHash ?? null,
+    p_provider_request: {
+      latency_ms: result.latencyMs,
+      at: new Date().toISOString(),
+      error: result.error ?? null,
+    },
+    p_expected: result.expected ?? null,
+  });
+  if (deliveryError || !delivery) return;
+  if (result.outcome === "accepted" && delivery.authoritative !== true) return;
 }
 
 // ---------------------------------------------------------------- post-call summary (PT) — does not depend on Hermes

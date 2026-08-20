@@ -40,13 +40,24 @@ export async function closeDeal(cap: Capability, args: Record<string, unknown>) 
   if (!bookingId) return { status: "invalid", error: "booking_id required" };
 
   const { data: booking } = await supa()
-    .from("bookings").select("*").eq("id", bookingId).eq("tenant_id", tenant.id).single();
+    .from("bookings").select("*").eq("id", bookingId).eq("tenant_id", tenant.id).eq("call_id", cap.callId).single();
   if (!booking) return { status: "invalid", error: "booking_not_found" };
   const confirmed = Number(booking.price_agreed ?? NaN);
   if (!Number.isFinite(confirmed)) return { status: "invalid", error: "booking_price_missing" };
   if (tenant.auth_epoch !== cap.authEpoch) return { status: "denied", error: "authorization_epoch_stale" };
   if (tenant.policy_epoch !== cap.policyEpoch) return { status: "denied", error: "policy_epoch_stale" };
-  if (booking.status === "confirmed") return { status: "confirmed", receipt: "accepted", say: CUSTOMER_OUTCOME.bookingAlreadyConfirmed };
+  if (booking.status === "confirmed") {
+    const { data: confirmation, error: confirmationError } = await supa().rpc("get_booking_confirmation", {
+      p_tenant: tenant.id, p_call: cap.callId, p_booking: bookingId,
+    });
+    if (!confirmationError && confirmation?.confirmed === true && confirmation.receipt_id) {
+      return {
+        status: "confirmed", receipt: "accepted", receipt_id: confirmation.receipt_id,
+        calendar_event_id: confirmation.external_id, say: CUSTOMER_OUTCOME.bookingAlreadyConfirmed,
+      };
+    }
+    return { status: "processing", receipt: "unknown", say: PENDING_SAY };
+  }
   if (booking.status === "pending_approval") return { status: "pending_approval", say: DENY_SAY };
   if (booking.status !== "proposed") return { status: booking.status, say: PENDING_SAY };
 
@@ -110,10 +121,17 @@ export async function closeDeal(cap: Capability, args: Record<string, unknown>) 
   // wait briefly for the worker (fat tool): confirmed in-call when fast, honest pending otherwise
   const deadline = Date.now() + 4_000;
   while (Date.now() < deadline) {
-    const { data: b } = await supa().from("bookings").select("status,calendar_event_id").eq("id", bookingId).single();
-    if (b?.status === "confirmed") {
-      return { status: "confirmed", receipt: "accepted", calendar_event_id: b.calendar_event_id, say: CUSTOMER_OUTCOME.bookingConfirmed };
+    const { data: confirmation, error: confirmationError } = await supa().rpc("get_booking_confirmation", {
+      p_tenant: tenant.id, p_call: cap.callId, p_booking: bookingId,
+    });
+    if (!confirmationError && confirmation?.confirmed === true && confirmation.receipt_id) {
+      return {
+        status: "confirmed", receipt: "accepted", receipt_id: confirmation.receipt_id,
+        calendar_event_id: confirmation.external_id, say: CUSTOMER_OUTCOME.bookingConfirmed,
+      };
     }
+    const { data: b } = await supa().from("bookings").select("status").eq("id", bookingId)
+      .eq("tenant_id", tenant.id).eq("call_id", cap.callId).single();
     if (b?.status === "failed") return { status: "failed", receipt: "failed", say: "Apologize, say the time slot could not be secured, and offer another slot." };
     await new Promise((r) => setTimeout(r, 200));
   }
