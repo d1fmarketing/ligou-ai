@@ -166,3 +166,21 @@ removed from the final migration sequence.
 Round-2 local verification: 205 isolated voice tests, 34 migration contracts, both controller bundles, root
 11-test/check/secret/runtime-manifest gate, and dashboard 16-test/build gate passed. Six credentialed integration
 tests remain intentionally skipped. Real PostgreSQL apply/concurrency and live Google verification remain blocked.
+
+## Run 2 Task 4 corrective review round 3
+
+- `transition_claimed_intent` now rejects stored or input NULL claim tokens before mutation. The claim-token-
+  fenced status transition must affect exactly one row before a held slot lease is deleted; a stale/NULL worker
+  cannot change status or release the lease.
+- Calendar connector authority is no longer cached. Every Google write, reconciliation, and free/busy operation
+  performs a current connector-table lookup, so revocation, inactivation, row change, or database failure takes
+  effect on the next operation. Fake calendar requires explicit `CALENDAR_PROVIDER=fake`; production defaults to
+  current Google connector resolution. A present empty pagination token is malformed/unknown.
+- Hermes classifies pricing/negotiation intent in both question and context before any network call, including
+  offer/accept/deal/lower/counter/discount/price/quote/minimum/floor/rate/cost/money/currency terms, English/
+  Spanish/Portuguese equivalents, and spelled-out number phrases. Advice with pricing/decision language, digits,
+  or currency is unavailable; non-pricing operational advice remains permitted.
+
+Round-3 local verification: 233 isolated voice tests, 34 migration contracts, both controller bundles, root
+11-test/check/secret/runtime-manifest gate, and dashboard 16-test/build gate passed. Six credentialed integration
+tests remain intentionally skipped. Real PostgreSQL and Google gates remain blocked and unclaimed.
