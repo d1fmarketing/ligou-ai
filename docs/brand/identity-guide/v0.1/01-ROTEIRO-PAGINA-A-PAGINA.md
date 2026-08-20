@@ -234,11 +234,11 @@ O guia deve explicar a marca na mesma ordem em que uma pessoa a entende: primeir
 
 **Texto-base proposto:**
 
-> A tipografia precisa ser direta no celular, forte nas manchetes e confortável em textos de orientação. O site atual usa Archivo em todo o sistema, com peso 800 para display e 400–600 para leitura e controles. Uma proposta anterior usava Familjen Grotesk nos títulos e reservava uma mono para dados reais. O Brand Guide só congelará uma dessas direções depois da aprovação.
+> A tipografia precisa ser direta no celular, forte nas manchetes e confortável em textos de orientação. O candidato V0.1 implementa Familjen Grotesk 600/700 nas manchetes e Archivo no texto, controles e leitura. Uma mono para dados reais continua apenas uma possibilidade futura. O Brand Guide só transforma essa implementação em sistema aprovado depois da decisão de brand.
 
-**Conteúdo:** comparação visual de Archivo-only versus Familjen + Archivo; escala de display, título, corpo, pequeno e legenda; regras de tracking e line-height.
+**Conteúdo:** documentação da combinação Familjen + Archivo implementada; escala de display, título, corpo, pequeno e legenda; regras de tracking e line-height.
 
-**Gate:** não apresentar Familjen ou Martian Mono como fontes oficiais antes da decisão.
+**Gate:** não apresentar a combinação implementada como aprovação final de brand; não introduzir Martian Mono sem decisão.
 
 ---
 

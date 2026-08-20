@@ -16,8 +16,9 @@
 > incluso. O documento vigente é
 > [`DECISAO-FINAL-O-FUNCIONARIO-2026-08-17.md`](DECISAO-FINAL-O-FUNCIONARIO-2026-08-17.md).
 >
-> **O que sobrevive deste documento:** os dossiês e vereditos (evidências JSON ao lado)
-> continuam válidos como mapa da categoria; a Vapi fica como fallback exclusivamente do
+> **O que sobrevive deste documento:** os vereditos resumidos continuam válidos como mapa
+> da categoria; os dossiês brutos de evidência são restritos/privados e não ficam ao lado
+> deste documento. A Vapi fica como fallback exclusivamente do
 > canal telefônico se o caminho SIP emperrar; a regra de custo ("nunca speech-to-speech
 > dentro de plataforma") e os números de telefonia continuam corretos.
 

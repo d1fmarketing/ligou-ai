@@ -23,10 +23,10 @@ Isso não é uma crítica. É o número que vai dimensionar prazo e dinheiro, e 
 | Componente | Onde vive | Maturidade | Reaproveitar |
 |---|---|---|---|
 | Landing v9 (React 19, build determinístico) | `origin/main = 161e8e8` — ponta canônica, idêntica a `codex/frontend-test-coverage` | **Produção** — 29 testes em 4 suítes, todos passam sem instalar nada | **Sim** |
-| `verify-claude-v9.mjs` (136 linhas) | `/Users/d1f/.codex/worktrees/47cc/Ligou.AI/scripts/` | **Produção** — 3 hashes de fonte, 50 hashes fixados, 39 refs de asset, asserts de copy comercial. Rodei: passa | **Sim** — é lint de contrato de produto, não só de código |
+| `verify-claude-v9.mjs` (136 linhas) | `scripts/` do checkout auditado | **Produção** — 3 hashes de fonte, 50 hashes fixados, 39 refs de asset, asserts de copy comercial. Rodei: passa | **Sim** — é lint de contrato de produto, não só de código |
 | Pipeline de build (Bun.Transpiler, 37 linhas, zero deps) | mesmo worktree, `scripts/build-claude-v9.mjs` | **Produção** | **Sim** |
 | Design system `_ds` empacotado (1.518 linhas) | `_ds/ligou-design-system-a33905fc.../` | **Produção** — React local, sem CDN | **Sim** |
-| Deploy real (OpenAI Sites + Cloudflare Workers) | `/Users/d1f/Desktop/Ligou.AI-Sites` — repo Git **separado, 15 commits, SEM remote** | **Funcional** — `public/v9/index.html` bate byte a byte com o `main` | **Sim**, com backup urgente |
+| Deploy real (Sites + Workers) | checkout de publicação separado, então sem remote | **Funcional** — `public/v9/index.html` bate byte a byte com o `main` | **Sim**, com backup urgente |
 | Corpus de docs (3.363 linhas, 20 arquivos) | `.../47cc/Ligou.AI/docs/` | **Produção** — o ativo mais denso do projeto; nunca promove intenção a entrega | **Sim** |
 | Mídia da hero (5 MP4 responsivos + posters, 22 MB) | `.../47cc/Ligou.AI/assets/` | **Produção** | **Sim** — mas 22 MB é peso real em 4G, nunca medido |
 
@@ -34,10 +34,10 @@ Isso não é uma crítica. É o número que vai dimensionar prazo e dinheiro, e 
 
 | Componente | Onde vive | Maturidade | Reaproveitar |
 |---|---|---|---|
-| Dashboard do cliente (5.565 linhas, React 19 + Vite) | `/Users/d1f/.codex/worktrees/ligou-dashboard/Ligou.AI/dashboard` — branch `codex/ligou-dashboard`, **ausente de `origin`** | **Protótipo** — 16 testes passam, mas persistência é `localStorage` e o "agente" é regex | **Parcial** |
+| Dashboard do cliente (5.565 linhas, React 19 + Vite) | branch `codex/ligou-dashboard`, ausente de `origin` | **Protótipo** — 16 testes passam, mas persistência é `localStorage` e o "agente" é regex | **Parcial** |
 | `model.js` (516 linhas): aprovação "só este caso" vs "virar regra", versionamento, receipt de revogação | mesmo worktree, `src/data/model.js` | **Protótipo** | **Sim, como contrato de vocabulário** — é a melhor especificação escrita do passo 7 |
 | `gateway.js` (257 linhas) | mesmo worktree | **Protótipo** — zero `fetch`. O próprio código confessa: *"não há telefonia, integrações ou backend conectados"* | **Parcial** — a assinatura da API é boa fronteira; a implementação é descartável |
-| `SITE_CONFIG` com `demoPhoneHref` (contrato de demo configurável) | `/Users/d1f/Desktop/Ligou.AI/script.js` — **branch ancestral, apagado no v9** | **Morto**, mas recuperável por `git show` | **Sim** — é o único design de ativação de voz já escrito, e o v9 o perdeu |
+| `SITE_CONFIG` com `demoPhoneHref` (contrato de demo configurável) | snapshot ancestral, apagado no v9 | **Morto**, mas recuperável por `git show` | **Sim** — é o único design de ativação de voz já escrito, e o v9 o perdeu |
 
 ### Ativos de outros projetos seus que valem COPIAR (não "inspirar")
 
@@ -50,7 +50,9 @@ Isso não é uma crítica. É o número que vai dimensionar prazo e dinheiro, e 
 
 ### Contas e serviços já pagos
 
-Twilio **viva e provisionada** (Account SID `AC…`, Messaging Service `MG…`, número toll-free US) — mas o uso comprovado é **100% SMS**; a única URL Twilio no disco é `/Messages.json`, zero endpoints de Voice. Chaves OpenAI, Anthropic, Gemini, xAI. Stripe em modo **LIVE**. Supabase real e populado. Cloudflare/wrangler e Vercel autenticados. Higgsfield em modo Unlimited. VPS Hostinger em produção.
+As contas e credenciais observadas durante a auditoria ficam em inventário restrito e
+não são reproduzidas neste arquivo. O uso comprovado da conta de telefonia era **100%
+SMS**; não havia endpoint de voz implementado no checkout auditado.
 
 **Correção de premissa que muda toda a conta:** o preço no ar não é $499. O artefato publicado (`src/runtime/ligou-app9.jsx`, linhas 467–488, travado por **duas suítes de teste em dois repositórios**) diz: **$299/mês para quem contratar até 31/12/2026, ativação ISENTA, valor travado enquanto a assinatura estiver ativa**; 400 min/mês, excedente $0.35/min. Os $499 + $499 são só o preço pós-oferta, num cartão secundário. A linhagem ancestral usa outra formulação ("$299 para os 25 primeiros"), mas ela é ancestral git superada pelo main — **o contrato é o que está no ar. Não há nada para reconciliar.**
 
@@ -305,7 +307,7 @@ A variável que decide a margem não é escolher `mini` vs `2.1` (fator ~3×). �
 ### Fase 0 — Parar de perder o que já existe (3 dias, antes de qualquer código)
 
 - `git push origin codex/ligou-dashboard` (5.565 linhas existem em **um** disco)
-- Dar remote ao `/Users/d1f/Desktop/Ligou.AI-Sites` (15 commits, único caminho de publicação, **zero backup**)
+- Dar remote ao checkout de publicação separado (15 commits, único caminho de publicação, **zero backup**)
 - Decidir e executar sobre `shellhouse-site/control-plane` — 66.400 linhas de TS com 507 testes verdes, **inteiramente untracked** (`git status` → `?? control-plane/`). Um `git clean -fdx` apaga o ativo técnico mais valioso do disco
 - Corrigir `docs/HANDOFF-NEXT-SESSION.md`, factualmente errado em dois pontos que ele declara como verdade operacional
 

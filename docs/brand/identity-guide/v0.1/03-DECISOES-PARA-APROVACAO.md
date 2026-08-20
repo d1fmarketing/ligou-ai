@@ -17,12 +17,10 @@ O handset no peito do agente deve permanecer separado como badge do canal telef�
 
 ## 2. Sistema tipográfico
 
-Escolher entre:
-
-- **congelar o que o site atual usa:** Archivo para display e corpo;
-- **retomar a proposta histórica:** Familjen Grotesk para display, Archivo para corpo e uma mono somente para dados reais.
-
-Martian Mono não está disponível localmente neste pacote e só deve ser adicionada depois da decisão.
+O candidato V0.1 já implementa **Familjen Grotesk 600/700 para display** e **Archivo
+para corpo**. A decisão pendente não é qual fonte o checkout executa, mas se essa
+combinação será aprovada como sistema de marca duradouro. Martian Mono não está
+disponível localmente e não deve ser introduzida sem decisão explícita.
 
 ## 3. Teal principal
 

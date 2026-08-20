@@ -1,7 +1,7 @@
 # Mapa de branches — 20 de agosto de 2026
 
 Inventário das famílias locais/remotas que fundamentaram a consolidação V0.1.
-Nenhuma ref foi removida. `ancestral` é o primeiro pai do tip; nomes repetidos no
+Nenhuma ref Git foi removida. `ancestral` é o primeiro pai do tip; nomes repetidos no
 mesmo tip são aliases, não trabalho independente. A disposição descreve o papel da
 ref nesta consolidação, não uma autorização para apagar ou publicar nada.
 
@@ -14,14 +14,17 @@ ref nesta consolidação, não uma autorização para apagar ou publicar nada.
   atual e o commit que contém este documento. `git rev-parse codex/ligou-v0.1` é o
   tip vivo; não se fixa aqui um SHA autocontraditório que ficará obsoleto ao próximo
   commit da própria integração.
+- **Exclusão explícita:** `codex/ligou-v0.1-hardening-wip@b69e5df` não integra esta
+  consolidação e não é candidato a merge nesta rodada.
 
 | Família / refs | Tip | Ancestral | Conteúdo único no tip | Disposição |
 | --- | --- | --- | --- | --- |
 | V0.1: `codex/ligou-v0.1` | tip vivo: `git rev-parse codex/ligou-v0.1` | base-fonte `8fb71b1`; âncora `5df68a9` | integração ativa da landing + dashboard unificados e da consolidação | branch atual; preservar e avançar por commits |
 | MVP: `codex/ligou-mvp`, `origin/codex/ligou-mvp` | `8fb71b1` | `4bd563a4` | mesmo MVP unificado | preservar como alias da base |
-| V9: `main`, `codex/frontend-test-coverage`, `codex/ligou-architecture`, `origin/main`, `origin/HEAD`, `origin/codex/frontend-test-coverage` | `161e8e8` | `08dd9bbf` | cobertura do frontend v9 | histórico de origem, já integrado ao MVP |
+| V9 local: `main` | `08dd9bbf` | anterior a `161e8e8` | estado local anterior à cobertura mais recente | preservar como histórico local; não confundir com `origin/main` |
+| V9 remoto: `origin/main`, `origin/HEAD`, `origin/codex/frontend-test-coverage`, `codex/frontend-test-coverage`, `codex/ligou-architecture` | `161e8e8` | `08dd9bbf` | cobertura do frontend v9 | histórico de origem, já integrado ao MVP |
 | Dashboard: `codex/ligou-dashboard`, `origin/codex/ligou-dashboard` | `278457f3` | `7f05e0c3` | dashboard na rota compartilhada | preservar; MVP é a integração selecionada |
-| Fonte/QA Claude: `origin/claude/happy-bohr-ja1fme` | `db7d9c3` | `950fe6c` | Familjen 600/700, tokens, manifesto e QA; também apaga runtime MVP | merge com ancestry; aceitar somente fontes/tokens/manifesto/QA |
+| Fonte/QA Claude: `origin/claude/happy-bohr-ja1fme` | `db7d9c3` | merge-base `161e8e8` | somente tipografia Familjen (incluindo 700), tokens, manifesto e QA | divergente de `origin/main`; incorporar apenas QA/tipografia, nunca remoções de runtime |
 | Checkpoint: `checkpoint/claude-visual-2`, `origin/checkpoint/claude-visual-2` | `dd6e0149` | `56ea1d0` | checkpoint visual 2 | preservar |
 | Agente V3: `codex/ligou-agent-v3`, `origin/codex/ligou-agent-v3` | `69630980` | `dd6e0149` | introduz o agente operacional | histórico de mensagem/design |
 | Visual 4: `codex/ligou-design-v4`, `origin/codex/ligou-design-v4` | `72790417` | `69630980` | reconstrução da landing Visual 4 | antecedente visual |
@@ -38,11 +41,12 @@ ref nesta consolidação, não uma autorização para apagar ou publicar nada.
 | Espanhol: `codex/ligou-v9-spanish-copy` | `4b5436cd` | `cb6293e0` | mensagem inclui espanhol | preservado na linha v9 |
 | Memória: `codex/ligou-memory-copy` | `4f8f971d` | `4b5436cd` | memória permanente do negócio | preservado na linha v9 |
 | CTA mobile: `codex/ligou-v9-mobile-cta` | `9f9710ed` | `4f8f971d` | remove CTA secundária mobile | preservado na linha v9 |
+| Hardening WIP: `codex/ligou-v0.1-hardening-wip` | `b69e5df` | `5bb6fe2` | trabalho posterior de hardening | preservar isolado; excluído desta consolidação |
 
 ## Regra de leitura
 
 Os tips v9 formam uma cadeia de intervenções de 10–14/08 que culmina em `161e8e8`;
-o MVP `8fb71b1` é descendente dessa linha. A branch Claude `db7d9c3` também parte do
-MVP, mas suas remoções de dashboard, builder, Supabase, controller e infraestrutura
-não são adotadas. Esta V0.1 mantém as refs e registra a fusão para tornar visível a
-proveniência de tipografia e QA.
+o MVP `8fb71b1` é descendente dessa linha. A branch Claude `db7d9c3` diverge de
+`origin/main` no merge-base `161e8e8` e contém somente a revisão de QA/tipografia
+identificada acima. Esta V0.1 mantém as refs e registra a proveniência de tipografia e
+QA sem incorporar `codex/ligou-v0.1-hardening-wip`.

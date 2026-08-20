@@ -158,7 +158,7 @@ App web do dono (protótipo do dashboard religado ao Supabase real, com login) �
 | Landing v9 (`origin/main = 161e8e8`) | produção, 29 testes, build determinístico, verificador de hashes | continua; ligar número real quando existir (o v9 perdeu o `SITE_CONFIG` — restaurar o contrato na Fase 2d) |
 | Dashboard protótipo (5.565 linhas) | localStorage, sem backend | vira o app web do dono na Fase 5; o `model.js` (aprovação "só este caso" vs "virar regra", versionamento, revogação) é o melhor vocabulário escrito do passo 7 |
 | `delivery.ts` (BUZZ), `schema.ts`/`consumeApproval` (Methylia), `memory-ledger.ts` (shellhouse) | prontos em outros repos | **padrões**, extraídos limpos — não importar serviços nem arrastar código de fork |
-| Contas: Twilio, Supabase, Stripe LIVE, Cloudflare/Vercel, chaves OpenAI/Anthropic/xAI/Gemini | pagas e vivas | nada novo a assinar para as Fases 0–3 |
+| Contas e credenciais de provedores | inventário restrito; estado comercial verificado na época | não reproduzir nesta branch de organização |
 
 ---
 
