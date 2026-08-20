@@ -2,6 +2,7 @@
 // deliberately separate: a transport-unknown intent can only use reconcile().
 import { createHash } from "node:crypto";
 import { supa } from "./rules.ts";
+import { decryptConnectorToken } from "../../supabase/functions/_shared/connector-crypto.ts";
 
 export interface CalendarEventInput {
   tenantId: string;
@@ -309,17 +310,37 @@ async function tenantCfg(tenantId: string): Promise<GoogleCfg | null> {
   let cfg: GoogleCfg | null = null;
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID, clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
   const { data, error } = await supa().from("connector_accounts")
-    .select("refresh_token,calendar_id,account_email,status")
+    .select("refresh_token_ciphertext,refresh_token_iv,token_key_version,token_account_ref,calendar_id,account_email,status")
     .eq("tenant_id", tenantId).eq("provider", "google_calendar").maybeSingle();
   if (error) throw new Error(`connector_lookup_failed:${error.message}`);
   if (data) {
     if (data.status !== "active") throw new Error(`connector_inactive:${data.status ?? "unknown"}`);
-    if (!data.refresh_token) throw new Error("connector_malformed:refresh_token_missing");
     if (!clientId || !clientSecret) throw new Error("connector_oauth_config_missing");
+    if (!data.refresh_token_ciphertext || !data.refresh_token_iv
+      || !Number.isSafeInteger(data.token_key_version) || !data.token_account_ref) {
+      throw new Error("connector_malformed:encrypted_token_missing");
+    }
+    const encryptionKey = process.env.CONNECTOR_TOKEN_ENCRYPTION_KEY;
+    if (!encryptionKey) throw new Error("connector_token_key_missing");
+    let refreshToken: string;
+    try {
+      refreshToken = await decryptConnectorToken({
+        ciphertext: data.refresh_token_ciphertext,
+        iv: data.refresh_token_iv,
+        keyVersion: data.token_key_version,
+      }, {
+        tenantId,
+        provider: "google_calendar",
+        accountRef: data.token_account_ref,
+        keyVersion: data.token_key_version,
+      }, { 1: encryptionKey });
+    } catch {
+      throw new Error("connector_token_decrypt_failed");
+    }
     cfg = {
       calendarId: data.calendar_id || "primary",
-      accountId: data.account_email || `oauth:${clientId}`,
-      oauth: { clientId, clientSecret, refreshToken: data.refresh_token },
+      accountId: data.token_account_ref,
+      oauth: { clientId, clientSecret, refreshToken },
     };
   }
   return cfg;

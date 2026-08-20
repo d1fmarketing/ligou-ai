@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { _setClient } from "../src/rules.ts";
 import { calendarPort, googleCalendar, payloadHash } from "../src/calendar.ts";
+import { encryptConnectorToken } from "../../supabase/functions/_shared/connector-crypto.ts";
 
 const INPUT = {
   tenantId: "tenant-1",
@@ -12,6 +13,7 @@ const INPUT = {
   idempotencyKey: "idem-1",
 };
 const EXPECTED_HASH = "170c6a7ac39bce4cd5d343262a74d878c0c5c9a336b2e1f0cd8274aeb1aca83f";
+const TEST_CONNECTOR_KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
 const exactEvent = () => ({
   id: "event-1",
@@ -36,6 +38,7 @@ let lookupResponse: { ok: boolean; status: number; body: any };
 let connectorError: { message: string } | null = null;
 let connectorData: any = null;
 let queriedTables: string[] = [];
+let connectorSelect = "";
 
 function response(value: { ok: boolean; status: number; body: any }): Response {
   return new Response(JSON.stringify(value.body), { status: value.status });
@@ -48,17 +51,19 @@ beforeEach(() => {
   process.env.GOOGLE_REFRESH_TOKEN = "synthetic-unit-test-token";
   process.env.GOOGLE_OAUTH_CLIENT_ID = "synthetic-oauth-client";
   process.env.GOOGLE_OAUTH_CLIENT_SECRET = "synthetic-oauth-secret";
+  process.env.CONNECTOR_TOKEN_ENCRYPTION_KEY = TEST_CONNECTOR_KEY;
   process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK = "enabled";
   requests = [];
   connectorError = null;
   connectorData = null;
   queriedTables = [];
+  connectorSelect = "";
   lookupResponse = { ok: true, status: 200, body: { items: [exactEvent()] } };
   _setClient({
     from(table: string) {
       queriedTables.push(table);
       const api: any = {
-        select() { return api; }, eq() { return api; },
+        select(columns: string) { if (table === "connector_accounts") connectorSelect = columns; return api; }, eq() { return api; },
         maybeSingle: async () => ({ data: connectorData, error: connectorError }),
       };
       return api;
@@ -86,11 +91,32 @@ afterAll(() => {
   delete process.env.GOOGLE_REFRESH_TOKEN;
   delete process.env.GOOGLE_OAUTH_CLIENT_ID;
   delete process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+  delete process.env.CONNECTOR_TOKEN_ENCRYPTION_KEY;
   delete process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK;
 });
 
 async function write(input = INPUT) {
   return googleCalendar.write(input as any);
+}
+
+async function encryptedConnector(tenantId: string, overrides: Record<string, unknown> = {}) {
+  const accountRef = "owner@example.com";
+  const wire = await encryptConnectorToken("tenant-refresh", {
+    tenantId,
+    provider: "google_calendar",
+    accountRef,
+    keyVersion: 1,
+  }, TEST_CONNECTOR_KEY);
+  return {
+    status: "active",
+    refresh_token_ciphertext: wire.ciphertext,
+    refresh_token_iv: wire.iv,
+    token_key_version: wire.keyVersion,
+    token_account_ref: accountRef,
+    calendar_id: "calendar-tenant",
+    account_email: accountRef,
+    ...overrides,
+  };
 }
 
 describe("canonical calendar commitment", () => {
@@ -192,16 +218,17 @@ describe("canonical calendar commitment", () => {
     expect(requests).toHaveLength(0);
   });
 
-  test("connector row without refresh token is malformed and never falls back", async () => {
-    connectorData = { status: "active", refresh_token: null, calendar_id: "calendar-tenant", account_email: "owner@example.com" };
+  test("legacy plaintext connector row is malformed and never falls back", async () => {
+    connectorData = { status: "active", refresh_token: "legacy-plaintext", calendar_id: "calendar-tenant", account_email: "owner@example.com" };
     const result = await write({ ...INPUT, tenantId: "tenant-malformed-token" });
     expect(result.outcome).toBe("unknown");
     expect(result.error).toContain("connector_malformed");
     expect(requests).toHaveLength(0);
+    expect(connectorSelect).not.toMatch(/(?:^|,)refresh_token(?:,|$)/);
   });
 
   test("connector row with incomplete OAuth client configuration never falls back", async () => {
-    connectorData = { status: "active", refresh_token: "tenant-refresh", calendar_id: "calendar-tenant", account_email: "owner@example.com" };
+    connectorData = await encryptedConnector("tenant-oauth-misconfigured");
     delete process.env.GOOGLE_OAUTH_CLIENT_SECRET;
     const result = await write({ ...INPUT, tenantId: "tenant-oauth-misconfigured" });
     expect(result.outcome).toBe("unknown");
@@ -219,7 +246,7 @@ describe("canonical calendar commitment", () => {
 
   test("inactive connector row is not treated as absence or allowed to fall back", async () => {
     connectorData = {
-      status: "revoked", refresh_token: "tenant-refresh",
+      status: "revoked",
       calendar_id: "calendar-tenant", account_email: "owner@example.com",
     };
     const result = await write({ ...INPUT, tenantId: "tenant-revoked-connector" });
@@ -246,10 +273,7 @@ describe("canonical calendar commitment", () => {
 
   test("connector state is re-read after an active row becomes revoked", async () => {
     const tenantId = "tenant-cache-revoked";
-    connectorData = {
-      status: "active", refresh_token: "tenant-refresh",
-      calendar_id: "calendar-tenant", account_email: "owner@example.com",
-    };
+    connectorData = await encryptedConnector(tenantId);
     await write({ ...INPUT, tenantId });
     const requestCount = requests.length;
     connectorData = { ...connectorData, status: "revoked" };
@@ -257,6 +281,36 @@ describe("canonical calendar commitment", () => {
     expect(result.outcome).toBe("unknown");
     expect(result.error).toContain("connector_inactive:revoked");
     expect(requests).toHaveLength(requestCount);
+  });
+
+  test("encrypted tenant token is decrypted only server-side before the OAuth exchange", async () => {
+    const tenantId = "tenant-encrypted-connector";
+    connectorData = await encryptedConnector(tenantId);
+    lookupResponse = { ok: false, status: 503, body: { error: "stop_after_token_exchange" } };
+
+    const result = await write({ ...INPUT, tenantId });
+
+    expect(result.outcome).toBe("unknown");
+    const tokenRequest = requests.find((request) => request.url === "https://oauth2.googleapis.com/token");
+    expect(String(tokenRequest?.body)).toContain("refresh_token=tenant-refresh");
+    expect(connectorSelect).toContain("refresh_token_ciphertext");
+    expect(connectorSelect).not.toMatch(/(?:^|,)refresh_token(?:,|$)/);
+  });
+
+  test("missing encryption key and tampered AAD both fail closed before provider access", async () => {
+    const tenantId = "tenant-encryption-fail-closed";
+    connectorData = await encryptedConnector(tenantId, { token_account_ref: "other@example.com" });
+    delete process.env.CONNECTOR_TOKEN_ENCRYPTION_KEY;
+    const missingKey = await write({ ...INPUT, tenantId });
+    expect(missingKey.outcome).toBe("unknown");
+    expect(missingKey.error).toContain("connector_token_key_missing");
+    expect(requests).toHaveLength(0);
+
+    process.env.CONNECTOR_TOKEN_ENCRYPTION_KEY = TEST_CONNECTOR_KEY;
+    const wrongAad = await write({ ...INPUT, tenantId });
+    expect(wrongAad.outcome).toBe("unknown");
+    expect(wrongAad.error).toContain("connector_token_decrypt_failed");
+    expect(requests).toHaveLength(0);
   });
 
   test("confirmed absence is re-read and a second-call DB error cannot use cached fallback", async () => {

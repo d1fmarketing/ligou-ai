@@ -16,6 +16,7 @@ test("unit runner uses only synthetic configuration and excludes live integratio
   expect(environment.CALENDAR_PROVIDER).toBe("fake");
   expect(unitTestFiles).not.toContain("test/booking.integration.test.ts");
   expect(unitTestFiles).toContain("test/unit-runner.test.ts");
+  expect(unitTestFiles).toContain("test/oauth-security.test.ts");
 });
 
 test("unit runner starts every unit file in its own Bun process", () => {
