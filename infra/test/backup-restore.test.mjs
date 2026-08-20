@@ -105,7 +105,12 @@ test("missing/tampered manifest and tampered archive are rejected before restore
     assert.equal(createManifest(archive, manifest).status, 0);
 
     const missing = run("bash", [restoreScript, "--archive", archive, "--manifest", `${manifest}.missing`], {
-      env: { PATH: "/usr/bin:/bin", TENANT_SLUG: TENANT, HERMES_IMAGE: IMAGE, LIGOU_BACKUP_MANIFEST_KEY: KEY, LIGOU_NODE_BIN: process.execPath },
+      env: {
+        PATH: "/usr/bin:/bin", TENANT_SLUG: TENANT, HERMES_IMAGE: IMAGE,
+        LIGOU_BACKUP_MANIFEST_KEY: KEY, LIGOU_NODE_BIN: process.execPath,
+        LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
+        LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
+      },
     });
     assert.notEqual(missing.status, 0);
     assert.match(missing.stderr, /manifest_required/);
@@ -230,11 +235,14 @@ test("backup script creates and uploads only the cognitive archive plus authenti
   try {
     const sourceArchive = await makeArchive(fixture);
     const bin = path.join(fixture, "bin");
-    const work = path.join(fixture, "work");
+    const legacySharedWork = path.join(fixture, "shared-work");
+    const stateRoot = path.join(fixture, "tenants");
+    const work = path.join(stateRoot, TENANT, "backups");
+    const registry = path.join(fixture, "tenant-registry.json");
     const dockerLog = path.join(fixture, "docker.log");
     const awsLog = path.join(fixture, "aws.log");
     await mkdir(bin);
-    await mkdir(work);
+    await mkdir(legacySharedWork);
     const docker = path.join(bin, "docker");
     const aws = path.join(bin, "aws");
     await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\nif [ "$1" = inspect ]; then printf '%s\\n' true; exit 0; fi\nif [ "$1" = ps ]; then printf '%s\\n' 'ligou-cell-test-tenant'; exit 0; fi\nif [ "$1" = cp ]; then cp "$STUB_ARCHIVE" "$3"; exit 0; fi\nexit 0\n`);
@@ -251,7 +259,9 @@ test("backup script creates and uploads only the cognitive archive plus authenti
         LIGOU_BACKUP_MANIFEST_KEY: KEY,
         LIGOU_BACKUP_MANIFEST_KEY_ID: "test-v1",
         HERMES_IMAGE: IMAGE,
-        LIGOU_BACKUP_WORK_DIR: work,
+        LIGOU_BACKUP_WORK_DIR: legacySharedWork,
+        LIGOU_TENANT_STATE_ROOT: stateRoot,
+        LIGOU_TENANT_REGISTRY: registry,
         LIGOU_NODE_BIN: process.execPath,
         DOCKER_LOG: dockerLog,
         AWS_LOG: awsLog,
@@ -260,6 +270,7 @@ test("backup script creates and uploads only the cognitive archive plus authenti
     });
     assert.equal(result.status, 0, result.stderr);
     const names = (await readdir(work)).sort();
+    assert.deepEqual(await readdir(legacySharedWork), [], "legacy shared work override must not receive tenant backups");
     assert.equal(names.filter((name) => name.endsWith(".zip")).length, 1);
     assert.equal(names.filter((name) => name.endsWith(".manifest.json")).length, 1);
     assert.equal(names.some((name) => name.endsWith(".sha256")), false);
@@ -270,6 +281,7 @@ test("backup script creates and uploads only the cognitive archive plus authenti
     assert.equal(verified.status, 0, verified.stderr);
     const uploads = await readFile(awsLog, "utf8");
     assert.equal(uploads.split("\n").filter((line) => line.includes("s3 cp")).length, 2);
+    assert.match(uploads, /cells\/test-tenant\/hermes-test-tenant-/);
     assert.match(uploads, /[.]zip[.]manifest[.]json/);
     assert.doesNotMatch(await readFile(dockerLog, "utf8"), /model-auth|auth[.]json|[.]env/);
   } finally {
@@ -296,6 +308,8 @@ function restoreEnv(fixture, bin, extra = {}) {
   return {
     PATH: `${bin}:/usr/bin:/bin`,
     TMPDIR: path.join(fixture, "tmp"),
+    LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
+    LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
     TENANT_SLUG: TENANT,
     LIGOU_BACKUP_MANIFEST_KEY: KEY,
     LIGOU_NODE_BIN: process.execPath,
@@ -325,7 +339,7 @@ test("restore imports into a disposable no-network/no-auth volume and runs all s
     assert.match(log, /skills list --json/);
     assert.match(log, /sessions list --json/);
     assert.match(log, /test ! -e \/root\/\.hermes\/auth\.json/);
-    assert.match(log, /rm -f restore-check-/);
+    assert.match(log, /rm -f hermes-test-tenant-restore-check-/);
     assert.match(log, /volume rm/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
