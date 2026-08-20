@@ -13,13 +13,30 @@ export async function tickIntents(): Promise<number> {
   return claimed.length;
 }
 
-async function executeIntent(intent: any) {
+export async function executeIntent(intent: any, calendar = calendarPort()) {
   if (intent.kind !== "calendar_book") {
     await supa().from("action_intents").update({ status: "failed", last_error: "unsupported_kind", finished_at: new Date().toISOString() }).eq("id", intent.id);
     return;
   }
+  const { data: authorityCurrent, error: authorityError } = await supa()
+    .rpc("validate_booking_intent_authority", { p_intent: intent.id });
+  if (authorityError) {
+    await supa().from("action_intents").update({
+      status: "queued",
+      last_error: `authority_validation_failed: ${authorityError.message}`,
+      lease_until: null,
+      next_attempt_at: new Date(Date.now() + 5_000).toISOString(),
+    }).eq("id", intent.id);
+    return;
+  }
+  if (!authorityCurrent) {
+    await supa().from("action_intents").update({
+      status: "failed", last_error: "authority_stale_before_provider", finished_at: new Date().toISOString(),
+    }).eq("id", intent.id);
+    return;
+  }
   const p = intent.payload ?? {};
-  const result = await calendarPort().book({
+  const result = await calendar.book({
     tenantId: intent.tenant_id,
     summary: String(p.summary ?? "Ligou booking"),
     description: String(p.description ?? ""),

@@ -130,31 +130,26 @@ export async function closeDeal(cap: Capability, args: Record<string, unknown>) 
   const intentIdem = createHash("sha256")
     .update(`${tenant.id}|calendar_book|${bookingId}|${confirmed}|epoch:${power.authEpoch ?? 1}`)
     .digest("hex");
-  const { data: intent, error: ie } = await supa()
-    .from("action_intents")
-    .upsert({
-      tenant_id: tenant.id, call_id: cap.callId, booking_id: bookingId,
-      kind: "calendar_book",
-      payload: {
-        summary: `${booking.service_type} — ${booking.client_name ?? "customer"} ($${confirmed})`,
-        description: `Booked by Ligou. Contact: ${booking.contact ?? "?"}. Call ${cap.callId}.`,
-        start_iso: booking.slot_start, end_iso: booking.slot_end ?? booking.slot_start,
-      },
-      policy_snapshot: {
-        power_id: power.powerId,
-        auth_epoch: power.authEpoch,
-        policy_epoch: tenant.policy_epoch,
-        price_min: band.price_min,
-        price_confirmed: confirmed,
-        rule_id: band.rule_id,
-        authority_context: authorityContext,
-      },
-      idempotency_key: intentIdem, status: "queued",
-    }, { onConflict: "idempotency_key" })
-    .select("id,status").single();
-  if (ie || !intent) return { status: "unknown", say: PENDING_SAY, error: ie?.message };
-
-  await supa().from("bookings").update({ intent_id: intent.id, price_agreed: confirmed }).eq("id", bookingId);
+  const payload = {
+    summary: `${booking.service_type} — ${booking.client_name ?? "customer"} ($${confirmed})`,
+    description: `Booked by Ligou. Contact: ${booking.contact ?? "?"}. Call ${cap.callId}.`,
+    start_iso: booking.slot_start, end_iso: booking.slot_end ?? booking.slot_start,
+  };
+  const { data: intent, error: ie } = await supa().rpc("authorize_booking_intent", {
+    p_tenant: tenant.id,
+    p_call: cap.callId,
+    p_booking: bookingId,
+    p_power: power.powerId,
+    p_rule: band.rule_id,
+    p_confirmed_price: confirmed,
+    p_expected_auth_epoch: cap.authEpoch,
+    p_expected_policy_epoch: cap.policyEpoch,
+    p_payload: payload,
+    p_idempotency_key: intentIdem,
+  });
+  if (ie || !intent) {
+    return { status: "pending_approval", say: DENY_SAY, reason: "authority_changed_before_enqueue", error: ie?.message };
+  }
 
   // Nudge the worker NOW instead of waiting for its next tick. RJ's first real booking was already
   // confirmed in Google, yet the agent said "processing, you'll get a text" because this tool gave up

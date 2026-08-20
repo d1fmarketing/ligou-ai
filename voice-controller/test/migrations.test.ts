@@ -86,3 +86,34 @@ describe("budget reservation settlement migration contract", () => {
     }
   });
 });
+
+describe("side-effect authority revalidation migration contract", () => {
+  test("atomically checks expected epochs plus referenced power/rule before enqueue", () => {
+    const sql = migrationSql("authority_side_effect_revalidation");
+    expect(sql).toContain("function public.authorize_booking_intent");
+    expect(sql).toContain("v_tenant.auth_epoch <> p_expected_auth_epoch or v_tenant.policy_epoch <> p_expected_policy_epoch");
+    expect(sql).toContain("from public.powers p");
+    expect(sql).toContain("from public.effective_rules er");
+    expect(sql).toContain("for update");
+  });
+
+  test("claim and immediate execution validation fail stale referenced authority", () => {
+    const sql = migrationSql("authority_side_effect_revalidation");
+    expect(sql).toContain("authority_stale_before_claim");
+    expect(sql).toContain("function public.validate_booking_intent_authority");
+    expect(sql).toContain("authority_stale_before_provider");
+    expect(sql).toContain("p.revoked_at is null");
+  });
+
+  test("replacement RPCs remain service-role-only", () => {
+    const sql = migrationSql("authority_side_effect_revalidation");
+    for (const signature of [
+      "public.authorize_booking_intent(uuid,uuid,uuid,uuid,uuid,numeric,integer,integer,jsonb,text)",
+      "public.validate_booking_intent_authority(uuid)",
+      "public.claim_intent(text)",
+    ]) {
+      expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated`);
+      expect(sql).toContain(`grant execute on function ${signature} to service_role`);
+    }
+  });
+});
