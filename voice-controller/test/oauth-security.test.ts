@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildOAuthState,
   parseOAuthState,
@@ -99,4 +102,11 @@ test("OAuth callback HTML escapes provider-derived text and the return URL", () 
   expect(html).not.toContain("<script>");
   expect(html).not.toContain("onclick=");
   expect(html).toContain(escapeHtml("owner@example.com<script>alert(2)</script>"));
+});
+
+test("service-role OAuth consumption checks the request claim, not the SECURITY DEFINER owner", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  const migration = readFileSync(path.join(root, "supabase/migrations/20260820191044_connector_oauth_hardening.sql"), "utf8");
+  expect(migration).toContain("current_setting('request.jwt.claim.role', true)");
+  expect(migration).not.toContain("current_user <> 'service_role'");
 });
