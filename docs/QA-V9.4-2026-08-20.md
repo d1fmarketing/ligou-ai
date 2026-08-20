@@ -66,10 +66,25 @@ e não contém nenhuma ocorrência de Martian Mono. Consequências verificadas:
 
 Não é perda de empacotamento deste repo: o export v9 já veio assim. Pela regra de
 override visual, a v9 prevalece em conflito estritamente visual, mas a decisão não
-foi registrada como deliberada em nenhum changelog. **Decisão pendente de RJ:**
-(a) confirmar Archivo como display e atualizar `.impeccable.md` + remover o TTF
-morto, ou (b) aplicar Familjen Grotesk ao token `--font-display`. Nenhuma das duas
-foi executada; nada foi alterado silenciosamente.
+foi registrada como deliberada em nenhum changelog.
+
+**Resolução (20/08, aprovada por RJ na sessão):** aplicada a opção (b) — Familjen
+Grotesk no token `--font-display`, com Archivo como fallback. Execução:
+
+- `@font-face` para Familjen Grotesk 600 (arquivo que já estava no repo) e 700
+  (baixado dos arquivos oficiais do Google Fonts, v11); a face 700 é declarada com
+  `font-weight: 700 900` para servir os pedidos de peso 800 do display sem bold
+  sintético;
+- `--font-display` agora é `'Familjen Grotesk','Archivo',system-ui,sans-serif`;
+  `--font-body` permanece Archivo;
+- manifesto `CLAUDE-V9-RUNTIME.sha256` atualizado (52 arquivos pinados, 41
+  referências de runtime); export em `src/claude-v9/` intocado;
+- re-QA da matriz completa de 10 viewports após a troca: zero overflow, vídeos
+  corretos, H1 na primeira tela, zero erros; `document.fonts.check('800 …')`
+  confirma a face Familjen ativa no peso do display.
+
+Martian Mono para dado de máquina continua ausente do runtime v9 — segue aberto,
+sem elemento de texto de dado na página atual que o exija.
 
 ## O que este QA promove
 

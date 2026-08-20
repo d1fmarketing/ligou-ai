@@ -11,3 +11,6 @@
 @font-face{font-family:'Archivo';font-style:italic;font-weight:700;font-display:swap;src:url('../../../assets/fonts/archivo-v25-italic-700.ttf') format('truetype')}
 @font-face{font-family:'Archivo';font-style:italic;font-weight:800;font-display:swap;src:url('../../../assets/fonts/archivo-v25-italic-800.ttf') format('truetype')}
 @font-face{font-family:'Archivo';font-style:italic;font-weight:900;font-display:swap;src:url('../../../assets/fonts/archivo-v25-italic-900.ttf') format('truetype')}
+/* Familjen Grotesk, display face per .impeccable.md contract; 700 file covers 700-900 requests without synthetic bold. */
+@font-face{font-family:'Familjen Grotesk';font-style:normal;font-weight:600;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-600.ttf') format('truetype')}
+@font-face{font-family:'Familjen Grotesk';font-style:normal;font-weight:700 900;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-700.ttf') format('truetype')}
