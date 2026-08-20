@@ -16,13 +16,20 @@ const originalEstimate = config.estCostPerSessionUsd;
 const originalFetch = globalThis.fetch;
 const originalWebSocket = globalThis.WebSocket;
 let fetchUrls: string[] = [];
+let callUpdates: any[] = [];
+let budgetUpdates: any[] = [];
 
 function client() {
   return {
     from(table: string) {
       const api: any = {
         select() { return api; }, eq() { return api; },
-        insert() { return api; }, update() { return api; },
+        insert() { return api; },
+        update(row: any) {
+          if (table === "calls") callUpdates.push(row);
+          if (table === "budget_reservations") budgetUpdates.push(row);
+          return api;
+        },
         single: async () => table === "tenants"
           ? { data: TENANT, error: null }
           : table === "calls"
@@ -55,6 +62,8 @@ beforeEach(() => {
   globalThis.fetch = originalFetch;
   globalThis.WebSocket = originalWebSocket;
   fetchUrls = [];
+  callUpdates = [];
+  budgetUpdates = [];
   invalidateTenant("rocha-plumbing");
   _setClient(client());
 });
@@ -101,18 +110,85 @@ describe("session budget lifecycle", () => {
     });
   });
 
-  test("settles exactly once when every Realtime model fails", async () => {
+  const assertUnknownProviderRemainsDiscoverable = () => {
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
+    expect(callUpdates.some((row) => row.status === "error" && row.provider_termination_state === "unknown")).toBe(true);
+    expect(budgetUpdates.some((row) => row.reconcile_lease_until === null && row.reconcile_last_error)).toBe(true);
+  };
+
+  test("first transport exception stops fallback and leaves the reservation active", async () => {
     config.openaiKey = "synthetic-openai-key";
-    globalThis.fetch = async () => new Response("unavailable", { status: 502 });
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      throw new Error("provider transport unknown");
+    };
 
     await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
-      message: "realtime_unavailable",
+      message: "provider_outcome_unknown",
       status: 502,
     });
 
-    const settlements = rpcCalls.filter((call) => call.name === "settle_call_budget");
-    expect(settlements).toHaveLength(1);
-    expect(settlements[0]?.args.p_outcome).toBe("startup_error");
+    expect(fetchUrls).toHaveLength(1);
+    assertUnknownProviderRemainsDiscoverable();
+  });
+
+  test("2xx without Location stops fallback and leaves the reservation active", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      return fetchUrls.length === 1
+        ? new Response("answer-without-id", { status: 200 })
+        : new Response("definitive fallback rejection", { status: 400 });
+    };
+
+    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+      message: "provider_outcome_unknown",
+      status: 502,
+    });
+
+    expect(fetchUrls).toHaveLength(1);
+    assertUnknownProviderRemainsDiscoverable();
+  });
+
+  test("ambiguous 5xx stops fallback and leaves the reservation active", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      return fetchUrls.length === 1
+        ? new Response("provider internal error", { status: 503 })
+        : new Response("definitive fallback rejection", { status: 400 });
+    };
+
+    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+      message: "provider_outcome_unknown",
+      status: 502,
+    });
+
+    expect(fetchUrls).toHaveLength(1);
+    assertUnknownProviderRemainsDiscoverable();
+  });
+
+  test("definitive 4xx can fall back and tracks only the successful call", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      return fetchUrls.length === 1
+        ? new Response("unsupported model", { status: 400 })
+        : new Response("fallback-answer", { status: 200, headers: { Location: "/v1/realtime/calls/rtc-fallback" } });
+    };
+    globalThis.WebSocket = class {
+      addEventListener() {}
+      send() {}
+      close() {}
+    } as any;
+
+    const result = await startSession("owner-1", "owner_browser", "test-sdp");
+
+    expect(fetchUrls).toHaveLength(2);
+    expect(result.fell_back).toBe(true);
+    expect(callUpdates.some((row) => row.openai_call_id === "rtc-fallback" && row.provider_termination_state === "active")).toBe(true);
+    expect(callUpdates.some((row) => row.provider_termination_state === "unknown")).toBe(false);
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
   });
 
   test("accepted browser call attach failure confirms hangup before zero settlement", async () => {

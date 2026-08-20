@@ -93,8 +93,10 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   // Unified interface (official server flow): ONE multipart POST with the STANDARD key. No ephemeral ek_ —
   // we proxy the SDP ourselves, and calls created under an ek_ are invisible to the standard-key sideband
   // (404 call_id_not_found), which killed tools mid-call on 2026-08-19. Fall back through the model chain.
-  let answerSdp = "", openaiCallId = "", usedModel = "", lastErr = "", providerStateUnknown = false;
+  let answerSdp = "", openaiCallId = "", usedModel = "", lastErr = "";
+  let ambiguousProvider: { detail: string; openaiCallId: string | null } | null = null;
   for (const model of chain) {
+    let attemptCallId: string | null = null;
     try {
       const form = new FormData();
       form.set("sdp", sdpOffer);
@@ -104,19 +106,44 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
         headers: { Authorization: `Bearer ${config.openaiKey}` },
         body: form,
       });
-      if (!callRes.ok) { lastErr = `sdp ${model}: ${callRes.status} ${await callRes.text()}`; continue; }
-      answerSdp = await callRes.text();
-      openaiCallId = (callRes.headers.get("Location") ?? "").split("/").pop() ?? "";
-      if (!openaiCallId) { providerStateUnknown = true; lastErr = `no_call_id ${model}`; continue; }
+      const candidateCallId = (callRes.headers.get("Location") ?? "").split("/").pop() ?? "";
+      attemptCallId = candidateCallId || null;
+      if (!callRes.ok) {
+        const responseText = await callRes.text();
+        const detail = `sdp ${model}: ${callRes.status} ${responseText}`;
+        if (callRes.status >= 400 && callRes.status < 500 && !candidateCallId) {
+          lastErr = detail;
+          continue; // explicit non-acceptance: this model did not create a call
+        }
+        ambiguousProvider = { detail, openaiCallId: candidateCallId || null };
+        break;
+      }
+      if (!candidateCallId) {
+        ambiguousProvider = { detail: `no_call_id ${model}`, openaiCallId: null };
+        break;
+      }
+      const candidateAnswerSdp = await callRes.text();
+      answerSdp = candidateAnswerSdp;
+      openaiCallId = candidateCallId;
       usedModel = model;
       break;
-    } catch (e: any) { lastErr = `${model}: ${e?.message}`; }
+    } catch (e: any) {
+      ambiguousProvider = { detail: `${model}: ${e?.message}`, openaiCallId: attemptCallId };
+      break;
+    }
+  }
+  if (ambiguousProvider) {
+    await settleStartupFailure("provider_outcome_unknown", {
+      openaiCallId: ambiguousProvider.openaiCallId,
+      mode: "hangup",
+    });
+    throw Object.assign(new Error("provider_outcome_unknown"), {
+      status: 502,
+      detail: ambiguousProvider.detail,
+    });
   }
   if (!usedModel) {
-    await settleStartupFailure(
-      "realtime_unavailable",
-      providerStateUnknown ? { openaiCallId: null, mode: "hangup" } : undefined,
-    );
+    await settleStartupFailure("realtime_unavailable");
     throw Object.assign(new Error("realtime_unavailable"), { status: 502, detail: lastErr });
   }
 
