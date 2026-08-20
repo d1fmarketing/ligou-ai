@@ -1,0 +1,1307 @@
+{
+ "dossiês": [
+  {
+   "platform": "Vapi (vapi.ai / docs.vapi.ai)",
+   "summary": "Vapi cobre 10 dos 12 requisitos do Ligou com fonte primária: números US via API (5 grátis/conta, ilimitado importando Twilio), troca de idioma na mesma chamada, tool calling síncrono via webhook + MCP nativo, warm transfer (só sobre Twilio), firstMessage verbatim, outbound via API, end-of-call-report com transcrição + structuredData via analysisPlan, BYO Twilio/SIP e escolha de modelo incluindo OpenAI Realtime. Preço: plataforma $0.05/min publicado + modelos/STT/TTS \"at cost ($0 com sua própria chave)\" + telefonia direto na Twilio — cabe folgado no guardrail de $0.20/min. As duas falhas: gravação é ON por padrão (desligável por assistant, transcrição independente), e o ToS concede à Vapi direito de usar conteúdo de chamadas para melhorar/treinar features quando hipaaEnabled:false — o opt-out efetivo é o modo HIPAA, que mata a persistência de transcrição (quebraria o resumo WhatsApp) e aparece como add-on de $2K/mês no pricing. Lock-in é moderado: números Twilio e authority plane são nossos e portáveis; o que se perde ao migrar para OpenAI Realtime cru é a orquestração (transferPlan, analysisPlan, turn-taking tuning, formato dos webhooks).",
+   "checklist": [
+    {
+     "req": "1. Número US local via API, multi-tenant sob uma conta",
+     "status": "yes",
+     "evidence": "POST api.vapi.ai/phone-number com numberDesiredAreaCode; \"Free Vapi phone numbers support US area codes only, with up to five free numbers per account\"; para escalar: \"Import a number from Twilio, Vonage, or Telnyx to scale without limits\" — sem gate enterprise documentado para números importados",
+     "url": "https://docs.vapi.ai/quickstart/phone"
+    },
+    {
+     "req": "2. EN+PT+ES na mesma chamada com troca de idioma",
+     "status": "yes",
+     "evidence": "\"Switch languages seamlessly when the user changes languages\"; transcribers multilíngues: Deepgram Nova-3 'Multi', Google STT 'Multilingual', Gladia auto-detect; vozes Azure 140+ / ElevenLabs 30+ idiomas (PT incluso). Caveat das docs: \"You must explicitly list the supported languages in your system prompt\". Qualidade PT-BR específica não benchmarkada nas docs — testar",
+     "url": "https://docs.vapi.ai/customization/multilingual"
+    },
+    {
+     "req": "3. Tool calling webhook síncrono p/ nosso servidor + MCP",
+     "status": "yes",
+     "evidence": "Custom tools: requisição síncrona ao seu Server URL; assistant espera a resposta {toolCallId, result} antes de continuar — encaixa o authority plane. MCP: \"allows your Vapi assistant to dynamically access tools from MCP servers during calls\" via Streamable HTTP",
+     "url": "https://docs.vapi.ai/tools/custom-tools"
+    },
+    {
+     "req": "4. Warm transfer para celular do dono",
+     "status": "yes",
+     "evidence": "transferCall tool com transferPlan: modos warm com summary, custom message, wait-for-operator, TwiML, e hold experimental. Caveat: \"Warm transfer functionality is currently available only with Twilio-based telephony systems\" — ok pois traremos Twilio",
+     "url": "https://docs.vapi.ai/call-forwarding"
+    },
+    {
+     "req": "5. Aviso legal VERBATIM no início (string fixa)",
+     "status": "yes",
+     "evidence": "firstMessage é string configurada, não gerada: \"your assistant will pick up and start the conversation with your configured first message\"; docs tratam firstMessage como forced utterance (não output do modelo), com firstMessageMode configurável",
+     "url": "https://docs.vapi.ai/quickstart/phone"
+    },
+    {
+     "req": "6. Gravação desligável (off por padrão) mantendo transcrição",
+     "status": "yes",
+     "evidence": "Desligável sim, off por padrão NÃO: \"recordingEnabled: Enable call recording... Default: true\" — precisa setar artifactPlan.recordingEnabled:false por assistant. transcriptPlan é config separada/independente; docs não afirmam explicitamente que transcrição persiste com gravação off — validar em teste",
+     "url": "https://docs.vapi.ai/assistants/call-recording"
+    },
+    {
+     "req": "7. Latência e barge-in nível produção com números publicados",
+     "status": "yes",
+     "evidence": "FAQ oficial: \"typically around 800 milliseconds for end-to-end voice processing\"; homepage anuncia sub-500ms. Barge-in documentado: stopSpeakingPlan (numWords, voiceSeconds default 0.2s, backoffSeconds default 1s) e startSpeakingPlan (waitSeconds default 0.4s, smart endpointing). Medições de terceiros 2026: 550–1500ms em produção; config default ~900-1200ms p95 sem tuning",
+     "url": "https://docs.vapi.ai/faq"
+    },
+    {
+     "req": "8. Preço total/min publicado (plataforma+modelo+telefonia)",
+     "status": "yes",
+     "evidence": "Plataforma publicada: \"$0.05 / min\" (Build, usage based); STT/LLM/TTS: \"At cost ($0 if you bring your own API key)\"; telefonia pass-through (BYO Twilio paga direto à Twilio). Não existe UM número all-in publicado — é composição de preços publicados por componente",
+     "url": "https://vapi.ai/pricing"
+    },
+    {
+     "req": "9. Webhook pós-chamada com transcrição + extração estruturada",
+     "status": "yes",
+     "evidence": "end-of-call-report entrega artifact com transcript completo + messages por speaker; analysisPlan gera call.analysis.summary e call.analysis.structuredData (prompt+schema customizáveis), \"attached to the call record... retrieved via the API\" — suficiente para o resumo PT via WhatsApp",
+     "url": "https://docs.vapi.ai/assistants/call-analysis"
+    },
+    {
+     "req": "10. Chamadas OUTBOUND via API (onboarding liga pro dono)",
+     "status": "yes",
+     "evidence": "\"Vapi's outbound calling API lets you programmatically initiate single or batch calls to any phone number\" — POST /call com assistantId, phoneNumberId, customer.number. Caveats: números grátis têm limite diário de outbound e não fazem internacional; importar Twilio remove limites",
+     "url": "https://docs.vapi.ai/calls/outbound-calling"
+    },
+    {
+     "req": "11. BYOC/SIP (trazer Twilio) e concorrência publicada",
+     "status": "yes",
+     "evidence": "Import Twilio por número+SID+Auth Token: \"You can now assign it to an assistant for inbound calls or use it to place outbound calls\"; BYO SIP trunk via credential provider byo-sip-trunk. Concorrência publicada no pricing: \"10 call concurrency ($10 per line/month)\" no Build, custom no Scale",
+     "url": "https://docs.vapi.ai/phone-numbers/import-twilio"
+    },
+    {
+     "req": "12. Escolha de modelo + NÃO treinar nos dados + controle do prompt",
+     "status": "no",
+     "evidence": "Escolha de modelo OK (pipeline com qualquer provider BYO key; OpenAI Realtime gpt-realtime-2025-08-28 \"Production Ready\") e prompt 100% nosso. Mas o ToS falha o no-train: \"We use Your Content to... improve, enhance, and optimize the performance of the service and call improvement-related features\"; com hipaaEnabled:false o cliente concede direito de uso de dados de chamada para treinamento de features (end-of-turn, interrupção). Opt-out real = modo HIPAA, que desliga persistência (mata transcrição) e consta como add-on $2K/mês",
+     "url": "https://vapi.ai/terms-of-service"
+    }
+   ],
+   "pricing": {
+    "perMinuteTotalUSD": null,
+    "monthly400minUSD": null,
+    "math": "Vapi NÃO publica um total all-in único; publica componentes: plataforma $0.05/min (vapi.ai/pricing, tier Build) + STT/LLM/TTS \"At cost ($0 if you bring your own API key)\" — com as chaves OpenAI/ElevenLabs que o Ligou já tem, esses custos são pagos direto aos provedores, não à Vapi + telefonia via BYO Twilio paga direto à Twilio (voz local US publicada pela Twilio em ~$0.0085/min inbound / ~$0.014/min outbound). Componente Vapi em 400 min: 400 × $0.05 = $20/mês por cliente. Total real/min = $0.05 + (modelo escolhido) + (TTS/STT escolhidos) + (Twilio) — com stack típica BYO (Deepgram + GPT-4o-mini + ElevenLabs/OpenAI TTS) a soma dos preços publicados dos provedores fica na faixa de $0.10–0.20/min, dentro do guardrail de $0.20; mas esse total é composição nossa, não número publicado pela Vapi. Concorrência: 10 chamadas simultâneas inclusas, +$10/linha/mês. Add-ons enterprise: HIPAA $2K/mês, data retention $1K/mês (pricing page)."
+   },
+   "mcpPlugins": "MCP suportado nativamente como tool de assistant: \"The Model Context Protocol (MCP) integration allows your Vapi assistant to dynamically access tools from MCP servers during calls\" — Vapi conecta ao MCP server via Streamable HTTP, busca a lista de tools e as adiciona dinamicamente ao assistant; nova conexão por invocação (https://docs.vapi.ai/tools/mcp). Além de MCP, tools custom via webhook síncrono e integrações prontas (Zapier/Make/Composio citadas nas docs). Requisito do dono atendido.",
+   "gotchas": [
+    "TREINAMENTO: ToS concede à Vapi uso do conteúdo de chamadas para melhorar features (end-of-turn, interrupção) quando hipaaEnabled:false; \"does not share Your Content with third-party services for their independent model training purposes\", mas usa internamente. Opt-out efetivo = hipaaEnabled:true, que desliga persistência de logs/gravações/TRANSCRIÇÕES (quebra o resumo WhatsApp) — e HIPAA é add-on $2K/mês no pricing. Conflito direto entre req 9 e req 12.",
+    "Gravação é ON por padrão (artifactPlan.recordingEnabled default true) — desligar explicitamente em cada assistant; docs não confirmam verbatim que transcrição sobrevive com gravação off (transcriptPlan é separado) — validar com uma chamada de teste antes de comprometer.",
+    "Warm transfer só funciona sobre telefonia Twilio (\"currently available only with Twilio-based telephony systems\") — ok para o Ligou (Twilio ativa), mas amarra a escolha de carrier.",
+    "Números grátis Vapi: máx 5 por conta, só US, limite diário de outbound, sem internacional — para 1 número/cliente, importar números Twilio desde o dia 1 (import é por SID+Auth Token, sem gate).",
+    "Latência: marketing diz sub-500ms, FAQ oficial diz ~800ms; medições independentes 2026 dão 550–1500ms e config default ~900-1200ms p95 — exige tuning (transcriber, waitSeconds, modelo) para ficar aceitável.",
+    "Webhooks síncronos têm orçamento de tempo: assistant-request tem timeout duro de 7.5s; tool-calls síncronos significam que a latência do NOSSO authority plane vira silêncio na chamada — o plane precisa responder em poucas centenas de ms.",
+    "OpenAI Realtime na Vapi: Knowledge Bases não suportadas, só 5 vozes (alloy, echo, shimmer, marin, cedar), sem voice cloning — se o produto depender de KB ou voz custom, usar pipeline tradicional.",
+    "Lock-in moderado: números (Twilio importados) e authority plane são nossos e saem junto; o que se reescreve ao migrar para OpenAI Realtime cru: transferPlan (warm transfer), analysisPlan (summary/structuredData), firstMessage/turn-taking config, formato dos payloads de tool-call e end-of-call-report, e o media-path telefônico (teria que montar Twilio Media Streams ou ConversationRelay).",
+    "Sem gate de KYC/vetting para começar: self-serve no Build tier; SOC2/HIPAA/PCI/SSO/RBAC só no Scale (contact sales).",
+    "Concorrência default 10 chamadas simultâneas ($10/linha extra/mês) — dimensionar quando a base passar de ~10 clientes com tráfego simultâneo.",
+    "Multilingual exige listar os idiomas explicitamente no system prompt e escolher transcriber multi (Deepgram Nova-3 Multi / Google / Gladia); troca de idioma é função do transcriber, não automática em qualquer config."
+   ],
+   "sources": [
+    "https://vapi.ai/pricing",
+    "https://docs.vapi.ai/quickstart/phone",
+    "https://docs.vapi.ai/customization/multilingual",
+    "https://docs.vapi.ai/tools/custom-tools",
+    "https://docs.vapi.ai/tools/mcp",
+    "https://docs.vapi.ai/call-forwarding",
+    "https://docs.vapi.ai/server-url/events",
+    "https://docs.vapi.ai/assistants/call-analysis",
+    "https://docs.vapi.ai/assistants/call-recording",
+    "https://docs.vapi.ai/calls/outbound-calling",
+    "https://docs.vapi.ai/phone-numbers/import-twilio",
+    "https://docs.vapi.ai/openai-realtime",
+    "https://docs.vapi.ai/faq",
+    "https://docs.vapi.ai/customization/speech-configuration",
+    "https://vapi.ai/terms-of-service",
+    "https://vapi.ai/privacy",
+    "https://docs.vapi.ai/security-and-privacy/hipaa"
+   ]
+  },
+  {
+   "platform": "Retell AI (retellai.com / docs.retellai.com)",
+   "summary": "Retell cobre 10 dos 12 requisitos do Ligou com docs primárias: números US locais via API a $2/mês sob uma conta pay-as-you-go (sem gate enterprise), outbound via API, custom function síncrona que espera NOSSO webhook antes de agir (authority plane encaixa direto), MCP nativo in-call, warm transfer com whisper, begin_message verbatim, webhook call_analyzed com transcrição completa + extração estruturada, BYOC Twilio via elastic SIP com telefonia da plataforma zerada, e escolha ampla de modelo (pipeline ou realtime). Custo publicado de ponta a ponta: ~$0.13/min numa config sólida (infra $0.055 + voz plataforma $0.015 + GPT-4.1 $0.045 + telefonia $0.015) = $52 nos 400 min — folga sob os tetos de $0.20/$0.60, desde que NÃO se use gpt-realtime ($0.345/min só de modelo). Falha dura: gravação de áudio é ON por default e não existe toggle que desligue só o áudio mantendo transcrição (as opções de storage são tudo, tudo-sem-PII, ou nada). Ponto cego: nenhuma declaração pública \"não treinamos nos seus dados\" nas fontes oficiais (DPA/BAA existem via click-agreements.retellai.com) — status unclear. Multilíngue EN+ES+PT na mesma chamada é suportado por multiselect de locales (pt-BR listado em todos os providers ASR/TTS), mas docs avisam perda de acurácia no pipeline cross-family e o dashboard é a fonte da verdade do combo; onboarding em PT deve usar agente single-language pt-BR (recomendação oficial quando o idioma é conhecido).",
+   "checklist": [
+    {
+     "req": "1. Número US local via API, muitos clientes sob uma conta",
+     "status": "yes",
+     "evidence": "Create Phone Number API: \"Buy a new phone number & Bind agents\"; \"Currently only supports US area code\"; $2.00/month por número; pay-as-you-go, nenhum gate enterprise ou teto de números por conta documentado",
+     "url": "https://docs.retellai.com/api-references/create-phone-number"
+    },
+    {
+     "req": "2. EN+PT+ES na mesma chamada com troca de idioma, qualidade PT-BR",
+     "status": "yes",
+     "evidence": "language \"Accepts... an array of locales for multilingual agents\"; pt-BR e es-419 listados em todos os providers TTS/ASR; agente \"is allowed to respond in any of the selected languages\". Caveat oficial: cross-family usa \"multilingual pipeline; some accuracy loss per language\" e o dashboard \"greys out combinations that aren't supported\" — validar o trio no dashboard antes de fechar",
+     "url": "https://docs.retellai.com/agent/multilingual"
+    },
+    {
+     "req": "3. Tool calling síncrono via webhook nosso + MCP",
+     "status": "yes",
+     "evidence": "Custom function: \"Retell sends a request to your URL with the function's arguments and waits for your response before continuing\" (timeout default 120s, IP de saída 100.20.5.228, X-Retell-Signature) — o authority plane aprova/nega antes da fala. MCP in-call: agente conecta a MCP server externo \"over Streamable HTTP\"",
+     "url": "https://docs.retellai.com/build/single-multi-prompt/custom-function"
+    },
+    {
+     "req": "4. Warm transfer para o celular do dono",
+     "status": "yes",
+     "evidence": "\"Your agent stays on the line after dialing the destination... play a private message only the destination hears, or do a quick three-way introduction\"; destino em E.164; ring timeout 30s com retorno ao agente se não atender",
+     "url": "https://docs.retellai.com/build/single-multi-prompt/transfer-call"
+    },
+    {
+     "req": "5. Aviso legal VERBATIM no início",
+     "status": "yes",
+     "evidence": "begin_message: \"First utterance said by the agent in the call. If not set, LLM will dynamically generate a message.\" — string fixa quando setada, geração só no fallback",
+     "url": "https://docs.retellai.com/api-references/create-retell-llm"
+    },
+    {
+     "req": "6. Gravação de áudio desligável (off por padrão) mantendo transcrição",
+     "status": "no",
+     "evidence": "Default data_storage_setting=everything (\"All artifacts (transcripts, recordings, logs) are stored\"); basic_attributes_only mata transcrição junto (\"No transcripts/recordings/logs are stored\"); não existe toggle áudio-only. Mitigação parcial: retenção 1 dia + PII redaction, mas o áudio É gravado",
+     "url": "https://docs.retellai.com/accounts/privacy-disable"
+    },
+    {
+     "req": "7. Latência e barge-in nível produção com números publicados",
+     "status": "yes",
+     "evidence": "Barge-in nativo: interruption_sensitivity [0,1], default 1; docs dedicadas de medir latência estimada/real por chamada; vendor publica claim de latência sub-segundo (~600ms). ALERTA de terceiro (pista, não prova): openbenchmarks 2026 mediu TTFAB mediano 1.740ms experienciado pelo caller — validar com demo própria antes de assinar",
+     "url": "https://docs.retellai.com/reliability/check-actual-latency"
+    },
+    {
+     "req": "8. Preço total/min publicado; custo em 400 min",
+     "status": "yes",
+     "evidence": "Todos os componentes publicados: infra $0.055/min + voz $0.015 (plataforma) ou $0.040 (ElevenLabs) + LLM (GPT-4.1 $0.045, Claude 4.6 Sonnet $0.08, gpt-realtime $0.345) + telefonia $0.015/min (zero com SIP próprio). Range oficial \"$0.07-$0.31/min\"",
+     "url": "https://www.retellai.com/pricing"
+    },
+    {
+     "req": "9. Webhook pós-chamada com transcrição + extração estruturada",
+     "status": "yes",
+     "evidence": "Evento call_analyzed: \"Full call data including call_analysis object\"; call_ended traz \"All fields from the call object except call_analysis\"; post_call_analysis_data com campos custom boolean/text/number/selector — alimenta direto o resumo PT via WhatsApp (WhatsApp em si é nosso, via Twilio)",
+     "url": "https://docs.retellai.com/features/webhook-overview"
+    },
+    {
+     "req": "10. Outbound via API (onboarding: agente liga pro dono em PT)",
+     "status": "yes",
+     "evidence": "create-phone-call: \"Create a new outbound phone call\"; retell_llm_dynamic_variables injeta contexto por chamada; override_agent_id permite agente dedicado pt-BR single-language para a entrevista (caminho recomendado pelas próprias docs quando o idioma é conhecido)",
+     "url": "https://docs.retellai.com/api-references/create-phone-call"
+    },
+    {
+     "req": "11. BYOC/SIP trunk (trazer Twilio) e concorrência publicada",
+     "status": "yes",
+     "evidence": "\"elastic SIP trunking connects Retell's VoIP with PSTN\"; números \"imported numbers from Twilio, Telnyx, and Vonage\"; pricing: \"No Charge for Sip Trunking/Custom Telephony\". Concorrência publicada: 20 default no pay-as-you-go, +$8.00/concorrência/mês, burst $0.10/min na chamada inteira",
+     "url": "https://docs.retellai.com/deploy/custom-telephony"
+    },
+    {
+     "req": "12. Escolha de modelo, política de não-treinar, controle do prompt",
+     "status": "unclear",
+     "evidence": "Escolha de modelo: YES — GPT 4.1/5.x, Claude 4.5–5, Gemini, s2s gpt-realtime, e Custom LLM via websocket (prompt 100% nosso). Política de treinamento: docs silenciosas — nenhuma declaração \"não treinamos em dados de clientes\" encontrada em retellai.com/docs/trust center; privacy policy só fala em QA/\"service improvement\"; DPA/BAA via click-agreements.retellai.com sem custo. SOC2 Type 1+2, HIPAA, GDPR confirmados",
+     "url": "https://docs.retellai.com/general/compliance"
+    }
+   ],
+   "pricing": {
+    "perMinuteTotalUSD": 0.13,
+    "monthly400minUSD": 52,
+    "math": "Config base (tudo publicado em retellai.com/pricing): Retell Voice Infra $0.055/min + Retell Platform Voice $0.015/min + LLM GPT-4.1 $0.045/min + telefonia Retell $0.015/min = $0.130/min. 400 min x $0.130 = $52.00/mês + $2/mês do número = $54.00. Config premium (ElevenLabs $0.040 + Claude 4.6 Sonnet $0.080): $0.055+$0.040+$0.080+$0.015 = $0.190/min = $76.00 nos 400 min — ainda sob o teto de $0.20. Config proibida: gpt-realtime 1.5 $0.345/min só de modelo + $0.055 infra + $0.015 telefonia = $0.415/min > excedente de $0.35 — mata o plano. BYOC Twilio zera os $0.015 da Retell mas o Twilio cobra a perna dele à parte (não publicado na Retell). Add-ons opcionais: knowledge base +$0.005/min, denoising +$0.005/min, PII removal +$0.01/min.",
+    "url": "https://www.retellai.com/pricing"
+   },
+   "mcpPlugins": "Suporte MCP nativo e triplo, tudo em docs primárias: (1) agente de voz chama MCP servers externos DURANTE a chamada em single/multi-prompt agents (https://docs.retellai.com/build/single-multi-prompt/mcp — \"Retell connects over Streamable HTTP\", auth headers custom, dynamic variables na URL, resposta cap 15.000 chars, sem retry automático em falha); (2) MCP node em conversation flows (https://docs.retellai.com/build/conversation-flow/mcp-node); (3) Retell MCP Server hospedado para gerenciar a conta a partir de Claude Code/Cursor etc. (https://docs.retellai.com/get-started/mcp-server). Bloqueia localhost/ranges privados/metadata endpoints — o MCP do authority plane precisa ser público (Cloudflare/Vercel resolve).",
+   "gotchas": [
+    "Gravação: ON por default e sem toggle áudio-only — desligar áudio mantendo transcrição NÃO existe (req 6 reprovado); plano B: data_storage_setting=everything_except_pii + retenção de 1 dia (data_storage_retention_days 1–730)",
+    "Nunca usar s2s gpt-realtime no plano do Ligou: $0.345/min só de modelo estoura até o excedente de $0.35; ficar na pipeline (GPT-4.1/5-mini/Claude Haiku)",
+    "Concorrência default 20 chamadas simultâneas por workspace pay-as-you-go; extra $8/mês cada; burst cobra $0.10/min NA CHAMADA INTEIRA — dimensionar antes de escalar clientes",
+    "Multilíngue cross-family (EN+ES+PT) roda no pipeline multilingual com perda de acurácia por idioma; docs mandam usar o menor set possível e o dashboard é a fonte da verdade do combo — testar EN+es-419+pt-BR no dashboard antes de decidir; onboarding PT usa agente single-language pt-BR separado (grátis de fazer, override_agent_id)",
+    "Política de treinamento: NENHUMA declaração pública 'não treinamos nos seus dados' nas fontes oficiais; retenção default é indefinida até configurar; DPA/BAA sem custo via click-agreements.retellai.com — exigir a cláusula no DPA antes de assinar",
+    "Latência: claim do vendor ~600ms vs benchmark terceiro 2026 (openbenchmarks, PISTA não prova) medindo 1.740ms mediano experienciado pelo caller, em parte por endpointing default de 1000ms — rodar demo própria com endpointing tunado antes do go",
+    "Custom function: timeout default 120s, resposta cap 15k chars, tráfego sai do IP fixo 100.20.5.228 (ótimo p/ allowlist do authority plane), assinatura X-Retell-Signature",
+    "Vetting/KYC: nenhum gate documentado para outbound; KYC listado como recomendação anti-abuso, não exigência; Verified Phone Number é add-on opcional de $10/mês/número; números só US/CA",
+    "Lock-in: prompts/conversation flows/post-call analysis/roteamento multilíngue são config proprietária Retell; números comprados NA Retell não têm portabilidade documentada — importar do Twilio via elastic SIP mantém o número nosso e zera a telefonia Retell. Migração futura p/ OpenAI Realtime cru: refazer ASR/TTS/turn-taking/barge-in/bridge de telefonia/transfer/análise; sobrevivem o contrato de webhook do authority plane, os números Twilio e o Supabase",
+    "WebFetch da pricing page retornou nomes de modelo de 2026 (GPT 5.x, Claude 4.6) consistentes em dois fetches independentes e com a lista de modelos do create-retell-llm — números cruzados, mas re-conferir a página ao assinar"
+   ],
+   "sources": [
+    "https://www.retellai.com/pricing",
+    "https://docs.retellai.com/api-references/create-phone-number",
+    "https://docs.retellai.com/deploy/purchase-number",
+    "https://docs.retellai.com/agent/multilingual",
+    "https://docs.retellai.com/agent/language",
+    "https://docs.retellai.com/build/language-support",
+    "https://docs.retellai.com/api-references/create-agent",
+    "https://docs.retellai.com/api-references/create-retell-llm",
+    "https://docs.retellai.com/build/single-multi-prompt/custom-function",
+    "https://docs.retellai.com/build/single-multi-prompt/mcp",
+    "https://docs.retellai.com/build/conversation-flow/mcp-node",
+    "https://docs.retellai.com/get-started/mcp-server",
+    "https://docs.retellai.com/build/single-multi-prompt/transfer-call",
+    "https://docs.retellai.com/features/webhook-overview",
+    "https://docs.retellai.com/features/post-call-analysis-overview",
+    "https://docs.retellai.com/api-references/create-phone-call",
+    "https://docs.retellai.com/deploy/custom-telephony",
+    "https://docs.retellai.com/deploy/concurrency",
+    "https://docs.retellai.com/accounts/privacy-disable",
+    "https://docs.retellai.com/accounts/data-retention",
+    "https://docs.retellai.com/general/compliance",
+    "https://docs.retellai.com/reliability/check-actual-latency",
+    "https://docs.retellai.com/reliability/prevent-abuse",
+    "https://trust.retellai.com/",
+    "https://www.retellai.com/legal/privacy-policy",
+    "https://openbenchmarks.com/voice-agent-latency/retell (TERCEIRO — pista, não prova)"
+   ]
+  },
+  {
+   "platform": "Bland AI (bland.ai / docs.bland.ai)",
+   "summary": "Bland cobre bem o esqueleto do Ligou: outbound via API, números US locais por API ($15/mo cada) com config de agente independente por número sob uma conta, first_sentence verbatim, record off por padrão com transcrição sempre entregue, custom tools HTTP síncronas com timeout p/ o authority plane, webhook pós-chamada com transcrição+variáveis+summary, BYOT Twilio e preço all-in publicado ($0.12-0.14/min) folgado sob o teto de $0.20. Os buracos: warm transfer é gated a enterprise (só cold forward no self-serve), o modo multilíngue in-call (Babel) é BETA e não há evidência publicada de qualidade PT-BR, MCP existe só como dev-tooling (o agente NÃO consome MCP em chamada), e não há escolha de modelo — é pipeline proprietária self-hosted (\"Zero third-party AI\"), com a política de não-treinar afirmada só em blog, não em docs/ToS. Lock-in de prompt/pathways/tools é total ao migrar para OpenAI Realtime; números sobrevivem via BYOT. Caps de conta (Build: 50 concorrentes, 2.000 calls/dia, 1.000/h) são compartilhados entre TODOS os clientes do Ligou, e o platform fee do tier Build ($299/mo) é igual ao preço inteiro do produto.",
+   "checklist": [
+    {
+     "req": "1. Número US local via API, muitos números/uma conta (multi-tenant)",
+     "status": "yes",
+     "evidence": "POST /v1/inbound/purchase: \"$15/mo. subscription using your stored payment method\", param area_code (US local); update por número aceita prompt, pathway_id, voice, webhook, language, first_sentence, record próprios — config independente por número sob a mesma API key. Docs silenciosas sobre limite de quantidade de números; compra não exige enterprise.",
+     "url": "https://docs.bland.ai/api-v1/post/inbound-purchase"
+    },
+    {
+     "req": "2. EN+PT+ES na mesma chamada com qualidade PT-BR",
+     "status": "unclear",
+     "evidence": "Send Call param language lista pt, pt-BR, pt-PT; modo \"babel\": \"The Bland Babel Transcription Engine (BETA)...can handle multilingual conversations by identifying and switching languages on the fly\"; modo \"fluent\" \"auto-detects the spoken language and switches\". Troca in-call documentada MAS em BETA, e docs silenciosas sobre qualidade PT-BR (sem benchmark/demo publicado).",
+     "url": "https://docs.bland.ai/api-v1/post/calls"
+    },
+    {
+     "req": "3. Tool calling síncrono via webhook nosso (approve/deny) + MCP",
+     "status": "yes",
+     "evidence": "Custom Tools: url https obrigatória, method GET/POST, body com variáveis, \"response\" via JSON Path vira variáveis do prompt, timeout default 10s (\"If the external API doesn't respond within the timeout window, the tool fails\"), campo \"speech\" falado enquanto executa — fluxo bloqueia na resposta, então approve/deny do nosso authority plane funciona. PORÉM MCP para o agente em chamada: inexistente (ver campo mcpPlugins).",
+     "url": "https://docs.bland.ai/api-v1/post/tools"
+    },
+    {
+     "req": "4. Warm transfer para o celular do dono",
+     "status": "yes",
+     "evidence": "Cold forward em todos os planos: transfer_phone_number (\"transfer to under specific conditions\"). Warm transfer real (briefing + merge 3-way) existe mas: \"Warm Transfer requires an enterprise account due to its advanced call routing and management capabilities.\"",
+     "url": "https://docs.bland.ai/tutorials/warm-transfer"
+    },
+    {
+     "req": "5. Aviso legal VERBATIM no início",
+     "status": "yes",
+     "evidence": "first_sentence: \"Makes your agent say a specific phrase or sentence for its first response.\" String fixa, não gerada; configurável também por número inbound.",
+     "url": "https://docs.bland.ai/api-v1/post/calls"
+    },
+    {
+     "req": "6. Gravação desligável (off por padrão) mantendo transcrição",
+     "status": "yes",
+     "evidence": "\"record (default: false)\" — off por padrão; webhook pós-chamada entrega \"transcripts\" e \"concatenated_transcript\" sempre, \"recording_url\" só quando recording habilitado.",
+     "url": "https://docs.bland.ai/api-v1/post/calls"
+    },
+    {
+     "req": "7. Latência e barge-in nível produção com números publicados",
+     "status": "yes",
+     "evidence": "Homepage publica \"400ms\" de latência vs \"1,240ms\" média da indústria; \"handles interruptions, accents, and topic changes\"; params interruption_threshold e block_interruptions nas docs. Número é claim de marketing próprio, sem metodologia publicada.",
+     "url": "https://www.bland.ai/"
+    },
+    {
+     "req": "8. Preço total/min publicado + custo em 400 min",
+     "status": "yes",
+     "evidence": "Pricing publicado: Start $0.14/min sem fee; Build $0.12/min + \"$299/month platform fee\"; rate cobre \"LLM, Real-time transcription, Premium voices\", \"No token charges\", sem linha separada de telefonia além de transfer ($0.04/min Build, \"Free when using your own Twilio number\") e mínimo outbound $0.015/call. Ver aritmética no campo pricing.",
+     "url": "https://www.bland.ai/pricing"
+    },
+    {
+     "req": "9. Webhook pós-chamada com transcrição + extração estruturada",
+     "status": "yes",
+     "evidence": "Payload documentado: \"transcripts\", \"concatenated_transcript\", \"summary\", \"variables\" (valores extraídos), \"disposition_tag\", \"metadata\", \"citations\" — suficiente para gerar o resumo PT via WhatsApp no nosso lado.",
+     "url": "https://docs.bland.ai/tutorials/post-call-webhooks"
+    },
+    {
+     "req": "10. Chamadas OUTBOUND via API",
+     "status": "yes",
+     "evidence": "POST /v1/calls é o endpoint central: \"phone_number (required): The phone number to call\" + \"from\" próprio; language pt-BR disponível para a entrevista de onboarding.",
+     "url": "https://docs.bland.ai/api-v1/post/calls"
+    },
+    {
+     "req": "11. BYOC/SIP (trazer Twilio) e concorrência publicada",
+     "status": "yes",
+     "evidence": "Custom Twilio: \"Connect Bland to your own Twilio account\", importa números via dashboard ou API, encrypted_key no request; suíte SIP completa (attach/port/trunk). Concorrência publicada: Start 10 / Build 50 / Scale 100 chamadas simultâneas, caps 100–5.000 calls/dia. Docs silenciosas sobre gate de plano p/ BYOT.",
+     "url": "https://docs.bland.ai/tutorials/custom-twilio"
+    },
+    {
+     "req": "12. Escolha de modelo, não-treinar, controle do prompt",
+     "status": "no",
+     "evidence": "Sem escolha de modelo externo: param model aceita só \"base\"/\"turbo\"; trust page: \"Zero third-party AI\" (não usam OpenAI/Anthropic/Google) — impossível usar OpenAI Realtime. Não-treinar: só em blog oficial (\"We never share data with frontier model providers or train our models on customer data\"), ausente das docs/ToS consultáveis. Controle total do prompt: sim (task/prompt por chamada e por número).",
+     "url": "https://www.bland.ai/trust-security"
+    }
+   ],
+   "pricing": {
+    "perMinuteTotalUSD": 0.12,
+    "monthly400minUSD": 63,
+    "math": "Tier Build: 400 min x $0.12/min = $48.00 de uso (rate publicado cobre LLM + transcrição + vozes; \"No token charges\", \"no model-provider pass-throughs\"; nenhuma linha separada de telefonia por minuto publicada além de transfer time). + $15.00/mês pelo número US do cliente = $63.00 por cliente em 400 min. FORA disso, uma vez por CONTA (não por cliente): platform fee Build de $299/mês — amortizado, ex.: 10 clientes = +$29.90/cliente. Alternativa sem fee: tier Start a $0.14/min → 400 x $0.14 = $56.00 + $15 = $71.00, mas com teto de 10 chamadas simultâneas e 100 calls/dia PARA A CONTA INTEIRA. Extras: mínimo outbound $0.015/call; transfer $0.04/min (Build) ou grátis com número Twilio próprio (BYOT). Ambos os cenários ficam sob o teto de $0.20/min do excedente do Ligou.",
+    "url": "https://www.bland.ai/pricing"
+   },
+   "mcpPlugins": "MCP existe SOMENTE como dev-tooling: server remoto https://api.bland.ai/v1/mcp para Claude Code/Cursor operarem a conta Bland (\"place and inspect calls, build and validate pathways, manage agents... without leaving your editor\" — docs.bland.ai/integrations/mcp/overview). NÃO há suporte documentado a agente de voz consumindo MCP servers como tools DURANTE a chamada — o requisito do dono nesse sentido falha. Extensão em chamada é só via Custom Tools HTTP e \"integration tools\" nativas (docs.bland.ai/tutorials/tools/overview).",
+   "gotchas": [
+    "Warm transfer real é enterprise-only (\"requires an enterprise account\"); no self-serve só existe cold forward via transfer_phone_number — o handoff quente pro celular do dono exige contrato enterprise ou downgrade da experiência.",
+    "Multilíngue in-call (Babel) está marcado BETA nas docs; qualidade PT-BR sem nenhuma evidência publicada — exigir POC com chamada real em pt-BR antes de assinar.",
+    "MCP: o agente NÃO consome MCP servers em chamada; suporte MCP é só para IDE controlar a conta. Requisito explícito do dono não atendido.",
+    "Lock-in alto de runtime: pipeline proprietária self-hosted (\"Zero third-party AI\"), sem opção OpenAI Realtime; prompts/pathways/custom tools/Babel são formatos Bland — migrar depois = reescrever tudo exceto o authority plane (que é nosso) e os números (portáveis se BYOT/port-out).",
+    "Política de não-treinar existe só em blog de marketing, não localizada em docs/ToS/DPA públicos — pedir por escrito no contrato (trust portal/NDA no plano Enterprise).",
+    "Caps são POR CONTA, não por cliente: Build = 50 concorrentes, 2.000 calls/dia, 1.000/h compartilhados entre todos os clientes do Ligou; Start = 10 concorrentes/100 por dia (inviável multi-cliente).",
+    "Platform fee Build de $299/mês é exatamente o preço de UM cliente Ligou — só fecha conta com >2-3 clientes ativos.",
+    "Custos ocultos pequenos: mínimo $0.015/call outbound, failed calls $0.015, transfer time $0.04/min (zerado com BYOT Twilio — já temos conta Twilio ativa), número $15/mo cada.",
+    "Timeout de custom tool default 10s e \"the tool fails and the AI proceeds\" — o authority plane precisa responder rápido e o prompt precisa tratar o caso de falha para o agente não agir sem aprovação.",
+    "Nenhum gate de KYC/vetting documentado para compra de número US ou outbound no self-serve; números fora de US/CA exigem contato com suporte."
+   ],
+   "sources": [
+    "https://www.bland.ai/pricing",
+    "https://docs.bland.ai/platform/billing.md",
+    "https://docs.bland.ai/api-v1/post/calls",
+    "https://docs.bland.ai/api-v1/post/inbound-purchase",
+    "https://docs.bland.ai/api-v1/post/inbound-number-update.md",
+    "https://docs.bland.ai/api-v1/post/tools.md",
+    "https://docs.bland.ai/tutorials/tools/custom-api.md",
+    "https://docs.bland.ai/tutorials/warm-transfer.md",
+    "https://docs.bland.ai/tutorials/custom-twilio.md",
+    "https://docs.bland.ai/tutorials/post-call-webhooks.md",
+    "https://docs.bland.ai/integrations/mcp/overview.md",
+    "https://docs.bland.ai/api-v1/post/orgs.md",
+    "https://www.bland.ai/trust-security",
+    "https://www.bland.ai/",
+    "https://www.bland.ai/blogs/why-ai-data-security-sovereignty-and-compliance-need-to-be-non-negotiable",
+    "https://docs.bland.ai/llms.txt"
+   ]
+  },
+  {
+   "platform": "ElevenLabs Agents (ElevenAgents / ex-Conversational AI)",
+   "summary": "ElevenAgents cobre quase todo o runtime de voz do Ligou sem construir infraestrutura: importa números da nossa Twilio via API (um por cliente, sem gate enterprise), fala 70+ idiomas com troca automática no meio da chamada (pt incluso), chama nosso authority plane por webhook síncrono, faz warm transfer via Twilio nativo, dispara outbound via API com override de idioma/first_message, e entrega transcrição + extração estruturada por post-call webhook. Preço de plataforma publicado é $0.08/min ($32 em 400 min), mas o TOTAL por minuto não é publicado: LLM é cobrado à parte por token (ou vai direto pra nossa conta OpenAI/Anthropic via custom LLM) e a telefonia é faturada pela nossa Twilio. MCP é suportado nativamente com modos de aprovação por ferramenta. Lacunas/caveats: gravação de áudio vem LIGADA por padrão (desligável por agente via API mantendo transcrição), treinamento em dados self-serve é opt-out (não-treinamento só é default em Enterprise), e MCP é incompatível com Zero Retention Mode. Não há opção OpenAI Realtime speech-to-speech — é a pipeline ASR→LLM→TTS deles com LLM à escolha.",
+   "checklist": [
+    {
+     "req": "1. Número US local via API, um por cliente, multi-tenant sem enterprise",
+     "status": "yes",
+     "evidence": "POST /v1/convai/phone-numbers: \"Import Phone Number from provider configuration (Twilio, Exotel, or SIP trunk)\" — ElevenLabs NÃO vende número; compra-se na nossa Twilio (API) e importa-se via API com sid/token; sem cap documentado de números por workspace e sem gate enterprise para Twilio nativo",
+     "url": "https://elevenlabs.io/docs/api-reference/phone-numbers/create"
+    },
+    {
+     "req": "2. EN+PT+ES na mesma chamada com troca de idioma, qualidade PT-BR",
+     "status": "yes",
+     "evidence": "Marketing oficial: \"Agents speak 70+ languages and can switch between them mid-conversation\"; system tool language detection: \"if a user speaks a different language than the current output language, a switch will be triggered\", com preset pt (\"Oi, como você está?\") e voz+first_message por idioma. Qualidade PT-BR depende da voz escolhida (\"Select voices specifically trained in your target languages... Appropriate regional accents\") — docs não publicam benchmark PT-BR",
+     "url": "https://elevenlabs.io/docs/eleven-agents/customization/tools/system-tools/language-detection"
+    },
+    {
+     "req": "3. Tool calling via webhook síncrono para nosso servidor + MCP",
+     "status": "yes",
+     "evidence": "Webhook tools: agente chama APIs externas durante a conversa, espera a resposta e pode \"Specify dynamic variables to update from the tool response for later use in the conversation\" — nosso authority plane aprova/nega dentro da resposta. MCP: \"ElevenLabs supports both SSE (Server-Sent Events) and HTTP streamable transport MCP servers\" com aprovação Always Ask / Fine-Grained / No Approval",
+     "url": "https://elevenlabs.io/docs/eleven-agents/customization/tools/webhook-tools"
+    },
+    {
+     "req": "4. Warm transfer para o celular do dono",
+     "status": "yes",
+     "evidence": "transfer_to_number com Conference Transfer (default): \"When using the native Twilio integration, supports a warm transfer message (agent_message) read to the human operator\" — warm message SÓ com número importado via Twilio nativo; \"SIP-based transfers do not support warm transfer messages\"",
+     "url": "https://elevenlabs.io/docs/eleven-agents/customization/tools/system-tools/transfer-to-number"
+    },
+    {
+     "req": "5. Aviso legal VERBATIM no início (string fixa, não gerada)",
+     "status": "yes",
+     "evidence": "first_message é string configurada literal por agente e por idioma (language_presets.pt.overrides.agent.first_message) e sobrescrevível por chamada via overrides; docs de disclosure preveem \"A verbal or pre-recorded disclosure at the start of a voice call\" com texto sample",
+     "url": "https://elevenlabs.io/docs/eleven-agents/customization/voice/customization/language"
+    },
+    {
+     "req": "6. Gravação de áudio desligável (off por padrão) mantendo transcrição",
+     "status": "yes",
+     "evidence": "CAVEAT: \"By default, audio recordings are enabled\" — mas desligável por agente via API (platform_settings.privacy.record_voice=false) e \"transcripts can still be viewed\"; nosso provisioning precisa setar off na criação. ZRM por agente também existe (aí some tudo, só via webhook)",
+     "url": "https://elevenlabs.io/docs/eleven-agents/customization/privacy/audio-saving"
+    },
+    {
+     "req": "7. Latência e barge-in de produção com números publicados",
+     "status": "yes",
+     "evidence": "Página oficial /agents: \"Sub-500ms end-to-end latency for natural conversation; 70+ languages\" + \"Talk to interrupt\"; docs de conversation flow configuram interruptions, turn timeout e turn eagerness; demo ao vivo na própria página",
+     "url": "https://elevenlabs.io/agents"
+    },
+    {
+     "req": "8. Preço TOTAL por minuto publicado (plataforma+modelo+telefonia)",
+     "status": "no",
+     "evidence": "Só a plataforma é publicada: $0.08/min (pricing + blog 2026-05-07). LLM é extra e por token: \"LLM token usage is calculated in fiat currency, and the corresponding cost is deducted from your ElevenLabs credits\"; telefonia é faturada pela nossa Twilio, fora do preço ElevenLabs. Não existe número TOTAL/min publicado",
+     "url": "https://elevenlabs.io/pricing/api"
+    },
+    {
+     "req": "9. Webhook pós-chamada com transcrição completa + extração estruturada",
+     "status": "yes",
+     "evidence": "post_call_transcription: \"Contains full conversation data including transcripts, analysis results, and metadata\"; campos transcript (array de turnos) e analysis (\"Evaluation results and conversation summary\"); Data collection \"extracts structured information from conversation transcripts using LLM-powered analysis\"; HMAC signature",
+     "url": "https://elevenlabs.io/docs/eleven-agents/workflows/post-call-webhooks"
+    },
+    {
+     "req": "10. Chamadas OUTBOUND via API (onboarding em PT)",
+     "status": "yes",
+     "evidence": "POST /v1/convai/twilio/outbound-call com agent_id, agent_phone_number_id, to_number + conversation_initiation_client_data (override de first_message, language, prompt, dynamic_variables) — dá pra ligar pro dono e entrevistar em português; batch calling também existe; docs de TCPA publicadas",
+     "url": "https://elevenlabs.io/docs/api-reference/twilio/outbound-call"
+    },
+    {
+     "req": "11. BYOC/SIP trunk (trazer Twilio) e concorrência publicada",
+     "status": "yes",
+     "evidence": "Twilio nativo + SIP trunking (\"connect your existing telephony infrastructure directly to ElevenLabs Agents\", TLS, G711/G722); concorrência publicada no pricing: Free 4 / Starter 6 / Creator 10 / Pro 20 / Scale-Business 30 concurrent calls, burst \"up to 3 times your normal concurrency limit\" (máx 300, a 2x o preço); SIP com IP estático \"available for Enterprise accounts\"",
+     "url": "https://elevenlabs.io/docs/eleven-agents/phone-numbers/sip-trunking"
+    },
+    {
+     "req": "12. Escolha de modelo, não-treinar nos dados, controle total do prompt",
+     "status": "yes",
+     "evidence": "LLM à escolha: GPT-5.x/4o, Gemini 3.x/2.5, Claude Opus 4.7/Sonnet/Haiku, Qwen hosted, ou custom LLM (\"specifying the endpoint we should make requests to\"); system prompt totalmente nosso. CAVEATS: sem opção OpenAI Realtime speech-to-speech (pipeline é ASR→LLM→TTS deles); treinamento: \"By default, we don't train on any data from our Enterprise customers\" + self-serve treina por padrão com opt-out (\"Anyone can opt out of data use at any time\" via toggle Data use); termos exigem avisar que conversas podem ser compartilhadas com LLM providers terceiros",
+     "url": "https://elevenlabs.io/docs/eleven-agents/customization/llm"
+    }
+   ],
+   "pricing": {
+    "perMinuteTotalUSD": null,
+    "monthly400minUSD": 32,
+    "math": "Plataforma (publicado): $0.08/min — pricing/api mostra \"Price per minute $0.08\" e Additional Minutes $0.08 em todos os tiers incl. PAYG; blog oficial 2026-05-07: \"New cost: $0.08 per minute\". 400 min × $0.08 = $32.00/mês SÓ de plataforma. LLM: NÃO incluso e sem número por minuto — tooltip oficial: \"The cost for each Agents session is determined by its duration and the cost of the LLM tokens... deducted from your ElevenLabs credits\"; com custom LLM endpoint, o LLM sai na nossa conta OpenAI/Anthropic. Telefonia: número fica na NOSSA Twilio e a Twilio fatura à parte (fora do preço ElevenLabs). Total/min portanto não publicado; a âncora publicada de $0.08 fica abaixo do teto de $0.20 do excedente do Ligou, sobrando $0.12/min para LLM+Twilio. Silêncio: \"periods of silence... billed at 5% of the usual per minute rate\" (>10s). Burst: 2x a tarifa. Requer assinatura ElevenLabs ou PAYG (planos $0–$990/mês; concorrência cresce com o plano).",
+    "url": "https://elevenlabs.io/pricing/api"
+   },
+   "mcpPlugins": "Suportado nativamente e documentado: agentes conectam a MCP servers externos (\"ElevenLabs supports both SSE (Server-Sent Events) and HTTP streamable transport MCP servers\") com três modos de aprovação por ferramenta — Always Ask, Fine-Grained (auto-approved/requires approval/disabled) e No Approval — o que casa com o authority plane do Ligou. Restrição dura: \"MCP support is not currently available for users on Zero Retention Mode or those requiring HIPAA compliance\". Além do MCP de runtime, há um hosted MCP server para gerenciar agentes a partir do Claude, e biblioteca de integrações prontas (Cal.com, Calendly, Google Calendar, HubSpot, Twilio Voice/SMS, Slack, Zendesk etc.). Fonte: https://elevenlabs.io/docs/eleven-agents/customization/tools/mcp e https://elevenlabs.io/docs/eleven-agents/operate/hosted-mcp",
+   "gotchas": [
+    "Gravação de áudio vem LIGADA por padrão (\"By default, audio recordings are enabled\") — o provisioning do Ligou tem que setar platform_settings.privacy.record_voice=false por agente na criação; transcrição continua disponível",
+    "LLM não está no $0.08/min: tokens são debitados dos créditos ElevenLabs em cima da tarifa; os \"minutos inclusos\" dos planos assumem custom LLM (\"The displayed minute estimates are provided for cases where the user is utilizing a custom LLM option\") — usar custom LLM com nossas chaves OpenAI/Anthropic tira o LLM da fatura ElevenLabs",
+    "MCP é incompatível com Zero Retention Mode e HIPAA — não dá pra ter zero-retention E ferramentas MCP no mesmo agente; webhook tools continuam funcionando",
+    "Warm transfer (agent_message lido pro dono) só existe com número importado via Twilio NATIVO; transfers via SIP são sem mensagem de aquecimento — mais um motivo pra ficar no caminho Twilio",
+    "Concorrência é o teto real do multi-tenant: 4/6/10/20/30 chamadas simultâneas conforme o plano (burst 3x até 300 a 2x o preço); acima disso, Enterprise — planejar upgrade de plano conforme a base de clientes cresce",
+    "Treinamento nos dados: conta self-serve TREINA por padrão (\"ElevenLabs uses certain data you provide to us to improve the quality of our audio models\") com opt-out manual no toggle Data use; não-treinamento contratual só Enterprise; os termos ainda obrigam a divulgar ao cliente final que a conversa pode ser compartilhada com ElevenLabs e LLM providers terceiros",
+    "Aparente contradição nas docs de idioma: a página Language diz \"Language selection is fixed for the duration of the call\" (contexto: seletor do widget) enquanto o system tool language detection troca idioma no meio da chamada — a troca mid-call EXIGE habilitar o system tool + listar os idiomas adicionais no agente",
+    "Lock-in: baixo em telefonia (números ficam na nossa Twilio, saem junto), médio em configuração (agent configs exportáveis em JSON via CLI `elevenlabs agents pull`), alto em voz e camada conversacional — migrar pra OpenAI Realtime cru significa reconstruir turn-taking/barge-in, detecção de idioma, warm transfer, voicemail detection, análise pós-chamada e perder as vozes ElevenLabs; o authority plane via webhook é nosso e migra intacto",
+    "Sem gate de vetting/KYC documentado para uso básico; gates encontrados: SIP com IP estático = Enterprise, ZRM global = \"select enterprise customers\" (ZRM por agente tem toggle documentado sem gate explícito — ambíguo), HIPAA = fluxo próprio",
+    "Silêncio >10s cobrado a 5% da tarifa — hold/espera quase de graça; docs de TCPA existem para o outbound de onboarding",
+    "Bônus: a plataforma tem canal WhatsApp nativo com API de outbound message/call — alternativa tática pro resumo em PT ao dono se quisermos adiar integração própria de WhatsApp"
+   ],
+   "sources": [
+    "https://elevenlabs.io/docs/api-reference/phone-numbers/create",
+    "https://elevenlabs.io/docs/eleven-agents/phone-numbers/twilio-integration/native-integration",
+    "https://elevenlabs.io/docs/eleven-agents/phone-numbers/sip-trunking",
+    "https://elevenlabs.io/docs/eleven-agents/customization/voice/customization/language",
+    "https://elevenlabs.io/docs/eleven-agents/customization/tools/system-tools/language-detection",
+    "https://elevenlabs.io/docs/eleven-agents/customization/tools/webhook-tools",
+    "https://elevenlabs.io/docs/eleven-agents/customization/tools/mcp",
+    "https://elevenlabs.io/docs/eleven-agents/customization/tools/system-tools/transfer-to-number",
+    "https://elevenlabs.io/docs/eleven-agents/customization/privacy/audio-saving",
+    "https://elevenlabs.io/docs/eleven-agents/customization/privacy/zrm",
+    "https://elevenlabs.io/docs/eleven-agents/workflows/post-call-webhooks",
+    "https://elevenlabs.io/docs/api-reference/twilio/outbound-call",
+    "https://elevenlabs.io/docs/eleven-agents/customization/llm",
+    "https://elevenlabs.io/docs/eleven-agents/customization/llm/optimizing-costs",
+    "https://elevenlabs.io/docs/eleven-agents/guides/burst-pricing",
+    "https://elevenlabs.io/pricing/api",
+    "https://elevenlabs.io/blog/weve-lowered-api-agents-pricing-and-introduced-pay-as-you-go",
+    "https://elevenlabs.io/agents",
+    "https://elevenlabs.io/docs/help-center/legal/is-my-data-used-to-improve-eleven-labs-ai-models",
+    "https://elevenlabs.io/docs/eleven-agents/legal/disclosure-requirement",
+    "https://elevenlabs.io/docs/eleven-agents/customization/conversation-flow",
+    "https://elevenlabs.io/docs/eleven-agents/customization/personalization/overrides",
+    "https://elevenlabs.io/docs/eleven-agents/operate/hosted-mcp",
+    "https://elevenlabs.io/docs/eleven-agents/legal/tcpa"
+   ]
+  },
+  {
+   "platform": "Twilio ConversationRelay (+ AI Assistants — APOSENTADO jul/2026; sucessor: Twilio Agent Connect)",
+   "summary": "ConversationRelay (GA desde 2025) aluga exatamente o que o Ligou não quer construir — telefonia, STT, TTS, barge-in, troca de idioma — por $0.07/min, e inverte o problema do authority plane: o LLM roda no NOSSO servidor via WebSocket, então nada é falado nem executado sem o nosso servidor enviar os tokens, por construção. Cobre 11 dos 12 requisitos com fonte primária: números US via API multi-tenant (subcontas, teto 1000 default), en/pt-BR/es com switch mid-call documentado, welcomeGreeting verbatim, gravação off por default com transcrição independente via WebSocket, outbound via Calls API, latência publicada (p50 491ms/p95 713ms, benchmark interno). Custo plataforma+telefonia ~$0.0785/min inbound (400 min ≈ $32.55/mês/cliente antes do LLM) — folga enorme sob o teto de $0.20/min. Ressalvas: a metade \"AI Assistants\" do stack avaliado já foi aposentada (julho/2026) — a avaliação vale para ConversationRelay puro; e o \"gerenciado\" termina no STT/TTS: o loop LLM, o resumo em PT e a extração estruturada são construção nossa (pequena, roda em Vercel/Cloudflare + nossas chaves OpenAI/Anthropic).",
+   "checklist": [
+    {
+     "req": "1. Número US local via API, um por cliente, multi-tenant sob uma conta",
+     "status": "yes",
+     "evidence": "Subcontas: \"create a Twilio subaccount for each customer that signs up\"; teto default de 1000 subcontas (elevável via suporte); números comprados/transferidos via IncomingPhoneNumber API; número local $1.15/mês; sem gate enterprise — pay-as-you-go",
+     "url": "https://www.twilio.com/docs/iam/api/subaccounts"
+    },
+    {
+     "req": "2. Voz em EN+PT+ES na mesma chamada, com troca de idioma e qualidade pt-BR",
+     "status": "yes",
+     "evidence": "Mensagem WebSocket de troca mid-call: {\"type\":\"language\",\"ttsLanguage\":...,\"transcriptionLanguage\":...}; pt-BR, es-US, es-ES e en-US constam na tabela de vozes default do ConversationRelay (pt-BR: ElevenLabs CstacWqMhJQlnfLPxRG4, STT Google); Deepgram tem modo 'multi' de auto-detecção",
+     "url": "https://www.twilio.com/docs/voice/conversationrelay/websocket-messages"
+    },
+    {
+     "req": "3. Tool calling síncrono aprovado por nós antes da ação — e MCP/plugins",
+     "status": "yes",
+     "evidence": "Arquitetura inverte o problema: \"Your application receives transcribed caller speech in structured messages and sends responses as text\" — o LLM e as tools rodam no NOSSO servidor; nada é falado/executado sem nós enviarmos. MCP em chamada: docs silenciosas (implementável livremente no nosso loop)",
+     "url": "https://www.twilio.com/docs/voice/conversationrelay/conversationrelay-noun"
+    },
+    {
+     "req": "4. Warm transfer da chamada para o celular do dono",
+     "status": "yes",
+     "evidence": "Padrão documentado 'Virtual to Human Agent Transfers': app envia end message com handoffData → callback no action URL recebe \"HandoffData\": \"{\\\"reason\\\": \\\"The caller requested to talk to a real person\\\"}\" → responder TwiML <Dial> para o celular do dono",
+     "url": "https://www.twilio.com/docs/conversation-intelligence-classic/conversation-relay-integration"
+    },
+    {
+     "req": "5. Aviso legal VERBATIM no início (string fixa, não gerada)",
+     "status": "yes",
+     "evidence": "Atributo welcomeGreeting: \"The message Twilio plays to the caller after answering a call\" — string fixa no TwiML, fora do modelo; welcomeGreetingInterruptible=\"none\" garante reprodução integral",
+     "url": "https://www.twilio.com/docs/voice/conversationrelay/conversationrelay-noun"
+    },
+    {
+     "req": "6. Gravação DESLIGÁVEL (off por default) mantendo transcrição",
+     "status": "yes",
+     "evidence": "Gravação só existe por ação explícita: \"You can start a recording... <Record>... Record=true in an outbound call...\" (7 mecanismos, todos opt-in); a transcrição do CR chega pelo WebSocket independente de gravação — CR \"sends the transcribed utterances, but not the audio\"",
+     "url": "https://www.twilio.com/docs/voice/api/recording"
+    },
+    {
+     "req": "7. Latência e barge-in nível produção, números publicados",
+     "status": "yes",
+     "evidence": "Blog oficial (nov/2025 — potencialmente defasado): \"Based on internal benchmarks with ConversationRelay (p50 491 ms, p95 713 ms)\"; barge-in nativo via atributos interruptible/interruptSensitivity + interrupt message no WebSocket; não inclui o tempo do NOSSO LLM",
+     "url": "https://www.twilio.com/en-us/blog/developers/best-practices/guide-core-latency-ai-voice-agents"
+    },
+    {
+     "req": "8. Preço TOTAL/min publicado; custo em 400 min",
+     "status": "yes",
+     "evidence": "\"$0.07 / minute\" (ConversationRelay, inclui STT+TTS+transcrição real-time; \"Voice costs are calculated separately\") + $0.0085/min inbound local + $1.15/mês número; LLM não incluído — BYO, pago direto à OpenAI/Anthropic",
+     "url": "https://www.twilio.com/en-us/products/conversational-ai/pricing"
+    },
+    {
+     "req": "9. Pós-chamada: transcrição completa + extração estruturada",
+     "status": "yes",
+     "evidence": "Transcrição integral chega em tempo real ao nosso WebSocket (prompt messages) — nós já a temos ao fim da chamada; callback action entrega SessionStatus/SessionDuration/HandoffData (não o transcript); opcional intelligenceService armazena transcript + Operators (summarização). Extração/resumo PT = nosso LLM",
+     "url": "https://www.twilio.com/docs/voice/conversationrelay/conversationrelay-noun"
+    },
+    {
+     "req": "10. Chamadas OUTBOUND via API (onboarding: agente liga em PT)",
+     "status": "yes",
+     "evidence": "POST /2010-04-01/Accounts/{Sid}/Calls.json com Twiml/Url; guia oficial de outbound cita explicitamente \"deploy AI-powered agents\"; o TwiML devolvido pode ser <Connect><ConversationRelay language=\"pt-BR\">",
+     "url": "https://www.twilio.com/docs/voice/tutorials/how-to-make-outbound-phone-calls"
+    },
+    {
+     "req": "11. BYOC/SIP import (trazer Twilio) e limites de concorrência publicados",
+     "status": "unclear",
+     "evidence": "Trazer Twilio é nativo (nossa conta já é a telefonia — nada a importar). Mas o limite de concorrência do CR existe e o valor default NÃO é publicado: erro 64109 diz só \"reach out to Twilio to see if they can increase your concurrency limit\" — docs silenciosas sobre o número; contas sem Primary Customer Profile aprovado têm concorrência reduzida (erro 10004)",
+     "url": "https://www.twilio.com/docs/api/errors/64109"
+    },
+    {
+     "req": "12. Escolha de modelo, não treinar nos nossos dados, controle total do prompt",
+     "status": "yes",
+     "evidence": "GA blog: compatível com \"any LLM or AI agent\" — o modelo é 100% escolha nossa (OpenAI/Anthropic/xAI/Realtime, tanto faz: CR é texto-in/texto-out); AI Nutrition Facts dos 4 fornecedores STT/TTS: \"Base Model is not trained using any Customer Data\"; prompt nunca sai do nosso servidor; requer aceitar o Predictive & Generative AI/ML Features Addendum",
+     "url": "https://www.twilio.com/docs/voice/conversationrelay"
+    }
+   ],
+   "pricing": {
+    "perMinuteTotalUSD": 0.0785,
+    "monthly400minUSD": 32.55,
+    "math": "Publicado: ConversationRelay $0.07/min (inclui STT + TTS + transcrição real-time; pricing page conversational-ai) + perna de voz inbound local US $0.0085/min (voice/pricing/us). Total plataforma+telefonia inbound = 0.07 + 0.0085 = $0.0785/min. Outbound (onboarding do dono) = 0.07 + 0.0140 = $0.0840/min. Número local: $1.15/mês. 400 min inbound = 400 × 0.0785 = $31.40 + $1.15 (número) = $32.55/mês por cliente. LLM NÃO incluído nem publicado pela Twilio — é BYO (nossas chaves OpenAI/Anthropic, cobrado por token pelo provedor do modelo); o $0.0785 é o total das partes publicadas. Margem: $0.0785 << teto de $0.20/min do excedente e << $0.60 do plano — mesmo somando um LLM típico o custo/min fica confortavelmente abaixo de $0.20. Transferência quente adiciona $0.014/min na perna outbound enquanto bridged. Gravação (se ligada): +$0.0025/min."
+   },
+   "mcpPlugins": "ConversationRelay não executa tools — o LLM roda no NOSSO servidor (WebSocket texto-in/texto-out), então tool calling e MCP são o que implementarmos no nosso loop: suporte TOTAL por arquitetura, zero suporte \"gerenciado\". Docs de runtime do CR são silenciosas sobre MCP. O \"Twilio MCP Server\" oficial é ferramenta de DEV-time (\"gives AI assistants like Claude Code... direct access to Twilio documentation\" — blog twilio.com/en-us/blog/developers/best-practices/why-connect-twilio-mcp-server), não tool-calling em chamada. A camada que tinha Tools gerenciadas via webhook (AI Assistants, Developer Preview) foi aposentada: \"Twilio AI Assistants (Developer Preview) is retiring in July 2026\" com migração para Twilio Agent Connect (twilio.com/code-exchange/ai-assistants-samples) — para o Ligou isso é irrelevante: o authority plane É o nosso servidor WebSocket.",
+   "gotchas": [
+    "A metade 'AI Assistants' do stack avaliado JÁ MORREU: 'retiring in July 2026' (hoje é ago/2026); sucessor é Agent Connect. Avaliar/usar só ConversationRelay, que é GA e sozinho cobre o Ligou.",
+    "ConversationRelay não é agente gerenciado: é ponte telefonia↔STT/TTS. O cérebro (LLM, prompt, tools, authority plane, resumo PT) é 100% construção nossa — é pouca coisa (um WebSocket server), mas existe; o que se aluga é exatamente a infra de voz, que era a prioridade.",
+    "O callback 'action' pós-sessão NÃO traz a transcrição completa (só SessionStatus/Duration/HandoffData) — montar o transcript a partir das prompt messages do WebSocket (chegam em tempo real) ou anexar intelligenceService.",
+    "Operators do Conversation Intelligence ficam documentadamente imprecisos em transcript multi-idioma — gerar o resumo em PT com o nosso próprio LLM, não com Operators.",
+    "Limite de concorrência do CR existe (erro 64109) mas o default não é publicado; contas sem Business Primary Customer Profile aprovado no Trust Hub têm concorrência de voz reduzida (erro 10004) — aprovar o profile e perguntar o limite antes de escalar.",
+    "Latência publicada (p50 491ms/p95 713ms) é benchmark interno da Twilio (blog nov/2025, potencialmente defasado) e NÃO inclui o tempo do nosso LLM — o check do authority plane entra no caminho crítico da fala; manter aprovação rápida/cacheada.",
+    "Gate de onboarding: aceitar o Predictive & Generative AI/ML Features Addendum no Console (Voice > Settings > Privacy & Security) antes do primeiro uso; fora isso, sem vetting/KYC/enterprise para CR — GA, pay-as-you-go.",
+    "Não colocar dado sensível em welcomeGreeting, customParameters ou handoffData — docs avisam que esses campos não são tratados como dados PCI.",
+    "Lock-in baixo: o que se reescreve ao migrar para OpenAI Realtime cru é o protocolo WebSocket do CR (setup/prompt/tokens/language/end) + config de vozes, trocado por Media Streams + Realtime; números, telefonia, prompt, authority plane e Supabase ficam intactos — a Twilio continua sendo a operadora nos dois cenários.",
+    "Transferência 'quente' documentada = end-session → action URL → <Dial> (transferência com handoff de contexto via HandoffData); briefing simultâneo dono+cliente exigiria conference, construção nossa.",
+    "ElevenLabs/Google/Amazon TTS e Google/Deepgram STT já inclusos no $0.07/min — não contratar ElevenLabs à parte."
+   ],
+   "sources": [
+    "https://www.twilio.com/docs/voice/conversationrelay/conversationrelay-noun",
+    "https://www.twilio.com/docs/voice/twiml/connect/conversationrelay",
+    "https://www.twilio.com/docs/voice/conversationrelay/websocket-messages",
+    "https://www.twilio.com/docs/voice/conversationrelay/voice-configuration",
+    "https://www.twilio.com/docs/voice/conversationrelay/onboarding",
+    "https://www.twilio.com/docs/voice/conversationrelay",
+    "https://www.twilio.com/en-us/products/conversational-ai/pricing",
+    "https://www.twilio.com/en-us/voice/pricing/us",
+    "https://www.twilio.com/docs/conversation-intelligence-classic/conversation-relay-integration",
+    "https://www.twilio.com/docs/api/errors/64109",
+    "https://www.twilio.com/docs/api/errors/10004",
+    "https://www.twilio.com/docs/voice/api/recording",
+    "https://www.twilio.com/docs/iam/api/subaccounts",
+    "https://www.twilio.com/docs/voice/tutorials/how-to-make-outbound-phone-calls",
+    "https://www.twilio.com/en-us/blog/developers/best-practices/guide-core-latency-ai-voice-agents",
+    "https://www.twilio.com/en-us/blog/conversationrelay-generally-available",
+    "https://www.twilio.com/code-exchange/ai-assistants-samples",
+    "https://www.twilio.com/en-us/blog/developers/best-practices/why-connect-twilio-mcp-server"
+   ]
+  },
+  {
+   "platform": "LiveKit Cloud + Agents (managed)",
+   "summary": "LiveKit Cloud cobre 11 dos 12 requisitos com fontes primárias: números US locais self-serve via API/CLI ($1/mês cada, sem gate enterprise), tool calling nativo (o agente É nosso código Python, então o authority plane roda in-process, sem webhook na latência crítica), MCP suportado, warm transfer documentado, say() verbatim, outbound via CreateSIPParticipant, BYOC Twilio oficial, escolha total de modelo (pipeline ou OpenAI Realtime via plugin BYO-key) e ZDR/no-training contratual no Inference. Custo marginal ~$0.063/min e ~$65/mês em 400 min (plano Ship) — folga enorme contra os tetos de $0.20/$0.60 do Ligou. O que falta: troca de idioma mid-call não é documentada (docs silenciosas; PT-BR depende do stack STT/TTS escolhido), números nativos LiveKit são inbound-only (outbound exige trunk Twilio BYOC), e gravação de observability é ON por padrão (desligável por sessão mantendo transcript). Trade-off central: não é turnkey tipo Retell/Vapi — é um framework de código com deploy gerenciado; mais engenharia inicial, porém lock-in menor e controle total.",
+   "checklist": [
+    {
+     "req": "1. Número US local via API, um por cliente, multi-tenant numa conta",
+     "status": "yes",
+     "evidence": "\"Purchase and manage phone numbers for your telephony apps directly through LiveKit\"; CLI \"lk number purchase --numbers +16505550010\" + Phone Numbers APIs; pricing: 1 número grátis por plano, depois $1.00/mês cada — self-serve, sem gate enterprise. Sem cap publicado de quantidade; roteamento por número via dispatch rules. CAVEAT: \"LiveKit Phone Numbers currently only supports inbound calling.\"",
+     "url": "https://docs.livekit.io/telephony/start/phone-numbers/"
+    },
+    {
+     "req": "2. EN+PT+ES na mesma chamada com qualidade PT-BR",
+     "status": "unclear",
+     "evidence": "Turn detector de áudio: \"supports 14 languages: English, ... Spanish, ... Portuguese...\" — mas docs silenciosas sobre troca de idioma mid-call e sobre qualidade PT-BR; STT/TTS são escolha nossa (Deepgram/AssemblyAI/Cartesia/ElevenLabs via Inference ou plugin), então é testável mas não provado pelas docs.",
+     "url": "https://docs.livekit.io/agents/build/turns/turn-detector/"
+    },
+    {
+     "req": "3. Tool calling síncrono para nosso servidor + MCP",
+     "status": "yes",
+     "evidence": "Function tools \"defined as functions within your agent's code base\" podem \"Call external APIs\" — o agente é NOSSO código Python, o gate do authority plane é uma chamada await dentro do tool, aprovação/negação antes de falar. MCP: \"Expose tools from MCP servers to your agent (Python only)\".",
+     "url": "https://docs.livekit.io/agents/build/tools/"
+    },
+    {
+     "req": "4. Warm transfer para o celular do dono",
+     "status": "yes",
+     "evidence": "Página oficial \"Agent-assisted warm transfer\": coloca caller em hold, agente resume a chamada ao humano, retorna ao caller se indisponível; WarmTransferTask(target_phone_number, hold_audio, sip_trunk_id) — API em livekit.agents.beta.workflows (beta).",
+     "url": "https://docs.livekit.io/telephony/features/transfers/warm/"
+    },
+    {
+     "req": "5. Aviso legal VERBATIM no início",
+     "status": "yes",
+     "evidence": "\"To have the agent speak a predefined message, use session.say(). This triggers the configured TTS to synthesize speech\" — string fixa, não gerada pelo LLM; docs até recomendam áudio pré-sintetizado em cache para greetings fixos.",
+     "url": "https://docs.livekit.io/agents/build/audio/"
+    },
+    {
+     "req": "6. Gravação desligável mantendo transcrição",
+     "status": "yes",
+     "evidence": "Controle granular por sessão: record={audio, transcript, traces, logs} — audio=False mantém transcript=True. CAVEAT: padrão é ON (\"Audio recordings are automatically collected and uploaded to LiveKit Cloud for each session\"; \"Omitted keys default to True\") — temos que passar audio=False explicitamente. Retenção 30 dias em plano pago.",
+     "url": "https://docs.livekit.io/deploy/observability/insights/"
+    },
+    {
+     "req": "7. Latência e barge-in nível produção",
+     "status": "yes",
+     "evidence": "Barge-in documentado: \"pauses the agent's speech whenever it detects user speech\"; interrupção trunca o histórico ao que o usuário ouviu; min_duration configurável. Turn detector: \"Per Turn Latency ~50-160 ms\". Métricas por turno (e2e_latency, TTFT, TTFB) expostas no SDK + blog oficial de latência. CAVEAT: nenhum número end-to-end garantido publicado.",
+     "url": "https://livekit.com/blog/understand-and-improve-agent-latency"
+    },
+    {
+     "req": "8. Preço TOTAL por minuto publicado",
+     "status": "yes",
+     "evidence": "Todos os componentes publicados: agente $0.01/min, número LiveKit inbound $0.01/min, STT Nova-3 $0.0048/min, TTS Cartesia Sonic 3 $50/M chars, GPT-4o mini $0.15/$0.60 por M tokens. Total ~$0.063/min (aritmética no campo pricing) — bem abaixo dos tetos $0.20/$0.60 do Ligou.",
+     "url": "https://livekit.com/pricing/inference"
+    },
+    {
+     "req": "9. Pós-chamada: transcrição completa + extração estruturada",
+     "status": "yes",
+     "evidence": "Não é webhook gerenciado — é código nosso: \"the session.history object contains the full conversation\" + ctx.add_shutdown_callback \"for post-conversation cleanup like webhooks or logging\" — no shutdown chamamos LLM para extração e postamos ao nosso servidor. Transcripts também ficam no Agent insights (30 dias).",
+     "url": "https://docs.livekit.io/deploy/observability/data/"
+    },
+    {
+     "req": "10. Chamadas OUTBOUND via API (onboarding)",
+     "status": "yes",
+     "evidence": "\"When you create a SIP participant, LiveKit uses an outbound trunk to initiate a call to the specified phone number\" — CreateSIPParticipant + agent dispatch com número no metadata. CAVEAT: números nativos LiveKit são inbound-only (\"Support for outbound calls is coming soon\") — outbound exige trunk BYOC (Twilio, que já temos).",
+     "url": "https://docs.livekit.io/telephony/making-calls/outbound-calls/"
+    },
+    {
+     "req": "11. BYOC/SIP trunk (Twilio) + concorrência publicada",
+     "status": "yes",
+     "evidence": "Guia oficial \"Create and configure a Twilio SIP trunk\" (inbound e outbound); \"LiveKit SIP is designed to work with all SIP providers\". Concorrência publicada no pricing: agent sessions Build 5 / Ship 20 / Scale 600+; Inference 5/20/50 conexões.",
+     "url": "https://docs.livekit.io/telephony/start/providers/twilio/"
+    },
+    {
+     "req": "12. Escolha de modelo, no-training, controle do prompt",
+     "status": "yes",
+     "evidence": "\"a high-performance STT-LLM-TTS voice pipeline ... or ... a realtime model with direct speech-to-speech\"; plugin OpenAI suporta \"the Realtime API\" com nossa key. ToS: inference providers \"contractually required not to retain, log, train on, fine-tune ... Inference Data\"; privacy: LiveKit não usa conteúdo/prompts/transcripts/áudio de clientes para treinar. Prompt 100% nosso (é nosso código).",
+     "url": "https://docs.livekit.io/agents/models/"
+    }
+   ],
+   "pricing": {
+    "perMinuteTotalUSD": 0.063,
+    "monthly400minUSD": 65,
+    "math": "Por minuto (rates Build/Ship publicados em livekit.com/pricing e livekit.com/pricing/inference): agente $0.010/min + telefonia número LiveKit inbound $0.010/min + STT Deepgram Nova-3 $0.0048/min + LLM GPT-4o mini ($0.15/M input, $0.60/M output; ASSUMINDO ~4.000 tokens in + 400 out por min = 4000×0.15/1M + 400×0.60/1M = $0.0006+$0.00024 ≈ $0.001/min) + TTS Cartesia Sonic 3 $50/M chars (ASSUMINDO ~750 chars de fala do agente por min = 750×50/1.000.000 = $0.0375/min) = 0.010+0.010+0.0048+0.001+0.0375 = $0.0633/min. Mês com 400 min no plano Ship ($50/mês, inclui 5.000 min de agente, 100 min inbound, $5 de créditos Inference, 20 sessões concorrentes): base $50 + agente 400 min (dentro dos 5.000 inclusos) $0 + telefonia (400−100)×$0.01 = $3.00 + inference 400×($0.0048+$0.001+$0.0375=$0.0433) = $17.32 − $5 crédito = $12.32 → TOTAL ≈ $65.32/mês. Excedente marginal $0.063/min vs $0.35 cobrado = margem ~$0.29/min. Número extra por cliente: $1.00/mês (1º grátis). Twilio BYOC para outbound cobra à parte (tarifa Twilio, fora deste total; lado LiveKit SIP $0.004/min).",
+    "url": "https://livekit.com/pricing"
+   },
+   "mcpPlugins": "Suportado oficialmente: \"Expose tools from MCP servers to your agent (Python only)\" (https://docs.livekit.io/agents/build/tools/) — o agente consome tools de servidores MCP; além disso ecossistema de plugins BYO-key (OpenAI incl. Realtime API, Deepgram, Cartesia, ElevenLabs, Google etc.) e LiveKit Inference embutido sem plugin. Como o runtime é nosso código, qualquer integração extra é código Python normal.",
+   "gotchas": [
+    "NÃO é turnkey tipo Retell/Vapi: LiveKit Agents é um framework — nós escrevemos e mantemos o worker Python; o \"managed\" é hospedagem/orquestração/observability na LiveKit Cloud. Mais engenharia inicial, mas o authority plane vira função in-process (sem hop HTTP na latência crítica).",
+    "Números nativos LiveKit são INBOUND-ONLY hoje (\"Support for outbound calls is coming soon\") — o onboarding outbound do Ligou exige trunk SIP Twilio BYOC em paralelo; operação com dois caminhos de telefonia. Port-out de números comprados na LiveKit: docs silenciosas.",
+    "Gravação de áudio de observability é ON por padrão em toda sessão — passar record={\"audio\": False} por sessão para cumprir o requisito 6; transcript continua coletado.",
+    "Free tier (Build) participa do \"model improvement program\" da LiveKit com retenção maior de dados anonimizados — produção tem que ser plano pago (Ship+, retenção 30 dias, sem treino).",
+    "O ZDR/no-training contratual cobre o LiveKit Inference; usando OpenAI Realtime via plugin BYO-key, a política de dados passa a ser a da OpenAI (nossa conta), fora do guarda-chuva LiveKit.",
+    "Nenhum número oficial de latência end-to-end garantido; só métricas por turno no SDK e turn detector ~50–160 ms — validar latência real num piloto.",
+    "Troca de idioma mid-call (EN↔ES↔PT) não documentada; qualidade PT-BR depende do STT/TTS escolhido — testar no onboarding (que é 100% PT) antes de comprometer.",
+    "Concorrência de Inference: 50 conexões STT/TTS no Scale — pode virar gargalo multi-tenant antes das 600 agent sessions; mitigável com plugins BYO-key (sem esse limite) ou Enterprise.",
+    "WarmTransferTask está em livekit.agents.beta.workflows (beta) — API pode mudar; existe caminho manual documentado como fallback.",
+    "Sem gate de vetting/KYC/enterprise documentado para números US ou SIP (self-serve); obrigações regulatórias do trunk Twilio (SHAKEN/STIR etc.) continuam do nosso lado.",
+    "Lock-in baixo-médio: livekit-agents é open source e self-hostável; prompts/lógica/authority plane portáveis. Migrar para OpenAI Realtime cru depois = reescrever transporte de áudio+SIP, turn detection, barge-in e warm transfer (as partes que hoje alugamos)."
+   ],
+   "sources": [
+    "https://livekit.com/pricing",
+    "https://livekit.com/pricing/inference",
+    "https://docs.livekit.io/telephony/start/phone-numbers/",
+    "https://docs.livekit.io/sip/",
+    "https://docs.livekit.io/agents/build/tools/",
+    "https://docs.livekit.io/telephony/features/transfers/warm/",
+    "https://docs.livekit.io/agents/build/audio/",
+    "https://docs.livekit.io/agents/build/turns/",
+    "https://docs.livekit.io/agents/build/turns/turn-detector/",
+    "https://docs.livekit.io/deploy/observability/insights/",
+    "https://docs.livekit.io/deploy/observability/data/",
+    "https://docs.livekit.io/telephony/making-calls/outbound-calls/",
+    "https://docs.livekit.io/telephony/start/providers/twilio/",
+    "https://docs.livekit.io/agents/models/",
+    "https://docs.livekit.io/deploy/admin/quotas-and-limits/",
+    "https://livekit.com/legal/terms-of-service",
+    "https://livekit.com/legal/privacy-policy",
+    "https://livekit.com/blog/understand-and-improve-agent-latency"
+   ]
+  },
+  {
+   "checklist": [
+    {
+     "req": "1. Número US local via API, um por cliente, multi-tenant sob uma conta",
+     "status": "yes",
+     "evidence": "POST https://api.daily.co/v1/buy-phone-number com busca por 'region, city, areacode'; 'There is no restriction on the number of phone numbers you can buy'. Roteamento por número: webhook automático (Settings > Telephony, escolhe o agente por número) ou webhook próprio p/ 'customize the bot's behavior based on the caller's number or the number dialed'. Sem gate enterprise; número US = $2/mês. Só US/Canadá (+1) — ok p/ Ligou.",
+     "url": "https://docs.daily.co/reference/rest-api/phone-numbers"
+    },
+    {
+     "req": "2. EN+PT+ES na mesma chamada com troca de idioma, qualidade PT-BR",
+     "status": "yes",
+     "evidence": "Troca mid-call documentada: 'STTUpdateSettingsFrame(delta=DeepgramSTTService.Settings(language=Language.ES))' e TTSUpdateSettingsFrame p/ trocar voz/idioma; 'update settings frames are uninterruptible'. CAVEAT: idiomas/qualidade PT-BR vêm do STT/TTS que NÓS escolhemos entre 80+ provedores (ElevenLabs/Cartesia/Deepgram têm pt-BR); a plataforma não publica claim de qualidade PT-BR própria.",
+     "url": "https://docs.pipecat.ai/pipecat/fundamentals/service-settings"
+    },
+    {
+     "req": "3. Tool calling síncrono via nosso webhook (aprovar/negar antes) + MCP",
+     "status": "yes",
+     "evidence": "O agente É código Python nosso rodando no container: function calling executa a função que escrevemos — o authority plane vira uma chamada HTTP síncrona in-process, com poder de bloquear fala/ação antes de acontecer (mais forte que webhook de plataforma fechada). MCP: 'MCPClient provides a way to access and call tools via MCP', suporta stdio/SSE/streamable HTTP, register_tools(llm).",
+     "url": "https://docs.pipecat.ai/server/utilities/mcp/mcp"
+    },
+    {
+     "req": "4. Warm transfer para o celular do dono",
+     "status": "yes",
+     "evidence": "Guia oficial Daily PSTN: warm transfer = 'the bot stays on the call, dials a specialist, briefs them while the caller is on hold, then bridges everyone together'; cold transfer via sip_call_transfer(); sip_refer() disponível ($0.20/evento). Nota: 'The bot is the room owner, so when it leaves, the Daily room terminates' — no warm transfer o bot fica na ponte e os minutos continuam contando.",
+     "url": "https://docs.pipecat.ai/pipecat/telephony/daily-pstn"
+    },
+    {
+     "req": "5. Aviso legal VERBATIM no início (string fixa, não gerada)",
+     "status": "yes",
+     "evidence": "TTSSpeakFrame: frame com 'text (the text to be spoken)' — empurra string literal direto pro TTS, fora do LLM; append_to_context controla se entra no contexto. Método recomendado desde 0.0.79 ('push a TTSSpeakFrame instead').",
+     "url": "https://docs.pipecat.ai/pipecat/learn/text-to-speech"
+    },
+    {
+     "req": "6. Gravação desligável (off por padrão) mantendo transcrição",
+     "status": "yes",
+     "evidence": "Gravação é 100% opt-in: dev adiciona AudioBufferProcessor ou contrata add-on ($0.005/min áudio) — nada grava por padrão; docs de segurança: 'Ephemeral data used during agent sessions is removed when the session ends'. Transcrição vem dos eventos do STT no pipeline, independente de gravação de áudio.",
+     "url": "https://docs.pipecat.ai/pipecat/fundamentals/recording-audio"
+    },
+    {
+     "req": "7. Latência e barge-in nível produção com números publicados",
+     "status": "yes",
+     "evidence": "Barge-in nativo do framework (InterruptionFrame; classes TTS 'interruptible'; word timestamps p/ contexto exato pós-interrupção). Latência: Daily publica benchmarks próprios (STT TTFS, alvo 'P95 Final under 800ms'; 'best voice agents... begin generating audio in under a second') e demos open-source verificáveis. CAVEAT: benchmarks de componente, não SLA fim-a-fim da plataforma.",
+     "url": "https://www.daily.co/blog/benchmarking-stt-for-voice-agents/"
+    },
+    {
+     "req": "8. Preço total/min publicado (plataforma+modelo+telefonia)",
+     "status": "yes",
+     "evidence": "Tudo da plataforma é publicado: agent-1x $0.01/min ativo ($0.0005/min reservado), PSTN dial-in/out $0.018/min, WebRTC voz 1:1 grátis, número $2/mês, SIP REFER $0.20/evento, gravação $0.005/min. CAVEAT estrutural: modelos (STT/LLM/TTS) NÃO passam pela plataforma — cobrados direto nas nossas chaves; não existe taxa única total, existe calculadora oficial na página de pricing.",
+     "url": "https://www.daily.co/pricing/pipecat-cloud/"
+    },
+    {
+     "req": "9. Webhook pós-chamada com transcrição completa + extração estruturada",
+     "status": "yes",
+     "evidence": "Não é turnkey — é código nosso: guia oficial 'Transcripts are collected using turn events on the context aggregators... you can save transcripts to a database or file'; como o processo é nosso, no fim da sessão o próprio bot POSTa transcrição + extração (LLM) pro nosso servidor/WhatsApp. Docs silenciosas sobre webhook pós-chamada nativo da plataforma.",
+     "url": "https://docs.pipecat.ai/pipecat/fundamentals/saving-transcripts"
+    },
+    {
+     "req": "10. Chamadas OUTBOUND via API (onboarding liga pro dono)",
+     "status": "yes",
+     "evidence": "POST https://api.pipecat.daily.co/v1/public/{service}/start com dialout_settings ('phoneNumber', 'callerId' = UUID de número comprado) e '\"enable_dialout\": true'; evento on_dialout_answered. 'If no callerId is provided, a random phone number will be used'. Gate: 'International dial-out needs explicit account enablement via sales contact' — dial-out doméstico US (nosso caso) sem gate.",
+     "url": "https://docs.pipecat.ai/pipecat-cloud/guides/telephony/daily-dial-out"
+    },
+    {
+     "req": "11. BYOC/SIP trunk (trazer Twilio) e limites de concorrência publicados",
+     "status": "yes",
+     "evidence": "Twilio suportado por 2 vias: Media Streams websocket com endpoint dedicado 'wss://{region}.api.pipecat.daily.co/ws/twilio?serviceHost=...' e SIP interconnect (URI SIP estática da sala Daily p/ 'routing calls from providers like Twilio, Telnyx...'). Concorrência publicada: 'Each deployment... has a maximum allowed pool size of 50'; mais que 50 = help@daily.co (marketing diz 'unlimited concurrency' — o número real de docs é 50 default).",
+     "url": "https://docs.pipecat.ai/pipecat-cloud/fundamentals/scaling"
+    },
+    {
+     "req": "12. Escolha de modelo (OpenAI Realtime ou pipeline própria), não-treino, controle total do prompt",
+     "status": "yes",
+     "evidence": "'OpenAIRealtimeLLMService provides speech-to-speech conversation over the OpenAI Realtime API, replacing separate STT, LLM, and TTS' — coexiste com pipeline em cascata (80+ provedores) no mesmo framework; prompt é 100% nosso (nós escrevemos o código). Não-treino: docs da plataforma silenciosas sobre treino (produto diz 'We don't store your data'; Trust Center gated) — mas a inferência vai direto nas NOSSAS chaves OpenAI/Anthropic, então vale a política API dos provedores que já temos.",
+     "url": "https://docs.pipecat.ai/api-reference/server/services/s2s/openai.md"
+    }
+   ],
+   "gotchas": [
+    "NATUREZA DA PLATAFORMA: Pipecat Cloud é runtime gerenciado para CÓDIGO Python nosso em container Docker — aluga infra (hosting, escala, PSTN, transfers), não aluga o agente pronto. É a opção managed mais code-heavy: uma pessoa + agentes de IA vai manter um codebase Python de voz. Em troca, authority plane, disclaimer verbatim, MCP e multi-tenant saem de graça porque tudo é nosso código.",
+    "Daily Bots é legado: docs.pipecat.daily.co redireciona 301 para docs.pipecat.ai; a página de pricing do Daily Bots ainda no ar tem taxas antigas (PSTN $0.025/min vs $0.018 atual) — avaliar/contratar como Pipecat Cloud (GA jan/2026), ignorar material Daily Bots como defasado.",
+    "Concorrência: marketing diz 'unlimited', docs dizem pool máximo default de 50 instâncias concorrentes por deployment (1 sessão por instância); acima disso é e-mail para help@daily.co. 50 chamadas simultâneas cobre o Ligou por muito tempo, mas o número real é 50, não infinito.",
+    "Cold start com scale-to-zero: 'around 10 seconds is a best case' — inaceitável para atender telefone. Precisa min-agents>=1 reservado: $0.0005/min × 1440 min/dia ≈ $0.72/dia ≈ $21.6/mês por instância quente (aritmética das taxas publicadas). Há buffer de auto-scale (~30s) gratuito acima disso.",
+    "Warm transfer mantém o bot como dono da sala fazendo ponte de áudio ('when it leaves, the Daily room terminates and any remaining PSTN legs drop') — minutos de agente + 2 pernas PSTN continuam contando durante toda a transferência. SIP REFER ($0.20/evento) libera a Daily da chamada, mas é handoff frio.",
+    "Números: só US/Canadá (+1) via API (ok p/ Ligou); número não pode ser liberado antes de 14 dias da compra; CNAM (nome no caller ID) é processo manual via help@daily.co com documentos da empresa. Dial-out internacional exige habilitação comercial — irrelevante para chamadas domésticas US, mas se o onboarding em português algum dia ligar para o Brasil, tem gate.",
+    "Não-treino nos dados: docs públicas silenciosas no nível da plataforma (Trust Center sob acesso mediante pedido; roadmap SOC 2 para Pipecat Cloud citado no blog GA — WebRTC da Daily já é SOC 2, HIPAA disponível). Mitigante estrutural: mídia é efêmera e modelos rodam nas nossas próprias chaves.",
+    "Bug conhecido relevante para o resumo pós-chamada: issue #4466 do pipecat — interrupção (barge-in) pode descartar TTSTextFrames já falados, e o transcript da fala interrompida não persiste via guia saving-transcripts. Testar o caminho transcrição→resumo WhatsApp com barge-in no disclaimer.",
+    "LOCK-IN (o mais baixo da categoria managed): Pipecat é open source (BSD-2) — o MESMO código roda self-hosted em VM (docs têm padrões vm-per-session/warm-pool) ou continua na Twilio via websocket. Migrar para OpenAI Realtime cru depois: o framework já embrulha OpenAI Realtime hoje (trocar 1 service no pipeline); abandonar o framework inteiro é que custaria — perderíamos telefonia/transfer/turn-taking prontos. O que prende à Daily especificamente: números PSTN da Daily ($2/mês; portabilidade não documentada), primitivas de sala/transfer, e o hosting — mas com nossa conta Twilio como BYOC via websocket, até a telefonia fica fora da Daily se quisermos."
+   ],
+   "mcpPlugins": "Suporte MCP first-class no framework: MCPClient oficial (pipecat.services.mcp_service.MCPClient) com transports stdio, SSE e streamable HTTP, filtro de tools e registro automático no LLM via register_tools() — docs primárias em https://docs.pipecat.ai/server/utilities/mcp/mcp e referência em https://reference-server.pipecat.ai/en/latest/api/pipecat.services.mcp_service.html. Como o agente é código nosso, 'plugins' = qualquer lib Python + qualquer MCP server; não há marketplace fechado nem gate.",
+   "platform": "Pipecat Cloud (Daily) — sucessor do Daily Bots; runtime gerenciado do framework open-source Pipecat",
+   "pricing": {
+    "perMinuteTotalUSD": null,
+    "monthly400minUSD": 13.2,
+    "math": "Publicado pela plataforma: hosting agent-1x $0.01/min ativo + telefonia Daily PSTN $0.018/min = $0.028/min (WebRTC voz 1:1 grátis). 400 min × $0.028/min = $11.20; + número US $2/mês = $13.20/mês de plataforma+telefonia. Modelos (STT/LLM/TTS ou OpenAI Realtime) NÃO são faturados pela plataforma — vão direto nas nossas chaves já existentes, sem taxa única publicada (a página oficial tem calculadora); por isso perMinuteTotalUSD=null. Folga contra o teto do Ligou: $0.20/min (excedente) − $0.028/min = $0.172/min disponíveis para modelos BYO; teto do plano $0.60/min − $0.028 = $0.572/min. Custo fixo extra recomendado: 1 instância reservada quente = $0.0005/min × 1440 = ~$0.72/dia (~$21.6/mês). Add-ons opcionais: gravação áudio $0.005/min, Krisp VIVA $0.0015/min acima de 10k min, SIP REFER $0.20/evento.",
+    "url": "https://www.daily.co/pricing/pipecat-cloud/"
+   },
+   "sources": [
+    "https://www.daily.co/pricing/pipecat-cloud/",
+    "https://www.daily.co/pricing/video-sdk/",
+    "https://docs.pipecat.ai/pipecat-cloud/guides/telephony/overview",
+    "https://docs.pipecat.ai/pipecat-cloud/guides/telephony/daily-dial-in",
+    "https://docs.pipecat.ai/pipecat-cloud/guides/telephony/daily-dial-out",
+    "https://docs.pipecat.ai/pipecat/telephony/daily-phone-numbers",
+    "https://docs.pipecat.ai/pipecat/telephony/daily-pstn",
+    "https://docs.daily.co/reference/rest-api/phone-numbers",
+    "https://docs.daily.co/guides/products/dial-in-dial-out",
+    "https://docs.pipecat.ai/pipecat/fundamentals/service-settings",
+    "https://docs.pipecat.ai/pipecat/fundamentals/recording-audio",
+    "https://docs.pipecat.ai/pipecat/fundamentals/saving-transcripts",
+    "https://docs.pipecat.ai/pipecat/learn/text-to-speech",
+    "https://docs.pipecat.ai/server/utilities/mcp/mcp",
+    "https://docs.pipecat.ai/api-reference/server/services/s2s/openai.md",
+    "https://docs.pipecat.ai/pipecat-cloud/fundamentals/scaling",
+    "https://docs.pipecat.ai/pipecat-cloud/security/security-and-compliance",
+    "https://www.daily.co/blog/benchmarking-stt-for-voice-agents/",
+    "https://www.daily.co/blog/pipecat-cloud-is-now-generally-available/",
+    "https://reference-server.pipecat.ai/en/stable/api/pipecat.transports.daily.transport.html",
+    "https://github.com/pipecat-ai/pipecat/issues/4466"
+   ],
+   "summary": "Pipecat Cloud (Daily, GA jan/2026) cobre os 12 requisitos do Ligou com fonte primária: números US locais via API sem limite e sem gate enterprise ($2/mês), dial-in/dial-out ($0.018/min PSTN), warm transfer documentado, troca de idioma mid-call, gravação opt-in, MCP first-class, OpenAI Realtime ou pipeline própria, e concorrência publicada (50 default). A diferença estrutural: é um runtime gerenciado para CÓDIGO Python nosso — o authority plane vira função síncrona in-process (controle máximo, mais forte que webhook de plataforma fechada), o disclaimer verbatim é um TTSSpeakFrame, e o resumo pós-chamada é código que nós escrevemos, não webhook turnkey. Plataforma+telefonia custam $0.028/min ($13.20/mês em 400 min + ~$21.6/mês de 1 instância quente obrigatória para atender telefone sem cold start de ~10s); modelos vão nas nossas chaves existentes, deixando $0.172/min de folga sob o teto de $0.20. O que falta 'de fábrica': qualidade PT-BR depende do STT/TTS que escolhermos, não há SLA de latência fim-a-fim (só benchmarks publicados), e política de não-treino é docs-silenciosa no nível plataforma (mitigada por mídia efêmera + inferência nas nossas chaves). Lock-in é o menor da categoria: framework open source que roda igual self-hosted ou com nossa Twilio via BYOC websocket — o custo real é manter um codebase Python de voz com um time de uma pessoa."
+  },
+  {
+   "platform": "xAI Grok Voice Agent API (Speech to Speech + SIP Phone Calls) — docs.x.ai",
+   "summary": "A xAI oferece um runtime de fala gerenciado (Grok Voice Agent API): speech-to-speech via WebSocket compatível com o protocolo OpenAI Realtime, com ponte SIP nativa (registra número BYO trunk, webhook de chamada entrante, refer/hangup/DTMF), force_message para aviso legal verbatim, pt-BR/es-* com auto-detecção de idioma, MCP nativo e política explícita de não treinar em dados de API. NÃO é plataforma de voice-agent completa: não vende números de telefone, não tem API de chamada outbound, não tem webhook pós-chamada nem extração estruturada, e não publica limites de concorrência — a orquestração da chamada (manter o WebSocket vivo, originar outbound via Twilio bridgeando para sip.voice.x.ai, gerar o resumo em PT) fica no nosso lado. Custo publicado: $0.08/min (grok-voice-think-fast-2.0) + Twilio Elastic SIP Trunking $0.0034/min ≈ $0.0834/min ≈ $34.51 em 400 min — folga enorme sob o teto de $0.20/min do excedente. Encaixe para o Ligou: excelente como motor de voz+telefonia-bridge barato com gate síncrono de tools no nosso socket, mas exige construirmos a camada de orquestração que plataformas tipo Vapi/Retell entregam pronta.",
+   "checklist": [
+    {
+     "req": "1. Número US local via API, um por cliente, multi-tenant numa conta",
+     "status": "no",
+     "evidence": "\"Provisioning xAI phone numbers via API is not supported\" — só registro de número próprio via origin: \"byo_trunk\" (POST /v2/phone-numbers); os números viriam da nossa conta Twilio (Elastic SIP Trunking) e são registrados na xAI por API; limite de números por time: docs silenciosas; nenhum gate enterprise documentado",
+     "url": "https://docs.x.ai/developers/model-capabilities/audio/voice-agent/sip"
+    },
+    {
+     "req": "2. EN+PT+ES na mesma chamada com troca de idioma e qualidade pt-BR",
+     "status": "yes",
+     "evidence": "\"Portuguese (Brazil) pt-BR\" listado; \"For Spanish and Portuguese, you must specify a regional variant\"; \"automatically detect the input language and respond naturally in the same language — no configuration required\" (20+ idiomas). Qualidade pt-BR: claim do vendor \"speak dozens of languages with native-level proficiency\", sem benchmark PT publicado",
+     "url": "https://docs.x.ai/developers/model-capabilities/audio/voice-agent"
+    },
+    {
+     "req": "3. Tool calling síncrono aprovável por nós + MCP",
+     "status": "yes",
+     "evidence": "Function tools emitidos como eventos no WebSocket que NOSSO servidor segura: \"resolve all function calls and send their results back before emitting response.create\" — gate síncrono nativo. MCP remoto suportado: \"MCP tools are server-side tools — xAI handles the connection and execution automatically\" (Streaming HTTP/SSE). Atenção: MCP executa do lado xAI, então ações sensíveis devem ser function tools para passar pelo authority plane",
+     "url": "https://docs.x.ai/developers/model-capabilities/audio/voice-agent"
+    },
+    {
+     "req": "4. Warm transfer para o celular do dono",
+     "status": "yes",
+     "evidence": "\"Use refer to transfer the caller to another PSTN or SIP destination\" (GET /v1/realtime/calls/{call_id}/refer); no Twilio: \"If your application transfers calls mid-session, enable call transfer on the trunk\". É SIP REFER (transferência cega/forward); warm/attended com anúncio não documentado — simulável com force_message antes do refer",
+     "url": "https://docs.x.ai/developers/model-capabilities/audio/voice-agent/sip"
+    },
+    {
+     "req": "5. Aviso legal VERBATIM no início (string fixa, não gerada)",
+     "status": "yes",
+     "evidence": "\"Use force_message to make the agent speak a hard-coded, TTS-synthesized line without involving the model\" — extensão xAI própria para saudações/disclosures roteirizados",
+     "url": "https://docs.x.ai/developers/model-capabilities/audio/voice-agent"
+    },
+    {
+     "req": "6. Gravação desligável (off por padrão) mantendo transcrição",
+     "status": "unclear",
+     "evidence": "Docs silenciosas sobre feature de gravação (não existe produto de recording — gravar seria opção nossa no trunk). Retenção xAI: \"All API requests and responses are stored on our servers (encrypted at rest) for 30 days\", com ZDR opcional (\"never persisted to disk\"); transcrição chega ao vivo no nosso WebSocket via conversation.item.input_audio_transcription.updated, independente de gravação",
+     "url": "https://docs.x.ai/developers/faq/security"
+    },
+    {
+     "req": "7. Latência e barge-in nível produção com números publicados",
+     "status": "yes",
+     "evidence": "\"average time-to-first-audio of less than 1 second, Grok is nearly 5 times faster than the closest competitor\"; \"#1 on Big Bench Audio\"; \"Enable server_vad for automatic, natural barge-in\" (threshold/silence configuráveis); playground de voz público para demo",
+     "url": "https://x.ai/news/grok-voice-agent-api"
+    },
+    {
+     "req": "8. Preço total/min publicado + custo em 400 min",
+     "status": "yes",
+     "evidence": "grok-voice-think-fast-2.0: \"$0.08 / min ($4.80 / hr) audio\" + \"$0.004 / text input\" (unidade ambígua na página); SIP bridge sem preço separado documentado; telefonia = Twilio Elastic SIP Trunking origination local \"$0.0034 / min\" + número \"$1.1500 / mo\"",
+     "url": "https://docs.x.ai/developers/pricing"
+    },
+    {
+     "req": "9. Webhook pós-chamada com transcrição completa + extração estruturada",
+     "status": "no",
+     "evidence": "Único webhook documentado é realtime.call.incoming; \"Audit event\" é só DTMF (\"Each keypress is reported to the client WebSocket\"). Sem webhook pós-chamada, sem produto de extração/summary — transcrição bilateral chega ao vivo no nosso WebSocket e o resumo PT é código nosso",
+     "url": "https://docs.x.ai/developers/model-capabilities/audio/voice-agent/sip"
+    },
+    {
+     "req": "10. Chamadas OUTBOUND via API (onboarding liga pro dono)",
+     "status": "unclear",
+     "evidence": "Nenhum endpoint create-call existe (REST reference: só phone-numbers, refer, hangup); fluxo documentado é inbound. Porém a seção BYO SIP diz: \"In your carrier, contact center, or PBX, create an outbound route or SIP trunk. Set the destination to sip:{number}@sip.voice.x.ai;transport=tls\" — Twilio pode originar a chamada ao dono e bridgear a perna para a xAI; padrão viável mas não documentado como caso de uso outbound",
+     "url": "https://docs.x.ai/developers/model-capabilities/audio/voice-agent/sip"
+    },
+    {
+     "req": "11. BYOC/SIP trunk (trazer Twilio) + limites de concorrência publicados",
+     "status": "unclear",
+     "evidence": "BYOC: SIM — origin: \"byo_trunk\", instruções passo-a-passo para Twilio Elastic SIP Trunking, Telnyx, Plivo, e provedores genéricos (IP allowlist ou digest auth). Concorrência: docs silenciosas — página de rate limits só diz \"For increases to Voice and Imagine API limits, contact sales@x.ai\"; \"100 concurrent sessions per team\" circula em fonte terceira, não confirmado em doc primária",
+     "url": "https://docs.x.ai/developers/rate-limits"
+    },
+    {
+     "req": "12. Escolha de modelo, não-treinamento, controle total do prompt",
+     "status": "yes",
+     "evidence": "Não-treino: \"xAI never trains on your API inputs or outputs without your explicit permission\" (retenção 30d, ZDR opcional). Prompt: controle total via instructions em session.update + override por resposta. Escolha de modelo: NÃO — só Grok (grok-voice-latest / think-fast-2.0 / 1.0 deprecado); protocolo é OpenAI Realtime-compatível, o que facilita migração de código, mas não roda modelo de terceiro",
+     "url": "https://docs.x.ai/developers/faq/security"
+    }
+   ],
+   "pricing": {
+    "perMinuteTotalUSD": 0.0834,
+    "monthly400minUSD": 34.51,
+    "math": "Modelo+plataforma xAI (uma taxa única, sem fee separado de plataforma ou SIP): grok-voice-think-fast-2.0 = $0.08/min de áudio (docs.x.ai/developers/pricing; obs: v1.0 a $0.05/min está deprecada e o blog de lançamento citando $0.05 está defasado; há ainda \"$0.004 / text input\" com unidade ambígua na página). Telefonia (nossa Twilio, Elastic SIP Trunking US): origination local $0.0034/min. Total por minuto inbound = $0.08 + $0.0034 = $0.0834/min. Em 400 min: 400 × $0.0834 = $33.36; + número local Twilio $1.15/mês = $34.51/mês. Margem: $0.0834 << teto de $0.20/min do excedente ($0.35/min cobrado ⇒ ~$0.27/min de margem bruta no excedente) e << $0.60/min que destruiria o plano.",
+    "url": "https://docs.x.ai/developers/pricing"
+   },
+   "mcpPlugins": "MCP suportado nativamente nas sessões de voz: tools MCP remotos configurados com server_url (\\\"Only Streaming HTTP and SSE transports are supported\\\"); \\\"MCP tools are server-side tools — xAI handles the connection and execution automatically\\\" (https://docs.x.ai/developers/model-capabilities/audio/voice-agent). Também há web_search/x_search/collections nativos e function tools custom via JSON schema. Ressalva para o authority plane do Ligou: como o MCP executa do lado da xAI sem passar pelo nosso cliente, ações sensíveis (agendar, preço) devem ser implementadas como function tools no NOSSO WebSocket — onde o gate síncrono é nativo — e não como MCP.",
+   "gotchas": [
+    "xAI não vende número de telefone: \"Provisioning xAI phone numbers via API is not supported\" — todo número vem da nossa Twilio via Elastic SIP Trunking com origination URI sip:{number}@sip.voice.x.ai;transport=tls; multi-tenant = N números Twilio registrados via POST /v2/phone-numbers (limite por time não documentado).",
+    "Sem API de outbound: o onboarding (agente LIGA pro dono) exige nós originarmos a chamada na Twilio e bridgearmos a perna para o SIP da xAI — mecânica documentada só como 'outbound route or SIP trunk' genérico, não como caso de uso suportado; precisa de spike de validação antes de comprometer.",
+    "Não é plataforma completa: nosso servidor mantém um WebSocket vivo por chamada (recebe webhook realtime.call.incoming, abre wss://api.x.ai/v1/realtime?call_id=..., envia session.update + response.create). Sem webhook pós-chamada, sem summary/extração — o resumo PT via WhatsApp é 100% código nosso alimentado pela transcrição ao vivo.",
+    "MCP executa server-side na xAI e bypassa o authority plane — usar function tools (nosso socket) para toda ação gated; docs exigem resolver TODOS os function calls antes de response.create, o que é exatamente o gate síncrono que queremos.",
+    "Concorrência e caps de sessão não publicados nas docs primárias (rate limits de tier só cobrem texto/embeddings; voz = \"contact sales@x.ai\"); o número '100 sessões concorrentes/time' é de fonte terciária (DataCamp/apidog, potencialmente defasada) — confirmar antes de escalar.",
+    "Preço: a v1.0 ($0.05/min) foi deprecada e a flagship 2.0 custa $0.08/min — o blog de lançamento (fonte 2025/defasada) ainda cita $0.05; a linha \"$0.004 / text input\" na página de preços tem unidade ambígua; tools nativos (web_search etc.) podem ter cobrança separada — não usaremos.",
+    "Transferência é SIP REFER (cega); warm transfer com anúncio ao dono não documentado — dá para aproximar com force_message antes do refer, e a Twilio exige \"enable call transfer on the trunk\".",
+    "Gravação não existe como feature (nem para ligar nem desligar): default xAI = retenção de 30 dias de requests/responses criptografados (sem treino, auto-delete); ZDR disponível mas desativa Responses API/Files/Batch; gravação real, se um dia quisermos, seria na perna Twilio (opt-in nosso).",
+    "Sem gate de vetting/KYC/enterprise documentado para a Voice API: tiers por gasto acumulado ($0/$50/$250/$1k/$5k, \"tiers never downgrade\"), registro de número self-serve por API; só aumentos de limite de voz passam por sales.",
+    "Lock-in BAIXO no protocolo, MÉDIO na telefonia: código WebSocket é OpenAI Realtime-compatível (\"update the base URL, swap your API key, and choose a Grok voice model\"; um evento renomeado: ...input_audio_transcription.delta → .updated). O que quebra ao migrar para OpenAI Realtime cru: force_message (aviso verbatim), resumption, replace (pronúncia), custom voices, registro de números/SIP host da xAI (re-apontar a origination URI do trunk Twilio) e MCP server-side. O trunk Twilio em si sobrevive à migração.",
+    "Qualidade pt-BR: suporte documentado com variante obrigatória (pt-BR) e auto-detecção para troca de idioma na mesma chamada, mas a qualidade é claim do vendor (\"native-level proficiency\") sem benchmark PT independente — validar com chamada de teste real antes de decidir."
+   ],
+   "sources": [
+    "https://docs.x.ai/developers/model-capabilities/audio/voice-agent",
+    "https://docs.x.ai/developers/model-capabilities/audio/voice-agent/sip",
+    "https://docs.x.ai/developers/pricing",
+    "https://docs.x.ai/developers/rate-limits",
+    "https://docs.x.ai/developers/faq/security",
+    "https://docs.x.ai/developers/rest-api-reference/inference/voice",
+    "https://x.ai/news/grok-voice-agent-api",
+    "https://www.twilio.com/en-us/sip-trunking/pricing/us"
+   ]
+  },
+  {
+   "platform": "OpenAI hosted agent products (AgentKit / Agent Builder / ChatKit) + Realtime API com SIP connector",
+   "summary": "OpenAI NÃO oferece um runtime de voz gerenciado: Agent Builder está deprecado com desligamento em 30/11/2026, ChatKit é UI de chat (sem telefonia), e o que resta é a Realtime API + SIP connector — que cobre modelo speech-to-speech, barge-in, function calling síncrono no nosso servidor e MCP nativo, mas não provisiona números, não tem outbound documentado, não grava, não tem webhook pós-chamada e não publica preço por minuto (só por token). Ou seja: para o Ligou isso é a opção \"OpenAI Realtime cru\" com nome de produto — toda a camada de telefonia/orquestração (números Twilio, discagem outbound, transcrição persistida, resumo pós-chamada, roteamento multi-tenant) seria construção NOSSA, violando a prioridade de alugar infra de voz. Vantagens reais: custo de modelo baixo (gpt-realtime-mini $10/$20 por 1M audio tokens), zero taxa de plataforma, não treina nos dados por default, lock-in praticamente nulo. Como plataforma gerenciada para o Ligou: reprovada; como camada de modelo por trás de uma plataforma gerenciada (Vapi/Retell/etc.) ou de build próprio futuro: forte.",
+   "checklist": [
+    {
+     "req": "1. Número US local via API, multi-tenant sob uma conta",
+     "status": "no",
+     "evidence": "SIP guide: \"If you want to connect a phone number to the Realtime API, use a SIP trunking provider (e.g., Twilio).\" OpenAI não provisiona números; muitos números Twilio podem apontar para 1 projeto e o webhook traz sip_headers para roteamento, mas o multi-tenant é construção nossa.",
+     "url": "https://platform.openai.com/docs/guides/realtime-sip"
+    },
+    {
+     "req": "2. EN+PT+ES na mesma chamada com qualidade PT-BR",
+     "status": "unclear",
+     "evidence": "Docs não publicam lista de idiomas do gpt-realtime; cookbook oficial admite multilinguismo/troca: \"Control language: Pin output to a target language if you see unwanted language switching.\" Qualidade PT-BR não documentada — docs silenciosas.",
+     "url": "https://developers.openai.com/cookbook/examples/realtime_prompting_guide"
+    },
+    {
+     "req": "3. Tool calling webhook síncrono com aprovação nossa + MCP",
+     "status": "yes",
+     "evidence": "\"The Realtime models also support function calling\" — a função executa no NOSSO código (nós seguramos o socket), então aprovar/negar antes de agir é inerente. MCP nativo: \"Unlike function tools, MCP tools are executed by the Realtime API itself\", com fluxo mcp_approval_request/mcp_approval_response.",
+     "url": "https://platform.openai.com/docs/guides/realtime-mcp"
+    },
+    {
+     "req": "4. Warm transfer para o celular do dono",
+     "status": "yes",
+     "evidence": "\"Transfer an active call using the Refer call endpoint\" (target_uri = número de telefone). É SIP REFER (transferência cega/forward); warm/attended não documentado; há relato de 500 no endpoint na comunidade (anedótico).",
+     "url": "https://platform.openai.com/docs/guides/realtime-sip"
+    },
+    {
+     "req": "5. Aviso legal VERBATIM (string fixa, não gerada)",
+     "status": "unclear",
+     "evidence": "docs silenciosas — nenhum primitivo de playback de áudio fixo; todo áudio de saída é gerado pelo modelo. Cookbook só oferece aproximação: \"The model strongly closely follows sample phrases\" (não é garantia verbatim).",
+     "url": "https://developers.openai.com/cookbook/examples/realtime_prompting_guide"
+    },
+    {
+     "req": "6. Gravação desligável (off por padrão) mantendo transcrição",
+     "status": "yes",
+     "evidence": "Não existe gravação de áudio server-side documentada (off por natureza); transcrição é opt-in explícito na configuração da sessão (input audio transcription / sessão type \"transcription\") — \"it is not automatic or implicit in a Realtime session\".",
+     "url": "https://developers.openai.com/api/docs/guides/realtime-transcription"
+    },
+    {
+     "req": "7. Latência e barge-in nível produção com números publicados",
+     "status": "unclear",
+     "evidence": "Barge-in documentado: \"Realtime API handles interruptions when VAD is enabled, in that it detects user speech, cancels the ongoing response, and starts a new one\" + \"The server will automatically truncate unplayed audio\". Porém nenhum número de latência publicado — docs silenciosas sobre métricas.",
+     "url": "https://developers.openai.com/api/docs/guides/realtime-conversations"
+    },
+    {
+     "req": "8. Preço TOTAL por minuto publicado (plataforma+modelo+telefonia)",
+     "status": "no",
+     "evidence": "Só preço por TOKEN publicado: gpt-realtime audio in $32.00/1M, out $64.00/1M, cached in $0.40/1M; gpt-realtime-mini audio in $10.00/1M, out $20.00/1M. Sem taxa de plataforma, sem preço por minuto, telefonia não é da OpenAI (Twilio à parte).",
+     "url": "https://developers.openai.com/api/docs/pricing"
+    },
+    {
+     "req": "9. Webhook pós-chamada com transcrição + extração estruturada",
+     "status": "no",
+     "evidence": "Lista exaustiva de webhook events na API reference contém apenas realtime.call.incoming / live.call.incoming como eventos de chamada — nenhum evento de fim de chamada nem payload com transcrição. Resumo pós-chamada seria construção nossa a partir dos eventos do WebSocket.",
+     "url": "https://developers.openai.com/api/reference/resources/webhooks"
+    },
+    {
+     "req": "10. Chamadas OUTBOUND via API",
+     "status": "unclear",
+     "evidence": "docs silenciosas — o guia SIP documenta apenas fluxo inbound (\"When OpenAI receives SIP traffic associated with your project, your webhook will be fired... realtime.call.incoming\"); nenhum endpoint de originação outbound. Workaround (Twilio origina e faz bridge ao SIP da OpenAI) só em tutoriais Twilio/Telnyx, não em doc OpenAI.",
+     "url": "https://platform.openai.com/docs/guides/realtime-sip"
+    },
+    {
+     "req": "11. BYOC/SIP trunk (trazer Twilio) e limites de concorrência publicados",
+     "status": "yes",
+     "evidence": "BYOC é o ÚNICO caminho: \"use a SIP trunking provider (e.g., Twilio)\" — nossa conta Twilio serve direto. Porém limites de concorrência do Realtime NÃO aparecem na página de rate limits — docs silenciosas nessa metade.",
+     "url": "https://platform.openai.com/docs/guides/realtime-sip"
+    },
+    {
+     "req": "12. Escolha de modelo, não-treino nos dados, controle total do prompt",
+     "status": "yes",
+     "evidence": "\"data sent to the OpenAI API is not used to train or improve OpenAI models (unless you explicitly opt in)\"; ZDR disponível; controle total de instructions da sessão; escolha entre gpt-realtime / gpt-realtime-2.1 / mini — mas só modelos OpenAI (sem pipeline STT/TTS própria nesta via).",
+     "url": "https://developers.openai.com/api/docs/guides/your-data"
+    }
+   ],
+   "pricing": {
+    "perMinuteTotalUSD": null,
+    "monthly400minUSD": null,
+    "math": "OpenAI não publica preço por minuto — só por token (por isso null nos dois campos; a disciplina proíbe estimar tokens/min). Publicado (developers.openai.com/api/docs/pricing): gpt-realtime = $32.00/1M audio input tokens + $64.00/1M audio output tokens + $0.40/1M cached audio input; gpt-realtime-mini = $10.00/1M in + $20.00/1M out + $0.30/1M cached. Não há taxa de plataforma nem cobrança do SIP connector publicada. Telefonia é 100% fora da OpenAI: soma-se o preço Twilio (número + voz + elastic SIP trunking) da nossa conta existente. Custo real/min depende do acúmulo de contexto (o áudio de input é re-cobrado a cada turno; cache mitiga) — só medível em piloto. Ponto favorável: mini custa 1/3 do full; ponto de risco: sem número publicado, o guard-rail de $0.20/min do excedente não é verificável por docs, só por medição.",
+    "url": "https://developers.openai.com/api/docs/pricing"
+   },
+   "mcpPlugins": "MCP é suportado NATIVAMENTE em sessões Realtime: \"Unlike function tools, MCP tools are executed by the Realtime API itself\", com remote MCP servers, allowed_tools e fluxo de aprovação mcp_approval_request/mcp_approval_response que casa com o authority plane (https://platform.openai.com/docs/guides/realtime-mcp). Function calling clássico também documentado. No lado \"hosted products\": Agent Builder (que tinha Connector Registry/MCP visual) está deprecado — \"the product is scheduled to shut down on November 30, 2026\" (https://developers.openai.com/api/docs/guides/agent-builder); ChatKit segue vivo mas é chat embarcado, sem voz/telefonia.",
+   "gotchas": [
+    "FATAL para a premissa da pesquisa: Agent Builder será DESLIGADO em 30/11/2026 (quote oficial: \"scheduled to shut down on November 30, 2026\"); OpenAI recomenda migrar para Agents SDK (código). Não construir nada sobre Agent Builder.",
+    "ChatKit é UI de CHAT para embed em site — nenhuma capacidade de voz/telefone documentada. O nome 'AgentKit' não entrega runtime de voz.",
+    "Não é plataforma de voz gerenciada: sem provisão de números, sem dashboard de chamadas, sem gravação, sem webhook pós-chamada, sem analytics — tudo isso viraria construção nossa (viola 'não construir infraestrutura de voz'). O que a OpenAI aluga é só o cérebro speech-to-speech + porta SIP.",
+    "Outbound (onboarding do Ligou = agente LIGA pro dono) não existe nas docs OpenAI; o padrão da indústria é o Twilio originar a ligação e fazer bridge para o SIP URI do projeto OpenAI — documentado em tutoriais oficiais da Twilio e Telnyx (pista de vendor, não doc OpenAI), e a lógica de discagem fica no nosso servidor.",
+    "Preço é por token, não por minuto: o áudio de input acumulado é re-cobrado a cada turno do diálogo (prompt caching a $0.40/1M mitiga) — custo/min real só sai de piloto medido; qualquer número por minuto que aparecer em blog de terceiro é estimativa, não preço.",
+    "Lock-in praticamente ZERO (isto JÁ É o 'OpenAI Realtime cru' — migrar depois = nada a migrar), mas o inverso também vale: nenhum trabalho de plataforma vem pronto.",
+    "Limites de concorrência de sessões Realtime/SIP não publicados na página de rate limits — docs silenciosas; validar no piloto antes de vender multi-cliente.",
+    "Sem gate de vetting/KYC/enterprise documentado para Realtime+SIP: chave de API padrão basta (nossa conta OpenAI existente serve); tiers de uso normais se aplicam.",
+    "REFER (transferência) tem relato de 500 Internal Server Error na comunidade OpenAI (anedótico, potencialmente resolvido) — testar antes de prometer warm transfer; e REFER é transferência cega, não warm de verdade.",
+    "gpt-realtime: context window 32k e knowledge cutoff out/2023 — regras longas do dono + chamada longa disputam contexto pequeno.",
+    "Docs migraram de platform.openai.com para developers.openai.com (redirect 301) — links antigos de pesquisa apontam para o host velho.",
+    "Aviso legal verbatim: sem primitivo de tocar áudio fixo; na arquitetura SIP nosso servidor não está no caminho de mídia, então nem dá para injetar um MP3 — o disclosure sairia da boca do modelo via prompt (aproximação, não garantia)."
+   ],
+   "sources": [
+    "https://platform.openai.com/docs/guides/realtime-sip (301 → https://developers.openai.com/api/docs/guides/realtime-sip)",
+    "https://developers.openai.com/api/docs/guides/agent-builder",
+    "https://developers.openai.com/api/docs/pricing",
+    "https://developers.openai.com/api/docs/models/gpt-realtime",
+    "https://developers.openai.com/api/docs/guides/realtime",
+    "https://developers.openai.com/api/docs/guides/realtime-mcp",
+    "https://developers.openai.com/api/docs/guides/realtime-conversations",
+    "https://developers.openai.com/api/docs/guides/realtime-transcription",
+    "https://developers.openai.com/api/docs/guides/your-data",
+    "https://developers.openai.com/api/reference/resources/webhooks",
+    "https://developers.openai.com/api/docs/guides/voice-agents",
+    "https://developers.openai.com/cookbook/examples/realtime_prompting_guide",
+    "(pista, terceiro/vendor) https://www.twilio.com/en-us/blog/developers/tutorials/product/openai-realtime-api-elastic-sip-trunking",
+    "(pista, terceiro/vendor) https://telnyx.com/resources/outbound-ai-calls-python-openai-realtime",
+    "(pista, comunidade) https://community.openai.com/t/openai-realtime-api-sip-refer-endpoint-returns-500-internal-server-error/1360937"
+   ]
+  }
+ ],
+ "ranking": {
+  "finalists": [
+   {
+    "platform": "Vapi (vapi.ai)",
+    "why": "Melhor combinação dos critérios 1 e 2: 11/12 requisitos confirmados com fonte primária e ZERO 'unclear' — o único 'no' (req 12) é cláusula de ToS, não lacuna de capacidade. Turnkey mais rápido para a primeira chamada real com uma pessoa: números US grátis via API no dia 1, import Twilio sem gate, outbound via API, tool síncrono que espera nosso authority plane, firstMessage verbatim, end-of-call-report com structuredData pronto para o resumo WhatsApp, e MCP nativo. Custo composto de componentes publicados (~$0.10–0.20/min com BYO keys, componente Vapi de só $20 nos 400 min) cabe no guardrail de $0.20. Lock-in moderado: números Twilio e authority plane saem juntos numa migração.",
+    "loadBearingClaims": [
+     "O custom tool é SÍNCRONO de verdade: o assistant espera a resposta {toolCallId, result} do nosso Server URL antes de falar/agir — sem isso o authority plane não gate-ia ações sensíveis (docs.vapi.ai/tools/custom-tools).",
+     "firstMessage é string forçada, não output do modelo — sem isso o aviso legal verbatim vira aproximação probabilística.",
+     "Com BYO keys (OpenAI/ElevenLabs/Deepgram) o total plataforma $0.05 + modelos + Twilio fica abaixo de $0.20/min — se a composição real estourar isso, o excedente de $0.35/min morre.",
+     "A transcrição persiste com artifactPlan.recordingEnabled:false — as docs tratam transcriptPlan como independente, mas NÃO afirmam isso verbatim; se for falso, req 6 e req 9 colidem e a candidatura cai."
+    ],
+    "killRisks": [
+     "ToS: com hipaaEnabled:false a Vapi ganha direito de usar conteúdo de chamadas para melhorar features; o opt-out real (HIPAA) custa $2K/mês E mata a persistência de transcrição (quebra o resumo WhatsApp). Checar se existe opt-out contratual sem HIPAA antes de assinar.",
+     "Latência: marketing diz sub-500ms, FAQ diz ~800ms, medições de terceiros dão 900–1200ms p95 na config default — rodar chamada de teste tunada (transcriber multi + waitSeconds) antes do go.",
+     "Validar em chamada de teste que transcrição + analysisPlan sobrevivem com gravação OFF (docs silenciosas nesse cruzamento).",
+     "Timeout duro de 7.5s em webhooks síncronos: o authority plane (Vercel/Cloudflare) precisa responder em poucas centenas de ms ou vira silêncio na linha — medir p95 do nosso plane sob carga."
+    ]
+   },
+   {
+    "platform": "ElevenLabs Agents (elevenlabs.io)",
+    "why": "Segundo turnkey do funil, vencendo Retell no critério dominante: 11/12 confirmados, zero 'unclear', e o único 'no' é transparência de preço (req 8) — computável a partir de componentes publicados ($0.08/min plataforma + LLM nas NOSSAS chaves via custom LLM + telefonia na NOSSA Twilio), não uma falha de capacidade. Crucialmente, atende o req 6 que a Retell falha: record_voice=false por agente mantendo transcrição. Troca de idioma mid-call com preset pt documentada, warm transfer com agent_message via Twilio nativo, outbound com override de idioma para a entrevista em PT, MCP com modos de aprovação por ferramenta, e números permanecem na nossa conta Twilio (lock-in de telefonia zero).",
+    "loadBearingClaims": [
+     "platform_settings.privacy.record_voice=false desliga o áudio mantendo transcript visível — se for falso, cai para o mesmo fail da Retell e perde a vaga.",
+     "O language detection system tool troca idioma no meio da chamada (EN↔ES↔PT) quando habilitado com os presets — a página Language diz 'fixed for the duration of the call' no contexto do widget; se essa leitura estiver errada, o requisito central do produto falha.",
+     "Custom LLM endpoint tira o LLM da fatura ElevenLabs (vai nas nossas chaves), mantendo o total real/min abaixo de $0.20 — se custom LLM tiver gate ou sobretaxa não documentada, a economia do plano quebra.",
+     "Webhook tool segura a conversa até a resposta chegar (dynamic variables da tool response usadas em seguida) — é o que permite o authority plane aprovar/negar ANTES da fala."
+    ],
+    "killRisks": [
+     "Conta self-serve TREINA nos dados por padrão; opt-out é um toggle manual e não-treinamento contratual é só Enterprise — obter o opt-out por escrito e verificar que ele cobre transcrições de chamadas antes de subir cliente real.",
+     "Sem caminho OpenAI Realtime speech-to-speech e vozes proprietárias: é o pior dos 3 finalistas no critério de migração futura — aceitável porque o critério 4 é o último, mas conscientemente.",
+     "Concorrência atrelada ao plano de assinatura (4–30 chamadas simultâneas; acima disso Enterprise) — dimensionar o tier contra a base projetada de clientes antes de vender.",
+     "MCP é incompatível com Zero Retention Mode — se o posicionamento de privacidade do Ligou exigir ZRM, perde-se MCP (webhook tools continuam); decidir qual dos dois o produto promete."
+    ]
+   },
+   {
+    "platform": "Twilio ConversationRelay (twilio.com)",
+    "why": "O finalista de menor risco estrutural: 11 'yes' / 1 'unclear' (concorrência), o custo publicado mais baixo da mesa ($0.07/min com STT+TTS+transcrição inclusos + $0.0085 de voz = $0.0785/min; ~$32.55 nos 400 min antes do LLM), e o authority plane garantido POR CONSTRUÇÃO — o LLM roda no NOSSO servidor via WebSocket, nada é falado ou executado sem nós enviarmos os tokens. Vendor já contratado (conta Twilio ativa), zero procurement novo, e o lock-in é o menor entre plataformas: migrar para OpenAI Realtime cru depois troca só o protocolo do WebSocket — números, telefonia, prompt e Supabase ficam intactos. Custa mais tempo até a primeira chamada que os turnkey (construímos o loop LLM), mas o dossiê qualifica essa construção como pequena (um WebSocket server texto-in/texto-out em Vercel/Cloudflare).",
+    "loadBearingClaims": [
+     "O $0.07/min realmente inclui STT + TTS + transcrição real-time (telefonia à parte a $0.0085) — se houver cobranças ocultas por voz premium/idioma, a vantagem de custo evapora.",
+     "welcomeGreeting é string fixa fora do modelo e a troca de idioma mid-call funciona via mensagem WebSocket {type:'language'} com pt-BR na tabela de vozes default — os dois requisitos mais duros do produto resolvidos por primitivo da plataforma.",
+     "O loop LLM que precisamos construir é pequeno o suficiente para uma pessoa + agentes de IA entregarem em dias, não semanas — se na prática virar um projeto de infra de voz, viola a prioridade número um do Ligou.",
+     "Outbound funciona com <Connect><ConversationRelay language='pt-BR'> via Calls API — é o mecanismo inteiro do onboarding por telefone."
+    ],
+    "killRisks": [
+     "Limite de concorrência do CR existe (erro 64109) mas o default NÃO é publicado, e conta sem Business Primary Customer Profile aprovado no Trust Hub tem concorrência reduzida (erro 10004) — aprovar o profile e perguntar o número à Twilio ANTES de escalar clientes.",
+     "A latência publicada (p50 491ms / p95 713ms) é benchmark interno e NÃO inclui o nosso LLM nem o check do authority plane, que entram no caminho crítico da fala — medir ponta-a-ponta num piloto com aprovação cacheada.",
+     "O callback pós-sessão não entrega a transcrição completa — temos que montá-la das prompt messages do WebSocket; validar que nada se perde com barge-in/queda de conexão antes de prometer o resumo WhatsApp.",
+     "Tempo até a primeira chamada é o maior dos 3 finalistas: se o spike de 1 semana do loop WebSocket não produzir uma chamada real de qualidade, cair para Vapi/ElevenLabs sem insistir."
+    ]
+   }
+  ],
+  "eliminated": [
+   {
+    "platform": "Retell AI",
+    "why": "Falha CONFIRMADA no req 6 — não existe como desligar a gravação de áudio mantendo a transcrição (as opções de storage são tudo, tudo-sem-PII ou nada) — somada a política de treinamento 'unclear', o que a deixa atrás de ElevenLabs (11 confirmados, zero unclear) no critério dominante, apesar do preço all-in publicado exemplar."
+   },
+   {
+    "platform": "Bland AI",
+    "why": "Warm transfer gated a enterprise, multilíngue in-call em BETA sem nenhuma evidência de qualidade pt-BR, agente NÃO consome MCP em chamada, e lock-in total numa pipeline proprietária sem escolha de modelo nem caminho OpenAI Realtime — com platform fee de $299/mês que iguala o preço de um cliente inteiro."
+   },
+   {
+    "platform": "LiveKit Cloud + Agents",
+    "why": "A troca de idioma mid-call — requisito central do produto — é 'unclear' (docs silenciosas), e o caminho framework-Python code-heavy atrasa a primeira chamada para uma pessoa só sem oferecer vantagem sobre a rota Twilio CR (vendor que já temos) no mesmo arquétipo de baixo lock-in; números nativos ainda são inbound-only."
+   },
+   {
+    "platform": "Pipecat Cloud (Daily)",
+    "why": "12/12 no papel, mas é a opção managed mais code-heavy da mesa — manter um codebase Python de voz em container Docker com um time de uma pessoa perde no critério 2 para os turnkey e não supera Twilio CR (protocolo mais simples, vendor já contratado) no arquétipo low-lock-in; agrava com cold start de ~10s exigindo instância quente paga e o bug #4466 ameaçando o caminho transcrição→resumo com barge-in."
+   },
+   {
+    "platform": "xAI Grok Voice Agent API",
+    "why": "Não é plataforma completa: não vende números (só BYO trunk), não tem API de outbound documentada (o onboarding viraria bridge Twilio não-suportado oficialmente), não tem webhook pós-chamada nem extração estruturada — a orquestração inteira viraria construção nossa, violando a prioridade de não construir infra de voz."
+   },
+   {
+    "platform": "OpenAI AgentKit / Realtime + SIP",
+    "why": "Não existe runtime de voz gerenciado: Agent Builder desliga em 30/11/2026, ChatKit não tem telefonia, e Realtime+SIP não provisiona números, não faz outbound documentado, não tem webhook pós-chamada nem preço por minuto — é exatamente o 'OpenAI Realtime cru' que a estratégia reserva como destino de migração futura, não como plataforma de lançamento."
+   }
+  ]
+ },
+ "verificacao": [
+  {
+   "platform": "Vapi (vapi.ai)",
+   "claimVerdicts": [
+    {
+     "claim": "O custom tool é SÍNCRONO de verdade: o assistant espera a resposta {toolCallId, result} do Server URL antes de falar/agir",
+     "verdict": "confirmed",
+     "evidence": "Fonte primária (schema oficial da API, docs.vapi.ai/api-reference/assistants/create.md, campo `async` dos tools): \"This determines if the tool is async. If async, the assistant will move forward without waiting for your server to respond... If sync, the assistant will wait for your server to respond... Defaults to synchronous (`false`).\" Formato de resposta confirmado em docs.vapi.ai/tools/custom-tools: \"your server needs to send back a response in the following JSON format: {\\\"results\\\": [{\\\"toolCallId\\\": \\\"X\\\", \\\"result\\\": \\\"Y\\\"}]}\". Troubleshooting oficial: sync = \"Wait for webhook response before resolving\". Detalhe operacional: `timeoutSeconds` do server do tool tem default 20s (schema: \"This is the timeout in seconds for the request. Defaults to 20 seconds\") — o gate funciona, mas resposta lenta vira silêncio na linha até 20s.",
+     "url": "https://docs.vapi.ai/tools/custom-tools"
+    },
+    {
+     "claim": "firstMessage é string forçada, não output do modelo — o aviso legal verbatim é garantido",
+     "verdict": "confirmed",
+     "evidence": "Schema oficial verbatim (docs.vapi.ai/api-reference/assistants/create.md): \"`firstMessage` (string, optional) — This is the first message that the assistant will say. This can also be a URL to a containerized audio file (mp3, wav, etc.).\" O fato de aceitar arquivo de áudio pré-gravado prova que não passa pelo modelo. A geração pelo modelo é um modo SEPARADO e opt-in: `firstMessageMode` enum com default 'assistant-speaks-first' vs 'assistant-speaks-first-with-model-generated-message' (\"to have the assistant speak first with a message generated by the model\"). Bônus: `firstMessageInterruptionsEnabled` default false — o caller não interrompe o aviso legal por default.",
+     "url": "https://docs.vapi.ai/api-reference/assistants/create"
+    },
+    {
+     "claim": "Com BYO keys o custo total por minuto fica abaixo de $0.20/min",
+     "verdict": "confirmed",
+     "evidence": "Aritmética com preços publicados (todos acessados 2026-08-17): Vapi platform \"$0.05 / min\" + provider \"At cost ($0 if you bring your own API key)\" (vapi.ai/pricing). Twilio US: inbound local $0.0085/min, outbound $0.0140/min (twilio.com/en-us/voice/pricing/us). Deepgram Nova-3 Multilingual streaming $0.0058/min (deepgram.com/pricing). ElevenLabs Flash/Turbo $0.05 por 1K chars ≈ \"$0.05/minute\" de ÁUDIO GERADO (elevenlabs.io/pricing/api) — pior caso agente falando 100% do minuto = $0.05/call-min. LLM gpt-4o-mini $0.15/$0.60 por 1M tokens (developers.openai.com/api/docs/pricing); assumindo ~30K input + 2K output por chamada de 5 min ≈ $0.006/chamada ≈ $0.0012/min (premissa minha, não número publicado). Soma pior caso inbound: 0.05+0.0085+0.0058+0.05+0.002 ≈ $0.116/min. Com ElevenLabs Multilingual v2 ($0.10/min áudio, 60% falando = $0.06): ≈ $0.126/min. Margem confortável sob $0.20. Ressalva: HIPAA add-on e ZDR add-on são custos fixos mensais à parte, não por minuto.",
+     "url": "https://vapi.ai/pricing"
+    },
+    {
+     "claim": "A transcrição persiste com artifactPlan.recordingEnabled:false (docs tratam transcriptPlan como independente, sem afirmar verbatim)",
+     "verdict": "confirmed",
+     "evidence": "Schema oficial: `recordingEnabled` — \"This determines whether assistant's calls are recorded. Defaults to true\" (controla SÓ gravação de áudio); campo separado `transcriptPlan` — \"This is the plan for call.artifact.transcript. To disable, set transcriptPlan.enabled to false\" e `transcriptPlan.enabled` — \"This determines whether the transcript is stored in call.artifact.transcript. Defaults to true.\" docs.vapi.ai/assistants/call-recording (comportamento em squads) mostra os dois pausando por toggles distintos: \"Recording: Pauses when recordingEnabled: false\" vs \"Transcripts: Pauses when transcriptPlan.enabled: false\". A caracterização da afirmação está correta: os campos são independentes por schema, mas NÃO existe frase verbatim \"transcript persists when recording is off\" — a chamada de teste (req do go/no-go) continua obrigatória antes de assinar.",
+     "url": "https://docs.vapi.ai/assistants/call-recording"
+    },
+    {
+     "claim": "KILL-RISK ToS: sem HIPAA a Vapi pode usar conteúdo de chamadas para melhorar features, sem opt-out geral",
+     "verdict": "confirmed",
+     "evidence": "ToS verbatim (vapi.ai/terms-of-service): \"We use Your Content to: (a) provide and maintain the Services, and (b) improve, enhance, and optimize the performance of the service and call improvement-related features\" (inclui \"speech recognition accuracy, end-of-turn detection, interruption detection, and latency reduction\", com a condição de não identificar o negócio/caller). Nenhum opt-out geral existe no ToS. PORÉM duas partes do kill-risk caíram: (1) o opt-out não é só HIPAA — o ToS e docs definem \"Zero Data Retention (ZDR): When ZDR is enabled, we do not store any call data, including transcripts, audio stream, or logs\" como add-on de organização (docs.vapi.ai/security-and-privacy/zero-data-retention; preço não publicado nos docs — relato de terceiro diz ~$1.000/mês, NÃO confirmado em fonte primária); (2) ver verdict seguinte sobre HIPAA não matar transcrição.",
+     "url": "https://vapi.ai/terms-of-service"
+    },
+    {
+     "claim": "KILL-RISK: HIPAA custa $2K/mês E mata a persistência de transcrição (quebraria o resumo WhatsApp)",
+     "verdict": "refuted",
+     "evidence": "Metade preço: confirmada — vapi.ai/pricing lista HIPAA add-on \"$2000/mo\". Metade transcrição: REFUTADA pelos docs atuais (2026). Schema oficial de `hipaaEnabled`: \"When this is enabled, logs, recordings, and transcriptions will be stored in HIPAA-compliant storage... This setting is only honored if the organization is on an Enterprise subscription or has purchased the HIPAA add-on.\" docs.vapi.ai/security-and-privacy/hipaa: \"Your call records, transcripts, and logs are then stored in a HIPAA compliant manner\" (exige BAA assinado antes). Ou seja: HIPAA mode em 2026 ARMAZENA transcrições (em storage compliant) — não quebra o resumo WhatsApp. Quem mata retenção é o add-on ZDR, e mesmo esse instrui enviar conteúdo via webhook para seus próprios sistemas antes de ativar (\"any call content you do not send to your own systems cannot be recovered\") — caminho para o resumo continuar existindo. Nota: memória de docs 2024/2025 dizia que hipaaEnabled desligava logs por default; a versão ATUAL diz o contrário — validar em chamada de teste se for contratar HIPAA.",
+     "url": "https://docs.vapi.ai/security-and-privacy/hipaa"
+    },
+    {
+     "claim": "KILL-RISK latência: marketing diz sub-500ms mas o FAQ oficial diz ~800ms (e terceiros medem 900-1200ms p95)",
+     "verdict": "confirmed",
+     "evidence": "Contradição em fontes primárias confirmada: homepage vapi.ai — \"Scale up to millions of calls with sub-500ms latency\" e \"<500ms average latency\"; FAQ oficial docs.vapi.ai/faq — \"Vapi is designed to achieve low latency, typically around 800 milliseconds for end-to-end voice processing.\" O número dos docs (~800ms) deve ser tratado como o real; o do marketing como aspiracional/enterprise. A parte \"900-1200ms p95 de terceiros\" fica UNPROVEN — nenhuma medição primária/publicada verificável encontrada; só blogs de concorrentes (pista, não prova). A chamada de teste tunada antes do go continua obrigatória.",
+     "url": "https://docs.vapi.ai/faq"
+    },
+    {
+     "claim": "KILL-RISK: timeout duro de 7.5s em webhooks síncronos ameaça o authority plane",
+     "verdict": "confirmed",
+     "evidence": "Confirmado COM correção de escopo importante. O 7.5s é real mas se aplica ao webhook `assistant-request` (e transfer), não aos tool calls: docs.vapi.ai/server-url/events verbatim — \"You must respond to the assistant-request webhook within 7.5 seconds end-to-end. This limit is fixed and not configurable: the telephony provider enforces a 15-second cap, and Vapi reserves ~7.5 seconds for call setup.\" Já os custom tools (o authority plane) têm `timeoutSeconds` configurável com default 20s (schema oficial: \"Defaults to 20 seconds\"). Consequência prática: o authority plane NÃO morre em 7.5s num tool call — mas cada centena de ms dele é silêncio na linha somado à latência base de ~800ms, então medir p95 do plane (Vercel/Cloudflare, cold starts inclusos) segue sendo gate de go/no-go. Se o design usar assistant-request dinâmico por chamada, aí sim o 7.5s (recomendado <1.5-2s) vale.",
+     "url": "https://docs.vapi.ai/server-url/events"
+    }
+   ],
+   "overall": "viable",
+   "notes": "Tentativa ativa de refutação NÃO derrubou nenhuma das 4 afirmações-núcleo; todas confirmadas em fonte primária atual (docs/pricing oficiais, acessados 2026-08-17). Dois kill-risks estavam OVERSTATED em direção pessimista: (1) HIPAA mode hoje armazena transcrições em storage compliant (não quebra o resumo WhatsApp) e existe ZDR como opt-out separado; (2) o 7.5s duro é do assistant-request, não dos tool calls (default 20s configurável). Kill-risks que permanecem reais e exigem ação antes de assinar: (a) ToS dá à Vapi direito de usar conteúdo de chamadas para melhorar o serviço sem opt-out geral — decidir se aceita, ou orçar ZDR (preço não publicado em fonte primária; relato de terceiro ~$1k/mês, tratar como não-confirmado e perguntar ao sales); (b) latência real ~800ms por FAQ oficial vs <500ms do marketing — rodar a chamada de teste tunada; (c) transcrição+analysisPlan com gravação OFF: independência clara por schema, mas sem frase verbatim — validar na mesma chamada de teste; (d) medir p95 do authority plane (cold starts Vercel/Cloudflare) porque cada ms é dead-air somado aos ~800ms. Aritmética de custo com números publicados fecha em ~$0.12-0.13/min pior caso — margem real contra o teto de $0.20. Fontes: docs.vapi.ai/tools/custom-tools, docs.vapi.ai/tools/custom-tools-troubleshooting, docs.vapi.ai/api-reference/assistants/create(.md), docs.vapi.ai/assistants/call-recording, docs.vapi.ai/security-and-privacy/hipaa, docs.vapi.ai/security-and-privacy/zero-data-retention, docs.vapi.ai/server-url/events, docs.vapi.ai/faq, vapi.ai (homepage), vapi.ai/pricing, vapi.ai/terms-of-service, twilio.com/en-us/voice/pricing/us, deepgram.com/pricing, elevenlabs.io/pricing/api, developers.openai.com/api/docs/pricing."
+  },
+  {
+   "platform": "ElevenLabs Agents (elevenlabs.io)",
+   "claimVerdicts": [
+    {
+     "claim": "platform_settings.privacy.record_voice=false desliga o armazenamento de áudio mantendo o transcript visível",
+     "verdict": "confirmed",
+     "url": "https://elevenlabs.io/docs/eleven-agents/customization/privacy/audio-saving",
+     "evidence": "Docs primárias (audio-saving, versão .md atual, 2026) mostram o campo exato: 'Set `platform_settings.privacy.record_voice`' com exemplo JSON/Python `\"record_voice\": false`. Texto literal: 'Disabling audio saving enhances privacy but limits the ability to review calls. However, transcripts can still be viewed.' Caveats documentados: gravações antigas permanecem até serem apagadas via retention settings, e é per-agent (default é gravar). Nenhum gate de plano mencionado. Não é o fail da Retell: áudio off + transcript on é comportamento documentado."
+    },
+    {
+     "claim": "O language detection system tool troca idioma no meio da chamada (EN↔ES↔PT); a frase 'fixed for the duration of the call' da página Language é contexto do widget",
+     "verdict": "confirmed",
+     "url": "https://elevenlabs.io/docs/eleven-agents/customization/tools/system-tools/language-detection",
+     "evidence": "Página do tool (texto cru): 'allows your ElevenLabs agent to switch its output language to any the agent supports'; trigger `detection`: 'if a user speaks a different language than the current output language, a switch will be triggered'; Purpose: 'Automatically switch to the user's detected language during conversations'. O exemplo de API da própria página inclui preset 'pt' ('Oi, como você está?'). A frase 'Language selection is fixed for the duration of the call' na página Language (https://elevenlabs.io/docs/eleven-agents/customization/voice/customization/language) aparece na seção 'Starting a call' logo após descrever o WIDGET pedindo idioma pré-chamada — e a MESMA página tem a seção 'Enable language detection': 'Add the language detection tool to your agent can automatically switch to the user's preferred language'. Leitura do time está correta. Ressalva menor: as docs não demonstram explicitamente a troca numa chamada telefônica (são silenciosas sobre canal), mas o tool é system tool do agente, sem restrição de canal documentada; requisito: os idiomas-alvo precisam estar habilitados nas Additional Languages do agente."
+    },
+    {
+     "claim": "Custom LLM endpoint tira o LLM da fatura ElevenLabs (vai nas nossas chaves), mantendo o total real/min abaixo de ~$0.20; sem gate ou sobretaxa",
+     "verdict": "confirmed",
+     "url": "https://elevenlabs.io/docs/eleven-agents/customization/llm/custom-llm",
+     "evidence": "Mecanismo confirmado em fonte primária: docs custom-llm: 'By default, we use our own internal credentials for popular models like OpenAI... Custom LLMs let you bring your own OpenAI API key or run an entirely custom LLM server' (endpoint OpenAI-compatible /v1/chat/completions ou /v1/responses, chave sua via secret). Pricing oficial (elevenlabs.io/pricing/agents, live): plataforma cobra $0.080/min adicional em TODOS os planos pagos (texto $0.003/msg; burst $0.160/min), e lista LLM/telefonia como 'External Providers... Based on usage and varies by model. At cost' — 'The LLM model and any telephony are billed separately on top, based on usage'. Aritmética com números publicados: ElevenLabs $0.08/min + Twilio (conta própria, tarifa publicada Twilio ~$0.014/min voz US) ≈ $0.094/min, deixando ~$0.10/min de folga para o LLM nas nossas chaves antes do teto de $0.20 — o custo LLM/min não é publicado (depende de tokens/uso), mas sai da NOSSA fatura OpenAI/Anthropic, não da ElevenLabs. Nenhum gate de plano nem sobretaxa de custom LLM aparece nas docs, no pricing ou no changelog atual (setup é fluxo padrão do dashboard); registro honesto: ausência de sobretaxa é ausência nas docs, não afirmação positiva da ElevenLabs."
+    },
+    {
+     "claim": "Webhook tool segura a conversa até a resposta chegar, e a resposta alimenta dynamic variables usadas em seguida (viabiliza o authority plane aprovar/negar ANTES da fala)",
+     "verdict": "confirmed",
+     "url": "https://elevenlabs.io/docs/eleven-agents/api-reference/tools/create",
+     "evidence": "API reference de tools (atual): `execution_mode` (default `immediate`) — ''immediate' executes the tool right away when requested by the LLM... 'async' runs the tool in the background without blocking - best for long-running operations' → só o modo async é não-bloqueante; o default espera o resultado. `response_timeout_secs` (default 20, 1–120s): 'The maximum time in seconds to wait for the tool call to complete.' Há ainda `pre_tool_speech` (auto/force/off — fala de espera baseada em latência recente) e `interruption_mode`/`disable_interruptions`, todos desenhados em torno de ESPERAR o tool. Webhook tools docs (https://elevenlabs.io/docs/eleven-agents/customization/tools/webhook-tools): 'Specify dynamic variables to update from the tool response for later use in the conversation' (seção 'Dynamic variable assignment'). Restrição prática: o authority plane precisa responder dentro do timeout (default 20s, máx 120s no schema atual; changelog menciona até 300s para webhook tools) — trivial para um approve/deny."
+    },
+    {
+     "claim": "KILL-RISK: conta self-serve treina nos dados por padrão; opt-out é toggle manual; não-treinamento contratual é Enterprise",
+     "verdict": "confirmed",
+     "url": "https://elevenlabs.io/privacy-policy",
+     "evidence": "Privacy Policy vigente: 'We may process your Personal Data to research, develop, train and/or otherwise improve our AI models. This may include processing audio, text, video content... collected or generated in connection with your use of the Services' (base legal: legitimate interest). Opt-out: 'You may opt out of our use of your Personal Data for training at any time by navigating to the ''Data use'' menu in the ''Terms and Privacy'' section of your ElevenLabs account. For clarity, the opt-out will only apply with respect to Personal Data provided or made available following the submission of the opt-out' — ou seja: default treina, toggle manual, só dali pra frente. A policy não afirma explicitamente que o opt-out cobre transcrições de chamadas de agentes (o escopo é 'Personal Data'/áudio/texto do uso dos Services — abrangente, mas não nominal); a mitigação técnica self-serve é ZRM per-agent (https://elevenlabs.io/docs/eleven-agents/customization/privacy/zrm: 'no PII is logged during or stored after a call... No transcripts or call metadata containing PII will be logged or stored'), disponível fora do Enterprise; ZRM global é o produto Enterprise. Ação antes de cliente real: ativar o toggle + guardar screenshot/confirmação escrita do suporte de que cobre transcripts."
+    },
+    {
+     "claim": "KILL-RISK: sem caminho OpenAI Realtime speech-to-speech nem portabilidade de vozes — pior dos 3 finalistas em migração futura",
+     "verdict": "confirmed",
+     "url": "https://elevenlabs.io/docs/eleven-agents/customization/llm/custom-llm",
+     "evidence": "A interface de custom LLM documentada é exclusivamente TEXTO: 'it must align with one of the following OpenAI-compatible request/response structures: Chat Completions API (/v1/chat/completions), Responses API (/v1/responses)' com resposta em SSE de texto — não existe nas docs nenhum caminho de áudio-in/áudio-out (Realtime speech-to-speech) para o LLM. As vozes são do ecossistema ElevenLabs (Voice Library, 'language top picks' curados dentro da plataforma); as docs são silenciosas sobre exportar/levar a voz para outra plataforma. Confirmo o trade-off consciente: pipeline é STT→LLM(texto)→TTS proprietário, migração exige refazer voz e camada de fala."
+    },
+    {
+     "claim": "KILL-RISK: concorrência atrelada ao plano (4–30 chamadas simultâneas; acima disso Enterprise)",
+     "verdict": "confirmed",
+     "url": "https://elevenlabs.io/pricing/agents",
+     "evidence": "Pricing oficial (live, 2026): Free $0 = 15 min / 4 concurrent; Starter $6 = 75 min / 6; Creator $22 = 275 min / 10; Pro $99 = 1.238 min / 20; Scale $299 = 3.738 min / 30; Business $990 = 12.375 min / 40 (correção ao número do brief: o teto self-serve é 40, não 30). Válvula de escape documentada: burst pricing (https://elevenlabs.io/docs/eleven-agents/guides/burst-pricing) = até 3x o limite do plano cobrado a 2x a tarifa ($0.16/min), teto absoluto 300 para não-Enterprise, com chamadas burst despriorizadas (latência maior). Help center: acima disso, Enterprise ('reach out to our Enterprise Department'). Dimensionamento: com clientes de serviços residenciais (chamadas curtas, distribuídas), Pro/20 concurrent cobre dezenas de clientes; risco real só em pico sincronizado (tempestade/pane regional)."
+    },
+    {
+     "claim": "KILL-RISK: MCP é incompatível com Zero Retention Mode (webhook tools continuam)",
+     "verdict": "confirmed",
+     "url": "https://elevenlabs.io/docs/eleven-agents/customization/tools/mcp",
+     "evidence": "Texto literal das docs MCP: 'MCP support is not currently available for users on Zero Retention Mode or those requiring HIPAA' e 'Workspaces with Zero Retention Mode or HIPAA compliance enabled cannot use MCP servers, regardless' (do setting de workspace). MCP é aliás opt-in por workspace ('MCP is disabled by default for every workspace'). Webhook tools são feature separada sem restrição de ZRM documentada — e com ZRM os dados pós-chamada só chegam via post-call webhooks ('To retrieve information about calls made with ZRM-enabled agents, you must use post-call webhooks', página ZRM). Para o Ligou isso é benigno: o authority plane é webhook tool, não MCP; a decisão pendente é só de posicionamento (prometer ZRM ou prometer MCP — não os dois)."
+    }
+   ],
+   "overall": "viable",
+   "notes": "Tentei derrubar as 4 afirmações e não consegui — todas têm fonte primária atual (agosto/2026, docs em elevenlabs.io/docs, caminho novo 'eleven-agents' pós-rebrand 'ElevenAgents'; os caminhos antigos 'agents-platform' redirecionam). Método: markdown cru das docs via .md (lido diretamente, não resumido), pricing page live, privacy policy live. Pontos de atenção que sobreviveram como ressalvas, não como kills: (1) o opt-out de treinamento é forward-only e a policy não nomeia transcrições de agentes — obter confirmação escrita do suporte antes do primeiro cliente real, ou ligar ZRM per-agent (que existe self-serve, ponto A FAVOR não previsto no brief); (2) timeout do webhook tool default 20s/máx 120s no schema — o authority plane precisa responder rápido (trivial); (3) troca de idioma mid-call é documentada como comportamento do system tool, mas nenhuma doc demonstra especificamente numa chamada telefônica — validar no piloto de onboarding PT; (4) correção ao brief: concorrência self-serve vai até 40 (Business $990), não 30, e burst dá 3x até 300 a $0.16/min; (5) sobre custo: plataforma $0.08/min de excedente publicado em todos os planos pagos + LLM 'at cost'/nas nossas chaves + Twilio direto — a margem do excedente de $0.35/min do Ligou aguenta com folga; a única parte não-publicável é o custo LLM/min (depende de tokens), mas ele sai das nossas chaves e é controlável por escolha de modelo. Nenhuma evidência de deprecação, waitlist ou 'enterprise only' nas features load-bearing. Veredito: viable."
+  },
+  {
+   "platform": "Twilio ConversationRelay (twilio.com)",
+   "claimVerdicts": [
+    {
+     "claim": "O $0.07/min do ConversationRelay inclui STT + TTS + transcricao real-time, com telefonia a parte a $0.0085/min, sem cobranca oculta por voz premium/idioma",
+     "verdict": "confirmed",
+     "evidence": "Pricing page oficial (fetch ago/2026): 'Conversation Relay $0.07 / min' como linha unica, sem breakdown por voz/idioma; 'Inbound local calls $0.0085 / min'. Doc oficial de integracao com Conversation Intelligence: 'Conversation Relay is billed per-minute of active AI agent session time... Real-Time Transcription is already included in the per-minute cost of Conversation Relay', com aritmetica publicada: '$.07 per minute * 5 minutes = $0.35'. Cacei sobretaxa de voz premium e nao existe nas fontes primarias: o provider TTS DEFAULT do CR e o proprio ElevenLabs (doc voice-configuration), logo a voz 'premium' ja e o caso base do preco flat. CORRECAO relevante: $0.0085 e so INBOUND; a perna outbound (chamada de onboarding) custa $0.0140/min (mesma pricing page), total $0.084/min — ainda muito abaixo do teto de $0.20. Custo inbound total sem LLM: $0.07 + $0.0085 = $0.0785/min.",
+     "url": "https://www.twilio.com/en-us/voice/pricing/us"
+    },
+    {
+     "claim": "welcomeGreeting e string fixa fora do modelo, e a troca de idioma mid-call funciona via mensagem WebSocket {type:'language'}, com pt-BR na tabela de vozes default",
+     "verdict": "confirmed",
+     "evidence": "Tres partes, tres fontes primarias. (1) TwiML doc <ConversationRelay>: welcomeGreeting = 'The message Twilio plays to the caller after answering a call. For example, Hello! How can I help you today?' — string fixa no TwiML, nao passa pelo LLM. (2) Doc websocket-messages mostra o JSON exato: {\"type\": \"language\", \"ttsLanguage\": \"sv-SE\", \"transcriptionLanguage\": \"en-US\"} ('Must equal language'). (3) Doc voice-configuration, tabela 'Default voice settings': linha 'pt-BR | CstacWqMhJQlnfLPxRG4 | ElevenLabs | telephony | Google'. Bonus contra o risco de idioma: modo 'multi' (deteccao automatica) existe mas exige Deepgram (STT) + ElevenLabs (TTS); com <Language> nouns declarados por idioma, a troca explicita via mensagem e o caminho documentado.",
+     "url": "https://www.twilio.com/docs/voice/conversationrelay/websocket-messages"
+    },
+    {
+     "claim": "O loop LLM que precisamos construir e pequeno o suficiente para uma pessoa + agentes de IA entregarem em dias, nao semanas",
+     "verdict": "unproven",
+     "evidence": "Julgamento de esforco, nao fato documentavel — nenhuma doc afirma prazo. A favor (fontes primarias): o protocolo e pequeno (setup/prompt/text/language/end sobre um WebSocket; texto entra, texto sai — zero manuseio de audio), Twilio publica sample oficial 'simple-conversation-relay' no GitHub e multiplos tutoriais oficiais de agente completo (FastAPI, Node, Mistral). Contra, e isto TEM fonte primaria: 'If the WebSocket disconnects unexpectedly in Conversation Relay, we don't reconnect, and the call disconnects with a failed status' — a doc manda implementar re-estabelecimento via action URL retornando novo TwiML; somado a montagem de transcricao das prompt messages e tratamento de barge-in, o 'dias' so fecha se o spike de 1 semana ja incluir esses tres itens. Nao e infra de voz (sem audio, sem codecs, sem VAD) — mas tambem nao e so um handler de 50 linhas.",
+     "url": "https://www.twilio.com/docs/voice/conversationrelay/websocket-messages"
+    },
+    {
+     "claim": "Outbound funciona com <Connect><ConversationRelay> via Calls API — mecanismo inteiro do onboarding por telefone",
+     "verdict": "confirmed",
+     "evidence": "Doc oficial Voice Insights 'Conversation Relay Insights Dashboard' define: 'Outbound: Calls made from your account via <Dial>, the Calls API, the Conference Participants API, and SIP trunking termination calls' e categoriza chamadas como 'Virtual Agent' 'if they execute the <Connect><ConversationRelay> TwiML' — ou seja, a propria telemetria da Twilio rastreia sessoes CR em chamadas outbound via Calls API. Tutoriais oficiais da Twilio (blog twilio.com: real-time voice translation com FastAPI; reference component do Voice React Native SDK, changelog oficial: 'an outbound call to a voice AI agent... using Twilio ConversationRelay and OpenAI') fazem exatamente o padrao do onboarding: Calls API cria a chamada, TwiML retorna <Connect><ConversationRelay>. Com pt-BR na tabela default (claim 2), language='pt-BR' no outbound e combinacao de dois primitivos confirmados. Custo da perna outbound: $0.0140/min, nao $0.0085.",
+     "url": "https://www.twilio.com/docs/voice/voice-insights/conversation-relay-insights-dashboard"
+    },
+    {
+     "claim": "Kill-risk concorrencia: limite do CR existe (erro 64109), o default NAO e publicado, e conta sem Business/Primary Customer Profile aprovado tem concorrencia reduzida (erro 10004)",
+     "verdict": "confirmed",
+     "evidence": "Pagina oficial do erro 64109 ('ConversationRelay: Concurrency limit reached'): 'The allowed concurrency limit on your account was reached... reach out to Twilio to see if they can increase your concurrency limit' — nenhum numero default publicado em lugar algum das docs (docs silenciosas quanto ao numero). Pagina do erro 10004: 'Trial accounts and some upgraded accounts without an approved Primary Customer Profile have reduced concurrency' e 'approved Business Primary Customer Profile removes limited concurrency for eligible Voice accounts'. Acao pre-escala confirmada como necessaria: aprovar o Business Profile no Trust Hub e perguntar o numero a Twilio.",
+     "url": "https://www.twilio.com/docs/api/errors/64109"
+    },
+    {
+     "claim": "Kill-risk latencia: p50 491ms / p95 713ms e benchmark interno da Twilio e nao inclui nosso LLM nem o check do authority plane",
+     "verdict": "confirmed",
+     "evidence": "Pagina de produto oficial do ConversationRelay, footnote literal: '*Based on internal benchmarks with Conversation Relay (p50 491 ms, p95 713 ms) using different models. Results may vary.' Metodologia nao divulgada; 'using different models' indica que ALGUM LLM entrou no benchmark deles, mas nao o nosso, e o hop extra do authority plane (webhook antes de falar preco/agendar) com certeza nao esta la. Terceiros (Telnyx, pista, nao prova) apontam que a fronteira de medicao nao e definida. Medir ponta-a-ponta no piloto com aprovacao cacheada continua obrigatorio.",
+     "url": "https://www.twilio.com/en-us/products/conversational-ai/conversationrelay"
+    },
+    {
+     "claim": "Kill-risk transcricao: o callback pos-sessao NAO entrega a transcricao completa — temos que monta-la das prompt messages do WebSocket",
+     "verdict": "confirmed",
+     "evidence": "Payloads de exemplo do action URL callback na doc oficial do noun trazem apenas AccountSid/CallSid/SessionStatus/SessionDuration/HandoffData — nenhum campo de transcricao. Doc websocket-messages: a mensagem 'end' so carrega handoffData opcional. Agravante com fonte primaria: 'If the WebSocket disconnects unexpectedly... we don't reconnect, and the call disconnects with a failed status' — em queda, o que ja chegou de prompt messages e tudo que existe. MITIGACAO encontrada (fonte primaria): a integracao oficial com Conversation Intelligence (classic) armazena transcricoes do CR 'at no additional cost' (so Language Operators sao cobrados a parte, ex. $0.0035/min de sumarizacao) — caminho documentado para o resumo WhatsApp sem depender 100% da montagem manual.",
+     "url": "https://www.twilio.com/docs/conversation-intelligence-classic/conversation-relay-integration"
+    },
+    {
+     "claim": "Kill-risk maturidade: ConversationRelay esta em GA (nao beta/waitlist), sem aviso de deprecacao",
+     "verdict": "confirmed",
+     "evidence": "Nenhuma das paginas primarias verificadas (TwiML reference, websocket-messages, voice-configuration, onboarding, pricing, pagina de produto) carrega badge de beta, pilot ou waitlist em ago/2026; pricing publicado self-serve ($0.07/min) e onboarding self-serve (aceitar o 'Predictive and Generative AI/ML Features Addendum' no console e habilitar o toggle) sao comportamento de produto GA. Nenhum aviso de deprecacao encontrado. Unica exigencia contratual: aceitar o addendum de AI/ML antes de usar.",
+     "url": "https://www.twilio.com/docs/voice/twiml/connect/conversationrelay"
+    }
+   ],
+   "overall": "viable",
+   "notes": "Verificacao adversarial concluida com fontes primarias twilio.com atuais (fetch em 2026-08-17). Tentei derrubar as 4 afirmacoes e nao consegui matar nenhuma: 3 confirmadas com citacao literal, 1 (esforco em dias) permanece unproven por ser julgamento — mas nada nas docs a contradiz. Aritmetica de custo com numeros publicados: inbound = $0.07 (CR, com STT+TTS+RT-transcription inclusos) + $0.0085 (telefonia) = $0.0785/min antes do LLM — folga de ~$0.27/min contra o excedente de $0.35 e ~10x abaixo do teto de $0.60 do plano. Duas correcoes que a decisao deve absorver: (1) perna outbound custa $0.0140/min, nao $0.0085 — irrelevante economicamente, mas o numero certo e esse para o onboarding; (2) o 'lang' direto na text token message nao existe no formato atual da doc de websocket-messages — a troca de idioma e via mensagem {type:'language'} (confirmada), nao via campo por-token. Riscos que continuam reais e ja tem acao definida: concorrencia default nao publicada (aprovar Business Profile no Trust Hub + perguntar numero a Twilio ANTES de escalar), latencia e benchmark interno sem nosso LLM/authority plane no caminho (medir no piloto com aprovacao cacheada), transcricao completa nao vem no callback (montar das prompt messages OU usar a integracao Conversation Intelligence classic, que armazena transcricoes do CR sem custo adicional — mitigacao nova achada nesta verificacao), e WebSocket caido = chamada morre com status failed sem reconexao automatica (implementar re-TwiML via action URL no spike). Mantida a disciplina do plano: se o spike de 1 semana nao produzir chamada real de qualidade, cair para Vapi/ElevenLabs sem insistir. Overall: viable."
+  }
+ ]
+}

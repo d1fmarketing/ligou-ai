@@ -1,0 +1,7 @@
+:root{
+--font-display:'Archivo',system-ui,sans-serif;--font-body:'Archivo',system-ui,sans-serif;
+--size-display-xl:64px;--size-display:48px;--size-title:34px;--size-h3:24px;--size-h4:19px;--size-body-lg:19px;--size-body:16px;--size-small:14px;--size-caption:12px;
+--leading-display:1.04;--leading-tight:1.15;--leading-body:1.55;
+--track-display:-0.03em;--track-tight:-0.015em;--track-caps:0.16em;
+--weight-black:800;--weight-bold:700;--weight-semibold:600;--weight-regular:440;
+}

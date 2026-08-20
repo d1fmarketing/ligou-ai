@@ -4,6 +4,10 @@ import { readFile } from "node:fs/promises";
 const root = new URL("../", import.meta.url);
 const html = await readFile(new URL("index.html", root), "utf8");
 const application = await readFile(new URL("src/runtime/ligou-app9.jsx", root), "utf8");
+const fontFaces = await readFile(
+  new URL("_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/tokens/fonts.css", root),
+  "utf8",
+);
 const noScript = html.match(/<noscript>([\s\S]*?)<\/noscript>/)?.[1] ?? "";
 
 test("the JavaScript-disabled fallback preserves the conversion proof and client route", () => {
@@ -30,4 +34,10 @@ test("placeholder and label-cleanup boundaries stay explicit", () => {
   expect(application).not.toMatch(/<Eyebrow[^>]*>\s*A dor\s*<\/Eyebrow>/);
   expect(application).not.toMatch(/<Eyebrow[^>]*>\s*Prova do produto\s*<\/Eyebrow>/);
   expect(noScript).not.toMatch(/>\s*(?:A dor|Prova do produto)\s*</);
+});
+
+test("display typography maps its real Familjen files to their supplied weights", () => {
+  expect(fontFaces).toContain("font-weight:600;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-600.ttf')");
+  expect(fontFaces).toContain("font-weight:700 900;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-700.ttf')");
+  expect(fontFaces).not.toContain("font-weight:400 900;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-600.ttf')");
 });
