@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,10 +8,12 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const manifestTool = path.join(repoRoot, "infra/backup-manifest.mjs");
+const archiveTool = path.join(repoRoot, "infra/archive-safety.mjs");
 const restoreScript = path.join(repoRoot, "infra/restore.sh");
 const backupScript = path.join(repoRoot, "infra/backup.sh");
 const KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 const TENANT = "test-tenant";
+const IMAGE = "example.invalid/hermes@sha256:" + "b".repeat(64);
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: "utf8", ...options });
@@ -36,10 +38,11 @@ async function makeArchive(base, { forbidden = false } = {}) {
   return archive;
 }
 
-function createManifest(archive, manifest) {
+function createManifest(archive, manifest, extraEnv = {}) {
   return run(process.execPath, [manifestTool, "create", "--archive", archive, "--manifest", manifest,
-    "--tenant", TENANT, "--source", "ec2:i-test", "--created", "2026-08-20T12:00:00.000Z"], {
-    env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY, LIGOU_BACKUP_MANIFEST_KEY_ID: "test-v1" },
+    "--tenant", TENANT, "--source", "ec2:i-test", "--created", "2026-08-20T12:00:00.000Z",
+    "--hermes-image", IMAGE], {
+    env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY, LIGOU_BACKUP_MANIFEST_KEY_ID: "test-v1", ...extraEnv },
   });
 }
 
@@ -52,20 +55,24 @@ test("authenticated manifest carries mandatory identity, archive proof, exclusio
     assert.equal(created.status, 0, created.stderr);
     const parsed = JSON.parse(await readFile(manifest, "utf8"));
     assert.deepEqual({ schema: parsed.schema, version: parsed.version, tenant: parsed.tenant }, {
-      schema: "ligou.hermes.backup-manifest", version: 1, tenant: TENANT,
+      schema: "ligou.hermes.backup-manifest", version: 2, tenant: TENANT,
     });
     assert.equal(parsed.source.identity, "ec2:i-test");
     assert.equal(parsed.archive.name, path.basename(archive));
     assert.match(parsed.archive.sha256, /^[a-f0-9]{64}$/);
     assert.ok(parsed.archive.size_bytes > 0);
     assert.equal(parsed.archive.format, "hermes-cognitive-zip");
+    assert.ok(parsed.archive.expanded_size_bytes > 0);
+    assert.ok(parsed.archive.file_count >= 4);
+    assert.deepEqual(parsed.limits, { max_files: 10_000, max_expanded_bytes: 536_870_912 });
+    assert.deepEqual(parsed.runtime, { hermes_image: IMAGE });
     assert.ok(parsed.exclusions.includes("**/.hermes/**"));
     assert.equal(parsed.created_at, "2026-08-20T12:00:00.000Z");
     assert.deepEqual(Object.keys(parsed.signature).sort(), ["algorithm", "key_id", "value"]);
     assert.doesNotMatch(JSON.stringify(parsed), new RegExp(KEY));
 
     const verified = run(process.execPath, [manifestTool, "verify", "--archive", archive,
-      "--manifest", manifest, "--tenant", TENANT], {
+      "--manifest", manifest, "--tenant", TENANT, "--hermes-image", IMAGE], {
       env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY },
     });
     assert.equal(verified.status, 0, verified.stderr);
@@ -82,7 +89,7 @@ test("missing/tampered manifest and tampered archive are rejected before restore
     assert.equal(createManifest(archive, manifest).status, 0);
 
     const missing = run("bash", [restoreScript, "--archive", archive, "--manifest", `${manifest}.missing`], {
-      env: { PATH: "/usr/bin:/bin", TENANT_SLUG: TENANT, LIGOU_BACKUP_MANIFEST_KEY: KEY, LIGOU_NODE_BIN: process.execPath },
+      env: { PATH: "/usr/bin:/bin", TENANT_SLUG: TENANT, HERMES_IMAGE: IMAGE, LIGOU_BACKUP_MANIFEST_KEY: KEY, LIGOU_NODE_BIN: process.execPath },
     });
     assert.notEqual(missing.status, 0);
     assert.match(missing.stderr, /manifest_required/);
@@ -91,7 +98,7 @@ test("missing/tampered manifest and tampered archive are rejected before restore
     parsed.source.identity = "ec2:attacker";
     await writeFile(manifest, `${JSON.stringify(parsed)}\n`);
     const badSignature = run(process.execPath, [manifestTool, "verify", "--archive", archive,
-      "--manifest", manifest, "--tenant", TENANT], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
+      "--manifest", manifest, "--tenant", TENANT, "--hermes-image", IMAGE], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
     assert.notEqual(badSignature.status, 0);
     assert.match(badSignature.stderr, /manifest_signature_invalid/);
 
@@ -100,16 +107,91 @@ test("missing/tampered manifest and tampered archive are rejected before restore
     keyIdTamper.signature.key_id = "attacker-key";
     await writeFile(manifest, `${JSON.stringify(keyIdTamper)}\n`);
     const badKeyId = run(process.execPath, [manifestTool, "verify", "--archive", archive,
-      "--manifest", manifest, "--tenant", TENANT], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
+      "--manifest", manifest, "--tenant", TENANT, "--hermes-image", IMAGE], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
     assert.notEqual(badKeyId.status, 0);
     assert.match(badKeyId.stderr, /manifest_signature_invalid/);
 
     assert.equal(createManifest(archive, manifest).status, 0);
     await writeFile(archive, "tamper", { flag: "a" });
     const badArchive = run(process.execPath, [manifestTool, "verify", "--archive", archive,
-      "--manifest", manifest, "--tenant", TENANT], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
+      "--manifest", manifest, "--tenant", TENANT, "--hermes-image", IMAGE], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
     assert.notEqual(badArchive.status, 0);
     assert.match(badArchive.stderr, /archive_(?:size|checksum)_mismatch/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("real zip symlinks with unsafe targets are rejected as non-regular entries", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-symlink-"));
+  try {
+    const payload = path.join(fixture, "payload");
+    await mkdir(path.join(payload, "memory"), { recursive: true });
+    await writeFile(path.join(payload, "memory/state.json"), "{}\n");
+    await symlink("../../outside-secret", path.join(payload, "memory/current"));
+    const archive = path.join(fixture, "hermes-test-tenant-20260820T120000Z.zip");
+    const zipped = run("zip", ["-qry", archive, "."], { cwd: payload });
+    assert.equal(zipped.status, 0, zipped.stderr);
+    const result = createManifest(archive, `${archive}.manifest.json`);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /archive_non_regular_entry|archive_unsafe_link_target/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("real archive expanded file count is bounded before signing", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-file-limit-"));
+  try {
+    const payload = path.join(fixture, "payload");
+    await mkdir(payload);
+    for (let index = 0; index < 4; index += 1) await writeFile(path.join(payload, `state-${index}.json`), "{}\n");
+    const archive = path.join(fixture, "hermes-test-tenant-20260820T120000Z.zip");
+    const zipped = run("zip", ["-q", archive, ...Array.from({ length: 4 }, (_, index) => `state-${index}.json`)], { cwd: payload });
+    assert.equal(zipped.status, 0, zipped.stderr);
+    const result = createManifest(archive, `${archive}.manifest.json`, { LIGOU_ARCHIVE_MAX_FILES: "3" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /archive_file_limit_exceeded/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("real archive expanded bytes are bounded before signing", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-size-limit-"));
+  try {
+    const payload = path.join(fixture, "payload");
+    await mkdir(payload);
+    await writeFile(path.join(payload, "state.json"), "12345678");
+    const archive = path.join(fixture, "hermes-test-tenant-20260820T120000Z.zip");
+    const zipped = run("zip", ["-q", archive, "state.json"], { cwd: payload });
+    assert.equal(zipped.status, 0, zipped.stderr);
+    const result = createManifest(archive, `${archive}.manifest.json`, { LIGOU_ARCHIVE_MAX_EXPANDED_BYTES: "7" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /archive_expanded_size_limit_exceeded/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("extracted filesystem lstat and realpath scan rejects a link escape before import", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-extracted-link-"));
+  try {
+    const payload = path.join(fixture, "payload");
+    const bin = path.join(fixture, "bin");
+    await mkdir(payload);
+    await mkdir(bin);
+    await writeFile(path.join(payload, "state.json"), "0123456789");
+    const archive = path.join(fixture, "hermes-test-tenant-20260820T120000Z.zip");
+    const zipped = run("zip", ["-q", archive, "state.json"], { cwd: payload });
+    assert.equal(zipped.status, 0, zipped.stderr);
+    await writeFile(path.join(bin, "unzip"), "#!/bin/sh\n/bin/mkdir -p \"$4\"\n/bin/ln -s /etc/hosts \"$4/state.json\"\n");
+    await chmod(path.join(bin, "unzip"), 0o755);
+    const result = run(process.execPath, [archiveTool, "extract", archive, path.join(fixture, "extracted")], {
+      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /archive_extracted_(?:path_escape|entry_invalid)/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -152,6 +234,7 @@ test("backup script creates and uploads only the cognitive archive plus authenti
         LIGOU_BACKUP_SOURCE_ID: "ec2:i-test",
         LIGOU_BACKUP_MANIFEST_KEY: KEY,
         LIGOU_BACKUP_MANIFEST_KEY_ID: "test-v1",
+        HERMES_IMAGE: IMAGE,
         LIGOU_BACKUP_WORK_DIR: work,
         LIGOU_NODE_BIN: process.execPath,
         DOCKER_LOG: dockerLog,
@@ -167,7 +250,7 @@ test("backup script creates and uploads only the cognitive archive plus authenti
     const archive = path.join(work, names.find((name) => name.endsWith(".zip")));
     const manifest = path.join(work, names.find((name) => name.endsWith(".manifest.json")));
     const verified = run(process.execPath, [manifestTool, "verify", "--archive", archive,
-      "--manifest", manifest, "--tenant", TENANT], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
+      "--manifest", manifest, "--tenant", TENANT, "--hermes-image", IMAGE], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
     assert.equal(verified.status, 0, verified.stderr);
     const uploads = await readFile(awsLog, "utf8");
     assert.equal(uploads.split("\n").filter((line) => line.includes("s3 cp")).length, 2);
@@ -185,8 +268,8 @@ async function stubCommands(fixture) {
   const curl = path.join(bin, "curl");
   const aws = path.join(bin, "aws");
   const sleep = path.join(bin, "sleep");
-  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"auth status openai-codex"*) printf '%s\\n' '{"authenticated":true}' ;;\nesac\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-check-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
-  await writeFile(curl, `#!/bin/sh\nif [ "\${CURL_MODE:-ok}" = fail ]; then printf '%s\\n' '{"ok":false}'; else printf '%s\\n' '{"ok":true}'; fi\n`);
+  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"authenticated":true}' ;;\nesac\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-check-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
+  await writeFile(curl, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\nif [ "\${CURL_MODE:-ok}" = fail ]; then printf '%s\\n' '{"ok":false}'; elif [ -n "\${CURL_FAIL_ONCE_MARKER:-}" ] && [ ! -e "$CURL_FAIL_ONCE_MARKER" ]; then : > "$CURL_FAIL_ONCE_MARKER"; printf '%s\\n' '{"ok":false}'; else printf '%s\\n' '{"ok":true}'; fi\n`);
   await writeFile(aws, "#!/bin/sh\nprintf '%s\\n' 'unexpected aws call' >&2\nexit 99\n");
   await writeFile(sleep, "#!/bin/sh\nexit 0\n");
   for (const command of [docker, curl, aws, sleep]) await chmod(command, 0o755);
@@ -200,8 +283,9 @@ function restoreEnv(fixture, bin, extra = {}) {
     TENANT_SLUG: TENANT,
     LIGOU_BACKUP_MANIFEST_KEY: KEY,
     LIGOU_NODE_BIN: process.execPath,
-    HERMES_IMAGE: "example.invalid/hermes@sha256:0123456789abcdef",
+    HERMES_IMAGE: IMAGE,
     DOCKER_LOG: path.join(fixture, "docker.log"),
+    CURL_LOG: path.join(fixture, "curl.log"),
     ...extra,
   };
 }
@@ -252,8 +336,34 @@ test("disposable smoke failure never reaches the live cell", async () => {
   }
 });
 
-test("live health failure automatically imports the pre-apply rollback snapshot", async () => {
+test("live health failure labels rollback applied only after recovered live smoke passes", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-rollback-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture);
+    const manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const bin = await stubCommands(fixture);
+    const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], {
+      env: restoreEnv(fixture, bin, { CURL_FAIL_ONCE_MARKER: path.join(fixture, "curl-failed-once") }),
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /restore_health_failed_rollback_applied/);
+    const log = await readFile(path.join(fixture, "docker.log"), "utf8");
+    assert.match(log, /hermes backup -o \/tmp\/rollback-test-tenant-/);
+    const liveImports = log.split("\n").filter((line) => line.includes("ligou-cell-test-tenant hermes import"));
+    assert.equal(liveImports.length, 2, log);
+    assert.match(liveImports[1], /rollback-test-tenant-/);
+    assert.equal(log.split("\n").filter((line) => line.includes("inspect --format") && line.includes("ligou-cell-test-tenant")).length, 2);
+    const curlCalls = (await readFile(path.join(fixture, "curl.log"), "utf8")).trim().split("\n");
+    assert.equal(curlCalls.length, 2, "new state and recovered rollback must each pass a live probe");
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("failed restore recovery is labeled rollback failed, never rollback applied", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-recovery-fail-"));
   try {
     await mkdir(path.join(fixture, "tmp"));
     const archive = await makeArchive(fixture);
@@ -264,12 +374,8 @@ test("live health failure automatically imports the pre-apply rollback snapshot"
       env: restoreEnv(fixture, bin, { CURL_MODE: "fail" }),
     });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /restore_health_failed_rollback_applied/);
-    const log = await readFile(path.join(fixture, "docker.log"), "utf8");
-    assert.match(log, /hermes backup -o \/tmp\/rollback-test-tenant-/);
-    const liveImports = log.split("\n").filter((line) => line.includes("ligou-cell-test-tenant hermes import"));
-    assert.equal(liveImports.length, 2, log);
-    assert.match(liveImports[1], /rollback-test-tenant-/);
+    assert.match(result.stderr, /restore_health_failed_rollback_failed/);
+    assert.doesNotMatch(result.stderr, /rollback_applied/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

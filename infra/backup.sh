@@ -9,6 +9,7 @@ MANIFEST_TOOL="${ROOT}/infra/backup-manifest.mjs"
 TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
 BUCKET="${LIGOU_BACKUP_BUCKET:?set LIGOU_BACKUP_BUCKET}"
 SOURCE_ID="${LIGOU_BACKUP_SOURCE_ID:?set LIGOU_BACKUP_SOURCE_ID}"
+IMAGE="${HERMES_IMAGE:?set immutable HERMES_IMAGE digest}"
 WORK="${LIGOU_BACKUP_WORK_DIR:-/opt/ligou/backups}"
 RETENTION_DAYS="${LIGOU_BACKUP_RETENTION_DAYS:-30}"
 
@@ -20,6 +21,7 @@ RETENTION_DAYS="${LIGOU_BACKUP_RETENTION_DAYS:-30}"
 [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] && [ "$RETENTION_DAYS" -ge 1 ] && [ "$RETENTION_DAYS" -le 3650 ] \
   || { echo "backup_retention_invalid" >&2; exit 2; }
 [ -n "${LIGOU_BACKUP_MANIFEST_KEY:-}" ] || { echo "manifest_key_required" >&2; exit 1; }
+[[ "$IMAGE" =~ ^[^[:space:]@]+(:[^[:space:]@]+)?@sha256:[a-f0-9]{64}$ ]] || { echo "hermes_image_digest_required" >&2; exit 1; }
 command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "node_required" >&2; exit 1; }
 
 CELL="ligou-cell-${TENANT}"
@@ -49,6 +51,7 @@ trap - EXIT
   --manifest "$LOCAL_MANIFEST" \
   --tenant "$TENANT" \
   --source "$SOURCE_ID" \
+  --hermes-image "$IMAGE" \
   --created "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >/dev/null
 
 aws s3 cp "$LOCAL_ARCHIVE" "s3://${BUCKET}/cells/${TENANT}/${NAME}" --sse AES256 --only-show-errors
