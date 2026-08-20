@@ -224,3 +224,35 @@ describe("opaque booking offers migration contract", () => {
     expect(sql).toContain(`grant execute on function ${signature} to service_role`);
   });
 });
+
+describe("booking commit lease and reconciliation migration contract", () => {
+  test("uses a tenant time-range exclusion and current-authority preparation before provider write", () => {
+    const sql = migrationSql("booking_commit_leases");
+    expect(sql).toContain("create table public.booking_slot_leases");
+    expect(sql).toContain("exclude using gist");
+    expect(sql).toContain("tenant_id with =");
+    expect(sql).toContain("slot_range with &&");
+    expect(sql).toContain("function public.prepare_booking_provider_write");
+    expect(sql).toContain("public.validate_booking_intent_authority(p_intent)");
+    expect(sql).toContain("exclusion_violation");
+  });
+
+  test("unknown claims are marked reconciliation-only and never promoted back to write", () => {
+    const sql = migrationSql("booking_commit_leases");
+    expect(sql).toContain("execution_mode");
+    expect(sql).toContain("when candidate.prior_status = 'unknown' then 'reconcile'");
+    expect(sql).toContain("status in ('authorized','queued','unknown')");
+  });
+
+  test("lease RPCs are service-role-only", () => {
+    const sql = migrationSql("booking_commit_leases");
+    for (const signature of [
+      "public.prepare_booking_provider_write(uuid)",
+      "public.release_booking_slot_lease(uuid)",
+      "public.commit_booking_slot_lease(uuid)",
+    ]) {
+      expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated`);
+      expect(sql).toContain(`grant execute on function ${signature} to service_role`);
+    }
+  });
+});
