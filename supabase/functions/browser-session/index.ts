@@ -5,7 +5,7 @@
 // local controller's POST /session, so the dashboard just points here in remote mode.
 // Deploy: supabase functions deploy browser-session --no-verify-jwt   (JWT is verified explicitly below)
 // Secrets: SERVICE_KEY=sb_secret_...  (SUPABASE_URL is injected by the platform)
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { createClient } from "@supabase/supabase-js";
 import { requireTenantOwner } from "../_shared/tenant-ownership.ts";
 
 const CORS = {

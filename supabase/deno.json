@@ -1,0 +1,7 @@
+{
+  "nodeModulesDir": "none",
+  "imports": {
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2.112.3",
+    "postgres": "npm:postgres@3.4.9"
+  }
+}

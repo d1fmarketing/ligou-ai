@@ -2,7 +2,7 @@
 // Fast ACK; the controller (outbound-only) does accept + sideband. Signature: standard-webhooks scheme.
 // Deploy: supabase functions deploy accept-call --no-verify-jwt
 // Secrets: supabase secrets set OPENAI_WEBHOOK_SECRET=whsec_... SERVICE_KEY=sb_secret_...
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { createClient } from "@supabase/supabase-js";
 import { hashCanonicalContact } from "../_shared/privacy.ts";
 import { extractAllowedSipHeaders } from "../_shared/sip-headers.ts";
 
