@@ -139,3 +139,30 @@ Corrective local verification: 192 isolated voice tests, 33 migration contracts,
 11-test/check/secret/runtime-manifest gate, and dashboard 16-test/build gate passed. Six credentialed integration
 tests still skip in a clean environment. The Docker CLI exists, but its daemon/local PostgreSQL is unavailable;
 real transaction/exclusion execution and live Google remain blocked and unclaimed.
+
+## Run 2 Task 4 corrective review round 2
+
+Migration ruling: migrations `0014` and earlier are treated as applied/immutable. Task 4 migrations were verified
+unapplied everywhere; therefore `20260820175153_booking_delivery_authority.sql` was corrected in place so its own
+transaction boundary is safe. The redundant, also-unapplied `20260820180408_booking_receipt_preflight.sql` was
+removed from the final migration sequence.
+
+- `begin_provider_write` now requires a `held` lease and compares tenant/start/end with `IS DISTINCT FROM`, using
+  canonical `coalesce(slot_end, slot_start)`.
+- All pre-write defer/fail/release operations use `transition_claimed_intent(intent, claim_token, ...)`. A stale
+  worker cannot release the slot or overwrite a newer claim. Direct service-role execution of the old unfenced
+  prepare/release/validator paths is revoked.
+- Connector state is queried even without OAuth client environment variables. Lookup error, inactive row,
+  missing token, or incomplete OAuth configuration is unknown and never falls back. Only confirmed row absence,
+  explicit fallback enablement, and complete global configuration may use the managed calendar. Malformed event
+  list/pagination bodies are unknown with zero POST.
+- Hermes removes every digit sequence from question/context and rejects advice containing digits, currency, or
+  pricing/threshold language.
+- The final receipt-authority migration quarantines every legacy accepted booking receipt before confirmation
+  authority is defined, never auto-maps legacy proof, preserves all audit rows, removes booking-ID uniqueness from
+  the accepted mapping, and checks quarantine in the first confirmation function. No quarantine-resolution
+  mechanism exists yet; resolution requires a future explicit forward policy.
+
+Round-2 local verification: 205 isolated voice tests, 34 migration contracts, both controller bundles, root
+11-test/check/secret/runtime-manifest gate, and dashboard 16-test/build gate passed. Six credentialed integration
+tests remain intentionally skipped. Real PostgreSQL apply/concurrency and live Google verification remain blocked.
