@@ -4,6 +4,8 @@ import { config } from "./config.ts";
 
 export interface Rule {
   id: string;
+  rule_group_id: string;
+  version: number;
   category: string;
   escopo: string;
   text: string;
@@ -19,6 +21,8 @@ export interface Tenant {
   timezone: string;
   session_max_minutes: number;
   owner_user_id: string | null;
+  auth_epoch: number;
+  policy_epoch: number;
 }
 
 let client: SupabaseClient | null = null;
@@ -29,24 +33,34 @@ export function supa(): SupabaseClient {
 // test seam
 export function _setClient(c: SupabaseClient | null) { client = c; }
 
-const tenantCache = new Map<string, { tenant: Tenant; rules: Rule[]; at: number }>();
-const TTL_MS = 30_000;
+const tenantCache = new Map<string, { authEpoch: number; policyEpoch: number; rules: Rule[] }>();
 
 export async function loadTenant(slug: string): Promise<{ tenant: Tenant; rules: Rule[] }> {
-  const hit = tenantCache.get(slug);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit;
   const s = supa();
   const { data: tenant, error: te } = await s.from("tenants").select("*").eq("slug", slug).single();
   if (te || !tenant) throw new Error(`tenant_not_found: ${slug}`);
+  const typedTenant = tenant as Tenant;
+  if (!Number.isInteger(typedTenant.auth_epoch) || !Number.isInteger(typedTenant.policy_epoch)) {
+    throw new Error("tenant_authority_epochs_missing");
+  }
+
+  const hit = tenantCache.get(slug);
+  if (hit && hit.authEpoch === typedTenant.auth_epoch && hit.policyEpoch === typedTenant.policy_epoch) {
+    return { tenant: typedTenant, rules: hit.rules };
+  }
+
   const { data: rules, error: re } = await s
-    .from("rules")
-    .select("id,category,escopo,text,structured")
-    .eq("tenant_id", tenant.id)
-    .eq("status", "aprovado");
+    .from("effective_rules")
+    .select("id,rule_group_id,version,category,escopo,text,structured")
+    .eq("tenant_id", typedTenant.id);
   if (re) throw new Error(`rules_load_failed: ${re.message}`);
-  const entry = { tenant: tenant as Tenant, rules: (rules ?? []) as Rule[], at: Date.now() };
-  tenantCache.set(slug, entry);
-  return entry;
+  const effectiveRules = (rules ?? []) as Rule[];
+  tenantCache.set(slug, {
+    authEpoch: typedTenant.auth_epoch,
+    policyEpoch: typedTenant.policy_epoch,
+    rules: effectiveRules,
+  });
+  return { tenant: typedTenant, rules: effectiveRules };
 }
 
 export function invalidateTenant(slug: string) { tenantCache.delete(slug); }

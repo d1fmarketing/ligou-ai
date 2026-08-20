@@ -13,9 +13,18 @@ export interface Capability {
   jti: string;
   expiresAt: number;
   allowedTools: string[];
+  authEpoch: number;
+  policyEpoch: number;
 }
 
-export function makeCapability(tenantSlug: string, tenantId: string, callId: string, maxMinutes: number, sessionType: "customer" | "owner_browser" | "onboarding" = "customer"): Capability {
+export function makeCapability(
+  tenantSlug: string,
+  tenantId: string,
+  callId: string,
+  maxMinutes: number,
+  sessionType: "customer" | "owner_browser" | "onboarding" = "customer",
+  epochs: { authEpoch: number; policyEpoch: number } = { authEpoch: 1, policyEpoch: 1 },
+): Capability {
   const allowedTools = sessionType === "onboarding"
     ? ["get_business_info", "record_interview_answer"]
     : ["get_business_info", "quote_price", "check_availability", "create_async_case", "consult_hermes", "propose_booking", "close_deal"];
@@ -27,6 +36,8 @@ export function makeCapability(tenantSlug: string, tenantId: string, callId: str
     jti: randomUUID(),
     expiresAt: Date.now() + maxMinutes * 60_000,
     allowedTools,
+    authEpoch: epochs.authEpoch,
+    policyEpoch: epochs.policyEpoch,
   };
 }
 
@@ -95,8 +106,9 @@ export const toolSchemas = [
         price: { type: "number", description: "price agreed with the caller" },
         client_name: { type: "string" },
         contact: { type: "string", description: "phone or email for confirmation" },
+        service_city: { type: "string", description: "city where service will occur; required for geographic authority" },
       },
-      required: ["service_type", "slot_start", "price"],
+      required: ["service_type", "slot_start", "price", "service_city"],
     },
   },
   {
@@ -171,6 +183,8 @@ export async function runTool(cap: Capability, name: string, args: Record<string
   try {
     const { tenant, rules } = await loadTenant(cap.tenantSlug);
     if (tenant.id !== cap.tenantId) return done({ error: "tenant_mismatch" }, false);
+    if (tenant.auth_epoch !== cap.authEpoch) return done({ error: "authorization_epoch_stale" }, false);
+    if (tenant.policy_epoch !== cap.policyEpoch) return done({ error: "policy_epoch_stale" }, false);
 
     switch (name) {
       case "get_business_info": {

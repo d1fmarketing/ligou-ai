@@ -1,6 +1,6 @@
 // Tool contract tests — run against a mocked Supabase client; no audio, no network, $0.
 import { describe, expect, test, beforeEach, afterAll } from "bun:test";
-import { _setClient } from "../src/rules.ts";
+import { _setClient, invalidateTenant } from "../src/rules.ts";
 import { makeCapability, runTool } from "../src/tools.ts";
 import { overlapsBusy } from "../src/calendar.ts";
 import { buildInstructions } from "../src/instructions.ts";
@@ -8,6 +8,7 @@ import { buildInstructions } from "../src/instructions.ts";
 const TENANT = {
   id: "t-1", slug: "rocha-plumbing", name: "Rocha Plumbing LLC", vertical: "plumbing",
   languages: ["en", "es"], timezone: "America/Los_Angeles", session_max_minutes: 15, owner_user_id: "u-1",
+  auth_epoch: 1, policy_epoch: 1,
 };
 const RULES = [
   { id: "r-price-drain", category: "preco", escopo: "servico", text: "Drain cleaning: $149–$225.", structured: { service_type: "drain_cleaning", price_min: 149, price_target: 225, duration_min: 60, grant: "AZUL" } },
@@ -24,36 +25,26 @@ let busyEvents: Array<{ start_iso: string; end_iso: string }> = [];
 let calendarFails = false;
 
 function mockSupabase() {
-  const single = async () => ({ data: { id: "case-1", status: "pendente" }, error: null });
   return {
     from(table: string) {
-      return {
-        select(_cols: string) {
-          return {
-            eq(_c: string, _v: string) {
-              return {
-                eq(_c2: string, _v2: string) { return Promise.resolve({ data: RULES, error: null }); },
-                single: async () => ({ data: TENANT, error: null }),
-                // fakeCalendar.busy(): .eq(tenant_id).lt(start_iso).gt(end_iso)
-                lt(_c2: string, _v2: string) {
-                  return {
-                    gt: async (_c3: string, _v3: string) =>
-                      calendarFails
-                        ? { data: null, error: { message: "calendar unreadable" } }
-                        : { data: busyEvents, error: null },
-                  };
-                },
-              };
-            },
-          };
+      const api: any = {
+        select() { return api; },
+        eq() { return api; },
+        lt() { return api; },
+        gt: async () => calendarFails
+          ? { data: null, error: { message: "calendar unreadable" } }
+          : { data: busyEvents, error: null },
+        single: async () => table === "tenants"
+          ? { data: TENANT, error: null }
+          : { data: { id: "case-1", status: "pendente" }, error: null },
+        upsert(row: any) { inserted.push({ table, row }); return api; },
+        update() { return api; },
+        insert(row: any) { inserted.push({ table, row }); return api; },
+        then(resolve: (value: unknown) => unknown) {
+          return Promise.resolve({ data: table === "effective_rules" ? RULES : [], error: null }).then(resolve);
         },
-        upsert(row: any, _opts: any) {
-          inserted.push({ table, row });
-          return { select: (_c: string) => ({ single }) };
-        },
-        update(_row: any) { return { eq: async () => ({ data: null, error: null }) }; },
-        insert(row: any) { inserted.push({ table, row }); return { select: (_c: string) => ({ single }) }; },
       };
+      return api;
     },
     rpc: async () => ({ data: "res-1", error: null }),
   } as any;
@@ -63,6 +54,7 @@ beforeEach(() => {
   inserted = [];
   busyEvents = [];
   calendarFails = false;
+  invalidateTenant("rocha-plumbing");
   _setClient(mockSupabase());
 });
 
@@ -181,6 +173,18 @@ describe("capability boundary", () => {
     const r = await runTool(c, "quote_price", { service_type: "drain_cleaning" });
     expect(r.ok).toBe(false);
     expect(r.body.error).toBe("tenant_mismatch");
+  });
+  test("denies a capability after a power revocation bumps auth epoch", async () => {
+    const c = makeCapability("rocha-plumbing", "t-1", "call-1", 15, "customer", { authEpoch: 0, policyEpoch: 1 });
+    const r = await runTool(c, "quote_price", { service_type: "drain_cleaning" });
+    expect(r.ok).toBe(false);
+    expect(r.body.error).toBe("authorization_epoch_stale");
+  });
+  test("denies a capability after effective policy changes", async () => {
+    const c = makeCapability("rocha-plumbing", "t-1", "call-1", 15, "customer", { authEpoch: 1, policyEpoch: 0 });
+    const r = await runTool(c, "quote_price", { service_type: "drain_cleaning" });
+    expect(r.ok).toBe(false);
+    expect(r.body.error).toBe("policy_epoch_stale");
   });
 });
 

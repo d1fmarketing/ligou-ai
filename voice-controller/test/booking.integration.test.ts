@@ -43,10 +43,14 @@ afterAll(async () => {
 });
 
 async function cap() {
+  const { data: tenant } = await supa().from("tenants").select("auth_epoch,policy_epoch").eq("id", TENANT_ID).single();
   const { data: call } = await supa().from("calls")
     .insert({ tenant_id: TENANT_ID, channel: "eval", session_type: "customer", status: "active" })
     .select("id").single();
-  return makeCapability(SLUG, TENANT_ID, call.id, 15);
+  return makeCapability(SLUG, TENANT_ID, call.id, 15, "customer", {
+    authEpoch: tenant.auth_epoch,
+    policyEpoch: tenant.policy_epoch,
+  });
 }
 
 d("booking end-to-end (fake calendar)", () => {

@@ -23,3 +23,23 @@ describe("tenant owner provisioning migration contract", () => {
     expect(sql).toContain("grant execute on function public.provision_tenant_owner(uuid,uuid) to service_role");
   });
 });
+
+describe("effective authority migration contract", () => {
+  test("projects only the deterministic latest approved version per tenant rule group", () => {
+    const sql = migrationSql("effective_authority_epochs");
+
+    expect(sql).toContain("with (security_invoker = true)");
+    expect(sql).toContain("partition by r.tenant_id, r.rule_group_id order by r.version desc, r.created_at desc, r.id desc");
+    expect(sql).toContain("where ranked.version_rank = 1 and ranked.status = 'aprovado'");
+  });
+
+  test("rule and power changes bump separate epochs and normalize seeded hours", () => {
+    const sql = migrationSql("effective_authority_epochs");
+
+    expect(sql).toContain("set policy_epoch = t.policy_epoch + 1");
+    expect(sql).toContain("set auth_epoch = t.auth_epoch + 1");
+    expect(sql).toContain("after insert on public.rules");
+    expect(sql).toContain("after insert or update or delete on public.powers");
+    expect(sql).toContain("jsonb_build_object('days', jsonb_build_array('mon','tue','wed','thu','fri','sat'), 'start', '08:00', 'end', '18:00')");
+  });
+});

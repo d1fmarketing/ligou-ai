@@ -60,6 +60,9 @@ async function handleIncoming(row: any) {
   }
   await supa().from("phone_events").update({ tenant_id: tenant.id, call_id: call!.id }).eq("id", row.id);
 
-  const cap = makeCapability(tenant.slug, tenant.id, call!.id, tenant.session_max_minutes ?? config.sessionMaxMinutes, "customer");
+  const cap = makeCapability(tenant.slug, tenant.id, call!.id, tenant.session_max_minutes ?? config.sessionMaxMinutes, "customer", {
+    authEpoch: tenant.auth_epoch,
+    policyEpoch: tenant.policy_epoch,
+  });
   attachSideband(cap, row.openai_call_id, model);
 }
