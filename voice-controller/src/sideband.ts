@@ -95,6 +95,13 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
     sock.addEventListener("close", (ev: any) => {
       console.log(`sideband CLOSE call=${cap.callId.slice(0, 8)} code=${ev?.code} attempt=${attempt} opened=${openedThisAttempt} terminal=${terminal}`);
       if (terminal || ledger.status !== "active") { clearTimeout(deadline); void finalize("terminal_close"); return; }
+      // 1002 after a healthy session means OpenAI no longer knows this call: the caller hung up.
+      // Retrying then just delays the summary (45s of pointless reattaches on RJ's first real call).
+      if (everOpened && !openedThisAttempt && ev?.code === 1002) {
+        clearTimeout(deadline);
+        void finalize("caller_hung_up");
+        return;
+      }
       if (attaches >= MAX_ATTACHES) {
         clearTimeout(deadline);
         ledger.transcript.push({ role: "system", text: `sideband lost after ${attaches} attaches (last close ${ev?.code})`, at: new Date().toISOString() });

@@ -68,7 +68,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
     try {
       const form = new FormData();
       form.set("sdp", sdpOffer);
-      form.set("session", JSON.stringify({ type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto", audio: { output: { voice: "marin" } } }));
+      form.set("session", JSON.stringify({ type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto", audio: { output: { voice: config.voice } } }));
       const callRes = await fetch("https://api.openai.com/v1/realtime/calls", {
         method: "POST",
         headers: { Authorization: `Bearer ${config.openaiKey}` },

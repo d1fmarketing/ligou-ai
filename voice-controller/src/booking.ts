@@ -5,8 +5,8 @@ import { loadTenant, priceRules, supa } from "./rules.ts";
 import { checkPower } from "./powers.ts";
 import type { Capability } from "./tools.ts";
 
-const DENY_SAY = "Tell the caller: that specific request needs a quick confirmation from the team — they'll receive a text or call back shortly.";
-const PENDING_SAY = "Tell the caller the appointment request went through and they'll receive a confirmation text shortly. Do NOT say it is booked yet.";
+const DENY_SAY = "Tell the caller: that specific request needs a quick confirmation from the team, and someone will get back to them shortly. Do not promise a text message — SMS is not connected yet.";
+const PENDING_SAY = "Tell the caller the request went through and the team will confirm the time shortly. Do NOT say it is booked yet, and do NOT promise a text message — SMS is not connected yet.";
 
 export async function proposeBooking(cap: Capability, args: Record<string, unknown>) {
   const { tenant, rules } = await loadTenant(cap.tenantSlug);
@@ -117,8 +117,13 @@ export async function closeDeal(cap: Capability, args: Record<string, unknown>) 
 
   await supa().from("bookings").update({ intent_id: intent.id, price_agreed: confirmed }).eq("id", bookingId);
 
+  // Nudge the worker NOW instead of waiting for its next tick. RJ's first real booking was already
+  // confirmed in Google, yet the agent said "processing, you'll get a text" because this tool gave up
+  // before the tick landed — technically honest, but it undersells a booking that actually happened.
+  void import("./worker.ts").then((w) => w.tickIntents()).catch(() => { /* the polling loop remains the safety net */ });
+
   // wait briefly for the worker (fat tool): confirmed in-call when fast, honest pending otherwise
-  const deadline = Date.now() + 1_500;
+  const deadline = Date.now() + 4_000;
   while (Date.now() < deadline) {
     const { data: b } = await supa().from("bookings").select("status,calendar_event_id").eq("id", bookingId).single();
     if (b?.status === "confirmed") {

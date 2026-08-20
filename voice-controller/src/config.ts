@@ -18,6 +18,8 @@ export const config = {
   hermesUrl: process.env.HERMES_URL ?? "http://127.0.0.1:8642",
   hermesKey: process.env.HERMES_API_KEY ?? "",
   defaultTenantSlug: process.env.LIGOU_TENANT ?? "rocha-plumbing",
+  // Male brand voice: RJ listened to cedar/ash/echo/verse/ballad on a real Ligou script and picked ASH.
+  voice: process.env.LIGOU_VOICE ?? "ash",
 };
 
 // $ per 1M tokens — official pricing 2026-08 (developers.openai.com/api/docs/pricing)

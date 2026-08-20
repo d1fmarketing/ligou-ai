@@ -51,7 +51,7 @@ async function handleIncoming(row: any) {
   const accept = await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(row.openai_call_id)}/accept`, {
     method: "POST",
     headers: { Authorization: `Bearer ${config.openaiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto", audio: { output: { voice: "marin" } } }),
+    body: JSON.stringify({ type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto", audio: { output: { voice: config.voice } } }),
   });
   if (!accept.ok) {
     await supa().from("phone_events").update({ status: "error" }).eq("id", row.id);
