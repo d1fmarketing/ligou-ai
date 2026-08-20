@@ -79,3 +79,34 @@ The Important/Minor review findings were corrected locally with forward migratio
 Corrective local verification: 117 isolated voice unit tests, 14 migration contracts, controller bundle, Edge
 Function Deno check, root security test, and root `bun run check` passed. Real PostgreSQL execution and live
 concurrency remain blocked to Task 6 and are not claimed.
+
+## Run 2 Task 4 — authoritative offers, calendar receipts, and customer truth
+
+Implemented locally on `codex/ligou-v0.1`; no migration was applied, no provider was called, and no deployment
+was performed.
+
+- Public quotes and appointment slots now carry cryptographically random opaque IDs. The database stores only
+  SHA-256 token hashes and binds each offer to tenant, call, service, exact normalized interval, local display,
+  public quote, geography, expiry, consumption state, referenced rule/power, and policy epoch. Proposal is one
+  service-role transaction; model-authored times, geography, service, and prices are ignored.
+- `evaluate_offer` is the only negotiation path. It evaluates the offered public price against private current
+  policy and returns only `accept`, `counter`, or `needs_owner` with a new server-bound public quote. A missing
+  private policy fails closed; close still rechecks the private policy and the Task 3 grant/rule/epoch snapshot.
+- Final write preparation invokes Task 3's authority validator and acquires a tenant/time-range exclusion. The
+  worker then rechecks free/busy immediately before the provider boundary. A newly busy or unreadable interval
+  causes zero writes; deterministic concurrent-worker tests permit at most one write.
+- `CalendarPort` now separates `write`, read-only `reconcile`, and `busy`. Unknown intents claim in reconciliation
+  mode, provider lookup failure never reaches POST, and definitive absence remains unknown/manual-review rather
+  than authorizing another write.
+- Google and fake adapters use one canonical expected payload and exact validator covering account/calendar
+  mapping, summary, commitment description, start, end, confirmed status, private idempotency/tenant/booking
+  keys, and expected payload hash. New and reused events use the same proof rule; receipts are unique per intent.
+- Customer outcome language is channel-neutral and centralized. Active Realtime prompts, tool snapshots/results,
+  booking responses, Hermes live-call context, and the executable landing demo contain no absent SMS promise or
+  private pricing floor. The byte-pinned historical Claude export remains unchanged.
+
+Local verification: 164 isolated voice unit tests passed; both controller entry points bundled; root `bun run
+check` passed with 11 frontend tests, secret scan, and the 52-file runtime manifest; dashboard tests/build passed
+(16 tests). Six credentialed booking integration tests were parsed and intentionally skipped in a clean
+environment. Real PostgreSQL exclusion/transaction execution and live Google behavior remain unproved because
+this workspace has no local PostgreSQL/Docker gate and live credentials/provider calls were prohibited.
