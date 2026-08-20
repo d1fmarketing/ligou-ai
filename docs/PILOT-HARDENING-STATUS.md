@@ -55,3 +55,27 @@ Local verification: 97 isolated voice unit tests passed, the controller entry po
 tests and a deterministic concurrency fixture passed, but true PostgreSQL execution/locking remains blocked:
 this workspace has no Docker server, `psql`, `initdb`, or safe live Supabase credential. That is a Task 6 gate,
 not live proof.
+
+## Run 1 Task 3 corrective review round
+
+The Important/Minor review findings were corrected locally with forward migrations only; the three earlier Task
+3 migrations remain unchanged.
+
+- Booking enqueue is now an atomic service-role RPC that locks the tenant and verifies expected auth/policy
+  epochs plus the exact current power and effective rule. Claim rejects stale queued authority, and the worker
+  revalidates the same references immediately before `calendar.book()`.
+- Communication conditions are evaluated per grant in one loop, including body limit, frequency lookup, prior
+  consent, quiet-hours window, geography, channel, and purpose. Unknown nested keys and lookup failures deny;
+  one restrictive grant cannot mask another valid grant.
+- Provider termination has durable call state. Accepted/potential calls require a positively confirmed OpenAI
+  `/hangup` or `/reject` before zero-cost settlement. Transport-unknown termination keeps the reservation active.
+- Terminal call fields are persisted before settlement. A leased worker reconciliation path discovers active
+  reservations on terminal calls, retries provider termination when needed, and retries idempotent settlement.
+- Reattach exhaustion and terminal OpenAI errors map to `error`; a corrective migration fixes legacy error/killed
+  outcomes. The replacement reservation function samples `clock_timestamp()` after acquiring the tenant lock.
+- Shared tenant ownership logic moved under `supabase/functions/_shared`, so Edge deployment does not depend on a
+  repository-root import.
+
+Corrective local verification: 117 isolated voice unit tests, 14 migration contracts, controller bundle, Edge
+Function Deno check, root security test, and root `bun run check` passed. Real PostgreSQL execution and live
+concurrency remain blocked to Task 6 and are not claimed.
