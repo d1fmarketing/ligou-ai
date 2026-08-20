@@ -228,7 +228,9 @@ test("migration CLI is pinned, tenant-locked, dry-run by default, and callback h
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
   const utility = readFileSync(path.join(root, "supabase/scripts/migrate-connector-tokens.ts"), "utf8").replace(/\s+/g, " ");
   const callback = readFileSync(path.join(root, "supabase/functions/google-callback/index.ts"), "utf8");
-  expect(utility).toContain('from "npm:postgres@3.4.9"');
+  const denoConfig = JSON.parse(readFileSync(path.join(root, "supabase/deno.json"), "utf8"));
+  expect(utility).toContain('from "postgres"');
+  expect(denoConfig.imports.postgres).toBe("npm:postgres@3.4.9");
   expect(utility).toContain("where tenant_id = ${lockedTenant}::uuid and refresh_token is not null order by provider, id for update");
   expect(utility).toContain('const apply = args.includes("--apply")');
   expect(callback).not.toMatch(/^\s*refresh_token\s*:/m);
