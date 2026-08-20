@@ -7,9 +7,9 @@
 # Runs ON the EC2 (invoked by the ligou-backup systemd timer). Restore: infra/restore.sh
 set -euo pipefail
 
-TENANT="${TENANT_SLUG:-rocha-plumbing}"
+TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
 CELL="ligou-cell-${TENANT}"
-BUCKET="${LIGOU_BACKUP_BUCKET:-ligou-backups-330140023537}"
+BUCKET="${LIGOU_BACKUP_BUCKET:?set LIGOU_BACKUP_BUCKET}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 WORK="/opt/ligou/backups"
 NAME="hermes-${TENANT}-${STAMP}.zip"

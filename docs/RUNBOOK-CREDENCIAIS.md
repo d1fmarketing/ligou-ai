@@ -19,11 +19,11 @@ preview local.
 - **(a) Login próprio da célula** — recomendado. Gera um token só da célula, sem tocar na conta pessoal do Mac.
   A instância **não tem chave SSH** (acesso é por SSM, mais seguro) — `ssh ligou` NÃO funciona. Use SSM:
   ```bash
-  aws ssm start-session --target i-0de12212f9a17dcfc --region us-east-1
+  aws ssm start-session --target "$LIGOU_INSTANCE_ID" --region "$LIGOU_AWS_REGION"
   ```
   e, dentro do shell da EC2:
   ```bash
-  sudo docker exec -it ligou-cell-rocha-plumbing hermes auth add openai-codex --type oauth --no-browser
+  sudo docker exec -it "ligou-cell-$TENANT_SLUG" hermes auth add openai-codex --type oauth --no-browser
   ```
   Ele imprime uma URL (`auth.openai.com/codex/device`) + código; abrir no browser e autorizar.
   **Ou peça à Isa** — ela dispara o fluxo pelo SSM e te entrega o link/código prontos.

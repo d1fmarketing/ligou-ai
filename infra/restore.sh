@@ -8,9 +8,9 @@
 #   infra/restore.sh --key <s3-key>       # pick a specific archive
 set -euo pipefail
 
-TENANT="${TENANT_SLUG:-rocha-plumbing}"
+TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
 CELL="ligou-cell-${TENANT}"
-BUCKET="${LIGOU_BACKUP_BUCKET:-ligou-backups-330140023537}"
+BUCKET="${LIGOU_BACKUP_BUCKET:?set LIGOU_BACKUP_BUCKET}"
 APPLY=0
 KEY=""
 

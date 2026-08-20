@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "bun run src/server.ts",
     "test": "bun test",
+    "test:unit": "node scripts/run-unit-tests.mjs",
+    "test:integration": "bun test test/booking.integration.test.ts",
     "eval": "bun run eval/run-eval.ts"
   },
   "dependencies": {

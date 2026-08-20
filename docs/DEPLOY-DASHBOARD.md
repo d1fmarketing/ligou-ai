@@ -1,7 +1,7 @@
 # Site unificado publicado — Vercel (domínio temporário)
 
-**URL:** https://client-nine-taupe-24.vercel.app
-**Conta:** `d1fdmarketing-8096` (Vercel CLI já autenticado neste Mac)
+**URL:** use o domínio configurado para o projeto Vercel.
+**Conta:** use a sessão Vercel autorizada para o ambiente alvo.
 
 Um deploy só serve os dois (2026-08-19):
 
@@ -9,15 +9,15 @@ Um deploy só serve os dois (2026-08-19):
 - `/dashboard/` — painel do cliente em **modo remoto**: login Supabase e sessões de voz servidas
   pela EC2 através da Edge Function pública `browser-session` — a EC2 continua sem porta de entrada.
 
-Links de teste antigos `https://client-nine-taupe-24.vercel.app/#k=…` continuam valendo: a landing
-redireciona `#k=` para `/dashboard/#k=…` no carregamento da página.
+O acesso ao painel usa o link mágico padrão do Supabase. Não use fragmentos de URL,
+senhas ou variáveis de build para contornar a autenticação.
 
 ## Republicar após mudanças
 
 ```bash
-cd /Users/d1f/Desktop/Ligou-MVP
+cd /caminho/para/Ligou.AI
 bun run site:build          # check da landing + build do dashboard + montagem em dist/client
-cd dist/client && vercel deploy --prod --yes
+cd dist/${LIGOU_SITE_OUTPUT_DIR:-client} && vercel deploy --prod --yes
 ```
 
 ## Notas
@@ -26,8 +26,8 @@ cd dist/client && vercel deploy --prod --yes
   para nenhum override vazar do shell.
 - `VITE_SESSION_URL` (em `dashboard/.env.local`) aponta para a Edge Function; é o que faz o botão de
   voz falar com a EC2 em vez de `localhost`.
-- A pasta de deploy precisa se chamar `client`: é o name-matching que religa ao projeto Vercel
-  existente (e mantém o domínio estável).
+- `LIGOU_SITE_OUTPUT_DIR` escolhe o diretório de artefato; mantenha `client` enquanto o projeto Vercel
+  existente estiver configurado para esse caminho.
 - Cosmético conhecido (pré-existente): em produção o app dispara `POST http://127.0.0.1:8795/claim`
   (aperto de mão do modo local, fire-and-forget) que o navegador bloqueia com
   `ERR_BLOCKED_BY_CLIENT`. Não afeta login nem voz.
