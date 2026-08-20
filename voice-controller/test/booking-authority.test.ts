@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { proposeBooking } from "../src/booking.ts";
+import { closeDeal, proposeBooking } from "../src/booking.ts";
 import { _setClient, invalidateTenant } from "../src/rules.ts";
 import { makeCapability } from "../src/tools.ts";
 
@@ -22,6 +22,8 @@ const POWERS = [{
 }];
 
 let inserted: Array<{ table: string; row: any }> = [];
+let rpcCalls: Array<{ name: string; args: any }> = [];
+let authorizeError: { message: string } | null = null;
 
 function client() {
   return {
@@ -29,9 +31,14 @@ function client() {
       const api: any = {
         select() { return api; }, eq() { return api; }, is() { return api; },
         upsert(row: any) { inserted.push({ table, row }); return api; },
+        update(row: any) { inserted.push({ table: `${table}:update`, row }); return api; },
         single: async () => {
           if (table === "tenants") return { data: TENANT, error: null };
-          if (table === "bookings") return { data: { id: "booking-1", status: "proposed" }, error: null };
+          if (table === "bookings") return { data: {
+            id: "booking-1", tenant_id: TENANT.id, status: "proposed", service_type: "drain_cleaning",
+            price_agreed: 225, slot_start: "2026-08-21T17:00:00Z", slot_end: "2026-08-21T18:00:00Z",
+            authority_context: { geography: "irvine", channel: "voice", purpose: "booking", appointment_at: "2026-08-21T17:00:00.000Z" },
+          }, error: null };
           if (table === "approval_cases") return { data: { id: "case-1" }, error: null };
           return { data: null, error: null };
         },
@@ -42,11 +49,20 @@ function client() {
       };
       return api;
     },
+    rpc(name: string, args: any) {
+      rpcCalls.push({ name, args });
+      if (name === "authorize_booking_intent") {
+        return Promise.resolve({ data: authorizeError ? null : { id: "intent-1", status: "queued" }, error: authorizeError });
+      }
+      return Promise.resolve({ data: null, error: null });
+    },
   } as any;
 }
 
 beforeEach(() => {
   inserted = [];
+  rpcCalls = [];
+  authorizeError = null;
   invalidateTenant("rocha-plumbing");
   _setClient(client());
 });
@@ -85,5 +101,14 @@ describe("booking passes the complete power context", () => {
       purpose: "booking",
       appointment_at: "2026-08-21T17:00:00.000Z",
     });
+  });
+
+  test("auth/policy TOCTOU before enqueue creates no direct intent", async () => {
+    authorizeError = { message: "authority_epoch_stale" };
+    const result = await closeDeal(capability(), { booking_id: "booking-1", confirmed_price: 225 });
+
+    expect(result.status).toBe("pending_approval");
+    expect(rpcCalls.filter((call) => call.name === "authorize_booking_intent")).toHaveLength(1);
+    expect(inserted.some((entry) => entry.table === "action_intents")).toBe(false);
   });
 });

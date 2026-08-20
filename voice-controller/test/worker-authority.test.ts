@@ -1,0 +1,69 @@
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { _setClient } from "../src/rules.ts";
+import { executeIntent } from "../src/worker.ts";
+
+let validation: { data: boolean | null; error: { message: string } | null } = { data: false, error: null };
+let providerCalls = 0;
+let intentUpdates: any[] = [];
+
+function client() {
+  return {
+    rpc(name: string) {
+      if (name === "validate_booking_intent_authority") return Promise.resolve(validation);
+      return Promise.resolve({ data: null, error: null });
+    },
+    from(table: string) {
+      const api: any = {
+        update(row: any) { if (table === "action_intents") intentUpdates.push(row); return api; },
+        insert() { return api; }, select() { return api; }, eq() { return api; }, in() { return api; },
+        single: async () => ({ data: { id: "receipt-1" }, error: null }),
+        then(resolve: (value: unknown) => unknown) {
+          return Promise.resolve({ data: null, error: null }).then(resolve);
+        },
+      };
+      return api;
+    },
+  } as any;
+}
+
+const intent = {
+  id: "intent-1", tenant_id: "tenant-1", call_id: "call-1", booking_id: "booking-1",
+  kind: "calendar_book", idempotency_key: "idem-1",
+  payload: { summary: "Drain cleaning", description: "Test", start_iso: "2026-08-21T17:00:00Z", end_iso: "2026-08-21T18:00:00Z" },
+};
+
+const calendar = {
+  async book() {
+    providerCalls += 1;
+    return { outcome: "accepted" as const, externalId: "event-1", readback: { id: "event-1" }, payloadHash: "hash", latencyMs: 1 };
+  },
+  async busy() { return { intervals: [] }; },
+};
+
+beforeEach(() => {
+  validation = { data: false, error: null };
+  providerCalls = 0;
+  intentUpdates = [];
+  _setClient(client());
+});
+afterAll(() => _setClient(null));
+
+describe("worker authority at the provider boundary", () => {
+  test("revocation after queue causes zero provider calls", async () => {
+    await executeIntent(intent, calendar);
+    expect(providerCalls).toBe(0);
+    expect(intentUpdates.some((row) => row.last_error === "authority_stale_before_provider")).toBe(true);
+  });
+
+  test("authority lookup error fails closed with zero provider calls", async () => {
+    validation = { data: null, error: { message: "authority unavailable" } };
+    await executeIntent(intent, calendar);
+    expect(providerCalls).toBe(0);
+  });
+
+  test("current referenced grant and rule allow one provider call", async () => {
+    validation = { data: true, error: null };
+    await executeIntent(intent, calendar);
+    expect(providerCalls).toBe(1);
+  });
+});
