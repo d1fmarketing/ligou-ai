@@ -1,3 +1,6 @@
+/* Familjen Grotesk 600, self-hosted — display face per .impeccable.md. The wide weight
+   range keeps browsers from synthesizing faux-bold where styles ask for 700/800. */
+@font-face{font-family:'Familjen Grotesk';font-style:normal;font-weight:400 900;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-600.ttf') format('truetype')}
 /* Archivo v25, self-hosted from the exact Google Fonts files used by the v9 export. */
 @font-face{font-family:'Archivo';font-style:normal;font-weight:400;font-display:swap;src:url('../../../assets/fonts/archivo-v25-400.ttf') format('truetype')}
 @font-face{font-family:'Archivo';font-style:normal;font-weight:500;font-display:swap;src:url('../../../assets/fonts/archivo-v25-500.ttf') format('truetype')}
