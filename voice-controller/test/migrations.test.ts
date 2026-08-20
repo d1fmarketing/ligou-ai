@@ -340,3 +340,14 @@ describe("booking delivery authority corrective migration contract", () => {
     }
   });
 });
+
+describe("legacy booking receipt preflight migration contract", () => {
+  test("quarantines pre-authority accepted history without deleting append-only receipts", () => {
+    const sql = migrationSql("booking_receipt_preflight");
+    expect(sql).toContain("legacy_accepted_receipt_unverifiable");
+    expect(sql).toContain("array_agg(r.id order by r.created_at, r.id)");
+    expect(sql).toContain("from public.receipts r");
+    expect(sql).not.toContain("delete from public.receipts");
+    expect(sql).toContain("not exists (select 1 from public.booking_receipt_conflicts c");
+  });
+});
