@@ -11,6 +11,7 @@ REGION="${LIGOU_AWS_REGION:?set LIGOU_AWS_REGION}"
 INSTANCE="${LIGOU_INSTANCE_ID:?set LIGOU_INSTANCE_ID}"
 BUCKET="${LIGOU_DEPLOY_BUCKET:?set LIGOU_DEPLOY_BUCKET}"
 SOURCE_ID="${LIGOU_DEPLOY_SOURCE_ID:?set LIGOU_DEPLOY_SOURCE_ID}"
+IMAGE="${HERMES_IMAGE:?set immutable HERMES_IMAGE digest}"
 
 [[ "$SOURCE_ROOT" = /* && -d "$SOURCE_ROOT" ]] || { echo "deploy_source_invalid" >&2; exit 2; }
 [ "$(git -C "$SOURCE_ROOT" rev-parse --is-inside-work-tree 2>/dev/null || true)" = "true" ] \
@@ -21,6 +22,7 @@ SOURCE_ID="${LIGOU_DEPLOY_SOURCE_ID:?set LIGOU_DEPLOY_SOURCE_ID}"
 [[ "$BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { echo "deploy_bucket_invalid" >&2; exit 2; }
 [[ "$SOURCE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ ]] || { echo "deploy_source_identity_invalid" >&2; exit 2; }
 [ -n "${LIGOU_RELEASE_MANIFEST_KEY:-}" ] || { echo "release_manifest_key_required" >&2; exit 1; }
+[[ "$IMAGE" =~ ^[^[:space:]@]+(:[^[:space:]@]+)?@sha256:[a-f0-9]{64}$ ]] || { echo "hermes_image_digest_required" >&2; exit 1; }
 command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "node_required" >&2; exit 1; }
 
 if [ -n "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ]; then
@@ -45,10 +47,11 @@ ARTIFACT_HASH="$(printf '%s' "$PACKAGE_JSON" | "$NODE_BIN" -e \
 
 MANIFEST_JSON="$("$NODE_BIN" "$SCRIPT_ROOT/infra/release-manifest.mjs" create \
   --artifact "$ARTIFACT" --manifest "$MANIFEST" --commit "$COMMIT" --source "$SOURCE_ID" \
+  --hermes-image "$IMAGE" \
   --created "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)")"
 RELEASE_ID="$(printf '%s' "$MANIFEST_JSON" | "$NODE_BIN" -e \
   'let value="";process.stdin.on("data",c=>value+=c).on("end",()=>process.stdout.write(JSON.parse(value).release_id||""));')"
-[[ "$RELEASE_ID" =~ ^[a-f0-9]{12}-[a-f0-9]{12}$ ]] || { echo "deploy_release_id_invalid" >&2; exit 1; }
+[[ "$RELEASE_ID" =~ ^[a-f0-9]{40}-[a-f0-9]{64}$ ]] || { echo "deploy_release_id_invalid" >&2; exit 1; }
 
 S3_PREFIX="releases/${RELEASE_ID}"
 aws s3 cp "$ARTIFACT" "s3://${BUCKET}/${S3_PREFIX}/release.tar.gz" --only-show-errors

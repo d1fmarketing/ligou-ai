@@ -13,7 +13,7 @@ const restoreScript = path.join(repoRoot, "infra/restore.sh");
 const backupScript = path.join(repoRoot, "infra/backup.sh");
 const KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 const TENANT = "test-tenant";
-const IMAGE = "example.invalid/hermes@sha256:" + "b".repeat(64);
+const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de";
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: "utf8", ...options });
@@ -76,6 +76,22 @@ test("authenticated manifest carries mandatory identity, archive proof, exclusio
       env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY },
     });
     assert.equal(verified.status, 0, verified.stderr);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("backup manifest rejects an immutable but unapproved Hermes image identity", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-image-identity-"));
+  try {
+    const archive = await makeArchive(fixture);
+    const result = run(process.execPath, [manifestTool, "create", "--archive", archive,
+      "--manifest", `${archive}.manifest.json`, "--tenant", TENANT, "--source", "ec2:i-test",
+      "--created", "2026-08-20T12:00:00.000Z", "--hermes-image", `example.invalid/hermes@sha256:${"f".repeat(64)}`], {
+      env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /hermes_image_not_approved/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

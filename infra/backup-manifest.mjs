@@ -16,6 +16,7 @@ const EXCLUSIONS = [
 const TENANT = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const DIGEST_IMAGE = /^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/;
+const APPROVED_HERMES_IMAGE = JSON.parse(readFileSync(new URL("./toolchain.json", import.meta.url), "utf8")).hermes_image;
 
 function fail(code) {
   process.stderr.write(String(code) + "\n");
@@ -74,6 +75,7 @@ function sign(body, key) {
 function createManifest(args) {
   if (!args.archive || !args.manifest || !args.tenant || !args.source || !args.created || !args.hermes_image) fail("manifest_arguments_missing");
   if (!TENANT.test(args.tenant) || !IDENTITY.test(args.source) || !DIGEST_IMAGE.test(args.hermes_image)) fail("manifest_identity_invalid");
+  if (args.hermes_image !== APPROVED_HERMES_IMAGE) fail("hermes_image_not_approved");
   if (new Date(args.created).toISOString() !== args.created) fail("manifest_created_at_invalid");
   let inspection;
   try { inspection = inspectArchive(args.archive); }
@@ -116,6 +118,7 @@ function createManifest(args) {
 function verifyManifest(args) {
   if (!args.archive || !args.manifest || !args.tenant || !args.hermes_image) fail("manifest_arguments_missing");
   if (!TENANT.test(args.tenant) || !DIGEST_IMAGE.test(args.hermes_image)) fail("manifest_identity_invalid");
+  if (args.hermes_image !== APPROVED_HERMES_IMAGE) fail("hermes_image_not_approved");
   let manifest;
   try { manifest = JSON.parse(readFileSync(args.manifest, "utf8")); }
   catch { fail("manifest_required"); }

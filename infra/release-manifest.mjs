@@ -18,7 +18,16 @@ const EXCLUSIONS = [
 ];
 const COMMIT = /^[a-f0-9]{40}$/;
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
-const RELEASE_ID = /^[a-f0-9]{12}-[a-f0-9]{12}$/;
+const RELEASE_ID = /^[a-f0-9]{40}-[a-f0-9]{64}$/;
+const DIGEST_IMAGE = /^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/;
+const PINNED_TOOLCHAIN = {
+  node: "22.22.3",
+  bun: "1.2.13",
+  deno: "2.9.4",
+  supabase_cli: "2.115.0",
+  hermes_image: "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de",
+  dependencies: { supabase_js: "2.112.3", postgres: "3.4.9" },
+};
 
 function fail(code) {
   process.stderr.write(String(code) + "\n");
@@ -95,21 +104,61 @@ function inspectArtifact(artifact) {
   if (!entries.length || entries.some(forbidden)) fail("release_artifact_forbidden_path");
 }
 
+function artifactFile(artifact, name) {
+  for (const candidate of [name, `./${name}`]) {
+    const result = spawnSync("tar", ["-xOf", artifact, candidate], { encoding: null, maxBuffer: 16 * 1024 * 1024 });
+    if (result.status === 0) return result.stdout;
+  }
+  fail("release_runtime_evidence_missing");
+}
+
+function runtimeEvidence(artifact, hermesImage) {
+  if (!DIGEST_IMAGE.test(hermesImage)) fail("release_hermes_image_digest_required");
+  if (hermesImage !== PINNED_TOOLCHAIN.hermes_image) fail("release_hermes_image_not_approved");
+  let toolchain;
+  let packageJson;
+  try {
+    toolchain = JSON.parse(artifactFile(artifact, "infra/toolchain.json").toString("utf8"));
+    packageJson = JSON.parse(artifactFile(artifact, "voice-controller/package.json").toString("utf8"));
+  } catch {
+    fail("release_runtime_evidence_invalid");
+  }
+  if (canonical(toolchain) !== canonical(PINNED_TOOLCHAIN)
+    || packageJson.packageManager !== `bun@${PINNED_TOOLCHAIN.bun}`) fail("release_runtime_evidence_invalid");
+  const lockfile = artifactFile(artifact, "voice-controller/bun.lock");
+  return {
+    node: { version: PINNED_TOOLCHAIN.node },
+    bun: { version: PINNED_TOOLCHAIN.bun },
+    deno: { version: PINNED_TOOLCHAIN.deno },
+    supabase_cli: { version: PINNED_TOOLCHAIN.supabase_cli },
+    dependencies: {
+      lockfile_path: "voice-controller/bun.lock",
+      lockfile_sha256: createHash("sha256").update(lockfile).digest("hex"),
+      evidence_scope: "lockfile-integrity-only",
+      supabase_js: PINNED_TOOLCHAIN.dependencies.supabase_js,
+      postgres: PINNED_TOOLCHAIN.dependencies.postgres,
+    },
+    hermes: { image: hermesImage },
+  };
+}
+
 function sign(value) {
   return createHmac("sha256", keyBytes()).update(canonical(value)).digest("base64url");
 }
 
 function create(args) {
-  if (!args.artifact || !args.manifest || !args.commit || !args.source || !args.created) fail("release_manifest_arguments_missing");
+  if (!args.artifact || !args.manifest || !args.commit || !args.source || !args.created || !args.hermes_image) fail("release_manifest_arguments_missing");
   if (!COMMIT.test(args.commit) || !IDENTITY.test(args.source)) fail("release_manifest_identity_invalid");
+  if (!DIGEST_IMAGE.test(args.hermes_image)) fail("release_hermes_image_digest_required");
   try { if (new Date(args.created).toISOString() !== args.created) fail("release_manifest_created_at_invalid"); }
   catch { fail("release_manifest_created_at_invalid"); }
   inspectArtifact(args.artifact);
   const artifactProof = proof(args.artifact);
-  const releaseId = args.commit.slice(0, 12) + "-" + artifactProof.sha256.slice(0, 12);
+  const releaseId = args.commit + "-" + artifactProof.sha256;
+  const runtime = runtimeEvidence(args.artifact, args.hermes_image);
   const body = {
     schema: "ligou.release-manifest",
-    version: 1,
+    version: 2,
     release_id: releaseId,
     commit_sha: args.commit,
     source: { identity: args.source },
@@ -119,6 +168,7 @@ function create(args) {
       sha256: artifactProof.sha256,
       size_bytes: artifactProof.size,
     },
+    runtime,
     exclusions: EXCLUSIONS,
     created_at: args.created,
   };
@@ -133,7 +183,7 @@ function verify(args) {
   let manifest;
   try { manifest = JSON.parse(readFileSync(args.manifest, "utf8")); }
   catch { fail("release_manifest_required"); }
-  exactKeys(manifest, ["schema", "version", "release_id", "commit_sha", "source", "artifact", "exclusions", "created_at", "signature"], "release_manifest_schema_invalid");
+  exactKeys(manifest, ["schema", "version", "release_id", "commit_sha", "source", "artifact", "runtime", "exclusions", "created_at", "signature"], "release_manifest_schema_invalid");
   exactKeys(manifest.signature, ["algorithm", "key_id", "value"], "release_manifest_signature_invalid");
   const { signature, ...body } = manifest;
   const metadata = { algorithm: signature.algorithm, key_id: signature.key_id };
@@ -142,7 +192,7 @@ function verify(args) {
   if (signature.algorithm !== "HMAC-SHA256" || expected.length !== received.length || !timingSafeEqual(expected, received)) fail("release_manifest_signature_invalid");
   exactKeys(manifest.source, ["identity"], "release_manifest_schema_invalid");
   exactKeys(manifest.artifact, ["name", "format", "sha256", "size_bytes"], "release_manifest_schema_invalid");
-  if (manifest.schema !== "ligou.release-manifest" || manifest.version !== 1 || manifest.commit_sha !== args.commit
+  if (manifest.schema !== "ligou.release-manifest" || manifest.version !== 2 || manifest.commit_sha !== args.commit
     || !RELEASE_ID.test(manifest.release_id) || !IDENTITY.test(manifest.source.identity)
     || manifest.artifact.name !== path.basename(args.artifact)
     || manifest.artifact.format !== "ligou-release-tar-gzip"
@@ -150,7 +200,9 @@ function verify(args) {
   const artifactProof = proof(args.artifact);
   if (manifest.artifact.size_bytes !== artifactProof.size) fail("release_artifact_size_mismatch");
   if (manifest.artifact.sha256 !== artifactProof.sha256) fail("release_artifact_checksum_mismatch");
-  if (manifest.release_id !== args.commit.slice(0, 12) + "-" + artifactProof.sha256.slice(0, 12)) fail("release_manifest_binding_invalid");
+  if (manifest.release_id !== args.commit + "-" + artifactProof.sha256) fail("release_manifest_binding_invalid");
+  const expectedRuntime = runtimeEvidence(args.artifact, manifest?.runtime?.hermes?.image);
+  if (canonical(manifest.runtime) !== canonical(expectedRuntime)) fail("release_runtime_evidence_invalid");
   inspectArtifact(args.artifact);
   process.stdout.write(JSON.stringify({ ok: true, release_id: manifest.release_id, commit_sha: manifest.commit_sha }) + "\n");
 }

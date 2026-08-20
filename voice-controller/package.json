@@ -2,6 +2,7 @@
   "name": "ligou-voice-controller",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.2.13",
   "scripts": {
     "dev": "bun run src/server.ts",
     "test": "npm run test:unit",

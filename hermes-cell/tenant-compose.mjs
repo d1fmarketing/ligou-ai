@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const TENANT = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
 const DIGEST_IMAGE = /^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/;
+const approvedImage = JSON.parse(readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../infra/toolchain.json"), "utf8")).hermes_image;
 
 function fail(code) {
   process.stderr.write(`${code}\n`);
@@ -42,11 +44,13 @@ if (isMain) {
   }
   if (args.length === 1 && args[0] === "--print-runtime") {
     if (!DIGEST_IMAGE.test(runtime.image)) fail("hermes_image_digest_required");
+    if (runtime.image !== approvedImage) fail("hermes_image_not_approved");
     process.stdout.write(`${JSON.stringify(runtime)}\n`);
     process.exit(0);
   }
   if (!args.length) fail("usage: tenant-compose.mjs <compose arguments> | --print-runtime");
   if (!DIGEST_IMAGE.test(runtime.image)) fail("hermes_image_digest_required");
+  if (runtime.image !== approvedImage) fail("hermes_image_not_approved");
   if (!process.env.HERMES_API_KEY) fail("hermes_api_key_required");
   const composeFile = path.join(path.dirname(fileURLToPath(import.meta.url)), "docker-compose.yml");
   const result = spawnSync("docker", ["compose", "--project-name", runtime.compose_project, "--file", composeFile, ...args], {
