@@ -3,16 +3,19 @@ import { describe, expect, test } from "bun:test";
 import { redactEvidence, validateProposals } from "../src/learning.ts";
 
 describe("redactEvidence", () => {
-  test("masks long digit runs and emails; drops system lines; truncates", () => {
+  test("uses the shared redactor for contact, payment, address, and access data", () => {
     const out = redactEvidence([
-      { role: "caller", text: "my card is 4111111111111111 and email bob@x.com, gate code 4321" },
+      { role: "caller", text: "card 4111 1111 1111 1111; bob@x.com; 123 Oak St; gate code 4321; phone (949) 555-0101" },
       { role: "system", text: "internal" },
       { role: "agent", text: "a".repeat(1000) },
     ]);
     expect(out).toHaveLength(2);
-    expect(out[0].text).toContain("[number-redacted]");
+    expect(out[0].text).toContain("[payment-redacted]");
     expect(out[0].text).toContain("[email-redacted]");
-    expect(out[0].text).toContain("4321"); // short codes stay — they're the useful memory
+    expect(out[0].text).toContain("[address-redacted]");
+    expect(out[0].text).toContain("[access-code-redacted]");
+    expect(out[0].text).toContain("[phone-redacted]");
+    expect(out[0].text).not.toMatch(/4321|4111|123 Oak|949/);
     expect(out[1].text.length).toBeLessThanOrEqual(600);
   });
 });
@@ -28,6 +31,16 @@ describe("validateProposals (strict — malformed is rejected, never repaired)",
     ]);
     expect(out).toHaveLength(1);
     expect(out[0].text).toContain("two dogs");
+  });
+  test("redacts sensitive model-authored proposal and evidence fields before staging", () => {
+    const [proposal] = validateProposals([{
+      text: "Use gate code 4321 at 123 Oak Street and call (949) 555-0101",
+      category: "cliente",
+      escopo: "cliente",
+      evidence: "My PIN is 4321 and card is 4111 1111 1111 1111",
+    }]);
+    expect(JSON.stringify(proposal)).not.toMatch(/4321|123 Oak|949|4111/);
+    expect(proposal.text).toContain("[access-code-redacted]");
   });
   test("non-array input yields nothing", () => {
     expect(validateProposals({ evil: true })).toHaveLength(0);

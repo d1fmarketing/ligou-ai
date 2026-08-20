@@ -207,15 +207,15 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
     expect(r.allowed).toBe(false);
     expect(r.reason).toBe("body_too_long");
   });
-  test("contact hashing is stable across formatting, so opt-out cannot be dodged", () => {
-    const canonical = contactHash("+19495550101");
+  test("contact hashing is keyed and stable across formatting, so opt-out cannot be dodged", async () => {
+    const canonical = await contactHash("+19495550101");
     for (const variant of ["+1 (949) 555-0101", "949-555-0101", "(949) 555 0101", " +1.949.555.0101 "]) {
-      expect(contactHash(variant)).toBe(canonical);
+      expect(await contactHash(variant)).toBe(canonical);
     }
     // different people stay different
-    expect(contactHash("+19495550102")).not.toBe(canonical);
+    expect(await contactHash("+19495550102")).not.toBe(canonical);
     // emails normalize by case/space, not by digits
-    expect(contactHash(" Marcos@Rocha.com ")).toBe(contactHash("marcos@rocha.com"));
+    expect(await contactHash(" Marcos@Rocha.com ")).toBe(await contactHash("marcos@rocha.com"));
   });
 });
 
