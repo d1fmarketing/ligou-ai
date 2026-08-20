@@ -303,14 +303,27 @@ describe("booking delivery authority corrective migration contract", () => {
     expect(sql).toContain("v_intent.provider_write_started_at is not null");
     expect(sql).toContain("provider_write_started_at = now()");
     expect(sql).toContain("execution_mode = 'reconcile'");
+    expect(sql).toContain("v_lease.state is distinct from 'held'");
+    expect(sql).toContain("v_lease.slot_end is distinct from coalesce(v_booking.slot_end, v_booking.slot_start)");
+  });
+
+  test("all pre-write defer/fail/release transitions require the current claim token", () => {
+    const sql = migrationSql("booking_delivery_authority");
+    expect(sql).toContain("function public.transition_claimed_intent");
+    expect(sql).toContain("v_intent.claim_token is distinct from p_claim_token");
+    expect(sql).toContain("v_intent.provider_write_started_at is not null");
+    expect(sql).toContain("delete from public.booking_slot_leases l");
+    expect(sql).toContain("revoke execute on function public.release_booking_slot_lease(uuid) from service_role");
+    expect(sql).toContain("revoke execute on function public.prepare_booking_provider_write(uuid) from service_role");
+    expect(sql).toContain("revoke execute on function public.validate_booking_intent_authority(uuid) from service_role");
   });
 
   test("provider input and lease are exactly reconstructed from locked booking state", () => {
     const sql = migrationSql("booking_delivery_authority");
     expect(sql).toContain("function public.booking_provider_input");
     expect(sql).toContain("v_intent.payload <> v_provider_input");
-    expect(sql).toContain("v_lease.slot_start = v_booking.slot_start");
-    expect(sql).toContain("v_lease.slot_end = v_booking.slot_end");
+    expect(sql).toContain("v_lease.slot_start is distinct from v_booking.slot_start");
+    expect(sql).toContain("v_lease.slot_end is distinct from coalesce(v_booking.slot_end, v_booking.slot_start)");
     expect(sql).toContain("function public.enforce_booking_intent_payload");
   });
 
@@ -341,13 +354,18 @@ describe("booking delivery authority corrective migration contract", () => {
   });
 });
 
-describe("legacy booking receipt preflight migration contract", () => {
-  test("quarantines pre-authority accepted history without deleting append-only receipts", () => {
-    const sql = migrationSql("booking_receipt_preflight");
-    expect(sql).toContain("legacy_accepted_receipt_unverifiable");
-    expect(sql).toContain("array_agg(r.id order by r.created_at, r.id)");
-    expect(sql).toContain("from public.receipts r");
-    expect(sql).not.toContain("delete from public.receipts");
+describe("unapplied Task 4 receipt migration boundary contract", () => {
+  test("quarantines all legacy accepted history before defining confirmation authority", () => {
+    const sql = migrationSql("booking_delivery_authority");
+    const quarantineAt = sql.indexOf("legacy_accepted_receipt_unverifiable");
+    const confirmationAt = sql.indexOf("function public.get_booking_confirmation");
+    const recordAt = sql.indexOf("function public.record_booking_delivery");
+    expect(quarantineAt).toBeGreaterThan(-1);
+    expect(confirmationAt).toBeGreaterThan(quarantineAt);
+    expect(sql.slice(0, recordAt)).not.toContain("insert into public.booking_accepted_receipts");
+    expect(sql).not.toContain("booking_id uuid not null unique");
     expect(sql).toContain("not exists (select 1 from public.booking_receipt_conflicts c");
+    expect(sql).toContain("receipt_history_quarantined");
+    expect(sql).not.toContain("delete from public.receipts");
   });
 });

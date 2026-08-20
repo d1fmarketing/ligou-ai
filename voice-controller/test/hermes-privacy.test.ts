@@ -44,3 +44,26 @@ test("Hermes monetary advice is rejected as non-authoritative", async () => {
   const result = await consultHermes("rocha-plumbing", "How should I respond?", "Caller is negotiating.");
   expect(result).toEqual({ status: "unavailable" });
 });
+
+test("Hermes input redacts bare digits and threshold phrasing", async () => {
+  let requestBody = "";
+  globalThis.fetch = (async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+    requestBody = String(init.body ?? "");
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Open a case." } }] }), { status: 200 });
+  }) as typeof fetch;
+  await consultHermes(
+    "rocha-plumbing",
+    "Accept anything above 149?",
+    "minimum acceptable is 149; internal threshold 149; {\"price_min\":149}",
+  );
+  expect(requestBody).not.toMatch(/149|minimum acceptable|threshold|price_min/i);
+});
+
+for (const advice of ["Accept anything above 149", "Stay above the threshold", "Use $ as the price marker"]) {
+  test(`Hermes rejects advice bypass: ${advice}`, async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      choices: [{ message: { content: advice } }],
+    }), { status: 200 })) as typeof fetch;
+    expect(await consultHermes("rocha-plumbing", "Help", "Caller is negotiating")).toEqual({ status: "unavailable" });
+  });
+}

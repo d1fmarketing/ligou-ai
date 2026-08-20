@@ -62,6 +62,11 @@ let acceptedReceiptCount = 0;
 let writtenInputs: any[] = [];
 let writeOutcomes: any[] = [];
 let reconcileOutcomes: any[] = [];
+let leaseHeld = true;
+let claimedStatus = "running";
+let currentClaimToken = "claim-a";
+let busyResult: any = { intervals: [] };
+let busyHook: (() => void) | null = null;
 
 function accepted() {
   return {
@@ -94,6 +99,16 @@ function client() {
         }
         return Promise.resolve({ data: { authoritative: false, receipt_id: `receipt-${deliveryOutcomes.length}` }, error: null });
       }
+      if (name === "release_booking_slot_lease") {
+        leaseHeld = false;
+        return Promise.resolve({ data: null, error: null });
+      }
+      if (name === "transition_claimed_intent") {
+        if (args.p_claim_token !== currentClaimToken) return Promise.resolve({ data: false, error: null });
+        leaseHeld = false;
+        claimedStatus = args.p_transition === "defer" ? "queued" : "failed";
+        return Promise.resolve({ data: true, error: null });
+      }
       return Promise.resolve({ data: null, error: null });
     },
     from(table: string) {
@@ -101,6 +116,7 @@ function client() {
         insert() { return api; }, select() { return api; }, eq() { return api; }, in() { return api; },
         update(row: any) {
           if (table === "bookings" && row.status === "confirmed") directConfirmed = true;
+          if (table === "action_intents" && row.status) claimedStatus = row.status;
           return api;
         },
         single: async () => table === "receipts"
@@ -125,7 +141,7 @@ const calendar = {
     reconcileCalls += 1;
     return reconcileOutcomes.shift() ?? accepted();
   },
-  async busy() { return { intervals: [] }; },
+  async busy() { busyHook?.(); return busyResult; },
 };
 
 beforeEach(() => {
@@ -140,6 +156,11 @@ beforeEach(() => {
   writtenInputs = [];
   writeOutcomes = [];
   reconcileOutcomes = [];
+  leaseHeld = true;
+  claimedStatus = "running";
+  currentClaimToken = "claim-a";
+  busyResult = { intervals: [] };
+  busyHook = null;
   _setClient(client());
 });
 afterAll(() => _setClient(null));
@@ -189,5 +210,22 @@ describe("booking delivery authority", () => {
     corrupt.payload.end_iso = "2099-01-01T01:00:00.000Z";
     await executeIntent(corrupt, calendar as any);
     expect(writtenInputs[0]).toEqual(LOCKED_INPUT);
+  });
+
+  test("old claim cannot defer or release after a newer claim wins", async () => {
+    currentClaimToken = "claim-old";
+    busyResult = { intervals: [], unknown: true };
+    busyHook = () => { currentClaimToken = "claim-new"; };
+    await executeIntent(intent("claim-old"), calendar as any);
+    expect(leaseHeld).toBe(true);
+    expect(claimedStatus).toBe("running");
+  });
+
+  test("current claim can atomically defer and release before write start", async () => {
+    currentClaimToken = "claim-current";
+    busyResult = { intervals: [], unknown: true };
+    await executeIntent(intent("claim-current"), calendar as any);
+    expect(leaseHeld).toBe(false);
+    expect(claimedStatus).toBe("queued");
   });
 });

@@ -31,6 +31,10 @@ function client() {
       }
       if (name === "get_booking_provider_input") return Promise.resolve({ data: providerInput, error: null });
       if (name === "record_booking_delivery") return Promise.resolve({ data: { authoritative: true, receipt_id: "receipt-1" }, error: null });
+      if (name === "transition_claimed_intent") {
+        intentUpdates.push({ status: "failed", last_error: "slot_became_busy" });
+        return Promise.resolve({ data: true, error: null });
+      }
       return Promise.resolve({ data: null, error: null });
     },
     from(table: string) {

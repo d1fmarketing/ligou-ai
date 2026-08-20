@@ -313,18 +313,19 @@ async function tenantCfg(tenantId: string): Promise<GoogleCfg | null> {
   if (hit && Date.now() - hit.at < CONN_TTL_MS) return hit.cfg;
   let cfg: GoogleCfg | null = null;
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID, clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
-  if (clientId && clientSecret) {
-    const { data, error } = await supa().from("connector_accounts")
-      .select("refresh_token,calendar_id,account_email")
-      .eq("tenant_id", tenantId).eq("provider", "google_calendar").eq("status", "active").maybeSingle();
-    if (error) throw new Error(`connector_lookup_failed:${error.message}`);
-    if (data?.refresh_token) {
-      cfg = {
-        calendarId: data.calendar_id || "primary",
-        accountId: data.account_email || `oauth:${clientId}`,
-        oauth: { clientId, clientSecret, refreshToken: data.refresh_token },
-      };
-    }
+  const { data, error } = await supa().from("connector_accounts")
+    .select("refresh_token,calendar_id,account_email,status")
+    .eq("tenant_id", tenantId).eq("provider", "google_calendar").maybeSingle();
+  if (error) throw new Error(`connector_lookup_failed:${error.message}`);
+  if (data) {
+    if (data.status !== "active") throw new Error(`connector_inactive:${data.status ?? "unknown"}`);
+    if (!data.refresh_token) throw new Error("connector_malformed:refresh_token_missing");
+    if (!clientId || !clientSecret) throw new Error("connector_oauth_config_missing");
+    cfg = {
+      calendarId: data.calendar_id || "primary",
+      accountId: data.account_email || `oauth:${clientId}`,
+      oauth: { clientId, clientSecret, refreshToken: data.refresh_token },
+    };
   }
   connCache.set(tenantId, { cfg, at: Date.now() });
   return cfg;
@@ -396,9 +397,15 @@ export function createGoogleCalendar(dependencies: GoogleDependencies = {}): Cal
     const { base, response } = await lookup(input, cfg, token);
     if (!response.ok) return { base, error: `lookup_${response.status}` };
     const body = (await response.json()) as any;
-    const items = Array.isArray(body?.items) ? body.items : [];
-    if (items.length > 1 || body?.nextPageToken) {
-      return { base, error: `lookup_ambiguous:${items.length}${body?.nextPageToken ? "+" : ""}` };
+    if (!body || typeof body !== "object" || !Array.isArray(body.items)) {
+      return { base, error: "lookup_malformed_items" };
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "nextPageToken") && typeof body.nextPageToken !== "string") {
+      return { base, error: "lookup_malformed_pagination" };
+    }
+    const items = body.items;
+    if (items.length > 1 || body.nextPageToken) {
+      return { base, error: `lookup_ambiguous:${items.length}${body.nextPageToken ? "+" : ""}` };
     }
     return { base, event: items[0] };
   }
