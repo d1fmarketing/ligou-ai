@@ -55,18 +55,19 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
 
   const settleStartupFailure = async (
     reason: string,
+    usageState: "not_applicable" | "unknown" | "resolved",
     provider?: { openaiCallId: string | null; mode: "hangup" | "reject" },
-    usageResolved = true,
   ) => {
+    const usageResolved = usageState === "not_applicable" || usageState === "resolved";
     const terminalWrite = await supa().from("calls").update({
       status: "error",
       ended_at: new Date().toISOString(),
       duration_seconds: 0,
-      cost_estimate_usd: 0,
+      cost_estimate_usd: usageResolved ? 0 : null,
       provider_termination_state: provider ? (provider.openaiCallId ? "active" : "unknown") : "not_required",
       provider_termination_mode: provider?.mode ?? null,
       provider_termination_reason: reason,
-      provider_usage_state: usageResolved ? (provider ? "resolved" : "not_applicable") : "unknown",
+      provider_usage_state: usageState,
     }).eq("id", call.id);
     if (terminalWrite.error) return false;
     return await finalizeTerminalBudget({
@@ -82,7 +83,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   };
 
   if (!config.openaiKey) {
-    await settleStartupFailure("openai_key_missing");
+    await settleStartupFailure("openai_key_missing", "not_applicable");
     throw Object.assign(new Error("openai_key_missing"), { status: 503 });
   }
 
@@ -140,17 +141,17 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
     }
   }
   if (ambiguousProvider) {
-    await settleStartupFailure("provider_outcome_unknown", {
+    await settleStartupFailure("provider_outcome_unknown", "unknown", {
       openaiCallId: ambiguousProvider.openaiCallId,
       mode: "hangup",
-    }, false);
+    });
     throw Object.assign(new Error("provider_outcome_unknown"), {
       status: 502,
       detail: ambiguousProvider.detail,
     });
   }
   if (!usedModel) {
-    await settleStartupFailure("realtime_unavailable");
+    await settleStartupFailure("realtime_unavailable", "not_applicable");
     throw Object.assign(new Error("realtime_unavailable"), { status: 502, detail: lastErr });
   }
 
@@ -164,7 +165,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   try {
     attachSideband(cap, openaiCallId, usedModel);
   } catch (error) {
-    await settleStartupFailure("sideband_attach_failed", { openaiCallId, mode: "hangup" }, false);
+    await settleStartupFailure("sideband_attach_failed", "unknown", { openaiCallId, mode: "hangup" });
     throw error;
   }
 

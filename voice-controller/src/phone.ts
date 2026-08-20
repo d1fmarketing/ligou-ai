@@ -62,7 +62,8 @@ export async function handleIncoming(row: any) {
 
   const failStartup = async (reason: string, mode: "reject" | "hangup", usageResolved: boolean) => {
     const terminalWrite = await supa().from("calls").update({
-      status: "error", ended_at: new Date().toISOString(), duration_seconds: 0, cost_estimate_usd: 0,
+      status: "error", ended_at: new Date().toISOString(), duration_seconds: 0,
+      cost_estimate_usd: usageResolved ? 0 : null,
       provider_termination_state: "active", provider_termination_mode: mode, provider_termination_reason: reason,
       provider_usage_state: usageResolved ? "resolved" : "unknown",
     }).eq("id", call!.id);

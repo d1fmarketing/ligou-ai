@@ -110,9 +110,29 @@ describe("session budget lifecycle", () => {
     });
   });
 
+  test("all definitive browser 4xx responses remain a safe not-applicable zero settlement", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      return new Response("model rejected", { status: 400 });
+    };
+
+    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+      message: "realtime_unavailable",
+      status: 502,
+    });
+
+    expect(providerCreationRequests()).toHaveLength(2);
+    expect(callUpdates.some((row) => row.provider_usage_state === "not_applicable"
+      && row.cost_estimate_usd === 0)).toBe(true);
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(1);
+  });
+
   const assertUnknownProviderRemainsDiscoverable = () => {
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
-    expect(callUpdates.some((row) => row.status === "error" && row.provider_usage_state === "unknown")).toBe(true);
+    expect(callUpdates.some((row) => row.status === "error"
+      && row.provider_usage_state === "unknown"
+      && row.cost_estimate_usd === null)).toBe(true);
     expect(budgetUpdates.some((row) => row.reconcile_lease_until === null && row.reconcile_last_error)).toBe(true);
   };
 
