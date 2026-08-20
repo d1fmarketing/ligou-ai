@@ -272,3 +272,71 @@ describe("private pricing policy guard migration contract", () => {
     expect(sql).toContain("before insert on public.slot_offers");
   });
 });
+
+describe("booking delivery authority corrective migration contract", () => {
+  test("replaces the flawed receipt index with append-safe attempts and explicit legacy conflict capture", () => {
+    const sql = migrationSql("booking_delivery_authority");
+    expect(sql).toContain("drop index if exists public.receipts_one_booking_per_intent");
+    expect(sql).toContain("attempt_key text");
+    expect(sql).toContain("create unique index receipts_booking_attempt_unique");
+    expect(sql).toContain("create table public.booking_receipt_conflicts");
+    expect(sql).toContain("array_agg(r.id order by r.created_at, r.id)");
+    expect(sql).toContain("create table public.booking_accepted_receipts");
+  });
+
+  test("claims carry a unique fence and every reclaimed running intent becomes reconciliation-only", () => {
+    const sql = migrationSql("booking_delivery_authority");
+    expect(sql).toContain("claim_token uuid");
+    expect(sql).toContain("claim_version bigint");
+    expect(sql).toContain("provider_write_started_at timestamptz");
+    expect(sql).toContain("candidate.prior_status in ('unknown','running')");
+    expect(sql).toContain("claim_token = gen_random_uuid()");
+    expect(sql).toContain("ai.status in ('authorized','queued')");
+    expect(sql).toContain("ai.provider_write_started_at is null");
+  });
+
+  test("only a current fenced begin transition can authorize one provider write", () => {
+    const sql = migrationSql("booking_delivery_authority");
+    expect(sql).toContain("function public.begin_provider_write");
+    expect(sql).toContain("v_intent.claim_token <> p_claim_token");
+    expect(sql).toContain("v_intent.lease_until <= now()");
+    expect(sql).toContain("v_intent.provider_write_started_at is not null");
+    expect(sql).toContain("provider_write_started_at = now()");
+    expect(sql).toContain("execution_mode = 'reconcile'");
+  });
+
+  test("provider input and lease are exactly reconstructed from locked booking state", () => {
+    const sql = migrationSql("booking_delivery_authority");
+    expect(sql).toContain("function public.booking_provider_input");
+    expect(sql).toContain("v_intent.payload <> v_provider_input");
+    expect(sql).toContain("v_lease.slot_start = v_booking.slot_start");
+    expect(sql).toContain("v_lease.slot_end = v_booking.slot_end");
+    expect(sql).toContain("function public.enforce_booking_intent_payload");
+  });
+
+  test("accepted receipt, lease, intent, and booking settle atomically with exact proof", () => {
+    const sql = migrationSql("booking_delivery_authority");
+    expect(sql).toContain("function public.record_booking_delivery");
+    expect(sql).toContain("accepted_receipt_conflict");
+    expect(sql).toContain("p_readback->'extendedProperties'->'private'->>'ligouPayloadHash') is distinct from p_payload_hash");
+    expect(sql).toContain("insert into public.booking_accepted_receipts");
+    expect(sql).toContain("set state = 'committed'");
+    expect(sql).toContain("set status = 'succeeded'");
+    expect(sql).toContain("status = 'confirmed'");
+    expect(sql).toContain("v_existing_map.intent_id is not null and p_outcome <> 'accepted'");
+  });
+
+  test("corrective authority RPCs remain service-role-only", () => {
+    const sql = migrationSql("booking_delivery_authority");
+    for (const signature of [
+      "public.prepare_booking_provider_write(uuid,uuid)",
+      "public.begin_provider_write(uuid,uuid)",
+      "public.get_booking_provider_input(uuid)",
+      "public.record_booking_delivery(uuid,text,text,text,jsonb,text,jsonb,jsonb)",
+      "public.get_booking_confirmation(uuid,uuid,uuid)",
+    ]) {
+      expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated`);
+      expect(sql).toContain(`grant execute on function ${signature} to service_role`);
+    }
+  });
+});

@@ -24,14 +24,29 @@ export interface CalendarWriteResult {
   externalId?: string;
   readback?: Record<string, unknown>;
   payloadHash?: string;
+  expected?: CalendarReceiptProof;
   error?: string;
   latencyMs: number;
+}
+
+export interface CalendarReceiptProof {
+  provider: ProviderMapping["provider"];
+  account_id: string;
+  calendar_id: string;
+  summary: string;
+  description: string;
+  start: string;
+  end: string;
+  status: "confirmed";
+  private: Record<string, string>;
+  payload_hash: string;
 }
 
 interface ExpectedCalendarPayload {
   mapping: ProviderMapping;
   hash: string;
   privateProperties: Record<string, string>;
+  proof: CalendarReceiptProof;
 }
 
 function normalizedInstant(value: string): string {
@@ -68,16 +83,30 @@ export function payloadHash(input: CalendarEventInput & Partial<{ provider: Prov
 
 function expectedPayload(input: CalendarEventInput, mapping: ProviderMapping): ExpectedCalendarPayload {
   const hash = payloadHash({ ...input, ...mapping });
+  const privateProperties = {
+    ligouKey: input.idempotencyKey,
+    ligouProvider: mapping.provider,
+    ligouTenantId: input.tenantId,
+    ligouBookingId: input.bookingId,
+    ligouCalendarId: mapping.calendarId,
+    ligouAccountId: mapping.accountId,
+    ligouPayloadHash: hash,
+  };
   return {
     mapping,
     hash,
-    privateProperties: {
-      ligouKey: input.idempotencyKey,
-      ligouTenantId: input.tenantId,
-      ligouBookingId: input.bookingId,
-      ligouCalendarId: mapping.calendarId,
-      ligouAccountId: mapping.accountId,
-      ligouPayloadHash: hash,
+    privateProperties,
+    proof: {
+      provider: mapping.provider,
+      account_id: mapping.accountId,
+      calendar_id: mapping.calendarId,
+      summary: input.summary,
+      description: input.description,
+      start: normalizedInstant(input.startIso),
+      end: normalizedInstant(input.endIso),
+      status: "confirmed",
+      private: privateProperties,
+      payload_hash: hash,
     },
   };
 }
@@ -91,6 +120,7 @@ function mismatchField(input: CalendarEventInput, expected: ExpectedCalendarPayl
   const privateFields = event?.extendedProperties?.private ?? {};
   const checks: Array<[string, string]> = [
     ["idempotency", "ligouKey"],
+    ["provider", "ligouProvider"],
     ["tenant", "ligouTenantId"],
     ["booking", "ligouBookingId"],
     ["calendar", "ligouCalendarId"],
@@ -113,7 +143,7 @@ function classifyReadback(input: CalendarEventInput, expected: ExpectedCalendarP
   }
   return {
     outcome: "accepted", externalId: event.id, readback: event,
-    payloadHash: expected.hash, latencyMs: Date.now() - started,
+    payloadHash: expected.hash, expected: expected.proof, latencyMs: Date.now() - started,
   };
 }
 
@@ -170,6 +200,7 @@ function fakeReadback(row: any) {
     status: row.status,
     extendedProperties: { private: {
       ligouKey: row.idempotency_key,
+      ligouProvider: "fake_calendar",
       ligouTenantId: row.tenant_id,
       ligouBookingId: row.booking_id,
       ligouCalendarId: row.calendar_id,
@@ -283,9 +314,10 @@ async function tenantCfg(tenantId: string): Promise<GoogleCfg | null> {
   let cfg: GoogleCfg | null = null;
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID, clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
   if (clientId && clientSecret) {
-    const { data } = await supa().from("connector_accounts")
+    const { data, error } = await supa().from("connector_accounts")
       .select("refresh_token,calendar_id,account_email")
       .eq("tenant_id", tenantId).eq("provider", "google_calendar").eq("status", "active").maybeSingle();
+    if (error) throw new Error(`connector_lookup_failed:${error.message}`);
     if (data?.refresh_token) {
       cfg = {
         calendarId: data.calendar_id || "primary",
@@ -299,7 +331,9 @@ async function tenantCfg(tenantId: string): Promise<GoogleCfg | null> {
 }
 
 async function cfgFor(tenantId: string): Promise<GoogleCfg | null> {
-  return (await tenantCfg(tenantId).catch(() => null)) ?? googleCfg();
+  const connected = await tenantCfg(tenantId);
+  if (connected) return connected;
+  return process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK === "enabled" ? googleCfg() : null;
 }
 
 const b64url = (value: Buffer | string) =>
@@ -352,24 +386,35 @@ export function createGoogleCalendar(dependencies: GoogleDependencies = {}): Cal
   async function lookup(input: CalendarEventInput, cfg: GoogleCfg, token: string) {
     const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cfg.calendarId)}/events`;
     const response = await fetcher(
-      `${base}?privateExtendedProperty=${encodeURIComponent(`ligouKey=${input.idempotencyKey}`)}&maxResults=1&showDeleted=false`,
+      `${base}?privateExtendedProperty=${encodeURIComponent(`ligouKey=${input.idempotencyKey}`)}&maxResults=10&showDeleted=false`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     return { base, response };
   }
 
+  async function lookupEvent(input: CalendarEventInput, cfg: GoogleCfg, token: string) {
+    const { base, response } = await lookup(input, cfg, token);
+    if (!response.ok) return { base, error: `lookup_${response.status}` };
+    const body = (await response.json()) as any;
+    const items = Array.isArray(body?.items) ? body.items : [];
+    if (items.length > 1 || body?.nextPageToken) {
+      return { base, error: `lookup_ambiguous:${items.length}${body?.nextPageToken ? "+" : ""}` };
+    }
+    return { base, event: items[0] };
+  }
+
   return {
     async write(input) {
       const started = Date.now();
-      const cfg = await resolveConfig(input.tenantId);
-      if (!cfg) return { outcome: "failed", error: "google_not_configured", latencyMs: Date.now() - started };
-      const mapping: ProviderMapping = { provider: "google_calendar", accountId: cfg.accountId, calendarId: cfg.calendarId };
-      const expected = expectedPayload(input, mapping);
       try {
+        const cfg = await resolveConfig(input.tenantId);
+        if (!cfg) return { outcome: "failed", error: "google_not_configured", latencyMs: Date.now() - started };
+        const mapping: ProviderMapping = { provider: "google_calendar", accountId: cfg.accountId, calendarId: cfg.calendarId };
+        const expected = expectedPayload(input, mapping);
         const token = await accessToken(cfg, fetcher);
-        const { base, response: lookupResponse } = await lookup(input, cfg, token);
-        if (!lookupResponse.ok) return { outcome: "unknown", error: `lookup_${lookupResponse.status}`, latencyMs: Date.now() - started };
-        const existing = ((await lookupResponse.json()) as any).items?.[0];
+        const found = await lookupEvent(input, cfg, token);
+        if (found.error) return { outcome: "unknown", error: found.error, latencyMs: Date.now() - started };
+        const { base, event: existing } = found;
         if (existing) return classifyReadback(input, expected, existing, started);
 
         const createResponse = await fetcher(base, {
@@ -400,14 +445,14 @@ export function createGoogleCalendar(dependencies: GoogleDependencies = {}): Cal
 
     async reconcile(input) {
       const started = Date.now();
-      const cfg = await resolveConfig(input.tenantId);
-      if (!cfg) return { outcome: "failed", error: "google_not_configured", latencyMs: Date.now() - started };
-      const expected = expectedPayload(input, { provider: "google_calendar", accountId: cfg.accountId, calendarId: cfg.calendarId });
       try {
+        const cfg = await resolveConfig(input.tenantId);
+        if (!cfg) return { outcome: "failed", error: "google_not_configured", latencyMs: Date.now() - started };
+        const expected = expectedPayload(input, { provider: "google_calendar", accountId: cfg.accountId, calendarId: cfg.calendarId });
         const token = await accessToken(cfg, fetcher);
-        const { response } = await lookup(input, cfg, token);
-        if (!response.ok) return { outcome: "unknown", error: `lookup_${response.status}`, latencyMs: Date.now() - started };
-        const existing = ((await response.json()) as any).items?.[0];
+        const found = await lookupEvent(input, cfg, token);
+        if (found.error) return { outcome: "unknown", error: found.error, latencyMs: Date.now() - started };
+        const existing = found.event;
         if (!existing) return { outcome: "unknown", error: "reconcile_absent_manual_review", latencyMs: Date.now() - started };
         return classifyReadback(input, expected, existing, started);
       } catch (error) {
@@ -416,9 +461,9 @@ export function createGoogleCalendar(dependencies: GoogleDependencies = {}): Cal
     },
 
     async busy(tenantId, fromIso, toIso) {
-      const cfg = await resolveConfig(tenantId);
-      if (!cfg) return { intervals: [], unknown: true };
       try {
+        const cfg = await resolveConfig(tenantId);
+        if (!cfg) return { intervals: [], unknown: true };
         const token = await accessToken(cfg, fetcher);
         const response = await fetcher("https://www.googleapis.com/calendar/v3/freeBusy", {
           method: "POST",
