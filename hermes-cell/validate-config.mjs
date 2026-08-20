@@ -26,6 +26,7 @@ const environmentExample = readOptional("hermes-cell/.env.example");
 const runtimeConfig = read("hermes-cell/config/config.yaml");
 const cliConfig = read("hermes-cell/config/cli-config.yaml");
 const backup = read("infra/backup.sh");
+const image = process.env.HERMES_IMAGE ?? "";
 
 if (/\b(?:CELL_)?OPENAI_API_KEY\b/.test(compose + "\n" + environmentExample)) {
   fail("reasoning_api_key_forbidden");
@@ -33,6 +34,16 @@ if (/\b(?:CELL_)?OPENAI_API_KEY\b/.test(compose + "\n" + environmentExample)) {
 if (![runtimeConfig, cliConfig].every((value) => /provider:\s*["']?openai-codex["']?/i.test(value))) {
   fail("oauth_provider_required");
 }
+if (!/^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/.test(image)) {
+  fail("hermes_image_digest_required");
+}
+for (const required of [
+  "LIGOU_COMPOSE_PROJECT", "HERMES_CONTAINER_NAME", "HERMES_COGNITIVE_VOLUME",
+  "HERMES_MODEL_AUTH_VOLUME", "HERMES_NETWORK", "HERMES_HOST_PORT",
+]) {
+  if (!compose.includes("${" + required + ":?")) fail("tenant_isolation_required");
+}
+if (!compose.includes("image: ${HERMES_IMAGE:?")) fail("hermes_image_digest_required");
 
 const cognitive = compose.match(/^\s*-\s*([a-z0-9_-]+):\/opt\/data\b/im)?.[1];
 const modelAuth = compose.match(/^\s*-\s*([a-z0-9_-]+):\/root\/\.hermes\b/im)?.[1];
@@ -45,6 +56,9 @@ process.stdout.write(JSON.stringify({
   ok: true,
   provider: "openai-codex",
   oauth_only: true,
-  volumes: { cognitive, model_auth: modelAuth },
+  tenant_isolation: true,
+  image,
+  image_immutable: true,
+  volumes: { cognitive: "HERMES_COGNITIVE_VOLUME", model_auth: "HERMES_MODEL_AUTH_VOLUME" },
   cognitive_backup_excludes_model_auth: true,
 }) + "\n");

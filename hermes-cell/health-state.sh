@@ -8,7 +8,14 @@ if ! [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]]; then
   exit 1
 fi
 CELL="ligou-cell-${TENANT}"
-HEALTH_URL="${HERMES_HEALTH_URL:-http://127.0.0.1:8642/health}"
+NODE_BIN="${LIGOU_NODE_BIN:-node}"
+if [ -n "${HERMES_HEALTH_URL:-}" ]; then
+  HEALTH_URL="$HERMES_HEALTH_URL"
+else
+  HOST_PORT="$("$NODE_BIN" "$(cd "$(dirname "$0")" && pwd)/tenant-compose.mjs" --field host_port)" \
+    || { echo '{"ok":false,"provider":"openai-codex","auth":"unknown","api":"invalid_route"}'; exit 1; }
+  HEALTH_URL="http://127.0.0.1:${HOST_PORT}/health"
+fi
 
 AUTH_RAW="$(docker exec "$CELL" hermes auth status openai-codex --json 2>/dev/null || true)"
 if printf '%s' "$AUTH_RAW" | grep -Eqi '"authenticated"[[:space:]]*:[[:space:]]*true|logged[[:space:]]+in'; then

@@ -49,6 +49,20 @@ describe("keyed canonical contacts", () => {
       .not.toBe(await hashCanonicalContact("9495550101", TEST_KEY));
     await expect(hashCanonicalContact("9495550101", "")).rejects.toThrow("contact_hash_key_missing");
   });
+
+  test("canonicalizes SIP From display names, domains, and tag parameters to one phone identity", async () => {
+    const variants = [
+      '"Alice Caller" <sip:+19495550101@pbx-a.example;user=phone>;tag=first',
+      '<sips:949-555-0101@pbx-b.example>;tag=second',
+      'sip:+1.949.555.0101@edge.example;tag=third',
+      '+1 (949) 555-0101',
+    ];
+    for (const value of variants) {
+      expect(canonicalContact(value)).toBe("9495550101");
+      expect(await hashCanonicalContact(value, TEST_KEY))
+        .toBe(await hashCanonicalContact("9495550101", TEST_KEY));
+    }
+  });
 });
 
 test("SIP parsing allowlists only routing inputs and never persists raw caller identity", () => {
