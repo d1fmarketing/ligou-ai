@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { emptyUsage } from "../src/config.ts";
 import { _setClient } from "../src/rules.ts";
-import { persistLedger, type SessionLedger } from "../src/sideband.ts";
+import { handleEvent, persistLedger, terminalStatusForReason, type SessionLedger } from "../src/sideband.ts";
 import { makeCapability } from "../src/tools.ts";
 
 let rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
@@ -51,6 +51,13 @@ function ledger(status: SessionLedger["status"]): SessionLedger {
 }
 
 describe("sideband budget finalization", () => {
+  test("reattach exhaustion and terminal OpenAI errors transition to error", async () => {
+    expect(terminalStatusForReason("active", "reattach_exhausted")).toBe("error");
+    const active = ledger("active");
+    await handleEvent(cap, active, { send() {}, close() {} } as any, { type: "error", error: { message: "terminal" } });
+    expect(active.status).toBe("error");
+  });
+
   test("normal end, deadline, cost kill, and error settle through the idempotent RPC", async () => {
     const expected = [
       ["ended", "ended"],
@@ -61,7 +68,7 @@ describe("sideband budget finalization", () => {
 
     for (const [status, outcome] of expected) {
       rpcCalls = [];
-      await persistLedger(cap, ledger(status));
+      await persistLedger(cap, ledger(status), async () => new Response(null, { status: 200 }));
       const settlements = rpcCalls.filter((call) => call.name === "settle_call_budget");
       expect(settlements).toHaveLength(1);
       expect(settlements[0]?.args.p_outcome).toBe(outcome);
@@ -71,8 +78,8 @@ describe("sideband budget finalization", () => {
 
   test("a repeated persistence attempt relies on SQL idempotency instead of duplicating ledger inserts", async () => {
     const ended = ledger("ended");
-    await persistLedger(cap, ended);
-    await persistLedger(cap, ended);
+    await persistLedger(cap, ended, async () => new Response(null, { status: 200 }));
+    await persistLedger(cap, ended, async () => new Response(null, { status: 200 }));
 
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(2);
     expect(directUsageInserts).toBe(0);

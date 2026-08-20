@@ -3,7 +3,8 @@
 import { config, emptyUsage, sessionCostUsd, type UsageTotals } from "./config.ts";
 import { runTool, type Capability } from "./tools.ts";
 import { supa } from "./rules.ts";
-import { settleCallBudget, type BudgetOutcome } from "./budget.ts";
+import { finalizeTerminalBudget, type BudgetOutcome } from "./budget.ts";
+import type { FetchLike } from "./provider-termination.ts";
 
 export interface SessionLedger {
   callId: string;
@@ -26,6 +27,14 @@ export function sessionCostCapUsd(model: string): number {
 
 const live = new Map<string, SessionLedger>();
 export const liveSessions = live;
+
+export function terminalStatusForReason(
+  current: SessionLedger["status"],
+  reason: string,
+): SessionLedger["status"] {
+  if (current !== "active") return current;
+  return reason === "caller_hung_up" ? "ended" : "error";
+}
 
 export function attachSideband(cap: Capability, openaiCallId: string, model: string): SessionLedger {
   const ledger: SessionLedger = {
@@ -52,7 +61,7 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
   const finalize = async (reason: string) => {
     if (!live.has(cap.callId)) return; // already finalized
     console.log(`sideband finalize call=${cap.callId.slice(0, 8)} reason=${reason} status=${ledger.status} tools=${ledger.toolLog.length}`);
-    if (ledger.status === "active") ledger.status = reason === "retries_exhausted" ? "error" : "ended";
+    ledger.status = terminalStatusForReason(ledger.status, reason);
     live.delete(cap.callId);
     await persistLedger(cap, ledger).catch((e) => console.error("persist failed", e));
   };
@@ -63,7 +72,6 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
     ledger.status = "killed_deadline";
     ledger.transcript.push({ role: "system", text: "session ended: max duration reached", at: new Date().toISOString() });
     try { ws?.close(); } catch {}
-    void hangup(openaiCallId);
     void finalize("deadline");
   }, Math.max(deadlineMs, 5_000));
 
@@ -90,7 +98,13 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
     sock.addEventListener("message", (ev) => {
       let msg: any;
       try { msg = JSON.parse(String(ev.data)); } catch { return; }
-      void handleEvent(cap, ledger, sock, msg);
+      void handleEvent(cap, ledger, sock, msg).then(() => {
+        if (ledger.status !== "active" && live.has(cap.callId)) {
+          terminal = true;
+          clearTimeout(deadline);
+          void finalize(ledger.status === "error" ? "openai_error" : "terminal_event");
+        }
+      });
     });
 
     sock.addEventListener("close", (ev: any) => {
@@ -106,7 +120,6 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
       if (attaches >= MAX_ATTACHES) {
         clearTimeout(deadline);
         ledger.transcript.push({ role: "system", text: `sideband lost after ${attaches} attaches (last close ${ev?.code})`, at: new Date().toISOString() });
-        void hangup(openaiCallId); // no tools without sideband -> better to end the call than let it flail
         void finalize(everOpened ? "reattach_exhausted" : "retries_exhausted");
         return;
       }
@@ -121,7 +134,7 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
   return ledger;
 }
 
-async function handleEvent(cap: Capability, ledger: SessionLedger, ws: WebSocket, msg: any) {
+export async function handleEvent(cap: Capability, ledger: SessionLedger, ws: WebSocket, msg: any) {
   switch (msg.type) {
     case "conversation.item.input_audio_transcription.completed":
       if (msg.transcript) ledger.transcript.push({ role: "caller", text: msg.transcript, at: new Date().toISOString() });
@@ -169,30 +182,23 @@ async function handleEvent(cap: Capability, ledger: SessionLedger, ws: WebSocket
         });
         console.warn(`budget kill: call ${ledger.callId} spent $${spent.toFixed(2)} (cap $${cap.toFixed(2)})`);
         try { ws.close(); } catch {}
-        void hangup(ledger.openaiCallId);
       }
       break;
     }
     case "error":
       ledger.transcript.push({ role: "system", text: `openai error: ${msg.error?.message ?? "?"}`, at: new Date().toISOString() });
+      ledger.status = "error";
+      try { ws.close(); } catch {}
       break;
   }
 }
 
-async function hangup(openaiCallId: string) {
-  try {
-    await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(openaiCallId)}/hangup`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${config.openaiKey}` },
-    });
-  } catch {}
-}
-
-export async function persistLedger(cap: Capability, ledger: SessionLedger) {
+export async function persistLedger(cap: Capability, ledger: SessionLedger, fetchImpl?: FetchLike) {
   const durationS = Math.round((Date.now() - ledger.startedAt) / 1000);
   const cost = sessionCostUsd(ledger.model, ledger.usage);
   const s = supa();
-  await s.from("calls").update({
+  const providerNeedsTermination = ledger.status !== "ended";
+  const terminalWrite = await s.from("calls").update({
     status: ledger.status,
     ended_at: new Date().toISOString(),
     duration_seconds: durationS,
@@ -200,7 +206,11 @@ export async function persistLedger(cap: Capability, ledger: SessionLedger) {
     usage_tokens: ledger.usage as any,
     cost_estimate_usd: Number(cost.toFixed(4)),
     summary_status: "pending_ingest",
+    provider_termination_state: providerNeedsTermination ? "active" : "confirmed",
+    provider_termination_mode: "hangup",
+    provider_termination_reason: providerNeedsTermination ? `sideband_${ledger.status}` : "caller_hung_up",
   }).eq("id", cap.callId);
+  if (terminalWrite.error) return false;
   const outcome: BudgetOutcome = ledger.status === "ended"
     ? "ended"
     : ledger.status === "killed_deadline"
@@ -208,12 +218,16 @@ export async function persistLedger(cap: Capability, ledger: SessionLedger) {
       : ledger.status === "killed_budget"
         ? "killed_budget"
         : "error";
-  await settleCallBudget({
+  return await finalizeTerminalBudget({
     tenantId: cap.tenantId,
     callId: cap.callId,
     actualCostUsd: Number(cost.toFixed(4)),
     minutes: Number((durationS / 60).toFixed(2)),
     outcome,
     detail: { tools: ledger.toolLog, model: ledger.model },
+    provider: providerNeedsTermination
+      ? { openaiCallId: ledger.openaiCallId, mode: "hangup", reason: `sideband_${ledger.status}` }
+      : undefined,
+    fetchImpl,
   });
 }

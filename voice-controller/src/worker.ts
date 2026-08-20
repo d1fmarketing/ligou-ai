@@ -3,6 +3,7 @@
 import { config } from "./config.ts";
 import { supa } from "./rules.ts";
 import { calendarPort } from "./calendar.ts";
+import { reconcileBudgetReservations } from "./budget.ts";
 
 const WORKER_ID = `worker-${process.pid}`;
 
@@ -158,6 +159,7 @@ export function startWorkerLoop() {
     try { await tickIntents(); } catch (e) { console.error("intents", e); }
     try { await tickSummaries(); } catch (e) { console.error("summaries", e); }
     try { const { tickLearning } = await import("./learning.ts"); await tickLearning(); } catch (e) { console.error("learning", e); }
+    try { await reconcileBudgetReservations(); } catch (e) { console.error("budget reconciliation", e); }
   };
   setInterval(loop, 1_000);
   setInterval(() => tickUsageAlerts().catch((e) => console.error("usage", e)), 60_000);

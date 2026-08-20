@@ -14,6 +14,8 @@ let rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
 const originalOpenAiKey = config.openaiKey;
 const originalEstimate = config.estCostPerSessionUsd;
 const originalFetch = globalThis.fetch;
+const originalWebSocket = globalThis.WebSocket;
+let fetchUrls: string[] = [];
 
 function client() {
   return {
@@ -51,6 +53,8 @@ beforeEach(() => {
   config.openaiKey = originalOpenAiKey;
   config.estCostPerSessionUsd = originalEstimate;
   globalThis.fetch = originalFetch;
+  globalThis.WebSocket = originalWebSocket;
+  fetchUrls = [];
   invalidateTenant("rocha-plumbing");
   _setClient(client());
 });
@@ -59,6 +63,7 @@ afterEach(() => {
   config.openaiKey = originalOpenAiKey;
   config.estCostPerSessionUsd = originalEstimate;
   globalThis.fetch = originalFetch;
+  globalThis.WebSocket = originalWebSocket;
 });
 
 afterAll(() => _setClient(null));
@@ -108,5 +113,39 @@ describe("session budget lifecycle", () => {
     const settlements = rpcCalls.filter((call) => call.name === "settle_call_budget");
     expect(settlements).toHaveLength(1);
     expect(settlements[0]?.args.p_outcome).toBe("startup_error");
+  });
+
+  test("accepted browser call attach failure confirms hangup before zero settlement", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      if (fetchUrls.length === 1) {
+        return new Response("answer-sdp", { status: 200, headers: { Location: "/v1/realtime/calls/rtc-1" } });
+      }
+      return new Response(null, { status: 200 });
+    };
+    globalThis.WebSocket = class { constructor() { throw new Error("sideband attach failed"); } } as any;
+
+    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toThrow("sideband attach failed");
+
+    expect(fetchUrls.some((url) => url.endsWith("/rtc-1/hangup"))).toBe(true);
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(1);
+  });
+
+  test("browser hangup transport failure keeps the reservation active", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      if (fetchUrls.length === 1) {
+        return new Response("answer-sdp", { status: 200, headers: { Location: "/v1/realtime/calls/rtc-1" } });
+      }
+      throw new Error("hangup transport unknown");
+    };
+    globalThis.WebSocket = class { constructor() { throw new Error("sideband attach failed"); } } as any;
+
+    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toThrow("sideband attach failed");
+
+    expect(fetchUrls.some((url) => url.endsWith("/rtc-1/hangup"))).toBe(true);
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
   });
 });
