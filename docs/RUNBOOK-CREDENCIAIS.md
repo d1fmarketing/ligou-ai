@@ -1,4 +1,4 @@
-# Runbook — as 3 credenciais que faltam
+# Runbook — autorizações humanas e segredos de implantação
 
 Tudo do MVP está construído, testado e rodando na EC2. O que falta são **três autenticações que só o RJ pode
 fazer** (conta pessoal / login humano). Cada uma leva ~2 minutos. Depois de cada uma, a Isa executa o resto.
@@ -29,29 +29,26 @@ preview local.
   **Ou peça à Isa** — ela dispara o fluxo pelo SSM e te entrega o link/código prontos.
 
 - **(b) Reusar o token do Mac** — mais rápido, porém copia a credencial pessoal do RJ para o servidor:
-  copiar `~/.codex/auth.json` → `/opt/ligou/hermes-auth/auth.json` na EC2 e montar no container.
+  copiar `~/.codex/auth.json` para `/root/.hermes/auth.json` dentro da célula. Esse caminho persiste somente no
+  volume `hermes-model-auth`; nunca copiar para `/opt/data` nem para o volume cognitivo.
 
-**Depois:** `hermes auth status openai-codex` deve dizer *logged in*; a Isa reinicia a célula e roda a prova de
-raciocínio (resumo PT + propostas) com o modelo real.
+**Depois:** `TENANT_SLUG=... bash hermes-cell/health-state.sh` deve retornar somente
+`{"ok":true,"provider":"openai-codex","auth":"ready","api":"ready"}`. O probe não imprime nem encaminha o token.
 
 ---
 
 ## 2. Google Calendar real
 
-**Por quê:** o adapter do Google **já está escrito** (`voice-controller/src/calendar.ts`: insert + read-back +
-freeBusy). Ele liga sozinho quando as 4 variáveis existirem — nenhum código novo é necessário.
+**Por quê:** o adapter Google usa OAuth por tenant, insert + read-back + `freeBusy`. Refresh token não entra no
+Playground, chat, dashboard nem SSM em plaintext.
 
-**Passo (OAuth Playground, ~2 min):**
-1. Abrir <https://developers.google.com/oauthplayground>
-2. Engrenagem (canto sup. dir.) → marcar *Use your own OAuth credentials* → colar Client ID e Secret de um
-   projeto Google Cloud com a **Calendar API** ativada
-3. Selecionar o scope `https://www.googleapis.com/auth/calendar` → *Authorize APIs* → logar com a conta dona da
-   agenda → *Exchange authorization code for tokens*
-4. Copiar o **refresh token**
+**Passo de operador, uma vez:** configurar o app Google (`GOOGLE_OAUTH_CLIENT_ID`,
+`GOOGLE_OAUTH_CLIENT_SECRET`, redirect exato da Edge Function) e fornecer a mesma chave AES-GCM base64 de 32
+bytes como `CONNECTOR_TOKEN_ENCRYPTION_KEY` somente nos secrets da Edge Function e do controller.
 
-**Entregar à Isa:** Client ID, Client Secret, refresh token e o `calendar_id` (ex.: `primary` ou o ID de um
-calendário secundário criado pra Rocha Plumbing). Ela grava no SSM (`/ligou/GOOGLE_*`), redeploya e roda o teste
-de agendamento real com read-back + prova de não-duplicação.
+**Passo do dono:** no dashboard, clicar **Conectar Google Calendar** e consentir no Google. O start autenticado
+cria state curto ligado a tenant/user/redirect/nonce; o callback consome esse state uma vez e grava somente
+ciphertext/IV/versão. Linha legada plaintext fica `reconnect_required` até reconexão explícita.
 
 ---
 
