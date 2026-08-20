@@ -1,0 +1,2 @@
+# Arquivo-fonte curado: preservar quebras Markdown com dois espaços finais.
+docs/brand/identity-guide/v0.1/*.md -whitespace

@@ -1,67 +1,49 @@
-# Ligou.AI landing page
+# Ligou.AI — candidato V0.1
 
-Checkpoint local da **Claude Design v9** em PT-BR. A página apresenta o Ligou como
-agente operacional para donos brasileiros de negócios de serviços nos Estados Unidos:
-hero `Ligou? Atendido.`, entrevista em português, operação multilíngue
-em inglês, espanhol e português, além da prova causal
-`cliente → regra → ação → decisão do dono`.
+Ligou é um agente operacional de IA para negócios de serviços. Este checkout reúne o
+candidato V0.1: a landing em `/`, o dashboard em `/dashboard/`, a camada de autoridade
+no Supabase, o controlador de voz, a célula Hermes e a infraestrutura que sustenta esses
+componentes.
 
-**Estado:** integrada ao histórico Git local como direção visual. Não houve push, PR ou
-deploy. Não publicar enquanto número da demo, checkout, Termos, Privacidade, oferta,
-inventário Founding e capacidades do backend não forem reais e aprovados.
+## Estado desta branch
 
-## Verificar e visualizar
+`codex/ligou-v0.1` é uma consolidação **somente local**. Não houve merge, push ou deploy
+autorizado desta branch. O código permanece candidato até que a validação operacional e
+as decisões de produto/brand sejam aprovadas separadamente. Não trate CTAs, dados de
+demonstração ou cópia visual como prova de uma capacidade publicada.
+
+## Componentes
+
+- `/`: landing estática e seus assets locais;
+- `/dashboard/`: aplicação de operação e autoridade do dono;
+- `dashboard/`: build, testes e integração do dashboard;
+- `supabase/`: esquema, migrações e políticas de autoridade;
+- `voice-controller/`: superfícies do controlador de voz;
+- `hermes-cell/`: célula de raciocínio sob a autoridade definida pelo produto;
+- `infra/`: definição de infraestrutura e procedimentos de operação.
+
+## Build e validação local
+
+Na raiz:
 
 ```bash
-bun test
 bun run check
-node dev-server.mjs
+bun run site:build
 ```
 
-Depois, abra `http://127.0.0.1:4174/`.
+No dashboard:
 
-O servidor responde a pedidos HTTP Range com `206 Partial Content`, necessário para os
-MP4s. `bun test` cobre transições responsivas, estado interativo, acessibilidade e os
-fallbacks de movimento reduzido e JavaScript desativado. `bun run check` recompila os
-JSX preservados, executa esses testes e verifica sintaxe, hashes da fonte e todas as
-referências locais do runtime.
+```bash
+cd dashboard
+npm test
+```
 
-## Estrutura atual
-
-- `index.html`: embalagem executável da v9, CSS específico e fallback sem JavaScript;
-- `src/claude-v9/`: HTML e JSX originais do ZIP, preservados byte a byte;
-- `scripts/build-claude-v9.mjs`: transpila os JSX com o runtime embutido do Bun;
-- `scripts/verify-claude-v9.mjs`: fixa proveniência e fecha referências do runtime;
-- `tests/`: contratos do artefato e comportamento do JSX com um harness determinístico;
-- `assets/js/`: JavaScript gerado; não editar manualmente;
-- `assets/vendor/`: React/ReactDOM production locais e licença;
-- `_ds/ligou-design-system-*/`: tokens, componentes e bundle usados pela v9;
-- `assets/hero-*`: vídeos e posters dedicados a desktop e mobile/tablet;
-- `assets/agent-*.png` e `assets/crop-*.png`: agente oficial, marca e recortes do export;
-- `dev-server.mjs`: preview estático com byte ranges para vídeo.
-
-`styles.css` e `script.js` pertencem aos snapshots anteriores e foram removidos desta
-rodada porque a v9 não os usa. Eles continuam integralmente recuperáveis no histórico.
-
-## Limites deste checkpoint
-
-- `DEMO_PHONE` é placeholder e os CTAs não comprovam telefonia ou checkout;
-- Termos e Privacidade ainda apontam para `#`;
-- botões de aprovação/ajuste são ilustrativos;
-- oferta e copy continuam candidatas, não congeladas;
-- `robots=noindex,nofollow` permanece ativo;
-- fonte, runtime e assets estão locais, mas isso não transforma o protótipo em produto
-  ou publicação.
+Para o preview local da landing, use `node dev-server.mjs` e abra a porta informada pelo
+processo. O servidor preserva suporte a HTTP Range para os vídeos locais.
 
 ## Documentação
 
-- [`docs/HANDOFF-NEXT-SESSION.md`](docs/HANDOFF-NEXT-SESSION.md): verdade operacional e ordem segura de retomada;
-- [`docs/CHANGELOG-CLAUDE-V9.md`](docs/CHANGELOG-CLAUDE-V9.md): fonte, inclusão/exclusão, embalagem, QA e bloqueios desta rodada;
-- [`docs/CLAUDE-V9-RUNTIME.sha256`](docs/CLAUDE-V9-RUNTIME.sha256): inventário verificável dos 42 arquivos do fechamento v9;
-- [`docs/BASELINE-MANIFEST.md`](docs/BASELINE-MANIFEST.md): hashes append-only dos snapshots;
-- [`docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md`](docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md): tese e fronteiras do produto;
-- [`.impeccable.md`](.impeccable.md): contrato de design e prova/claim discipline;
-- [`docs/CHANGELOG-DEMO-HERO-RESTORE.md`](docs/CHANGELOG-DEMO-HERO-RESTORE.md): checkpoint anterior e recuperação da demo;
-- [`docs/CHANGELOG-HIGGSFIELD-MOTION.md`](docs/CHANGELOG-HIGGSFIELD-MOTION.md): rodada anterior de motion;
-- [`docs/CHANGELOG-CLAUDE-R2.md`](docs/CHANGELOG-CLAUDE-R2.md): integração Claude anterior;
-- [`docs/CHANGELOG-VISUAL-4.md`](docs/CHANGELOG-VISUAL-4.md): base Visual 4 preservada.
+- [`docs/HANDOFF-NEXT-SESSION.md`](docs/HANDOFF-NEXT-SESSION.md): contexto operacional e retomada segura;
+- [`docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md`](docs/source/LIGOU-PRODUCT-BRIEF-WORKING.md): premissa e limites do produto;
+- [`docs/BRANCH-MAP-2026-08-20.md`](docs/BRANCH-MAP-2026-08-20.md): proveniência, disposições e exclusões desta consolidação;
+- [`docs/brand/identity-guide/v0.1/README.md`](docs/brand/identity-guide/v0.1/README.md): roteiro editorial de brand; não é aprovação de identidade.
