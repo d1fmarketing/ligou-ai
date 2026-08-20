@@ -1,8 +1,7 @@
 // Voice tools — executed ONLY server-side under a CALLER capability. The model proposes; these handlers answer.
-// F1 surface: read-only + create_async_case + consult_hermes. Booking mutations arrive in F2 via the action worker.
+// F1 surface: deterministic read/decision tools + create_async_case. Booking mutations arrive in F2 via the action worker.
 import { createHash, randomUUID } from "node:crypto";
 import { loadTenant, priceRules, supa } from "./rules.ts";
-import { consultHermes } from "./hermes.ts";
 import { calendarPort, overlapsBusy, zonedInstantIso, spokenLocal } from "./calendar.ts";
 import { checkPower, normalizeGeography } from "./powers.ts";
 import { issueQuote, issueSlotOffers, readQuote } from "./offers.ts";
@@ -30,7 +29,7 @@ export function makeCapability(
 ): Capability {
   const allowedTools = sessionType === "onboarding"
     ? ["get_business_info", "record_interview_answer"]
-    : ["get_business_info", "quote_price", "evaluate_offer", "check_availability", "create_async_case", "consult_hermes", "propose_booking", "close_deal"];
+    : ["get_business_info", "quote_price", "evaluate_offer", "check_availability", "create_async_case", "propose_booking", "close_deal"];
   return {
     actor: "CALLER",
     tenantSlug,
@@ -153,16 +152,6 @@ export const toolSchemas = [
       required: ["topic", "rule_text"],
     },
   },
-  {
-    type: "function",
-    name: "consult_ligou_brain",
-    description: "Consult the business brain for strategy on complex situations (unusual jobs, tricky negotiation). Say a short bridge phrase like 'let me check that for you' before using it.",
-    parameters: {
-      type: "object",
-      properties: { question: { type: "string" }, context: { type: "string" } },
-      required: ["question"],
-    },
-  },
 ] as const;
 
 // map external tool name -> internal capability name
@@ -172,7 +161,6 @@ const CAP_NAME: Record<string, string> = {
   evaluate_offer: "evaluate_offer",
   check_availability: "check_availability",
   create_async_case: "create_async_case",
-  consult_ligou_brain: "consult_hermes",
   propose_booking: "propose_booking",
   close_deal: "close_deal",
   record_interview_answer: "record_interview_answer",
@@ -190,6 +178,12 @@ export interface ToolResult { ok: boolean; body: Record<string, unknown>; durati
 export async function runTool(cap: Capability, name: string, args: Record<string, unknown>): Promise<ToolResult> {
   const started = Date.now();
   const done = (body: Record<string, unknown>, ok = true): ToolResult => ({ ok, body, durationMs: Date.now() - started });
+
+  // Existing Realtime sessions may still emit a call from an older schema. Fail closed before tenant loading,
+  // capability checks, or any network path; Task 5 owns any future structured Hermes interface.
+  if (name === "consult_ligou_brain") {
+    return done({ status: "unavailable", reason: "tool_disabled" }, false);
+  }
 
   const capName = CAP_NAME[name];
   if (!capName || !cap.allowedTools.includes(capName)) return done({ error: "tool_not_allowed" }, false);
@@ -387,11 +381,6 @@ export async function runTool(cap: Capability, name: string, args: Record<string
         }).select("id").single();
         if (error) return done({ status: "unknown", error: error.message }, false);
         return done({ status: "recorded", rule_id: data.id, note: "Suggested rule saved; the owner approves the batch in the dashboard." });
-      }
-      case "consult_ligou_brain": {
-        const advice = await consultHermes(cap.tenantSlug, String(args.question ?? ""), String(args.context ?? "").slice(0, 1500));
-        if (advice.status === "ok") return done({ status: "ok", advice: advice.advice });
-        return done({ status: "unavailable", say: "Proceed with the approved rules; if unsure, open a case for the team." });
       }
       default:
         return done({ error: "unknown_tool" }, false);

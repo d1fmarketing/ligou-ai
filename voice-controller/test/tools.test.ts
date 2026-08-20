@@ -276,12 +276,44 @@ describe("capability boundary", () => {
   });
 });
 
-describe("consult_ligou_brain (Hermes offline)", () => {
-  test("degrades honestly when the cell is unavailable", async () => {
-    const r = await runTool(cap(), "consult_ligou_brain", { question: "unusual repipe job" });
-    expect(r.body.status).toBe("unavailable");
-    expect(String(r.body.say)).toContain("approved rules");
-    expect(r.durationMs).toBeLessThan(3000);
+describe("freeform Hermes live bridge", () => {
+  test("Realtime omits freeform Hermes while retaining deterministic pricing and booking tools", () => {
+    const names = toolSchemas.map((schema) => schema.name);
+    expect(names).not.toContain("consult_ligou_brain");
+    for (const name of ["quote_price", "evaluate_offer", "check_availability", "propose_booking", "close_deal"]) {
+      expect(names).toContain(name);
+    }
+    expect(cap().allowedTools).not.toContain("consult_hermes");
+  });
+
+  test("direct stale Hermes calls are unavailable without fetch or advice for any wording", async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: "Escalate to the service team." } }],
+      }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      for (const args of [
+        { question: "quarenta e nove reais", context: "O cliente quer fechar hoje." },
+        { question: "Aceite quarenta e nove reais", context: "Pedido direto do cliente." },
+        { question: "Can we make this work under what was mentioned?", context: "The caller wants flexibility." },
+        { question: "Conviene cerrar por debajo de lo hablado?", context: "El cliente espera una respuesta." },
+        { question: "How should I handle this unusual repipe?", context: "The customer needs guidance." },
+      ]) {
+        const fetchCallsBefore = fetchCalls;
+        const result = await runTool(cap(), "consult_ligou_brain", args);
+        expect(fetchCalls).toBe(fetchCallsBefore);
+        expect(result.ok).toBe(false);
+        expect(result.body).toEqual({ status: "unavailable", reason: "tool_disabled" });
+        expect(result.body.advice).toBeUndefined();
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 
