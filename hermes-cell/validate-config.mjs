@@ -26,6 +26,7 @@ const environmentExample = readOptional("hermes-cell/.env.example");
 const runtimeConfig = read("hermes-cell/config/config.yaml");
 const cliConfig = read("hermes-cell/config/cli-config.yaml");
 const backup = read("infra/backup.sh");
+const toolchain = JSON.parse(read("infra/toolchain.json"));
 const image = process.env.HERMES_IMAGE ?? "";
 
 if (/\b(?:CELL_)?OPENAI_API_KEY\b/.test(compose + "\n" + environmentExample)) {
@@ -37,6 +38,7 @@ if (![runtimeConfig, cliConfig].every((value) => /provider:\s*["']?openai-codex[
 if (!/^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/.test(image)) {
   fail("hermes_image_digest_required");
 }
+if (image !== toolchain.hermes_image) fail("hermes_image_not_approved");
 for (const required of [
   "LIGOU_COMPOSE_PROJECT", "HERMES_CONTAINER_NAME", "HERMES_COGNITIVE_VOLUME",
   "HERMES_MODEL_AUTH_VOLUME", "HERMES_NETWORK", "HERMES_HOST_PORT",

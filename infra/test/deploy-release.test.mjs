@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,6 +13,7 @@ const hostDeploy = path.join(repoRoot, "infra/deploy-host.sh");
 const healthTool = path.join(repoRoot, "infra/release-health.sh");
 const deployScript = path.join(repoRoot, "infra/deploy.sh");
 const RELEASE_KEY = "Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA=";
+const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de";
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: "utf8", ...options });
@@ -31,7 +32,7 @@ async function gitFixture(base) {
   await mkdir(root);
   await writeTree(root, {
     "voice-controller/src/good.ts": "export const good = true;\n",
-    "voice-controller/package.json": '{"name":"fixture"}\n',
+    "voice-controller/package.json": '{"name":"fixture","packageManager":"bun@1.2.13"}\n',
     "voice-controller/bun.lock": "fixture-lock\n",
     "voice-controller/node_modules/dep.js": "forbidden dependency\n",
     "voice-controller/dist/bundle.js": "forbidden build\n",
@@ -44,6 +45,10 @@ async function gitFixture(base) {
     "supabase/functions/good/index.ts": "export {};\n",
     "supabase/.temp/project-ref": "forbidden temp\n",
     "infra/good.sh": "#!/bin/sh\nexit 0\n",
+    "infra/toolchain.json": JSON.stringify({
+      node: "22.22.3", bun: "1.2.13", deno: "2.9.4", supabase_cli: "2.115.0", hermes_image: IMAGE,
+      dependencies: { supabase_js: "2.112.3", postgres: "3.4.9" },
+    }) + "\n",
     "infra/._deploy": "forbidden apple double\n",
   });
   assert.equal(run("git", ["init", "-q"], { cwd: root }).status, 0);
@@ -55,7 +60,8 @@ async function gitFixture(base) {
 
 function createReleaseManifest(artifact, manifest, commit) {
   return run(process.execPath, [manifestTool, "create", "--artifact", artifact, "--manifest", manifest,
-    "--commit", commit, "--source", "builder:unit", "--created", "2026-08-20T12:00:00.000Z"], {
+    "--commit", commit, "--source", "builder:unit", "--created", "2026-08-20T12:00:00.000Z",
+    "--hermes-image", IMAGE], {
     env: { ...process.env, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY, LIGOU_RELEASE_MANIFEST_KEY_ID: "release-test-v1" },
   });
 }
@@ -81,12 +87,45 @@ test("packaging exact commit excludes contamination and emits a signed immutable
     assert.equal(body.commit_sha, repo.commit);
     assert.match(body.artifact.sha256, /^[a-f0-9]{64}$/);
     assert.equal(body.artifact.name, "release.tar.gz");
-    assert.match(body.release_id, new RegExp(`^${repo.commit.slice(0, 12)}-[a-f0-9]{12}$`));
+    assert.equal(body.release_id, `${repo.commit}-${body.artifact.sha256}`);
     assert.ok(body.exclusions.includes("**/._*"));
     assert.ok(body.exclusions.includes("supabase/.temp/**"));
+    assert.deepEqual(body.runtime, {
+      node: { version: "22.22.3" },
+      bun: { version: "1.2.13" },
+      deno: { version: "2.9.4" },
+      supabase_cli: { version: "2.115.0" },
+      dependencies: {
+        lockfile_path: "voice-controller/bun.lock",
+        lockfile_sha256: "b636fb14b47b7d83c9f26513d1341f630f18c8960192897a73e885e4303162dc",
+        evidence_scope: "lockfile-integrity-only",
+        supabase_js: "2.112.3",
+        postgres: "3.4.9",
+      },
+      hermes: { image: IMAGE },
+    });
     const verified = run(process.execPath, [manifestTool, "verify", "--artifact", artifact,
       "--manifest", manifest, "--commit", repo.commit], { env: { ...process.env, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY } });
     assert.equal(verified.status, 0, verified.stderr);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("release manifest fails closed when immutable Hermes image input is absent or tag-only", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-release-image-input-"));
+  try {
+    const repo = await gitFixture(fixture);
+    const artifact = path.join(fixture, "release.tar.gz");
+    assert.equal(run(process.execPath, [packageTool, "--root", repo.root, "--output", artifact, "--commit", repo.commit]).status, 0);
+    for (const image of [undefined, "nousresearch/hermes-agent:v2026.8.18"]) {
+      const args = [manifestTool, "create", "--artifact", artifact, "--manifest", `${artifact}.manifest.json`,
+        "--commit", repo.commit, "--source", "builder:unit", "--created", "2026-08-20T12:00:00.000Z"];
+      if (image) args.push("--hermes-image", image);
+      const result = run(process.execPath, args, { env: { ...process.env, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY } });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /release_(?:manifest_arguments_missing|hermes_image_digest_required)/);
+    }
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -101,8 +140,11 @@ test("packaged Hermes validator accepts the intentional .env example exclusion",
       "hermes-cell/config/config.yaml": await readFile(path.join(repoRoot, "hermes-cell/config/config.yaml"), "utf8"),
       "hermes-cell/config/cli-config.yaml": await readFile(path.join(repoRoot, "hermes-cell/config/cli-config.yaml"), "utf8"),
       "infra/backup.sh": await readFile(path.join(repoRoot, "infra/backup.sh"), "utf8"),
+      "infra/toolchain.json": await readFile(path.join(repoRoot, "infra/toolchain.json"), "utf8"),
     });
-    const result = run(process.execPath, [path.join(fixture, "hermes-cell/validate-config.mjs"), "--root", fixture, "--json"]);
+    const result = run(process.execPath, [path.join(fixture, "hermes-cell/validate-config.mjs"), "--root", fixture, "--json"], {
+      env: { ...process.env, HERMES_IMAGE: IMAGE },
+    });
     assert.equal(result.status, 0, result.stderr);
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -123,9 +165,15 @@ test("host rejects artifact hash mismatch before extraction or activation", asyn
     const old = path.join(deployRoot, "releases/old-release");
     await mkdir(old, { recursive: true });
     await symlink(old, path.join(deployRoot, "current"));
-    await symlink(old, path.join(deployRoot, "app"));
+    await symlink(path.join(deployRoot, "current"), path.join(deployRoot, "app"));
+    const bin = path.join(fixture, "bin");
+    await mkdir(bin);
+    const flock = await writeBasicFlock(bin);
     const result = run("bash", [hostDeploy, "--artifact", artifact, "--manifest", manifest, "--commit", repo.commit], {
-      env: { PATH: "/usr/bin:/bin", LIGOU_DEPLOY_ROOT: deployRoot, LIGOU_NODE_BIN: process.execPath, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY },
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`, LIGOU_DEPLOY_ROOT: deployRoot, LIGOU_NODE_BIN: process.execPath,
+        LIGOU_FLOCK_BIN: flock, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY, HERMES_IMAGE: IMAGE,
+      },
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /release_verification_failed/);
@@ -165,6 +213,7 @@ test("deploy wrapper packages one clean commit, uploads artifact+manifest, and d
         LIGOU_NODE_BIN: process.execPath,
         LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY,
         LIGOU_RELEASE_MANIFEST_KEY_ID: "release-test-v1",
+        HERMES_IMAGE: IMAGE,
       },
     });
     assert.equal(result.status, 0, result.stderr);
@@ -181,14 +230,18 @@ test("deploy wrapper packages one clean commit, uploads artifact+manifest, and d
   }
 });
 
-async function runnableArtifact(fixture, commit) {
+async function runnableArtifact(fixture, commit, { healthScript = '#!/bin/sh\nexit "${STUB_RELEASE_HEALTH_STATUS:-0}"\n' } = {}) {
   const payload = path.join(fixture, "payload");
   await writeTree(payload, {
-    "voice-controller/package.json": '{"name":"fixture"}\n',
+    "voice-controller/package.json": '{"name":"fixture","packageManager":"bun@1.2.13"}\n',
     "voice-controller/bun.lock": "fixture-lock\n",
     "hermes-cell/validate-config.mjs": "process.exit(0);\n",
-    "infra/release-health.sh": '#!/bin/sh\nexit "${STUB_RELEASE_HEALTH_STATUS:-0}"\n',
+    "infra/release-health.sh": healthScript,
     "infra/release-marker": "safe\n",
+    "infra/toolchain.json": JSON.stringify({
+      node: "22.22.3", bun: "1.2.13", deno: "2.9.4", supabase_cli: "2.115.0", hermes_image: IMAGE,
+      dependencies: { supabase_js: "2.112.3", postgres: "3.4.9" },
+    }) + "\n",
   });
   await chmod(path.join(payload, "infra/release-health.sh"), 0o755);
   const artifact = path.join(fixture, "runnable.tar.gz");
@@ -199,21 +252,51 @@ async function runnableArtifact(fixture, commit) {
   return { artifact, manifest };
 }
 
+async function writeBasicFlock(bin) {
+  const flock = path.join(bin, "flock");
+  await writeFile(flock, `#!/bin/sh\n[ "$1" = -n ] && shift\nif [ "$1" = -E ]; then shift 2; fi\nshift\nexec "$@"\n`);
+  await chmod(flock, 0o755);
+  return flock;
+}
+
+async function prepareOldRelease(deployRoot, { healthStatus = 0 } = {}) {
+  const old = path.join(deployRoot, "releases/old-release");
+  await mkdir(path.join(old, "infra"), { recursive: true });
+  await writeFile(path.join(old, "infra/release-health.sh"), `#!/bin/sh\nexit ${healthStatus}\n`);
+  await chmod(path.join(old, "infra/release-health.sh"), 0o755);
+  await writeFile(path.join(old, ".ligou-release-manifest.json"), '{"release_id":"old-release"}\n');
+  await symlink(old, path.join(deployRoot, "current"));
+  await symlink(path.join(deployRoot, "current"), path.join(deployRoot, "app"));
+  return old;
+}
+
+async function writeContendedFlock(bin) {
+  const flock = path.join(bin, "flock");
+  await writeFile(flock, `#!/bin/sh\n[ "$1" = -n ] && shift\nconflict=1\nif [ "$1" = -E ]; then conflict="$2"; shift 2; fi\nlock="$1"; shift\nif ! /bin/mkdir "${'${lock}'}.held" 2>/dev/null; then exit "$conflict"; fi\ntrap '/bin/rmdir "${'${lock}'}.held"' EXIT INT TERM\n"$@"\nstatus=$?\nexit "$status"\n`);
+  await chmod(flock, 0o755);
+  return flock;
+}
+
+async function waitForFile(file) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try { await access(file); return; } catch { await new Promise((resolve) => setTimeout(resolve, 20)); }
+  }
+  throw new Error(`timed out waiting for ${file}`);
+}
+
 test("functional health failure atomically reactivates the previous release and logs only sanitized state", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-release-rollback-"));
   try {
     const commit = "a".repeat(40);
     const { artifact, manifest } = await runnableArtifact(fixture, commit);
     const deployRoot = path.join(fixture, "host");
-    const old = path.join(deployRoot, "releases/old-release");
-    await mkdir(old, { recursive: true });
-    await symlink(old, path.join(deployRoot, "current"));
-    await symlink(old, path.join(deployRoot, "app"));
+    const old = await prepareOldRelease(deployRoot);
     const bin = path.join(fixture, "bin");
     const systemctlLog = path.join(fixture, "systemctl.log");
     await mkdir(bin);
     await writeFile(path.join(bin, "systemctl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\nexit 0\n");
-    await writeFile(path.join(bin, "bun"), "#!/bin/sh\nexit 0\n");
+    await writeFile(path.join(bin, "bun"), "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' 1.2.13; fi\nexit 0\n");
+    const flock = await writeBasicFlock(bin);
     await chmod(path.join(bin, "systemctl"), 0o755);
     await chmod(path.join(bin, "bun"), 0o755);
 
@@ -223,7 +306,9 @@ test("functional health failure atomically reactivates the previous release and 
         LIGOU_DEPLOY_ROOT: deployRoot,
         LIGOU_NODE_BIN: process.execPath,
         LIGOU_BUN_BIN: path.join(bin, "bun"),
+        LIGOU_FLOCK_BIN: flock,
         LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY,
+        HERMES_IMAGE: IMAGE,
         LIGOU_SERVICE_NAME: "ligou-controller",
         STUB_RELEASE_HEALTH_STATUS: "1",
         SYSTEMCTL_LOG: systemctlLog,
@@ -232,12 +317,137 @@ test("functional health failure atomically reactivates the previous release and 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /release_health_failed_rollback_applied/);
     assert.equal(path.resolve(deployRoot, await readlink(path.join(deployRoot, "current"))), path.resolve(old));
-    assert.equal(path.resolve(deployRoot, await readlink(path.join(deployRoot, "app"))), path.resolve(old));
+    assert.equal(path.resolve(deployRoot, await readlink(path.join(deployRoot, "app"))), path.join(deployRoot, "current"));
     assert.equal((await readFile(systemctlLog, "utf8")).split("\n").filter((line) => line.includes("restart")).length, 2);
     const results = await readFile(path.join(deployRoot, "deploy-results.jsonl"), "utf8");
     assert.match(results, /"status":"rolled_back"/);
     assert.doesNotMatch(results, /synthetic|RELEASE_KEY|secret|stdout|stderr|access[_-]?token/i);
   } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("failed rollback health is terminal rollback_failed and is never labeled rolled_back", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-release-rollback-failed-"));
+  try {
+    const commit = "b".repeat(40);
+    const { artifact, manifest } = await runnableArtifact(fixture, commit);
+    const deployRoot = path.join(fixture, "host");
+    await prepareOldRelease(deployRoot, { healthStatus: 1 });
+    const bin = path.join(fixture, "bin");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "systemctl"), "#!/bin/sh\nexit 0\n");
+    await writeFile(path.join(bin, "bun"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.13; fi\nexit 0\n");
+    for (const command of ["systemctl", "bun"]) await chmod(path.join(bin, command), 0o755);
+    const flock = await writeBasicFlock(bin);
+    const result = run("bash", [hostDeploy, "--artifact", artifact, "--manifest", manifest, "--commit", commit], {
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`, LIGOU_DEPLOY_ROOT: deployRoot, LIGOU_NODE_BIN: process.execPath,
+        LIGOU_BUN_BIN: path.join(bin, "bun"), LIGOU_FLOCK_BIN: flock, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY,
+        HERMES_IMAGE: IMAGE, STUB_RELEASE_HEALTH_STATUS: "1",
+      },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /release_health_failed_rollback_failed/);
+    assert.doesNotMatch(result.stderr, /rollback_applied/);
+    const results = await readFile(path.join(deployRoot, "deploy-results.jsonl"), "utf8");
+    assert.match(results, /"status":"rollback_failed"/);
+    assert.doesNotMatch(results, /"status":"rolled_back"/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("host activation rejects a Bun version that differs from signed runtime evidence before mutation", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-release-bun-version-"));
+  try {
+    const commit = "c".repeat(40);
+    const { artifact, manifest } = await runnableArtifact(fixture, commit);
+    const deployRoot = path.join(fixture, "host");
+    const old = await prepareOldRelease(deployRoot);
+    const bin = path.join(fixture, "bin");
+    const systemctlLog = path.join(fixture, "systemctl.log");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "systemctl"), `#!/bin/sh\necho "$*" >> "$SYSTEMCTL_LOG"\nexit 0\n`);
+    await writeFile(path.join(bin, "bun"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.12; fi\nexit 0\n");
+    for (const command of ["systemctl", "bun"]) await chmod(path.join(bin, command), 0o755);
+    const flock = await writeBasicFlock(bin);
+    const result = run("bash", [hostDeploy, "--artifact", artifact, "--manifest", manifest, "--commit", commit], {
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`, LIGOU_DEPLOY_ROOT: deployRoot, LIGOU_NODE_BIN: process.execPath,
+        LIGOU_BUN_BIN: path.join(bin, "bun"), LIGOU_FLOCK_BIN: flock, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY,
+        HERMES_IMAGE: IMAGE, SYSTEMCTL_LOG: systemctlLog,
+      },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /bun_runtime_mismatch/);
+    assert.equal(path.resolve(deployRoot, await readlink(path.join(deployRoot, "current"))), path.resolve(old));
+    await assert.rejects(readFile(systemctlLog, "utf8"));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("host flock prevents a concurrent second activation from entering the mutation window", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-release-concurrent-"));
+  const gate = path.join(fixture, "release-gate");
+  let first;
+  try {
+    const firstDir = path.join(fixture, "first");
+    const secondDir = path.join(fixture, "second");
+    const marker = path.join(fixture, "health-entered");
+    const waitingHealth = `#!/bin/sh\n: > "$HOLD_MARKER"\nwhile [ ! -e "$RELEASE_GATE" ]; do /bin/sleep 0.02; done\nexit 0\n`;
+    const firstRelease = await runnableArtifact(firstDir, "d".repeat(40), { healthScript: waitingHealth });
+    const secondRelease = await runnableArtifact(secondDir, "e".repeat(40));
+    const firstId = JSON.parse(await readFile(firstRelease.manifest, "utf8")).release_id;
+    const secondId = JSON.parse(await readFile(secondRelease.manifest, "utf8")).release_id;
+    const deployRoot = path.join(fixture, "host");
+    await prepareOldRelease(deployRoot);
+    const bin = path.join(fixture, "bin");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "systemctl"), "#!/bin/sh\nexit 0\n");
+    await writeFile(path.join(bin, "bun"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.13; fi\nexit 0\n");
+    for (const command of ["systemctl", "bun"]) await chmod(path.join(bin, command), 0o755);
+    const flock = await writeContendedFlock(bin);
+    const env = {
+      ...process.env, PATH: `${bin}:/usr/bin:/bin`, LIGOU_DEPLOY_ROOT: deployRoot,
+      LIGOU_NODE_BIN: process.execPath, LIGOU_BUN_BIN: path.join(bin, "bun"), LIGOU_FLOCK_BIN: flock,
+      LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY, HERMES_IMAGE: IMAGE, HOLD_MARKER: marker, RELEASE_GATE: gate,
+    };
+    first = spawn("bash", [hostDeploy, "--artifact", firstRelease.artifact, "--manifest", firstRelease.manifest, "--commit", "d".repeat(40)], {
+      env, stdio: ["ignore", "pipe", "pipe"], detached: true,
+    });
+    let firstStdout = "";
+    let firstStderr = "";
+    first.stdout.on("data", (chunk) => { firstStdout += chunk; });
+    first.stderr.on("data", (chunk) => { firstStderr += chunk; });
+    await waitForFile(marker);
+
+    const second = run("bash", [hostDeploy, "--artifact", secondRelease.artifact, "--manifest", secondRelease.manifest, "--commit", "e".repeat(40)], { env });
+    assert.equal(second.status, 75);
+    assert.match(second.stderr, /release_activation_locked/);
+    assert.equal(path.resolve(deployRoot, await readlink(path.join(deployRoot, "current"))), path.join(deployRoot, "releases", firstId));
+    assert.equal((await readdir(path.join(deployRoot, "releases"))).includes(secondId), false);
+
+    await writeFile(gate, "continue\n");
+    const firstStatus = await new Promise((resolve) => first.once("close", resolve));
+    assert.equal(firstStatus, 0, firstStderr + firstStdout);
+    assert.equal(
+      await readFile(path.join(deployRoot, "releases", firstId, ".ligou-release-manifest.json"), "utf8"),
+      await readFile(firstRelease.manifest, "utf8"),
+    );
+    assert.equal(path.resolve(deployRoot, await readlink(path.join(deployRoot, "app"))), path.join(deployRoot, "current"));
+  } finally {
+    await writeFile(gate, "continue\n").catch(() => {});
+    if (first && first.exitCode === null) {
+      await Promise.race([
+        new Promise((resolve) => first.once("close", resolve)),
+        new Promise((resolve) => setTimeout(resolve, 500)),
+      ]);
+    }
+    if (first && first.exitCode === null) {
+      try { process.kill(-first.pid, "SIGTERM"); } catch {}
+    }
     await rm(fixture, { recursive: true, force: true });
   }
 });

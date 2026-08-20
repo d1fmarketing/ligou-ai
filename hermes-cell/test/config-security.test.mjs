@@ -10,7 +10,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../
 const validator = path.join(repoRoot, "hermes-cell/validate-config.mjs");
 const health = path.join(repoRoot, "hermes-cell/health-state.sh");
 const tenantCompose = path.join(repoRoot, "hermes-cell/tenant-compose.mjs");
-const IMAGE = "example.invalid/hermes@sha256:" + "a".repeat(64);
+const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de";
 
 test("repository Hermes config is OAuth-only with separate cognitive and model-auth volumes", () => {
   const result = spawnSync(process.execPath, [validator, "--root", repoRoot, "--json"], {
@@ -59,6 +59,29 @@ test("config validator rejects missing and tag-only Hermes image release inputs"
   }
 });
 
+test("config validator rejects a digest that is immutable but not the approved release identity", () => {
+  const result = spawnSync(process.execPath, [validator, "--root", repoRoot, "--json"], {
+    encoding: "utf8",
+    env: { ...process.env, HERMES_IMAGE: "example.invalid/hermes@sha256:" + "f".repeat(64) },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /hermes_image_not_approved/);
+});
+
+test("normal tenant launcher rejects an unapproved immutable image before Docker", () => {
+  const result = spawnSync(process.execPath, [tenantCompose, "--print-runtime"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      TENANT_SLUG: "test-tenant",
+      HERMES_API_KEY: "synthetic-local-key",
+      HERMES_IMAGE: "example.invalid/hermes@sha256:" + "f".repeat(64),
+    },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /hermes_image_not_approved/);
+});
+
 test("config validator rejects an API-key reasoning credential", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-hermes-config-"));
   try {
@@ -73,6 +96,7 @@ test("config validator rejects an API-key reasoning credential", async () => {
     await writeFile(path.join(fixture, "hermes-cell/config/config.yaml"), "provider: openai-codex\n");
     await writeFile(path.join(fixture, "hermes-cell/config/cli-config.yaml"), "provider: openai-codex\n");
     await writeFile(path.join(fixture, "infra/backup.sh"), "hermes backup -o /opt/data/backup.zip\n");
+    await writeFile(path.join(fixture, "infra/toolchain.json"), JSON.stringify({ hermes_image: IMAGE }));
 
     const result = spawnSync(process.execPath, [validator, "--root", fixture, "--json"], { encoding: "utf8" });
     assert.notEqual(result.status, 0);
