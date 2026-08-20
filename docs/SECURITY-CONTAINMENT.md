@@ -3,8 +3,10 @@
 ## Scope and invariant
 
 No credential belongs in a URL, client bundle, Git content, or `.env.example`. The dashboard uses the
-standard Supabase magic-link flow. The repository scanner is intentionally narrow: it checks tracked files
-only and masks every finding as category, path, line, and short SHA-256 fingerprint.
+standard Supabase magic-link flow. The repository scanner is intentionally narrow: it checks tracked regular
+files only (never follows symlinks), validates blank-only `.env.example` files, and masks every finding as
+category, path, line, and short SHA-256 fingerprint. It covers dotenv-style names, structured YAML/JSON
+secret fields, common provider token shapes, and PEM private-key material; `bun run check` enforces it.
 
 ## Operator-only rotation checklist
 
