@@ -21,20 +21,20 @@ alter table public.booking_receipt_conflicts force row level security;
 create trigger booking_receipt_conflicts_append_only before update or delete on public.booking_receipt_conflicts
   for each row execute function public.block_mutation();
 
--- Preserve every legacy receipt. Multiple historical attempts are quarantined
--- for review instead of being deleted, rewritten, or silently selected.
+-- This migration has never been applied. At its own transaction boundary,
+-- quarantine every pre-authority accepted receipt before confirmation authority
+-- exists. Preserve every receipt row; future policy must resolve quarantine.
 insert into public.booking_receipt_conflicts (intent_id, receipt_ids, reason)
-select r.intent_id, array_agg(r.id order by r.created_at, r.id), 'legacy_multiple_booking_receipts'
+select r.intent_id, array_agg(r.id order by r.created_at, r.id), 'legacy_accepted_receipt_unverifiable'
 from public.receipts r
-where r.kind = 'booking' and r.intent_id is not null
+where r.kind = 'booking' and r.outcome = 'accepted' and r.intent_id is not null
 group by r.intent_id
-having count(*) > 1
 on conflict (intent_id) do nothing;
 
 create table public.booking_accepted_receipts (
   intent_id uuid primary key references public.action_intents (id),
   tenant_id uuid not null references public.tenants (id),
-  booking_id uuid not null unique references public.bookings (id),
+  booking_id uuid not null references public.bookings (id),
   receipt_id uuid not null unique references public.receipts (id),
   payload_hash text not null,
   external_id text not null,
@@ -45,32 +45,6 @@ alter table public.booking_accepted_receipts enable row level security;
 alter table public.booking_accepted_receipts force row level security;
 create trigger booking_accepted_receipts_append_only before update or delete on public.booking_accepted_receipts
   for each row execute function public.block_mutation();
-
--- A single unambiguous legacy accepted receipt may be mapped. Conflicted
--- histories remain preserved but cannot become confirmation authority.
-insert into public.booking_accepted_receipts (
-  intent_id, tenant_id, booking_id, receipt_id, payload_hash, external_id, expected_payload
-)
-select
-  r.intent_id, r.tenant_id, ai.booking_id, r.id, r.payload_hash, r.external_id,
-  jsonb_build_object(
-    'provider', coalesce(r.readback->'extendedProperties'->'private'->>'ligouProvider', 'legacy'),
-    'account_id', r.readback->'extendedProperties'->'private'->>'ligouAccountId',
-    'calendar_id', r.readback->'extendedProperties'->'private'->>'ligouCalendarId',
-    'summary', r.readback->>'summary',
-    'description', r.readback->>'description',
-    'start', r.readback->'start'->>'dateTime',
-    'end', r.readback->'end'->>'dateTime',
-    'status', r.readback->>'status',
-    'private', r.readback->'extendedProperties'->'private',
-    'payload_hash', r.payload_hash
-  )
-from public.receipts r
-join public.action_intents ai on ai.id = r.intent_id and ai.booking_id is not null
-where r.kind = 'booking' and r.outcome = 'accepted'
-  and r.external_id is not null and r.readback is not null and r.payload_hash is not null
-  and not exists (select 1 from public.booking_receipt_conflicts c where c.intent_id = r.intent_id)
-on conflict (intent_id) do nothing;
 
 alter table public.action_intents
   add column claim_token uuid,
@@ -237,8 +211,11 @@ begin
   select ai.* into v_intent from public.action_intents ai where ai.id = p_intent;
   select b.* into v_booking from public.bookings b where b.id = v_intent.booking_id for update;
   select l.* into v_lease from public.booking_slot_leases l where l.intent_id = p_intent for update;
-  if v_lease.intent_id is null or v_lease.tenant_id <> v_booking.tenant_id
-     or not (v_lease.slot_start = v_booking.slot_start and v_lease.slot_end = v_booking.slot_end) then
+  if v_lease.intent_id is null
+     or v_lease.state is distinct from 'held'
+     or v_lease.tenant_id is distinct from v_booking.tenant_id
+     or v_lease.slot_start is distinct from v_booking.slot_start
+     or v_lease.slot_end is distinct from coalesce(v_booking.slot_end, v_booking.slot_start) then
     raise exception 'booking_slot_lease_mismatch';
   end if;
   v_provider_input := jsonb_build_object(
@@ -275,6 +252,58 @@ $$;
 
 revoke all on function public.get_booking_provider_input(uuid) from public, anon, authenticated;
 grant execute on function public.get_booking_provider_input(uuid) to service_role;
+
+create or replace function public.transition_claimed_intent(
+  p_intent uuid,
+  p_claim_token uuid,
+  p_transition text,
+  p_reason text,
+  p_delay_seconds integer default 0
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_intent public.action_intents;
+  v_rows integer;
+begin
+  if auth.role() <> 'service_role' then raise exception 'service_role_required' using errcode = '42501'; end if;
+  if p_transition not in ('defer','fail') then raise exception 'invalid_claim_transition'; end if;
+  select ai.* into v_intent from public.action_intents ai where ai.id = p_intent for update;
+  if v_intent.id is null or v_intent.status <> 'running'
+     or v_intent.claim_token is distinct from p_claim_token
+     or v_intent.lease_until is null or v_intent.lease_until <= now()
+     or v_intent.provider_write_started_at is not null then return false; end if;
+
+  delete from public.booking_slot_leases l
+  where l.intent_id = p_intent and l.state = 'held';
+
+  if p_transition = 'defer' then
+    update public.action_intents ai set
+      status = 'queued', last_error = left(coalesce(p_reason, 'prewrite_deferred'), 400),
+      lease_until = null, next_attempt_at = now() + make_interval(secs => greatest(coalesce(p_delay_seconds, 0), 0))
+    where ai.id = p_intent and ai.claim_token = p_claim_token and ai.status = 'running';
+    get diagnostics v_rows = row_count;
+  else
+    update public.action_intents ai set
+      status = 'failed', last_error = left(coalesce(p_reason, 'prewrite_failed'), 400),
+      finished_at = now(), lease_until = null
+    where ai.id = p_intent and ai.claim_token = p_claim_token and ai.status = 'running';
+    get diagnostics v_rows = row_count;
+    if v_intent.booking_id is not null then
+      update public.bookings b set status = 'failed'
+      where b.id = v_intent.booking_id and b.tenant_id = v_intent.tenant_id
+        and b.call_id = v_intent.call_id and b.status in ('proposed','unknown');
+    end if;
+  end if;
+  return v_rows = 1;
+end;
+$$;
+
+revoke all on function public.transition_claimed_intent(uuid,uuid,text,text,integer) from public, anon, authenticated;
+grant execute on function public.transition_claimed_intent(uuid,uuid,text,text,integer) to service_role;
 
 create or replace function public.record_booking_delivery(
   p_intent uuid,
@@ -322,6 +351,9 @@ begin
   end if;
 
   if p_outcome = 'accepted' then
+    if exists (select 1 from public.booking_receipt_conflicts c where c.intent_id = p_intent) then
+      raise exception 'receipt_history_quarantined';
+    end if;
     if p_external_id is null or p_readback is null or p_payload_hash is null or p_expected is null then
       raise exception 'accepted_receipt_proof_required';
     end if;
@@ -443,9 +475,10 @@ begin
   from public.bookings b
   join public.booking_accepted_receipts m on m.booking_id = b.id and m.tenant_id = b.tenant_id and m.receipt_id = b.receipt_id
   join public.receipts r on r.id = m.receipt_id and r.intent_id = m.intent_id and r.outcome = 'accepted'
-  where b.id = p_booking and b.tenant_id = p_tenant and b.call_id = p_call
+  where b.id = p_booking and b.tenant_id = p_tenant and b.call_id = p_call and m.intent_id = b.intent_id
     and b.status = 'confirmed' and b.calendar_event_id = r.external_id
-    and m.payload_hash = r.payload_hash and m.external_id = r.external_id;
+    and m.payload_hash = r.payload_hash and m.external_id = r.external_id
+    and not exists (select 1 from public.booking_receipt_conflicts c where c.intent_id = m.intent_id);
   return coalesce(v_result, jsonb_build_object('confirmed', false));
 end;
 $$;
@@ -455,3 +488,6 @@ grant execute on function public.get_booking_confirmation(uuid,uuid,uuid) to ser
 
 -- The old split commit RPC is no longer confirmation authority.
 revoke execute on function public.commit_booking_slot_lease(uuid) from service_role;
+revoke execute on function public.release_booking_slot_lease(uuid) from service_role;
+revoke execute on function public.prepare_booking_provider_write(uuid) from service_role;
+revoke execute on function public.validate_booking_intent_authority(uuid) from service_role;

@@ -17,7 +17,10 @@ export async function tickIntents(): Promise<number> {
 
 export async function executeIntent(intent: any, calendar = calendarPort()) {
   if (intent.kind !== "calendar_book") {
-    await supa().from("action_intents").update({ status: "failed", last_error: "unsupported_kind", finished_at: new Date().toISOString() }).eq("id", intent.id);
+    await supa().rpc("transition_claimed_intent", {
+      p_intent: intent.id, p_claim_token: intent.claim_token,
+      p_transition: "fail", p_reason: "unsupported_kind", p_delay_seconds: 0,
+    });
     return;
   }
   let result;
@@ -33,10 +36,10 @@ export async function executeIntent(intent: any, calendar = calendarPort()) {
     const { data: prepared, error: prepareError } = await supa()
       .rpc("prepare_booking_provider_write", { p_intent: intent.id, p_claim_token: intent.claim_token });
     if (prepareError) {
-      await supa().from("action_intents").update({
-        status: "queued", last_error: `provider_write_prepare_failed: ${prepareError.message}`,
-        lease_until: null, next_attempt_at: new Date(Date.now() + 5_000).toISOString(),
-      }).eq("id", intent.id);
+      await supa().rpc("transition_claimed_intent", {
+        p_intent: intent.id, p_claim_token: intent.claim_token, p_transition: "defer",
+        p_reason: `provider_write_prepare_failed: ${prepareError.message}`, p_delay_seconds: 5,
+      });
       return;
     }
     if (!prepared?.ready || !prepared.provider_input) {
@@ -50,22 +53,20 @@ export async function executeIntent(intent: any, calendar = calendarPort()) {
     const preparedInput = prepared.provider_input;
     const availability = await calendar.busy(intent.tenant_id, preparedInput.startIso, preparedInput.endIso);
     if (availability.unknown) {
-      await supa().rpc("release_booking_slot_lease", { p_intent: intent.id });
-      await supa().from("action_intents").update({
-        status: "queued", last_error: "free_busy_unknown", lease_until: null,
-        next_attempt_at: new Date(Date.now() + 15_000).toISOString(),
-      }).eq("id", intent.id);
+      await supa().rpc("transition_claimed_intent", {
+        p_intent: intent.id, p_claim_token: intent.claim_token, p_transition: "defer",
+        p_reason: "free_busy_unknown", p_delay_seconds: 15,
+      });
       return;
     }
     if (availability.intervals.some((busy) => {
       const start = Date.parse(preparedInput.startIso), end = Date.parse(preparedInput.endIso);
       return start < Date.parse(busy.end) && Date.parse(busy.start) < end;
     })) {
-      await supa().rpc("release_booking_slot_lease", { p_intent: intent.id });
-      await supa().from("action_intents").update({
-        status: "failed", last_error: "slot_became_busy", finished_at: new Date().toISOString(),
-      }).eq("id", intent.id);
-      if (intent.booking_id) await supa().from("bookings").update({ status: "failed" }).eq("id", intent.booking_id).in("status", ["proposed"]);
+      await supa().rpc("transition_claimed_intent", {
+        p_intent: intent.id, p_claim_token: intent.claim_token, p_transition: "fail",
+        p_reason: "slot_became_busy", p_delay_seconds: 0,
+      });
       return;
     }
     const { data: begun, error: beginError } = await supa()

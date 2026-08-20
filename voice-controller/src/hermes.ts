@@ -7,7 +7,7 @@ export interface HermesAdvice {
   advice?: string;
 }
 
-const PRIVATE_PRICING_TERM = /\b(?:price[_\s-]*min|internal\s+(?:floor|minimum)|(?:lowest|minimum)\s+acceptable\s+price|walk[-\s]?away\s+price|reservation\s+price|private\s+(?:price|pricing|floor)|pricing\s+floor)\b/gi;
+const PRIVATE_PRICING_TERM = /\b(?:price[_\s-]*min|internal\s+(?:floor|minimum|threshold)|(?:lowest|minimum)\s+acceptable(?:\s+price)?|walk[-\s]?away\s+price|reservation\s+price|private\s+(?:price|pricing|floor|threshold)|pricing\s+floor|threshold)\b/gi;
 const MONEY_VALUE = /(?:[$€£]\s*\d+(?:[,.]\d+)*|\b\d+(?:[,.]\d+)*\s*(?:usd|dollars?|euros?|gbp)\b)/gi;
 
 export function sanitizeHermesContext(context: string): string {
@@ -15,15 +15,17 @@ export function sanitizeHermesContext(context: string): string {
     .replace(/["']?(?:price[_\s-]*min|internal[_\s-]*(?:floor|minimum)|lowest[_\s-]*acceptable[_\s-]*price)["']?\s*[:=]\s*["']?\$?\d+(?:\.\d+)?["']?/gi, "[private pricing redacted]")
     .replace(PRIVATE_PRICING_TERM, "[private pricing redacted]")
     .replace(MONEY_VALUE, "[monetary value redacted]")
+    .replace(/\d+/g, "[numeric value redacted]")
     .slice(0, 1500);
 }
 
 function containsPricingAdvice(advice: string): boolean {
   PRIVATE_PRICING_TERM.lastIndex = 0;
   MONEY_VALUE.lastIndex = 0;
-  return PRIVATE_PRICING_TERM.test(advice)
+  return /\d|[$€£]/.test(advice)
+    || PRIVATE_PRICING_TERM.test(advice)
     || MONEY_VALUE.test(advice)
-    || /\b(?:price|pricing|quote|discount|counter(?:offer)?|monetary)\b/i.test(advice);
+    || /\b(?:price|pricing|quote|discount|counter(?:offer)?|monetary|minimum|lowest|threshold)\b/i.test(advice);
 }
 
 export async function consultHermes(tenantSlug: string, question: string, context: string, timeoutMs = 2500): Promise<HermesAdvice> {
