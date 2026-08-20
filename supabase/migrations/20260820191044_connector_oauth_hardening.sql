@@ -29,7 +29,11 @@ declare
   v_state public.oauth_states%rowtype;
   v_now timestamptz := clock_timestamp();
 begin
-  if current_user <> 'service_role' then
+  if coalesce(
+    nullif(current_setting('request.jwt.claim.role', true), ''),
+    auth.jwt()->>'role',
+    ''
+  ) <> 'service_role' then
     raise exception using errcode = '42501', message = 'service_role_required';
   end if;
   if p_state is null or p_nonce_hash is null or p_tenant is null or p_user is null or p_redirect is null then
