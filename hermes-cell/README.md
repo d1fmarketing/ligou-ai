@@ -21,6 +21,11 @@ volumes cognitivo/auth, rede e porta loopback distintos. Para configurar o contr
 use o `hermes_url` retornado por `node tenant-compose.mjs --print-runtime`; não reutilize a URL de outra
 empresa. O Compose direto falha fechado porque esses nomes qualificados não têm defaults.
 
+O controller não aceita `HERMES_URL` global. Em cada consulta ele recarrega a empresa do estado autoritativo,
+resolve o slug no registro travado de tenants e confere slug, container e rota antes do fetch. Caller, modelo e
+ambiente de processo não escolhem a célula. O canal pós-chamada de aprendizado livre está desativado; somente
+validação local/determinística permanece até existir um contrato fechado separado e comprovado.
+
 O estado cognitivo fica em `hermes-cognitive:/opt/data`. O OAuth fica separadamente em
 `hermes-model-auth:/root/.hermes`; nunca copie `auth.json` para `/opt/data` e nunca inclua o volume de auth
 num backup cognitivo. `health-state.sh` consome o status bruto localmente e retorna somente estados

@@ -1,6 +1,6 @@
 // Learning pipeline unit tests — redaction and strict proposal validation ($0).
 import { describe, expect, test } from "bun:test";
-import { redactEvidence, validateProposals } from "../src/learning.ts";
+import { redactEvidence, tickLearning, validateProposals } from "../src/learning.ts";
 
 describe("redactEvidence", () => {
   test("uses the shared redactor for contact, payment, address, and access data", () => {
@@ -50,4 +50,16 @@ describe("validateProposals (strict — malformed is rejected, never repaired)",
     const many = Array.from({ length: 20 }, (_, i) => ({ text: `fact ${i}`, category: "geral", escopo: "geral" }));
     expect(validateProposals(many)).toHaveLength(8);
   });
+});
+
+test("post-call learning channel is disabled and cannot call Hermes or persist model-authored proposals", async () => {
+  let fetchCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { fetchCalls += 1; throw new Error("must_not_fetch"); }) as typeof fetch;
+  try {
+    expect(await tickLearning()).toBe(0);
+    expect(fetchCalls).toBe(0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
