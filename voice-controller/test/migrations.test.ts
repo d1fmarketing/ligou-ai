@@ -755,6 +755,29 @@ describe("booking delivery authority corrective migration contract", () => {
   });
 });
 
+describe("legacy unknown booking receipt reconciliation contract", () => {
+  test("preserves every duplicate receipt while unlinking only noncanonical unknown evidence", () => {
+    const sql = migrationSql("legacy_unknown_receipt_reconciliation");
+    expect(sql).toContain("create table if not exists public.legacy_unknown_receipt_quarantine");
+    expect(sql).toContain("receipt_id uuid primary key references public.receipts(id)");
+    expect(sql).toContain("original_intent_id uuid not null");
+    expect(sql).toContain("row_number() over ( partition by r.intent_id order by r.created_at, r.id )");
+    expect(sql).toContain("where r.kind = 'booking' and r.outcome = 'unknown'");
+    expect(sql).toContain("where ranked.receipt_rank > 1");
+    expect(sql).toContain("on conflict (receipt_id) do nothing");
+    expect(sql).toContain("disable trigger receipts_append_only");
+    expect(sql).toContain("set intent_id = null");
+    expect(sql).toContain("r.intent_id = q.original_intent_id");
+    expect(sql).toContain("enable trigger receipts_append_only");
+    expect(sql).toContain("create trigger legacy_unknown_receipt_quarantine_append_only");
+    expect(sql).toContain("lock table public.receipts in access exclusive mode");
+    expect(sql).not.toContain("delete from public.receipts");
+    expect(sql).not.toContain("delete from public.legacy_unknown_receipt_quarantine");
+    expect(sql).toContain("revoke all on table public.legacy_unknown_receipt_quarantine from public, anon, authenticated");
+    expect(sql).toContain("grant select, insert on table public.legacy_unknown_receipt_quarantine to service_role");
+  });
+});
+
 describe("booking provider-write settlement fence migration contract", () => {
   test("accepted delivery requires the current provider-write claim and exact locked input", () => {
     const sql = migrationSql("booking_delivery_fence");
