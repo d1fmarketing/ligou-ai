@@ -47,14 +47,34 @@ CHECK_CELL=""
 CHECK_VOLUME=""
 CHECK_CREATED=0
 CHECK_STARTED=0
+PROMOTED=0
+RESTORE_COMPLETE=0
+INTERRUPTED=0
 
 cleanup() {
+  local status=$?
+  trap - EXIT INT TERM HUP
   set +e
+  if [ "$PROMOTED" -eq 1 ] && [ "$RESTORE_COMPLETE" -eq 0 ]; then
+    if rollback_activation; then
+      PROMOTED=0
+      docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
+      CHECK_CREATED=0
+      if [ "$INTERRUPTED" -eq 1 ]; then echo "restore_interrupted_rollback_applied" >&2; fi
+    else
+      CHECK_CREATED=0
+      echo "restore_interrupted_rollback_failed" >&2
+    fi
+  fi
   if [ "$CHECK_STARTED" -eq 1 ]; then docker rm -f "$CHECK_CELL" >/dev/null 2>&1; fi
   if [ "$CHECK_CREATED" -eq 1 ]; then docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1; fi
   rm -rf "$SCRATCH"
+  exit "$status"
 }
 trap cleanup EXIT
+trap 'INTERRUPTED=1; exit 130' INT
+trap 'INTERRUPTED=1; exit 143' TERM
+trap 'INTERRUPTED=1; exit 129' HUP
 
 if [ -n "$LOCAL_ARCHIVE" ] || [ -n "$LOCAL_MANIFEST" ]; then
   [ -n "$LOCAL_ARCHIVE" ] && [ -f "$LOCAL_ARCHIVE" ] || { echo "archive_required" >&2; exit 1; }
@@ -164,13 +184,23 @@ rollback_activation() {
     && live_smoke
 }
 
+test_interrupt() {
+  local boundary="$1"
+  if [ "${LIGOU_RESTORE_TEST_HARNESS:-0}" = 1 ] && [ "${LIGOU_RESTORE_TEST_INTERRUPT_AFTER:-}" = "$boundary" ]; then
+    case "$RESTORE_WORK" in /tmp/*|/var/folders/*) kill -TERM $$ ;; *) echo "restore_test_harness_forbidden" >&2; exit 2 ;; esac
+  fi
+}
+
 if ! activate_volume "$CHECK_VOLUME" "$ACTIVE_COGNITIVE"; then
   echo "restore_stage_activation_failed" >&2
   exit 1
 fi
+PROMOTED=1
+test_interrupt registry_promotion
 
 if ! recreate_cell; then
   if rollback_activation; then
+    PROMOTED=0
     docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
     CHECK_CREATED=0
     echo "restore_activation_failed_rollback_applied" >&2
@@ -179,9 +209,11 @@ if ! recreate_cell; then
   fi
   exit 1
 fi
+test_interrupt container_recreate
 
 if ! live_smoke; then
   if rollback_activation; then
+    PROMOTED=0
     docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
     CHECK_CREATED=0
     echo "restore_health_failed_rollback_applied" >&2
@@ -190,6 +222,8 @@ if ! live_smoke; then
   fi
   exit 1
 fi
+test_interrupt live_smoke
 
+RESTORE_COMPLETE=1
 CHECK_CREATED=0
 printf '{"ok":true,"mode":"apply","disposable":true,"staged_volume":true,"archive_id":"%s"}\n' "$ARCHIVE_ID"

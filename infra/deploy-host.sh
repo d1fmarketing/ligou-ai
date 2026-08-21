@@ -5,14 +5,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NODE_BIN="${LIGOU_NODE_BIN:-node}"
 BUN_BIN="${LIGOU_BUN_BIN:-/usr/local/bin/bun}"
-FLOCK_BIN="${LIGOU_FLOCK_BIN:-flock}"
 DEPLOY_ROOT="${LIGOU_DEPLOY_ROOT:-/opt/ligou}"
 SERVICE="${LIGOU_SERVICE_NAME:-ligou-controller}"
 RESULTS_FILE="${LIGOU_DEPLOY_RESULTS_FILE:-${DEPLOY_ROOT}/deploy-results.jsonl}"
 ARTIFACT=""
 MANIFEST=""
 COMMIT=""
-ORIGINAL_ARGS=("$@")
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -29,18 +27,27 @@ done
 [ -f "$ARTIFACT" ] && [ -f "$MANIFEST" ] || { echo "release_inputs_required" >&2; exit 1; }
 [ -n "${LIGOU_RELEASE_MANIFEST_KEY:-}" ] || { echo "release_manifest_key_required" >&2; exit 1; }
 command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "node_required" >&2; exit 1; }
-command -v "$FLOCK_BIN" >/dev/null 2>&1 || { echo "flock_required" >&2; exit 1; }
 
 mkdir -p "$DEPLOY_ROOT"
-LOCK_FILE="${LIGOU_DEPLOY_LOCK_FILE:-${DEPLOY_ROOT}/deploy.lock}"
-[[ "$LOCK_FILE" = /* && "$LOCK_FILE" != "/" ]] || { echo "deploy_lock_invalid" >&2; exit 2; }
-if [ "${LIGOU_DEPLOY_LOCK_HELD:-0}" != 1 ]; then
+TEST_LOCK_DIR=""
+STAGING=""
+cleanup_deploy() {
   set +e
-  "$FLOCK_BIN" -n -E 75 "$LOCK_FILE" env LIGOU_DEPLOY_LOCK_HELD=1 "$0" "${ORIGINAL_ARGS[@]}"
-  lock_status=$?
-  set -e
-  if [ "$lock_status" -eq 75 ]; then echo "release_activation_locked" >&2; fi
-  exit "$lock_status"
+  if [ -n "$STAGING" ] && [ -d "$STAGING" ]; then rm -rf "$STAGING"; fi
+  if [ -n "$TEST_LOCK_DIR" ]; then rmdir "$TEST_LOCK_DIR" >/dev/null 2>&1 || true; fi
+}
+trap cleanup_deploy EXIT INT TERM HUP
+
+if [ "${LIGOU_DEPLOY_TEST_HARNESS:-0}" = 1 ]; then
+  case "$DEPLOY_ROOT" in
+    /tmp/*|/var/folders/*) TEST_LOCK_DIR="${DEPLOY_ROOT}/.deploy-test-lock" ;;
+    *) echo "deploy_test_harness_forbidden" >&2; exit 2 ;;
+  esac
+  if ! mkdir "$TEST_LOCK_DIR" 2>/dev/null; then echo "release_activation_locked" >&2; exit 75; fi
+else
+  [ -x /usr/bin/flock ] || { echo "flock_required" >&2; exit 1; }
+  exec 9>"${DEPLOY_ROOT}/deploy.lock"
+  if ! /usr/bin/flock -n -E 75 9; then echo "release_activation_locked" >&2; exit 75; fi
 fi
 
 mkdir -p "$DEPLOY_ROOT/releases"
@@ -75,8 +82,6 @@ FINAL="${DEPLOY_ROOT}/releases/${RELEASE_ID}"
 STAGING="${DEPLOY_ROOT}/releases/.staging-${RELEASE_ID}-$$"
 [ ! -e "$FINAL" ] && [ ! -e "$STAGING" ] || { echo "release_already_exists" >&2; exit 1; }
 mkdir "$STAGING"
-cleanup_staging() { [ ! -d "$STAGING" ] || rm -rf "$STAGING"; }
-trap cleanup_staging EXIT
 
 tar -xzf "$ARTIFACT" -C "$STAGING"
 [ -f "$STAGING/voice-controller/package.json" ] \
@@ -88,7 +93,7 @@ tar -xzf "$ARTIFACT" -C "$STAGING"
 cp "$MANIFEST" "$STAGING/.ligou-release-manifest.json"
 chmod 600 "$STAGING/.ligou-release-manifest.json"
 mv "$STAGING" "$FINAL"
-trap - EXIT
+STAGING=""
 
 atomic_link() {
   local target="$1" link="$2" next="${2}.next.$$"

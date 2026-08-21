@@ -26,6 +26,7 @@ export const unitTestFiles = [
   "test/hermes-privacy.test.ts",
   "test/oauth-security.test.ts",
   "test/privacy.test.ts",
+  "test/accept-call-edge.test.ts",
   "test/learning.test.ts",
   "test/skills.test.ts",
   "test/unit-runner.test.ts",

@@ -357,7 +357,7 @@ async function stubCommands(fixture) {
   const curl = path.join(bin, "curl");
   const aws = path.join(bin, "aws");
   const sleep = path.join(bin, "sleep");
-  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"volume inspect"*) exit 1 ;;\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"authenticated":true}' ;;\nesac\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
+  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"volume inspect"*) exit 1 ;;\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
   await writeFile(curl, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\nif [ "\${CURL_MODE:-ok}" = fail ]; then printf '%s\\n' '{"ok":false}'; elif [ -n "\${CURL_FAIL_ONCE_MARKER:-}" ] && [ ! -e "$CURL_FAIL_ONCE_MARKER" ]; then : > "$CURL_FAIL_ONCE_MARKER"; printf '%s\\n' '{"ok":false}'; else printf '%s\\n' '{"ok":true}'; fi\n`);
   await writeFile(aws, "#!/bin/sh\nprintf '%s\\n' 'unexpected aws call' >&2\nexit 99\n");
   await writeFile(sleep, "#!/bin/sh\nexit 0\n");
@@ -496,3 +496,32 @@ test("failed restore recovery is labeled rollback failed, never rollback applied
     await rm(fixture, { recursive: true, force: true });
   }
 });
+
+for (const boundary of ["registry_promotion", "container_recreate", "live_smoke"]) {
+  test(`interrupt after ${boundary} restores registry and container before stage cleanup`, async () => {
+    const fixture = await mkdtemp(path.join(os.tmpdir(), `ligou-restore-interrupt-${boundary}-`));
+    try {
+      await mkdir(path.join(fixture, "tmp"));
+      const archive = await makeArchive(fixture);
+      const manifest = `${archive}.manifest.json`;
+      assert.equal(createManifest(archive, manifest).status, 0);
+      const archiveId = JSON.parse(await readFile(manifest, "utf8")).archive.id;
+      const bin = await stubCommands(fixture);
+      const env = restoreEnv(fixture, bin, {
+        LIGOU_RESTORE_TEST_HARNESS: "1",
+        LIGOU_RESTORE_TEST_INTERRUPT_AFTER: boundary,
+      });
+      const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /restore_interrupted_rollback_applied/);
+      const registry = JSON.parse(await readFile(env.LIGOU_TENANT_REGISTRY, "utf8"));
+      assert.equal(registry.tenants[TENANT].cognitive_volume, "ligou-test-tenant-hermes-cognitive");
+      const log = await readFile(path.join(fixture, "docker.log"), "utf8");
+      assert.match(log, /compose --project-name ligou-test-tenant/);
+      assert.match(log, /inspect --format .* ligou-cell-test-tenant/);
+      assert.match(log, new RegExp(`volume rm ligou-test-tenant-hermes-cognitive-stage-${archiveId}`));
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+}

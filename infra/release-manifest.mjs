@@ -2,6 +2,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { gunzipSync } from "node:zlib";
 
 const EXCLUSIONS = [
   "**/.env*",
@@ -103,6 +104,25 @@ function inspectArtifact(artifact) {
   if (result.status !== 0) fail("release_artifact_listing_failed");
   const entries = result.stdout.split("\n").filter(Boolean);
   if (!entries.length || entries.some(forbidden)) fail("release_artifact_forbidden_path");
+  const seen = new Set();
+  for (const entry of entries) {
+    const normalized = entry.replace(/^(?:[.]\/)+/, "").replace(/\/$/, "");
+    if (seen.has(normalized)) fail("release_artifact_duplicate_entry");
+    seen.add(normalized);
+  }
+  let tar;
+  try { tar = gunzipSync(readFileSync(artifact)); }
+  catch { fail("release_artifact_listing_failed"); }
+  for (let offset = 0; offset + 512 <= tar.length;) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const type = String.fromCharCode(header[156] || 0);
+    const sizeText = header.subarray(124, 136).toString("ascii").replace(/\0.*$/, "").trim();
+    const size = sizeText ? Number.parseInt(sizeText, 8) : 0;
+    if (!Number.isSafeInteger(size) || size < 0) fail("release_artifact_listing_failed");
+    if (!["\0", "0", "5", "x", "g", "L", "K"].includes(type)) fail("release_artifact_non_regular_entry");
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
 }
 
 function artifactFile(artifact, name) {
