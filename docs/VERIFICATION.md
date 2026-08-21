@@ -13,10 +13,10 @@ production-ready**. Historical live experiments are not release evidence for thi
   refresh-token or managed-calendar fallback.
 - OAuth, connector conversion, booking authority, receipts, budgets, privacy, HMAC cutover, backup, restore,
   release, rollback, and concurrency are covered by local contract/behavior tests.
-- All 37 repository migrations apply exactly once to a real disposable PostgreSQL 17.6 database in the
+- All 44 repository migrations apply exactly once to a real disposable PostgreSQL 17.6 database in the
   dedicated `ligou-rc1` Colima profile. The gate also rehearses the 13-file legacy sequence through `0014`
   before applying timestamp migrations and the guarded connector conversion.
-- Real pgTAP catalog assertions, service-role concurrency tests, all six Task 3/4 booking integration tests
+- Real pgTAP catalog assertions, nine concurrency/retention tests, nine authenticated two-tenant RLS/BOLA assertions, and all six Task 3/4 booking integration tests
   through the local REST API, the voice-controller budget-deferral integration, controller startup/health,
   and a migration no-op replay pass locally.
 - The dedicated profile disables Colima's automatic port forwarder. A gate-owned SSH process binds only

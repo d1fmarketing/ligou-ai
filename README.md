@@ -16,6 +16,7 @@ RC1 é um candidato local com código implementado, testes unitários e contrato
 - [Verificação local e gate de banco](docs/VERIFICATION.md) e [runbook de migrações](docs/runbooks/MIGRATION-VERIFICATION.md)
 - [Proveniência do replay](docs/release/V0.1-HARDENING-REPLAY-MAP.md)
 - [QA visual estático](docs/release/V0.1-VISUAL-QA.md)
+- [Retenção futura](docs/runbooks/RETENTION.md)
 
 ## Verificação local
 

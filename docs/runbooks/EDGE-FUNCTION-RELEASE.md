@@ -4,20 +4,26 @@
 
 Este é um procedimento de operador futuro; não registra deploy executado. Só prossiga com autoridade explícita, projeto-alvo confirmado, revisão do commit/manifesto e janela de rollback. Nunca cole valores de segredo em terminal gravado, tickets ou Git.
 
-As funções são `browser-session`, `google-connect`, `google-callback` e `accept-call`. Hashes SHA-256 dos fontes `index.ts`, calculados no momento desta documentação:
+As funções são `browser-session`, `google-connect`, `google-callback` e `accept-call`. A identidade de release é composta: inclui o `index.ts`, dependências locais transitivas sob `_shared`, `supabase/deno.json` e `supabase/deno.lock`.
 
-| Função | SHA-256 |
+| Função | SHA-256 composto |
 |---|---|
-| `browser-session` | `5f60609859b7444cd2f083c4995006930b1f0473895077c1c3679d62111ef581` |
-| `google-connect` | `bbf964b376a5eacc489d2e6922ee3f42027a5b39350ebb12f25ccb0793c0d916` |
-| `google-callback` | `05c6ea840a689e5daf570c888e6d31a787774174fe8bfdae92d7f748d9170737` |
-| `accept-call` | `f151e406ed282ea84f50395f02bcf93b993b2361af08cfe1216f0b38768d9cf2` |
+| `browser-session` | `a60a3b9f6f702dbee7b4763ed2b65c127b131679b09ed637089430316f37a138` |
+| `google-connect` | `51d2d2f5dfd161afca4a498aa4d0878fe5a41531a132fa52780feee417200afa` |
+| `google-callback` | `a88b25b51fd2fb3918a20c5a9619150b9e693e8ebc16d6cf22e05b63031650b1` |
+| `accept-call` | `49301741f474acc64a53e810678993128309c67cb3402748e5584b1364267253` |
+
+Recalcule pelo código, sem editar a tabela manualmente:
+
+```sh
+node -e 'import("./infra/edge-release-identity.mjs").then(m => console.log(JSON.stringify(m.computeEdgeReleaseIdentity(process.cwd()), null, 2)))'
+```
 
 Secret names only: `SERVICE_KEY`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT`, `CONNECTOR_TOKEN_ENCRYPTION_KEY`, `OPENAI_WEBHOOK_SECRET`, `CONTACT_HASH_KEY`, `LIGOU_TENANT`, `LIGOU_DASHBOARD_URL`. A plataforma injeta `SUPABASE_URL`; confirme sua presença sem exibir valor.
 
 ## Ordem de execução autorizada
 
-1. Confirme branch/commit, hashes acima ou hashes atualizados aprovados, migrations forward-only compatíveis e ambiente-alvo.
+1. Confirme branch/commit, hashes compostos acima ou identidades recalculadas aprovadas, migrations forward-only compatíveis e ambiente-alvo.
 2. Rode a verificação local limpa: `bun run test:edge-functions` e `bun run test:security`. Falha bloqueia a mudança.
 3. Configure/valide os secret names no cofre/superfície autorizada, sem imprimir valores. Defina primeiro dependências compartilhadas; mantenha o callback indisponível se a criptografia de conector estiver incompleta.
 4. Faça deploy de `browser-session`, depois `google-connect`, `google-callback` e por último `accept-call`. Preserve a configuração de verificação de JWT prevista no código, sem substituir as verificações explícitas de autoridade/assinatura.

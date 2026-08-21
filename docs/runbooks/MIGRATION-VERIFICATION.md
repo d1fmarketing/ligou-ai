@@ -39,17 +39,18 @@ The only destructive database operation in the gate is `bunx supabase db reset -
 
 The verified local run on 2026-08-20 produced:
 
-- `37` repository migrations applied in numeric version order and present exactly once in `supabase_migrations.schema_migrations`;
+- `44` repository migrations applied in numeric version order and present exactly once in `supabase_migrations.schema_migrations`;
 - the intentional local filename jump from `0007` to `0009` preserved;
 - `pgcrypto` and `btree_gist` installed, with `2` `CREATE EXTENSION` statements and no explicit extension version clauses;
 - `24` real pgTAP catalog assertions passing before and after the upgrade rehearsal;
-- `7` real concurrency/transaction cases passing;
+- `9` real concurrency/transaction cases passing;
 - `11` upgrade-rehearsal checks passing;
 - all `6` Task 3/4 booking integration tests passing through local PostgREST;
-- `1` real service-role budget deferral test and `1` voice-controller startup/health smoke passing;
+- `2` real service-role budget tests (unknown-usage deferral and settlement ceiling) and `1` voice-controller startup/health smoke passing;
+- `9` real authenticated REST RLS/BOLA assertions across two users and two tenants;
 - pinned `migration up --local` proving an unchanged history/no-op;
 - database lint with `0` errors and `2` legacy warnings;
-- advisors with `0` errors, `0` warnings, and `53` informational findings;
+- advisors with `0` errors, `0` warnings, and `52` informational findings;
 - no tracked-worktree mutation during the command.
 
 The pgTAP suite checks real catalog state: RLS plus FORCE RLS on public tables, empty `search_path` on SECURITY DEFINER functions, explicit function/table ACL sets, an invoker-security `effective_rules` view, inaccessible connector tables for `anon` and `authenticated`, removed booking RPC execution denial, valid booking/OAuth/hash constraints and triggers, and the final absence of the plaintext connector column.
@@ -63,6 +64,10 @@ The concurrency suite uses independent `psql` sessions and exercises database lo
 5. OAuth state double-consume;
 6. concurrent policy/power epoch invalidation;
 7. rollback at the accepted booking-delivery boundary.
+8. five suggested onboarding answers under one epoch plus immediate approved/revoked invalidation.
+9. expired OAuth state, slot-offer, and unreferenced quote retention while future rows remain.
+
+The REST RLS/BOLA suite creates two synthetic users through local GoTrue, assigns two synthetic tenants, authenticates both normally, and proves owner-only tenant/call/rule reads, empty cross-tenant reads, blocked connector-table access, blocked service-only health, and blocked cross-tenant connector status.
 
 The upgrade rehearsal does not substitute a fresh reset. It exposes only the immutable legacy files through `0014`, resets locally, seeds synthetic legacy connector and receipt rows, and then exposes timestamp migrations in stages. Before the final plaintext-drop invariant, it proves:
 
@@ -81,10 +86,10 @@ The two lint warnings are legacy PL/pgSQL hygiene findings, not execution errors
 
 They were not “fixed” by rewriting applied migrations. A later reviewed forward migration may remove the unused variable and give the compatibility parameter an explicit validation/audit use.
 
-The `53` advisor items are informational:
+The `52` advisor items are informational:
 
 - `32` unindexed foreign keys;
-- `11` unused indexes in the fresh local database;
+- `10` unused indexes in the fresh local database;
 - `10` RLS-enabled internal tables with intentionally no owner policy.
 
 The policyless internal tables are `booking_accepted_receipts`, `booking_quotes`, `booking_receipt_conflicts`, `booking_slot_leases`, `browser_session_requests`, `connector_accounts`, `fake_calendar_events`, `oauth_states`, `phone_events`, and `slot_offers`. They have FORCE RLS and no direct `anon`/`authenticated` grants. Required service operations are granted explicitly. Do not add permissive policies merely to silence an informational advisor.

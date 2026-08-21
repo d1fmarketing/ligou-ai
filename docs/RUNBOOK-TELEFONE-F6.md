@@ -1,25 +1,21 @@
-# Runbook — Telefone (F6)
+# Runbook futuro — Telefone (F6)
 
-O código do caminho de telefone JÁ ESTÁ PRONTO e deployado (Edge Function `accept-call` + listener no controller).
-Zero A2P/toll-free (isso é só SMS). Zero porta de entrada em qualquer lugar. Falta só a conta.
+Este documento descreve uma implantação futura. A release candidate contém contratos locais para ingestão `accept-call`, listener do controller, budget gate e reconciliação, mas não prova Edge Function implantada, número comprado, SIP trunk, webhook, chamada real, carrier delivery ou execução em produção.
 
-## O que o RJ faz (10 min, uma vez)
-1. Criar conta Twilio da Ligou em twilio.com/try-twilio (e-mail da Ligou) e fazer **upgrade** (cartão + crédito mínimo)
-   — remove limite de trial no mesmo dia.
-2. Me passar (clipboard, um por vez): `TWILIO_ACCOUNT_SID` e `TWILIO_AUTH_TOKEN`.
+## Pré-condições externas ainda não verificadas
 
-## O que eu faço em seguida (automatizado)
-1. Comprar 1 número local US (~$1.15/mês) via API.
-2. Criar Elastic SIP Trunk com Origination URI:
-   `sip:proj_<OPENAI_PROJECT_ID>@sip.api.openai.com;transport=tls` e apontar o número pro trunk.
-3. No projeto OpenAI: registrar webhook `realtime.call.incoming` →
-   `https://ixpbqquvxirvuevjhmrq.supabase.co/functions/v1/accept-call` e guardar o `whsec_` nos secrets da função:
-   `OPENAI_WEBHOOK_SECRET`, `SERVICE_KEY` e `CONTACT_HASH_KEY` (base64, 32 bytes) nos secrets da função. A mesma
-   `CONTACT_HASH_KEY` vai ao controller para opt-out/frequência. Depois, deploy de `accept-call --no-verify-jwt`.
-4. Teste de aceite: ligar do celular → mesmo agente do dashboard; caso fora-de-regra aparece ao vivo;
-   custo da chamada no ledger (`select * from calls where channel='phone'`).
+1. Conta de telefonia aprovada e financiada, com autorização explícita para compra/configuração.
+2. Projeto OpenAI e endpoint Edge do ambiente-alvo confirmados na superfície responsável.
+3. Secrets server-side configurados por nome, sem copiar valores para Git ou logs: `OPENAI_WEBHOOK_SECRET`, `SERVICE_KEY` e `CONTACT_HASH_KEY`.
+4. Migrations verificadas primeiro em staging/ambiente descartável; a situação remota de `0008` continua desconhecida.
+5. Budget, provider-termination reconciliation e observabilidade ativos antes de receber tráfego.
 
-## Fluxo em produção
-PSTN → Twilio SIP trunk → OpenAI Realtime → webhook → `phone_events` (Supabase) → Realtime acorda o
-controller na EC2 → `accept` com a MESMA config canônica + sideband autoritativo. Budget gate ativo
-(estouro = reject antes de atender).
+## Sequência futura autorizada
+
+1. Adquirir um número local e configurar o SIP trunk na conta autorizada.
+2. Registrar o webhook `realtime.call.incoming` usando a URL resolvida do projeto-alvo; este repositório não contém URL operacional fixa.
+3. Publicar `accept-call` conforme [EDGE-FUNCTION-RELEASE.md](runbooks/EDGE-FUNCTION-RELEASE.md), sem reutilizar credenciais de browser.
+4. Verificar uma chamada sintética autorizada: persistência do evento antes do 2xx, budget reservation igual ao teto de sessão, sideband contínuo e rejeição/hangup reconciliável.
+5. Só registrar confirmação depois do read-back do provedor, ledger e estado final do carrier.
+
+O fluxo pretendido é PSTN → SIP → OpenAI Realtime → Edge `accept-call` → evento durável → controller outbound → sideband autoritativo. Isso é arquitetura implementada/localmente testada, não evidência de implantação.

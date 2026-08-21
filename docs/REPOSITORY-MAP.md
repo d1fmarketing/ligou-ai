@@ -8,6 +8,7 @@
 | `supabase/` | Migrações, RLS, RPCs e quatro Edge Functions | Contratos e gate de banco isolado; não implantado. |
 | `hermes-cell/` | Célula tenant-scoped, OAuth do modelo separado e contrato estruturado | Configuração unit-testada; runtime host não exercitado. |
 | `infra/` | Pacote assinado, release imutável, health, backup e restore | Testes locais; procedimentos de operador ainda futuros. |
+| `infra/systemd/` | Units futuras do scheduler de retenção | Versionadas; não instaladas nem habilitadas. |
 | `tests/`, `dashboard/*test*`, `voice-controller/test/`, `infra/test/` | Contratos e regressões | Evidência local somente. |
 | `docs/` | Escopo, status, runbooks e proveniência | Documentação da fronteira de evidências. |
 
