@@ -38,7 +38,6 @@ export function createUnitTestEnvironment() {
     NODE_ENV: "test",
     OPENAI_API_KEY: "synthetic-unit-test-key",
     HERMES_API_KEY: "synthetic-unit-test-key",
-    HERMES_URL: "http://127.0.0.1:28642",
     SUPABASE_URL: "https://unit-test.invalid",
     SUPABASE_SECRET_KEY: "synthetic-unit-test-key",
     SUPABASE_PUBLISHABLE_KEY: "synthetic-unit-test-key",
@@ -61,7 +60,12 @@ export function runUnitTests(run = execFileSync, files = unitTestFiles) {
       run(process.execPath, ["test", absoluteTestPath(file)], {
         cwd: isolatedCwd,
         stdio: "inherit",
-        env: { ...createUnitTestEnvironment(), TMPDIR: isolatedCwd },
+        env: {
+          ...createUnitTestEnvironment(),
+          TMPDIR: isolatedCwd,
+          LIGOU_TENANT_STATE_ROOT: path.join(isolatedCwd, "tenants"),
+          LIGOU_TENANT_REGISTRY: path.join(isolatedCwd, "tenant-registry.json"),
+        },
       });
     }
   } finally {

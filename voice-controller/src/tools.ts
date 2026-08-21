@@ -378,7 +378,7 @@ export async function runTool(cap: Capability, name: string, args: Record<string
         } catch {
           return done({ status: "unavailable", reason: "invalid_structured_request" }, false);
         }
-        const advice = await consultHermes(cap.tenantSlug, context);
+        const advice = await consultHermes({ id: tenant.id, slug: tenant.slug }, context);
         return done(advice, advice.status === "ok");
       }
       case "propose_booking": {

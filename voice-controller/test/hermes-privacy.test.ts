@@ -1,5 +1,7 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -9,6 +11,15 @@ import {
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
+const routeFixture = mkdtempSync(path.join(os.tmpdir(), "ligou-hermes-routes-"));
+process.env.LIGOU_TENANT_STATE_ROOT = path.join(routeFixture, "tenants");
+process.env.LIGOU_TENANT_REGISTRY = path.join(routeFixture, "registry.json");
+afterAll(() => {
+  delete process.env.LIGOU_TENANT_STATE_ROOT;
+  delete process.env.LIGOU_TENANT_REGISTRY;
+  delete process.env.HERMES_URL;
+  rmSync(routeFixture, { recursive: true, force: true });
+});
 
 const TENANT = {
   id: "tenant-1",
@@ -31,7 +42,7 @@ const RULES = [
 
 test("controller has no shared fixed Hermes route when tenant routing is absent", () => {
   const configModule = pathToFileURL(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/config.ts")).href;
-  const result = spawnSync(process.execPath, ["-e", `import { config } from ${JSON.stringify(configModule)}; console.log(config.hermesUrl);`], {
+  const result = spawnSync(process.execPath, ["-e", `import { config } from ${JSON.stringify(configModule)}; console.log("hermesUrl" in config);`], {
     encoding: "utf8",
     env: {
       PATH: "/usr/bin:/bin",
@@ -43,7 +54,7 @@ test("controller has no shared fixed Hermes route when tenant routing is absent"
     },
   });
   expect(result.status).toBe(0);
-  expect(result.stdout.trim()).toBe("");
+  expect(result.stdout.trim()).toBe("false");
 });
 
 describe("trusted structured Hermes context", () => {
@@ -79,7 +90,7 @@ describe("strict Hermes action output", () => {
       return new Response(JSON.stringify({ choices: [{ message: { content: '{"action":"open_team_case"}' } }] }), { status: 200 });
     }) as typeof fetch;
 
-    const result = await consultHermes("rocha-plumbing", context());
+    const result = await consultHermes({ id: "tenant-1", slug: "rocha-plumbing" }, context());
 
     expect(result).toEqual({
       status: "ok",
@@ -102,7 +113,22 @@ describe("strict Hermes action output", () => {
       globalThis.fetch = (async () => new Response(JSON.stringify({
         choices: [{ message: { content } }],
       }), { status: 200 })) as typeof fetch;
-      expect(await consultHermes("rocha-plumbing", context())).toEqual({ status: "unavailable" });
+      expect(await consultHermes({ id: "tenant-1", slug: "rocha-plumbing" }, context())).toEqual({ status: "unavailable" });
     });
   }
+
+  test("derives distinct routes from trusted tenant state and ignores process-global route selection", async () => {
+    const urls: string[] = [];
+    process.env.HERMES_URL = "http://127.0.0.1:9999";
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      urls.push(String(input));
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"action":"continue_standard_flow"}' } }] }), { status: 200 });
+    }) as typeof fetch;
+    await consultHermes({ id: "tenant-a", slug: "alpha-plumbing" }, context());
+    await consultHermes({ id: "tenant-b", slug: "beta-plumbing" }, context());
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).not.toBe(urls[1]);
+    expect(urls.join("\n")).not.toContain(":9999");
+    expect(urls[0]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1\/chat\/completions$/);
+  });
 });

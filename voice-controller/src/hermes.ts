@@ -1,6 +1,7 @@
 // Structurally safe Hermes boundary. The Realtime model supplies only an enum topic and service ID.
 // Trusted state is rebuilt server-side, and Hermes may return only one action code mapped to fixed guidance.
 import { config } from "./config.ts";
+import { resolveTenantIdentity } from "../../hermes-cell/tenant-identity.mjs";
 
 export const HERMES_TOPICS = [
   "customer_upset",
@@ -76,23 +77,32 @@ function parseAction(value: unknown): HermesAction | null {
 }
 
 export async function consultHermes(
-  tenantSlug: string,
+  tenant: { id: string; slug: string },
   context: TrustedHermesContext,
   timeoutMs = 2_500,
 ): Promise<HermesAdvice> {
-  if (!config.hermesKey || !config.hermesUrl || !/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/.test(tenantSlug)) {
+  if (!config.hermesKey || !tenant?.id || !/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/.test(tenant?.slug)) {
     return { status: "unavailable" };
   }
+  let identity;
+  try {
+    identity = resolveTenantIdentity(tenant.slug);
+  } catch {
+    return { status: "unavailable" };
+  }
+  if (identity.tenant !== tenant.slug
+    || identity.container_name !== `ligou-cell-${tenant.slug}`
+    || identity.hermes_url !== `http://127.0.0.1:${identity.host_port}`) return { status: "unavailable" };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${config.hermesUrl}/v1/chat/completions`, {
+    const response = await fetch(`${identity.hermes_url}/v1/chat/completions`, {
       method: "POST",
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${config.hermesKey}`,
-        "X-Hermes-Session-Key": `tenant:${tenantSlug}`,
+        "X-Hermes-Session-Key": `tenant:${tenant.slug}`,
       },
       body: JSON.stringify({
         model: "hermes",
