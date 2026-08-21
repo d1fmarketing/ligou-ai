@@ -53,7 +53,7 @@ RELEASE_ID="$(printf '%s' "$MANIFEST_JSON" | "$NODE_BIN" -e \
   'let value="";process.stdin.on("data",c=>value+=c).on("end",()=>process.stdout.write(JSON.parse(value).release_id||""));')"
 [[ "$RELEASE_ID" =~ ^[a-f0-9]{40}-[a-f0-9]{64}$ ]] || { echo "deploy_release_id_invalid" >&2; exit 1; }
 BOOTSTRAP_MODULES="$("$NODE_BIN" "$SCRIPT_ROOT/infra/bootstrap-module-closure.mjs" \
-  --root "$SOURCE_ROOT" --entry infra/release-manifest.mjs)"
+  --root "$SOURCE_ROOT" --entry infra/release-manifest.mjs --commit "$COMMIT")"
 [[ "$BOOTSTRAP_MODULES" =~ ^infra/[A-Za-z0-9._/-]+(\ infra/[A-Za-z0-9._/-]+)*$ ]] \
   || { echo "deploy_bootstrap_closure_invalid" >&2; exit 1; }
 

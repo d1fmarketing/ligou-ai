@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { access, chmod, link, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { localModuleClosure } from "../bootstrap-module-closure.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const packageTool = path.join(repoRoot, "infra/package-release.mjs");
@@ -12,12 +14,39 @@ const manifestTool = path.join(repoRoot, "infra/release-manifest.mjs");
 const hostDeploy = path.join(repoRoot, "infra/deploy-host.sh");
 const healthTool = path.join(repoRoot, "infra/release-health.sh");
 const deployScript = path.join(repoRoot, "infra/deploy.sh");
+const closureTool = path.join(repoRoot, "infra/bootstrap-module-closure.mjs");
+const isolationGuard = path.join(repoRoot, "infra/test/helpers/bootstrap-isolation-guard.mjs");
 const retentionScript = path.join(repoRoot, "infra/retention.sh");
 const RELEASE_KEY = "Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA=";
 const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de";
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: "utf8", ...options });
+}
+
+const tarPath = ["/usr/bin/tar", "/bin/tar"].find(existsSync);
+if (!tarPath) throw new Error("tar_required_for_release_tests");
+
+function runPermissionedNode(script, args, { cwd, readPaths, artifact = "/dev/null", env = {} }) {
+  const allowed = [isolationGuard, ...readPaths].map((candidate) => realpathSync(candidate));
+  const canonicalScript = realpathSync(script);
+  return run(process.execPath, [
+    "--no-warnings",
+    "--permission",
+    ...allowed.map((candidate) => `--allow-fs-read=${candidate}`),
+    "--allow-child-process",
+    `--import=${pathToFileURL(isolationGuard).href}`,
+    canonicalScript,
+    ...args,
+  ], {
+    cwd: realpathSync(cwd),
+    env: {
+      PATH: path.dirname(tarPath),
+      LIGOU_BOOTSTRAP_ALLOWED_ARTIFACT: artifact === "/dev/null" ? artifact : realpathSync(artifact),
+      LIGOU_BOOTSTRAP_TAR_COMMAND: "tar",
+      ...env,
+    },
+  });
 }
 
 async function writeTree(root, files) {
@@ -90,6 +119,17 @@ async function commitVerifierGraph(repo) {
   return run("git", ["rev-parse", "HEAD"], { cwd: repo.root }).stdout.trim();
 }
 
+async function commitModuleGraph(base, files) {
+  const root = path.join(base, "module-repo");
+  await mkdir(root);
+  await writeTree(root, files);
+  assert.equal(run("git", ["init", "-q"], { cwd: root }).status, 0);
+  assert.equal(run("git", ["add", "."], { cwd: root }).status, 0);
+  assert.equal(run("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "commit", "-qm", "module graph"], { cwd: root }).status, 0);
+  return { root, commit: run("git", ["rev-parse", "HEAD"], { cwd: root }).stdout.trim() };
+}
+
 function createReleaseManifest(artifact, manifest, commit) {
   return run(process.execPath, [manifestTool, "create", "--artifact", artifact, "--manifest", manifest,
     "--commit", commit, "--source", "builder:unit", "--created", "2026-08-20T12:00:00.000Z",
@@ -151,6 +191,112 @@ test("packaging exact commit excludes contamination and emits a signed immutable
     const verified = run(process.execPath, [manifestTool, "verify", "--artifact", artifact,
       "--manifest", manifest, "--commit", repo.commit], { env: { ...process.env, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY } });
     assert.equal(verified.status, 0, verified.stderr);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("bootstrap closure lexes ESM syntax without treating comments or strings as imports", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-bootstrap-lexer-"));
+  try {
+    await writeTree(fixture, {
+      "infra/entry.mjs": [
+        "const decoy = 'import(\\\"./string-decoy.mjs\\\")';",
+        "// import './line-comment-decoy.mjs';",
+        "/* export { nope } from './block-comment-decoy.mjs'; */",
+        "import './static-side-effect.mjs';",
+        "import { from as importedFrom } from './reserved-binding.mjs';",
+        "export { named } from './static-export.mjs';",
+        "void import('./dynamic-string.mjs');",
+        "void import(`./dynamic-template.mjs`);",
+        "void import.meta.url;",
+      ].join("\n"),
+      "infra/static-side-effect.mjs": "export const sideEffect = true;\n",
+      "infra/reserved-binding.mjs": "export const from = true;\n",
+      "infra/static-export.mjs": "export const named = true;\n",
+      "infra/dynamic-string.mjs": "export const dynamicString = true;\n",
+      "infra/dynamic-template.mjs": "export const dynamicTemplate = true;\n",
+    });
+
+    assert.deepEqual(localModuleClosure(fixture, "infra/entry.mjs"), [
+      "infra/dynamic-string.mjs",
+      "infra/dynamic-template.mjs",
+      "infra/entry.mjs",
+      "infra/reserved-binding.mjs",
+      "infra/static-export.mjs",
+      "infra/static-side-effect.mjs",
+    ]);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("bootstrap closure rejects nonliteral and interpolated dynamic imports", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-bootstrap-dynamic-"));
+  try {
+    for (const [name, source] of Object.entries({
+      variable: "const target = './dep.mjs'; void import(target);\n",
+      interpolated: "const name = 'dep'; void import(`./${name}.mjs`);\n",
+      concatenated: "void import('./dep-' + 'one.mjs');\n",
+    })) {
+      const entry = `infra/${name}.mjs`;
+      await writeTree(fixture, { [entry]: source });
+      assert.throws(() => localModuleClosure(fixture, entry), /bootstrap_closure_dynamic_import_nonliteral/, name);
+    }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("bootstrap closure CLI resolves the exact committed module bytes", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-bootstrap-commit-"));
+  try {
+    const repo = await commitModuleGraph(fixture, {
+      "infra/entry.mjs": "import './committed.mjs';\n",
+      "infra/committed.mjs": "export const committed = true;\n",
+    });
+    await writeTree(repo.root, {
+      "infra/entry.mjs": "import './worktree-only.mjs';\n",
+      "infra/worktree-only.mjs": "export const dirty = true;\n",
+    });
+    const result = run(process.execPath, [closureTool, "--root", repo.root, "--entry", "infra/entry.mjs", "--commit", repo.commit]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "infra/committed.mjs infra/entry.mjs");
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("bootstrap verifier isolation denies outside reads, absolute imports, fetch, and child commands", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-bootstrap-isolation-red-"));
+  try {
+    const bootstrap = path.join(fixture, "bootstrap");
+    const outside = path.join(fixture, "outside");
+    await writeTree(fixture, {
+      "outside/sentinel.txt": "outside-readable\n",
+      "outside/external.mjs": "export const external = true;\n",
+      "bootstrap/read-external.mjs": "import {readFileSync} from 'node:fs'; process.stdout.write(readFileSync(process.argv[2], 'utf8'));\n",
+      "bootstrap/import-external.mjs": "await import(process.argv[2]);\n",
+      "bootstrap/network.mjs": "await fetch('data:text/plain,network-readable');\n",
+      "bootstrap/net.mjs": "import net from 'node:net'; net.connect({host:'127.0.0.1',port:9});\n",
+      "bootstrap/child.mjs": "import {spawnSync} from 'node:child_process'; const r=spawnSync(process.execPath,['-e','process.exit(0)']); process.exit(r.status ?? 1);\n",
+      "bootstrap/tar-abuse.mjs": "import {spawnSync} from 'node:child_process'; spawnSync('tar',['--version']);\n",
+    });
+    const attempts = [
+      runPermissionedNode(path.join(bootstrap, "read-external.mjs"), [path.join(outside, "sentinel.txt")], { cwd: bootstrap, readPaths: [bootstrap] }),
+      runPermissionedNode(path.join(bootstrap, "import-external.mjs"), [pathToFileURL(path.join(outside, "external.mjs")).href], { cwd: bootstrap, readPaths: [bootstrap] }),
+      runPermissionedNode(path.join(bootstrap, "network.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
+      runPermissionedNode(path.join(bootstrap, "net.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
+      runPermissionedNode(path.join(bootstrap, "child.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
+      runPermissionedNode(path.join(bootstrap, "tar-abuse.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
+    ];
+    assert.deepEqual(attempts.map((attempt) => attempt.status), [1, 1, 1, 1, 1, 1], attempts.map((attempt) => attempt.stderr).join("\n"));
+    assert.match(attempts[0].stderr, /ERR_ACCESS_DENIED/);
+    assert.match(attempts[1].stderr, /ERR_ACCESS_DENIED/);
+    assert.match(attempts[2].stderr, /bootstrap_network_forbidden/);
+    assert.match(attempts[3].stderr, /bootstrap_network_forbidden/);
+    assert.match(attempts[4].stderr, /bootstrap_child_process_forbidden/);
+    assert.match(attempts[5].stderr, /bootstrap_child_process_forbidden/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -375,10 +521,14 @@ exit 0
     const extracted = run("tar", ["-xzf", artifact, "-C", bootstrap, ...bootstrapFiles]);
     assert.equal(extracted.status, 0, extracted.stderr);
 
-    const isolated = run(process.execPath, [path.join(bootstrap, "infra/release-manifest.mjs"), "verify",
-      "--artifact", artifact, "--manifest", manifest, "--commit", commit], {
+    const canonicalArtifact = realpathSync(artifact);
+    const canonicalManifest = realpathSync(manifest);
+    const isolated = runPermissionedNode(path.join(bootstrap, "infra/release-manifest.mjs"), ["verify",
+      "--artifact", canonicalArtifact, "--manifest", canonicalManifest, "--commit", commit], {
       cwd: bootstrap,
-      env: { PATH: "/usr/bin:/bin", LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY },
+      readPaths: [bootstrap, artifact, manifest],
+      artifact: canonicalArtifact,
+      env: { LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY },
     });
     assert.equal(isolated.status, 0, isolated.stderr);
     await access(path.join(bootstrap, "infra/edge-release-identity.mjs"));
