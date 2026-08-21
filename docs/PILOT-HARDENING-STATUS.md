@@ -1,5 +1,8 @@
 # Pilot hardening status
 
+All current hardening statements below describe implemented/local contract-tested source unless explicitly
+marked historical. This branch has not been deployed or live-verified and is not production-ready.
+
 ## Run 0 baseline (sanitized)
 
 Recorded before this containment change:
@@ -34,9 +37,9 @@ build-time variable must never supply a password or cause a password sign-in.
 ## Run 3 superseding Hermes invariant
 
 The Run 2 notes below describe historical defenses around a now-retired interface; they do not authorize its
-return. Live Hermes is no longer given a model-authored question, freeform context, transcript excerpt, caller
+return. Runtime Hermes is no longer given a model-authored question, freeform context, transcript excerpt, caller
 instruction, contact/address field, or private pricing state, and no natural-language Hermes response returns
-to Realtime. The only live contract is `consult_ligou_brain(topic enum, service_id)`: the server rebuilds a
+to Realtime. The only runtime contract is `consult_ligou_brain(topic enum, service_id)`: the server rebuilds a
 small trusted context, Hermes returns one exact JSON action code, and the server maps that code to fixed
 guidance. Invalid JSON, prose, extra fields, unknown actions, digits, and monetary output are unavailable.
 Reasoning uses `openai-codex` OAuth in its own model-auth volume; cognitive backup excludes that volume.
@@ -137,9 +140,8 @@ three original Task 4 migrations remain byte-unchanged.
   corrupt intent payloads; the internal exclusion must match the same booking interval.
 - `close_deal` is call-scoped and reports confirmed only through `get_booking_confirmation`, which joins the
   booking, canonical accepted mapping, and exact accepted receipt.
-- Connector lookup error is distinct from confirmed absence. Managed-calendar fallback requires explicit
-  `GOOGLE_MANAGED_CALENDAR_FALLBACK=enabled`. Duplicate `ligouKey` matches are manual conflicts for write and
-  reconciliation.
+- Connector lookup error is distinct from confirmed absence. No managed-calendar or plaintext environment
+  fallback exists. Duplicate `ligouKey` matches are manual conflicts for write and reconciliation.
 - Historical only: Run 2 sanitized a freeform Hermes question/context. Run 3 removed that interface entirely;
   do not restore it from this note.
 - Existing pre-authority accepted receipt history is preserved and quarantined. It cannot become confirmation

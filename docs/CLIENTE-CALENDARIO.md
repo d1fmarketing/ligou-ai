@@ -63,8 +63,9 @@ Fontes: [verificação de escopo sensível](https://developers.google.com/identi
 
 O adapter (`voice-controller/src/calendar.ts`) **já aceita os dois caminhos** e escolhe sozinho:
 
-- `GOOGLE_SA_CLIENT_EMAIL` + `GOOGLE_SA_PRIVATE_KEY` → service account (Caso B, calendário gerenciado);
-- `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` + `GOOGLE_REFRESH_TOKEN` → OAuth (Caso A, agenda do cliente);
+- `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_OAUTH_CLIENT_SECRET` → troca OAuth do conector do tenant;
+- o refresh token existe somente cifrado em `connector_accounts`, vinculado a tenant/provedor por AES-GCM;
+- não existe fallback por refresh token, service account ou calendário gerenciado no ambiente do processo.
 - nenhum dos dois → adapter falso persistido no Supabase (é o estado de hoje, que deixa o resto do fluxo
   funcionar e o agente ser honesto: *"não consigo confirmar o horário agora, a equipe confirma"*).
 
@@ -94,4 +95,3 @@ escopo mínimo `calendar.events`, `access_type=offline` + `prompt=consent`, e o 
 Enquanto o app não passa pela verificação do Google (escopo de agenda é "sensível"), o cliente vê uma tela
 extra de "app não verificado" com um "Avançado → continuar". Isso é aceitável no piloto; a verificação
 (domínio, logo, política de privacidade, vídeo) roda em paralelo e some com o aviso.
-
