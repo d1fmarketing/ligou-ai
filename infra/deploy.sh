@@ -52,6 +52,10 @@ MANIFEST_JSON="$("$NODE_BIN" "$SCRIPT_ROOT/infra/release-manifest.mjs" create \
 RELEASE_ID="$(printf '%s' "$MANIFEST_JSON" | "$NODE_BIN" -e \
   'let value="";process.stdin.on("data",c=>value+=c).on("end",()=>process.stdout.write(JSON.parse(value).release_id||""));')"
 [[ "$RELEASE_ID" =~ ^[a-f0-9]{40}-[a-f0-9]{64}$ ]] || { echo "deploy_release_id_invalid" >&2; exit 1; }
+BOOTSTRAP_MODULES="$("$NODE_BIN" "$SCRIPT_ROOT/infra/bootstrap-module-closure.mjs" \
+  --root "$SOURCE_ROOT" --entry infra/release-manifest.mjs)"
+[[ "$BOOTSTRAP_MODULES" =~ ^infra/[A-Za-z0-9._/-]+(\ infra/[A-Za-z0-9._/-]+)*$ ]] \
+  || { echo "deploy_bootstrap_closure_invalid" >&2; exit 1; }
 
 S3_PREFIX="releases/${RELEASE_ID}"
 aws s3 cp "$ARTIFACT" "s3://${BUCKET}/${S3_PREFIX}/release.tar.gz" --only-show-errors
@@ -66,7 +70,7 @@ ACTUAL=\$(sha256sum \$ART | awk '{print \$1}'); \
 [ \"\$ACTUAL\" = ${ARTIFACT_HASH} ] || { echo release_bootstrap_hash_mismatch >&2; exit 1; }; \
 BOOT=\$(mktemp -d /tmp/ligou-bootstrap.XXXXXX); \
 trap 'rm -rf \"\$BOOT\" \"\$ART\" \"\$MAN\"' EXIT; \
-tar -xzf \$ART -C \$BOOT infra/deploy-host.sh infra/release-manifest.mjs; \
+tar -xzf \$ART -C \$BOOT infra/deploy-host.sh ${BOOTSTRAP_MODULES}; \
 chmod 700 \$BOOT/infra/deploy-host.sh; \
 set -a; . /opt/ligou/env; set +a; \
 LIGOU_DEPLOY_ROOT=/opt/ligou LIGOU_ENV_FILE=/opt/ligou/env \

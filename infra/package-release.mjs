@@ -7,6 +7,7 @@ const ALLOWED_ROOTS = new Set(["voice-controller", "hermes-cell", "supabase", "i
 const BUILD_OR_DEPENDENCY = new Set(["node_modules", "dist", "build", "coverage", ".next", ".turbo", ".cache", "vendor"]);
 const ARCHIVE = /\.(?:zip|tar|tgz|gz|7z|rar)$/i;
 const BUILDER_ONLY = new Set([
+  "infra/bootstrap-module-closure.mjs",
   "infra/deploy.sh",
   "infra/package-release.mjs",
   "infra/pull-env.sh",

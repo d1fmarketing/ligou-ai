@@ -53,9 +53,13 @@ async function gitFixture(base) {
     "supabase/deno.lock": "fixture-deno-lock\n",
     "supabase/.temp/project-ref": "forbidden temp\n",
     "infra/good.sh": "#!/bin/sh\nexit 0\n",
+    "infra/deploy-host.sh": await readFile(hostDeploy, "utf8"),
+    "infra/release-manifest.mjs": await readFile(manifestTool, "utf8"),
+    "infra/edge-release-identity.mjs": await readFile(path.join(repoRoot, "infra/edge-release-identity.mjs"), "utf8"),
     "infra/deploy.sh": "#!/bin/sh\necho live-deploy\n",
     "infra/pull-env.sh": "#!/bin/sh\necho live-env\n",
     "infra/package-release.mjs": "// builder-only\n",
+    "infra/bootstrap-module-closure.mjs": "// builder-only closure discovery\n",
     "infra/test/proof.test.mjs": "// test-only\n",
     "infra/toolchain.json": JSON.stringify({
       node: "22.22.3", application_version: "0.1.0", bun: "1.2.13", deno: "2.9.4", supabase_cli: "2.115.0", hermes_image: IMAGE,
@@ -68,6 +72,22 @@ async function gitFixture(base) {
   assert.equal(run("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd: root }).status, 0);
   const commit = run("git", ["rev-parse", "HEAD"], { cwd: root }).stdout.trim();
   return { root, commit };
+}
+
+async function commitVerifierGraph(repo) {
+  const manifestSource = await readFile(manifestTool, "utf8");
+  const edgeSource = await readFile(path.join(repoRoot, "infra/edge-release-identity.mjs"), "utf8");
+  await writeTree(repo.root, {
+    "infra/deploy-host.sh": await readFile(hostDeploy, "utf8"),
+    "infra/release-manifest.mjs": manifestSource,
+    "infra/edge-release-identity.mjs": `import "./nested-release-proof.mjs";\n${edgeSource}`,
+    "infra/nested-release-proof.mjs": "export const nestedReleaseProof = true;\n",
+  });
+  assert.equal(run("git", ["add", "infra/deploy-host.sh", "infra/release-manifest.mjs",
+    "infra/edge-release-identity.mjs", "infra/nested-release-proof.mjs"], { cwd: repo.root }).status, 0);
+  assert.equal(run("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "commit", "-qm", "verifier graph"], { cwd: repo.root }).status, 0);
+  return run("git", ["rev-parse", "HEAD"], { cwd: repo.root }).stdout.trim();
 }
 
 function createReleaseManifest(artifact, manifest, commit) {
@@ -91,7 +111,7 @@ test("packaging exact commit excludes contamination and emits a signed immutable
     assert.ok(entries.includes("voice-controller/src/good.ts"));
     assert.ok(entries.includes("supabase/functions/good/index.ts"));
     assert.doesNotMatch(entries.join("\n"), /(?:^|\/)\._|(?:^|\/)\.env|node_modules|(?:^|\/)dist\/|supabase\/\.temp|private-backup[.]zip/);
-    assert.doesNotMatch(entries.join("\n"), /prove-onboarding|\/test\/|supabase\/scripts\/|infra\/(?:deploy|pull-env|package-release)[.]/);
+    assert.doesNotMatch(entries.join("\n"), /prove-onboarding|\/test\/|supabase\/scripts\/|infra\/(?:deploy|pull-env|package-release|bootstrap-module-closure)[.]/);
 
     const manifest = `${artifact}.manifest.json`;
     const created = createReleaseManifest(artifact, manifest, repo.commit);
@@ -283,6 +303,87 @@ test("deploy wrapper packages one clean commit, uploads artifact+manifest, and d
     assert.doesNotMatch(log + result.stdout + result.stderr, /OPENAI_API_KEY|SUPABASE_SECRET|LIGOU_RELEASE_MANIFEST_KEY=/);
   } finally {
     if (linkedWorktree) run("git", ["worktree", "remove", "--force", linkedWorktree], { cwd: path.join(fixture, "repo") });
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("SSM bootstrap runs the real verifier with its complete transitive local module closure", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-bootstrap-closure-"));
+  try {
+    const repo = await gitFixture(fixture);
+    const commit = await commitVerifierGraph(repo);
+    const bin = path.join(fixture, "bin");
+    const work = path.join(fixture, "work");
+    const store = path.join(fixture, "s3");
+    const parametersFile = path.join(fixture, "ssm-parameters.json");
+    await mkdir(bin);
+    await mkdir(work);
+    await mkdir(store);
+    await writeFile(path.join(bin, "aws"), `#!/bin/sh
+if [ "$1" = s3 ] && [ "$2" = cp ]; then
+  case "$3" in
+    *.manifest.json) cp "$3" "$S3_STORE/release.tar.gz.manifest.json" ;;
+    *) cp "$3" "$S3_STORE/release.tar.gz" ;;
+  esac
+  exit 0
+fi
+if [ "$1" = ssm ] && [ "$2" = send-command ]; then
+  capture=0
+  for argument in "$@"; do
+    if [ "$capture" = 1 ]; then printf '%s' "$argument" > "$SSM_PARAMETERS_FILE"; break; fi
+    if [ "$argument" = --parameters ]; then capture=1; fi
+  done
+  printf '%s\n' cmd-test
+  exit 0
+fi
+case "$*" in
+  *StandardOutputContent*) printf '%s\n' '{"ok":true,"status":"activated"}' ;;
+  *'--query Status'*) printf '%s\n' Success ;;
+esac
+exit 0
+`);
+    await writeFile(path.join(bin, "sleep"), "#!/bin/sh\nexit 0\n");
+    for (const command of ["aws", "sleep"]) await chmod(path.join(bin, command), 0o755);
+
+    const deployed = run("bash", [deployScript], {
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`,
+        S3_STORE: store,
+        SSM_PARAMETERS_FILE: parametersFile,
+        LIGOU_AWS_REGION: "us-east-1",
+        LIGOU_INSTANCE_ID: "i-0123456789abcdef0",
+        LIGOU_DEPLOY_BUCKET: "unit-deploys",
+        LIGOU_DEPLOY_SOURCE_ID: "builder:unit",
+        LIGOU_DEPLOY_SOURCE_ROOT: repo.root,
+        LIGOU_DEPLOY_WORK_DIR: work,
+        LIGOU_NODE_BIN: process.execPath,
+        LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY,
+        LIGOU_RELEASE_MANIFEST_KEY_ID: "release-test-v1",
+        HERMES_IMAGE: IMAGE,
+      },
+    });
+    assert.equal(deployed.status, 0, deployed.stderr);
+
+    const remoteCommand = JSON.parse(await readFile(parametersFile, "utf8")).commands[0];
+    const extraction = /tar -xzf \$ART -C \$BOOT ([^;]+);/.exec(remoteCommand);
+    assert.ok(extraction, remoteCommand);
+    const bootstrapFiles = extraction[1].trim().split(/\s+/);
+    const bootstrap = path.join(fixture, "bootstrap");
+    await mkdir(bootstrap);
+    const artifact = path.join(store, "release.tar.gz");
+    const manifest = path.join(store, "release.tar.gz.manifest.json");
+    const extracted = run("tar", ["-xzf", artifact, "-C", bootstrap, ...bootstrapFiles]);
+    assert.equal(extracted.status, 0, extracted.stderr);
+
+    const isolated = run(process.execPath, [path.join(bootstrap, "infra/release-manifest.mjs"), "verify",
+      "--artifact", artifact, "--manifest", manifest, "--commit", commit], {
+      cwd: bootstrap,
+      env: { PATH: "/usr/bin:/bin", LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY },
+    });
+    assert.equal(isolated.status, 0, isolated.stderr);
+    await access(path.join(bootstrap, "infra/edge-release-identity.mjs"));
+    await access(path.join(bootstrap, "infra/nested-release-proof.mjs"));
+  } finally {
     await rm(fixture, { recursive: true, force: true });
   }
 });
