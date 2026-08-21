@@ -191,11 +191,11 @@ test_interrupt() {
   fi
 }
 
+PROMOTED=1
 if ! activate_volume "$CHECK_VOLUME" "$ACTIVE_COGNITIVE"; then
   echo "restore_stage_activation_failed" >&2
   exit 1
 fi
-PROMOTED=1
 test_interrupt registry_promotion
 
 if ! recreate_cell; then
