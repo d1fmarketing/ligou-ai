@@ -29,9 +29,106 @@ while [ "$#" -gt 0 ]; do
 done
 
 [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] || { echo "tenant_invalid" >&2; exit 2; }
+[[ "$TENANT_ID" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$ ]] \
+  || { echo "tenant_id_invalid" >&2; exit 2; }
 command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "node_required" >&2; exit 1; }
 [ -n "${LIGOU_BACKUP_MANIFEST_KEY:-}" ] || { echo "manifest_key_required" >&2; exit 1; }
 [[ "$IMAGE" =~ ^[^[:space:]@]+(:[^[:space:]@]+)?@sha256:[a-f0-9]{64}$ ]] || { echo "hermes_image_digest_required" >&2; exit 1; }
+
+RESTORE_LOCK_HELD=0
+RESTORE_TEST_LOCK_DIR=""
+SCRATCH=""
+CHECK_CELL=""
+CHECK_VOLUME=""
+CHECK_CREATED=0
+CHECK_STARTED=0
+INTERRUPTED=0
+ACTIVE_COGNITIVE=""
+
+release_restore_lock() {
+  if [ "$RESTORE_LOCK_HELD" -eq 1 ] && [ -n "$RESTORE_TEST_LOCK_DIR" ]; then
+    rmdir "$RESTORE_TEST_LOCK_DIR" >/dev/null 2>&1 || true
+  fi
+  RESTORE_LOCK_HELD=0
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM HUP
+  set +e
+  if [ "$CHECK_STARTED" -eq 1 ]; then
+    docker rm -f "$CHECK_CELL" >/dev/null 2>&1
+    CHECK_STARTED=0
+  fi
+  if [ "$status" -ne 0 ] && [ "$CHECK_CREATED" -eq 1 ] && [ -n "$CHECK_VOLUME" ]; then
+    local registry_volume
+    registry_volume="$(registry_cognitive_volume 2>/dev/null || true)"
+    if [ "$registry_volume" = "$CHECK_VOLUME" ]; then
+      if rollback_activation; then
+        remove_owned_inactive_stage || true
+        if [ "$INTERRUPTED" -eq 1 ]; then echo "restore_interrupted_rollback_applied" >&2; fi
+      else
+        echo "restore_interrupted_rollback_failed" >&2
+      fi
+    elif [ "$registry_volume" = "$ACTIVE_COGNITIVE" ]; then
+      if recreate_cell && live_smoke; then
+        remove_owned_inactive_stage || true
+        if [ "$INTERRUPTED" -eq 1 ]; then echo "restore_interrupted_no_promotion" >&2; fi
+      else
+        echo "restore_interrupted_rollback_failed" >&2
+      fi
+    else
+      echo "restore_registry_state_unknown" >&2
+    fi
+  fi
+  if [ "$CHECK_CREATED" -eq 1 ]; then remove_owned_inactive_stage || true; fi
+  if [ -n "$SCRATCH" ]; then rm -rf "$SCRATCH"; fi
+  release_restore_lock
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'INTERRUPTED=1; exit 130' INT
+trap 'INTERRUPTED=1; exit 143' TERM
+trap 'INTERRUPTED=1; exit 129' HUP
+
+# Production lock identity is fixed and derives only from the immutable tenant UUID.
+# The temporary-directory variant exists solely for the local command-double harness.
+if [ "${LIGOU_RESTORE_TEST_HARNESS:-0}" = 1 ]; then
+  RESTORE_TEST_STATE="$("$NODE_BIN" -e 'const fs=require("node:fs"),path=require("node:path");const value=path.resolve(process.argv[1]);process.stdout.write(path.join(fs.realpathSync(path.dirname(value)),path.basename(value)))' "${LIGOU_TENANT_STATE_ROOT:-.}")"
+  RESTORE_TEST_ROOT="$(dirname "$RESTORE_TEST_STATE")"
+  RESTORE_TEST_REGISTRY="$("$NODE_BIN" -e 'const fs=require("node:fs"),path=require("node:path");const value=path.resolve(process.argv[1]);process.stdout.write(path.join(fs.realpathSync(path.dirname(value)),path.basename(value)))' "${LIGOU_TENANT_REGISTRY:-.}")"
+  RESTORE_TEST_DOCKER="$(command -v docker 2>/dev/null || true)"
+  if [ -n "$RESTORE_TEST_DOCKER" ]; then
+    RESTORE_TEST_DOCKER="$("$NODE_BIN" -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$RESTORE_TEST_DOCKER")"
+  fi
+  case "$RESTORE_TEST_STATE" in
+    /tmp/*|/var/folders/*|/private/var/folders/*) RESTORE_TEST_LOCK_ROOT="${RESTORE_TEST_STATE}/.restore-locks" ;;
+    *) echo "restore_test_harness_forbidden" >&2; exit 2 ;;
+  esac
+  case "$RESTORE_TEST_REGISTRY" in "$RESTORE_TEST_ROOT"/*) ;; *) echo "restore_test_harness_forbidden" >&2; exit 2 ;; esac
+  case "$RESTORE_TEST_DOCKER" in "$RESTORE_TEST_ROOT"/*) ;; *) echo "restore_test_harness_forbidden" >&2; exit 2 ;; esac
+  mkdir -p "$RESTORE_TEST_LOCK_ROOT"
+  chmod 700 "$RESTORE_TEST_LOCK_ROOT"
+  RESTORE_TEST_LOCK_DIR="${RESTORE_TEST_LOCK_ROOT}/${TENANT_ID}.lock"
+  if ! mkdir "$RESTORE_TEST_LOCK_DIR" 2>/dev/null; then
+    echo "restore_tenant_locked" >&2
+    exit 75
+  fi
+  RESTORE_LOCK_HELD=1
+else
+  RESTORE_LOCK_ROOT="/opt/ligou/restore-locks"
+  mkdir -p "$RESTORE_LOCK_ROOT"
+  chmod 700 "$RESTORE_LOCK_ROOT"
+  [ -x /usr/bin/flock ] || { echo "flock_required" >&2; exit 1; }
+  RESTORE_LOCK_PATH="${RESTORE_LOCK_ROOT}/${TENANT_ID}.lock"
+  exec 8>>"$RESTORE_LOCK_PATH"
+  chmod 600 "$RESTORE_LOCK_PATH"
+  if ! /usr/bin/flock -n -E 75 8; then
+    echo "restore_tenant_locked" >&2
+    exit 75
+  fi
+  RESTORE_LOCK_HELD=1
+fi
 
 IDENTITY_JSON="$("$NODE_BIN" "$IDENTITY_TOOL" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --json)"
 identity_field() {
@@ -44,11 +141,6 @@ ACTIVE_COGNITIVE="$(identity_field cognitive_volume)"
 mkdir -p "$RESTORE_WORK"
 chmod 700 "$RESTORE_WORK"
 SCRATCH="$(mktemp -d "${RESTORE_WORK}/run.XXXXXX")"
-CHECK_CELL=""
-CHECK_VOLUME=""
-CHECK_CREATED=0
-CHECK_STARTED=0
-INTERRUPTED=0
 
 cell_active() {
   [ "$(docker inspect --format '{{.State.Running}}' "$CELL" 2>/dev/null || true)" = "true" ]
@@ -66,6 +158,8 @@ activate_volume() {
   local next="$1" expected="$2"
   if [ "${LIGOU_RESTORE_TEST_HARNESS:-0}" = 1 ] && [ "${LIGOU_RESTORE_TEST_FAIL_CAS:-0}" = 1 ] \
     && [ "$next" = "$CHECK_VOLUME" ]; then return 1; fi
+  if [ "${LIGOU_RESTORE_TEST_HARNESS:-0}" = 1 ] && [ "${LIGOU_RESTORE_TEST_FAIL_ROLLBACK_CAS:-0}" = 1 ] \
+    && [ "$next" = "$ACTIVE_COGNITIVE" ] && [ "$expected" = "$CHECK_VOLUME" ]; then return 1; fi
   "$NODE_BIN" "$IDENTITY_TOOL" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --activate-cognitive "$next" --expected "$expected" --json >/dev/null
 }
 
@@ -79,45 +173,18 @@ rollback_activation() {
     && live_smoke
 }
 
-cleanup() {
-  local status=$?
-  trap - EXIT INT TERM HUP
-  set +e
-  if [ "$status" -ne 0 ] && [ -n "$CHECK_VOLUME" ]; then
-    local registry_volume
-    registry_volume="$("$NODE_BIN" "$IDENTITY_TOOL" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --field cognitive_volume 2>/dev/null || true)"
-    if [ "$registry_volume" = "$CHECK_VOLUME" ]; then
-      if rollback_activation; then
-        docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
-        CHECK_CREATED=0
-        if [ "$INTERRUPTED" -eq 1 ]; then echo "restore_interrupted_rollback_applied" >&2; fi
-      else
-        CHECK_CREATED=0
-        echo "restore_interrupted_rollback_failed" >&2
-      fi
-    elif [ "$registry_volume" = "$ACTIVE_COGNITIVE" ]; then
-      if recreate_cell && live_smoke; then
-        docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
-        CHECK_CREATED=0
-        if [ "$INTERRUPTED" -eq 1 ]; then echo "restore_interrupted_no_promotion" >&2; fi
-      else
-        CHECK_CREATED=0
-        echo "restore_interrupted_rollback_failed" >&2
-      fi
-    else
-      CHECK_CREATED=0
-      echo "restore_registry_state_unknown" >&2
-    fi
-  fi
-  if [ "$CHECK_STARTED" -eq 1 ]; then docker rm -f "$CHECK_CELL" >/dev/null 2>&1; fi
-  if [ "$CHECK_CREATED" -eq 1 ]; then docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1; fi
-  rm -rf "$SCRATCH"
-  exit "$status"
+registry_cognitive_volume() {
+  "$NODE_BIN" "$IDENTITY_TOOL" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --field cognitive_volume
 }
-trap cleanup EXIT
-trap 'INTERRUPTED=1; exit 130' INT
-trap 'INTERRUPTED=1; exit 143' TERM
-trap 'INTERRUPTED=1; exit 129' HUP
+
+remove_owned_inactive_stage() {
+  [ "$CHECK_CREATED" -eq 1 ] && [ -n "$CHECK_VOLUME" ] || return 1
+  local registry_volume
+  registry_volume="$(registry_cognitive_volume)" || return 1
+  [ "$registry_volume" != "$CHECK_VOLUME" ] || return 1
+  docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || return 1
+  CHECK_CREATED=0
+}
 
 if [ -n "$LOCAL_ARCHIVE" ] || [ -n "$LOCAL_MANIFEST" ]; then
   [ -n "$LOCAL_ARCHIVE" ] && [ -f "$LOCAL_ARCHIVE" ] || { echo "archive_required" >&2; exit 1; }
@@ -216,9 +283,7 @@ test_interrupt registry_promotion
 
 if ! recreate_cell; then
   if rollback_activation; then
-    docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
-    CHECK_CREATED=0
-    CHECK_VOLUME=""
+    remove_owned_inactive_stage || true
     echo "restore_activation_failed_rollback_applied" >&2
   else
     echo "restore_activation_failed_rollback_failed" >&2
@@ -229,9 +294,7 @@ test_interrupt container_recreate
 
 if ! live_smoke; then
   if rollback_activation; then
-    docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
-    CHECK_CREATED=0
-    CHECK_VOLUME=""
+    remove_owned_inactive_stage || true
     echo "restore_health_failed_rollback_applied" >&2
   else
     echo "restore_health_failed_rollback_failed" >&2

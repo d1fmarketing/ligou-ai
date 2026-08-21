@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -18,6 +18,29 @@ const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: "utf8", ...options });
+}
+
+function runAsync(command, args, options = {}) {
+  const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "", stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const completed = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (status, signal) => resolve({ status, signal, stdout, stderr }));
+  });
+  return { child, completed };
+}
+
+async function waitForPath(target, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { await access(target); return; } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`timed_out_waiting_for:${target}`);
 }
 
 async function makeArchive(base, { forbidden = false, corruptSqlite = false } = {}) {
@@ -142,17 +165,14 @@ test("backup manifest rejects an immutable but unapproved Hermes image identity"
 test("missing/tampered manifest and tampered archive are rejected before restore commands", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-tamper-"));
   try {
+    await mkdir(path.join(fixture, "tmp"));
     const archive = await makeArchive(fixture);
     const manifest = `${archive}.manifest.json`;
     assert.equal(createManifest(archive, manifest).status, 0);
+    const bin = await stubCommands(fixture);
 
     const missing = run("bash", [restoreScript, "--archive", archive, "--manifest", `${manifest}.missing`], {
-      env: {
-        PATH: "/usr/bin:/bin", TENANT_ID: TENANT, TENANT_SLUG, HERMES_IMAGE: IMAGE,
-        LIGOU_BACKUP_MANIFEST_KEY: KEY, LIGOU_NODE_BIN: process.execPath,
-        LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
-        LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
-      },
+      env: restoreEnv(fixture, bin),
     });
     assert.notEqual(missing.status, 0);
     assert.match(missing.stderr, /manifest_required/);
@@ -359,7 +379,7 @@ async function stubCommands(fixture) {
   const curl = path.join(bin, "curl");
   const aws = path.join(bin, "aws");
   const sleep = path.join(bin, "sleep");
-  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"volume inspect"*) if [ -n "\${STAGE_EXISTS_ONCE_MARKER:-}" ] && [ ! -e "$STAGE_EXISTS_ONCE_MARKER" ]; then : > "$STAGE_EXISTS_ONCE_MARKER"; exit 0; fi; exit 1 ;;\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\nif [ "\${FAIL_DISPOSABLE_IMPORT:-0}" = 1 ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'hermes import'; then exit 1; fi\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
+  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"volume inspect"*) if [ -n "\${STAGE_EXISTS_ONCE_MARKER:-}" ] && [ ! -e "$STAGE_EXISTS_ONCE_MARKER" ]; then : > "$STAGE_EXISTS_ONCE_MARKER"; exit 0; fi; exit 1 ;;\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\nif [ -n "\${HOLD_IMPORT_READY:-}" ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'hermes import'; then\n  : > "$HOLD_IMPORT_READY"\n  while [ ! -e "$HOLD_IMPORT_RELEASE" ]; do /bin/sleep 0.02; done\nfi\nif [ "\${FAIL_DISPOSABLE_IMPORT:-0}" = 1 ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'hermes import'; then exit 1; fi\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
   await writeFile(curl, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\nif [ "\${CURL_MODE:-ok}" = fail ]; then printf '%s\\n' '{"ok":false}'; elif [ -n "\${CURL_FAIL_ONCE_MARKER:-}" ] && [ ! -e "$CURL_FAIL_ONCE_MARKER" ]; then : > "$CURL_FAIL_ONCE_MARKER"; printf '%s\\n' '{"ok":false}'; else printf '%s\\n' '{"ok":true}'; fi\n`);
   await writeFile(aws, "#!/bin/sh\nprintf '%s\\n' 'unexpected aws call' >&2\nexit 99\n");
   await writeFile(sleep, "#!/bin/sh\nexit 0\n");
@@ -377,6 +397,7 @@ function restoreEnv(fixture, bin, extra = {}) {
     TENANT_SLUG,
     LIGOU_BACKUP_MANIFEST_KEY: KEY,
     LIGOU_NODE_BIN: process.execPath,
+    LIGOU_RESTORE_TEST_HARNESS: "1",
     HERMES_IMAGE: IMAGE,
     HERMES_API_KEY: "synthetic-local-key",
     DOCKER_LOG: path.join(fixture, "docker.log"),
@@ -450,21 +471,102 @@ test("early disposable import failure cleans the stage without undefined recover
   } finally { await rm(fixture, { recursive: true, force: true }); }
 });
 
-test("stage-volume-exists failure is leak-free and the same restore remains retryable", async () => {
+test("a pre-existing unowned stage volume is preserved", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-stage-exists-"));
   try {
     await mkdir(path.join(fixture, "tmp"));
     const archive = await makeArchive(fixture), manifest = `${archive}.manifest.json`;
     assert.equal(createManifest(archive, manifest).status, 0);
     const bin = await stubCommands(fixture);
+    const archiveId = JSON.parse(await readFile(manifest, "utf8")).archive.id;
+    const stage = `ligou-${TENANT}-hermes-cognitive-stage-${archiveId}`;
     const env = restoreEnv(fixture, bin, { STAGE_EXISTS_ONCE_MARKER: path.join(fixture, "stage-existed") });
-    const first = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env });
-    assert.notEqual(first.status, 0);
-    assert.match(first.stderr, /restore_stage_volume_exists/);
-    assert.doesNotMatch(first.stderr, /command not found|rollback_activation: not found|recreate_cell: not found/);
-    const retry = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env });
-    assert.equal(retry.status, 0, retry.stderr);
+    const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /restore_stage_volume_exists/);
+    assert.doesNotMatch(result.stderr, /command not found|rollback_activation: not found|recreate_cell: not found/);
+    const log = await readFile(path.join(fixture, "docker.log"), "utf8");
+    assert.doesNotMatch(log, new RegExp(`volume rm ${stage}`));
+    assert.doesNotMatch(log, new RegExp(`volume create ${stage}`));
+    const registry = JSON.parse(await readFile(env.LIGOU_TENANT_REGISTRY, "utf8"));
+    assert.equal(registry.tenants[TENANT].cognitive_volume, `ligou-${TENANT}-hermes-cognitive`);
   } finally { await rm(fixture, { recursive: true, force: true }); }
+});
+
+test("two same-tenant same-archive restores serialize before mutation and the winner stage survives CAS", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-concurrent-"));
+  let winner;
+  const holdReady = path.join(fixture, "winner-import-ready");
+  const holdRelease = path.join(fixture, "winner-import-release");
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture), manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const archiveId = JSON.parse(await readFile(manifest, "utf8")).archive.id;
+    const stage = `ligou-${TENANT}-hermes-cognitive-stage-${archiveId}`;
+    const bin = await stubCommands(fixture);
+    const winnerDocker = path.join(fixture, "winner-docker.log");
+    const winnerEnv = restoreEnv(fixture, bin, {
+      DOCKER_LOG: winnerDocker,
+      CURL_LOG: path.join(fixture, "winner-curl.log"),
+      HOLD_IMPORT_READY: holdReady,
+      HOLD_IMPORT_RELEASE: holdRelease,
+    });
+    winner = runAsync("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env: winnerEnv });
+    await waitForPath(holdReady);
+
+    const registryBefore = await readFile(winnerEnv.LIGOU_TENANT_REGISTRY, "utf8");
+    const lockPath = path.join(winnerEnv.LIGOU_TENANT_STATE_ROOT, ".restore-locks", `${TENANT}.lock`);
+    await access(lockPath);
+    const loserDocker = path.join(fixture, "loser-docker.log");
+    const loser = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], {
+      env: restoreEnv(fixture, bin, {
+        DOCKER_LOG: loserDocker,
+        CURL_LOG: path.join(fixture, "loser-curl.log"),
+        LIGOU_RESTORE_LOCK_ROOT: path.join(fixture, "caller-bypass-must-be-ignored"),
+      }),
+    });
+    const registryAfterLoser = await readFile(winnerEnv.LIGOU_TENANT_REGISTRY, "utf8");
+
+    await writeFile(holdRelease, "release\n");
+    const winnerResult = await winner.completed;
+    assert.equal(loser.status, 75, loser.stderr);
+    assert.match(loser.stderr, /restore_tenant_locked/);
+    assert.equal(registryAfterLoser, registryBefore,
+      "the losing process must not mutate the registry while the winner is held");
+    await assert.rejects(readFile(loserDocker, "utf8"), { code: "ENOENT" });
+    assert.equal(winnerResult.status, 0, winnerResult.stderr);
+    const winnerLog = await readFile(winnerDocker, "utf8");
+    assert.match(winnerLog, new RegExp(`volume create ${stage}`));
+    assert.doesNotMatch(winnerLog, new RegExp(`volume rm ${stage}`));
+    const registry = JSON.parse(await readFile(winnerEnv.LIGOU_TENANT_REGISTRY, "utf8"));
+    assert.equal(registry.tenants[TENANT].cognitive_volume, stage);
+  } finally {
+    await writeFile(holdRelease, "release\n").catch(() => {});
+    if (winner) await winner.completed.catch(() => {});
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("the local lock harness cannot be redirected away from its registry mutation root", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-lock-harness-"));
+  const outside = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-lock-outside-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture), manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const bin = await stubCommands(fixture);
+    const outsideRegistry = path.join(outside, "tenant-registry.json");
+    const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest], {
+      env: restoreEnv(fixture, bin, { LIGOU_TENANT_REGISTRY: outsideRegistry }),
+    });
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /restore_test_harness_forbidden/);
+    await assert.rejects(readFile(outsideRegistry, "utf8"), { code: "ENOENT" });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
 });
 
 test("apply promotes a validated tenant-staged volume without importing into the live volume", async () => {
@@ -534,6 +636,29 @@ test("failed restore recovery is labeled rollback failed, never rollback applied
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
+});
+
+test("failed rollback CAS preserves the owned stage while the registry still references it", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-rollback-cas-fail-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture), manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const archiveId = JSON.parse(await readFile(manifest, "utf8")).archive.id;
+    const stage = `ligou-${TENANT}-hermes-cognitive-stage-${archiveId}`;
+    const bin = await stubCommands(fixture);
+    const env = restoreEnv(fixture, bin, {
+      CURL_FAIL_ONCE_MARKER: path.join(fixture, "curl-failed-once"),
+      LIGOU_RESTORE_TEST_FAIL_ROLLBACK_CAS: "1",
+    });
+    const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /restore_health_failed_rollback_failed/);
+    const registry = JSON.parse(await readFile(env.LIGOU_TENANT_REGISTRY, "utf8"));
+    assert.equal(registry.tenants[TENANT].cognitive_volume, stage);
+    const log = await readFile(path.join(fixture, "docker.log"), "utf8");
+    assert.doesNotMatch(log, new RegExp(`volume rm ${stage}`));
+  } finally { await rm(fixture, { recursive: true, force: true }); }
 });
 
 for (const boundary of ["registry_promotion", "container_recreate", "live_smoke"]) {
