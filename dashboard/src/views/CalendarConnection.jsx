@@ -8,18 +8,18 @@ const FN = import.meta.env.VITE_SUPABASE_FUNCTIONS_URL || "";
 // "Connect Google Calendar" — the whole customer-facing setup (docs/CLIENTE-CALENDARIO.md, Caso A).
 // One click, Google's own consent screen, done. Until the owner connects, the Ligou-managed calendar
 // (Caso B) keeps working, so nobody is ever blocked on this.
-export function CalendarConnection({ onToast }) {
+export function CalendarConnection({ onToast, tenantId }) {
   const [status, setStatus] = useState(null); // null = loading
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      setStatus((await loadConnectorStatus(supabase)) ?? false);
+      setStatus((await loadConnectorStatus(supabase, tenantId)) ?? false);
     } catch {
       setStatus(false);
       onToast?.({ kind: "warning", text: "Não foi possível verificar a conexão da agenda." });
     }
-  }, [onToast]);
+  }, [onToast, tenantId]);
 
   useEffect(() => { load(); }, [load]);
 

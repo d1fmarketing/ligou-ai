@@ -223,7 +223,7 @@ function AppInner() {
         ) : null}
         {route === "poderes" && supabaseConfigured ? (
           <>
-            <CalendarConnection onToast={setToast} />
+            <CalendarConnection onToast={setToast} tenantId={state?.tenant?.id} />
             <PowersView onToast={setToast} />
           </>
         ) : null}

@@ -102,6 +102,18 @@ describe("communication contact hash cutover migration contract", () => {
   });
 });
 
+describe("tenant-scoped connector status migration contract", () => {
+  test("requires one tenant and verifies the current user owns that exact tenant", () => {
+    const sql = migrationSql("connector_status_tenant_scope");
+    expect(sql).toContain("function public.get_connector_status(p_tenant uuid)");
+    expect(sql).toContain("t.id = p_tenant and t.owner_user_id = v_user");
+    expect(sql).toContain("where ca.tenant_id = p_tenant");
+    expect(sql).toContain("revoke all on function public.get_connector_status(uuid) from public, anon");
+    expect(sql).toContain("grant execute on function public.get_connector_status(uuid) to authenticated");
+    expect(sql).toContain("drop function if exists public.get_connector_status()");
+  });
+});
+
 describe("privacy retention migration contract", () => {
   test("service-role retention removes raw transcripts and transient transport rows only", () => {
     const sql = migrationSql("privacy_retention");
