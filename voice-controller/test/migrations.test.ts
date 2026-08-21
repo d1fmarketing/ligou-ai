@@ -75,6 +75,18 @@ describe("connector plaintext invariant migration contract", () => {
     expect(sql).toContain("revoke all on table public.connector_accounts from public, anon, authenticated");
     expect(sql).toContain("grant select, insert, update, delete on table public.connector_accounts to service_role");
   });
+
+  test("removes the plaintext-dependent active constraint before the column and recreates an encrypted-only invariant", () => {
+    const sql = migrationSql("connector_plaintext_invariant");
+    const constraintDropAt = sql.indexOf("drop constraint if exists connector_accounts_active_encrypted_check");
+    const columnDropAt = sql.indexOf("drop column if exists refresh_token");
+    const constraintAddAt = sql.indexOf("add constraint connector_accounts_active_encrypted_check");
+    expect(constraintDropAt).toBeGreaterThan(-1);
+    expect(columnDropAt).toBeGreaterThan(constraintDropAt);
+    expect(constraintAddAt).toBeGreaterThan(columnDropAt);
+    expect(sql.slice(constraintAddAt)).not.toContain("refresh_token is null");
+    expect(sql.slice(constraintAddAt)).toContain("refresh_token_ciphertext is not null");
+  });
 });
 
 describe("privacy retention migration contract", () => {
