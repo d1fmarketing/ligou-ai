@@ -147,12 +147,14 @@ function artifactFile(artifact, name) {
 function edgeArtifactFiles(artifact) {
   const result = spawnSync("tar", ["-tzf", artifact], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
   if (result.status !== 0) fail("release_artifact_listing_failed");
-  const selected = result.stdout.split("\n").filter((name) => (
-    name === "supabase/deno.json" || name === "supabase/deno.lock"
-    || /^supabase\/functions\/.*[.]ts$/.test(name)
-  ));
   const files = new Map();
-  for (const name of selected) files.set(name, artifactFile(artifact, name));
+  for (const rawName of result.stdout.split("\n")) {
+    const name = rawName.replace(/^(?:[.]\/)+/, "").replace(/\/$/, "");
+    if (name === "supabase/deno.json" || name === "supabase/deno.lock"
+      || /^supabase\/functions\/.*[.]ts$/.test(name)) {
+      files.set(name, artifactFile(artifact, name));
+    }
+  }
   return files;
 }
 

@@ -295,6 +295,8 @@ async function runnableArtifact(fixture, commit, { healthScript = '#!/bin/sh\nex
     "infra/release-health.sh": healthScript,
     "infra/release-marker": "safe\n",
     "supabase/deno.lock": "fixture-deno-lock\n",
+    "supabase/deno.json": '{"imports":{}}\n',
+    "supabase/functions/fixture/index.ts": "export {};\n",
     "infra/toolchain.json": JSON.stringify({
       node: "22.22.3", application_version: "0.1.0", bun: "1.2.13", deno: "2.9.4", supabase_cli: "2.115.0", hermes_image: IMAGE,
       dependencies: { supabase_js: "2.112.3", postgres: "3.4.9" },
@@ -305,7 +307,8 @@ async function runnableArtifact(fixture, commit, { healthScript = '#!/bin/sh\nex
   const tarred = run("tar", ["-czf", artifact, "-C", payload, "."]);
   assert.equal(tarred.status, 0, tarred.stderr);
   const manifest = `${artifact}.manifest.json`;
-  assert.equal(createReleaseManifest(artifact, manifest, commit).status, 0);
+  const created = createReleaseManifest(artifact, manifest, commit);
+  assert.equal(created.status, 0, created.stderr);
   return { artifact, manifest };
 }
 
