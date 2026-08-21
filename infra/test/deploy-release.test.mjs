@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, link, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -135,6 +135,40 @@ test("release manifest fails closed when immutable Hermes image input is absent 
   }
 });
 
+test("release manifest rejects symlink, hardlink, device-like, and duplicate tar entries", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-release-tar-types-"));
+  try {
+    for (const kind of ["symlink", "hardlink", "fifo", "duplicate"]) {
+      const base = path.join(fixture, kind);
+      const payload = path.join(base, "payload");
+      await writeTree(payload, {
+        "voice-controller/package.json": '{"name":"fixture","packageManager":"bun@1.2.13"}\n',
+        "voice-controller/bun.lock": "fixture-lock\n",
+        "supabase/deno.lock": "fixture-deno-lock\n",
+        "infra/toolchain.json": JSON.stringify({
+          node: "22.22.3", application_version: "0.1.0", bun: "1.2.13", deno: "2.9.4",
+          supabase_cli: "2.115.0", hermes_image: IMAGE,
+          dependencies: { supabase_js: "2.112.3", postgres: "3.4.9" },
+        }) + "\n",
+      });
+      const target = path.join(payload, "infra/toolchain.json");
+      if (kind === "symlink") await symlink("toolchain.json", path.join(payload, "infra/toolchain-link"));
+      if (kind === "hardlink") await link(target, path.join(payload, "infra/toolchain-hardlink"));
+      if (kind === "fifo") assert.equal(run("mkfifo", [path.join(payload, "infra/device-pipe")]).status, 0);
+      const artifact = path.join(base, "release.tar.gz");
+      const tarArgs = kind === "duplicate"
+        ? ["-czf", artifact, "-C", payload, ".", "-C", payload, "."]
+        : ["-czf", artifact, "-C", payload, "."];
+      assert.equal(run("tar", tarArgs).status, 0);
+      const result = createReleaseManifest(artifact, `${artifact}.manifest.json`, "f".repeat(40));
+      assert.notEqual(result.status, 0, kind);
+      assert.match(result.stderr, /release_artifact_(?:non_regular_entry|duplicate_entry)/, kind);
+    }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("packaged Hermes validator accepts the intentional .env example exclusion", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-release-validator-"));
   try {
@@ -172,11 +206,10 @@ test("host rejects artifact hash mismatch before extraction or activation", asyn
     await symlink(path.join(deployRoot, "current"), path.join(deployRoot, "app"));
     const bin = path.join(fixture, "bin");
     await mkdir(bin);
-    const flock = await writeBasicFlock(bin);
     const result = run("bash", [hostDeploy, "--artifact", artifact, "--manifest", manifest, "--commit", repo.commit], {
       env: {
         PATH: `${bin}:/usr/bin:/bin`, LIGOU_DEPLOY_ROOT: deployRoot, LIGOU_NODE_BIN: process.execPath,
-        LIGOU_FLOCK_BIN: flock, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY, HERMES_IMAGE: IMAGE,
+        LIGOU_DEPLOY_TEST_HARNESS: "1", LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY, HERMES_IMAGE: IMAGE,
       },
     });
     assert.notEqual(result.status, 0);
@@ -257,13 +290,6 @@ async function runnableArtifact(fixture, commit, { healthScript = '#!/bin/sh\nex
   return { artifact, manifest };
 }
 
-async function writeBasicFlock(bin) {
-  const flock = path.join(bin, "flock");
-  await writeFile(flock, `#!/bin/sh\n[ "$1" = -n ] && shift\nif [ "$1" = -E ]; then shift 2; fi\nshift\nexec "$@"\n`);
-  await chmod(flock, 0o755);
-  return flock;
-}
-
 async function prepareOldRelease(deployRoot, { healthStatus = 0 } = {}) {
   const old = path.join(deployRoot, "releases/old-release");
   await mkdir(path.join(old, "infra"), { recursive: true });
@@ -273,13 +299,6 @@ async function prepareOldRelease(deployRoot, { healthStatus = 0 } = {}) {
   await symlink(old, path.join(deployRoot, "current"));
   await symlink(path.join(deployRoot, "current"), path.join(deployRoot, "app"));
   return old;
-}
-
-async function writeContendedFlock(bin) {
-  const flock = path.join(bin, "flock");
-  await writeFile(flock, `#!/bin/sh\n[ "$1" = -n ] && shift\nconflict=1\nif [ "$1" = -E ]; then conflict="$2"; shift 2; fi\nlock="$1"; shift\nif ! /bin/mkdir "${'${lock}'}.held" 2>/dev/null; then exit "$conflict"; fi\ntrap '/bin/rmdir "${'${lock}'}.held"' EXIT INT TERM\n"$@"\nstatus=$?\nexit "$status"\n`);
-  await chmod(flock, 0o755);
-  return flock;
 }
 
 async function waitForFile(file) {
@@ -301,7 +320,6 @@ test("functional health failure atomically reactivates the previous release and 
     await mkdir(bin);
     await writeFile(path.join(bin, "systemctl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\nexit 0\n");
     await writeFile(path.join(bin, "bun"), "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' 1.2.13; fi\nexit 0\n");
-    const flock = await writeBasicFlock(bin);
     await chmod(path.join(bin, "systemctl"), 0o755);
     await chmod(path.join(bin, "bun"), 0o755);
 
@@ -311,7 +329,7 @@ test("functional health failure atomically reactivates the previous release and 
         LIGOU_DEPLOY_ROOT: deployRoot,
         LIGOU_NODE_BIN: process.execPath,
         LIGOU_BUN_BIN: path.join(bin, "bun"),
-        LIGOU_FLOCK_BIN: flock,
+        LIGOU_DEPLOY_TEST_HARNESS: "1",
         LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY,
         HERMES_IMAGE: IMAGE,
         LIGOU_SERVICE_NAME: "ligou-controller",
@@ -344,11 +362,10 @@ test("failed rollback health is terminal rollback_failed and is never labeled ro
     await writeFile(path.join(bin, "systemctl"), "#!/bin/sh\nexit 0\n");
     await writeFile(path.join(bin, "bun"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.13; fi\nexit 0\n");
     for (const command of ["systemctl", "bun"]) await chmod(path.join(bin, command), 0o755);
-    const flock = await writeBasicFlock(bin);
     const result = run("bash", [hostDeploy, "--artifact", artifact, "--manifest", manifest, "--commit", commit], {
       env: {
         PATH: `${bin}:/usr/bin:/bin`, LIGOU_DEPLOY_ROOT: deployRoot, LIGOU_NODE_BIN: process.execPath,
-        LIGOU_BUN_BIN: path.join(bin, "bun"), LIGOU_FLOCK_BIN: flock, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY,
+        LIGOU_BUN_BIN: path.join(bin, "bun"), LIGOU_DEPLOY_TEST_HARNESS: "1", LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY,
         HERMES_IMAGE: IMAGE, STUB_RELEASE_HEALTH_STATUS: "1",
       },
     });
@@ -376,11 +393,10 @@ test("host activation rejects a Bun version that differs from signed runtime evi
     await writeFile(path.join(bin, "systemctl"), `#!/bin/sh\necho "$*" >> "$SYSTEMCTL_LOG"\nexit 0\n`);
     await writeFile(path.join(bin, "bun"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.12; fi\nexit 0\n");
     for (const command of ["systemctl", "bun"]) await chmod(path.join(bin, command), 0o755);
-    const flock = await writeBasicFlock(bin);
     const result = run("bash", [hostDeploy, "--artifact", artifact, "--manifest", manifest, "--commit", commit], {
       env: {
         PATH: `${bin}:/usr/bin:/bin`, LIGOU_DEPLOY_ROOT: deployRoot, LIGOU_NODE_BIN: process.execPath,
-        LIGOU_BUN_BIN: path.join(bin, "bun"), LIGOU_FLOCK_BIN: flock, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY,
+        LIGOU_BUN_BIN: path.join(bin, "bun"), LIGOU_DEPLOY_TEST_HARNESS: "1", LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY,
         HERMES_IMAGE: IMAGE, SYSTEMCTL_LOG: systemctlLog,
       },
     });
@@ -413,10 +429,11 @@ test("host flock prevents a concurrent second activation from entering the mutat
     await writeFile(path.join(bin, "systemctl"), "#!/bin/sh\nexit 0\n");
     await writeFile(path.join(bin, "bun"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.13; fi\nexit 0\n");
     for (const command of ["systemctl", "bun"]) await chmod(path.join(bin, command), 0o755);
-    const flock = await writeContendedFlock(bin);
     const env = {
       ...process.env, PATH: `${bin}:/usr/bin:/bin`, LIGOU_DEPLOY_ROOT: deployRoot,
-      LIGOU_NODE_BIN: process.execPath, LIGOU_BUN_BIN: path.join(bin, "bun"), LIGOU_FLOCK_BIN: flock,
+      LIGOU_NODE_BIN: process.execPath, LIGOU_BUN_BIN: path.join(bin, "bun"),
+      LIGOU_DEPLOY_TEST_HARNESS: "1",
+      LIGOU_DEPLOY_LOCK_HELD: "1", LIGOU_DEPLOY_LOCK_FILE: path.join(fixture, "attacker-one.lock"),
       LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY, HERMES_IMAGE: IMAGE, HOLD_MARKER: marker, RELEASE_GATE: gate,
     };
     first = spawn("bash", [hostDeploy, "--artifact", firstRelease.artifact, "--manifest", firstRelease.manifest, "--commit", "d".repeat(40)], {
@@ -428,7 +445,9 @@ test("host flock prevents a concurrent second activation from entering the mutat
     first.stderr.on("data", (chunk) => { firstStderr += chunk; });
     await waitForFile(marker);
 
-    const second = run("bash", [hostDeploy, "--artifact", secondRelease.artifact, "--manifest", secondRelease.manifest, "--commit", "e".repeat(40)], { env });
+    const second = run("bash", [hostDeploy, "--artifact", secondRelease.artifact, "--manifest", secondRelease.manifest, "--commit", "e".repeat(40)], {
+      env: { ...env, LIGOU_DEPLOY_LOCK_HELD: "different", LIGOU_DEPLOY_LOCK_FILE: path.join(fixture, "attacker-two.lock") },
+    });
     assert.equal(second.status, 75);
     assert.match(second.stderr, /release_activation_locked/);
     assert.equal(path.resolve(deployRoot, await readlink(path.join(deployRoot, "current"))), path.join(deployRoot, "releases", firstId));
@@ -464,7 +483,7 @@ test("release health performs controller, safe Supabase read, and token-free Her
     const curlLog = path.join(fixture, "curl.log");
     await mkdir(bin);
     await writeFile(path.join(bin, "curl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\ncase "$*" in\n  *'127.0.0.1:8790/health'*) printf '%s\\n' '{"ok":true,"openai":true}' ;;\n  *'/rest/v1/tenants'*) printf '%s\\n' '[]' ;;\n  *) printf '%s\\n' '{"ok":true}' ;;\nesac\n`);
-    await writeFile(path.join(bin, "docker"), "#!/bin/sh\nprintf '%s\\n' '{\"authenticated\":true}'\n");
+    await writeFile(path.join(bin, "docker"), "#!/bin/sh\nprintf '%s\\n' '{\"provider\":\"openai-codex\",\"authenticated\":true}'\n");
     await chmod(path.join(bin, "curl"), 0o755);
     await chmod(path.join(bin, "docker"), 0o755);
     const envFile = path.join(fixture, "env");
@@ -476,7 +495,7 @@ test("release health performs controller, safe Supabase read, and token-free Her
       "HERMES_HEALTH_URL='http://127.0.0.1:28642/health'",
     ].join("\n"));
     const result = run("bash", [healthTool], {
-      env: { PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile, CURL_LOG: curlLog },
+      env: { PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile, CURL_LOG: curlLog, LIGOU_NODE_BIN: process.execPath },
     });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), '{"ok":true,"controller":"ready","supabase":"ready","hermes":"ready"}');
@@ -496,7 +515,7 @@ test("release health rejects a controller that is up without its voice credentia
     const bin = path.join(fixture, "bin");
     await mkdir(bin);
     await writeFile(path.join(bin, "curl"), `#!/bin/sh\ncase "$*" in\n  *'127.0.0.1:8790/health'*) printf '%s\\n' '{"ok":true,"openai":false}' ;;\n  *'/rest/v1/tenants'*) printf '%s\\n' '[]' ;;\n  *) printf '%s\\n' '{"ok":true}' ;;\nesac\n`);
-    await writeFile(path.join(bin, "docker"), "#!/bin/sh\nprintf '%s\\n' '{\"authenticated\":true}'\n");
+    await writeFile(path.join(bin, "docker"), "#!/bin/sh\nprintf '%s\\n' '{\"provider\":\"openai-codex\",\"authenticated\":true}'\n");
     await chmod(path.join(bin, "curl"), 0o755);
     await chmod(path.join(bin, "docker"), 0o755);
     const envFile = path.join(fixture, "env");
@@ -505,7 +524,7 @@ test("release health rejects a controller that is up without its voice credentia
       "TENANT_SLUG='test-tenant'", "PORT='8790'",
       "HERMES_HEALTH_URL='http://127.0.0.1:28642/health'",
     ].join("\n"));
-    const result = run("bash", [healthTool], { env: { PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile } });
+    const result = run("bash", [healthTool], { env: { PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile, LIGOU_NODE_BIN: process.execPath } });
     assert.notEqual(result.status, 0);
     assert.match(result.stdout, /"controller":"unavailable"/);
   } finally {

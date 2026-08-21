@@ -5,6 +5,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { hashCanonicalContact } from "../_shared/privacy.ts";
 import { extractAllowedSipHeaders } from "../_shared/sip-headers.ts";
+import { persistPhoneEvent } from "../_shared/accept-call.ts";
 
 const enc = new TextEncoder();
 
@@ -44,12 +45,10 @@ Deno.serve(async (req) => {
       return Response.json({ error: "contact_hash_unavailable" }, { status: 503 });
     }
   }
-  await supa.from("phone_events").upsert({
+  return persistPhoneEvent(supa, {
     openai_call_id: event.data?.call_id,
     called_number: headers.calledNumber,
     caller_number_hash: callerHash,
     sip_headers: headers.storedHeaders,
-  }, { onConflict: "openai_call_id", ignoreDuplicates: true });
-
-  return Response.json({ received: true });
+  });
 });
