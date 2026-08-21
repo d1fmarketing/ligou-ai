@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { supabase } from "../lib/supabase.js";
+import { magicLinkRedirectUrl } from "../runtime-config.js";
 
 export function Login() {
   const [email, setEmail] = useState("");
@@ -13,7 +14,7 @@ export function Login() {
     setError(null);
     const { error: err } = await supabase.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: window.location.origin },
+      options: { emailRedirectTo: magicLinkRedirectUrl(window.location.origin, import.meta.env.BASE_URL) },
     });
     setBusy(false);
     if (err) setError(err.message);

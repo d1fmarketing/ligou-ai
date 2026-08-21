@@ -13,6 +13,7 @@ import { CalendarConnection } from "./views/CalendarConnection.jsx";
 import { Login } from "./auth/Login.jsx";
 import { VoicePanel } from "./voice/VoicePanel.jsx";
 import { supabase, supabaseConfigured } from "./lib/supabase.js";
+import { calendarTenantId } from "./runtime-config.js";
 
 const ROUTES = new Set(["ligou", "memoria", "aprovacoes", "poderes"]);
 
@@ -223,7 +224,7 @@ function AppInner() {
         ) : null}
         {route === "poderes" && supabaseConfigured ? (
           <>
-            <CalendarConnection onToast={setToast} tenantId={state?.tenant?.id} />
+            <CalendarConnection onToast={setToast} tenantId={calendarTenantId(state)} />
             <PowersView onToast={setToast} />
           </>
         ) : null}

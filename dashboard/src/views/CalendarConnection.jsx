@@ -2,8 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { IconCalendarCheck, IconCalendarPlus } from "@tabler/icons-react";
 import { supabase } from "../lib/supabase.js";
 import { loadConnectorStatus } from "../data/connectors.js";
-
-const FN = import.meta.env.VITE_SUPABASE_FUNCTIONS_URL || "";
+import { connectorPresentation, resolveFunctionsBase } from "../runtime-config.js";
 
 // "Connect Google Calendar" — the whole customer-facing setup (docs/CLIENTE-CALENDARIO.md, Caso A).
 // One click, Google's own consent screen, done. Until the owner connects, the Ligou-managed calendar
@@ -28,7 +27,11 @@ export function CalendarConnection({ onToast, tenantId }) {
     try {
       const { data: sess } = await supabase.auth.getSession();
       if (!sess?.session?.access_token) throw new Error("Entre novamente para conectar a agenda.");
-      const res = await fetch(`${FN}/google-connect`, {
+      const functionsBase = resolveFunctionsBase(
+        import.meta.env.VITE_SUPABASE_FUNCTIONS_URL,
+        import.meta.env.VITE_SUPABASE_URL,
+      );
+      const res = await fetch(`${functionsBase}/google-connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${sess.session.access_token}` },
       });
@@ -44,24 +47,26 @@ export function CalendarConnection({ onToast, tenantId }) {
   }
 
   if (status === null) return null;
+  const presentation = connectorPresentation(status || null);
 
   return (
     <section className="calendar-connection">
       <h2>Agenda</h2>
-      {status ? (
+      {presentation.connected ? (
         <p className="calendar-connected">
-          <IconCalendarCheck aria-hidden="true" /> Conectada
+          <IconCalendarCheck aria-hidden="true" /> {presentation.message}
           {status.account_email ? <> — <strong>{status.account_email}</strong></> : null}
           <span className="calendar-note">O Ligou consulta e marca nessa agenda.</span>
         </p>
       ) : (
         <>
           <p className="calendar-note">
-            Hoje o Ligou usa a agenda que criamos para você. Se preferir que ele use a <strong>sua</strong> agenda
-            do Google, conecte abaixo — leva alguns segundos.
+            {status ? "A conexão precisa de atenção. Reconecte para o Ligou voltar a consultar e marcar nessa agenda." : (
+              <>Hoje o Ligou ainda não tem uma agenda Google ativa. Conecte a <strong>sua</strong> agenda abaixo.</>
+            )}
           </p>
           <button type="button" className="calendar-connect" onClick={connect} disabled={busy}>
-            <IconCalendarPlus aria-hidden="true" /> {busy ? "Abrindo o Google…" : "Conectar Google Calendar"}
+            <IconCalendarPlus aria-hidden="true" /> {busy ? "Abrindo o Google…" : presentation.message}
           </button>
         </>
       )}
