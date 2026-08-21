@@ -36,7 +36,7 @@ if [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] && [[ "$PORT" =~ ^[0-9]{
     fi
   fi
 
-  if TENANT_SLUG="$TENANT" HERMES_HEALTH_URL="${HERMES_HEALTH_URL:-http://127.0.0.1:8642/health}" \
+  if TENANT_SLUG="$TENANT" HERMES_HEALTH_URL="${HERMES_HEALTH_URL:-${HERMES_URL:-}}" \
     "${ROOT}/hermes-cell/health-state.sh" >/dev/null 2>&1; then
     HERMES_STATE=ready
   fi

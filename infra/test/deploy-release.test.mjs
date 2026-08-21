@@ -473,6 +473,7 @@ test("release health performs controller, safe Supabase read, and token-free Her
       "SUPABASE_PUBLISHABLE_KEY='synthetic-publishable'",
       "TENANT_SLUG='test-tenant'",
       "PORT='8790'",
+      "HERMES_HEALTH_URL='http://127.0.0.1:28642/health'",
     ].join("\n"));
     const result = run("bash", [healthTool], {
       env: { PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile, CURL_LOG: curlLog },
@@ -502,6 +503,7 @@ test("release health rejects a controller that is up without its voice credentia
     await writeFile(envFile, [
       "SUPABASE_URL='https://unit.invalid'", "SUPABASE_PUBLISHABLE_KEY='synthetic-publishable'",
       "TENANT_SLUG='test-tenant'", "PORT='8790'",
+      "HERMES_HEALTH_URL='http://127.0.0.1:28642/health'",
     ].join("\n"));
     const result = run("bash", [healthTool], { env: { PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile } });
     assert.notEqual(result.status, 0);

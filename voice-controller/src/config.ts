@@ -15,7 +15,7 @@ export const config = {
   fallbackModel: process.env.LIGOU_FALLBACK_MODEL ?? "gpt-realtime-2.1-mini",
   sessionMaxMinutes: Number(process.env.SESSION_MAX_MINUTES ?? 15),
   estCostPerSessionUsd: Number(process.env.EST_COST_PER_SESSION ?? 1.0),
-  hermesUrl: process.env.HERMES_URL ?? "http://127.0.0.1:8642",
+  hermesUrl: process.env.HERMES_URL ?? "",
   hermesKey: process.env.HERMES_API_KEY ?? "",
   defaultTenantSlug: process.env.LIGOU_TENANT ?? "rocha-plumbing",
   // Male brand voice: RJ listened to cedar/ash/echo/verse/ballad on a real Ligou script and picked ASH.

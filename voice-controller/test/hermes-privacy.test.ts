@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   buildTrustedHermesContext,
   consultHermes,
@@ -25,6 +28,23 @@ const RULES = [
   },
   { category: "agenda", text: "Mon-Sat 08:00-18:00", structured: null },
 ];
+
+test("controller has no shared fixed Hermes route when tenant routing is absent", () => {
+  const configModule = pathToFileURL(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/config.ts")).href;
+  const result = spawnSync(process.execPath, ["-e", `import { config } from ${JSON.stringify(configModule)}; console.log(config.hermesUrl);`], {
+    encoding: "utf8",
+    env: {
+      PATH: "/usr/bin:/bin",
+      NODE_ENV: "test",
+      HERMES_API_KEY: "synthetic-unit-key",
+      SUPABASE_URL: "https://unit.invalid",
+      SUPABASE_SECRET_KEY: "synthetic-unit-key",
+      SUPABASE_PUBLISHABLE_KEY: "synthetic-unit-key",
+    },
+  });
+  expect(result.status).toBe(0);
+  expect(result.stdout.trim()).toBe("");
+});
 
 describe("trusted structured Hermes context", () => {
   test("is built server-side from enum/service/rule state without PII, transcript, or private floor", () => {

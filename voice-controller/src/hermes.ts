@@ -80,7 +80,7 @@ export async function consultHermes(
   context: TrustedHermesContext,
   timeoutMs = 2_500,
 ): Promise<HermesAdvice> {
-  if (!config.hermesKey || !/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/.test(tenantSlug)) {
+  if (!config.hermesKey || !config.hermesUrl || !/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/.test(tenantSlug)) {
     return { status: "unavailable" };
   }
   const controller = new AbortController();

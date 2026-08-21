@@ -38,6 +38,7 @@ export function createUnitTestEnvironment() {
     NODE_ENV: "test",
     OPENAI_API_KEY: "synthetic-unit-test-key",
     HERMES_API_KEY: "synthetic-unit-test-key",
+    HERMES_URL: "http://127.0.0.1:28642",
     SUPABASE_URL: "https://unit-test.invalid",
     SUPABASE_SECRET_KEY: "synthetic-unit-test-key",
     SUPABASE_PUBLISHABLE_KEY: "synthetic-unit-test-key",
