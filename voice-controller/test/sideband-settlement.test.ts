@@ -129,7 +129,7 @@ describe("sideband budget finalization", () => {
         output_token_details: { text_tokens: 2, audio_tokens: 3 },
       },
     });
-    ended.status = "ended";
+    expect(ended.status).toBe("ended");
 
     await persistLedger(cap, ended, async () => new Response(null, { status: 200 }));
 
@@ -151,7 +151,7 @@ describe("sideband budget finalization", () => {
         output_token_details: { text_tokens: 0, audio_tokens: 0 },
       },
     });
-    ended.status = "ended";
+    expect(ended.status).toBe("ended");
     await persistLedger(cap, ended, async () => new Response(null, { status: 200 }));
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
     expect(callUpdates.some((row) => row.provider_usage_state === "unknown")).toBe(true);
@@ -202,7 +202,7 @@ describe("sideband budget finalization", () => {
           output_token_details: { text_tokens: 0, audio_tokens: 0 },
       },
     });
-    ended.status = "ended";
+    expect(ended.status).toBe("ended");
     await persistLedger(cap, ended, async () => new Response(null, { status: 200 }));
     await persistLedger(cap, ended, async () => new Response(null, { status: 200 }));
 

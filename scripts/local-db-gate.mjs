@@ -836,7 +836,7 @@ export async function runLocalDatabaseGate() {
       path.join(repoRoot, "voice-controller/test/booking.integration.test.ts"), 6, applicationEnv, runnerRoot,
     );
     const budgetRuntimeTests = await runBunTestFile(
-      path.join(repoRoot, "voice-controller/test/budget.local.integration.test.ts"), 1, applicationEnv, runnerRoot,
+      path.join(repoRoot, "voice-controller/test/budget.local.integration.test.ts"), 2, applicationEnv, runnerRoot,
     );
     const startupTests = await runVoiceControllerStartup(repoRoot, runtime, fixture, runnerRoot);
 

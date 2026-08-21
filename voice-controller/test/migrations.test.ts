@@ -256,6 +256,16 @@ describe("budget reservation settlement migration contract", () => {
   });
 });
 
+describe("session settlement ceiling migration contract", () => {
+  test("actual settlement cannot exceed the amount reserved for that session", () => {
+    const sql = migrationSql("session_settlement_ceiling");
+    expect(sql).toContain("p_actual_cost > v_reservation.reserved_cost_usd");
+    expect(sql).toContain("settlement_exceeds_reservation");
+    expect(sql).toContain("function public.settle_call_budget(");
+    expect(sql).toContain("grant execute on function public.settle_call_budget(uuid,uuid,numeric,numeric,text,jsonb) to service_role");
+  });
+});
+
 describe("provider termination reconciliation migration contract", () => {
   test("claims terminal provider work independently of budget reservations", () => {
     const sql = migrationSql("provider_termination_reconciliation");

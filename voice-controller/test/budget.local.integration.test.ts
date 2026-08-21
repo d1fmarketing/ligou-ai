@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { finalizeTerminalBudget, reserveCallBudget } from "../src/budget.ts";
+import { finalizeTerminalBudget, reserveCallBudget, settleCallBudget } from "../src/budget.ts";
 import { supa } from "../src/rules.ts";
 
 const tenantId = process.env.LIGOU_TEST_PRESEEDED_TENANT_ID ?? "";
@@ -44,4 +44,32 @@ test("voice-controller defers an unresolved reservation through the real service
   expect(reservation.reconcile_last_error).toContain("provider_usage_unresolved");
   expect(reservation.reconcile_after).toBeTruthy();
   expect(reservation.reconcile_lease_until).toBeNull();
+});
+
+test("real settlement rejects cost above the exact session reservation ceiling", async () => {
+  const { data: call, error: callError } = await supa().from("calls").insert({
+    tenant_id: tenantId,
+    channel: "eval",
+    session_type: "customer",
+    status: "ended",
+    ended_at: new Date().toISOString(),
+    provider_termination_state: "confirmed",
+    provider_usage_state: "resolved",
+    provider_usage_evidence: { source: "synthetic-terminal", terminal: true, continuous: true },
+  }).select("id").single();
+  expect(callError).toBeNull();
+  const reservationId = await reserveCallBudget(tenantId, call.id, 1.5);
+
+  await expect(settleCallBudget({
+    tenantId,
+    callId: call.id,
+    actualCostUsd: 1.5001,
+    minutes: 15,
+    outcome: "ended",
+  })).rejects.toMatchObject({ message: "budget_settlement_failed" });
+
+  const { data: reservation } = await supa().from("budget_reservations")
+    .select("status,final_cost_usd").eq("id", reservationId).single();
+  expect(reservation.status).toBe("active");
+  expect(reservation.final_cost_usd).toBeNull();
 });

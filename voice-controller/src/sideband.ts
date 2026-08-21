@@ -122,6 +122,7 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
     sock.addEventListener("close", (ev: any) => {
       console.log(`sideband CLOSE call=${cap.callId.slice(0, 8)} code=${ev?.code} attempt=${attempt} opened=${openedThisAttempt} terminal=${terminal}`);
       if (terminal || ledger.status !== "active") { clearTimeout(deadline); void finalize("terminal_close"); return; }
+      ledger.providerUsageEvidence.continuous = false;
       // 1002 after a healthy session means OpenAI no longer knows this call: the caller hung up.
       // Retrying then just delays the summary (45s of pointless reattaches on RJ's first real call).
       if (everOpened && !openedThisAttempt && ev?.code === 1002) {
@@ -129,7 +130,6 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
         void finalize("caller_hung_up");
         return;
       }
-      if (openedThisAttempt) ledger.providerUsageEvidence.continuous = false;
       if (attaches >= MAX_ATTACHES) {
         clearTimeout(deadline);
         ledger.transcript.push({ role: "system", text: `sideband lost after ${attaches} attaches (last close ${ev?.code})`, at: new Date().toISOString() });
@@ -207,6 +207,8 @@ export async function handleEvent(cap: Capability, ledger: SessionLedger, ws: We
         ledger.providerUsageEvidence.terminal = true;
         ledger.providerUsageEvidence.lastReceivedAt = new Date().toISOString();
       }
+      ledger.status = "ended";
+      try { ws.close(); } catch {}
       break;
     }
     case "error":
