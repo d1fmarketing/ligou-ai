@@ -462,5 +462,11 @@ export function createGoogleCalendar(dependencies: GoogleDependencies = {}): Cal
 export const googleCalendar = createGoogleCalendar();
 
 export function calendarPort(): CalendarPort {
-  return process.env.CALENDAR_PROVIDER === "fake" ? fakeCalendar : googleCalendar;
+  if (process.env.CALENDAR_PROVIDER === "fake") {
+    if (process.env.NODE_ENV !== "test" || process.env.LIGOU_SYNTHETIC_TEST_CALENDAR !== "1") {
+      throw new Error("fake_calendar_forbidden");
+    }
+    return fakeCalendar;
+  }
+  return googleCalendar;
 }

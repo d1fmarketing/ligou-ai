@@ -5,6 +5,16 @@ const need = (k: string): string => {
   return v;
 };
 
+export function parseSessionCostCeilingUsd(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return 1.5;
+  if (!/^(?:0[.]\d{1,4}|[1-4](?:[.]\d{1,4})?|5(?:[.]0{1,4})?)$/.test(raw)) {
+    throw new Error("session_cost_ceiling_invalid");
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0.01 || value > 5) throw new Error("session_cost_ceiling_invalid");
+  return value;
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 8790),
   supabaseUrl: need("SUPABASE_URL"),
@@ -14,7 +24,7 @@ export const config = {
   model: process.env.LIGOU_MODEL ?? "gpt-realtime-2.1",
   fallbackModel: process.env.LIGOU_FALLBACK_MODEL ?? "gpt-realtime-2.1-mini",
   sessionMaxMinutes: Number(process.env.SESSION_MAX_MINUTES ?? 15),
-  estCostPerSessionUsd: Number(process.env.EST_COST_PER_SESSION ?? 1.0),
+  sessionCostCeilingUsd: parseSessionCostCeilingUsd(process.env.SESSION_COST_CEILING_USD),
   hermesKey: process.env.HERMES_API_KEY ?? "",
   defaultTenantSlug: process.env.LIGOU_TENANT ?? "rocha-plumbing",
   // Male brand voice: RJ listened to cedar/ash/echo/verse/ballad on a real Ligou script and picked ASH.

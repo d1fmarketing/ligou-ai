@@ -187,6 +187,18 @@ describe("effective authority migration contract", () => {
   });
 });
 
+describe("effective policy epoch event migration contract", () => {
+  test("suggested and rejected versions are non-effective while approved/revoked changes bump once", () => {
+    const sql = migrationSql("effective_policy_epoch_events");
+    expect(sql).toContain("where r.status in ('aprovado','revogado')");
+    expect(sql).toContain("where ranked.version_rank = 1 and ranked.status = 'aprovado'");
+    expect(sql).toContain("if new.status in ('aprovado','revogado') then");
+    expect(sql).toContain("drop trigger if exists rules_policy_epoch on public.rules");
+    expect(sql).toContain("after insert on public.rules");
+    expect(sql).not.toContain("if new.status = 'sugerido'");
+  });
+});
+
 describe("budget reservation settlement migration contract", () => {
   test("serializes cap reservations on the tenant row and uses the tenant-local day", () => {
     const sql = migrationSql("budget_reservation_settlement");
@@ -227,6 +239,19 @@ describe("budget reservation settlement migration contract", () => {
       expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated`);
       expect(sql).toContain(`grant execute on function ${signature} to service_role`);
     }
+  });
+});
+
+describe("provider termination reconciliation migration contract", () => {
+  test("claims terminal provider work independently of budget reservations", () => {
+    const sql = migrationSql("provider_termination_reconciliation");
+    expect(sql).toContain("function public.claim_provider_termination_reconciliation(p_worker text)");
+    expect(sql).toContain("from public.calls c");
+    expect(sql).not.toContain("join public.budget_reservations");
+    expect(sql).toContain("provider_termination_state in ('active','pending','unknown')");
+    expect(sql).toContain("for update of c skip locked");
+    expect(sql).toContain("revoke all on function public.claim_provider_termination_reconciliation(text) from public, anon, authenticated");
+    expect(sql).toContain("grant execute on function public.claim_provider_termination_reconciliation(text) to service_role");
   });
 });
 
@@ -499,6 +524,19 @@ describe("booking delivery authority corrective migration contract", () => {
       expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated`);
       expect(sql).toContain(`grant execute on function ${signature} to service_role`);
     }
+  });
+});
+
+describe("booking provider-write settlement fence migration contract", () => {
+  test("accepted delivery requires the current provider-write claim and exact locked input", () => {
+    const sql = migrationSql("booking_delivery_fence");
+    expect(sql).toContain("p_claim_token uuid");
+    expect(sql).toContain("v_intent.provider_write_started_at is null");
+    expect(sql).toContain("v_intent.provider_write_claim_token is distinct from p_claim_token");
+    expect(sql).toContain("v_intent.claim_token is distinct from p_claim_token");
+    expect(sql).toContain("v_intent.provider_write_input is distinct from public.booking_provider_input(p_intent)");
+    expect(sql).toContain("revoke all on function public.record_booking_delivery(uuid,text,text,text,jsonb,text,jsonb,jsonb) from public, anon, authenticated, service_role");
+    expect(sql).toContain("grant execute on function public.record_booking_delivery(uuid,uuid,text,text,text,jsonb,text,jsonb,jsonb) to service_role");
   });
 });
 

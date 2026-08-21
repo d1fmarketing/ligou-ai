@@ -16,6 +16,8 @@ export interface SessionLedger {
     eventCount: number;
     lastResponseId: string | null;
     lastReceivedAt: string | null;
+    continuous: boolean;
+    terminal: boolean;
   };
   transcript: Array<{ role: "caller" | "agent" | "system"; text: string; at: string }>;
   toolLog: Array<{ name: string; ok: boolean; durationMs: number }>;
@@ -24,10 +26,8 @@ export interface SessionLedger {
 
 /** Plan v4 §8: reserving quota only gates FUTURE sessions — a live session that runs up the bill must be cut.
  *  Returns the ceiling in USD for one session (reservation-based, overridable per deploy). */
-export function sessionCostCapUsd(model: string): number {
-  const explicit = Number(process.env.SESSION_COST_CAP_USD ?? 0);
-  if (explicit > 0) return explicit;
-  return model === "gpt-realtime-2.1-mini" ? 0.5 : 1.5;
+export function sessionCostCapUsd(_model: string): number {
+  return config.sessionCostCeilingUsd;
 }
 
 const live = new Map<string, SessionLedger>();
@@ -48,7 +48,13 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
     model,
     startedAt: Date.now(),
     usage: emptyUsage(),
-    providerUsageEvidence: { eventCount: 0, lastResponseId: null, lastReceivedAt: null },
+    providerUsageEvidence: {
+      eventCount: 0,
+      lastResponseId: null,
+      lastReceivedAt: null,
+      continuous: true,
+      terminal: false,
+    },
     transcript: [],
     toolLog: [],
     status: "active",
@@ -123,6 +129,7 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
         void finalize("caller_hung_up");
         return;
       }
+      if (openedThisAttempt) ledger.providerUsageEvidence.continuous = false;
       if (attaches >= MAX_ATTACHES) {
         clearTimeout(deadline);
         ledger.transcript.push({ role: "system", text: `sideband lost after ${attaches} attaches (last close ${ev?.code})`, at: new Date().toISOString() });
@@ -193,6 +200,15 @@ export async function handleEvent(cap: Capability, ledger: SessionLedger, ws: We
       }
       break;
     }
+    case "session.ended": {
+      const usage = validatedProviderUsage(msg.usage);
+      if (usage) {
+        ledger.usage = usage;
+        ledger.providerUsageEvidence.terminal = true;
+        ledger.providerUsageEvidence.lastReceivedAt = new Date().toISOString();
+      }
+      break;
+    }
     case "error":
       ledger.transcript.push({ role: "system", text: `openai error: ${msg.error?.message ?? "?"}`, at: new Date().toISOString() });
       ledger.status = "error";
@@ -240,7 +256,8 @@ function validatedProviderUsage(value: unknown): UsageTotals | null {
 
 export async function persistLedger(cap: Capability, ledger: SessionLedger, fetchImpl?: FetchLike) {
   const durationS = Math.round((Date.now() - ledger.startedAt) / 1000);
-  const usageResolved = ledger.providerUsageEvidence.eventCount > 0;
+  const usageResolved = ledger.providerUsageEvidence.continuous === true
+    && ledger.providerUsageEvidence.terminal === true;
   const cost = usageResolved ? Number(sessionCostUsd(ledger.model, ledger.usage).toFixed(4)) : null;
   const s = supa();
   const providerNeedsTermination = ledger.status !== "ended";
@@ -261,6 +278,8 @@ export async function persistLedger(cap: Capability, ledger: SessionLedger, fetc
       event_count: ledger.providerUsageEvidence.eventCount,
       last_response_id: ledger.providerUsageEvidence.lastResponseId,
       last_received_at: ledger.providerUsageEvidence.lastReceivedAt,
+      continuous: true,
+      terminal: true,
     } : null,
   }).eq("id", cap.callId);
   if (terminalWrite.error) return false;

@@ -328,11 +328,12 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
 
 // ---------------------------------------------------------------- cost kill-switch (plan v4 §8)
 import { sessionCostCapUsd } from "../src/sideband.ts";
-import { sessionCostUsd, emptyUsage } from "../src/config.ts";
+import { config, sessionCostUsd, emptyUsage } from "../src/config.ts";
 
 describe("session cost cap (a live expensive session must be cut, not just future ones)", () => {
-  test("mini has a lower ceiling than the frontier model", () => {
-    expect(sessionCostCapUsd("gpt-realtime-2.1-mini")).toBeLessThan(sessionCostCapUsd("gpt-realtime-2.1"));
+  test("every model uses the exact same reserved session ceiling", () => {
+    expect(sessionCostCapUsd("gpt-realtime-2.1-mini")).toBe(config.sessionCostCeilingUsd);
+    expect(sessionCostCapUsd("gpt-realtime-2.1")).toBe(config.sessionCostCeilingUsd);
   });
   test("a runaway session crosses the cap and would be killed", () => {
     const u = emptyUsage();
@@ -344,10 +345,5 @@ describe("session cost cap (a live expensive session must be cut, not just futur
     const u = emptyUsage();
     u.audioIn = 2_000; u.audioOut = 1_500; // ~a couple of minutes
     expect(sessionCostUsd("gpt-realtime-2.1", u)).toBeLessThan(sessionCostCapUsd("gpt-realtime-2.1"));
-  });
-  test("env override wins when set", () => {
-    process.env.SESSION_COST_CAP_USD = "0.25";
-    expect(sessionCostCapUsd("gpt-realtime-2.1")).toBe(0.25);
-    delete process.env.SESSION_COST_CAP_USD;
   });
 });

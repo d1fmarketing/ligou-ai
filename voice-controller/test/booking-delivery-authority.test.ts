@@ -68,6 +68,7 @@ let currentClaimToken = "claim-a";
 let busyResult: any = { intervals: [] };
 let busyHook: (() => void) | null = null;
 let transitionOrder: string[] = [];
+let deliveryClaims: Array<string | null> = [];
 
 function accepted() {
   return {
@@ -93,6 +94,7 @@ function client() {
       if (name === "record_booking_delivery") {
         if (deliveryError) return Promise.resolve({ data: null, error: deliveryError });
         deliveryOutcomes.push(args.p_outcome);
+        deliveryClaims.push(args.p_claim_token ?? null);
         if (args.p_outcome === "accepted") {
           if (!authoritativeConfirmed) acceptedReceiptCount += 1;
           authoritativeConfirmed = true;
@@ -167,6 +169,7 @@ beforeEach(() => {
   busyResult = { intervals: [] };
   busyHook = null;
   transitionOrder = [];
+  deliveryClaims = [];
   _setClient(client());
 });
 afterAll(() => _setClient(null));
@@ -200,6 +203,7 @@ describe("booking delivery authority", () => {
     await executeIntent(intent("claim-b", "reconcile"), calendar as any);
     expect(authoritativeConfirmed).toBe(true);
     expect(acceptedReceiptCount).toBe(1);
+    expect(deliveryClaims).toEqual(["claim-a", "claim-b"]);
   });
 
   test("same-intent lease reclaim can invoke provider write at most once", async () => {

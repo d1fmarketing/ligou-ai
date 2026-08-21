@@ -6,7 +6,8 @@ import { buildInstructions } from "./instructions.ts";
 import { loadTenant, supa } from "./rules.ts";
 import { makeCapability, toolSchemas } from "./tools.ts";
 import { attachSideband } from "./sideband.ts";
-import { finalizeTerminalBudget, reserveCallBudget } from "./budget.ts";
+import { deferProviderTerminationReconciliation, finalizeTerminalBudget, reserveCallBudget } from "./budget.ts";
+import { terminateProviderCall } from "./provider-termination.ts";
 
 export function startPhoneListener() {
   if (!config.openaiKey) return;
@@ -50,13 +51,38 @@ export async function handleIncoming(row: any) {
       provider_usage_state: "unknown",
     })
     .select("id").single();
+  if (!call?.id) throw Object.assign(new Error("phone_call_insert_failed"), { status: 503 });
+  await supa().from("phone_events").update({ tenant_id: tenant.id, call_id: call.id }).eq("id", row.id);
   try {
-    await reserveCallBudget(tenant.id, call!.id, config.estCostPerSessionUsd);
-  } catch {
-    await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(row.openai_call_id)}/reject`, {
-      method: "POST", headers: { Authorization: `Bearer ${config.openaiKey}` },
-    }).catch(() => {});
-    await supa().from("calls").update({ status: "killed_budget", ended_at: new Date().toISOString() }).eq("id", call!.id);
+    await reserveCallBudget(tenant.id, call.id, config.sessionCostCeilingUsd);
+  } catch (reservationError) {
+    await supa().from("calls").update({
+      status: "killed_budget",
+      ended_at: new Date().toISOString(),
+      duration_seconds: 0,
+      cost_estimate_usd: 0,
+      provider_usage_state: "not_applicable",
+      provider_termination_reason: "budget_denied_before_accept",
+      provider_termination_mode: "reject",
+    }).eq("id", call.id);
+    const termination = await terminateProviderCall({
+      callId: call.id,
+      openaiCallId: row.openai_call_id ?? null,
+      mode: "reject",
+      reason: "budget_denied_before_accept",
+    });
+    await supa().from("phone_events").update({
+      status: termination.confirmed ? "rejected" : "error",
+      tenant_id: tenant.id,
+      call_id: call.id,
+    }).eq("id", row.id);
+    if (!termination.confirmed) {
+      await deferProviderTerminationReconciliation(call.id, termination.error ?? reservationError);
+      throw Object.assign(new Error("provider_reject_unconfirmed"), {
+        status: 503,
+        detail: termination.error ?? "provider_termination_unknown",
+      });
+    }
     return;
   }
 
@@ -94,7 +120,7 @@ export async function handleIncoming(row: any) {
     await failStartup("phone_accept_failed", "reject", accept.status >= 400 && accept.status < 500);
     throw new Error(`accept_failed: ${accept.status} ${await accept.text()}`);
   }
-  await supa().from("phone_events").update({ tenant_id: tenant.id, call_id: call!.id }).eq("id", row.id);
+  await supa().from("phone_events").update({ tenant_id: tenant.id, call_id: call.id }).eq("id", row.id);
   await supa().from("calls").update({
     provider_termination_state: "active", provider_termination_mode: "hangup", provider_usage_state: "unknown",
   }).eq("id", call!.id);

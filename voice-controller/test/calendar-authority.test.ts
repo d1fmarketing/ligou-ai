@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { _setClient } from "../src/rules.ts";
-import { calendarPort, googleCalendar, payloadHash } from "../src/calendar.ts";
+import { calendarPort, fakeCalendar, googleCalendar, payloadHash } from "../src/calendar.ts";
 import { encryptConnectorToken } from "../../supabase/functions/_shared/connector-crypto.ts";
 
 const INPUT = {
@@ -346,6 +346,29 @@ describe("canonical calendar commitment", () => {
     expect(result.outcome).toBe("unknown");
     expect(result.error).toContain("connector_lookup_failed");
     expect(queriedTables).toContain("connector_accounts");
+  });
+
+  test("fake calendar requires both test mode and the explicit synthetic flag", () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalProvider = process.env.CALENDAR_PROVIDER;
+    const originalSynthetic = process.env.LIGOU_SYNTHETIC_TEST_CALENDAR;
+    try {
+      process.env.CALENDAR_PROVIDER = "fake";
+      process.env.NODE_ENV = "production";
+      process.env.LIGOU_SYNTHETIC_TEST_CALENDAR = "1";
+      expect(() => calendarPort()).toThrow("fake_calendar_forbidden");
+
+      process.env.NODE_ENV = "test";
+      delete process.env.LIGOU_SYNTHETIC_TEST_CALENDAR;
+      expect(() => calendarPort()).toThrow("fake_calendar_forbidden");
+
+      process.env.LIGOU_SYNTHETIC_TEST_CALENDAR = "1";
+      expect(calendarPort()).toBe(fakeCalendar);
+    } finally {
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = originalNodeEnv;
+      if (originalProvider === undefined) delete process.env.CALENDAR_PROVIDER; else process.env.CALENDAR_PROVIDER = originalProvider;
+      if (originalSynthetic === undefined) delete process.env.LIGOU_SYNTHETIC_TEST_CALENDAR; else process.env.LIGOU_SYNTHETIC_TEST_CALENDAR = originalSynthetic;
+    }
   });
 
   for (const method of ["write", "reconcile"] as const) {

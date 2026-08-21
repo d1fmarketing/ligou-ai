@@ -3,7 +3,7 @@
 import { config } from "./config.ts";
 import { supa } from "./rules.ts";
 import { calendarPort } from "./calendar.ts";
-import { reconcileBudgetReservations } from "./budget.ts";
+import { reconcileBudgetReservations, reconcileProviderTerminations } from "./budget.ts";
 import { randomUUID } from "node:crypto";
 
 const WORKER_ID = `worker-${process.pid}`;
@@ -77,6 +77,7 @@ export async function executeIntent(intent: any, calendar = calendarPort()) {
 
   const { data: delivery, error: deliveryError } = await supa().rpc("record_booking_delivery", {
     p_intent: intent.id,
+    p_claim_token: intent.claim_token,
     p_attempt_key: randomUUID(),
     p_outcome: result.outcome,
     p_external_id: result.externalId ?? null,
@@ -169,6 +170,7 @@ export function startWorkerLoop() {
     try { await tickSummaries(); } catch (e) { console.error("summaries", e); }
     try { const { tickLearning } = await import("./learning.ts"); await tickLearning(); } catch (e) { console.error("learning", e); }
     try { await reconcileBudgetReservations(); } catch (e) { console.error("budget reconciliation", e); }
+    try { await reconcileProviderTerminations(); } catch (e) { console.error("provider termination reconciliation", e); }
   };
   setInterval(loop, 1_000);
   setInterval(() => tickUsageAlerts().catch((e) => console.error("usage", e)), 60_000);

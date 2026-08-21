@@ -15,9 +15,11 @@ let callInserts = 0;
 let fetchUrls: string[] = [];
 let callUpdates: any[] = [];
 let budgetUpdates: any[] = [];
+let reserveError: { message: string } | null = null;
+let phoneEventUpdates: any[] = [];
 const originalFetch = globalThis.fetch;
 const originalWebSocket = globalThis.WebSocket;
-const originalEstimate = config.estCostPerSessionUsd;
+const originalCeiling = config.sessionCostCeilingUsd;
 
 function client() {
   return {
@@ -27,6 +29,7 @@ function client() {
         update(row: any) {
           if (table === "calls") callUpdates.push(row);
           if (table === "budget_reservations") budgetUpdates.push(row);
+          if (table === "phone_events") phoneEventUpdates.push(row);
           return api;
         },
         insert() { if (table === "calls") callInserts += 1; return api; },
@@ -44,8 +47,8 @@ function client() {
     },
     rpc(name: string, args: Record<string, unknown>) {
       rpcCalls.push({ name, args });
-      if (name === "reserve_call_budget" && !ownerUserId) {
-        return Promise.resolve({ data: null, error: { message: "must not reserve" } });
+      if (name === "reserve_call_budget" && (!ownerUserId || reserveError)) {
+        return Promise.resolve({ data: null, error: reserveError ?? { message: "must not reserve" } });
       }
       return Promise.resolve({ data: "reservation-1", error: null });
     },
@@ -59,7 +62,9 @@ beforeEach(() => {
   fetchUrls = [];
   callUpdates = [];
   budgetUpdates = [];
-  config.estCostPerSessionUsd = originalEstimate;
+  reserveError = null;
+  phoneEventUpdates = [];
+  config.sessionCostCeilingUsd = originalCeiling;
   globalThis.fetch = originalFetch;
   globalThis.WebSocket = originalWebSocket;
   invalidateTenant("rocha-plumbing");
@@ -67,7 +72,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  config.estCostPerSessionUsd = originalEstimate;
+  config.sessionCostCeilingUsd = originalCeiling;
   globalThis.fetch = originalFetch;
   globalThis.WebSocket = originalWebSocket;
 });
@@ -96,7 +101,7 @@ describe("phone startup budget lifecycle", () => {
   });
 
   test("ambiguous accept failure confirms reject but keeps usage unresolved", async () => {
-    config.estCostPerSessionUsd = 2.25;
+    config.sessionCostCeilingUsd = 2.25;
     globalThis.fetch = async (input) => {
       fetchUrls.push(String(input));
       return fetchUrls.length === 1
@@ -109,6 +114,29 @@ describe("phone startup budget lifecycle", () => {
     expect(rpcCalls.find((call) => call.name === "reserve_call_budget")?.args.p_est_cost).toBe(2.25);
     expect(fetchUrls.some((url) => url.endsWith("/reject"))).toBe(true);
     expectUsageUnresolved();
+  });
+
+  test("budget-denied phone reject failure is durable without a reservation and returns retryable failure", async () => {
+    reserveError = { message: "budget cap" };
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      return new Response("reject unavailable", { status: 503 });
+    };
+
+    await expect(handleIncoming(row)).rejects.toMatchObject({
+      message: "provider_reject_unconfirmed",
+      status: 503,
+    });
+
+    expect(fetchUrls).toEqual(["https://api.openai.com/v1/realtime/calls/rtc-1/reject"]);
+    expect(callUpdates.some((update) => update.status === "killed_budget"
+      && update.provider_usage_state === "not_applicable")).toBe(true);
+    expect(callUpdates.some((update) => update.provider_termination_state === "unknown"
+      && String(update.provider_termination_last_error).includes("provider_reject_failed: 503"))).toBe(true);
+    expect(phoneEventUpdates.some((update) => update.status === "error"
+      && update.tenant_id === TENANT.id && update.call_id === "call-1")).toBe(true);
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
+    expect(budgetUpdates).toHaveLength(0);
   });
 
   test("a definitive phone 4xx rejection resolves authoritative zero usage", async () => {

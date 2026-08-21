@@ -35,7 +35,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   // Primary model, then automatic fallback (RJ 2026-08-19: 2.1 primary, mini as fallback).
   const primary = modelOverride && ALLOWED_MODELS.has(modelOverride) ? modelOverride : config.model;
   const chain = primary === config.fallbackModel ? [primary] : [primary, config.fallbackModel];
-  const estCost = config.estCostPerSessionUsd;
+  const sessionCeiling = config.sessionCostCeilingUsd;
 
   // call row first (budget RPC references it)
   const { data: call, error: ce } = await supa()
@@ -47,7 +47,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
 
   // atomic budget reservation — hard gate
   try {
-    await reserveCallBudget(tenant.id, call.id, estCost);
+    await reserveCallBudget(tenant.id, call.id, sessionCeiling);
   } catch (error: any) {
     await supa().from("calls").update({ status: "killed_budget", ended_at: new Date().toISOString() }).eq("id", call.id);
     throw error;

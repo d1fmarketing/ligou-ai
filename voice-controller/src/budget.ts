@@ -52,6 +52,21 @@ async function deferBudgetReconciliation(callId: string, error: unknown) {
   }
 }
 
+export async function deferProviderTerminationReconciliation(callId: string, error: unknown) {
+  const detail = (error as any)?.error ?? (error as any)?.detail ?? (error as any)?.message ?? String(error);
+  const { error: deferError } = await supa().from("calls").update({
+    provider_termination_reconcile_after: new Date(Date.now() + 5_000).toISOString(),
+    provider_termination_reconcile_lease_until: null,
+    provider_termination_last_error: String(detail).slice(0, 400),
+  }).eq("id", callId);
+  if (deferError) {
+    throw Object.assign(new Error("provider_termination_reconciliation_defer_failed"), {
+      status: 503,
+      detail: deferError.message ?? "provider_termination_reconciliation_update_failed",
+    });
+  }
+}
+
 export async function finalizeTerminalBudget(args: {
   tenantId: string;
   callId: string;
@@ -118,4 +133,28 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
     fetchImpl,
     usageResolved: providerUsageState === "resolved" || providerUsageState === "not_applicable",
   }) ? 1 : 0;
+}
+
+export async function reconcileProviderTerminations(fetchImpl?: FetchLike): Promise<number> {
+  const { data: claim, error } = await supa().rpc("claim_provider_termination_reconciliation", {
+    p_worker: `provider-termination-${process.pid}`,
+  });
+  if (error || !claim) return 0;
+  const row = claim as any;
+  const termination = await terminateProviderCall({
+    callId: String(row.call_id),
+    openaiCallId: row.openai_call_id ? String(row.openai_call_id) : null,
+    mode: row.provider_termination_mode === "reject" ? "reject" : "hangup",
+    reason: String(row.provider_termination_reason ?? "durable_provider_termination_reconciliation"),
+    fetchImpl,
+  });
+  if (!termination.confirmed) {
+    await deferProviderTerminationReconciliation(String(row.call_id), termination.error ?? "provider_termination_unknown");
+    return 0;
+  }
+  await supa().from("calls").update({
+    provider_termination_reconcile_lease_until: null,
+    provider_termination_reconcile_worker: null,
+  }).eq("id", String(row.call_id));
+  return 1;
 }

@@ -280,10 +280,11 @@ async function staleAndCurrentWorkerFence(connection, home) {
   requireSuccess(await runSql(connection, home, `update public.action_intents set status = 'failed' where id = '${intent}';`), "worker fence cleanup");
 }
 
-function acceptedDeliverySql(intentId, attemptKey, outcome = "accepted") {
+function acceptedDeliverySql(intentId, attemptKey, outcome = "accepted", claimToken = null) {
+  const claimSql = claimToken ? `'${claimToken}'::uuid` : "null::uuid";
   if (outcome !== "accepted") {
     return serviceTransaction(`select public.record_booking_delivery(
-      '${intentId}', '${attemptKey}', 'unknown', null, null, null,
+      '${intentId}', ${claimSql}, '${attemptKey}', 'unknown', null, null, null,
       '{"error":"synthetic reconciliation"}'::jsonb, null
     )::text;`);
   }
@@ -306,7 +307,7 @@ function acceptedDeliverySql(intentId, attemptKey, outcome = "accepted") {
       from provider_input
     )
     select public.record_booking_delivery(
-      '${intentId}', '${attemptKey}', 'accepted', 'synthetic-event-id',
+      '${intentId}', ${claimSql}, '${attemptKey}', 'accepted', 'synthetic-event-id',
       jsonb_build_object(
         'id', 'synthetic-event-id', 'summary', expected->>'summary', 'description', expected->>'description',
         'start', jsonb_build_object('dateTime', expected->>'start'),
@@ -325,15 +326,32 @@ async function duplicateDeliveryAndReconciliation(connection, home) {
     select intent_id::text from public.booking_slot_leases where tenant_id = '${slot.tenant}'
   `), "slot winner lookup");
   assert.match(winner, /^[a-f0-9-]{36}$/);
+  const claim = scalar(await runSql(connection, home, `
+    select claim_token::text from public.action_intents where id = '${winner}'
+  `), "slot winner claim lookup");
+  assert.match(claim, /^[a-f0-9-]{36}$/);
+  const fabricated = await runSql(connection, home, acceptedDeliverySql(
+    winner, "synthetic-prepare-only-fabrication", "accepted", claim,
+  ));
+  assert.notEqual(fabricated.code, 0);
+  assert.match(fabricated.stderr, /provider_write_fence_required/);
+  assert.equal(scalar(await runSql(connection, home, `
+    select count(*)::text from public.receipts where intent_id = '${winner}'
+  `), "prepare-only fabrication invariant"), "0");
+
+  const begun = JSON.parse(scalar(await runSql(connection, home, serviceTransaction(`
+    select public.begin_provider_write('${winner}', '${claim}')::text;
+  `)), "provider-write fence transition"));
+  assert.equal(begun.authorized, true);
   const [first, second] = await Promise.all([
-    runSql(connection, home, acceptedDeliverySql(winner, "synthetic-delivery-attempt")),
-    runSql(connection, home, acceptedDeliverySql(winner, "synthetic-delivery-attempt")),
+    runSql(connection, home, acceptedDeliverySql(winner, "synthetic-delivery-attempt", "accepted", claim)),
+    runSql(connection, home, acceptedDeliverySql(winner, "synthetic-delivery-attempt", "accepted", claim)),
   ]);
   const results = [JSON.parse(scalar(first, "first delivery")), JSON.parse(scalar(second, "duplicate delivery"))];
   assert.deepEqual(results.map((item) => item.reused).sort(), [false, true]);
   const [lateOne, lateTwo] = await Promise.all([
-    runSql(connection, home, acceptedDeliverySql(winner, "synthetic-reconcile-attempt", "unknown")),
-    runSql(connection, home, acceptedDeliverySql(winner, "synthetic-reconcile-attempt", "unknown")),
+    runSql(connection, home, acceptedDeliverySql(winner, "synthetic-reconcile-attempt", "unknown", claim)),
+    runSql(connection, home, acceptedDeliverySql(winner, "synthetic-reconcile-attempt", "unknown", claim)),
   ]);
   assert.equal(JSON.parse(scalar(lateOne, "first reconciliation")).authoritative, true);
   assert.equal(JSON.parse(scalar(lateTwo, "duplicate reconciliation")).authoritative, true);
@@ -419,6 +437,44 @@ async function concurrentEpochInvalidation(connection, home) {
   assert.equal(scalar(await runSql(connection, home, `select status || ':' || last_error from public.action_intents where id = '${ids.intent}'`), "epoch invalidation invariant"), "failed:authority_stale_before_claim");
 }
 
+async function onboardingEpochSemantics(connection, home) {
+  const tenant = "41000000-0000-4000-8000-000000000001";
+  const group = "41000000-0000-4000-8000-000000000010";
+  requireSuccess(await runSql(connection, home, `
+    insert into public.tenants (id, slug, name, status)
+    values ('${tenant}', 'synthetic-onboarding-epoch', 'Synthetic Onboarding Epoch', 'provisioning');
+    insert into public.rules (tenant_id, rule_group_id, version, origem, escopo, status, category, text)
+    values
+      ('${tenant}', '${group}', 1, 'onboarding', 'servico', 'sugerido', 'preco', 'answer one'),
+      ('${tenant}', '41000000-0000-4000-8000-000000000011', 1, 'onboarding', 'localizacao', 'sugerido', 'area', 'answer two'),
+      ('${tenant}', '41000000-0000-4000-8000-000000000012', 1, 'onboarding', 'servico', 'sugerido', 'preco', 'answer three'),
+      ('${tenant}', '41000000-0000-4000-8000-000000000013', 1, 'onboarding', 'geral', 'sugerido', 'agenda', 'answer four'),
+      ('${tenant}', '41000000-0000-4000-8000-000000000014', 1, 'onboarding', 'geral', 'sugerido', 'emergencia', 'answer five');
+  `), "onboarding suggested answers");
+  assert.equal(scalar(await runSql(connection, home, `
+    select policy_epoch::text || ':' || (select count(*) from public.effective_rules where tenant_id = '${tenant}')::text
+    from public.tenants where id = '${tenant}'
+  `), "suggested answers preserve capability epoch"), "1:0");
+
+  requireSuccess(await runSql(connection, home, `
+    insert into public.rules (tenant_id, rule_group_id, version, origem, escopo, status, category, text)
+    values ('${tenant}', '${group}', 2, 'onboarding', 'servico', 'aprovado', 'preco', 'approved answer one');
+  `), "onboarding approval");
+  assert.equal(scalar(await runSql(connection, home, `
+    select policy_epoch::text || ':' || (select count(*) from public.effective_rules where tenant_id = '${tenant}')::text
+    from public.tenants where id = '${tenant}'
+  `), "approved answer invalidates capability"), "2:1");
+
+  requireSuccess(await runSql(connection, home, `
+    insert into public.rules (tenant_id, rule_group_id, version, origem, escopo, status, category, text)
+    values ('${tenant}', '${group}', 3, 'edicao_manual', 'servico', 'revogado', 'preco', 'revoked answer one');
+  `), "onboarding revocation");
+  assert.equal(scalar(await runSql(connection, home, `
+    select policy_epoch::text || ':' || (select count(*) from public.effective_rules where tenant_id = '${tenant}')::text
+    from public.tenants where id = '${tenant}'
+  `), "revoked answer invalidates capability"), "3:0");
+}
+
 async function bookingDeliveryRollback(connection, home) {
   const tenant = "50000000-0000-4000-8000-000000000001";
   const call = "50000000-0000-4000-8000-000000000030";
@@ -441,7 +497,7 @@ async function bookingDeliveryRollback(connection, home) {
   `), "rollback fixture");
   const failed = await runSql(connection, home, acceptedDeliverySql(intent, "synthetic-rollback-attempt"));
   assert.notEqual(failed.code, 0);
-  assert.match(failed.stderr, /booking_slot_lease_missing/);
+  assert.match(failed.stderr, /provider_write_fence_required/);
   assert.equal(scalar(await runSql(connection, home, `
     select
       (select count(*) from public.receipts where intent_id = '${intent}')::text || ':' ||
@@ -462,6 +518,7 @@ export async function runConcurrencySuite(env = process.env) {
     ["duplicate delivery/reconciliation", duplicateDeliveryAndReconciliation],
     ["OAuth double-consume", oauthDoubleConsume],
     ["concurrent policy/power epoch invalidation", concurrentEpochInvalidation],
+    ["onboarding effective policy epochs", onboardingEpochSemantics],
     ["booking-delivery transaction rollback", bookingDeliveryRollback],
   ];
   try {

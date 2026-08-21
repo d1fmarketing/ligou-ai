@@ -46,6 +46,7 @@ export function createUnitTestEnvironment() {
     GOOGLE_OAUTH_CLIENT_SECRET: "synthetic-unit-test-key",
     CONTACT_HASH_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
     CALENDAR_PROVIDER: "fake",
+    LIGOU_SYNTHETIC_TEST_CALENDAR: "1",
   };
 }
 

@@ -68,6 +68,7 @@ beforeEach(() => {
   busyEvents = [];
   calendarFails = false;
   quoteRows = [];
+  TENANT.policy_epoch = 1;
   invalidateTenant("rocha-plumbing");
   _setClient(mockSupabase());
 });
@@ -243,6 +244,34 @@ describe("create_async_case", () => {
 });
 
 describe("capability boundary", () => {
+  test("one onboarding capability records all five answers and an effective policy change invalidates it immediately", async () => {
+    const onboarding = makeCapability(
+      TENANT.slug,
+      TENANT.id,
+      "call-onboarding",
+      30,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1 },
+    );
+    for (const [index, topic] of ["servicos", "area", "precos", "agenda", "emergencia"].entries()) {
+      const result = await runTool(onboarding, "record_interview_answer", {
+        topic,
+        rule_text: `Synthetic onboarding answer ${index + 1}`,
+      });
+      expect(result.body.status).toBe("recorded");
+    }
+    expect(inserted.filter((entry) => entry.table === "rules")).toHaveLength(5);
+
+    TENANT.policy_epoch = 2;
+    invalidateTenant(TENANT.slug);
+    const stale = await runTool(onboarding, "record_interview_answer", {
+      topic: "outro",
+      rule_text: "This must not be recorded under the stale capability",
+    });
+    expect(stale.body.error).toBe("policy_epoch_stale");
+    expect(inserted.filter((entry) => entry.table === "rules")).toHaveLength(5);
+  });
+
   test("denies tools not in the allowlist", async () => {
     const c = cap();
     c.allowedTools = ["get_business_info"];

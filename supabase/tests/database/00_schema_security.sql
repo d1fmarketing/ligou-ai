@@ -85,6 +85,7 @@ select extensions.ok(
       ('begin_provider_write(uuid,uuid)'),
       ('booking_provider_input(uuid)'),
       ('claim_budget_reconciliation(text)'),
+      ('claim_provider_termination_reconciliation(text)'),
       ('claim_intent(text)'),
       ('consume_oauth_state(text,text,uuid,uuid,text)'),
       ('consume_slot_offer(uuid,uuid,text,integer,integer,text,text)'),
@@ -94,7 +95,7 @@ select extensions.ok(
       ('prepare_booking_provider_write(uuid,uuid)'),
       ('provision_tenant_owner(uuid,uuid)'),
       ('purge_ephemeral_call_data(timestamp with time zone,timestamp with time zone)'),
-      ('record_booking_delivery(uuid,text,text,text,jsonb,text,jsonb,jsonb)'),
+      ('record_booking_delivery(uuid,uuid,text,text,text,jsonb,text,jsonb,jsonb)'),
       ('reserve_call_budget(uuid,uuid,numeric)'),
       ('settle_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
       ('transition_claimed_intent(uuid,uuid,text,text,integer)')

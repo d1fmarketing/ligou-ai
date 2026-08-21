@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { config } from "../src/config.ts";
+import * as configModule from "../src/config.ts";
 import { _setClient, invalidateTenant } from "../src/rules.ts";
 import { startSession } from "../src/server.ts";
 
@@ -9,10 +9,12 @@ const TENANT = {
   owner_user_id: "owner-1", auth_epoch: 2, policy_epoch: 3,
 };
 
+const { config } = configModule;
+
 let reserveError: { message: string } | null = null;
 let rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
 const originalOpenAiKey = config.openaiKey;
-const originalEstimate = config.estCostPerSessionUsd;
+const originalCeiling = config.sessionCostCeilingUsd;
 const originalFetch = globalThis.fetch;
 const originalWebSocket = globalThis.WebSocket;
 let fetchUrls: string[] = [];
@@ -58,7 +60,7 @@ beforeEach(() => {
   reserveError = null;
   rpcCalls = [];
   config.openaiKey = originalOpenAiKey;
-  config.estCostPerSessionUsd = originalEstimate;
+  config.sessionCostCeilingUsd = originalCeiling;
   globalThis.fetch = originalFetch;
   globalThis.WebSocket = originalWebSocket;
   fetchUrls = [];
@@ -70,7 +72,7 @@ beforeEach(() => {
 
 afterEach(() => {
   config.openaiKey = originalOpenAiKey;
-  config.estCostPerSessionUsd = originalEstimate;
+  config.sessionCostCeilingUsd = originalCeiling;
   globalThis.fetch = originalFetch;
   globalThis.WebSocket = originalWebSocket;
 });
@@ -78,8 +80,17 @@ afterEach(() => {
 afterAll(() => _setClient(null));
 
 describe("session budget lifecycle", () => {
-  test("reserves the configured EST_COST_PER_SESSION value", async () => {
-    config.estCostPerSessionUsd = 2.75;
+  test("session ceiling defaults to the primary maximum and rejects unbounded overrides", () => {
+    expect(typeof configModule.parseSessionCostCeilingUsd).toBe("function");
+    expect(configModule.parseSessionCostCeilingUsd(undefined)).toBe(1.5);
+    expect(configModule.parseSessionCostCeilingUsd("2.75")).toBe(2.75);
+    for (const value of ["0", "-1", "5.01", "NaN", "Infinity", "1.23456"]) {
+      expect(() => configModule.parseSessionCostCeilingUsd(value)).toThrow("session_cost_ceiling_invalid");
+    }
+  });
+
+  test("reserves the same validated ceiling used by the live cost kill switch", async () => {
+    config.sessionCostCeilingUsd = 2.75;
     reserveError = { message: "budget cap" };
 
     await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({

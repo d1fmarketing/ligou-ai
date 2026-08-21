@@ -14,6 +14,7 @@ test("unit runner uses only synthetic configuration and excludes live integratio
   expect(environment.SUPABASE_SECRET_KEY).toBe("synthetic-unit-test-key");
   expect(environment.SUPABASE_PUBLISHABLE_KEY).toBe("synthetic-unit-test-key");
   expect(environment.CALENDAR_PROVIDER).toBe("fake");
+  expect(environment.LIGOU_SYNTHETIC_TEST_CALENDAR).toBe("1");
   expect(unitTestFiles).not.toContain("test/booking.integration.test.ts");
   expect(unitTestFiles).toContain("test/unit-runner.test.ts");
   expect(unitTestFiles).toContain("test/oauth-security.test.ts");
