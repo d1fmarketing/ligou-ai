@@ -4,7 +4,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveTenantIdentity } from "./tenant-identity.mjs";
 
-const TENANT = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
 const DIGEST_IMAGE = /^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/;
 const approvedImage = JSON.parse(readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../infra/toolchain.json"), "utf8")).hermes_image;
 
@@ -13,18 +12,19 @@ function fail(code) {
   process.exit(1);
 }
 
-export function tenantRuntime(tenant, image = "") {
+export function tenantRuntime(tenantId, tenantSlug, image = "") {
   return {
-    ...resolveTenantIdentity(tenant),
+    ...resolveTenantIdentity(tenantId, tenantSlug),
     image,
   };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  const tenant = process.env.TENANT_SLUG ?? "";
+  const tenantId = process.env.TENANT_ID ?? "";
+  const tenantSlug = process.env.TENANT_SLUG ?? "";
   let runtime;
-  try { runtime = tenantRuntime(tenant, process.env.HERMES_IMAGE ?? ""); }
+  try { runtime = tenantRuntime(tenantId, tenantSlug, process.env.HERMES_IMAGE ?? ""); }
   catch (error) { fail(error instanceof Error ? error.message : "tenant_invalid"); }
   const args = process.argv.slice(2);
   if (args.length === 2 && args[0] === "--field") {

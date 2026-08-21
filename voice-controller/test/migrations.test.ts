@@ -114,6 +114,17 @@ describe("tenant-scoped connector status migration contract", () => {
   });
 });
 
+describe("learning retention skip migration contract", () => {
+  test("backfills pending free-form learning to a fixed retention-eligible skipped state", () => {
+    const sql = migrationSql("learning_retention_skip");
+    expect(sql).toContain("add column if not exists learning_skip_reason text");
+    expect(sql).toContain("set learning_status = 'skipped'");
+    expect(sql).toContain("learning_skip_reason = 'freeform_model_learning_disabled'");
+    expect(sql).toContain("where learning_status = 'pending'");
+    expect(sql).not.toContain("delete from public.calls");
+  });
+});
+
 describe("privacy retention migration contract", () => {
   test("service-role retention removes raw transcripts and transient transport rows only", () => {
     const sql = migrationSql("privacy_retention");

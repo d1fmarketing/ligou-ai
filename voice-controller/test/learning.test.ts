@@ -1,6 +1,7 @@
 // Learning pipeline unit tests — redaction and strict proposal validation ($0).
 import { describe, expect, test } from "bun:test";
 import { redactEvidence, tickLearning, validateProposals } from "../src/learning.ts";
+import { _setClient } from "../src/rules.ts";
 
 describe("redactEvidence", () => {
   test("uses the shared redactor for contact, payment, address, and access data", () => {
@@ -54,12 +55,29 @@ describe("validateProposals (strict — malformed is rejected, never repaired)",
 
 test("post-call learning channel is disabled and cannot call Hermes or persist model-authored proposals", async () => {
   let fetchCalls = 0;
+  let updatePayload: any = null;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => { fetchCalls += 1; throw new Error("must_not_fetch"); }) as typeof fetch;
+  _setClient({
+    from() {
+      const api: any = {
+        select() { return api; }, eq() { return api; },
+        limit: async () => ({ data: [{ id: "call-1" }, { id: "call-2" }], error: null }),
+        update(payload: any) { updatePayload = payload; return api; },
+        in: async () => ({ error: null }),
+      };
+      return api;
+    },
+  } as any);
   try {
-    expect(await tickLearning()).toBe(0);
+    expect(await tickLearning()).toBe(2);
     expect(fetchCalls).toBe(0);
+    expect(updatePayload).toEqual({
+      learning_status: "skipped",
+      learning_skip_reason: "freeform_model_learning_disabled",
+    });
   } finally {
+    _setClient(null);
     globalThis.fetch = originalFetch;
   }
 });

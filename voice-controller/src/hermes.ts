@@ -86,12 +86,12 @@ export async function consultHermes(
   }
   let identity;
   try {
-    identity = resolveTenantIdentity(tenant.slug);
+    identity = resolveTenantIdentity(tenant.id, tenant.slug);
   } catch {
     return { status: "unavailable" };
   }
-  if (identity.tenant !== tenant.slug
-    || identity.container_name !== `ligou-cell-${tenant.slug}`
+  if (identity.tenant_id !== tenant.id || identity.tenant_slug !== tenant.slug
+    || identity.container_name !== `ligou-cell-${tenant.id}`
     || identity.hermes_url !== `http://127.0.0.1:${identity.host_port}`) return { status: "unavailable" };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);

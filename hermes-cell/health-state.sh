@@ -3,17 +3,20 @@
 set -u
 
 TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
+TENANT_ID="${TENANT_ID:?set TENANT_ID}"
 if ! [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]]; then
   printf '%s\n' '{"ok":false,"provider":"openai-codex","auth":"invalid_tenant","api":"unknown"}'
   exit 1
 fi
-CELL="ligou-cell-${TENANT}"
 NODE_BIN="${LIGOU_NODE_BIN:-node}"
+IDENTITY_JSON="$("$NODE_BIN" "$(cd "$(dirname "$0")" && pwd)/tenant-identity.mjs" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --json)" \
+  || { echo '{"ok":false,"provider":"openai-codex","auth":"invalid_tenant","api":"unknown"}'; exit 1; }
+identity_field() { "$NODE_BIN" -e 'const v=JSON.parse(process.argv[1]);process.stdout.write(String(v[process.argv[2]]||""));' "$IDENTITY_JSON" "$1"; }
+CELL="$(identity_field container_name)"
 if [ -n "${HERMES_HEALTH_URL:-}" ]; then
   HEALTH_URL="$HERMES_HEALTH_URL"
 else
-  HOST_PORT="$("$NODE_BIN" "$(cd "$(dirname "$0")" && pwd)/tenant-compose.mjs" --field host_port)" \
-    || { echo '{"ok":false,"provider":"openai-codex","auth":"unknown","api":"invalid_route"}'; exit 1; }
+  HOST_PORT="$(identity_field host_port)"
   HEALTH_URL="http://127.0.0.1:${HOST_PORT}/health"
 fi
 

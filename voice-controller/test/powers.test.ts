@@ -72,13 +72,14 @@ let sentRows: any[] = [];
 let tenantLookupFails = false;
 let communicationsLookupError: { message: string } | null = null;
 let lookupHashes: string[] = [];
+let hashMetadata: Record<string, any[]> = { contact_opt_outs: [], communications: [] };
 
 function mockSupabase() {
   return {
     from(table: string) {
       const filters: Record<string, unknown> = {};
       const api: any = {
-        select() { return api; },
+        select(columns: string) { filters.select = columns; return api; },
         eq(column: string, value: unknown) { filters[column] = value; return api; },
         in(column: string, values: unknown[]) { if (column === "contact_hash") lookupHashes = values as string[]; return api; },
         gte() { return api; },
@@ -96,8 +97,11 @@ function mockSupabase() {
               : { data: { auth_epoch: 1, timezone: TZ }, error: null }
             : { data: powersRows[0] ?? null, error: null },
         then(res: any) { // awaited without a terminal method (powers / communications lookups)
-          const data = table === "powers" ? powersRows : table === "communications"
-            ? sentRows.filter((row) => !row.contact_hash || lookupHashes.includes(row.contact_hash)) : [];
+          const metadataQuery = String(filters.select ?? "").includes("hash_algorithm");
+          const data = metadataQuery && (table === "contact_opt_outs" || table === "communications")
+            ? hashMetadata[table]
+            : table === "powers" ? powersRows : table === "communications"
+              ? sentRows.filter((row) => !row.contact_hash || lookupHashes.includes(row.contact_hash)) : [];
           const error = table === "communications" ? communicationsLookupError : null;
           return Promise.resolve({ data: error ? null : data, error }).then(res);
         },
@@ -114,6 +118,7 @@ beforeEach(() => {
   tenantLookupFails = false;
   communicationsLookupError = null;
   lookupHashes = [];
+  hashMetadata = { contact_opt_outs: [], communications: [] };
   _setClient(mockSupabase());
 });
 afterAll(() => _setClient(null));
@@ -229,7 +234,11 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
   });
 
   test("legacy SHA opt-out remains authoritative during HMAC cutover", async () => {
-    const legacy = await hashLegacyCanonicalContact(base.contact);
+    const legacy = "b390966e34771a9c5b8a8d1f0039519f7de0c6212fd8906ff0e5c56c4d84024c";
+    expect(await hashLegacyCanonicalContact(base.contact)).toBe(legacy);
+    expect(await hashLegacyCanonicalContact('"Alice Caller" <sip:+19495550101@pbx.example>;tag=x'))
+      .toBe("b3d2347f8d25bfd197851fb49ca326293b624d42b4f7ccbfb9c956bc87ad5616");
+    hashMetadata.contact_opt_outs = [{ hash_algorithm: "sha256", hash_key_version: null }];
     optOutRows = [{ id: "legacy-opt-out", contact_hash: legacy, hash_algorithm: "sha256", hash_key_version: null }];
     const result = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
     expect(result.reason).toBe("opt_out");
@@ -237,7 +246,8 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
   });
 
   test("legacy SHA communication history still enforces the frequency cap", async () => {
-    const legacy = await hashLegacyCanonicalContact(base.contact);
+    const legacy = "b390966e34771a9c5b8a8d1f0039519f7de0c6212fd8906ff0e5c56c4d84024c";
+    hashMetadata.communications = [{ hash_algorithm: "sha256", hash_key_version: null }];
     sentRows = [
       { id: "legacy-1", contact_hash: legacy, hash_algorithm: "sha256" },
       { id: "legacy-2", contact_hash: legacy, hash_algorithm: "sha256" },
@@ -260,6 +270,7 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
       expect(identity.algorithm).toBe("hmac-sha256");
       expect(identity.keyVersion).toBe(2);
       const old = await contactHash(base.contact, 1);
+      hashMetadata.contact_opt_outs = [{ hash_algorithm: "hmac-sha256", hash_key_version: 1 }];
       optOutRows = [{ id: "v1-opt-out", contact_hash: old, hash_algorithm: "hmac-sha256", hash_key_version: 1 }];
       const result = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
       expect(result.reason).toBe("opt_out");
@@ -269,6 +280,13 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
       if (originalVersion === undefined) delete process.env.CONTACT_HASH_KEY_VERSION; else process.env.CONTACT_HASH_KEY_VERSION = originalVersion;
       if (originalKeyring === undefined) delete process.env.CONTACT_HASH_KEYRING; else process.env.CONTACT_HASH_KEYRING = originalKeyring;
     }
+  });
+
+  test("missing historical HMAC key fails closed instead of erasing authority", async () => {
+    hashMetadata.contact_opt_outs = [{ hash_algorithm: "hmac-sha256", hash_key_version: 2 }];
+    const result = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe("contact_hash_history_key_unavailable");
   });
 });
 

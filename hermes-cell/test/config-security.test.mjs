@@ -12,6 +12,9 @@ const health = path.join(repoRoot, "hermes-cell/health-state.sh");
 const tenantCompose = path.join(repoRoot, "hermes-cell/tenant-compose.mjs");
 const tenantIdentity = path.join(repoRoot, "hermes-cell/tenant-identity.mjs");
 const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de";
+const TENANT_A = "11111111-1111-4111-8111-111111111111";
+const TENANT_B = "22222222-2222-4222-8222-222222222222";
+const TENANT_C = "33333333-3333-4333-8333-333333333333";
 
 test("repository Hermes config is OAuth-only with separate cognitive and model-auth volumes", () => {
   const result = spawnSync(process.execPath, [validator, "--root", repoRoot, "--json"], {
@@ -33,12 +36,13 @@ test("repository Hermes config is OAuth-only with separate cognitive and model-a
 
 test("normal tenant launcher gives two tenants isolated project, volumes, paths, backup identity, and route", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-tenant-compose-"));
-  const launch = (tenant) => {
+  const launch = (tenantId, tenantSlug) => {
     const result = spawnSync(process.execPath, [tenantCompose, "--print-runtime"], {
       encoding: "utf8",
       env: {
         ...process.env,
-        TENANT_SLUG: tenant,
+        TENANT_ID: tenantId,
+        TENANT_SLUG: tenantSlug,
         HERMES_API_KEY: "synthetic-local-key",
         HERMES_IMAGE: IMAGE,
         LIGOU_TENANT_REGISTRY: path.join(fixture, "registry.json"),
@@ -49,8 +53,8 @@ test("normal tenant launcher gives two tenants isolated project, volumes, paths,
     return JSON.parse(result.stdout);
   };
   try {
-    const alpha = launch("alpha-plumbing");
-    const beta = launch("beta-plumbing");
+    const alpha = launch(TENANT_A, "alpha-plumbing");
+    const beta = launch(TENANT_B, "beta-plumbing");
     for (const field of [
       "compose_project", "container_name", "cognitive_volume", "model_auth_volume", "network", "host_port",
       "hermes_url", "projected_rules_path", "backup_work_dir", "restore_work_dir", "archive_prefix",
@@ -68,8 +72,8 @@ test("locked persistent registry resolves a forced preferred-port collision with
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-tenant-registry-"));
   const registry = path.join(fixture, "registry.json");
   const stateRoot = path.join(fixture, "tenants");
-  const resolve = (tenant) => new Promise((resolveResult) => {
-    const child = spawn(process.execPath, [tenantIdentity, "--tenant", tenant, "--json"], {
+  const resolve = (tenantId, tenantSlug) => new Promise((resolveResult) => {
+    const child = spawn(process.execPath, [tenantIdentity, "--tenant-id", tenantId, "--tenant-slug", tenantSlug, "--json"], {
       env: {
         ...process.env,
         LIGOU_TENANT_REGISTRY: registry,
@@ -85,18 +89,18 @@ test("locked persistent registry resolves a forced preferred-port collision with
     child.once("close", (status) => resolveResult({ status, stdout, stderr }));
   });
   try {
-    const [alphaResult, betaResult] = await Promise.all([resolve("alpha-plumbing"), resolve("beta-plumbing")]);
+    const [alphaResult, betaResult] = await Promise.all([resolve(TENANT_A, "alpha-plumbing"), resolve(TENANT_C, "gamma-plumbing")]);
     assert.equal(alphaResult.status, 0, alphaResult.stderr);
     assert.equal(betaResult.status, 0, betaResult.stderr);
     const alpha = JSON.parse(alphaResult.stdout);
     const beta = JSON.parse(betaResult.stdout);
     assert.equal(alpha.preferred_host_port, beta.preferred_host_port, "fixture tenants must exercise collision resolution");
     assert.notEqual(alpha.host_port, beta.host_port);
-    const alphaAgain = await resolve("alpha-plumbing");
+    const alphaAgain = await resolve(TENANT_A, "alpha-plumbing");
     assert.equal(alphaAgain.status, 0, alphaAgain.stderr);
     assert.equal(JSON.parse(alphaAgain.stdout).host_port, alpha.host_port, "assignment must persist across resolver processes");
     const stored = JSON.parse(await readFile(registry, "utf8"));
-    assert.deepEqual(Object.keys(stored.tenants).sort(), ["alpha-plumbing", "beta-plumbing"]);
+    assert.deepEqual(Object.keys(stored.tenants).sort(), [TENANT_A, TENANT_C]);
     await assert.rejects(readFile(`${registry}.lock`, "utf8"));
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -111,24 +115,61 @@ test("locked registry atomically activates one tenant staged cognitive volume wi
     LIGOU_TENANT_REGISTRY: registry,
     LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
   };
-  const resolve = (tenant) => spawnSync(process.execPath, [tenantIdentity, "--tenant", tenant, "--json"], { encoding: "utf8", env });
+  const resolve = (tenantId, tenantSlug) => spawnSync(process.execPath, [tenantIdentity,
+    "--tenant-id", tenantId, "--tenant-slug", tenantSlug, "--json"], { encoding: "utf8", env });
   try {
-    const alphaBefore = JSON.parse(resolve("alpha-plumbing").stdout);
-    const betaBefore = JSON.parse(resolve("beta-plumbing").stdout);
+    const alphaBefore = JSON.parse(resolve(TENANT_A, "alpha-plumbing").stdout);
+    const betaBefore = JSON.parse(resolve(TENANT_B, "beta-plumbing").stdout);
     const staged = `${alphaBefore.cognitive_volume}-stage-${"a".repeat(64)}`;
-    const activated = spawnSync(process.execPath, [tenantIdentity, "--tenant", "alpha-plumbing",
+    const activated = spawnSync(process.execPath, [tenantIdentity, "--tenant-id", TENANT_A, "--tenant-slug", "alpha-plumbing",
       "--activate-cognitive", staged, "--expected", alphaBefore.cognitive_volume, "--json"], { encoding: "utf8", env });
     assert.equal(activated.status, 0, activated.stderr);
     assert.equal(JSON.parse(activated.stdout).cognitive_volume, staged);
-    assert.equal(JSON.parse(resolve("alpha-plumbing").stdout).cognitive_volume, staged);
-    assert.equal(JSON.parse(resolve("beta-plumbing").stdout).cognitive_volume, betaBefore.cognitive_volume);
+    assert.equal(JSON.parse(resolve(TENANT_A, "alpha-plumbing").stdout).cognitive_volume, staged);
+    assert.equal(JSON.parse(resolve(TENANT_B, "beta-plumbing").stdout).cognitive_volume, betaBefore.cognitive_volume);
 
-    const stale = spawnSync(process.execPath, [tenantIdentity, "--tenant", "alpha-plumbing",
+    const stale = spawnSync(process.execPath, [tenantIdentity, "--tenant-id", TENANT_A, "--tenant-slug", "alpha-plumbing",
       "--activate-cognitive", `${alphaBefore.cognitive_volume}-stage-${"b".repeat(64)}`,
       "--expected", alphaBefore.cognitive_volume, "--json"], { encoding: "utf8", env });
     assert.notEqual(stale.status, 0);
     assert.match(stale.stderr, /tenant_cognitive_compare_failed/);
-    assert.equal(JSON.parse(resolve("alpha-plumbing").stdout).cognitive_volume, staged);
+    assert.equal(JSON.parse(resolve(TENANT_A, "alpha-plumbing").stdout).cognitive_volume, staged);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("immutable tenant UUID owns every resource while display slug must match exactly", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-tenant-uuid-"));
+  const env = {
+    ...process.env,
+    LIGOU_TENANT_REGISTRY: path.join(fixture, "registry.json"),
+    LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
+  };
+  const resolve = (id, slug) => spawnSync(process.execPath, [tenantIdentity,
+    "--tenant-id", id, "--tenant-slug", slug, "--json"], { encoding: "utf8", env });
+  try {
+    const valid = resolve(TENANT_A, "shared-slug");
+    assert.equal(valid.status, 0, valid.stderr);
+    const identity = JSON.parse(valid.stdout);
+    assert.equal(identity.tenant_id, TENANT_A);
+    assert.equal(identity.tenant_slug, "shared-slug");
+    for (const field of [
+      "compose_project", "container_name", "cognitive_volume", "model_auth_volume", "network",
+      "tenant_root", "projected_rules_path", "backup_work_dir", "restore_work_dir", "archive_prefix",
+    ]) {
+      assert.match(identity[field], new RegExp(TENANT_A));
+      assert.doesNotMatch(identity[field], /shared-slug/);
+    }
+
+    const reusedSlug = resolve(TENANT_B, "shared-slug");
+    assert.notEqual(reusedSlug.status, 0);
+    assert.match(reusedSlug.stderr, /tenant_slug_reused/);
+    const changedSlug = resolve(TENANT_A, "changed-slug");
+    assert.notEqual(changedSlug.status, 0);
+    assert.match(changedSlug.stderr, /tenant_slug_mismatch/);
+    const stored = JSON.parse(await readFile(env.LIGOU_TENANT_REGISTRY, "utf8"));
+    assert.deepEqual(Object.keys(stored.tenants), [TENANT_A]);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -162,6 +203,7 @@ test("normal tenant launcher rejects an unapproved immutable image before Docker
       env: {
         ...process.env,
         TENANT_SLUG: "test-tenant",
+        TENANT_ID: TENANT_A,
         HERMES_API_KEY: "synthetic-local-key",
         HERMES_IMAGE: "example.invalid/hermes@sha256:" + "f".repeat(64),
         LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
@@ -216,7 +258,7 @@ test("token-free health wrapper returns state only and never forwards or prints 
       encoding: "utf8",
       env: {
         PATH: `${bin}:/usr/bin:/bin`,
-        TENANT_SLUG: "test-tenant",
+        TENANT_SLUG: "test-tenant", TENANT_ID: TENANT_A,
         LIGOU_NODE_BIN: process.execPath,
         LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
         LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
@@ -251,8 +293,10 @@ test("token-free health rejects negative and malformed auth prose", async () => 
       const result = spawnSync("bash", [health], {
         encoding: "utf8",
         env: {
-          PATH: `${bin}:/usr/bin:/bin`, TENANT_SLUG: "test-tenant", AUTH_PAYLOAD: payload,
+          PATH: `${bin}:/usr/bin:/bin`, TENANT_ID: TENANT_A, TENANT_SLUG: "test-tenant", AUTH_PAYLOAD: payload,
           HERMES_HEALTH_URL: "http://127.0.0.1:28642/health", LIGOU_NODE_BIN: process.execPath,
+          LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
+          LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
         },
       });
       assert.notEqual(result.status, 0, payload);

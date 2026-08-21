@@ -12,7 +12,8 @@ const archiveTool = path.join(repoRoot, "infra/archive-safety.mjs");
 const restoreScript = path.join(repoRoot, "infra/restore.sh");
 const backupScript = path.join(repoRoot, "infra/backup.sh");
 const KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
-const TENANT = "test-tenant";
+const TENANT = "11111111-1111-4111-8111-111111111111";
+const TENANT_SLUG = "test-tenant";
 const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de";
 
 function run(command, args, options = {}) {
@@ -147,7 +148,7 @@ test("missing/tampered manifest and tampered archive are rejected before restore
 
     const missing = run("bash", [restoreScript, "--archive", archive, "--manifest", `${manifest}.missing`], {
       env: {
-        PATH: "/usr/bin:/bin", TENANT_SLUG: TENANT, HERMES_IMAGE: IMAGE,
+        PATH: "/usr/bin:/bin", TENANT_ID: TENANT, TENANT_SLUG, HERMES_IMAGE: IMAGE,
         LIGOU_BACKUP_MANIFEST_KEY: KEY, LIGOU_NODE_BIN: process.execPath,
         LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
         LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
@@ -314,7 +315,8 @@ test("backup script creates and uploads only the cognitive archive plus authenti
     const result = run("bash", [backupScript], {
       env: {
         PATH: `${bin}:/usr/bin:/bin`,
-        TENANT_SLUG: TENANT,
+        TENANT_ID: TENANT,
+        TENANT_SLUG,
         LIGOU_BACKUP_BUCKET: "unit-backups",
         LIGOU_BACKUP_SOURCE_ID: "ec2:i-test",
         LIGOU_BACKUP_MANIFEST_KEY: KEY,
@@ -342,7 +344,7 @@ test("backup script creates and uploads only the cognitive archive plus authenti
     assert.equal(verified.status, 0, verified.stderr);
     const uploads = await readFile(awsLog, "utf8");
     assert.equal(uploads.split("\n").filter((line) => line.includes("s3 cp")).length, 2);
-    assert.match(uploads, /cells\/test-tenant\/hermes-test-tenant-/);
+    assert.match(uploads, new RegExp(`cells/${TENANT}/hermes-${TENANT}-`));
     assert.match(uploads, /[.]zip[.]manifest[.]json/);
     assert.doesNotMatch(await readFile(dockerLog, "utf8"), /model-auth|auth[.]json|[.]env/);
   } finally {
@@ -371,7 +373,8 @@ function restoreEnv(fixture, bin, extra = {}) {
     TMPDIR: path.join(fixture, "tmp"),
     LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
     LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
-    TENANT_SLUG: TENANT,
+    TENANT_ID: TENANT,
+    TENANT_SLUG,
     LIGOU_BACKUP_MANIFEST_KEY: KEY,
     LIGOU_NODE_BIN: process.execPath,
     HERMES_IMAGE: IMAGE,
@@ -401,7 +404,7 @@ test("restore imports into a disposable no-network/no-auth volume and runs all s
     assert.match(log, /skills list --json/);
     assert.match(log, /sessions list --json/);
     assert.match(log, /test ! -e \/root\/\.hermes\/auth\.json/);
-    assert.match(log, /rm -f hermes-test-tenant-restore-check-/);
+    assert.match(log, new RegExp(`rm -f hermes-${TENANT}-restore-check-`));
     assert.match(log, /volume rm/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -422,7 +425,7 @@ test("disposable smoke failure never reaches the live cell", async () => {
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /disposable_smoke_failed/);
     const log = await readFile(path.join(fixture, "docker.log"), "utf8");
-    assert.doesNotMatch(log, /ligou-cell-test-tenant hermes backup|ligou-cell-test-tenant hermes import/);
+    assert.doesNotMatch(log, new RegExp(`ligou-cell-${TENANT} hermes (?:backup|import)`));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -441,9 +444,9 @@ test("apply promotes a validated tenant-staged volume without importing into the
     const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env });
     assert.equal(result.status, 0, result.stderr);
     const log = await readFile(path.join(fixture, "docker.log"), "utf8");
-    assert.doesNotMatch(log, /ligou-cell-test-tenant hermes (?:backup|import)/);
-    assert.match(log, /compose --project-name ligou-test-tenant .* up -d --force-recreate/);
-    const staged = `ligou-test-tenant-hermes-cognitive-stage-${archiveId}`;
+    assert.doesNotMatch(log, new RegExp(`ligou-cell-${TENANT} hermes (?:backup|import)`));
+    assert.match(log, new RegExp(`compose --project-name ligou-${TENANT} .* up -d --force-recreate`));
+    const staged = `ligou-${TENANT}-hermes-cognitive-stage-${archiveId}`;
     assert.match(log, new RegExp(`source=${staged},target=/opt/data`));
     assert.doesNotMatch(log, new RegExp(`volume rm ${staged}`));
     const registry = JSON.parse(await readFile(env.LIGOU_TENANT_REGISTRY, "utf8"));
@@ -467,10 +470,10 @@ test("live health failure labels rollback applied only after recovered live smok
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /restore_health_failed_rollback_applied/);
     const log = await readFile(path.join(fixture, "docker.log"), "utf8");
-    assert.doesNotMatch(log, /ligou-cell-test-tenant hermes (?:backup|import)/);
-    assert.equal(log.split("\n").filter((line) => line.includes("compose --project-name ligou-test-tenant")).length, 2);
+    assert.doesNotMatch(log, new RegExp(`ligou-cell-${TENANT} hermes (?:backup|import)`));
+    assert.equal(log.split("\n").filter((line) => line.includes(`compose --project-name ligou-${TENANT}`)).length, 2);
     const registry = JSON.parse(await readFile(path.join(fixture, "tenant-registry.json"), "utf8"));
-    assert.equal(registry.tenants[TENANT].cognitive_volume, "ligou-test-tenant-hermes-cognitive");
+    assert.equal(registry.tenants[TENANT].cognitive_volume, `ligou-${TENANT}-hermes-cognitive`);
     const curlCalls = (await readFile(path.join(fixture, "curl.log"), "utf8")).trim().split("\n");
     assert.equal(curlCalls.length, 2, "new state and recovered rollback must each pass a live probe");
   } finally {
@@ -515,13 +518,56 @@ for (const boundary of ["registry_promotion", "container_recreate", "live_smoke"
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /restore_interrupted_rollback_applied/);
       const registry = JSON.parse(await readFile(env.LIGOU_TENANT_REGISTRY, "utf8"));
-      assert.equal(registry.tenants[TENANT].cognitive_volume, "ligou-test-tenant-hermes-cognitive");
+      assert.equal(registry.tenants[TENANT].cognitive_volume, `ligou-${TENANT}-hermes-cognitive`);
       const log = await readFile(path.join(fixture, "docker.log"), "utf8");
-      assert.match(log, /compose --project-name ligou-test-tenant/);
-      assert.match(log, /inspect --format .* ligou-cell-test-tenant/);
-      assert.match(log, new RegExp(`volume rm ligou-test-tenant-hermes-cognitive-stage-${archiveId}`));
+      assert.match(log, new RegExp(`compose --project-name ligou-${TENANT}`));
+      assert.match(log, new RegExp(`inspect --format .* ligou-cell-${TENANT}`));
+      assert.match(log, new RegExp(`volume rm ligou-${TENANT}-hermes-cognitive-stage-${archiveId}`));
     } finally {
       await rm(fixture, { recursive: true, force: true });
     }
   });
 }
+
+test("interrupt before registry CAS leaves old identity active and removes only the unused stage", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-interrupt-before-cas-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture);
+    const manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const archiveId = JSON.parse(await readFile(manifest, "utf8")).archive.id;
+    const bin = await stubCommands(fixture);
+    const env = restoreEnv(fixture, bin, { LIGOU_RESTORE_TEST_HARNESS: "1", LIGOU_RESTORE_TEST_INTERRUPT_AFTER: "before_cas" });
+    const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /restore_interrupted_no_promotion/);
+    const registry = JSON.parse(await readFile(env.LIGOU_TENANT_REGISTRY, "utf8"));
+    assert.equal(registry.tenants[TENANT].cognitive_volume, `ligou-${TENANT}-hermes-cognitive`);
+    const log = await readFile(path.join(fixture, "docker.log"), "utf8");
+    assert.match(log, new RegExp(`volume rm ligou-${TENANT}-hermes-cognitive-stage-${archiveId}`));
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+});
+
+test("failed promotion CAS leaves retryable old identity and never deletes an active stage", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-failed-cas-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture);
+    const manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const bin = await stubCommands(fixture);
+    const baseEnv = restoreEnv(fixture, bin, { LIGOU_RESTORE_TEST_HARNESS: "1" });
+    const failed = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], {
+      env: { ...baseEnv, LIGOU_RESTORE_TEST_FAIL_CAS: "1" },
+    });
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /restore_stage_activation_failed/);
+    let registry = JSON.parse(await readFile(baseEnv.LIGOU_TENANT_REGISTRY, "utf8"));
+    assert.equal(registry.tenants[TENANT].cognitive_volume, `ligou-${TENANT}-hermes-cognitive`);
+    const retry = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env: baseEnv });
+    assert.equal(retry.status, 0, retry.stderr);
+    registry = JSON.parse(await readFile(baseEnv.LIGOU_TENANT_REGISTRY, "utf8"));
+    assert.match(registry.tenants[TENANT].cognitive_volume, /-stage-[a-f0-9]{64}$/);
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+});

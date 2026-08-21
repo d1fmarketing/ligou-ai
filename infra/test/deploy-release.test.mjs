@@ -491,11 +491,16 @@ test("release health performs controller, safe Supabase read, and token-free Her
       "SUPABASE_URL='https://unit.invalid'",
       "SUPABASE_PUBLISHABLE_KEY='synthetic-publishable'",
       "TENANT_SLUG='test-tenant'",
+      "TENANT_ID='11111111-1111-4111-8111-111111111111'",
       "PORT='8790'",
       "HERMES_HEALTH_URL='http://127.0.0.1:28642/health'",
     ].join("\n"));
     const result = run("bash", [healthTool], {
-      env: { PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile, CURL_LOG: curlLog, LIGOU_NODE_BIN: process.execPath },
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile, CURL_LOG: curlLog, LIGOU_NODE_BIN: process.execPath,
+        LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
+        LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
+      },
     });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), '{"ok":true,"controller":"ready","supabase":"ready","hermes":"ready"}');
@@ -522,9 +527,16 @@ test("release health rejects a controller that is up without its voice credentia
     await writeFile(envFile, [
       "SUPABASE_URL='https://unit.invalid'", "SUPABASE_PUBLISHABLE_KEY='synthetic-publishable'",
       "TENANT_SLUG='test-tenant'", "PORT='8790'",
+      "TENANT_ID='11111111-1111-4111-8111-111111111111'",
       "HERMES_HEALTH_URL='http://127.0.0.1:28642/health'",
     ].join("\n"));
-    const result = run("bash", [healthTool], { env: { PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile, LIGOU_NODE_BIN: process.execPath } });
+    const result = run("bash", [healthTool], {
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile, LIGOU_NODE_BIN: process.execPath,
+        LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
+        LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
+      },
+    });
     assert.notEqual(result.status, 0);
     assert.match(result.stdout, /"controller":"unavailable"/);
   } finally {
