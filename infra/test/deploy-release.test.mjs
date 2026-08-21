@@ -482,18 +482,18 @@ test("release health performs controller, safe Supabase read, and token-free Her
     const bin = path.join(fixture, "bin");
     const curlLog = path.join(fixture, "curl.log");
     await mkdir(bin);
-    await writeFile(path.join(bin, "curl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\ncase "$*" in\n  *'127.0.0.1:8790/health'*) printf '%s\\n' '{"ok":true,"openai":true}' ;;\n  *'/rest/v1/tenants'*) printf '%s\\n' '[]' ;;\n  *) printf '%s\\n' '{"ok":true}' ;;\nesac\n`);
-    await writeFile(path.join(bin, "docker"), "#!/bin/sh\nprintf '%s\\n' '{\"provider\":\"openai-codex\",\"authenticated\":true}'\n");
+    await writeFile(path.join(bin, "curl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\ncase "$*" in\n  *'127.0.0.1:8790/health'*) printf '%s\\n' '{"ok":true,"openai":true}' ;;\n  *'/rest/v1/rpc/release_health_state'*) printf '%s\\n' '{"ok":true,"tenant_id":"11111111-1111-4111-8111-111111111111","tenant_slug":"test-tenant","status":"active"}' ;;\n  *) printf '%s\\n' '{"ok":true}' ;;\nesac\n`);
+    await writeFile(path.join(bin, "docker"), `#!/bin/sh\ncase "$*" in\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-11111111-1111-4111-8111-111111111111","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}' ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]' ;;\n  *'auth status openai-codex'*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\n`);
     await chmod(path.join(bin, "curl"), 0o755);
     await chmod(path.join(bin, "docker"), 0o755);
     const envFile = path.join(fixture, "env");
     await writeFile(envFile, [
       "SUPABASE_URL='https://unit.invalid'",
-      "SUPABASE_PUBLISHABLE_KEY='synthetic-publishable'",
+      "SUPABASE_SECRET_KEY='synthetic-service-secret'",
       "TENANT_SLUG='test-tenant'",
       "TENANT_ID='11111111-1111-4111-8111-111111111111'",
       "PORT='8790'",
-      "HERMES_HEALTH_URL='http://127.0.0.1:28642/health'",
+      `HERMES_IMAGE='${IMAGE}'`,
     ].join("\n"));
     const result = run("bash", [healthTool], {
       env: {
@@ -504,11 +504,12 @@ test("release health performs controller, safe Supabase read, and token-free Her
     });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), '{"ok":true,"controller":"ready","supabase":"ready","hermes":"ready"}');
-    assert.doesNotMatch(result.stdout + result.stderr, /synthetic-publishable|unit[.]invalid|test-tenant/);
+    assert.doesNotMatch(result.stdout + result.stderr, /synthetic-service-secret|unit[.]invalid|test-tenant/);
     const calls = await readFile(curlLog, "utf8");
     assert.match(calls, /127[.]0[.]0[.]1:8790\/health/);
-    assert.match(calls, /https:\/\/unit[.]invalid\/rest\/v1\/tenants/);
-    assert.doesNotMatch(calls, /Authorization:/i);
+    assert.match(calls, /https:\/\/unit[.]invalid\/rest\/v1\/rpc\/release_health_state/);
+    assert.match(calls, /Authorization: Bearer synthetic-service-secret/);
+    assert.doesNotMatch(calls, /synthetic-publishable|\/rest\/v1\/tenants/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -519,16 +520,16 @@ test("release health rejects a controller that is up without its voice credentia
   try {
     const bin = path.join(fixture, "bin");
     await mkdir(bin);
-    await writeFile(path.join(bin, "curl"), `#!/bin/sh\ncase "$*" in\n  *'127.0.0.1:8790/health'*) printf '%s\\n' '{"ok":true,"openai":false}' ;;\n  *'/rest/v1/tenants'*) printf '%s\\n' '[]' ;;\n  *) printf '%s\\n' '{"ok":true}' ;;\nesac\n`);
-    await writeFile(path.join(bin, "docker"), "#!/bin/sh\nprintf '%s\\n' '{\"provider\":\"openai-codex\",\"authenticated\":true}'\n");
+    await writeFile(path.join(bin, "curl"), `#!/bin/sh\ncase "$*" in\n  *'127.0.0.1:8790/health'*) printf '%s\\n' '{"ok":true,"openai":false}' ;;\n  *'/rest/v1/rpc/release_health_state'*) printf '%s\\n' '{"ok":true,"tenant_id":"11111111-1111-4111-8111-111111111111","tenant_slug":"test-tenant","status":"active"}' ;;\n  *) printf '%s\\n' '{"ok":true}' ;;\nesac\n`);
+    await writeFile(path.join(bin, "docker"), `#!/bin/sh\ncase "$*" in\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-11111111-1111-4111-8111-111111111111","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}' ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]' ;;\n  *'auth status openai-codex'*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\n`);
     await chmod(path.join(bin, "curl"), 0o755);
     await chmod(path.join(bin, "docker"), 0o755);
     const envFile = path.join(fixture, "env");
     await writeFile(envFile, [
-      "SUPABASE_URL='https://unit.invalid'", "SUPABASE_PUBLISHABLE_KEY='synthetic-publishable'",
+      "SUPABASE_URL='https://unit.invalid'", "SUPABASE_SECRET_KEY='synthetic-service-secret'",
       "TENANT_SLUG='test-tenant'", "PORT='8790'",
       "TENANT_ID='11111111-1111-4111-8111-111111111111'",
-      "HERMES_HEALTH_URL='http://127.0.0.1:28642/health'",
+      `HERMES_IMAGE='${IMAGE}'`,
     ].join("\n"));
     const result = run("bash", [healthTool], {
       env: {

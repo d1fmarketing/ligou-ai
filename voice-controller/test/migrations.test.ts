@@ -255,6 +255,18 @@ describe("provider termination reconciliation migration contract", () => {
   });
 });
 
+describe("service-role release health migration contract", () => {
+  test("returns only exact sanitized tenant state and rejects every browser role", () => {
+    const sql = migrationSql("release_health_state");
+    expect(sql).toContain("function public.release_health_state(p_tenant uuid, p_slug text)");
+    expect(sql).toContain("auth.role() <> 'service_role'");
+    expect(sql).toContain("t.id = p_tenant and t.slug = p_slug and t.status = 'active'");
+    expect(sql).toContain("jsonb_build_object('ok', true, 'tenant_id', t.id, 'tenant_slug', t.slug, 'status', t.status)");
+    expect(sql).toContain("revoke all on function public.release_health_state(uuid,text) from public, anon, authenticated");
+    expect(sql).toContain("grant execute on function public.release_health_state(uuid,text) to service_role");
+  });
+});
+
 describe("side-effect authority revalidation migration contract", () => {
   test("atomically checks expected epochs plus referenced power/rule before enqueue", () => {
     const sql = migrationSql("authority_side_effect_revalidation");

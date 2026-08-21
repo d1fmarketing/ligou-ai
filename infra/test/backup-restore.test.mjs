@@ -327,7 +327,7 @@ test("backup script creates and uploads only the cognitive archive plus authenti
     await mkdir(legacySharedWork);
     const docker = path.join(bin, "docker");
     const aws = path.join(bin, "aws");
-    await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\nif [ "$1" = inspect ]; then printf '%s\\n' true; exit 0; fi\nif [ "$1" = ps ]; then printf '%s\\n' 'ligou-cell-test-tenant'; exit 0; fi\nif [ "$1" = cp ]; then cp "$STUB_ARCHIVE" "$3"; exit 0; fi\nexit 0\n`);
+    await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-${TENANT}","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}'; exit 0 ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]'; exit 0 ;;\nesac\nif [ "$1" = cp ]; then cp "$STUB_ARCHIVE" "$3"; exit 0; fi\nexit 0\n`);
     await writeFile(aws, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AWS_LOG\"\nexit 0\n");
     await chmod(docker, 0o755);
     await chmod(aws, 0o755);
@@ -372,6 +372,36 @@ test("backup script creates and uploads only the cognitive archive plus authenti
   }
 });
 
+test("backup refuses to create or sign when the actual running Hermes digest mismatches", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-running-image-"));
+  try {
+    const sourceArchive = await makeArchive(fixture);
+    const bin = path.join(fixture, "bin");
+    const stateRoot = path.join(fixture, "tenants");
+    const dockerLog = path.join(fixture, "docker.log");
+    const awsLog = path.join(fixture, "aws.log");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "docker"), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(dockerLog)}\ncase "$*" in\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-${TENANT}","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"b".repeat(64)}","State":{"Running":true}}' ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["example.invalid/hermes@sha256:${"f".repeat(64)}"]' ;;\nesac\n`);
+    await writeFile(path.join(bin, "aws"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AWS_LOG\"\nexit 0\n");
+    await chmod(path.join(bin, "docker"), 0o755);
+    await chmod(path.join(bin, "aws"), 0o755);
+    const result = run("bash", [backupScript], { env: {
+      PATH: `${bin}:/usr/bin:/bin`, TENANT_ID: TENANT, TENANT_SLUG,
+      LIGOU_BACKUP_BUCKET: "unit-backups", LIGOU_BACKUP_SOURCE_ID: "ec2:i-test",
+      LIGOU_BACKUP_MANIFEST_KEY: KEY, HERMES_IMAGE: IMAGE,
+      LIGOU_TENANT_STATE_ROOT: stateRoot,
+      LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
+      LIGOU_NODE_BIN: process.execPath, DOCKER_LOG: dockerLog, AWS_LOG: awsLog, STUB_ARCHIVE: sourceArchive,
+    } });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /running_image_mismatch/);
+    assert.doesNotMatch(await readFile(dockerLog, "utf8"), /hermes backup/);
+    await assert.rejects(readFile(awsLog, "utf8"), { code: "ENOENT" });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 async function stubCommands(fixture) {
   const bin = path.join(fixture, "bin");
   await mkdir(bin, { recursive: true });
@@ -379,7 +409,7 @@ async function stubCommands(fixture) {
   const curl = path.join(bin, "curl");
   const aws = path.join(bin, "aws");
   const sleep = path.join(bin, "sleep");
-  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"volume inspect"*) if [ -n "\${STAGE_EXISTS_ONCE_MARKER:-}" ] && [ ! -e "$STAGE_EXISTS_ONCE_MARKER" ]; then : > "$STAGE_EXISTS_ONCE_MARKER"; exit 0; fi; exit 1 ;;\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\nif [ -n "\${HOLD_IMPORT_READY:-}" ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'hermes import'; then\n  : > "$HOLD_IMPORT_READY"\n  while [ ! -e "$HOLD_IMPORT_RELEASE" ]; do /bin/sleep 0.02; done\nfi\nif [ "\${FAIL_DISPOSABLE_IMPORT:-0}" = 1 ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'hermes import'; then exit 1; fi\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
+  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"volume inspect"*) if [ -n "\${STAGE_EXISTS_ONCE_MARKER:-}" ] && [ ! -e "$STAGE_EXISTS_ONCE_MARKER" ]; then : > "$STAGE_EXISTS_ONCE_MARKER"; exit 0; fi; exit 1 ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]' ;;\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-${TENANT}","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}' ;;\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\nif [ -n "\${HOLD_IMPORT_READY:-}" ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'hermes import'; then\n  : > "$HOLD_IMPORT_READY"\n  while [ ! -e "$HOLD_IMPORT_RELEASE" ]; do /bin/sleep 0.02; done\nfi\nif [ "\${FAIL_DISPOSABLE_IMPORT:-0}" = 1 ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'hermes import'; then exit 1; fi\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
   await writeFile(curl, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\nif [ "\${CURL_MODE:-ok}" = fail ]; then printf '%s\\n' '{"ok":false}'; elif [ -n "\${CURL_FAIL_ONCE_MARKER:-}" ] && [ ! -e "$CURL_FAIL_ONCE_MARKER" ]; then : > "$CURL_FAIL_ONCE_MARKER"; printf '%s\\n' '{"ok":false}'; else printf '%s\\n' '{"ok":true}'; fi\n`);
   await writeFile(aws, "#!/bin/sh\nprintf '%s\\n' 'unexpected aws call' >&2\nexit 99\n");
   await writeFile(sleep, "#!/bin/sh\nexit 0\n");

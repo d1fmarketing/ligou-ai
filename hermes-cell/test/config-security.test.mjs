@@ -249,7 +249,7 @@ test("token-free health wrapper returns state only and never forwards or prints 
     await mkdir(bin);
     const docker = path.join(bin, "docker");
     const curl = path.join(bin, "curl");
-    await writeFile(docker, "#!/bin/sh\nprintf '%s\\n' \"${AUTH_PAYLOAD:-{\\\"provider\\\":\\\"openai-codex\\\",\\\"authenticated\\\":true,\\\"access_token\\\":\\\"sensitive-oauth-token\\\"}}\"\n");
+    await writeFile(docker, `#!/bin/sh\ncase "$*" in\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-${TENANT_A}","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}' ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]' ;;\n  *'auth status openai-codex'*) printf '%s\\n' "\${AUTH_PAYLOAD:-{\\\"provider\\\":\\\"openai-codex\\\",\\\"authenticated\\\":true,\\\"access_token\\\":\\\"sensitive-oauth-token\\\"}}" ;;\nesac\n`);
     await writeFile(curl, `#!/bin/sh\nprintf '%s\\n' "$*" > ${JSON.stringify(curlLog)}\nprintf '%s\\n' '{"ok":true,"model":"private-model-detail"}'\n`);
     await chmod(docker, 0o755);
     await chmod(curl, 0o755);
@@ -259,6 +259,7 @@ test("token-free health wrapper returns state only and never forwards or prints 
       env: {
         PATH: `${bin}:/usr/bin:/bin`,
         TENANT_SLUG: "test-tenant", TENANT_ID: TENANT_A,
+        HERMES_IMAGE: IMAGE,
         LIGOU_NODE_BIN: process.execPath,
         LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
         LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
@@ -278,7 +279,7 @@ test("token-free health rejects negative and malformed auth prose", async () => 
   const bin = path.join(fixture, "bin");
   try {
     await mkdir(bin);
-    await writeFile(path.join(bin, "docker"), "#!/bin/sh\nprintf '%s\\n' \"$AUTH_PAYLOAD\"\n");
+    await writeFile(path.join(bin, "docker"), `#!/bin/sh\ncase "$*" in\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-${TENANT_A}","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}' ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]' ;;\n  *'auth status openai-codex'*) printf '%s\\n' "$AUTH_PAYLOAD" ;;\nesac\n`);
     await writeFile(path.join(bin, "curl"), "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true}'\n");
     await chmod(path.join(bin, "docker"), 0o755);
     await chmod(path.join(bin, "curl"), 0o755);
@@ -294,7 +295,7 @@ test("token-free health rejects negative and malformed auth prose", async () => 
         encoding: "utf8",
         env: {
           PATH: `${bin}:/usr/bin:/bin`, TENANT_ID: TENANT_A, TENANT_SLUG: "test-tenant", AUTH_PAYLOAD: payload,
-          HERMES_HEALTH_URL: "http://127.0.0.1:28642/health", LIGOU_NODE_BIN: process.execPath,
+          HERMES_IMAGE: IMAGE, LIGOU_NODE_BIN: process.execPath,
           LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
           LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
         },
@@ -302,6 +303,49 @@ test("token-free health rejects negative and malformed auth prose", async () => 
       assert.notEqual(result.status, 0, payload);
       assert.match(result.stdout, /"auth":"unavailable"/);
     }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("tenant health rejects route overrides, nested success text, and running image mismatches", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-hermes-health-binding-"));
+  const bin = path.join(fixture, "bin");
+  const curlLog = path.join(fixture, "curl.log");
+  try {
+    await mkdir(bin);
+    const writeDocker = async (repoDigest) => {
+      await writeFile(path.join(bin, "docker"), `#!/bin/sh\ncase "$*" in\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-${TENANT_A}","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}' ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${repoDigest}"]' ;;\n  *'auth status openai-codex'*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\n`);
+      await chmod(path.join(bin, "docker"), 0o755);
+    };
+    await writeDocker(IMAGE);
+    await writeFile(path.join(bin, "curl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\nprintf '%s\\n' "$API_PAYLOAD"\n`);
+    await chmod(path.join(bin, "curl"), 0o755);
+    const identity = {
+      PATH: `${bin}:/usr/bin:/bin`, TENANT_ID: TENANT_A, TENANT_SLUG: "test-tenant",
+      HERMES_IMAGE: IMAGE, LIGOU_NODE_BIN: process.execPath,
+      LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
+      LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
+      CURL_LOG: curlLog,
+      API_PAYLOAD: JSON.stringify({ ok: true }),
+    };
+
+    const override = spawnSync("bash", [health], {
+      encoding: "utf8", env: { ...identity, HERMES_HEALTH_URL: "https://attacker.invalid/health" },
+    });
+    assert.notEqual(override.status, 0);
+    assert.match(override.stdout + override.stderr, /health_route_mismatch/);
+
+    const nested = spawnSync("bash", [health], {
+      encoding: "utf8", env: { ...identity, API_PAYLOAD: JSON.stringify({ nested: { ok: true } }) },
+    });
+    assert.notEqual(nested.status, 0);
+    assert.match(nested.stdout, /"api":"unavailable"/);
+
+    await writeDocker(`example.invalid/hermes@sha256:${"f".repeat(64)}`);
+    const mismatch = spawnSync("bash", [health], { encoding: "utf8", env: identity });
+    assert.notEqual(mismatch.status, 0);
+    assert.match(mismatch.stdout + mismatch.stderr, /running_image_mismatch/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

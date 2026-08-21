@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NODE_BIN="${LIGOU_NODE_BIN:-node}"
 MANIFEST_TOOL="${ROOT}/infra/backup-manifest.mjs"
 IDENTITY_TOOL="${ROOT}/hermes-cell/tenant-identity.mjs"
+IMAGE_TOOL="${ROOT}/hermes-cell/verify-running-image.mjs"
 TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
 TENANT_ID="${TENANT_ID:?set TENANT_ID}"
 BUCKET="${LIGOU_BACKUP_BUCKET:?set LIGOU_BACKUP_BUCKET}"
@@ -39,8 +40,7 @@ LOCAL_ARCHIVE="${WORK}/${NAME}"
 LOCAL_MANIFEST="${WORK}/${MANIFEST_NAME}"
 
 mkdir -p "$WORK"
-RUNNING="$(docker inspect --format '{{.State.Running}}' "$CELL" 2>/dev/null || true)"
-[ "$RUNNING" = "true" ] || { echo "backup_cell_unavailable" >&2; exit 1; }
+"$NODE_BIN" "$IMAGE_TOOL" --container "$CELL" --expected "$IMAGE" >/dev/null
 
 cleanup_remote() {
   docker exec "$CELL" rm -f "$REMOTE_ARCHIVE" >/dev/null 2>&1 || true

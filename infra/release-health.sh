@@ -23,22 +23,25 @@ HERMES_STATE=unavailable
 if [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] \
   && [[ "$TENANT_ID" =~ ^[a-f0-9-]{36}$ ]] && [[ "$PORT" =~ ^[0-9]{2,5}$ ]]; then
   CONTROLLER_RAW="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/health" 2>/dev/null || true)"
-  if printf '%s' "$CONTROLLER_RAW" | grep -Eqi '"ok"[[:space:]]*:[[:space:]]*true' \
-    && printf '%s' "$CONTROLLER_RAW" | grep -Eqi '"openai"[[:space:]]*:[[:space:]]*true'; then
+  if printf '%s' "$CONTROLLER_RAW" | "${LIGOU_NODE_BIN:-node}" -e '
+let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{try{const v=JSON.parse(raw);process.exit(v&&!Array.isArray(v)&&typeof v==="object"&&v.ok===true&&v.openai===true?0:1)}catch{process.exit(1)}});'; then
     CONTROLLER_STATE=ready
   fi
 
-  if [[ "${SUPABASE_URL:-}" =~ ^https://[A-Za-z0-9.-]+/?$ ]] && [ -n "${SUPABASE_PUBLISHABLE_KEY:-}" ]; then
+  if [[ "${SUPABASE_URL:-}" =~ ^https://[A-Za-z0-9.-]+/?$ ]] && [ -n "${SUPABASE_SECRET_KEY:-}" ]; then
     SUPABASE_RAW="$(curl -fsS --max-time 5 \
-      "${SUPABASE_URL%/}/rest/v1/tenants?select=id&limit=1" \
-      -H "apikey: ${SUPABASE_PUBLISHABLE_KEY}" \
-      -H 'Accept: application/json' 2>/dev/null || true)"
-    if printf '%s' "$SUPABASE_RAW" | grep -Eq '^[[:space:]]*\['; then
+      -X POST "${SUPABASE_URL%/}/rest/v1/rpc/release_health_state" \
+      -H "apikey: ${SUPABASE_SECRET_KEY}" \
+      -H "Authorization: Bearer ${SUPABASE_SECRET_KEY}" \
+      -H 'Content-Type: application/json' \
+      --data "{\"p_tenant\":\"${TENANT_ID}\",\"p_slug\":\"${TENANT}\"}" 2>/dev/null || true)"
+    if printf '%s' "$SUPABASE_RAW" | "${LIGOU_NODE_BIN:-node}" -e '
+let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{try{const v=JSON.parse(raw),id=process.argv[1],slug=process.argv[2];const keys=Object.keys(v||{}).sort().join(",");process.exit(keys==="ok,status,tenant_id,tenant_slug"&&v.ok===true&&v.status==="active"&&v.tenant_id===id&&v.tenant_slug===slug?0:1)}catch{process.exit(1)}});' "$TENANT_ID" "$TENANT"; then
       SUPABASE_STATE=ready
     fi
   fi
 
-  if TENANT_ID="$TENANT_ID" TENANT_SLUG="$TENANT" HERMES_HEALTH_URL="${HERMES_HEALTH_URL:-${HERMES_URL:-}}" \
+  if TENANT_ID="$TENANT_ID" TENANT_SLUG="$TENANT" HERMES_IMAGE="${HERMES_IMAGE:-}" HERMES_HEALTH_URL="${HERMES_HEALTH_URL:-}" \
     "${ROOT}/hermes-cell/health-state.sh" >/dev/null 2>&1; then
     HERMES_STATE=ready
   fi

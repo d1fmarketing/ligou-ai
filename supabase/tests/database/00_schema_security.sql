@@ -96,6 +96,7 @@ select extensions.ok(
       ('provision_tenant_owner(uuid,uuid)'),
       ('purge_ephemeral_call_data(timestamp with time zone,timestamp with time zone)'),
       ('record_booking_delivery(uuid,uuid,text,text,text,jsonb,text,jsonb,jsonb)'),
+      ('release_health_state(uuid,text)'),
       ('reserve_call_budget(uuid,uuid,numeric)'),
       ('settle_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
       ('transition_claimed_intent(uuid,uuid,text,text,integer)')
