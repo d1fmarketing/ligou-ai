@@ -125,6 +125,20 @@ describe("learning retention skip migration contract", () => {
   });
 });
 
+describe("contact hash requirements aggregate RPC contract", () => {
+  test("returns one bounded aggregate for one tenant and is service-role-only", () => {
+    const sql = migrationSql("contact_hash_requirements_rpc");
+    expect(sql).toContain("function public.get_contact_hash_requirements(p_tenant uuid)");
+    expect(sql).toContain("security definer set search_path = ''");
+    expect(sql).toContain("from public.contact_opt_outs");
+    expect(sql).toContain("from public.communications");
+    expect(sql).toContain("group by hash_algorithm, hash_key_version");
+    expect(sql).toContain("too_many_contact_hash_versions");
+    expect(sql).toContain("revoke all on function public.get_contact_hash_requirements(uuid) from public, anon, authenticated");
+    expect(sql).toContain("grant execute on function public.get_contact_hash_requirements(uuid) to service_role");
+  });
+});
+
 describe("privacy retention migration contract", () => {
   test("service-role retention removes raw transcripts and transient transport rows only", () => {
     const sql = migrationSql("privacy_retention");
