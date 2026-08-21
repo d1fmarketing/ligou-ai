@@ -33,7 +33,7 @@ try {
           const transaction: ConnectorMigrationTransaction = {
           async lockLegacyRows(lockedTenant) {
             return await transactionSql`
-              select id, tenant_id, provider, account_email, token_account_ref, refresh_token
+              select id, tenant_id, provider, account_email, token_account_ref, refresh_token, status
               from public.connector_accounts
               where tenant_id = ${lockedTenant}::uuid and refresh_token is not null
               order by provider, id
@@ -48,8 +48,9 @@ try {
                   token_key_version = ${input.wire.keyVersion},
                   token_account_ref = ${input.accountRef},
                   refresh_token = null,
-                  status = 'active',
-                  last_error = null,
+                  status = ${input.status},
+                  last_error = case when ${input.status} = 'reconnect_required'
+                    then 'fresh_oauth_reconnect_required' else last_error end,
                   updated_at = clock_timestamp()
               where id = ${input.id}::uuid
                 and tenant_id = ${input.tenantId}::uuid

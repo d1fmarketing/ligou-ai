@@ -281,29 +281,7 @@ export const fakeCalendar: CalendarPort = {
 interface GoogleCfg {
   calendarId: string;
   accountId: string;
-  sa?: { clientEmail: string; privateKey: string };
-  oauth?: { clientId: string; clientSecret: string; refreshToken: string };
-}
-
-function googleCfg(): GoogleCfg | null {
-  const { GOOGLE_CALENDAR_ID, GOOGLE_SA_CLIENT_EMAIL, GOOGLE_SA_PRIVATE_KEY,
-    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN } = process.env;
-  if (!GOOGLE_CALENDAR_ID) return null;
-  if (GOOGLE_SA_CLIENT_EMAIL && GOOGLE_SA_PRIVATE_KEY) {
-    return {
-      calendarId: GOOGLE_CALENDAR_ID,
-      accountId: GOOGLE_SA_CLIENT_EMAIL,
-      sa: { clientEmail: GOOGLE_SA_CLIENT_EMAIL, privateKey: GOOGLE_SA_PRIVATE_KEY.replace(/\\n/g, "\n") },
-    };
-  }
-  if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN) {
-    return {
-      calendarId: GOOGLE_CALENDAR_ID,
-      accountId: `oauth:${GOOGLE_CLIENT_ID}`,
-      oauth: { clientId: GOOGLE_CLIENT_ID, clientSecret: GOOGLE_CLIENT_SECRET, refreshToken: GOOGLE_REFRESH_TOKEN },
-    };
-  }
-  return null;
+  oauth: { clientId: string; clientSecret: string; refreshToken: string };
 }
 
 async function tenantCfg(tenantId: string): Promise<GoogleCfg | null> {
@@ -347,36 +325,11 @@ async function tenantCfg(tenantId: string): Promise<GoogleCfg | null> {
 }
 
 async function cfgFor(tenantId: string): Promise<GoogleCfg | null> {
-  const connected = await tenantCfg(tenantId);
-  if (connected) return connected;
-  return process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK === "enabled" ? googleCfg() : null;
-}
-
-const b64url = (value: Buffer | string) =>
-  Buffer.from(value as any).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-
-async function saAccessToken(sa: { clientEmail: string; privateKey: string }, fetcher: typeof fetch): Promise<string> {
-  const { createSign } = await import("node:crypto");
-  const now = Math.floor(Date.now() / 1000);
-  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const claims = b64url(JSON.stringify({
-    iss: sa.clientEmail, scope: "https://www.googleapis.com/auth/calendar",
-    aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600,
-  }));
-  const signer = createSign("RSA-SHA256");
-  signer.update(`${header}.${claims}`);
-  const signature = b64url(signer.sign(sa.privateKey));
-  const response = await fetcher("https://oauth2.googleapis.com/token", {
-    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${header}.${claims}.${signature}` }),
-  });
-  if (!response.ok) throw new Error(`google_sa_token_failed:${response.status}`);
-  return ((await response.json()) as any).access_token;
+  return tenantCfg(tenantId);
 }
 
 async function googleAccessToken(cfg: GoogleCfg, fetcher: typeof fetch): Promise<string> {
-  if (cfg.sa) return saAccessToken(cfg.sa, fetcher);
-  const oauth = cfg.oauth!;
+  const oauth = cfg.oauth;
   const response = await fetcher("https://oauth2.googleapis.com/token", {
     method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({

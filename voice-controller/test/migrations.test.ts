@@ -89,6 +89,19 @@ describe("connector plaintext invariant migration contract", () => {
   });
 });
 
+describe("communication contact hash cutover migration contract", () => {
+  test("marks legacy SHA rows and defaults new rows to versioned HMAC metadata", () => {
+    const sql = migrationSql("communication_hash_cutover");
+    expect(sql).toContain("add column if not exists hash_algorithm text");
+    expect(sql).toContain("add column if not exists hash_key_version integer");
+    expect(sql).toContain("set hash_algorithm = 'sha256', hash_key_version = null");
+    expect(sql).toContain("alter column hash_algorithm set default 'hmac-sha256'");
+    expect(sql).toContain("alter column hash_key_version set default 1");
+    expect(sql).not.toContain("update public.contact_opt_outs set contact_hash");
+    expect(sql).not.toContain("update public.communications set contact_hash");
+  });
+});
+
 describe("privacy retention migration contract", () => {
   test("service-role retention removes raw transcripts and transient transport rows only", () => {
     const sql = migrationSql("privacy_retention");

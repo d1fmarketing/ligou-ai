@@ -14,6 +14,7 @@ export interface LegacyConnectorRow {
   account_email: string | null;
   token_account_ref: string | null;
   refresh_token: string;
+  status: string;
 }
 
 export interface ConnectorMigrationTransaction {
@@ -25,6 +26,7 @@ export interface ConnectorMigrationTransaction {
     expectedPlaintext: string;
     accountRef: string;
     wire: ConnectorTokenWire;
+    status: "reconnect_required" | "revoked" | "error";
   }): Promise<boolean>;
   readEncrypted(id: string): Promise<Record<string, unknown> | null>;
 }
@@ -59,6 +61,7 @@ export async function migrateTenantConnectorTokens(input: {
     if (!apply) return { tenant_id: input.tenantId, mode: "dry-run", eligible: rows.length, migrated: 0 } as const;
     let migrated = 0;
     for (const row of rows) {
+      const status = row.status === "revoked" || row.status === "error" ? row.status : "reconnect_required";
       const accountRef = accountReference(row);
       const aad = { tenantId: row.tenant_id, provider: row.provider, accountRef, keyVersion: 1 };
       const wire = await encryptConnectorToken(row.refresh_token, aad, input.encodedKey);
@@ -71,11 +74,12 @@ export async function migrateTenantConnectorTokens(input: {
         expectedPlaintext: row.refresh_token,
         accountRef,
         wire,
+        status,
       });
       if (!updated) throw new Error("connector_migration_concurrent_change");
       const persisted = await transaction.readEncrypted(row.id);
       if (!persisted || persisted.refresh_token !== null
-        || persisted.status !== "active"
+        || persisted.status !== status
         || persisted.token_account_ref !== accountRef) throw new Error("connector_migration_persisted_state_invalid");
       const verified = await decryptConnectorToken({
         ciphertext: String(persisted.refresh_token_ciphertext ?? ""),
