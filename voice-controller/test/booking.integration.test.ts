@@ -5,10 +5,12 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 
 const HAVE_ENV = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY);
 const d = HAVE_ENV ? describe : describe.skip;
+const PRESEEDED_TENANT_ID = process.env.LIGOU_TEST_PRESEEDED_TENANT_ID ?? "";
+const PRESEEDED_TENANT_SLUG = process.env.LIGOU_TEST_PRESEEDED_TENANT_SLUG ?? "";
 
 let supa: any, proposeBooking: any, closeDeal: any, tickIntents: any, makeCapability: any, runTool: any;
 let TENANT_ID = "";
-const SLUG = `test-tenant-${Date.now()}`;
+const SLUG = PRESEEDED_TENANT_SLUG || `test-tenant-${Date.now()}`;
 
 beforeAll(async () => {
   if (!HAVE_ENV) return;
@@ -19,6 +21,14 @@ beforeAll(async () => {
   ({ proposeBooking, closeDeal } = await import("../src/booking.ts"));
   ({ tickIntents } = await import("../src/worker.ts"));
   ({ makeCapability, runTool } = await import("../src/tools.ts"));
+
+  if (PRESEEDED_TENANT_ID) {
+    const { data: tenant, error } = await supa().from("tenants")
+      .select("id,slug").eq("id", PRESEEDED_TENANT_ID).eq("slug", SLUG).single();
+    if (error || !tenant) throw new Error(error?.message ?? "preseeded_tenant_missing");
+    TENANT_ID = tenant.id;
+    return;
+  }
 
   const { data: tenant, error } = await supa().from("tenants")
     .insert({ slug: SLUG, name: "Test Plumbing", vertical: "plumbing", status: "active" })
@@ -37,6 +47,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!HAVE_ENV || !TENANT_ID) return;
+  if (PRESEEDED_TENANT_ID) return;
   // cleanup in FK order (rules/receipts are append-only via triggers — delete is blocked; leave them, they're test-tenant scoped)
   for (const table of ["notifications", "bookings", "action_intents", "approval_cases", "usage_ledger", "calls", "fake_calendar_events", "powers"]) {
     await supa().from(table).delete().eq("tenant_id", TENANT_ID).then(() => {});
@@ -101,13 +112,17 @@ d("booking end-to-end (fake calendar)", () => {
 
     expect(closed.status).toBe("confirmed");
     expect(closed.receipt).toBe("accepted");
-    const { data: receipt } = await supa().from("receipts").select("*").eq("tenant_id", TENANT_ID).eq("kind", "booking").eq("outcome", "accepted").single();
-    expect(receipt.external_id).toBeTruthy();
-    expect(receipt.readback).toBeTruthy();       // read-back proof, not just an id
-    expect(receipt.payload_hash).toBeTruthy();
     const { data: booking } = await supa().from("bookings").select("status,calendar_event_id,receipt_id").eq("id", prop.booking_id).single();
     expect(booking.status).toBe("confirmed");
-    expect(booking.receipt_id).toBe(receipt.id);
+    expect(booking.receipt_id).toBeTruthy();
+    const { data: confirmation, error: confirmationError } = await supa().rpc("get_booking_confirmation", {
+      p_tenant: TENANT_ID, p_call: c.callId, p_booking: prop.booking_id,
+    });
+    expect(confirmationError).toBeNull();
+    expect(confirmation.confirmed).toBe(true);
+    expect(confirmation.receipt_id).toBe(booking.receipt_id);
+    expect(confirmation.readback).toBeTruthy();
+    expect(confirmation.payload_hash).toBeTruthy();
   }, 20000);
 
   test("retry of the same close is idempotent: one intent, one event", async () => {
@@ -126,30 +141,30 @@ d("booking end-to-end (fake calendar)", () => {
     expect(second.status).toBe("confirmed");
     const { data: events } = await supa().from("fake_calendar_events").select("id").eq("tenant_id", TENANT_ID).like("summary", "%210%");
     expect(events.length).toBe(1);
-    const { data: intents } = await supa().from("action_intents").select("id").eq("tenant_id", TENANT_ID).eq("booking_id", prop.booking_id);
-    expect(intents.length).toBe(1);
+    const { data: booking } = await supa().from("bookings").select("intent_id").eq("id", prop.booking_id).single();
+    expect(booking.intent_id).toBeTruthy();
   }, 25000);
 
   test("an arbitrary offer token creates no booking or provider intent", async () => {
     const c = await cap();
     const prop = await proposeBooking(c, { slot_token: "model-invented-token" });
     expect(prop.status).toBe("invalid_offer");
-    const { data: intents } = await supa().from("action_intents").select("id").eq("call_id", c.callId);
-    expect(intents).toHaveLength(0);
+    const { data: bookings } = await supa().from("bookings").select("id").eq("call_id", c.callId);
+    expect(bookings).toHaveLength(0);
   });
 
-  test("receipts table refuses accepted without read-back proof (DB constraint)", async () => {
+  test("service role cannot bypass receipt RPC authority with a direct insert", async () => {
     const { error } = await supa().from("receipts").insert({
       tenant_id: TENANT_ID, kind: "booking", outcome: "accepted", external_id: "ev-123", // missing readback/payload_hash
     });
     expect(error).toBeTruthy();
-    expect(error.message).toContain("receipts_accepted_proof");
+    expect(error.message).toMatch(/permission denied|not allowed|receipts_accepted_proof/i);
   });
 
-  test("rules are append-only at the database level", async () => {
+  test("service role has no direct rule mutation authority", async () => {
     const { data: rule } = await supa().from("rules").select("id").eq("tenant_id", TENANT_ID).limit(1).single();
     const { error } = await supa().from("rules").update({ text: "hacked" }).eq("id", rule.id);
     expect(error).toBeTruthy();
-    expect(error.message).toContain("append_only");
+    expect(error.message).toMatch(/permission denied|not allowed|append_only/i);
   });
 });

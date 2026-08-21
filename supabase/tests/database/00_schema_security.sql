@@ -329,7 +329,7 @@ select extensions.ok(
       ('contact_opt_outs', 'select'),
       ('skill_candidates', 'select'), ('skill_candidates', 'insert'), ('skill_candidates', 'update'),
       ('skill_pipeline_events', 'insert'),
-      ('budget_reservations', 'update'),
+      ('budget_reservations', 'select'), ('budget_reservations', 'update'),
       ('booking_quotes', 'select'), ('booking_quotes', 'insert'),
       ('slot_offers', 'insert'),
       ('effective_rules', 'select'),

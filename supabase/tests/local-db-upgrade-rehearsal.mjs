@@ -146,7 +146,7 @@ function assertHistory(expectedFiles, actualVersions) {
   assert.equal(new Set(actualVersions).size, actualVersions.length, "migration history must not contain duplicates");
 }
 
-export async function runUpgradeRehearsal(env = process.env) {
+export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
   const connection = localConnection(env);
   const rehearsalRoot = await mkdtemp(path.join(os.tmpdir(), "ligou-rc1-upgrade-"));
   const home = path.join(rehearsalRoot, "home");
@@ -182,6 +182,12 @@ export async function runUpgradeRehearsal(env = process.env) {
     });
     return successful(result, label, connection.password);
   };
+  const beforeDestructive = async (label) => {
+    if (typeof hooks.beforeDestructive !== "function") {
+      throw new Error("upgrade rehearsal requires a fail-closed stack identity hook");
+    }
+    await hooks.beforeDestructive({ label, rehearsalRoot });
+  };
   const stage = async (fileName) => {
     await symlink(path.join(sourceMigrations, fileName), path.join(stagedMigrations, fileName));
   };
@@ -192,6 +198,7 @@ export async function runUpgradeRehearsal(env = process.env) {
     assertions += 1;
 
     for (const fileName of legacyMigrations) await stage(fileName);
+    await beforeDestructive("legacy database reset");
     await runSupabase(["db", "reset", "--local", "--no-seed"], "legacy database reset");
     assertHistory(legacyMigrations, await history(connection, home));
     assert.equal(legacyMigrations.some((name) => migrationVersion(name) === "0008"), false);
@@ -242,6 +249,7 @@ export async function runUpgradeRehearsal(env = process.env) {
     assertions += 1;
 
     for (const fileName of throughRetirement.slice(legacyMigrations.length)) await stage(fileName);
+    await beforeDestructive("timestamp migrations through retirement");
     await runSupabase(["migration", "up", "--local", "--include-all"], "timestamp migrations through retirement");
     assertHistory(throughRetirement, await history(connection, home));
     assertions += 1;
@@ -290,6 +298,7 @@ export async function runUpgradeRehearsal(env = process.env) {
     assertions += 1;
 
     for (const fileName of allMigrations.slice(throughRetirement.length)) await stage(fileName);
+    await beforeDestructive("remaining timestamp migrations");
     await runSupabase(["migration", "up", "--local", "--include-all"], "remaining timestamp migrations");
     assertHistory(allMigrations, await history(connection, home));
     assertions += 1;
@@ -316,6 +325,7 @@ export async function runUpgradeRehearsal(env = process.env) {
       legacyMigrations: legacyMigrations.length,
       finalMigrations: allMigrations.length,
       missing0008: true,
+      stackWorkdir: rehearsalRoot,
     };
   } finally {
     await rm(rehearsalRoot, { recursive: true, force: true });

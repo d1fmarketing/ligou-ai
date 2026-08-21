@@ -13,26 +13,25 @@ The committed project is imperative: `supabase/migrations/*.sql` is the ordered 
 - Deno `2.9.4`
 - Supabase CLI `2.115.0`, installed as the exact root dev dependency and invoked only as `bunx supabase`
 - PostgreSQL client `psql`
-- A local Docker-compatible runtime; the verified run used Colima
+- Colima with the dedicated `ligou-rc1` profile; the default profile/context is never used by the gate
 
-The pinned local image reported PostgreSQL `17.6` (`public.ecr.aws/supabase/postgres:17.6.1.159`). No repository `.env` file is needed or loaded by the gate. Its CLI subprocesses run from a temporary CWD and HOME, resolve the pinned local `node_modules`, discard inherited database/Supabase/PG/dotenv variables, and receive only an explicit local Unix Docker socket.
+The pinned local image reported PostgreSQL `17.6` (`public.ecr.aws/supabase/postgres:17.6.1.159`). No repository `.env` file is needed or loaded by the gate. It rejects inherited `DOCKER_HOST`, starts or validates the dedicated profile with `autoActivate: false` and `portForwarder: none`, verifies its context/socket realpath, and mounts only this RC worktree. A test-owned SSH process provides the only host listeners, exactly `127.0.0.1:54321` and `127.0.0.1:54322`.
 
 ## CI-ready commands
 
-Run from the repository root in a clean CI job whose Docker daemon is already local:
+Run from the repository root on the verified macOS/Colima host. The single gate command owns the dedicated profile lifecycle:
 
 ```sh
 bun install --frozen-lockfile
 bunx supabase --help
 bunx supabase --version
-bunx supabase db start
 node --test tests/local-db-gate.test.mjs
 node scripts/local-db-gate.mjs
 git diff --check
 git status --short
 ```
 
-`node scripts/local-db-gate.mjs` deliberately begins with `bunx supabase status -o json`. It stops if the local stack is absent or if status does not return a loopback PostgreSQL URL. It never falls back to `DATABASE_URL`, a linked project, a cached Supabase token, or a repository environment file.
+`node scripts/local-db-gate.mjs` starts the local API stack only through the verified dedicated Docker socket and owned loopback forwards. Before every reset, migration operation, or stop, it rechecks status plus the exact DB container name, image, labels, workdir, port, volume, health, SSH PID, and host listeners. It never falls back to `DATABASE_URL`, a linked project, a cached Supabase token, or a repository environment file.
 
 The only destructive database operation in the gate is `bunx supabase db reset --local --no-seed`, against the exact disposable project ID. The upgrade rehearsal also uses explicit `--local` commands in a temporary project workdir that points to the same disposable container.
 
@@ -40,14 +39,17 @@ The only destructive database operation in the gate is `bunx supabase db reset -
 
 The verified local run on 2026-08-20 produced:
 
-- `36` repository migrations applied in numeric version order and present exactly once in `supabase_migrations.schema_migrations`;
+- `37` repository migrations applied in numeric version order and present exactly once in `supabase_migrations.schema_migrations`;
 - the intentional local filename jump from `0007` to `0009` preserved;
 - `pgcrypto` and `btree_gist` installed, with `2` `CREATE EXTENSION` statements and no explicit extension version clauses;
 - `24` real pgTAP catalog assertions passing before and after the upgrade rehearsal;
 - `7` real concurrency/transaction cases passing;
 - `11` upgrade-rehearsal checks passing;
+- all `6` Task 3/4 booking integration tests passing through local PostgREST;
+- `1` real service-role budget deferral test and `1` voice-controller startup/health smoke passing;
+- pinned `migration up --local` proving an unchanged history/no-op;
 - database lint with `0` errors and `2` legacy warnings;
-- advisors with `0` errors, `0` warnings, and `58` informational findings;
+- advisors with `0` errors, `0` warnings, and `53` informational findings;
 - no tracked-worktree mutation during the command.
 
 The pgTAP suite checks real catalog state: RLS plus FORCE RLS on public tables, empty `search_path` on SECURITY DEFINER functions, explicit function/table ACL sets, an invoker-security `effective_rules` view, inaccessible connector tables for `anon` and `authenticated`, removed booking RPC execution denial, valid booking/OAuth/hash constraints and triggers, and the final absence of the plaintext connector column.
@@ -79,10 +81,10 @@ The two lint warnings are legacy PL/pgSQL hygiene findings, not execution errors
 
 They were not “fixed” by rewriting applied migrations. A later reviewed forward migration may remove the unused variable and give the compatibility parameter an explicit validation/audit use.
 
-The `58` advisor items are informational:
+The `53` advisor items are informational:
 
 - `32` unindexed foreign keys;
-- `16` unused indexes in the fresh local database;
+- `11` unused indexes in the fresh local database;
 - `10` RLS-enabled internal tables with intentionally no owner policy.
 
 The policyless internal tables are `booking_accepted_receipts`, `booking_quotes`, `booking_receipt_conflicts`, `booking_slot_leases`, `browser_session_requests`, `connector_accounts`, `fake_calendar_events`, `oauth_states`, `phone_events`, and `slot_offers`. They have FORCE RLS and no direct `anon`/`authenticated` grants. Required service operations are granted explicitly. Do not add permissive policies merely to silence an informational advisor.

@@ -39,11 +39,17 @@ export async function settleCallBudget(args: {
 
 async function deferBudgetReconciliation(callId: string, error: unknown) {
   const detail = (error as any)?.detail ?? (error as any)?.message ?? String(error);
-  await supa().from("budget_reservations").update({
+  const { error: deferError } = await supa().from("budget_reservations").update({
     reconcile_last_error: String(detail).slice(0, 400),
     reconcile_after: new Date(Date.now() + 5_000).toISOString(),
     reconcile_lease_until: null,
   }).eq("call_id", callId).eq("status", "active");
+  if (deferError) {
+    throw Object.assign(new Error("budget_reconciliation_defer_failed"), {
+      status: 503,
+      detail: deferError.message ?? "budget_reconciliation_update_failed",
+    });
+  }
 }
 
 export async function finalizeTerminalBudget(args: {

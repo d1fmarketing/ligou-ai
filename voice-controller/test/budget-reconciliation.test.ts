@@ -5,6 +5,7 @@ import { _setClient } from "../src/rules.ts";
 let settleAttempts = 0;
 let deferred: any[] = [];
 let claimRow: any;
+let deferError: any;
 
 function client() {
   return {
@@ -24,7 +25,9 @@ function client() {
       const api: any = {
         update(row: any) { if (table === "budget_reservations") deferred.push(row); return api; },
         eq() { return api; },
-        then(resolve: (value: unknown) => unknown) { return Promise.resolve({ data: null, error: null }).then(resolve); },
+        then(resolve: (value: unknown) => unknown) {
+          return Promise.resolve({ data: null, error: table === "budget_reservations" ? deferError : null }).then(resolve);
+        },
       };
       return api;
     },
@@ -34,6 +37,7 @@ function client() {
 beforeEach(() => {
   settleAttempts = 0;
   deferred = [];
+  deferError = null;
   claimRow = {
     reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
     actual_cost_usd: 0, minutes: 0, outcome: "startup_error",
@@ -97,5 +101,22 @@ describe("durable budget reconciliation", () => {
       expect(settleAttempts).toBe(0);
       expect(deferred.some((row) => String(row.reconcile_last_error).includes("provider_usage"))).toBe(true);
     }
+  });
+
+  test("a failed deferral update is propagated instead of reporting safe deferral", async () => {
+    deferError = { message: "permission denied for budget_reservations" };
+
+    await expect(finalizeTerminalBudget({
+      tenantId: "tenant-1",
+      callId: "call-1",
+      actualCostUsd: 0,
+      minutes: 0,
+      outcome: "startup_error",
+      usageResolved: false,
+    })).rejects.toMatchObject({
+      message: "budget_reconciliation_defer_failed",
+      status: 503,
+      detail: "permission denied for budget_reservations",
+    });
   });
 });

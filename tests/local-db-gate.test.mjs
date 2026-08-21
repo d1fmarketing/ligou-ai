@@ -3,12 +3,18 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  assertCanonicalColimaIdentity,
+  assertDisposableStackIdentity,
+  assertExactLocalDatabaseIdentity,
   assertLoopbackDatabaseUrl,
   assertMigrationHistory,
   assertNoExtensionVersionClauses,
+  assertOwnedForwardListeners,
   assertSafeLocalProjectId,
   buildSanitizedChildEnv,
+  guardedDestructiveAction,
   orderMigrationFiles,
+  parseLocalRuntimeStatus,
   parseLocalStatus,
 } from "../scripts/local-db-gate.mjs";
 
@@ -24,6 +30,19 @@ test("local DB gate rejects non-loopback database hosts without echoing credenti
       return true;
     },
   );
+
+  const exact = new URL("postgresql://postgres:synthetic@127.0.0.1:54322/postgres");
+  assert.equal(assertExactLocalDatabaseIdentity(exact, "ligou-v0-1-rc1"), exact);
+  for (const unsafe of [
+    "postgresql://postgres:synthetic@127.0.0.1:6543/postgres",
+    "postgresql://postgres:synthetic@127.0.0.1:54322/forwarded_prod",
+    "postgresql://app:synthetic@127.0.0.1:54322/postgres",
+  ]) {
+    assert.throws(
+      () => assertExactLocalDatabaseIdentity(new URL(unsafe), "ligou-v0-1-rc1"),
+      /exact disposable database identity/i,
+    );
+  }
 });
 
 test("extension migrations reject explicit version clauses", () => {
@@ -69,7 +88,7 @@ test("local DB gate strips inherited database, Supabase, and dotenv inputs", () 
 
   assert.equal(child.PATH, "/synthetic/bin");
   assert.equal(child.HOME, "/synthetic/isolated-home");
-  assert.equal(child.DOCKER_HOST, "unix:///synthetic/docker.sock");
+  assert.equal(child.DOCKER_HOST, undefined);
   assert.equal(child.SUPABASE_NO_UPDATE_NOTIFIER, "1");
   for (const forbidden of [
     "DATABASE_URL",
@@ -77,9 +96,92 @@ test("local DB gate strips inherited database, Supabase, and dotenv inputs", () 
     "SUPABASE_DB_PASSWORD",
     "PGHOST",
     "DOTENV_CONFIG_PATH",
+    "DOCKER_HOST",
   ]) {
     assert.equal(child[forbidden], undefined);
   }
+
+  const colima = {
+    inheritedDockerHost: undefined,
+    status: {
+      display_name: "colima [profile=ligou-rc1]",
+      runtime: "docker",
+      docker_socket: "unix:///Users/synthetic/.colima/ligou-rc1/docker.sock",
+    },
+    contextHost: "unix:///Users/synthetic/.colima/ligou-rc1/docker.sock",
+    runtimeRootRealpath: "/Users/synthetic/.colima/ligou-rc1",
+    socketRealpath: "/Users/synthetic/.colima/ligou-rc1/docker.sock",
+    profileConfig: {
+      runtime: "docker",
+      autoActivate: false,
+      portForwarder: "none",
+      mountLocation: "/synthetic/rc1/Ligou.AI",
+      mountWritable: true,
+    },
+    expectedMountLocation: "/synthetic/rc1/Ligou.AI",
+    sshConfigRealpath: "/Users/synthetic/.colima/_lima/colima-ligou-rc1/ssh.config",
+    expectedSshConfigRealpath: "/Users/synthetic/.colima/_lima/colima-ligou-rc1/ssh.config",
+  };
+  assert.equal(assertCanonicalColimaIdentity(colima), colima.status.docker_socket);
+  assert.throws(
+    () => assertCanonicalColimaIdentity({ ...colima, inheritedDockerHost: "unix:///tmp/forwarded.sock" }),
+    /inherited docker_host/i,
+  );
+  assert.throws(
+    () => assertCanonicalColimaIdentity({ ...colima, contextHost: "unix:///tmp/forwarded.sock" }),
+    /canonical colima socket/i,
+  );
+
+  const stack = {
+    Name: "/supabase_db_ligou-v0-1-rc1",
+    Config: {
+      Image: "public.ecr.aws/supabase/postgres:17.6.1.159",
+      Labels: {
+        "com.docker.compose.project": "ligou-v0-1-rc1",
+        "com.supabase.cli.project": "ligou-v0-1-rc1",
+        "com.supabase.cli.workdir": "/synthetic/rc1/Ligou.AI",
+      },
+    },
+    State: { Running: true, Health: { Status: "healthy" } },
+    HostConfig: { PortBindings: { "5432/tcp": [{ HostIp: "", HostPort: "54322" }] } },
+    NetworkSettings: { Ports: { "5432/tcp": [
+      { HostIp: "0.0.0.0", HostPort: "54322" },
+      { HostIp: "::", HostPort: "54322" },
+    ] } },
+    Mounts: [{ Type: "volume", Name: "supabase_db_ligou-v0-1-rc1", Destination: "/var/lib/postgresql/data" }],
+  };
+  const identityOptions = { allowedWorkdirs: ["/synthetic/rc1/Ligou.AI"] };
+  const listeners = [
+    { pid: 4242, address: "127.0.0.1", port: 54321 },
+    { pid: 4242, address: "127.0.0.1", port: 54322 },
+  ];
+  assert.equal(assertOwnedForwardListeners(listeners, 4242), listeners);
+  identityOptions.forwardListeners = listeners;
+  identityOptions.forwardPid = 4242;
+  assert.equal(assertDisposableStackIdentity(stack, identityOptions), stack);
+
+  let destructiveCalls = 0;
+  const invalidStacks = [
+    { ...structuredClone(stack), Name: "/supabase_db_other-project" },
+    (() => { const value = structuredClone(stack); value.Config.Labels["com.supabase.cli.project"] = "other-project"; return value; })(),
+    (() => { const value = structuredClone(stack); value.NetworkSettings.Ports["5432/tcp"][0].HostPort = "6543"; return value; })(),
+  ];
+  for (const invalid of invalidStacks) {
+    assert.throws(
+      () => guardedDestructiveAction(invalid, identityOptions, () => { destructiveCalls += 1; }),
+      /disposable stack identity/i,
+    );
+  }
+  assert.throws(
+    () => guardedDestructiveAction(stack, {
+      ...identityOptions,
+      forwardListeners: [{ pid: 4242, address: "0.0.0.0", port: 54322 }],
+    }, () => { destructiveCalls += 1; }),
+    /owned loopback ssh forwards/i,
+  );
+  assert.equal(destructiveCalls, 0);
+  guardedDestructiveAction(stack, identityOptions, () => { destructiveCalls += 1; });
+  assert.equal(destructiveCalls, 1);
 });
 
 test("local DB gate derives its database connection only from sanitized CLI status JSON", () => {
@@ -92,6 +194,25 @@ test("local DB gate derives its database connection only from sanitized CLI stat
   assert.equal(status.databaseUrl.hostname, "127.0.0.1");
   assert.equal(status.databaseUrl.port, "54322");
   assert.deepEqual(Object.keys(status), ["databaseUrl"]);
+
+  const runtime = parseLocalRuntimeStatus(JSON.stringify({
+    API_URL: "http://127.0.0.1:54321",
+    DB_URL: "postgresql://postgres:synthetic-local-only@127.0.0.1:54322/postgres",
+    SERVICE_ROLE_KEY: "synthetic-local-service-key",
+    ANON_KEY: "synthetic-local-publishable-key",
+  }));
+  assert.equal(runtime.apiUrl, "http://127.0.0.1:54321");
+  assert.equal(runtime.serviceRoleKey, "synthetic-local-service-key");
+  assert.equal(runtime.publishableKey, "synthetic-local-publishable-key");
+  assert.throws(
+    () => parseLocalRuntimeStatus(JSON.stringify({
+      API_URL: "http://127.0.0.1:6543",
+      DB_URL: "postgresql://postgres:synthetic@127.0.0.1:54322/postgres",
+      SERVICE_ROLE_KEY: "synthetic",
+      ANON_KEY: "synthetic",
+    })),
+    /exact disposable api identity/i,
+  );
 });
 
 test("local DB gate accepts only the disposable RC1 project identity", () => {
@@ -127,6 +248,8 @@ test("repository exposes the exact pinned local Supabase gate", async () => {
 test("Supabase config is disposable, imperative, and contains no secret indirection", async () => {
   const config = await readFile(new URL("../supabase/config.toml", import.meta.url), "utf8");
   assert.match(config, /^project_id = "ligou-v0-1-rc1"$/m);
+  assert.match(config, /^\[api\]\nenabled = true$/m);
+  assert.match(config, /^\[auth\]\nenabled = true$/m);
   assert.match(config, /^\[db[.]migrations\]$/m);
   assert.match(config, /^schema_paths = \[\]$/m);
   assert.doesNotMatch(config, /env\s*\(/i);

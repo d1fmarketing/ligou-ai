@@ -81,7 +81,9 @@ function startSql(connection, isolatedHome, sql) {
     waitFor(marker, timeoutMs = 5_000) {
       if (stdout.includes(marker)) return Promise.resolve();
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`SQL marker timeout: ${marker}`)), timeoutMs);
+        const timer = setTimeout(() => reject(new Error(
+          `SQL marker timeout: ${marker}; stdout=${redact(stdout, connection.password)}; stderr=${redact(stderr, connection.password)}`,
+        )), timeoutMs);
         waiters.push({ marker, resolve: () => { clearTimeout(timer); resolve(); } });
       });
     },
@@ -112,7 +114,11 @@ function scalar(result, label) {
 
 function serviceTransaction(statement) {
   return `begin;
+set local role service_role;
 select set_config('request.jwt.claim.role', 'service_role', true);
+do $$ begin
+  if current_user <> 'service_role' then raise exception 'service_role_impersonation_failed'; end if;
+end $$;
 ${statement}
 commit;
 `;
@@ -146,9 +152,9 @@ async function parallelBudgetReservationCap(connection, home) {
   `), "budget fixture");
 
   const first = startSql(connection, home, serviceTransaction(`
-    select 'LOCK_HELD' from public.tenants where id = '${tenant}' for update;
-    select pg_sleep(0.75);
     select public.reserve_call_budget('${tenant}', '${call1}', 6);
+    select 'LOCK_HELD';
+    select pg_sleep(0.75);
   `));
   await first.waitFor("LOCK_HELD");
   const secondStartedAt = Date.now();
@@ -282,28 +288,25 @@ function acceptedDeliverySql(intentId, attemptKey, outcome = "accepted") {
     )::text;`);
   }
   return serviceTransaction(`
-    with source as (
-      select ai.id as action_intent_id, ai.idempotency_key as intent_key, b.*
-      from public.action_intents ai join public.bookings b on b.id = ai.booking_id
-      where ai.id = '${intentId}'
+    with provider_input as (
+      select public.get_booking_provider_input('${intentId}') as input
     ), expected as (
-      select source.*,
+      select
         jsonb_build_object(
           'provider', 'fake_calendar', 'account_id', 'synthetic-account', 'calendar_id', 'synthetic-calendar',
-          'summary', service_type || ' — ' || coalesce(client_name, 'customer') || ' ($' || price_agreed::text || ')',
-          'description', 'Booked by Ligou. Contact: ' || coalesce(contact, '?') || '. Call ' || call_id::text || '.',
-          'start', slot_start, 'end', coalesce(slot_end, slot_start), 'status', 'confirmed',
+          'summary', input->>'summary', 'description', input->>'description',
+          'start', (input->>'startIso')::timestamptz, 'end', (input->>'endIso')::timestamptz, 'status', 'confirmed',
           'payload_hash', 'synthetic-payload-hash',
           'private', jsonb_build_object(
-            'ligouKey', intent_key, 'ligouProvider', 'fake_calendar', 'ligouTenantId', tenant_id::text,
-            'ligouBookingId', id::text, 'ligouCalendarId', 'synthetic-calendar',
+            'ligouKey', input->>'idempotencyKey', 'ligouProvider', 'fake_calendar', 'ligouTenantId', input->>'tenantId',
+            'ligouBookingId', input->>'bookingId', 'ligouCalendarId', 'synthetic-calendar',
             'ligouAccountId', 'synthetic-account', 'ligouPayloadHash', 'synthetic-payload-hash'
           )
         ) as expected
-      from source
+      from provider_input
     )
     select public.record_booking_delivery(
-      action_intent_id, '${attemptKey}', 'accepted', 'synthetic-event-id',
+      '${intentId}', '${attemptKey}', 'accepted', 'synthetic-event-id',
       jsonb_build_object(
         'id', 'synthetic-event-id', 'summary', expected->>'summary', 'description', expected->>'description',
         'start', jsonb_build_object('dateTime', expected->>'start'),
