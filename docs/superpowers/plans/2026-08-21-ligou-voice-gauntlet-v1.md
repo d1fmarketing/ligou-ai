@@ -1,5 +1,10 @@
 # Ligou Voice Gauntlet v1 Implementation Plan
 
+> **DEFERRED — NOT LAUNCH CRITICAL (2026-08-21).** Task 1 is preserved as
+> completed research. Tasks 2–7 are intentionally not being executed in the
+> V0.1 launch path. Resume only through the backlog in
+> `benchmark/BACKLOG-V0.2-V0.3.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a reproducible, provider-neutral, exactly-50-scenario voice benchmark laboratory that reaches Stage 0 without paid API calls.
@@ -37,25 +42,25 @@
 - Produces: candidate records with `id`, `provider`, `model`, `pinning`, `voice`, `api_version`, `transport`, capability booleans, pricing snapshot, credential names, qualification and official URLs.
 - Consumed by: Tasks 6 and 7.
 
-- [ ] **Step 1: Write the failing registry test**
+- [x] **Step 1: Write the failing registry test**
 
 Create `benchmark/tests/provider-registry.test.ts` with literal checks that the registry has 1–5 unique candidates, exact configuration identity, official HTTPS references, a `2026-08-21` evidence date, explicit qualification, credential names only, and every `QUALIFIED` candidate satisfies all ten qualification predicates from the spec.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `bun test benchmark/tests/provider-registry.test.ts`
 
 Expected: FAIL because `benchmark/config/candidates.json` does not exist.
 
-- [ ] **Step 3: Research official sources and write the registry**
+- [x] **Step 3: Research official sources and write the registry**
 
 Research no more than five exact configurations using provider-owned documentation and pricing pages. Record every required compatibility field and classify each configuration `QUALIFIED`, `CONDITIONALLY_QUALIFIED`, `INCOMPATIBLE` or `NOT_VERIFIABLE`. Do not infer capability from marketing prose when the API reference does not establish it.
 
-- [ ] **Step 4: Write compatibility and benchmark overview docs**
+- [x] **Step 4: Write compatibility and benchmark overview docs**
 
 `PROVIDER-COMPATIBILITY.md` cites the official source beside each claim and explains qualification failures. `README.md` states Stage 0, paid-gate rules, synthetic-audio limitations and the expected no-spend verdict.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 Run: `bun test benchmark/tests/provider-registry.test.ts && node scripts/scan-secrets.mjs && git diff --check`
 
@@ -338,4 +343,3 @@ Commit: `feat: complete voice gauntlet stage zero`
 - [ ] Run `bun run check` and `cd voice-controller && npm test` only if shared production files changed; always run secret scan and `git diff --check`.
 - [ ] Dispatch an independent whole-branch reviewer. Fix every Critical and Important finding and re-review.
 - [ ] Leave `codex/v0.2-voice-gauntlet` clean. Do not push, merge, tag, deploy or execute a paid provider call.
-

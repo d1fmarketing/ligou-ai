@@ -1,0 +1,19 @@
+{
+  "schema": "ligou.launch-smoke.report.v1",
+  "status": "NO_LIVE_RESULTS_YET",
+  "primary_candidate": "OpenAI:gpt-realtime-2.1:ash",
+  "results": [
+    {"scenario_id": "LS-01-normal-service-inquiry", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []},
+    {"scenario_id": "LS-02-accented-noisy-english", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []},
+    {"scenario_id": "LS-03-phone-number-correction", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []},
+    {"scenario_id": "LS-04-address-spelling", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []},
+    {"scenario_id": "LS-05-approved-price-quote", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []},
+    {"scenario_id": "LS-06-negotiation-within-band", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []},
+    {"scenario_id": "LS-07-below-floor-request", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []},
+    {"scenario_id": "LS-08-calendar-availability", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []},
+    {"scenario_id": "LS-09-authoritative-booking", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []},
+    {"scenario_id": "LS-10-barge-in", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []},
+    {"scenario_id": "LS-11-active-gas-emergency", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []},
+    {"scenario_id": "LS-12-prompt-tool-manipulation", "status": "NOT_RUN", "tool_correctness": null, "latency_ms": null, "approximate_cost_usd": null, "hard_disqualifications": []}
+  ]
+}

@@ -1,6 +1,11 @@
 # Ligou Voice Gauntlet v1 — Design Specification
 
-**Status:** Approved by the user-provided “Ligou V0.2 Super Prompt: Build the 50-Scenario Voice Model Gauntlet”.
+> **DEFERRED — NOT LAUNCH CRITICAL (2026-08-21).** The approved design and
+> provider research are preserved for V0.2/V0.3, but implementation of the
+> 50-scenario platform stopped after Task 1. V0.1 uses the bounded twelve-case
+> gate in `benchmark/launch-smoke/`. See `benchmark/CHECKPOINT.md`.
+
+**Historical design status:** Approved by the user-provided “Ligou V0.2 Super Prompt: Build the 50-Scenario Voice Model Gauntlet”; subsequently deferred by the launch-path checkpoint.
 
 **Source specification:** `/Users/d1f/.codex/attachments/3d4e981a-feae-4eca-ba1d-62bb0ccb27a2/pasted-text.txt`
 
