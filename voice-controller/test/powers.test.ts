@@ -73,9 +73,16 @@ let tenantLookupFails = false;
 let communicationsLookupError: { message: string } | null = null;
 let lookupHashes: string[] = [];
 let hashMetadata: Record<string, any[]> = { contact_opt_outs: [], communications: [] };
+let requirementsPayload: any = { schema: "ligou.contact-hash-requirements.v1", requirements: [], row_count: 0 };
+let requirementsError: any = null;
 
 function mockSupabase() {
   return {
+    async rpc(name: string, args: any) {
+      expect(name).toBe("get_contact_hash_requirements");
+      expect(args).toEqual({ p_tenant: "t-1" });
+      return { data: requirementsPayload, error: requirementsError };
+    },
     from(table: string) {
       const filters: Record<string, unknown> = {};
       const api: any = {
@@ -119,6 +126,8 @@ beforeEach(() => {
   communicationsLookupError = null;
   lookupHashes = [];
   hashMetadata = { contact_opt_outs: [], communications: [] };
+  requirementsPayload = { schema: "ligou.contact-hash-requirements.v1", requirements: [], row_count: 0 };
+  requirementsError = null;
   _setClient(mockSupabase());
 });
 afterAll(() => _setClient(null));
@@ -238,7 +247,10 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
     expect(await hashLegacyCanonicalContact(base.contact)).toBe(legacy);
     expect(await hashLegacyCanonicalContact('"Alice Caller" <sip:+19495550101@pbx.example>;tag=x'))
       .toBe("b3d2347f8d25bfd197851fb49ca326293b624d42b4f7ccbfb9c956bc87ad5616");
-    hashMetadata.contact_opt_outs = [{ hash_algorithm: "sha256", hash_key_version: null }];
+    requirementsPayload = {
+      schema: "ligou.contact-hash-requirements.v1",
+      requirements: [{ algorithm: "sha256", key_version: null, row_count: 1 }], row_count: 1,
+    };
     optOutRows = [{ id: "legacy-opt-out", contact_hash: legacy, hash_algorithm: "sha256", hash_key_version: null }];
     const result = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
     expect(result.reason).toBe("opt_out");
@@ -247,7 +259,10 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
 
   test("legacy SHA communication history still enforces the frequency cap", async () => {
     const legacy = "b390966e34771a9c5b8a8d1f0039519f7de0c6212fd8906ff0e5c56c4d84024c";
-    hashMetadata.communications = [{ hash_algorithm: "sha256", hash_key_version: null }];
+    requirementsPayload = {
+      schema: "ligou.contact-hash-requirements.v1",
+      requirements: [{ algorithm: "sha256", key_version: null, row_count: 1205 }], row_count: 1205,
+    };
     sentRows = [
       { id: "legacy-1", contact_hash: legacy, hash_algorithm: "sha256" },
       { id: "legacy-2", contact_hash: legacy, hash_algorithm: "sha256" },
@@ -270,7 +285,10 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
       expect(identity.algorithm).toBe("hmac-sha256");
       expect(identity.keyVersion).toBe(2);
       const old = await contactHash(base.contact, 1);
-      hashMetadata.contact_opt_outs = [{ hash_algorithm: "hmac-sha256", hash_key_version: 1 }];
+      requirementsPayload = {
+        schema: "ligou.contact-hash-requirements.v1",
+        requirements: [{ algorithm: "hmac-sha256", key_version: 1, row_count: 1001 }], row_count: 1001,
+      };
       optOutRows = [{ id: "v1-opt-out", contact_hash: old, hash_algorithm: "hmac-sha256", hash_key_version: 1 }];
       const result = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
       expect(result.reason).toBe("opt_out");
@@ -283,10 +301,28 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
   });
 
   test("missing historical HMAC key fails closed instead of erasing authority", async () => {
-    hashMetadata.contact_opt_outs = [{ hash_algorithm: "hmac-sha256", hash_key_version: 2 }];
+    requirementsPayload = {
+      schema: "ligou.contact-hash-requirements.v1",
+      requirements: [{ algorithm: "hmac-sha256", key_version: 2, row_count: 1 }], row_count: 1,
+    };
     const result = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
     expect(result.allowed).toBe(false);
     expect(result.reason).toBe("contact_hash_history_key_unavailable");
+  });
+
+  test("malformed or unknown aggregate requirements fail closed", async () => {
+    for (const payload of [
+      null,
+      { schema: "wrong", requirements: [], row_count: 0 },
+      { schema: "ligou.contact-hash-requirements.v1", requirements: "many", row_count: 1 },
+      { schema: "ligou.contact-hash-requirements.v1", requirements: [{ algorithm: "md5", key_version: null, row_count: 1 }], row_count: 1 },
+      { schema: "ligou.contact-hash-requirements.v1", requirements: [{ algorithm: "hmac-sha256", key_version: 0, row_count: 1 }], row_count: 1 },
+    ]) {
+      requirementsPayload = payload;
+      const result = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toMatch(/contact_hash_requirements/);
+    }
   });
 });
 

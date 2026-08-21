@@ -250,19 +250,27 @@ export async function contactHash(contact: string, version?: number): Promise<st
 }
 
 async function contactHashRequirements(tenantId: string): Promise<{ legacy: boolean; versions: number[] }> {
-  let legacy = false;
-  const versions = new Set<number>([currentHashVersion()]);
-  for (const table of ["contact_opt_outs", "communications"]) {
-    const { data, error } = await supa().from(table)
-      .select("hash_algorithm,hash_key_version").eq("tenant_id", tenantId);
-    if (error) throw new Error(`condition_lookup_failed: ${error.message}`);
-    for (const row of data ?? []) {
-      if (row.hash_algorithm === "sha256" && row.hash_key_version == null) legacy = true;
-      else if (row.hash_algorithm === "hmac-sha256" && Number.isSafeInteger(row.hash_key_version) && row.hash_key_version > 0) {
-        versions.add(Number(row.hash_key_version));
-      } else throw new Error("contact_hash_metadata_invalid");
-    }
+  const { data, error } = await supa().rpc("get_contact_hash_requirements", { p_tenant: tenantId });
+  if (error) throw new Error(`condition_lookup_failed: ${error.message}`);
+  if (!data || typeof data !== "object" || Array.isArray(data)
+    || data.schema !== "ligou.contact-hash-requirements.v1"
+    || !Array.isArray(data.requirements) || data.requirements.length > 64
+    || !Number.isSafeInteger(data.row_count) || data.row_count < 0) throw new Error("contact_hash_requirements_invalid");
+  let legacy = false, counted = 0;
+  const versions = new Set<number>([currentHashVersion()]), seen = new Set<string>();
+  for (const item of data.requirements) {
+    if (!item || typeof item !== "object" || Array.isArray(item)
+      || Object.keys(item).sort().join(",") !== "algorithm,key_version,row_count"
+      || !Number.isSafeInteger(item.row_count) || item.row_count < 1) throw new Error("contact_hash_requirements_invalid");
+    const key = `${item.algorithm}:${item.key_version ?? "legacy"}`;
+    if (seen.has(key)) throw new Error("contact_hash_requirements_invalid");
+    seen.add(key);
+    counted += item.row_count;
+    if (item.algorithm === "sha256" && item.key_version == null) legacy = true;
+    else if (item.algorithm === "hmac-sha256" && Number.isSafeInteger(item.key_version) && item.key_version > 0) versions.add(item.key_version);
+    else throw new Error("contact_hash_requirements_invalid");
   }
+  if (counted !== data.row_count) throw new Error("contact_hash_requirements_invalid");
   return { legacy, versions: [...versions].sort((a, b) => a - b) };
 }
 

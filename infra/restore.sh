@@ -50,6 +50,35 @@ CHECK_CREATED=0
 CHECK_STARTED=0
 INTERRUPTED=0
 
+cell_active() {
+  [ "$(docker inspect --format '{{.State.Running}}' "$CELL" 2>/dev/null || true)" = "true" ]
+}
+
+live_smoke() {
+  cell_active \
+    && docker exec "$CELL" hermes memory list --json >/dev/null \
+    && docker exec "$CELL" hermes skills list --json >/dev/null \
+    && docker exec "$CELL" hermes sessions list --json >/dev/null \
+    && TENANT_ID="$TENANT_ID" TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$HEALTH_TOOL" >/dev/null
+}
+
+activate_volume() {
+  local next="$1" expected="$2"
+  if [ "${LIGOU_RESTORE_TEST_HARNESS:-0}" = 1 ] && [ "${LIGOU_RESTORE_TEST_FAIL_CAS:-0}" = 1 ] \
+    && [ "$next" = "$CHECK_VOLUME" ]; then return 1; fi
+  "$NODE_BIN" "$IDENTITY_TOOL" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --activate-cognitive "$next" --expected "$expected" --json >/dev/null
+}
+
+recreate_cell() {
+  TENANT_ID="$TENANT_ID" TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$NODE_BIN" "$TENANT_COMPOSE" up -d --force-recreate >/dev/null
+}
+
+rollback_activation() {
+  activate_volume "$ACTIVE_COGNITIVE" "$CHECK_VOLUME" \
+    && recreate_cell \
+    && live_smoke
+}
+
 cleanup() {
   local status=$?
   trap - EXIT INT TERM HUP
@@ -170,35 +199,6 @@ fi
 
 docker rm -f "$CHECK_CELL" >/dev/null
 CHECK_STARTED=0
-
-cell_active() {
-  [ "$(docker inspect --format '{{.State.Running}}' "$CELL" 2>/dev/null || true)" = "true" ]
-}
-
-live_smoke() {
-  cell_active \
-    && docker exec "$CELL" hermes memory list --json >/dev/null \
-    && docker exec "$CELL" hermes skills list --json >/dev/null \
-    && docker exec "$CELL" hermes sessions list --json >/dev/null \
-    && TENANT_ID="$TENANT_ID" TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$HEALTH_TOOL" >/dev/null
-}
-
-activate_volume() {
-  local next="$1" expected="$2"
-  if [ "${LIGOU_RESTORE_TEST_HARNESS:-0}" = 1 ] && [ "${LIGOU_RESTORE_TEST_FAIL_CAS:-0}" = 1 ] \
-    && [ "$next" = "$CHECK_VOLUME" ]; then return 1; fi
-  "$NODE_BIN" "$IDENTITY_TOOL" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --activate-cognitive "$next" --expected "$expected" --json >/dev/null
-}
-
-recreate_cell() {
-  TENANT_ID="$TENANT_ID" TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$NODE_BIN" "$TENANT_COMPOSE" up -d --force-recreate >/dev/null
-}
-
-rollback_activation() {
-  activate_volume "$ACTIVE_COGNITIVE" "$CHECK_VOLUME" \
-    && recreate_cell \
-    && live_smoke
-}
 
 test_interrupt() {
   local boundary="$1"

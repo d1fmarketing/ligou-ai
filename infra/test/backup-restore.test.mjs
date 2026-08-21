@@ -359,7 +359,7 @@ async function stubCommands(fixture) {
   const curl = path.join(bin, "curl");
   const aws = path.join(bin, "aws");
   const sleep = path.join(bin, "sleep");
-  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"volume inspect"*) exit 1 ;;\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
+  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"volume inspect"*) if [ -n "\${STAGE_EXISTS_ONCE_MARKER:-}" ] && [ ! -e "$STAGE_EXISTS_ONCE_MARKER" ]; then : > "$STAGE_EXISTS_ONCE_MARKER"; exit 0; fi; exit 1 ;;\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\nif [ "\${FAIL_DISPOSABLE_IMPORT:-0}" = 1 ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'hermes import'; then exit 1; fi\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
   await writeFile(curl, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\nif [ "\${CURL_MODE:-ok}" = fail ]; then printf '%s\\n' '{"ok":false}'; elif [ -n "\${CURL_FAIL_ONCE_MARKER:-}" ] && [ ! -e "$CURL_FAIL_ONCE_MARKER" ]; then : > "$CURL_FAIL_ONCE_MARKER"; printf '%s\\n' '{"ok":false}'; else printf '%s\\n' '{"ok":true}'; fi\n`);
   await writeFile(aws, "#!/bin/sh\nprintf '%s\\n' 'unexpected aws call' >&2\nexit 99\n");
   await writeFile(sleep, "#!/bin/sh\nexit 0\n");
@@ -424,11 +424,47 @@ test("disposable smoke failure never reaches the live cell", async () => {
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /disposable_smoke_failed/);
+    assert.doesNotMatch(result.stderr, /command not found|rollback_activation: not found|recreate_cell: not found/);
     const log = await readFile(path.join(fixture, "docker.log"), "utf8");
     assert.doesNotMatch(log, new RegExp(`ligou-cell-${TENANT} hermes (?:backup|import)`));
+    assert.match(log, /volume rm/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
+});
+
+test("early disposable import failure cleans the stage without undefined recovery calls", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-import-fail-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture), manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const bin = await stubCommands(fixture);
+    const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], {
+      env: restoreEnv(fixture, bin, { FAIL_DISPOSABLE_IMPORT: "1" }),
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /disposable_import_failed/);
+    assert.doesNotMatch(result.stderr, /command not found|rollback_activation: not found|recreate_cell: not found/);
+    assert.match(await readFile(path.join(fixture, "docker.log"), "utf8"), /volume rm/);
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+});
+
+test("stage-volume-exists failure is leak-free and the same restore remains retryable", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-stage-exists-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture), manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const bin = await stubCommands(fixture);
+    const env = restoreEnv(fixture, bin, { STAGE_EXISTS_ONCE_MARKER: path.join(fixture, "stage-existed") });
+    const first = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env });
+    assert.notEqual(first.status, 0);
+    assert.match(first.stderr, /restore_stage_volume_exists/);
+    assert.doesNotMatch(first.stderr, /command not found|rollback_activation: not found|recreate_cell: not found/);
+    const retry = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest, "--apply"], { env });
+    assert.equal(retry.status, 0, retry.stderr);
+  } finally { await rm(fixture, { recursive: true, force: true }); }
 });
 
 test("apply promotes a validated tenant-staged volume without importing into the live volume", async () => {

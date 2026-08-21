@@ -111,7 +111,7 @@ was performed.
 - `CalendarPort` now separates `write`, read-only `reconcile`, and `busy`. Unknown intents claim in reconciliation
   mode, provider lookup failure never reaches POST, and definitive absence remains unknown/manual-review rather
   than authorizing another write.
-- Google and fake adapters use one canonical expected payload and exact validator covering account/calendar
+- The tenant connector adapter uses one canonical expected payload and exact validator covering account/calendar
   mapping, summary, commitment description, start, end, confirmed status, private idempotency/tenant/booking
   keys, and expected payload hash. New and reused events use the same proof rule; receipts are unique per intent.
 - Customer outcome language is channel-neutral and centralized. Active Realtime prompts, tool snapshots/results,
@@ -165,9 +165,8 @@ removed from the final migration sequence.
   worker cannot release the slot or overwrite a newer claim. Direct service-role execution of the old unfenced
   prepare/release/validator paths is revoked.
 - Connector state is queried even without OAuth client environment variables. Lookup error, inactive row,
-  missing token, or incomplete OAuth configuration is unknown and never falls back. Only confirmed row absence,
-  explicit fallback enablement, and complete global configuration may use the managed calendar. Malformed event
-  list/pagination bodies are unknown with zero POST.
+  missing token, incomplete OAuth configuration, or confirmed absence never falls back. No global/fake/managed
+  Calendar configuration authorizes runtime provider access. Malformed event list/pagination is unknown with zero POST.
 - Historical only: Run 2 filtered digits from freeform question/context. Run 3 removed question/context/advice
   inputs and outputs entirely in favor of the closed action-code contract above.
 - The final receipt-authority migration quarantines every legacy accepted booking receipt before confirmation
@@ -186,8 +185,8 @@ tests remain intentionally skipped. Real PostgreSQL apply/concurrency and live G
   cannot change status or release the lease.
 - Calendar connector authority is no longer cached. Every Google write, reconciliation, and free/busy operation
   performs a current connector-table lookup, so revocation, inactivation, row change, or database failure takes
-  effect on the next operation. Fake calendar requires explicit `CALENDAR_PROVIDER=fake`; production defaults to
-  current Google connector resolution. A present empty pagination token is malformed/unknown.
+  effect on the next operation. Runtime uses the encrypted tenant connector only; fake Calendar remains a test
+  adapter and is not a fallback. A present empty pagination token is malformed/unknown.
 - Historical only: Run 2 classified freeform pricing/negotiation wording. Run 3 no longer permits any freeform
   question, context, or model advice; only strict action codes can cross the boundary.
 
