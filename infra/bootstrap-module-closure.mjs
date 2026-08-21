@@ -248,6 +248,22 @@ function staticFromSpecifier(tokens, start) {
   return { found: false, value: null };
 }
 
+function isImportIdentifierName(tokens, index) {
+  const next = tokens[index + 1]?.value;
+  if (next === ":") return true;
+  if (next !== "(") return false;
+  let depth = 0;
+  for (let cursor = index + 1; cursor < tokens.length; cursor += 1) {
+    const value = tokens[cursor]?.value;
+    if (value === "(") depth += 1;
+    else if (value === ")") {
+      depth -= 1;
+      if (depth === 0) return tokens[cursor + 1]?.value === "{";
+    }
+  }
+  return false;
+}
+
 export function moduleSpecifiers(source) {
   const tokens = tokenize(source);
   const specifiers = [];
@@ -256,6 +272,7 @@ export function moduleSpecifiers(source) {
     if (token.type !== "identifier") continue;
     if (token.value === "import") {
       if (tokens[index - 1]?.value === "." || tokens[index + 1]?.value === ".") continue;
+      if (isImportIdentifierName(tokens, index)) continue;
       if (tokens[index + 1]?.value === "(") {
         const argument = tokens[index + 2];
         const specifier = literalSpecifier(argument);

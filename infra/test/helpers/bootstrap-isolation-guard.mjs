@@ -1,6 +1,7 @@
 import childProcess from "node:child_process";
 import dgram from "node:dgram";
 import dns from "node:dns";
+import dnsPromises from "node:dns/promises";
 import http from "node:http";
 import http2 from "node:http2";
 import https from "node:https";
@@ -28,10 +29,33 @@ https.request = denyNetwork;
 https.get = denyNetwork;
 http2.connect = denyNetwork;
 dgram.createSocket = denyNetwork;
-dns.lookup = denyNetwork;
-dns.resolve = denyNetwork;
-dns.resolve4 = denyNetwork;
-dns.resolve6 = denyNetwork;
+
+const patchResolverPrototype = (Resolver) => {
+  if (typeof Resolver !== "function" || !Resolver.prototype) throw new Error("bootstrap_dns_guard_invalid");
+  for (const method of Object.getOwnPropertyNames(Resolver.prototype)) {
+    if (method !== "constructor" && typeof Resolver.prototype[method] === "function") {
+      Resolver.prototype[method] = denyNetwork;
+    }
+  }
+};
+const patchDnsQueries = (surface) => {
+  for (const method of Object.keys(surface)) {
+    if ((method === "lookup" || method === "lookupService" || method === "reverse" || method.startsWith("resolve"))
+      && typeof surface[method] === "function") {
+      surface[method] = denyNetwork;
+    }
+  }
+  patchResolverPrototype(surface.Resolver);
+};
+const patchAllPromiseDnsFunctions = (surface) => {
+  patchResolverPrototype(surface.Resolver);
+  for (const method of Object.keys(surface)) {
+    if (method !== "Resolver" && typeof surface[method] === "function") surface[method] = denyNetwork;
+  }
+};
+patchDnsQueries(dns);
+patchAllPromiseDnsFunctions(dns.promises);
+patchAllPromiseDnsFunctions(dnsPromises);
 
 const originalSpawnSync = childProcess.spawnSync;
 const safeArchiveEntry = (candidate) => (

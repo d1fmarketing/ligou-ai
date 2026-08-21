@@ -231,6 +231,32 @@ test("bootstrap closure lexes ESM syntax without treating comments or strings as
   }
 });
 
+test("bootstrap closure treats import object and class members as IdentifierNames", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-bootstrap-import-members-"));
+  try {
+    await writeTree(fixture, {
+      "infra/entry.mjs": [
+        "const objectMethod = { import() { return 'method'; } };",
+        "class Value { import() { return 'class-method'; } }",
+        "const objectProperty = { import: 1 };",
+        "void objectMethod; void Value; void objectProperty;",
+        "void import('./dynamic-literal.mjs');",
+        "import './static-side-effect.mjs';",
+      ].join("\n"),
+      "infra/dynamic-literal.mjs": "export const dynamicLiteral = true;\n",
+      "infra/static-side-effect.mjs": "export const staticSideEffect = true;\n",
+    });
+
+    assert.deepEqual(localModuleClosure(fixture, "infra/entry.mjs"), [
+      "infra/dynamic-literal.mjs",
+      "infra/entry.mjs",
+      "infra/static-side-effect.mjs",
+    ]);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("bootstrap closure rejects nonliteral and interpolated dynamic imports", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-bootstrap-dynamic-"));
   try {
@@ -267,7 +293,7 @@ test("bootstrap closure CLI resolves the exact committed module bytes", async ()
   }
 });
 
-test("bootstrap verifier isolation denies outside reads, absolute imports, fetch, and child commands", async () => {
+test("bootstrap verifier isolation denies filesystem, network including every DNS surface, and child commands", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-bootstrap-isolation-red-"));
   try {
     const bootstrap = path.join(fixture, "bootstrap");
@@ -279,6 +305,11 @@ test("bootstrap verifier isolation denies outside reads, absolute imports, fetch
       "bootstrap/import-external.mjs": "await import(process.argv[2]);\n",
       "bootstrap/network.mjs": "await fetch('data:text/plain,network-readable');\n",
       "bootstrap/net.mjs": "import net from 'node:net'; net.connect({host:'127.0.0.1',port:9});\n",
+      "bootstrap/dns-callback.mjs": "import dns from 'node:dns'; dns.lookup('localhost', () => {});\n",
+      "bootstrap/dns-promises-module.mjs": "import * as dnsPromises from 'node:dns/promises'; await dnsPromises.lookup('localhost');\n",
+      "bootstrap/dns-default-promises.mjs": "import dns from 'node:dns'; dns.setServers(['127.0.0.1']); try { await dns.promises.reverse('127.0.0.1'); } catch (error) { if (error?.message === 'bootstrap_network_forbidden') throw error; }\n",
+      "bootstrap/dns-resolver-callback.mjs": "import dns from 'node:dns'; const resolver = new dns.Resolver(); resolver.setServers(['127.0.0.1']); try { resolver.resolve4('localhost', () => {}); } catch (error) { throw error; }\n",
+      "bootstrap/dns-resolver-promises.mjs": "import {Resolver} from 'node:dns/promises'; const resolver = new Resolver(); resolver.setServers(['127.0.0.1']); try { await resolver.resolveAny('localhost'); } catch (error) { if (error?.message === 'bootstrap_network_forbidden') throw error; }\n",
       "bootstrap/child.mjs": "import {spawnSync} from 'node:child_process'; const r=spawnSync(process.execPath,['-e','process.exit(0)']); process.exit(r.status ?? 1);\n",
       "bootstrap/tar-abuse.mjs": "import {spawnSync} from 'node:child_process'; spawnSync('tar',['--version']);\n",
     });
@@ -287,16 +318,24 @@ test("bootstrap verifier isolation denies outside reads, absolute imports, fetch
       runPermissionedNode(path.join(bootstrap, "import-external.mjs"), [pathToFileURL(path.join(outside, "external.mjs")).href], { cwd: bootstrap, readPaths: [bootstrap] }),
       runPermissionedNode(path.join(bootstrap, "network.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
       runPermissionedNode(path.join(bootstrap, "net.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
+      runPermissionedNode(path.join(bootstrap, "dns-callback.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
+      runPermissionedNode(path.join(bootstrap, "dns-promises-module.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
+      runPermissionedNode(path.join(bootstrap, "dns-default-promises.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
+      runPermissionedNode(path.join(bootstrap, "dns-resolver-callback.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
+      runPermissionedNode(path.join(bootstrap, "dns-resolver-promises.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
       runPermissionedNode(path.join(bootstrap, "child.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
       runPermissionedNode(path.join(bootstrap, "tar-abuse.mjs"), [], { cwd: bootstrap, readPaths: [bootstrap] }),
     ];
-    assert.deepEqual(attempts.map((attempt) => attempt.status), [1, 1, 1, 1, 1, 1], attempts.map((attempt) => attempt.stderr).join("\n"));
+    assert.deepEqual(attempts.map((attempt) => attempt.status), [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], attempts.map((attempt) => attempt.stderr).join("\n"));
     assert.match(attempts[0].stderr, /ERR_ACCESS_DENIED/);
     assert.match(attempts[1].stderr, /ERR_ACCESS_DENIED/);
     assert.match(attempts[2].stderr, /bootstrap_network_forbidden/);
     assert.match(attempts[3].stderr, /bootstrap_network_forbidden/);
-    assert.match(attempts[4].stderr, /bootstrap_child_process_forbidden/);
-    assert.match(attempts[5].stderr, /bootstrap_child_process_forbidden/);
+    for (const attempt of attempts.slice(4, 9)) {
+      assert.match(attempt.stderr, /bootstrap_network_forbidden/);
+    }
+    assert.match(attempts[9].stderr, /bootstrap_child_process_forbidden/);
+    assert.match(attempts[10].stderr, /bootstrap_child_process_forbidden/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
