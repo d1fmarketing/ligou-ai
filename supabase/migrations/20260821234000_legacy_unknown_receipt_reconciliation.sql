@@ -4,6 +4,8 @@
 -- every later row is quarantined with its original relationship before only the
 -- duplicate intent link is cleared.
 
+begin;
+
 create table if not exists public.legacy_unknown_receipt_quarantine (
   receipt_id uuid primary key references public.receipts(id),
   original_intent_id uuid not null references public.action_intents(id),
@@ -78,3 +80,5 @@ begin
   end if;
 end;
 $$;
+
+commit;

@@ -758,6 +758,12 @@ describe("booking delivery authority corrective migration contract", () => {
 describe("legacy unknown booking receipt reconciliation contract", () => {
   test("preserves every duplicate receipt while unlinking only noncanonical unknown evidence", () => {
     const sql = migrationSql("legacy_unknown_receipt_reconciliation");
+    const beginAt = sql.indexOf("begin;");
+    const lockAt = sql.indexOf("lock table public.receipts in access exclusive mode");
+    const commitAt = sql.lastIndexOf("commit;");
+    expect(beginAt).toBeGreaterThan(-1);
+    expect(lockAt).toBeGreaterThan(beginAt);
+    expect(commitAt).toBeGreaterThan(lockAt);
     expect(sql).toContain("create table if not exists public.legacy_unknown_receipt_quarantine");
     expect(sql).toContain("receipt_id uuid primary key references public.receipts(id)");
     expect(sql).toContain("original_intent_id uuid not null");
