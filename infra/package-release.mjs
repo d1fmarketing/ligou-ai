@@ -40,6 +40,7 @@ export function excludedReleasePath(candidate) {
   const normalized = candidate.replace(/\/$/, "");
   if (normalized.startsWith("voice-controller/scripts/")
     || normalized.startsWith("voice-controller/test/")
+    || normalized.startsWith("hermes-cell/test/")
     || normalized.startsWith("supabase/scripts/")
     || normalized.startsWith("supabase/tests/")
     || normalized.startsWith("infra/test/")

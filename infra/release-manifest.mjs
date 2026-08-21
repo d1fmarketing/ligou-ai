@@ -18,6 +18,7 @@ const EXCLUSIONS = [
   "**/auth.json",
   "**/*.{zip,tar,tgz,gz,7z,rar}",
   "voice-controller/{scripts,test}/**",
+  "hermes-cell/test/**",
   "supabase/{scripts,tests}/**",
   "infra/test/**",
   "infra/{deploy.sh,package-release.mjs,pull-env.sh}",
@@ -98,6 +99,7 @@ function forbidden(candidate) {
   const basename = lower.at(-1) ?? "";
   if (normalized.startsWith("voice-controller/scripts/")
     || normalized.startsWith("voice-controller/test/")
+    || normalized.startsWith("hermes-cell/test/")
     || normalized.startsWith("supabase/scripts/")
     || normalized.startsWith("supabase/tests/")
     || normalized.startsWith("infra/test/")

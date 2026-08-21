@@ -45,6 +45,7 @@ async function gitFixture(base) {
     "hermes-cell/config/config.yaml": "model:\n  provider: openai-codex\n",
     "hermes-cell/config/cli-config.yaml": "model:\n  provider: openai-codex\n",
     "hermes-cell/docker-compose.yml": "services: {}\n",
+    "hermes-cell/test/config.test.mjs": "test-only\n",
     "supabase/functions/good/index.ts": "export {};\n",
     "supabase/deno.json": "{\"imports\":{}}\n",
     "supabase/scripts/admin.ts": "admin-only\n",
