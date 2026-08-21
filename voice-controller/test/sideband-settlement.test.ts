@@ -44,15 +44,30 @@ class SyntheticWebSocket {
   static throwOnSend = false;
   listeners = new Map<string, Array<(event: any) => void>>();
   closed = 0;
+  sent: string[] = [];
   constructor() { SyntheticWebSocket.instances.push(this); }
   addEventListener(type: string, listener: (event: any) => void) {
     this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
   }
-  send() { if (SyntheticWebSocket.throwOnSend) throw new Error("synthetic send failure"); }
+  send(payload: string) {
+    if (SyntheticWebSocket.throwOnSend) throw new Error("synthetic send failure");
+    this.sent.push(payload);
+  }
   close() { this.closed += 1; this.emit("close", { code: 1000 }); }
   emit(type: string, event: any = {}) {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
   }
+}
+
+function emitTranscriptAndFunctionCall(socket: SyntheticWebSocket, marker: string) {
+  socket.emit("message", { data: JSON.stringify({
+    type: "conversation.item.input_audio_transcription.completed",
+    transcript: marker,
+  }) });
+  socket.emit("message", { data: JSON.stringify({
+    type: "response.output_item.done",
+    item: { type: "function_call", name: "synthetic_forbidden_tool", call_id: marker, arguments: "{}" },
+  }) });
 }
 
 function installSyntheticClock() {
@@ -109,6 +124,28 @@ function phoneLifecycleClient(options: { errors?: Set<string> } = {}) {
           then(resolve: (value: unknown) => unknown) { return Promise.resolve({ data: null, error: null }).then(resolve); },
         };
         return api;
+      },
+    } as any,
+  };
+}
+
+function deferredPhoneActivationClient() {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  let resolveConfirmation!: (value: { data: boolean; error: null }) => void;
+  let rejectConfirmation!: (error: Error) => void;
+  const confirmation = new Promise<{ data: boolean; error: null }>((resolve, reject) => {
+    resolveConfirmation = resolve;
+    rejectConfirmation = reject;
+  });
+  return {
+    calls,
+    confirm() { resolveConfirmation({ data: true, error: null }); },
+    fail(error: Error) { rejectConfirmation(error); },
+    client: {
+      rpc(name: string, args: Record<string, unknown>) {
+        calls.push({ name, args });
+        if (name === "confirm_phone_sideband") return confirmation;
+        return Promise.resolve({ data: true, error: null });
       },
     } as any,
   };
@@ -182,6 +219,220 @@ describe("sideband budget finalization", () => {
       expect(liveSessions.has(cap.callId)).toBe(false);
       expect(clock.timeouts.size).toBe(0);
       expect(clock.intervals.size).toBe(0);
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = originalWebSocket;
+      clock.restore();
+    }
+  });
+
+  test("phone messages cannot run transcripts or tools before durable activation confirms", async () => {
+    const clock = installSyntheticClock();
+    const originalWebSocket = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const lifecycle = deferredPhoneActivationClient();
+    _setClient(lifecycle.client);
+    try {
+      const control = attachSideband(cap, "rtc-1", "gpt-realtime-2.1-mini", {
+        phone: { eventId: "event-1", claimToken: "claim-1" },
+      });
+      const socket = SyntheticWebSocket.instances[0]!;
+      socket.emit("open");
+      emitTranscriptAndFunctionCall(socket, "pre-confirm");
+      await flushAsync();
+
+      expect(control.ledger.transcript).toEqual([]);
+      expect(control.ledger.toolLog).toEqual([]);
+      expect(socket.sent).toEqual([]);
+      expect(lifecycle.calls.map((call) => call.name)).toEqual(["confirm_phone_sideband"]);
+
+      lifecycle.confirm();
+      await control.opened;
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = originalWebSocket;
+      clock.restore();
+    }
+  });
+
+  test("a confirmation that returns after cancel cannot reactivate the phone sideband", async () => {
+    const clock = installSyntheticClock();
+    const originalWebSocket = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const lifecycle = deferredPhoneActivationClient();
+    _setClient(lifecycle.client);
+    try {
+      const control = attachSideband(cap, "rtc-1", "gpt-realtime-2.1-mini", {
+        phone: { eventId: "event-1", claimToken: "claim-1" },
+      });
+      const socket = SyntheticWebSocket.instances[0]!;
+      socket.emit("open");
+      control.cancel("cancel_while_confirming");
+      await expect(control.opened).rejects.toThrow("phone_sideband_cancelled");
+
+      lifecycle.confirm();
+      await flushAsync();
+
+      expect(socket.sent).toEqual([]);
+      expect(clock.intervals.size).toBe(0);
+      expect(liveSessions.has(cap.callId)).toBe(false);
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = originalWebSocket;
+      clock.restore();
+    }
+  });
+
+  test("a confirmation rejection after cancel cannot mutate the terminated ledger", async () => {
+    const clock = installSyntheticClock();
+    const originalWebSocket = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const lifecycle = deferredPhoneActivationClient();
+    _setClient(lifecycle.client);
+    try {
+      const control = attachSideband(cap, "rtc-1", "gpt-realtime-2.1-mini", {
+        phone: { eventId: "event-1", claimToken: "claim-1" },
+      });
+      SyntheticWebSocket.instances[0]!.emit("open");
+      control.cancel("cancel_while_confirming");
+      await expect(control.opened).rejects.toThrow("phone_sideband_cancelled");
+
+      lifecycle.fail(new Error("synthetic confirmation rejection"));
+      await flushAsync();
+
+      expect(control.ledger.status).toBe("active");
+      expect(control.ledger.transcript).toEqual([]);
+      expect(liveSessions.has(cap.callId)).toBe(false);
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = originalWebSocket;
+      clock.restore();
+    }
+  });
+
+  test("messages arriving after cancel cannot mutate transcript, run tools, or write RPCs", async () => {
+    const clock = installSyntheticClock();
+    const originalWebSocket = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const lifecycle = phoneLifecycleClient();
+    _setClient(lifecycle.client);
+    try {
+      const control = attachSideband(cap, "rtc-1", "gpt-realtime-2.1-mini", {
+        phone: { eventId: "event-1", claimToken: "claim-1" },
+      });
+      const socket = SyntheticWebSocket.instances[0]!;
+      socket.emit("open");
+      await control.opened;
+      control.cancel("boundary_test");
+      const sentBefore = socket.sent.length;
+      const rpcBefore = lifecycle.calls.length;
+
+      emitTranscriptAndFunctionCall(socket, "post-cancel");
+      await flushAsync();
+
+      expect(control.ledger.transcript).toEqual([]);
+      expect(control.ledger.toolLog).toEqual([]);
+      expect(socket.sent).toHaveLength(sentBefore);
+      expect(lifecycle.calls).toHaveLength(rpcBefore);
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = originalWebSocket;
+      clock.restore();
+    }
+  });
+
+  test("messages from a replaced socket cannot mutate transcript, run tools, or write RPCs", async () => {
+    const clock = installSyntheticClock();
+    const originalWebSocket = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const lifecycle = phoneLifecycleClient();
+    _setClient(lifecycle.client);
+    try {
+      const control = attachSideband(cap, "rtc-1", "gpt-realtime-2.1-mini", {
+        phone: { eventId: "event-1", claimToken: "claim-1" },
+      });
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      first.emit("close", { code: 1012 });
+      const retry = [...clock.timeouts.values()].at(-1)!;
+      retry();
+      expect(SyntheticWebSocket.instances).toHaveLength(2);
+      const sentBefore = first.sent.length;
+      const rpcBefore = lifecycle.calls.length;
+
+      emitTranscriptAndFunctionCall(first, "stale-socket");
+      await flushAsync();
+
+      expect(control.ledger.transcript).toEqual([]);
+      expect(control.ledger.toolLog).toEqual([]);
+      expect(first.sent).toHaveLength(sentBefore);
+      expect(lifecycle.calls).toHaveLength(rpcBefore);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = originalWebSocket;
+      clock.restore();
+    }
+  });
+
+  test("messages arriving after terminal finalization cannot mutate transcript or run tools", async () => {
+    const clock = installSyntheticClock();
+    const originalWebSocket = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const lifecycle = phoneLifecycleClient();
+    _setClient(lifecycle.client);
+    try {
+      const control = attachSideband(cap, "rtc-1", "gpt-realtime-2.1-mini", {
+        phone: { eventId: "event-1", claimToken: "claim-1" },
+      });
+      const socket = SyntheticWebSocket.instances[0]!;
+      socket.emit("open");
+      await control.opened;
+      socket.emit("message", { data: JSON.stringify({ type: "session.ended" }) });
+      await flushAsync();
+      const transcriptBefore = [...control.ledger.transcript];
+      const sentBefore = socket.sent.length;
+      const rpcBefore = lifecycle.calls.length;
+
+      emitTranscriptAndFunctionCall(socket, "post-terminal");
+      await flushAsync();
+
+      expect(control.ledger.transcript).toEqual(transcriptBefore);
+      expect(control.ledger.toolLog).toEqual([]);
+      expect(socket.sent).toHaveLength(sentBefore);
+      expect(lifecycle.calls).toHaveLength(rpcBefore);
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = originalWebSocket;
+      clock.restore();
+    }
+  });
+
+  test("browser sideband processes messages after the physical socket opens", async () => {
+    const clock = installSyntheticClock();
+    const originalWebSocket = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    try {
+      const control = attachSideband(cap, "rtc-1", "gpt-realtime-2.1-mini");
+      const socket = SyntheticWebSocket.instances[0]!;
+      socket.emit("open");
+      await control.opened;
+      socket.emit("message", { data: JSON.stringify({
+        type: "conversation.item.input_audio_transcription.completed",
+        transcript: "browser-after-open",
+      }) });
+      await flushAsync();
+      expect(control.ledger.transcript.map((entry) => entry.text)).toEqual(["browser-after-open"]);
+      control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
       globalThis.WebSocket = originalWebSocket;

@@ -99,6 +99,14 @@ export function attachSideband(
   });
   void opened.catch(() => {});
 
+  const ownsLiveLedger = () => (
+    !cancelled
+    && !terminal
+    && !finalizing
+    && live.get(cap.callId) === ledger
+  );
+  const ownsSocket = (sock: WebSocket) => ownsLiveLedger() && ws === sock;
+
   const clearRuntimeTimers = () => {
     if (deadline) clearTimeout(deadline);
     if (heartbeat) clearInterval(heartbeat);
@@ -112,8 +120,9 @@ export function attachSideband(
     if (cancelled) return;
     cancelled = true;
     terminal = true;
+    phoneActive = false;
     clearRuntimeTimers();
-    live.delete(cap.callId);
+    if (live.get(cap.callId) === ledger) live.delete(cap.callId);
     if (!openedSettled) {
       openedSettled = true;
       rejectOpened(new Error("phone_sideband_cancelled"));
@@ -124,9 +133,10 @@ export function attachSideband(
   };
 
   const finalize = async (reason: string) => {
-    if (cancelled || finalizing || !live.has(cap.callId)) return;
+    if (cancelled || finalizing || live.get(cap.callId) !== ledger) return;
     finalizing = true;
     terminal = true;
+    phoneActive = false;
     clearRuntimeTimers();
     if (!openedSettled) {
       openedSettled = true;
@@ -150,13 +160,13 @@ export function attachSideband(
         p_error: `sideband_terminal_persistence_failed:${reason}`,
       }).catch(() => ({ data: null, error: { message: "defer_failed" } }));
     }
-    live.delete(cap.callId);
+    if (live.get(cap.callId) === ledger) live.delete(cap.callId);
   };
 
   const startHeartbeat = () => {
-    if (!options.phone || heartbeat || cancelled) return;
+    if (!options.phone || heartbeat || !phoneActive || !ownsLiveLedger()) return;
     heartbeat = setInterval(() => {
-      if (heartbeatInFlight || cancelled || finalizing) return;
+      if (heartbeatInFlight || !phoneActive || !ownsLiveLedger()) return;
       heartbeatInFlight = true;
       void (async () => {
         try {
@@ -164,12 +174,13 @@ export function attachSideband(
             p_event_id: options.phone!.eventId,
             p_claim_token: options.phone!.claimToken,
           });
+          if (!phoneActive || !ownsLiveLedger()) return;
           if (!error && data === true) return;
           ledger.status = "error";
           ledger.transcript.push({ role: "system", text: "sideband heartbeat failed", at: new Date().toISOString() });
           await finalize("sideband_heartbeat_failed");
         } catch {
-          await finalize("sideband_heartbeat_failed");
+          if (phoneActive && ownsLiveLedger()) await finalize("sideband_heartbeat_failed");
         } finally {
           heartbeatInFlight = false;
         }
@@ -178,12 +189,13 @@ export function attachSideband(
   };
 
   const activateOpenedSocket = async (sock: WebSocket) => {
-    if (cancelled) return;
+    if (!ownsSocket(sock)) return;
     if (options.phone && !phoneActive) {
       const { data, error } = await supa().rpc("confirm_phone_sideband", {
         p_event_id: options.phone.eventId,
         p_claim_token: options.phone.claimToken,
       });
+      if (!ownsSocket(sock)) return;
       if (error || data !== true) {
         if (!openedSettled) {
           openedSettled = true;
@@ -192,13 +204,17 @@ export function attachSideband(
         cancel("phone_sideband_activation_failed");
         return;
       }
+      if (!ownsSocket(sock)) return;
       phoneActive = true;
+      if (!ownsSocket(sock)) return;
       startHeartbeat();
     }
+    if (!ownsSocket(sock)) return;
     sock.send(JSON.stringify({
       type: "session.update",
       session: { type: "realtime", audio: { input: { transcription: { model: "gpt-live-transcribe" } } } },
     }));
+    if (!ownsSocket(sock)) return;
     if (!openedSettled) {
       openedSettled = true;
       resolveOpened();
@@ -217,11 +233,12 @@ export function attachSideband(
     ws = sock;
 
     sock.addEventListener("open", () => {
-      if (cancelled) return;
+      if (!ownsSocket(sock)) return;
       openedThisAttempt = true;
       everOpened = true;
       console.log(`sideband OPEN call=${cap.callId.slice(0, 8)} rtc=${openaiCallId} attempt=${attempt}`);
       void activateOpenedSocket(sock).catch((error) => {
+        if (!ownsSocket(sock)) return;
         ledger.status = "error";
         ledger.transcript.push({ role: "system", text: `sideband setup failed: ${String(error)}`, at: new Date().toISOString() });
         void finalize("sideband_session_update_failed");
@@ -229,10 +246,19 @@ export function attachSideband(
     });
 
     sock.addEventListener("message", (ev) => {
+      const canHandleMessage = () => (
+        openedThisAttempt
+        && ledger.status === "active"
+        && ownsSocket(sock)
+        && (!options.phone || phoneActive)
+      );
+      if (!canHandleMessage()) return;
       let msg: any;
       try { msg = JSON.parse(String(ev.data)); } catch { return; }
-      void handleEvent(cap, ledger, sock, msg).then(() => {
-        if (ledger.status !== "active" && live.has(cap.callId)) {
+      if (!canHandleMessage()) return;
+      void handleEvent(cap, ledger, sock, msg, canHandleMessage).then(() => {
+        if (!openedThisAttempt || !ownsSocket(sock) || (options.phone && !phoneActive)) return;
+        if (ledger.status !== "active") {
           terminal = true;
           clearTimeout(deadline);
           void finalize(ledger.status === "error" ? "openai_error" : "terminal_event");
@@ -241,7 +267,9 @@ export function attachSideband(
     });
 
     sock.addEventListener("close", (ev: any) => {
-      if (cancelled) return;
+      const wasCurrent = ws === sock;
+      if (wasCurrent) ws = null;
+      if (cancelled || !wasCurrent || live.get(cap.callId) !== ledger) return;
       console.log(`sideband CLOSE call=${cap.callId.slice(0, 8)} code=${ev?.code} attempt=${attempt} opened=${openedThisAttempt} terminal=${terminal}`);
       if (terminal || ledger.status !== "active") { clearTimeout(deadline); void finalize("terminal_close"); return; }
       ledger.providerUsageEvidence.continuous = false;
@@ -262,7 +290,7 @@ export function attachSideband(
       const delay = openedThisAttempt ? 500 : Math.min(1_000 * 2 ** (attempt - 1), 8_000);
       const retry = setTimeout(() => {
         retryTimers.delete(retry);
-        if (!terminal && !cancelled && live.has(cap.callId)) {
+        if (!terminal && !cancelled && live.get(cap.callId) === ledger) {
           try { connect(); } catch { void finalize("sideband_reconnect_failed"); }
         }
       }, delay);
@@ -294,7 +322,14 @@ export function attachSideband(
   return { ledger, opened, cancel };
 }
 
-export async function handleEvent(cap: Capability, ledger: SessionLedger, ws: WebSocket, msg: any) {
+export async function handleEvent(
+  cap: Capability,
+  ledger: SessionLedger,
+  ws: WebSocket,
+  msg: any,
+  isCurrent: () => boolean = () => true,
+) {
+  if (!isCurrent()) return;
   switch (msg.type) {
     case "conversation.item.input_audio_transcription.completed":
       if (msg.transcript) ledger.transcript.push({ role: "caller", text: msg.transcript, at: new Date().toISOString() });
@@ -305,14 +340,18 @@ export async function handleEvent(cap: Capability, ledger: SessionLedger, ws: We
     case "response.output_item.done": {
       const item = msg.item;
       if (item?.type === "function_call") {
+        if (!isCurrent()) return;
         let args: Record<string, unknown> = {};
         try { args = JSON.parse(item.arguments ?? "{}"); } catch {}
         const result = await runTool(cap, item.name, args);
+        if (!isCurrent()) return;
         ledger.toolLog.push({ name: item.name, ok: result.ok, durationMs: result.durationMs });
+        if (!isCurrent()) return;
         ws.send(JSON.stringify({
           type: "conversation.item.create",
           item: { type: "function_call_output", call_id: item.call_id, output: JSON.stringify(result.body) },
         }));
+        if (!isCurrent()) return;
         ws.send(JSON.stringify({ type: "response.create" }));
       }
       break;
