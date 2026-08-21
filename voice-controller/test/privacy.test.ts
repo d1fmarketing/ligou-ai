@@ -30,6 +30,13 @@ describe("PII minimization and redaction", () => {
     expect(out.length).toBeLessThanOrEqual(120);
     expect(out).not.toContain("4111");
   });
+
+  test("redacts contiguous phones before truncation so a leading fragment cannot escape", () => {
+    expect(minimizeAndRedact("Call 9495550101 now", 80)).toBe("Call [phone-redacted] now");
+    const boundary = minimizeAndRedact(`${"safe ".repeat(23)}9495550101 trailing`, 120);
+    expect(boundary.length).toBeLessThanOrEqual(120);
+    expect(boundary).not.toMatch(/94955|5550101/);
+  });
 });
 
 describe("keyed canonical contacts", () => {

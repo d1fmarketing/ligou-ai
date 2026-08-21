@@ -137,7 +137,7 @@ describe("tenant-scoped legacy connector migration", () => {
             row.token_key_version = input.wire.keyVersion;
             row.token_account_ref = input.accountRef;
             row.refresh_token = null;
-            row.status = "active";
+            row.status = input.status;
             return true;
           },
           async readEncrypted(id: string) {
@@ -200,9 +200,23 @@ describe("tenant-scoped legacy connector migration", () => {
       await expect(migrateTenantConnectorTokens({ tenantId: TENANT, encodedKey: key, apply: true, store }))
         .rejects.toThrow();
       expect(store.state[0]?.refresh_token).toBe(legacy.refresh_token);
-      expect(store.state[0]?.refresh_token_ciphertext).toBeNull();
+    expect(store.state[0]?.refresh_token_ciphertext).toBeNull();
     }
   });
+
+  for (const [priorStatus, expectedStatus] of [
+    ["active", "reconnect_required"],
+    ["reconnect_required", "reconnect_required"],
+    ["revoked", "revoked"],
+    ["error", "error"],
+  ] as const) {
+    test(`conversion preserves authorization boundary ${priorStatus} -> ${expectedStatus}`, async () => {
+      const store = memoryStore([{ ...legacy, status: priorStatus }]);
+      await migrateTenantConnectorTokens({ tenantId: TENANT, encodedKey: TEST_KEY, apply: true, store });
+      expect(store.state[0]?.status).toBe(expectedStatus);
+      expect(store.state[0]?.status).not.toBe("active");
+    });
+  }
 });
 
 test("OAuth callback HTML escapes provider-derived text and the return URL", () => {

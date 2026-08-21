@@ -43,7 +43,6 @@ export function createUnitTestEnvironment() {
     SUPABASE_PUBLISHABLE_KEY: "synthetic-unit-test-key",
     GOOGLE_OAUTH_CLIENT_ID: "synthetic-unit-test-client",
     GOOGLE_OAUTH_CLIENT_SECRET: "synthetic-unit-test-key",
-    GOOGLE_REFRESH_TOKEN: "synthetic-unit-test-token",
     CONTACT_HASH_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
     CALENDAR_PROVIDER: "fake",
   };

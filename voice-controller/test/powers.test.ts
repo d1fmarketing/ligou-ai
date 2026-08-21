@@ -2,7 +2,8 @@
 // Pure logic + mocked Supabase — no network, $0.
 import { describe, expect, test, beforeEach, afterAll } from "bun:test";
 import { _setClient } from "../src/rules.ts";
-import { conditionsDeny, checkPower, checkCommunication, contactHash } from "../src/powers.ts";
+import { conditionsDeny, checkPower, checkCommunication, contactHash, contactHashIdentity } from "../src/powers.ts";
+import { hashLegacyCanonicalContact } from "../../supabase/functions/_shared/privacy.ts";
 
 const TZ = "America/Los_Angeles";
 // Thursday 2026-08-20, 10:00 and 03:00 Pacific
@@ -70,17 +71,24 @@ let optOutRows: any[] = [];
 let sentRows: any[] = [];
 let tenantLookupFails = false;
 let communicationsLookupError: { message: string } | null = null;
+let lookupHashes: string[] = [];
 
 function mockSupabase() {
   return {
     from(table: string) {
+      const filters: Record<string, unknown> = {};
       const api: any = {
         select() { return api; },
-        eq() { return api; },
-        in() { return api; },
+        eq(column: string, value: unknown) { filters[column] = value; return api; },
+        in(column: string, values: unknown[]) { if (column === "contact_hash") lookupHashes = values as string[]; return api; },
         gte() { return api; },
         is() { return api; },
-        limit: async () => ({ data: table === "contact_opt_outs" ? optOutRows : [], error: null }),
+        limit: async () => ({
+          data: table === "contact_opt_outs"
+            ? optOutRows.filter((row) => !row.contact_hash || lookupHashes.includes(row.contact_hash))
+            : [],
+          error: null,
+        }),
         single: async () =>
           table === "tenants"
             ? tenantLookupFails
@@ -88,7 +96,8 @@ function mockSupabase() {
               : { data: { auth_epoch: 1, timezone: TZ }, error: null }
             : { data: powersRows[0] ?? null, error: null },
         then(res: any) { // awaited without a terminal method (powers / communications lookups)
-          const data = table === "powers" ? powersRows : table === "communications" ? sentRows : [];
+          const data = table === "powers" ? powersRows : table === "communications"
+            ? sentRows.filter((row) => !row.contact_hash || lookupHashes.includes(row.contact_hash)) : [];
           const error = table === "communications" ? communicationsLookupError : null;
           return Promise.resolve({ data: error ? null : data, error }).then(res);
         },
@@ -104,6 +113,7 @@ beforeEach(() => {
   sentRows = [];
   tenantLookupFails = false;
   communicationsLookupError = null;
+  lookupHashes = [];
   _setClient(mockSupabase());
 });
 afterAll(() => _setClient(null));
@@ -216,6 +226,49 @@ describe("checkCommunication (complete grant, plan v4 §12)", () => {
     expect(await contactHash("+19495550102")).not.toBe(canonical);
     // emails normalize by case/space, not by digits
     expect(await contactHash(" Marcos@Rocha.com ")).toBe(await contactHash("marcos@rocha.com"));
+  });
+
+  test("legacy SHA opt-out remains authoritative during HMAC cutover", async () => {
+    const legacy = await hashLegacyCanonicalContact(base.contact);
+    optOutRows = [{ id: "legacy-opt-out", contact_hash: legacy, hash_algorithm: "sha256", hash_key_version: null }];
+    const result = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
+    expect(result.reason).toBe("opt_out");
+    expect(lookupHashes).toContain(legacy);
+  });
+
+  test("legacy SHA communication history still enforces the frequency cap", async () => {
+    const legacy = await hashLegacyCanonicalContact(base.contact);
+    sentRows = [
+      { id: "legacy-1", contact_hash: legacy, hash_algorithm: "sha256" },
+      { id: "legacy-2", contact_hash: legacy, hash_algorithm: "sha256" },
+    ];
+    const result = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
+    expect(result.reason).toBe("frequency_cap");
+    expect(lookupHashes).toContain(legacy);
+  });
+
+  test("current writes are versioned HMAC and rotation keeps prior HMAC candidates", async () => {
+    const originalVersion = process.env.CONTACT_HASH_KEY_VERSION;
+    const originalKeyring = process.env.CONTACT_HASH_KEYRING;
+    try {
+      process.env.CONTACT_HASH_KEY_VERSION = "2";
+      process.env.CONTACT_HASH_KEYRING = JSON.stringify({
+        1: process.env.CONTACT_HASH_KEY,
+        2: "Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA=",
+      });
+      const identity = await contactHashIdentity(base.contact);
+      expect(identity.algorithm).toBe("hmac-sha256");
+      expect(identity.keyVersion).toBe(2);
+      const old = await contactHash(base.contact, 1);
+      optOutRows = [{ id: "v1-opt-out", contact_hash: old, hash_algorithm: "hmac-sha256", hash_key_version: 1 }];
+      const result = await checkCommunication({ ...base, at: THU_10AM, timezone: TZ });
+      expect(result.reason).toBe("opt_out");
+      expect(lookupHashes).toContain(old);
+      expect(lookupHashes).toContain(identity.hash);
+    } finally {
+      if (originalVersion === undefined) delete process.env.CONTACT_HASH_KEY_VERSION; else process.env.CONTACT_HASH_KEY_VERSION = originalVersion;
+      if (originalKeyring === undefined) delete process.env.CONTACT_HASH_KEYRING; else process.env.CONTACT_HASH_KEYRING = originalKeyring;
+    }
   });
 });
 

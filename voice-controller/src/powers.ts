@@ -2,7 +2,7 @@
 // Plan v4 §3: a grant carries conditions (geography, allowed_hours, channel, purpose...). Those conditions are
 // ENFORCED here — a grant that says "mon-sat 08:00-18:00" must not authorize an action at 3am.
 import { supa } from "./rules.ts";
-import { canonicalContact, hashCanonicalContact } from "../../supabase/functions/_shared/privacy.ts";
+import { canonicalContact, hashCanonicalContact, hashLegacyCanonicalContact } from "../../supabase/functions/_shared/privacy.ts";
 
 export interface PowerCheck {
   granted: boolean;
@@ -28,6 +28,7 @@ export interface PowerContext {
   priorConsent?: boolean;
   body?: string;
   contactHash?: string;
+  contactHashes?: string[];
   recentCommunicationCount?: number;
 }
 
@@ -192,11 +193,12 @@ export async function checkPower(
     if (structuralDenial) { lastReason = structuralDenial; continue; }
     let grantContext = ctx;
     if (parsed.frequency) {
-      if (!ctx.contactHash) { lastReason = "contact_context_required"; continue; }
+      const hashes = ctx.contactHashes?.length ? ctx.contactHashes : ctx.contactHash ? [ctx.contactHash] : [];
+      if (!hashes.length) { lastReason = "contact_context_required"; continue; }
       const since = new Date((ctx.at ?? new Date()).getTime() - parsed.frequency.per_days * 86_400_000).toISOString();
       const { data: recent, error: conditionError } = await supa()
         .from("communications").select("id")
-        .eq("tenant_id", tenantId).eq("contact_hash", ctx.contactHash).eq("status", "sent").gte("created_at", since);
+        .eq("tenant_id", tenantId).in("contact_hash", hashes).eq("status", "sent").gte("created_at", since);
       if (conditionError) {
         lastReason = `condition_lookup_failed: ${conditionError.message}`;
         continue;
@@ -214,7 +216,44 @@ export async function checkPower(
 /** Normalize before hashing so the SAME person always yields the SAME hash — otherwise "+1 (949) 555-0101"
  *  and "+19495550101" would look like two people and an opt-out could be dodged by reformatting. */
 export const normalizeContact = canonicalContact;
-export const contactHash = hashCanonicalContact;
+
+function configuredHashKeys(): Map<number, string> {
+  const keys = new Map<number, string>();
+  const raw = process.env.CONTACT_HASH_KEYRING;
+  if (raw) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { throw new Error("contact_hash_keyring_invalid"); }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("contact_hash_keyring_invalid");
+    for (const [version, key] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!/^[1-9][0-9]*$/.test(version) || typeof key !== "string") throw new Error("contact_hash_keyring_invalid");
+      keys.set(Number(version), key);
+    }
+  }
+  if (process.env.CONTACT_HASH_KEY && !keys.has(1)) keys.set(1, process.env.CONTACT_HASH_KEY);
+  return keys;
+}
+
+function currentHashVersion(): number {
+  const version = Number(process.env.CONTACT_HASH_KEY_VERSION ?? 1);
+  if (!Number.isSafeInteger(version) || version < 1) throw new Error("contact_hash_key_version_invalid");
+  return version;
+}
+
+export async function contactHashIdentity(contact: string, version = currentHashVersion()) {
+  const key = configuredHashKeys().get(version);
+  if (!key) throw new Error("contact_hash_key_version_unavailable");
+  return { algorithm: "hmac-sha256" as const, keyVersion: version, hash: await hashCanonicalContact(contact, key) };
+}
+
+export async function contactHash(contact: string, version?: number): Promise<string> {
+  return (await contactHashIdentity(contact, version)).hash;
+}
+
+async function contactHashCandidates(contact: string): Promise<string[]> {
+  const hashes = [await hashLegacyCanonicalContact(contact)];
+  for (const version of [...configuredHashKeys().keys()].sort((a, b) => a - b)) hashes.push(await contactHash(contact, version));
+  return [...new Set(hashes)];
+}
 
 export interface CommGateResult {
   allowed: boolean;
@@ -228,17 +267,18 @@ export async function checkCommunication(args: {
   tenantId: string; contact: string; channel: string; purpose: string; body: string;
   at?: Date; timezone?: string; priorConsent?: boolean;
 }): Promise<CommGateResult> {
-  const hash = await contactHash(args.contact);
+  const identity = await contactHashIdentity(args.contact);
+  const hashes = await contactHashCandidates(args.contact);
 
   const power = await checkPower(args.tenantId, "hermes", "follow_up_message", args.channel, {
     channel: args.channel, purpose: args.purpose, at: args.at, timezone: args.timezone,
-    priorConsent: args.priorConsent, body: args.body, contactHash: hash,
+    priorConsent: args.priorConsent, body: args.body, contactHash: identity.hash, contactHashes: hashes,
   });
   if (!power.granted) return { allowed: false, reason: power.reason === "outside_allowed_hours" ? "outside_allowed_hours" : (power.reason ?? "no_grant") };
 
   const { data: optOut, error: optOutError } = await supa()
     .from("contact_opt_outs").select("id")
-    .eq("tenant_id", args.tenantId).eq("contact_hash", hash).in("channel", ["*", args.channel]).limit(1);
+    .eq("tenant_id", args.tenantId).in("contact_hash", hashes).in("channel", ["*", args.channel]).limit(1);
   if (optOutError) return { allowed: false, reason: `condition_lookup_failed: ${optOutError.message}`, powerId: power.powerId };
   if (optOut?.length) return { allowed: false, reason: "opt_out", powerId: power.powerId };
 

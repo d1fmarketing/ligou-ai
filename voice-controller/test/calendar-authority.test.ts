@@ -44,18 +44,19 @@ function response(value: { ok: boolean; status: number; body: any }): Response {
   return new Response(JSON.stringify(value.body), { status: value.status });
 }
 
-beforeEach(() => {
-  process.env.GOOGLE_CALENDAR_ID = "calendar-1";
-  process.env.GOOGLE_CLIENT_ID = "synthetic-unit-test-client";
-  process.env.GOOGLE_CLIENT_SECRET = "synthetic-unit-test-key";
-  process.env.GOOGLE_REFRESH_TOKEN = "synthetic-unit-test-token";
+beforeEach(async () => {
+  delete process.env.GOOGLE_REFRESH_TOKEN;
+  delete process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK;
   process.env.GOOGLE_OAUTH_CLIENT_ID = "synthetic-oauth-client";
   process.env.GOOGLE_OAUTH_CLIENT_SECRET = "synthetic-oauth-secret";
   process.env.CONNECTOR_TOKEN_ENCRYPTION_KEY = TEST_CONNECTOR_KEY;
-  process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK = "enabled";
   requests = [];
   connectorError = null;
-  connectorData = null;
+  connectorData = await encryptedConnector(INPUT.tenantId, {
+    token_account_ref: "oauth:synthetic-unit-test-client",
+    calendar_id: "calendar-1",
+    account_email: null,
+  });
   queriedTables = [];
   connectorSelect = "";
   lookupResponse = { ok: true, status: 200, body: { items: [exactEvent()] } };
@@ -100,7 +101,7 @@ async function write(input = INPUT) {
 }
 
 async function encryptedConnector(tenantId: string, overrides: Record<string, unknown> = {}) {
-  const accountRef = "owner@example.com";
+  const accountRef = typeof overrides.token_account_ref === "string" ? overrides.token_account_ref : "owner@example.com";
   const wire = await encryptConnectorToken("tenant-refresh", {
     tenantId,
     provider: "google_calendar",
@@ -196,6 +197,7 @@ describe("canonical calendar commitment", () => {
   });
 
   test("confirmed connector absence uses no managed fallback unless explicitly enabled", async () => {
+    connectorData = null;
     delete process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK;
     const result = await write({ ...INPUT, tenantId: "tenant-no-fallback" });
     expect(result.outcome).toBe("failed");
@@ -203,9 +205,14 @@ describe("canonical calendar commitment", () => {
     expect(requests).toHaveLength(0);
   });
 
-  test("explicit managed fallback follows confirmed connector absence", async () => {
+  test("plaintext managed calendar environment never authorizes fallback", async () => {
+    connectorData = null;
+    process.env.GOOGLE_MANAGED_CALENDAR_FALLBACK = "enabled";
+    process.env.GOOGLE_REFRESH_TOKEN = "legacy-plaintext-token";
     const result = await write();
-    expect(result.outcome).toBe("accepted");
+    expect(result.outcome).toBe("failed");
+    expect(result.error).toBe("google_not_configured");
+    expect(requests).toHaveLength(0);
   });
 
   test("connector lookup error stays unknown even when OAuth client env is absent", async () => {
@@ -299,7 +306,8 @@ describe("canonical calendar commitment", () => {
 
   test("missing encryption key and tampered AAD both fail closed before provider access", async () => {
     const tenantId = "tenant-encryption-fail-closed";
-    connectorData = await encryptedConnector(tenantId, { token_account_ref: "other@example.com" });
+    connectorData = await encryptedConnector(tenantId);
+    connectorData.token_account_ref = "other@example.com";
     delete process.env.CONNECTOR_TOKEN_ENCRYPTION_KEY;
     const missingKey = await write({ ...INPUT, tenantId });
     expect(missingKey.outcome).toBe("unknown");
