@@ -22,3 +22,4 @@ output/
 *.swp
 *~
 supabase/.temp/
+supabase/.branches/

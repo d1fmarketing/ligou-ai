@@ -13,6 +13,10 @@
     "test:hermes-config": "node --test hermes-cell/test/config-security.test.mjs",
     "test:backup-restore": "node --test infra/test/backup-restore.test.mjs",
     "test:deploy-release": "node --test infra/test/deploy-release.test.mjs",
-    "test:edge-functions": "node scripts/check-edge-functions.mjs"
+    "test:edge-functions": "node scripts/check-edge-functions.mjs",
+    "db:gate:local": "node scripts/local-db-gate.mjs"
+  },
+  "devDependencies": {
+    "supabase": "2.115.0"
   }
 }
