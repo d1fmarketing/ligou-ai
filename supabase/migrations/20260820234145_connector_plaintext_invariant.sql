@@ -11,7 +11,20 @@ $$;
 
 alter table public.connector_accounts
   drop constraint if exists connector_accounts_plaintext_quarantined_check,
+  drop constraint if exists connector_accounts_active_encrypted_check,
   drop column if exists refresh_token;
+
+alter table public.connector_accounts
+  add constraint connector_accounts_active_encrypted_check
+  check (
+    status <> 'active'
+    or (
+      refresh_token_ciphertext is not null
+      and refresh_token_iv is not null
+      and token_key_version is not null
+      and token_account_ref is not null
+    )
+  );
 
 revoke all on table public.connector_accounts from public, anon, authenticated;
 grant select, insert, update, delete on table public.connector_accounts to service_role;
