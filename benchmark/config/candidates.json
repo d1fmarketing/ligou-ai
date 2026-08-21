@@ -1,0 +1,963 @@
+{
+  "schema": "ligou.voice-gauntlet.candidates.v1",
+  "evidence_date": "2026-08-21",
+  "candidates": [
+    {
+      "id": "openai-gpt-realtime-2-1-marin-ws-server-vad-client-tools",
+      "provider": "OpenAI",
+      "model": "gpt-realtime-2.1",
+      "pinning": {
+        "supported": true,
+        "pinned_model": "gpt-realtime-2.1",
+        "note": "The official model catalog lists gpt-realtime-2.1 in its Snapshots section as the exact versioned identifier available on the evidence date; no moving 'latest' alias is used."
+      },
+      "voice": "marin",
+      "api_version": "v1",
+      "transport": "WebSocket /v1/realtime with JSON control events and base64 audio",
+      "interruption_configuration": {
+        "turn_detection": "server_vad",
+        "threshold": 0.5,
+        "prefix_padding_ms": 300,
+        "silence_duration_ms": 500,
+        "create_response": true,
+        "interrupt_response": true
+      },
+      "tool_configuration": {
+        "mode": "custom_function",
+        "execution_authority": "ligou_client",
+        "arguments_event": "response.function_call_arguments.done",
+        "result_event": "conversation.item.create:function_call_output"
+      },
+      "capabilities": {
+        "bidirectional_streaming_audio": true,
+        "caller_interruption": true,
+        "programmatic_session_termination": true,
+        "deterministic_tool_call_events": true,
+        "ligou_retains_tool_authority": true,
+        "transcript_evidence": true,
+        "usage_cost_evidence": true,
+        "automated_execution": true,
+        "identifiable_model_version": true,
+        "no_external_credentials_to_model": true,
+        "function_calling": true,
+        "server_authoritative_tool_execution": true,
+        "transcript_events": true,
+        "usage_telemetry": true,
+        "cost_telemetry": false
+      },
+      "qualification_predicates": {
+        "bidirectional_streaming_audio": {
+          "value": true,
+          "official_urls": [
+            "https://developers.openai.com/api/docs/guides/realtime-conversations",
+            "https://developers.openai.com/api/docs/guides/realtime-websocket"
+          ],
+          "note": "Realtime conversations accept streamed input audio and emit streamed output audio over a bidirectional WebSocket."
+        },
+        "caller_interruption": {
+          "value": true,
+          "official_urls": [
+            "https://developers.openai.com/api/docs/guides/realtime-vad"
+          ],
+          "note": "Server VAD exposes interrupt_response=true and the client can also cancel and truncate responses."
+        },
+        "programmatic_session_termination": {
+          "value": true,
+          "official_urls": [
+            "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "https://developers.openai.com/api/docs/guides/realtime-sip"
+          ],
+          "note": "The client owns the WebSocket lifecycle; call-backed sessions additionally expose POST /v1/realtime/calls/{call_id}/hangup."
+        },
+        "deterministic_tool_call_events": {
+          "value": true,
+          "official_urls": [
+            "https://developers.openai.com/api/docs/guides/realtime-conversations"
+          ],
+          "note": "response.done and response.function_call_arguments.done expose the function name, call_id and complete arguments."
+        },
+        "ligou_retains_tool_authority": {
+          "value": true,
+          "official_urls": [
+            "https://developers.openai.com/api/docs/guides/realtime-conversations"
+          ],
+          "note": "The developer application executes custom code and returns function_call_output; the model receives results but not state-changing credentials."
+        },
+        "transcript_evidence": {
+          "value": true,
+          "official_urls": [
+            "https://developers.openai.com/api/docs/guides/realtime-conversations"
+          ],
+          "note": "Input transcription completion and output audio transcript delta/done events are documented."
+        },
+        "usage_cost_evidence": {
+          "value": true,
+          "official_urls": [
+            "https://developers.openai.com/api/docs/guides/realtime-costs",
+            "https://developers.openai.com/api/docs/models/gpt-realtime-2.1"
+          ],
+          "note": "response.done carries modality-specific token usage that can be reconciled against the model's official rate card; no direct USD field is claimed."
+        },
+        "automated_execution": {
+          "value": true,
+          "official_urls": [
+            "https://developers.openai.com/api/docs/guides/realtime-websocket"
+          ],
+          "note": "The documented server-side WebSocket flow is fully programmable and authenticates with an API key."
+        },
+        "identifiable_model_version": {
+          "value": true,
+          "official_urls": [
+            "https://developers.openai.com/api/docs/models/gpt-realtime-2.1"
+          ],
+          "note": "The candidate uses the exact gpt-realtime-2.1 identifier rather than a latest alias."
+        },
+        "no_external_credentials_to_model": {
+          "value": true,
+          "official_urls": [
+            "https://developers.openai.com/api/docs/guides/realtime-conversations",
+            "https://developers.openai.com/api/docs/guides/realtime-websocket"
+          ],
+          "note": "Only OPENAI_API_KEY authenticates the transport; Google, Supabase, AWS and tenant credentials remain inside Ligou's custom-function executor."
+        }
+      },
+      "session_termination": {
+        "method": "Close the WebSocket; for call-backed sessions POST /v1/realtime/calls/{call_id}/hangup",
+        "official_urls": [
+          "https://developers.openai.com/api/docs/guides/realtime-websocket",
+          "https://developers.openai.com/api/docs/guides/realtime-sip"
+        ]
+      },
+      "session_duration_limits": {
+        "value": "60 minutes maximum per Realtime session",
+        "official_urls": [
+          "https://developers.openai.com/api/docs/guides/realtime-conversations"
+        ]
+      },
+      "audio_formats": {
+        "input": [
+          "audio/pcm;rate=24000"
+        ],
+        "output": [
+          "audio/pcm;rate=24000",
+          "audio/pcmu"
+        ],
+        "official_urls": [
+          "https://developers.openai.com/api/docs/guides/realtime-conversations"
+        ]
+      },
+      "concurrency_rate_limits": {
+        "value": "Tier-dependent: Tier 1 is 200 RPM, 1,000 RPD and 40,000 TPM; higher tiers are listed on the model page",
+        "official_urls": [
+          "https://developers.openai.com/api/docs/models/gpt-realtime-2.1"
+        ]
+      },
+      "regional_restrictions": {
+        "value": "API access is limited to OpenAI's supported countries and territories; the benchmark plan must recheck account eligibility",
+        "official_urls": [
+          "https://developers.openai.com/api/docs/supported-countries"
+        ]
+      },
+      "pricing_snapshot": {
+        "date": "2026-08-21",
+        "currency": "USD",
+        "basis": "per 1,000,000 tokens",
+        "rates": {
+          "text_input": 4,
+          "text_cached_input": 0.4,
+          "text_output": 24,
+          "audio_input": 32,
+          "audio_cached_input": 0.4,
+          "audio_output": 64
+        },
+        "limitations": "Input transcription is billed separately. USD cost is derived from provider-reported usage and this rate card, not returned directly in the Realtime event.",
+        "official_urls": [
+          "https://developers.openai.com/api/docs/models/gpt-realtime-2.1",
+          "https://developers.openai.com/api/docs/guides/realtime-costs"
+        ]
+      },
+      "credential_env_vars": [
+        "OPENAI_API_KEY"
+      ],
+      "qualification": {
+        "result": "QUALIFIED",
+        "reason": "All ten entry predicates are established by current API references. Selection still authorizes no provider call; Stage 1 remains behind the paid gate."
+      },
+      "selected_for_v1": true,
+      "official_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-realtime-2.1",
+        "https://developers.openai.com/api/docs/guides/realtime-conversations",
+        "https://developers.openai.com/api/docs/guides/realtime-vad",
+        "https://developers.openai.com/api/docs/guides/realtime-websocket",
+        "https://developers.openai.com/api/docs/guides/realtime-sip",
+        "https://developers.openai.com/api/docs/guides/realtime-costs",
+        "https://developers.openai.com/api/docs/supported-countries"
+      ]
+    },
+    {
+      "id": "google-gemini-3-1-flash-live-preview-kore-ws-auto-vad-client-tools",
+      "provider": "Google",
+      "model": "gemini-3.1-flash-live-preview",
+      "pinning": {
+        "supported": false,
+        "pinned_model": null,
+        "note": "The official model page exposes only a Preview model code and no immutable dated snapshot; the exact code is identifiable but not documented as pin-stable."
+      },
+      "voice": "Kore",
+      "api_version": "v1beta",
+      "transport": "WebSocket BidiGenerateContent with JSON messages and base64 raw PCM blobs",
+      "interruption_configuration": {
+        "automatic_activity_detection": true,
+        "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
+        "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
+        "activity_handling": "START_OF_ACTIVITY_INTERRUPTS"
+      },
+      "tool_configuration": {
+        "mode": "synchronous_function_calling",
+        "execution_authority": "ligou_client",
+        "request_message": "toolCall.functionCalls",
+        "result_message": "toolResponse.functionResponses"
+      },
+      "capabilities": {
+        "bidirectional_streaming_audio": true,
+        "caller_interruption": true,
+        "programmatic_session_termination": true,
+        "deterministic_tool_call_events": true,
+        "ligou_retains_tool_authority": true,
+        "transcript_evidence": true,
+        "usage_cost_evidence": true,
+        "automated_execution": true,
+        "identifiable_model_version": true,
+        "no_external_credentials_to_model": true,
+        "function_calling": true,
+        "server_authoritative_tool_execution": true,
+        "transcript_events": true,
+        "usage_telemetry": true,
+        "cost_telemetry": false
+      },
+      "qualification_predicates": {
+        "bidirectional_streaming_audio": {
+          "value": true,
+          "official_urls": [
+            "https://ai.google.dev/gemini-api/docs/live-api/capabilities",
+            "https://ai.google.dev/api/live"
+          ],
+          "note": "Live API streams realtime PCM input and audio output over the same WebSocket session."
+        },
+        "caller_interruption": {
+          "value": true,
+          "official_urls": [
+            "https://ai.google.dev/api/live",
+            "https://ai.google.dev/gemini-api/docs/live-api/capabilities"
+          ],
+          "note": "START_OF_ACTIVITY_INTERRUPTS is the documented default and interrupted server content identifies the cut-off turn."
+        },
+        "programmatic_session_termination": {
+          "value": true,
+          "official_urls": [
+            "https://ai.google.dev/gemini-api/docs/live-api/session-management"
+          ],
+          "note": "The official SDK flow exposes session.close(), which terminates the WebSocket connection and session."
+        },
+        "deterministic_tool_call_events": {
+          "value": true,
+          "official_urls": [
+            "https://ai.google.dev/api/live"
+          ],
+          "note": "BidiGenerateContentToolCall carries function calls with IDs; tool responses are matched by the same IDs and cancellation lists canceled IDs."
+        },
+        "ligou_retains_tool_authority": {
+          "value": true,
+          "official_urls": [
+            "https://ai.google.dev/api/live"
+          ],
+          "note": "The server requests execution, while Ligou sends client-generated FunctionResponse objects after its own authority checks."
+        },
+        "transcript_evidence": {
+          "value": true,
+          "official_urls": [
+            "https://ai.google.dev/api/live",
+            "https://ai.google.dev/gemini-api/docs/live-api/capabilities"
+          ],
+          "note": "Input and output audio transcription fields are opt-in documented server evidence."
+        },
+        "usage_cost_evidence": {
+          "value": true,
+          "official_urls": [
+            "https://ai.google.dev/api/live",
+            "https://ai.google.dev/gemini-api/docs/pricing",
+            "https://ai.google.dev/gemini-api/docs/live-api/best-practices"
+          ],
+          "note": "usageMetadata reports modality token counts; the official rate card and billing guide make cost derivable, including transcription surcharges and context re-billing."
+        },
+        "automated_execution": {
+          "value": true,
+          "official_urls": [
+            "https://ai.google.dev/gemini-api/docs/live-api/capabilities"
+          ],
+          "note": "The official SDK and raw WebSocket flows support unattended programmatic sessions."
+        },
+        "identifiable_model_version": {
+          "value": true,
+          "official_urls": [
+            "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview"
+          ],
+          "note": "The exact preview model code is documented, although Google does not document it as immutable."
+        },
+        "no_external_credentials_to_model": {
+          "value": true,
+          "official_urls": [
+            "https://ai.google.dev/api/live"
+          ],
+          "note": "Only the Gemini credential authenticates the session; Ligou executes function calls and retains all Google Calendar, Supabase, AWS and tenant credentials."
+        }
+      },
+      "session_termination": {
+        "method": "Call session.close() to terminate the WebSocket and session",
+        "official_urls": [
+          "https://ai.google.dev/gemini-api/docs/live-api/session-management"
+        ]
+      },
+      "session_duration_limits": {
+        "value": "15 minutes for audio-only without compression; connection around 10 minutes; context compression and resumption can extend the logical session",
+        "official_urls": [
+          "https://ai.google.dev/gemini-api/docs/live-api/session-management"
+        ]
+      },
+      "audio_formats": {
+        "input": [
+          "raw little-endian 16-bit PCM; native 16000 Hz"
+        ],
+        "output": [
+          "raw little-endian 16-bit PCM; 24000 Hz"
+        ],
+        "official_urls": [
+          "https://ai.google.dev/gemini-api/docs/live-api/capabilities"
+        ]
+      },
+      "concurrency_rate_limits": {
+        "value": "Project-, model- and tier-specific limits are shown in AI Studio; public limits are not guaranteed and preview models are more restricted; Tier 1 spend cap is $10 per rolling 10 minutes",
+        "official_urls": [
+          "https://ai.google.dev/gemini-api/docs/rate-limits"
+        ]
+      },
+      "regional_restrictions": {
+        "value": "Access and API clients are limited to Google's published available regions; United States and Brazil are listed",
+        "official_urls": [
+          "https://ai.google.dev/gemini-api/docs/available-regions"
+        ]
+      },
+      "pricing_snapshot": {
+        "date": "2026-08-21",
+        "currency": "USD",
+        "basis": "paid tier per 1,000,000 tokens, with official audio minute equivalents",
+        "rates": {
+          "text_input": 0.75,
+          "audio_input": 3,
+          "audio_input_per_minute_equivalent": 0.005,
+          "text_output": 4.5,
+          "audio_output": 12,
+          "audio_output_per_minute_equivalent": 0.018
+        },
+        "limitations": "Live billing reprocesses accumulated context each turn. Input/output transcriptions add text-output charges. usageMetadata has tokens but no direct USD field.",
+        "official_urls": [
+          "https://ai.google.dev/gemini-api/docs/pricing",
+          "https://ai.google.dev/gemini-api/docs/live-api/best-practices"
+        ]
+      },
+      "credential_env_vars": [
+        "GEMINI_API_KEY"
+      ],
+      "qualification": {
+        "result": "CONDITIONALLY_QUALIFIED",
+        "reason": "All ten entry predicates are documented, but the only current Gemini 3.1 Live model is Preview and Google exposes no immutable dated snapshot. Promote only after the paid-plan preflight confirms the same model code and accepts this reproducibility limitation."
+      },
+      "selected_for_v1": false,
+      "official_urls": [
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview",
+        "https://ai.google.dev/gemini-api/docs/live-api/capabilities",
+        "https://ai.google.dev/api/live",
+        "https://ai.google.dev/gemini-api/docs/live-api/session-management",
+        "https://ai.google.dev/gemini-api/docs/live-api/best-practices",
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/rate-limits",
+        "https://ai.google.dev/gemini-api/docs/available-regions"
+      ]
+    },
+    {
+      "id": "xai-grok-voice-think-fast-2-0-eve-ws-server-vad-client-tools",
+      "provider": "xAI",
+      "model": "grok-voice-think-fast-2.0",
+      "pinning": {
+        "supported": true,
+        "pinned_model": "grok-voice-think-fast-2.0",
+        "note": "xAI explicitly instructs production users to pin the versioned name rather than grok-voice-latest."
+      },
+      "voice": "eve",
+      "api_version": "v1",
+      "transport": "WebSocket /v1/realtime with JSON control and base64 audio",
+      "interruption_configuration": {
+        "turn_detection": "server_vad",
+        "threshold": 0.85,
+        "prefix_padding_ms": 333,
+        "barge_in": true
+      },
+      "tool_configuration": {
+        "mode": "custom_function",
+        "execution_authority": "ligou_client",
+        "arguments_event": "response.function_call_arguments.done",
+        "result_event": "conversation.item.create:function_call_output"
+      },
+      "capabilities": {
+        "bidirectional_streaming_audio": true,
+        "caller_interruption": true,
+        "programmatic_session_termination": true,
+        "deterministic_tool_call_events": true,
+        "ligou_retains_tool_authority": true,
+        "transcript_evidence": true,
+        "usage_cost_evidence": false,
+        "automated_execution": true,
+        "identifiable_model_version": true,
+        "no_external_credentials_to_model": true,
+        "function_calling": true,
+        "server_authoritative_tool_execution": true,
+        "transcript_events": true,
+        "usage_telemetry": false,
+        "cost_telemetry": false
+      },
+      "qualification_predicates": {
+        "bidirectional_streaming_audio": {
+          "value": true,
+          "official_urls": [
+            "https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech",
+            "https://docs.x.ai/developers/rest-api-reference/inference/voice"
+          ],
+          "note": "The Speech to Speech API streams audio and text bidirectionally over WebSocket."
+        },
+        "caller_interruption": {
+          "value": true,
+          "official_urls": [
+            "https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech",
+            "https://docs.x.ai/developers/rest-api-reference/inference/voice"
+          ],
+          "note": "xAI documents server_vad for natural barge-in and response.cancel for manual cancellation."
+        },
+        "programmatic_session_termination": {
+          "value": true,
+          "official_urls": [
+            "https://docs.x.ai/developers/rest-api-reference/inference/voice",
+            "https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech/sip"
+          ],
+          "note": "The client owns the WebSocket lifecycle and SIP sessions expose POST /v1/realtime/calls/{call_id}/hangup."
+        },
+        "deterministic_tool_call_events": {
+          "value": true,
+          "official_urls": [
+            "https://docs.x.ai/developers/rest-api-reference/inference/voice"
+          ],
+          "note": "response.function_call_arguments.done exposes a call_id, name and complete arguments; result messages match the call_id."
+        },
+        "ligou_retains_tool_authority": {
+          "value": true,
+          "official_urls": [
+            "https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech"
+          ],
+          "note": "Custom functions are executed in developer code and returned as function_call_output; built-in/MCP tools are excluded from this candidate."
+        },
+        "transcript_evidence": {
+          "value": true,
+          "official_urls": [
+            "https://docs.x.ai/developers/rest-api-reference/inference/voice"
+          ],
+          "note": "The Voice API reference documents input transcription completed/updated and output audio transcript delta/done events."
+        },
+        "usage_cost_evidence": {
+          "value": false,
+          "official_urls": [
+            "https://docs.x.ai/developers/rest-api-reference/inference/voice",
+            "https://docs.x.ai/developers/cost-tracking",
+            "https://docs.x.ai/developers/models/speech-to-speech"
+          ],
+          "note": "The Voice response.done reference does not document a usage or charged-cost payload. The general cost-tracking page explicitly describes other API surfaces, while Voice pricing only says 'starting at', so provider-reconciled session cost is not verified."
+        },
+        "automated_execution": {
+          "value": true,
+          "official_urls": [
+            "https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech"
+          ],
+          "note": "The official Python and JavaScript WebSocket examples are fully programmable."
+        },
+        "identifiable_model_version": {
+          "value": true,
+          "official_urls": [
+            "https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech"
+          ],
+          "note": "grok-voice-think-fast-2.0 is a versioned, explicitly pinnable model name."
+        },
+        "no_external_credentials_to_model": {
+          "value": true,
+          "official_urls": [
+            "https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech"
+          ],
+          "note": "Only XAI_API_KEY authenticates the voice transport; client-side custom functions keep all business-system credentials inside Ligou."
+        }
+      },
+      "session_termination": {
+        "method": "Close the WebSocket; for SIP calls POST /v1/realtime/calls/{call_id}/hangup",
+        "official_urls": [
+          "https://docs.x.ai/developers/rest-api-reference/inference/voice",
+          "https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech/sip"
+        ]
+      },
+      "session_duration_limits": {
+        "value": "120 minutes maximum",
+        "official_urls": [
+          "https://docs.x.ai/developers/models/speech-to-speech"
+        ]
+      },
+      "audio_formats": {
+        "input": [
+          "audio/pcm Linear16 24000 Hz",
+          "audio/pcmu 8000 Hz",
+          "audio/pcma 8000 Hz",
+          "audio/opus 24000 Hz"
+        ],
+        "output": [
+          "audio/pcm Linear16 24000 Hz",
+          "audio/pcmu 8000 Hz",
+          "audio/pcma 8000 Hz",
+          "audio/opus 24000 Hz"
+        ],
+        "official_urls": [
+          "https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech"
+        ]
+      },
+      "concurrency_rate_limits": {
+        "value": "10 concurrent sessions per team",
+        "official_urls": [
+          "https://docs.x.ai/developers/models/speech-to-speech"
+        ]
+      },
+      "regional_restrictions": {
+        "value": "Speech to Speech is listed in us-east-1",
+        "official_urls": [
+          "https://docs.x.ai/developers/models/speech-to-speech"
+        ]
+      },
+      "pricing_snapshot": {
+        "date": "2026-08-21",
+        "currency": "USD",
+        "basis": "starting price per minute of audio sent or received plus per text-input event",
+        "rates": {
+          "audio_per_minute_starting": 0.05,
+          "text_input_event": 0.004
+        },
+        "limitations": "The public Voice page says 'starting at' and does not establish the exact applicable rate or a per-session usage/cost response field. This snapshot cannot authorize a paid run.",
+        "official_urls": [
+          "https://docs.x.ai/developers/models/speech-to-speech"
+        ]
+      },
+      "credential_env_vars": [
+        "XAI_API_KEY"
+      ],
+      "qualification": {
+        "result": "CONDITIONALLY_QUALIFIED",
+        "reason": "The realtime, interruption, tool-authority, transcript, automation and identity gates are verified. Provider-reconciled per-session usage/cost evidence is not documented for Voice, so the candidate cannot enter Stage 1 unless current official evidence closes that gap."
+      },
+      "selected_for_v1": false,
+      "official_urls": [
+        "https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech",
+        "https://docs.x.ai/developers/rest-api-reference/inference/voice",
+        "https://docs.x.ai/developers/models/speech-to-speech",
+        "https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech/sip",
+        "https://docs.x.ai/developers/cost-tracking"
+      ]
+    },
+    {
+      "id": "deepgram-agent-v1-flux-gpt-5-4-mini-flux-kit-client-tools",
+      "provider": "Deepgram",
+      "model": "flux-general-en + gpt-5.4-mini + flux-kit-en",
+      "pinning": {
+        "supported": false,
+        "pinned_model": null,
+        "note": "The Voice Agent settings accept these exact listen/think/speak model codes and the Management API returns resolved model UUIDs after the request, but no immutable pre-run snapshot selector is documented."
+      },
+      "voice": "flux-kit-en",
+      "api_version": "agent-v1/listen-v2/speak-v2",
+      "transport": "WebSocket /v1/agent/converse with binary audio and JSON control events",
+      "interruption_configuration": {
+        "listen_model": "flux-general-en",
+        "barge_in_event": "UserStartedSpeaking",
+        "playback_action": "stop_immediately"
+      },
+      "tool_configuration": {
+        "mode": "client_side_function",
+        "client_side": true,
+        "execution_authority": "ligou_client",
+        "request_message": "FunctionCallRequest",
+        "result_message": "FunctionCallResponse"
+      },
+      "capabilities": {
+        "bidirectional_streaming_audio": true,
+        "caller_interruption": true,
+        "programmatic_session_termination": true,
+        "deterministic_tool_call_events": true,
+        "ligou_retains_tool_authority": true,
+        "transcript_evidence": true,
+        "usage_cost_evidence": true,
+        "automated_execution": true,
+        "identifiable_model_version": true,
+        "no_external_credentials_to_model": true,
+        "function_calling": true,
+        "server_authoritative_tool_execution": true,
+        "transcript_events": true,
+        "usage_telemetry": true,
+        "cost_telemetry": true
+      },
+      "qualification_predicates": {
+        "bidirectional_streaming_audio": {
+          "value": true,
+          "official_urls": [
+            "https://developers.deepgram.com/docs/build-a-voice-agent",
+            "https://developers.deepgram.com/reference/voice-agent/voice-agent"
+          ],
+          "note": "The Agent API uses one WebSocket for raw input audio, JSON control events and raw output audio."
+        },
+        "caller_interruption": {
+          "value": true,
+          "official_urls": [
+            "https://developers.deepgram.com/docs/voice-agent-message-flow"
+          ],
+          "note": "Deepgram stops its agent turn on caller speech and emits UserStartedSpeaking so the client can clear queued playback."
+        },
+        "programmatic_session_termination": {
+          "value": true,
+          "official_urls": [
+            "https://developers.deepgram.com/reference/voice-agent/voice-agent",
+            "https://developers.deepgram.com/docs/voice-agent-feature-overview"
+          ],
+          "note": "The client owns the Agent WebSocket and can close it; the protocol also enforces a documented two-hour maximum."
+        },
+        "deterministic_tool_call_events": {
+          "value": true,
+          "official_urls": [
+            "https://developers.deepgram.com/reference/voice-agent/voice-agent",
+            "https://developers.deepgram.com/docs/voice-agent-function-call-response"
+          ],
+          "note": "FunctionCallRequest and FunctionCallResponse carry stable IDs, names, serialized arguments/results and the client_side flag."
+        },
+        "ligou_retains_tool_authority": {
+          "value": true,
+          "official_urls": [
+            "https://developers.deepgram.com/docs/voice-agents-function-calling"
+          ],
+          "note": "client_side=true routes execution to Ligou, which can enforce authority before returning a FunctionCallResponse."
+        },
+        "transcript_evidence": {
+          "value": true,
+          "official_urls": [
+            "https://developers.deepgram.com/docs/voice-agent-observability"
+          ],
+          "note": "ConversationText and History events provide the user/assistant transcript and function-call record."
+        },
+        "usage_cost_evidence": {
+          "value": true,
+          "official_urls": [
+            "https://developers.deepgram.com/docs/using-logs-usage",
+            "https://developers.deepgram.com/reference/manage/requests/get",
+            "https://developers.deepgram.com/docs/voice-agent-observability"
+          ],
+          "note": "Welcome supplies request_id; the authenticated Management API resolves that exact request to duration, models and USD cost."
+        },
+        "automated_execution": {
+          "value": true,
+          "official_urls": [
+            "https://developers.deepgram.com/reference/voice-agent/voice-agent"
+          ],
+          "note": "The documented WebSocket protocol supports fully automated server-side clients with token authentication."
+        },
+        "identifiable_model_version": {
+          "value": true,
+          "official_urls": [
+            "https://developers.deepgram.com/docs/voice-agent-llm-models",
+            "https://developers.deepgram.com/reference/manage/requests/get"
+          ],
+          "note": "Settings record all three model codes and the per-request Management record returns resolved model UUIDs for run identity."
+        },
+        "no_external_credentials_to_model": {
+          "value": true,
+          "official_urls": [
+            "https://developers.deepgram.com/docs/voice-agents-function-calling",
+            "https://developers.deepgram.com/docs/voice-agent-llm-models"
+          ],
+          "note": "Managed models require only Deepgram authentication and client-side functions keep business-system credentials inside Ligou."
+        }
+      },
+      "session_termination": {
+        "method": "Close the Agent WebSocket and retain request_id for Management API reconciliation",
+        "official_urls": [
+          "https://developers.deepgram.com/reference/voice-agent/voice-agent",
+          "https://developers.deepgram.com/docs/voice-agent-observability"
+        ]
+      },
+      "session_duration_limits": {
+        "value": "2 hours maximum; warning 5 minutes before forced close",
+        "official_urls": [
+          "https://developers.deepgram.com/docs/voice-agent-feature-overview"
+        ]
+      },
+      "audio_formats": {
+        "input": [
+          "linear16 16000 Hz"
+        ],
+        "output": [
+          "linear16 24000 Hz, no container"
+        ],
+        "official_urls": [
+          "https://developers.deepgram.com/docs/configure-voice-agent"
+        ]
+      },
+      "concurrency_rate_limits": {
+        "value": "Voice Agent WSS: up to 45 concurrent sessions on Pay As You Go and 60 on Growth",
+        "official_urls": [
+          "https://deepgram.com/pricing"
+        ]
+      },
+      "regional_restrictions": {
+        "value": "Global endpoint plus documented EU and AU Voice Agent endpoints; use the endpoint selected in the run identity",
+        "official_urls": [
+          "https://developers.deepgram.com/docs/build-a-voice-agent"
+        ]
+      },
+      "pricing_snapshot": {
+        "date": "2026-08-21",
+        "currency": "USD",
+        "basis": "Pay As You Go Standard Voice Agent per WebSocket connection minute",
+        "rates": {
+          "standard_through_2026_09_12_per_minute": 0.056,
+          "standard_after_2026_09_12_per_minute": 0.075
+        },
+        "limitations": "The shown public rate is the Model Improvement Program opt-in price and Flux TTS promotional period. Stage 1 uses synthetic audio only and must reconcile the exact request's USD field before accepting a result.",
+        "official_urls": [
+          "https://deepgram.com/pricing",
+          "https://developers.deepgram.com/docs/build-a-voice-agent"
+        ]
+      },
+      "credential_env_vars": [
+        "DEEPGRAM_API_KEY",
+        "DEEPGRAM_PROJECT_ID"
+      ],
+      "qualification": {
+        "result": "QUALIFIED",
+        "reason": "All ten entry predicates are documented, including per-request USD reconciliation by request_id and client-side tool authority. The unpinned provider aliases are captured as a limitation and resolved model UUIDs are mandatory run evidence."
+      },
+      "selected_for_v1": true,
+      "official_urls": [
+        "https://developers.deepgram.com/docs/build-a-voice-agent",
+        "https://developers.deepgram.com/reference/voice-agent/voice-agent",
+        "https://developers.deepgram.com/docs/voice-agent-message-flow",
+        "https://developers.deepgram.com/docs/voice-agent-function-call-response",
+        "https://developers.deepgram.com/docs/voice-agents-function-calling",
+        "https://developers.deepgram.com/docs/voice-agent-observability",
+        "https://developers.deepgram.com/docs/using-logs-usage",
+        "https://developers.deepgram.com/reference/manage/requests/get",
+        "https://developers.deepgram.com/docs/voice-agent-llm-models",
+        "https://developers.deepgram.com/docs/voice-agent-tts-models",
+        "https://developers.deepgram.com/docs/voice-agent-feature-overview",
+        "https://developers.deepgram.com/docs/configure-voice-agent",
+        "https://deepgram.com/pricing"
+      ]
+    },
+    {
+      "id": "elevenlabs-agents-gemini-2-5-flash-flash-v2-5-rachel-client-tools",
+      "provider": "ElevenLabs",
+      "model": "gemini-2.5-flash + eleven_flash_v2_5",
+      "pinning": {
+        "supported": false,
+        "pinned_model": null,
+        "note": "ElevenLabs versions agent configuration and reports version_id after a conversation, but the WebSocket handshake accepts agent_id rather than a documented immutable version selector."
+      },
+      "voice": "21m00Tcm4TlvDq8ikWAM",
+      "api_version": "v1",
+      "transport": "WebSocket /v1/convai/conversation with base64 PCM audio and JSON events",
+      "interruption_configuration": {
+        "client_events": [
+          "interruption"
+        ],
+        "disable_first_message_interruptions": false
+      },
+      "tool_configuration": {
+        "mode": "client_tool",
+        "execution_authority": "ligou_client",
+        "request_event": "client_tool_call",
+        "result_event": "client_tool_result",
+        "backup_llms": "disabled"
+      },
+      "capabilities": {
+        "bidirectional_streaming_audio": true,
+        "caller_interruption": true,
+        "programmatic_session_termination": true,
+        "deterministic_tool_call_events": true,
+        "ligou_retains_tool_authority": true,
+        "transcript_evidence": true,
+        "usage_cost_evidence": true,
+        "automated_execution": true,
+        "identifiable_model_version": true,
+        "no_external_credentials_to_model": true,
+        "function_calling": true,
+        "server_authoritative_tool_execution": true,
+        "transcript_events": true,
+        "usage_telemetry": true,
+        "cost_telemetry": true
+      },
+      "qualification_predicates": {
+        "bidirectional_streaming_audio": {
+          "value": true,
+          "official_urls": [
+            "https://elevenlabs.io/docs/eleven-agents/api-reference/eleven-agents/websocket"
+          ],
+          "note": "The Agent WebSocket accepts base64 user audio and emits base64 agent audio plus control events."
+        },
+        "caller_interruption": {
+          "value": true,
+          "official_urls": [
+            "https://elevenlabs.io/docs/eleven-agents/api-reference/eleven-agents/websocket",
+            "https://elevenlabs.io/docs/eleven-agents/customization/events/client-events"
+          ],
+          "note": "The protocol includes an Interruption event carrying the truncated response, and the exact config enables interruption events."
+        },
+        "programmatic_session_termination": {
+          "value": true,
+          "official_urls": [
+            "https://elevenlabs.io/docs/eleven-agents/libraries/java-script"
+          ],
+          "note": "The official SDK exposes endSession(), which ends the conversation and disconnects the WebSocket."
+        },
+        "deterministic_tool_call_events": {
+          "value": true,
+          "official_urls": [
+            "https://elevenlabs.io/docs/eleven-agents/api-reference/eleven-agents/websocket"
+          ],
+          "note": "client_tool_call and client_tool_result use a tool_call_id, tool name, parameters, result and error flag."
+        },
+        "ligou_retains_tool_authority": {
+          "value": true,
+          "official_urls": [
+            "https://elevenlabs.io/docs/eleven-agents/customization/events/client-events"
+          ],
+          "note": "Client tools require execution by Ligou and an explicit result event; state-changing provider/server tools are excluded."
+        },
+        "transcript_evidence": {
+          "value": true,
+          "official_urls": [
+            "https://elevenlabs.io/docs/eleven-agents/api-reference/eleven-agents/websocket",
+            "https://elevenlabs.io/docs/eleven-agents/api-reference/conversations/get"
+          ],
+          "note": "Live user_transcript and agent_response events are backed by a post-call transcript in conversation details."
+        },
+        "usage_cost_evidence": {
+          "value": true,
+          "official_urls": [
+            "https://elevenlabs.io/docs/eleven-agents/api-reference/conversations/get",
+            "https://elevenlabs.io/pricing/agents"
+          ],
+          "note": "Conversation details expose call_duration_secs, cost, cost_fiat and LLM charging metadata for post-call reconciliation."
+        },
+        "automated_execution": {
+          "value": true,
+          "official_urls": [
+            "https://elevenlabs.io/docs/eleven-agents/api-reference/eleven-agents/websocket"
+          ],
+          "note": "The API reference defines a programmable authenticated WebSocket protocol and event flow."
+        },
+        "identifiable_model_version": {
+          "value": true,
+          "official_urls": [
+            "https://elevenlabs.io/docs/eleven-agents/customization/llm",
+            "https://elevenlabs.io/docs/eleven-agents/api-reference/conversations/get",
+            "https://elevenlabs.io/docs/eleven-agents/api-reference/agents/get"
+          ],
+          "note": "The exact LLM/TTS model codes live in the agent config and post-call details return the agent version_id; backup LLMs are disabled in this candidate."
+        },
+        "no_external_credentials_to_model": {
+          "value": true,
+          "official_urls": [
+            "https://elevenlabs.io/docs/eleven-agents/customization/events/client-events",
+            "https://elevenlabs.io/docs/eleven-agents/customization/llm"
+          ],
+          "note": "Native models use ElevenLabs-managed provider access and client tools keep all business-system credentials inside Ligou."
+        }
+      },
+      "session_termination": {
+        "method": "Call endSession() to end the conversation and disconnect the WebSocket",
+        "official_urls": [
+          "https://elevenlabs.io/docs/eleven-agents/libraries/java-script"
+        ]
+      },
+      "session_duration_limits": {
+        "value": "600 seconds in this exact agent configuration; the consulted reference documents max_duration_seconds as a configurable field, not a provider-wide ceiling",
+        "official_urls": [
+          "https://elevenlabs.io/docs/eleven-agents/api-reference/agents/get"
+        ]
+      },
+      "audio_formats": {
+        "input": [
+          "pcm_16000"
+        ],
+        "output": [
+          "pcm_16000"
+        ],
+        "official_urls": [
+          "https://elevenlabs.io/docs/eleven-agents/api-reference/eleven-agents/websocket"
+        ]
+      },
+      "concurrency_rate_limits": {
+        "value": "Plan-dependent: 4 concurrent calls on Free through 40 on Business; burst can temporarily reach up to 3x the plan limit at burst pricing",
+        "official_urls": [
+          "https://elevenlabs.io/pricing/agents"
+        ]
+      },
+      "regional_restrictions": {
+        "value": "Hosted models are in the United States or an enterprise deployment region; EU residency removes some older LLMs",
+        "official_urls": [
+          "https://elevenlabs.io/docs/eleven-agents/customization/llm"
+        ]
+      },
+      "pricing_snapshot": {
+        "date": "2026-08-21",
+        "currency": "USD",
+        "basis": "ElevenAgents platform minute plus passed-through LLM charge",
+        "rates": {
+          "additional_call_minute": 0.08,
+          "burst_call_minute": 0.16,
+          "text_message": 0.003,
+          "gemini_2_5_flash_estimated_minute": 0.0012
+        },
+        "limitations": "Included minutes depend on subscription; telephony is separate; the pricing page labels LLM pricing as usage-based and the calculator rate as an estimate. Accept only post-call cost_fiat and charging metadata as scored cost evidence.",
+        "official_urls": [
+          "https://elevenlabs.io/pricing/agents",
+          "https://elevenlabs.io/docs/eleven-agents/api-reference/conversations/get"
+        ]
+      },
+      "credential_env_vars": [
+        "ELEVENLABS_API_KEY",
+        "ELEVENLABS_AGENT_ID"
+      ],
+      "qualification": {
+        "result": "CONDITIONALLY_QUALIFIED",
+        "reason": "All ten entry predicates are documented when backup LLMs are disabled and only client tools are used. The WebSocket starts by mutable agent_id and no official pre-run immutable version selector was found; promote only if the paid-plan preflight can freeze and verify the agent version before any session."
+      },
+      "selected_for_v1": false,
+      "official_urls": [
+        "https://elevenlabs.io/docs/eleven-agents/api-reference/eleven-agents/websocket",
+        "https://elevenlabs.io/docs/eleven-agents/customization/events/client-events",
+        "https://elevenlabs.io/docs/eleven-agents/customization/llm",
+        "https://elevenlabs.io/docs/eleven-agents/libraries/java-script",
+        "https://elevenlabs.io/docs/eleven-agents/api-reference/conversations/get",
+        "https://elevenlabs.io/docs/eleven-agents/api-reference/agents/get",
+        "https://elevenlabs.io/pricing/agents",
+        "https://elevenlabs.io/docs/help-center/technical/how-do-i-find-the-model-id"
+      ]
+    }
+  ]
+}
