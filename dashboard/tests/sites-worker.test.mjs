@@ -85,3 +85,15 @@ test("builds every dashboard asset under the shared /dashboard route", async () 
   assert.doesNotMatch(script, /["']\/assets\//);
   assert.match(style, /url\(\/dashboard\/fonts\//);
 });
+
+test("builds the dashboard favicon under the shared /dashboard route", async () => {
+  const client = new URL("../dist/client/", import.meta.url);
+  const html = await readFile(new URL("index.html", client), "utf8");
+  const favicon = html.match(/<link[^>]+rel="icon"[^>]+href="([^"]+)"[^>]*>/i)?.[1];
+
+  assert.ok(favicon);
+  assert.match(favicon, /^\/dashboard\/assets\/agent-node-mark\.svg$/);
+
+  const faviconPath = new URL(favicon, "https://example.test").pathname;
+  await access(new URL(faviconPath.replace(/^\/dashboard\//, ""), client));
+});
