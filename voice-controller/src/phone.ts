@@ -1,138 +1,274 @@
-// F6: phone listener — reacts to phone_events via Supabase Realtime (outbound-only; zero open ports),
-// accepts the SIP call on OpenAI with the SAME canonical session config, then attaches the authoritative sideband.
+// Inbound phone orchestration. Database claim/transition RPCs own the lifecycle;
+// provider writes occur only after their corresponding durable intent.
 import { createClient } from "@supabase/supabase-js";
 import { config } from "./config.ts";
 import { buildInstructions } from "./instructions.ts";
 import { loadTenant, supa } from "./rules.ts";
 import { makeCapability, toolSchemas } from "./tools.ts";
 import { attachSideband } from "./sideband.ts";
-import { deferProviderTerminationReconciliation, finalizeTerminalBudget, reserveCallBudget } from "./budget.ts";
-import { terminateProviderCall } from "./provider-termination.ts";
+import {
+  requestProviderTermination,
+  type FetchLike,
+  type ProviderTerminationMode,
+} from "./provider-termination.ts";
+
+type PhoneAcceptState = "not_attempted" | "attempting" | "accepted" | "failed" | "unknown";
+type PhoneRuntime = {
+  workerId?: string;
+  fetchImpl?: FetchLike;
+  attachSidebandImpl?: typeof attachSideband;
+};
+
+type PhoneClaim = { id: string; claim_token: string; openai_call_id: string };
+type PhoneTerminationClaim = {
+  event_id: string;
+  claim_token: string;
+  action: "terminate" | "resolve_not_applicable";
+  openai_call_id: string | null;
+  provider_termination_mode: ProviderTerminationMode;
+};
+
+function runtimeError(message: string, status: number, detail?: string) {
+  return Object.assign(new Error(message), { status, detail });
+}
+
+async function requiredRpc<T>(name: string, args: Record<string, unknown>, message: string): Promise<T> {
+  const { data, error } = await supa().rpc(name, args);
+  if (error || data === null || data === false) {
+    throw runtimeError(message, 503, error?.message ?? "lifecycle_write_failed");
+  }
+  return data as T;
+}
+
+async function claimPhoneEvent(eventId: string, workerId: string): Promise<PhoneClaim | null> {
+  const { data, error } = await supa().rpc("claim_phone_event", { p_event_id: eventId, p_worker: workerId });
+  if (error) throw runtimeError("phone_claim_failed", 503, error.message);
+  return data ? data as PhoneClaim : null;
+}
+
+async function completeTermination(args: {
+  eventId: string;
+  claimToken: string;
+  confirmed: boolean;
+  error?: string;
+}) {
+  await requiredRpc<boolean>("complete_phone_termination", {
+    p_event_id: args.eventId,
+    p_claim_token: args.claimToken,
+    p_confirmed: args.confirmed,
+    p_error: args.error ?? null,
+  }, "phone_termination_persistence_failed");
+}
+
+async function terminatePhoneLifecycle(args: {
+  eventId: string;
+  claimToken: string;
+  openaiCallId: string | null;
+  mode: ProviderTerminationMode;
+  reason: string;
+  acceptState: PhoneAcceptState;
+  fetchImpl: FetchLike;
+}): Promise<boolean> {
+  const intent = await requiredRpc<{ should_attempt: boolean; openai_call_id?: string | null }>(
+    "begin_phone_termination",
+    {
+      p_event_id: args.eventId,
+      p_claim_token: args.claimToken,
+      p_mode: args.mode,
+      p_reason: args.reason,
+      p_accept_state: args.acceptState,
+    },
+    "phone_termination_intent_failed",
+  );
+  if (intent.should_attempt !== true) return false;
+  const result = await requestProviderTermination({
+    openaiCallId: intent.openai_call_id ?? args.openaiCallId,
+    mode: args.mode,
+    fetchImpl: args.fetchImpl,
+  });
+  await completeTermination({
+    eventId: args.eventId,
+    claimToken: args.claimToken,
+    confirmed: result.confirmed,
+    error: result.error,
+  });
+  return result.confirmed;
+}
 
 export function startPhoneListener() {
   if (!config.openaiKey) return;
   const rt = createClient(config.supabaseUrl, config.supabaseSecretKey, { auth: { persistSession: false } });
   rt.channel("phone-events")
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "phone_events" }, (payload) => {
-      void handleIncoming(payload.new as any).catch((e) => console.error("phone accept failed", e));
+      void handleIncoming(payload.new as any).catch((error) => console.error("phone lifecycle failed", error));
     })
     .subscribe();
-  // safety net: poll for rows missed while offline
   setInterval(async () => {
-    const { data } = await supa().from("phone_events").select("*").eq("status", "pending")
+    const { data } = await supa().from("phone_events").select("*")
+      .eq("status", "pending").eq("lifecycle_state", "pending")
       .lt("created_at", new Date(Date.now() - 3_000).toISOString()).limit(3);
     for (const row of data ?? []) await handleIncoming(row).catch(() => {});
+    await reconcilePhoneLifecycles().catch((error) => console.error("phone lifecycle reconciliation", error));
   }, 5_000);
-  console.log("phone listener active (realtime + poll)");
+  console.log("phone listener active (realtime + poll + lifecycle reconciliation)");
 }
 
-export async function handleIncoming(row: any) {
-  // claim the row (race-safe against the poll/realtime double path)
-  const { data: claimed } = await supa().from("phone_events")
-    .update({ status: "accepted", handled_at: new Date().toISOString() })
-    .eq("id", row.id).eq("status", "pending").select("id");
-  if (!claimed?.length) return;
-
-  // tenant by called number (single-tenant F6 start: default slug)
-  const { tenant, rules } = await loadTenant(config.defaultTenantSlug);
-  const model = config.model;
-  if (!tenant.owner_user_id) {
-    await supa().from("phone_events").update({ status: "rejected" }).eq("id", row.id);
-    await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(row.openai_call_id)}/reject`, {
-      method: "POST", headers: { Authorization: `Bearer ${config.openaiKey}` },
-    }).catch(() => {});
-    throw Object.assign(new Error("tenant_provisioning_required"), { status: 409 });
-  }
-
-  const { data: call } = await supa().from("calls")
-    .insert({
-      tenant_id: tenant.id, channel: "phone", session_type: "customer", model, status: "active",
-      openai_call_id: row.openai_call_id, provider_termination_state: "active", provider_termination_mode: "reject",
-      provider_usage_state: "unknown",
-    })
-    .select("id").single();
-  if (!call?.id) throw Object.assign(new Error("phone_call_insert_failed"), { status: 503 });
-  await supa().from("phone_events").update({ tenant_id: tenant.id, call_id: call.id }).eq("id", row.id);
-  try {
-    await reserveCallBudget(tenant.id, call.id, config.sessionCostCeilingUsd);
-  } catch (reservationError) {
-    await supa().from("calls").update({
-      status: "killed_budget",
-      ended_at: new Date().toISOString(),
-      duration_seconds: 0,
-      cost_estimate_usd: 0,
-      provider_usage_state: "not_applicable",
-      provider_termination_reason: "budget_denied_before_accept",
-      provider_termination_mode: "reject",
-    }).eq("id", call.id);
-    const termination = await terminateProviderCall({
-      callId: call.id,
-      openaiCallId: row.openai_call_id ?? null,
-      mode: "reject",
-      reason: "budget_denied_before_accept",
-    });
-    await supa().from("phone_events").update({
-      status: termination.confirmed ? "rejected" : "error",
-      tenant_id: tenant.id,
-      call_id: call.id,
-    }).eq("id", row.id);
-    if (!termination.confirmed) {
-      await deferProviderTerminationReconciliation(call.id, termination.error ?? reservationError);
-      throw Object.assign(new Error("provider_reject_unconfirmed"), {
-        status: 503,
-        detail: termination.error ?? "provider_termination_unknown",
-      });
-    }
-    return;
-  }
-
-  const failStartup = async (reason: string, mode: "reject" | "hangup", usageResolved: boolean) => {
-    const terminalWrite = await supa().from("calls").update({
-      status: "error", ended_at: new Date().toISOString(), duration_seconds: 0,
-      cost_estimate_usd: usageResolved ? 0 : null,
-      provider_termination_state: "active", provider_termination_mode: mode, provider_termination_reason: reason,
-      provider_usage_state: usageResolved ? "resolved" : "unknown",
-    }).eq("id", call!.id);
-    if (terminalWrite.error) return false;
-    return await finalizeTerminalBudget({
-      tenantId: tenant.id, callId: call!.id, actualCostUsd: 0, minutes: 0,
-      outcome: "startup_error", detail: { reason },
-      provider: { openaiCallId: row.openai_call_id, mode, reason },
-      usageResolved,
-    });
+export async function handleIncoming(row: any, runtime: PhoneRuntime = {}) {
+  const workerId = runtime.workerId ?? `phone-${process.pid}`;
+  const fetchImpl = runtime.fetchImpl ?? fetch;
+  const attachSidebandImpl = runtime.attachSidebandImpl ?? attachSideband;
+  const claim = await claimPhoneEvent(String(row.id), workerId);
+  if (!claim) return;
+  const context = {
+    eventId: String(claim.id),
+    claimToken: String(claim.claim_token),
+    openaiCallId: claim.openai_call_id ? String(claim.openai_call_id) : null,
   };
+  const terminate = async (
+    mode: ProviderTerminationMode,
+    reason: string,
+    acceptState: PhoneAcceptState,
+  ) => await terminatePhoneLifecycle({ ...context, mode, reason, acceptState, fetchImpl });
 
-  const instructions = buildInstructions(tenant, rules, "customer");
+  let tenant: any;
+  let rules: any[];
+  try {
+    ({ tenant, rules } = await loadTenant(config.defaultTenantSlug));
+  } catch (error) {
+    await terminate("reject", "tenant_load_failed_before_accept", "not_attempted");
+    throw error;
+  }
+  if (!tenant.owner_user_id) {
+    await terminate("reject", "tenant_provisioning_required", "not_attempted");
+    throw runtimeError("tenant_provisioning_required", 409);
+  }
+
+  let callId: string;
+  try {
+    callId = String(await requiredRpc<string>("persist_phone_call", {
+      p_event_id: context.eventId,
+      p_claim_token: context.claimToken,
+      p_tenant_id: tenant.id,
+      p_model: config.model,
+    }, "phone_call_insert_failed"));
+  } catch (error) {
+    await terminate("reject", "phone_call_insert_failed", "not_attempted");
+    throw error;
+  }
+
+  try {
+    await requiredRpc<string>("reserve_phone_call_budget", {
+      p_event_id: context.eventId,
+      p_claim_token: context.claimToken,
+      p_est_cost: config.sessionCostCeilingUsd,
+    }, "phone_budget_reservation_failed");
+  } catch (error) {
+    await terminate("reject", "budget_denied_before_accept", "not_attempted");
+    throw error;
+  }
+
+  let instructions: string;
+  try {
+    instructions = buildInstructions(tenant, rules, "customer");
+    await requiredRpc<boolean>("begin_phone_provider_accept", {
+      p_event_id: context.eventId,
+      p_claim_token: context.claimToken,
+    }, "phone_accept_intent_failed");
+  } catch (error) {
+    await terminate("reject", "phone_accept_preparation_failed", "not_attempted");
+    throw error;
+  }
+
   let accept: Response;
   try {
-    accept = await fetch(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(row.openai_call_id)}/accept`, {
+    accept = await fetchImpl(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(context.openaiCallId ?? "")}/accept`, {
       method: "POST",
       headers: { Authorization: `Bearer ${config.openaiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto", audio: { output: { voice: config.voice } } }),
+      body: JSON.stringify({
+        type: "realtime",
+        model: config.model,
+        instructions,
+        tools: toolSchemas,
+        tool_choice: "auto",
+        audio: { output: { voice: config.voice } },
+      }),
     });
   } catch (error) {
-    await supa().from("phone_events").update({ status: "error" }).eq("id", row.id);
-    await failStartup("phone_accept_transport_unknown", "reject", false);
+    await terminate("hangup", "phone_accept_transport_unknown", "unknown");
     throw error;
   }
   if (!accept.ok) {
-    await supa().from("phone_events").update({ status: "error" }).eq("id", row.id);
-    await failStartup("phone_accept_failed", "reject", accept.status >= 400 && accept.status < 500);
-    throw new Error(`accept_failed: ${accept.status} ${await accept.text()}`);
+    const definitive = accept.status >= 400 && accept.status < 500;
+    await terminate(definitive ? "reject" : "hangup", "phone_accept_failed", definitive ? "failed" : "unknown");
+    throw runtimeError("accept_failed", 502, `${accept.status} ${await accept.text()}`);
   }
-  await supa().from("phone_events").update({ tenant_id: tenant.id, call_id: call.id }).eq("id", row.id);
-  await supa().from("calls").update({
-    provider_termination_state: "active", provider_termination_mode: "hangup", provider_usage_state: "unknown",
-  }).eq("id", call!.id);
 
-  const cap = makeCapability(tenant.slug, tenant.id, call!.id, tenant.session_max_minutes ?? config.sessionMaxMinutes, "customer", {
-    authEpoch: tenant.auth_epoch,
-    policyEpoch: tenant.policy_epoch,
-  });
   try {
-    attachSideband(cap, row.openai_call_id, model);
+    await requiredRpc<boolean>("confirm_phone_provider_accept", {
+      p_event_id: context.eventId,
+      p_claim_token: context.claimToken,
+    }, "phone_accept_persistence_failed");
   } catch (error) {
-    await failStartup("sideband_attach_failed", "hangup", false);
+    await terminate("hangup", "phone_accept_persistence_failed", "accepted");
     throw error;
   }
+
+  let cap;
+  try {
+    cap = makeCapability(
+      tenant.slug,
+      tenant.id,
+      callId,
+      tenant.session_max_minutes ?? config.sessionMaxMinutes,
+      "customer",
+      { authEpoch: tenant.auth_epoch, policyEpoch: tenant.policy_epoch },
+    );
+    await requiredRpc<boolean>("begin_phone_sideband", {
+      p_event_id: context.eventId,
+      p_claim_token: context.claimToken,
+    }, "phone_sideband_intent_failed");
+  } catch (error) {
+    await terminate("hangup", "phone_sideband_ownership_failed", "accepted");
+    throw error;
+  }
+
+  try {
+    attachSidebandImpl(cap, context.openaiCallId!, config.model);
+  } catch (error) {
+    await terminate("hangup", "sideband_attach_failed", "accepted");
+    throw error;
+  }
+  try {
+    await requiredRpc<boolean>("confirm_phone_sideband", {
+      p_event_id: context.eventId,
+      p_claim_token: context.claimToken,
+    }, "phone_sideband_persistence_failed");
+  } catch (error) {
+    await terminate("hangup", "phone_sideband_persistence_failed", "accepted");
+    throw error;
+  }
+}
+
+export async function reconcilePhoneLifecycles(runtime: Pick<PhoneRuntime, "workerId" | "fetchImpl"> = {}): Promise<number> {
+  const workerId = runtime.workerId ?? `phone-reconciliation-${process.pid}`;
+  const fetchImpl = runtime.fetchImpl ?? fetch;
+  const { data, error } = await supa().rpc("claim_phone_lifecycle_reconciliation", { p_worker: workerId });
+  if (error || !data) return 0;
+  const claim = data as PhoneTerminationClaim;
+  if (claim.action === "resolve_not_applicable") {
+    await completeTermination({ eventId: claim.event_id, claimToken: claim.claim_token, confirmed: true });
+    return 1;
+  }
+  const result = await requestProviderTermination({
+    openaiCallId: claim.openai_call_id,
+    mode: claim.provider_termination_mode,
+    fetchImpl,
+  });
+  await completeTermination({
+    eventId: claim.event_id,
+    claimToken: claim.claim_token,
+    confirmed: result.confirmed,
+    error: result.error,
+  });
+  return result.confirmed ? 1 : 0;
 }

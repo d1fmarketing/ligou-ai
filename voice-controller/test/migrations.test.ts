@@ -288,6 +288,89 @@ describe("provider termination claim ordering repair migration contract", () => 
   });
 });
 
+describe("durable phone lifecycle migration contract", () => {
+  test("models ownership, every provider boundary, and fail-closed call identity", () => {
+    const sql = migrationSql("durable_phone_lifecycle");
+    for (const column of [
+      "lifecycle_state text", "lifecycle_owner text", "lifecycle_claim_token uuid",
+      "provider_accept_state text", "provider_termination_state text", "provider_termination_mode text",
+      "sideband_state text", "lifecycle_last_error text", "phone_event_id uuid",
+    ]) expect(sql).toContain(column);
+    expect(sql).toContain("'call_persisted','budget_reserved','accepting','accepted','sideband_attaching','active'");
+    expect(sql).toContain("'rejected','terminated','reconciliation_required'");
+    expect(sql).toContain("duplicate_openai_call_id_before_phone_lifecycle");
+    expect(sql).toContain("phone_call_tenant_mismatch_before_phone_lifecycle");
+    expect(sql).toContain("p.tenant_id is not null and c.tenant_id is distinct from p.tenant_id");
+    expect(sql.indexOf("duplicate_openai_call_id_before_phone_lifecycle")).toBeLessThan(sql.indexOf("create unique index calls_openai_call_id_unique"));
+    expect(sql).toContain("phone_event_id uuid references public.phone_events (id) on delete set null");
+    expect(sql).not.toContain("delete from public.calls");
+    const retentionAt = sql.indexOf("function public.purge_ephemeral_call_data");
+    expect(sql.slice(0, retentionAt)).not.toContain("delete from public.phone_events");
+  });
+
+  test("claims atomically, compares the owner token, and reconciles events without calls rows", () => {
+    const sql = migrationSql("durable_phone_lifecycle");
+    expect(sql).toContain("function public.claim_phone_event(p_event_id uuid, p_worker text)");
+    expect(sql).toContain("'openai_call_id', v_event.openai_call_id");
+    expect(sql).toContain("for update of p skip locked");
+    expect(sql).toContain("v_claim uuid := gen_random_uuid()");
+    expect(sql).toContain("v_event.lifecycle_claim_token is distinct from p_claim_token");
+    expect(sql).toContain("function public.claim_phone_lifecycle_reconciliation(p_worker text)");
+    const reconcileAt = sql.indexOf("function public.claim_phone_lifecycle_reconciliation");
+    const reconcileEnd = sql.indexOf("revoke all on function public.claim_phone_lifecycle_reconciliation", reconcileAt);
+    const reconcileSql = sql.slice(reconcileAt, reconcileEnd);
+    expect(reconcileSql).toContain("from public.phone_events p");
+    expect(reconcileSql).toContain("for update of p skip locked");
+    expect(reconcileSql).not.toContain("from public.phone_events p join public.calls");
+    expect(reconcileSql).toContain("openai_call_id");
+    expect(reconcileSql).toContain("provider_termination_mode");
+    expect(sql).toContain("p_mode is null or p_mode not in ('reject','hangup')");
+  });
+
+  test("all lifecycle RPCs are service-role-only with an empty search path", () => {
+    const sql = migrationSql("durable_phone_lifecycle");
+    const signatures = [
+      "public.claim_phone_event(uuid,text)",
+      "public.persist_phone_call(uuid,uuid,uuid,text)",
+      "public.reserve_phone_call_budget(uuid,uuid,numeric)",
+      "public.begin_phone_provider_accept(uuid,uuid)",
+      "public.confirm_phone_provider_accept(uuid,uuid)",
+      "public.begin_phone_sideband(uuid,uuid)",
+      "public.confirm_phone_sideband(uuid,uuid)",
+      "public.begin_phone_termination(uuid,uuid,text,text,text)",
+      "public.complete_phone_termination(uuid,uuid,boolean,text)",
+      "public.claim_phone_lifecycle_reconciliation(text)",
+      "public.claim_provider_termination_reconciliation(text)",
+      "public.claim_budget_reconciliation(text)",
+      "public.purge_ephemeral_call_data(timestamptz,timestamptz)",
+    ];
+    expect(sql.match(/security definer set search_path = ''/g)?.length).toBe(signatures.length);
+    expect(sql.match(/service_role_required/g)?.length).toBe(signatures.length);
+    for (const signature of signatures) {
+      expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated`);
+      expect(sql).toContain(`grant execute on function ${signature} to service_role`);
+    }
+  });
+
+  test("retention purges only lifecycle-safe terminal phone events", () => {
+    const sql = migrationSql("durable_phone_lifecycle");
+    expect(sql).toContain("function public.purge_ephemeral_call_data(");
+    expect(sql).toContain("p.status in ('accepted', 'rejected', 'error')");
+    expect(sql).toContain("p.lifecycle_state in ('active', 'rejected', 'terminated')");
+    expect(sql).toContain("c.status <> 'active'");
+    expect(sql).toContain("c.provider_termination_state in ('confirmed','not_required')");
+    expect(sql).not.toContain("p.lifecycle_state in ('reconciliation_required'");
+  });
+
+  test("existing budget and provider reconcilers cannot race the phone lifecycle owner", () => {
+    const sql = migrationSql("durable_phone_lifecycle");
+    expect(sql).toContain("function public.claim_provider_termination_reconciliation(p_worker text)");
+    expect(sql).toContain("c.phone_event_id is null");
+    expect(sql).toContain("function public.claim_budget_reconciliation(p_worker text)");
+    expect(sql).toContain("c.phone_event_id is null or c.provider_termination_state in ('confirmed','not_required')");
+  });
+});
+
 describe("service-role release health migration contract", () => {
   test("returns only exact sanitized tenant state and rejects every browser role", () => {
     const sql = migrationSql("release_health_state");

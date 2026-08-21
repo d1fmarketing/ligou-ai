@@ -1,0 +1,733 @@
+-- Durable inbound phone ownership and provider lifecycle. Every provider write is
+-- preceded by a fenced database transition; ambiguous outcomes stay reconcilable.
+alter table public.phone_events
+  add column lifecycle_state text not null default 'pending',
+  add column lifecycle_owner text,
+  add column lifecycle_claim_token uuid,
+  add column lifecycle_claimed_at timestamptz,
+  add column lifecycle_updated_at timestamptz not null default now(),
+  add column lifecycle_last_error text,
+  add column lifecycle_reconcile_attempts integer not null default 0,
+  add column lifecycle_reconcile_after timestamptz not null default now(),
+  add column lifecycle_reconcile_lease_until timestamptz,
+  add column lifecycle_reconcile_worker text,
+  add column provider_accept_state text not null default 'not_attempted',
+  add column provider_accepted_at timestamptz,
+  add column provider_termination_state text not null default 'not_required',
+  add column provider_termination_mode text,
+  add column provider_terminated_at timestamptz,
+  add column sideband_state text not null default 'not_attached',
+  add column sideband_attached_at timestamptz;
+
+-- The old implementation wrote accepted before any durable ownership existed.
+-- Preserve pending rows; quarantine every historical handled outcome for explicit
+-- reconciliation instead of guessing that a provider transition succeeded.
+update public.phone_events p
+set lifecycle_state = case when p.status = 'pending' then 'pending' else 'reconciliation_required' end,
+    provider_accept_state = case when p.status = 'pending' then 'not_attempted' else 'unknown' end,
+    provider_termination_state = case when p.status = 'pending' then 'not_required' else 'unknown' end,
+    provider_termination_mode = case when p.status = 'rejected' then 'reject' when p.status in ('accepted','error') then 'hangup' else null end,
+    sideband_state = case when p.status = 'pending' then 'not_attached' else 'unknown' end,
+    lifecycle_last_error = case when p.status = 'pending' then null else 'legacy_phone_lifecycle_requires_reconciliation' end,
+    lifecycle_reconcile_after = clock_timestamp();
+
+alter table public.phone_events
+  add constraint phone_events_lifecycle_state_check check (lifecycle_state in (
+    'pending','claimed','call_persisted','budget_reserved','accepting','accepted','sideband_attaching','active',
+    'rejected','terminated','reconciliation_required'
+  )),
+  add constraint phone_events_lifecycle_owner_check check (
+    lifecycle_owner is null or nullif(btrim(lifecycle_owner), '') is not null
+  ),
+  add constraint phone_events_provider_accept_state_check check (
+    provider_accept_state in ('not_attempted','attempting','accepted','failed','unknown')
+  ),
+  add constraint phone_events_provider_termination_state_check check (
+    provider_termination_state in ('not_required','active','pending','confirmed','unknown')
+  ),
+  add constraint phone_events_provider_termination_mode_check check (
+    provider_termination_mode is null or provider_termination_mode in ('reject','hangup')
+  ),
+  add constraint phone_events_sideband_state_check check (
+    sideband_state in ('not_attached','attaching','attached','failed','unknown')
+  );
+
+alter table public.calls
+  add column phone_event_id uuid references public.phone_events (id) on delete set null;
+
+do $$
+begin
+  if exists (
+    select c.openai_call_id from public.calls c
+    where c.openai_call_id is not null
+    group by c.openai_call_id having count(*) > 1
+  ) then
+    raise exception 'duplicate_openai_call_id_before_phone_lifecycle' using errcode = '23505';
+  end if;
+  if exists (
+    select p.call_id from public.phone_events p
+    where p.call_id is not null
+    group by p.call_id having count(*) > 1
+  ) then
+    raise exception 'duplicate_phone_event_call_before_phone_lifecycle' using errcode = '23505';
+  end if;
+  if exists (
+    select 1 from public.phone_events p
+    join public.calls c on c.id = p.call_id
+    where p.call_id is not null and c.openai_call_id is distinct from p.openai_call_id
+  ) then
+    raise exception 'phone_call_identity_mismatch_before_phone_lifecycle' using errcode = '23514';
+  end if;
+  if exists (
+    select 1 from public.phone_events p
+    join public.calls c on c.id = p.call_id
+    where p.call_id is not null
+      and p.tenant_id is not null and c.tenant_id is distinct from p.tenant_id
+  ) then
+    raise exception 'phone_call_tenant_mismatch_before_phone_lifecycle' using errcode = '23514';
+  end if;
+end;
+$$;
+
+create or replace function public.claim_phone_lifecycle_reconciliation(p_worker text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_event public.phone_events;
+  v_claim uuid := gen_random_uuid();
+  v_action text;
+  v_mode text;
+begin
+  if auth.role() <> 'service_role' then raise exception 'service_role_required' using errcode = '42501'; end if;
+  if nullif(btrim(p_worker), '') is null then raise exception 'worker_required' using errcode = '22023'; end if;
+
+  select p.* into v_event
+  from public.phone_events p
+  where p.lifecycle_reconcile_after <= clock_timestamp()
+    and (p.lifecycle_reconcile_lease_until is null or p.lifecycle_reconcile_lease_until <= clock_timestamp())
+    and (
+      (p.lifecycle_state = 'reconciliation_required' and p.provider_termination_state in ('pending','unknown'))
+      or (
+        p.lifecycle_state in ('claimed','call_persisted','budget_reserved','accepting','accepted','sideband_attaching')
+        and p.provider_termination_state in ('active','pending','unknown')
+      )
+      or (
+        p.lifecycle_state = 'rejected'
+        and p.provider_accept_state in ('not_attempted','failed')
+        and p.provider_termination_state = 'confirmed'
+        and p.call_id is not null
+        and exists (
+          select 1 from public.calls c
+          join public.budget_reservations br on br.call_id = c.id and br.status = 'active'
+          where c.id = p.call_id and c.provider_usage_state = 'unknown'
+        )
+      )
+    )
+  order by p.created_at, p.id
+  for update of p skip locked
+  limit 1;
+  if v_event.id is null then return null; end if;
+
+  v_action := case when v_event.lifecycle_state = 'rejected' and v_event.provider_termination_state = 'confirmed'
+    then 'resolve_not_applicable' else 'terminate' end;
+  v_mode := case when v_event.provider_accept_state in ('attempting','accepted','unknown') then 'hangup' else 'reject' end;
+
+  update public.phone_events p set
+    lifecycle_owner = left(p_worker, 100),
+    lifecycle_claim_token = v_claim,
+    lifecycle_reconcile_attempts = p.lifecycle_reconcile_attempts + 1,
+    lifecycle_reconcile_lease_until = clock_timestamp() + interval '30 seconds',
+    lifecycle_reconcile_worker = left(p_worker, 100),
+    lifecycle_updated_at = clock_timestamp(),
+    lifecycle_state = case when v_action = 'terminate' then 'reconciliation_required' else p.lifecycle_state end,
+    status = case when v_action = 'terminate' then 'error' else p.status end,
+    provider_termination_state = case when v_action = 'terminate' then 'pending' else p.provider_termination_state end,
+    provider_termination_mode = case when v_action = 'terminate' then v_mode else p.provider_termination_mode end
+  where p.id = v_event.id;
+
+  if v_action = 'terminate' then
+    update public.calls c set
+      status = 'error', ended_at = coalesce(c.ended_at, clock_timestamp()),
+      provider_termination_state = 'pending', provider_termination_mode = v_mode,
+      provider_termination_reason = 'phone_lifecycle_reconciliation', provider_usage_state = 'unknown',
+      provider_termination_reconcile_after = clock_timestamp() + interval '1 minute',
+      provider_termination_reconcile_lease_until = clock_timestamp() + interval '1 minute'
+    where c.id = v_event.call_id;
+  end if;
+
+  return jsonb_build_object(
+    'event_id', v_event.id,
+    'claim_token', v_claim,
+    'action', v_action,
+    'openai_call_id', v_event.openai_call_id,
+    'provider_termination_mode', case when v_action = 'terminate' then v_mode else v_event.provider_termination_mode end
+  );
+end;
+$$;
+
+-- Generic provider reconciliation must not race the phone-event owner. Phone
+-- calls are driven exclusively by claim_phone_lifecycle_reconciliation.
+create or replace function public.claim_provider_termination_reconciliation(p_worker text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v_call public.calls;
+begin
+  if auth.role() <> 'service_role' then raise exception 'service_role_required' using errcode = '42501'; end if;
+  if nullif(btrim(p_worker), '') is null then raise exception 'worker_required' using errcode = '22023'; end if;
+  select c.* into v_call
+  from public.calls c
+  where c.phone_event_id is null
+    and c.status <> 'active'
+    and c.provider_termination_state in ('active','pending','unknown')
+    and c.provider_termination_mode in ('reject','hangup')
+    and c.provider_termination_reconcile_after <= clock_timestamp()
+    and (c.provider_termination_reconcile_lease_until is null or c.provider_termination_reconcile_lease_until <= clock_timestamp())
+  order by c.started_at, c.id
+  for update of c skip locked
+  limit 1;
+  if v_call.id is null then return null; end if;
+  update public.calls c set
+    provider_termination_reconcile_attempts = c.provider_termination_reconcile_attempts + 1,
+    provider_termination_reconcile_lease_until = clock_timestamp() + interval '30 seconds',
+    provider_termination_reconcile_worker = left(p_worker, 100)
+  where c.id = v_call.id;
+  return jsonb_build_object(
+    'call_id', v_call.id, 'openai_call_id', v_call.openai_call_id,
+    'provider_termination_mode', v_call.provider_termination_mode,
+    'provider_termination_reason', v_call.provider_termination_reason
+  );
+end;
+$$;
+
+-- Budget reconciliation may inspect a phone call only after the phone owner has
+-- confirmed termination. Until then it cannot issue a competing provider write.
+create or replace function public.claim_budget_reconciliation(p_worker text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_reservation public.budget_reservations;
+  v_call public.calls;
+  v_outcome text;
+begin
+  if auth.role() <> 'service_role' then raise exception 'service_role_required' using errcode = '42501'; end if;
+  if nullif(btrim(p_worker), '') is null then raise exception 'worker_required' using errcode = '22023'; end if;
+  select br.* into v_reservation
+  from public.budget_reservations br
+  join public.calls c on c.id = br.call_id and c.tenant_id = br.tenant_id
+  where br.status = 'active'
+    and c.status <> 'active'
+    and (c.phone_event_id is null or c.provider_termination_state in ('confirmed','not_required'))
+    and br.reconcile_after <= now()
+    and (br.reconcile_lease_until is null or br.reconcile_lease_until < now())
+  order by br.created_at
+  for update of br skip locked
+  limit 1;
+  if v_reservation.id is null then return null; end if;
+  update public.budget_reservations br set
+    reconcile_attempts = br.reconcile_attempts + 1,
+    reconcile_lease_until = now() + interval '30 seconds',
+    reconcile_last_error = null
+  where br.id = v_reservation.id;
+  select c.* into v_call from public.calls c where c.id = v_reservation.call_id;
+  v_outcome := case
+    when v_call.status = 'ended' then 'ended'
+    when v_call.status = 'killed_deadline' then 'killed_deadline'
+    when v_call.status = 'killed_budget' then 'killed_budget'
+    when v_call.status = 'error' then 'error'
+    else 'startup_error'
+  end;
+  return jsonb_build_object(
+    'reservation_id', v_reservation.id, 'tenant_id', v_reservation.tenant_id,
+    'call_id', v_reservation.call_id, 'actual_cost_usd', coalesce(v_call.cost_estimate_usd, 0),
+    'minutes', coalesce(v_call.duration_seconds, 0)::numeric / 60, 'outcome', v_outcome,
+    'provider_termination_state', v_call.provider_termination_state,
+    'provider_termination_mode', v_call.provider_termination_mode,
+    'provider_termination_reason', v_call.provider_termination_reason,
+    'provider_terminated_at', v_call.provider_terminated_at,
+    'provider_usage_state', v_call.provider_usage_state,
+    'openai_call_id', v_call.openai_call_id
+  );
+end;
+$$;
+
+-- Keep the latest retention behavior while excluding unresolved lifecycle work.
+create or replace function public.purge_ephemeral_call_data(
+  p_transcript_before timestamptz,
+  p_transient_before timestamptz
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_now timestamptz := clock_timestamp();
+  v_transcripts integer := 0;
+  v_browser_rows integer := 0;
+  v_phone_rows integer := 0;
+  v_oauth_states integer := 0;
+  v_slot_offers integer := 0;
+  v_booking_quotes integer := 0;
+begin
+  if coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), '') <> 'service_role' then
+    raise exception using errcode = '42501', message = 'service_role_required';
+  end if;
+  if p_transcript_before is null or p_transient_before is null
+    or p_transcript_before > v_now or p_transient_before > v_now then
+    raise exception using errcode = '22023', message = 'retention_cutoff_invalid';
+  end if;
+  update public.calls c set transcript = '[]'::jsonb, transcript_deleted_at = v_now
+  where c.ended_at is not null and c.ended_at < p_transcript_before
+    and c.transcript <> '[]'::jsonb and c.summary_status in ('ready', 'failed')
+    and c.learning_status in ('done', 'skipped', 'failed');
+  get diagnostics v_transcripts = row_count;
+  delete from public.browser_session_requests b
+  where b.created_at < p_transient_before and b.status in ('ready', 'error', 'expired');
+  get diagnostics v_browser_rows = row_count;
+  delete from public.phone_events p
+  where p.created_at < p_transient_before and p.handled_at is not null
+    and p.status in ('accepted', 'rejected', 'error')
+    and p.lifecycle_state in ('active', 'rejected', 'terminated')
+    and (
+      p.call_id is null
+      or exists (
+        select 1 from public.calls c
+        where c.id = p.call_id
+          and c.status <> 'active'
+          and c.provider_termination_state in ('confirmed','not_required')
+      )
+    );
+  get diagnostics v_phone_rows = row_count;
+  delete from public.oauth_states o where o.expires_at < p_transient_before;
+  get diagnostics v_oauth_states = row_count;
+  delete from public.slot_offers s where s.expires_at < p_transient_before;
+  get diagnostics v_slot_offers = row_count;
+  delete from public.booking_quotes q
+  where q.expires_at < p_transient_before
+    and not exists (select 1 from public.slot_offers s where s.quote_id = q.id);
+  get diagnostics v_booking_quotes = row_count;
+  return jsonb_build_object(
+    'transcripts_redacted', v_transcripts, 'browser_rows_deleted', v_browser_rows,
+    'phone_rows_deleted', v_phone_rows, 'oauth_states_deleted', v_oauth_states,
+    'slot_offers_deleted', v_slot_offers, 'booking_quotes_deleted', v_booking_quotes,
+    'completed_at', v_now
+  );
+end;
+$$;
+
+update public.calls c
+set phone_event_id = p.id
+from public.phone_events p
+where p.call_id = c.id and c.phone_event_id is null;
+
+create unique index calls_openai_call_id_unique
+  on public.calls (openai_call_id) where openai_call_id is not null;
+create unique index calls_phone_event_id_unique
+  on public.calls (phone_event_id) where phone_event_id is not null;
+create index phone_events_lifecycle_reconciliation_idx
+  on public.phone_events (lifecycle_reconcile_after, created_at)
+  where lifecycle_state <> 'active';
+
+create or replace function public.claim_phone_event(p_event_id uuid, p_worker text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_event public.phone_events;
+  v_claim uuid := gen_random_uuid();
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'service_role_required' using errcode = '42501';
+  end if;
+  if p_event_id is null or nullif(btrim(p_worker), '') is null then
+    raise exception 'phone_claim_arguments_invalid' using errcode = '22023';
+  end if;
+
+  select p.* into v_event
+  from public.phone_events p
+  where p.id = p_event_id and p.status = 'pending' and p.lifecycle_state = 'pending'
+  for update of p skip locked;
+  if v_event.id is null then return null; end if;
+
+  update public.phone_events p
+  set lifecycle_state = 'claimed',
+      lifecycle_owner = left(p_worker, 100),
+      lifecycle_claim_token = v_claim,
+      lifecycle_claimed_at = clock_timestamp(),
+      lifecycle_updated_at = clock_timestamp(),
+      lifecycle_reconcile_after = clock_timestamp() + interval '30 seconds',
+      lifecycle_reconcile_lease_until = null,
+      lifecycle_reconcile_worker = null,
+      provider_termination_state = 'active',
+      provider_termination_mode = 'reject',
+      handled_at = coalesce(p.handled_at, clock_timestamp())
+  where p.id = v_event.id;
+
+  return jsonb_build_object(
+    'id', v_event.id,
+    'claim_token', v_claim,
+    'openai_call_id', v_event.openai_call_id
+  );
+end;
+$$;
+
+create or replace function public.persist_phone_call(
+  p_event_id uuid,
+  p_claim_token uuid,
+  p_tenant_id uuid,
+  p_model text
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_event public.phone_events;
+  v_call uuid;
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'service_role_required' using errcode = '42501';
+  end if;
+  if p_event_id is null or p_claim_token is null or p_tenant_id is null or nullif(btrim(p_model), '') is null then
+    raise exception 'phone_call_arguments_invalid' using errcode = '22023';
+  end if;
+
+  select p.* into v_event from public.phone_events p where p.id = p_event_id for update;
+  if v_event.id is null then raise exception 'phone_event_not_found' using errcode = 'P0002'; end if;
+  if v_event.lifecycle_claim_token is distinct from p_claim_token or nullif(btrim(v_event.lifecycle_owner), '') is null then
+    raise exception 'phone_claim_lost' using errcode = '42501';
+  end if;
+  if v_event.lifecycle_state = 'call_persisted' and v_event.call_id is not null then return v_event.call_id; end if;
+  if v_event.lifecycle_state <> 'claimed' then raise exception 'phone_lifecycle_transition_invalid' using errcode = '55000'; end if;
+
+  insert into public.calls (
+    tenant_id, channel, session_type, model, status, openai_call_id, phone_event_id,
+    provider_termination_state, provider_termination_mode, provider_termination_reason, provider_usage_state
+  ) values (
+    p_tenant_id, 'phone', 'customer', p_model, 'active', v_event.openai_call_id, v_event.id,
+    'active', 'reject', 'phone_waiting_before_accept', 'unknown'
+  ) returning id into v_call;
+
+  update public.phone_events p
+  set tenant_id = p_tenant_id,
+      call_id = v_call,
+      lifecycle_state = 'call_persisted',
+      lifecycle_updated_at = clock_timestamp(),
+      lifecycle_reconcile_after = clock_timestamp() + interval '30 seconds'
+  where p.id = v_event.id;
+  return v_call;
+end;
+$$;
+
+create or replace function public.reserve_phone_call_budget(
+  p_event_id uuid,
+  p_claim_token uuid,
+  p_est_cost numeric
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_event public.phone_events;
+  v_reservation uuid;
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'service_role_required' using errcode = '42501';
+  end if;
+  if p_event_id is null or p_claim_token is null or p_est_cost is null or p_est_cost < 0 then
+    raise exception 'phone_budget_arguments_invalid' using errcode = '22023';
+  end if;
+
+  select p.* into v_event from public.phone_events p where p.id = p_event_id for update;
+  if v_event.id is null then raise exception 'phone_event_not_found' using errcode = 'P0002'; end if;
+  if v_event.lifecycle_claim_token is distinct from p_claim_token or nullif(btrim(v_event.lifecycle_owner), '') is null then
+    raise exception 'phone_claim_lost' using errcode = '42501';
+  end if;
+  if v_event.lifecycle_state = 'budget_reserved' then
+    select br.id into v_reservation from public.budget_reservations br where br.call_id = v_event.call_id;
+    if v_reservation is null then raise exception 'phone_reservation_missing' using errcode = 'P0002'; end if;
+    return v_reservation;
+  end if;
+  if v_event.lifecycle_state <> 'call_persisted' or v_event.call_id is null or v_event.tenant_id is null then
+    raise exception 'phone_lifecycle_transition_invalid' using errcode = '55000';
+  end if;
+
+  v_reservation := public.reserve_call_budget(v_event.tenant_id, v_event.call_id, p_est_cost);
+  update public.phone_events p
+  set lifecycle_state = 'budget_reserved',
+      lifecycle_updated_at = clock_timestamp(),
+      lifecycle_reconcile_after = clock_timestamp() + interval '30 seconds'
+  where p.id = v_event.id;
+  return v_reservation;
+end;
+$$;
+
+create or replace function public.begin_phone_provider_accept(p_event_id uuid, p_claim_token uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v_event public.phone_events;
+begin
+  if auth.role() <> 'service_role' then raise exception 'service_role_required' using errcode = '42501'; end if;
+  if p_event_id is null or p_claim_token is null then raise exception 'phone_accept_arguments_invalid' using errcode = '22023'; end if;
+  select p.* into v_event from public.phone_events p where p.id = p_event_id for update;
+  if v_event.id is null then raise exception 'phone_event_not_found' using errcode = 'P0002'; end if;
+  if v_event.lifecycle_claim_token is distinct from p_claim_token or nullif(btrim(v_event.lifecycle_owner), '') is null then
+    raise exception 'phone_claim_lost' using errcode = '42501';
+  end if;
+  if v_event.lifecycle_state = 'accepting' then return true; end if;
+  if v_event.lifecycle_state <> 'budget_reserved' then raise exception 'phone_lifecycle_transition_invalid' using errcode = '55000'; end if;
+  update public.phone_events p set
+    lifecycle_state = 'accepting', provider_accept_state = 'attempting',
+    provider_termination_state = 'active', provider_termination_mode = 'hangup',
+    lifecycle_updated_at = clock_timestamp(), lifecycle_reconcile_after = clock_timestamp() + interval '30 seconds'
+  where p.id = v_event.id;
+  update public.calls c set provider_termination_mode = 'hangup', provider_termination_reason = 'phone_accept_outcome_pending'
+  where c.id = v_event.call_id;
+  if not found then raise exception 'phone_call_not_found' using errcode = 'P0002'; end if;
+  return true;
+end;
+$$;
+
+create or replace function public.confirm_phone_provider_accept(p_event_id uuid, p_claim_token uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v_event public.phone_events;
+begin
+  if auth.role() <> 'service_role' then raise exception 'service_role_required' using errcode = '42501'; end if;
+  if p_event_id is null or p_claim_token is null then raise exception 'phone_accept_arguments_invalid' using errcode = '22023'; end if;
+  select p.* into v_event from public.phone_events p where p.id = p_event_id for update;
+  if v_event.id is null then raise exception 'phone_event_not_found' using errcode = 'P0002'; end if;
+  if v_event.lifecycle_claim_token is distinct from p_claim_token or nullif(btrim(v_event.lifecycle_owner), '') is null then
+    raise exception 'phone_claim_lost' using errcode = '42501';
+  end if;
+  if v_event.lifecycle_state <> 'accepting' then raise exception 'phone_lifecycle_transition_invalid' using errcode = '55000'; end if;
+  update public.calls c set
+    provider_termination_state = 'active', provider_termination_mode = 'hangup',
+    provider_termination_reason = 'phone_provider_accepted', provider_usage_state = 'unknown'
+  where c.id = v_event.call_id;
+  if not found then raise exception 'phone_call_not_found' using errcode = 'P0002'; end if;
+  update public.phone_events p set
+    status = 'accepted', lifecycle_state = 'accepted', provider_accept_state = 'accepted',
+    provider_accepted_at = clock_timestamp(), lifecycle_updated_at = clock_timestamp(),
+    lifecycle_reconcile_after = clock_timestamp() + interval '30 seconds'
+  where p.id = v_event.id;
+  return true;
+end;
+$$;
+
+create or replace function public.begin_phone_sideband(p_event_id uuid, p_claim_token uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v_event public.phone_events;
+begin
+  if auth.role() <> 'service_role' then raise exception 'service_role_required' using errcode = '42501'; end if;
+  if p_event_id is null or p_claim_token is null then raise exception 'phone_sideband_arguments_invalid' using errcode = '22023'; end if;
+  select p.* into v_event from public.phone_events p where p.id = p_event_id for update;
+  if v_event.id is null then raise exception 'phone_event_not_found' using errcode = 'P0002'; end if;
+  if v_event.lifecycle_claim_token is distinct from p_claim_token or nullif(btrim(v_event.lifecycle_owner), '') is null then
+    raise exception 'phone_claim_lost' using errcode = '42501';
+  end if;
+  if v_event.lifecycle_state <> 'accepted' then raise exception 'phone_lifecycle_transition_invalid' using errcode = '55000'; end if;
+  update public.phone_events p set
+    lifecycle_state = 'sideband_attaching', sideband_state = 'attaching',
+    lifecycle_updated_at = clock_timestamp(), lifecycle_reconcile_after = clock_timestamp() + interval '30 seconds'
+  where p.id = v_event.id;
+  return true;
+end;
+$$;
+
+create or replace function public.confirm_phone_sideband(p_event_id uuid, p_claim_token uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v_event public.phone_events;
+begin
+  if auth.role() <> 'service_role' then raise exception 'service_role_required' using errcode = '42501'; end if;
+  if p_event_id is null or p_claim_token is null then raise exception 'phone_sideband_arguments_invalid' using errcode = '22023'; end if;
+  select p.* into v_event from public.phone_events p where p.id = p_event_id for update;
+  if v_event.id is null then raise exception 'phone_event_not_found' using errcode = 'P0002'; end if;
+  if v_event.lifecycle_claim_token is distinct from p_claim_token or nullif(btrim(v_event.lifecycle_owner), '') is null then
+    raise exception 'phone_claim_lost' using errcode = '42501';
+  end if;
+  if v_event.lifecycle_state <> 'sideband_attaching' then raise exception 'phone_lifecycle_transition_invalid' using errcode = '55000'; end if;
+  update public.phone_events p set
+    lifecycle_state = 'active', sideband_state = 'attached', sideband_attached_at = clock_timestamp(),
+    lifecycle_updated_at = clock_timestamp(), lifecycle_reconcile_lease_until = null,
+    lifecycle_reconcile_worker = null
+  where p.id = v_event.id;
+  return true;
+end;
+$$;
+
+create or replace function public.begin_phone_termination(
+  p_event_id uuid,
+  p_claim_token uuid,
+  p_mode text,
+  p_reason text,
+  p_accept_state text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare v_event public.phone_events;
+begin
+  if auth.role() <> 'service_role' then raise exception 'service_role_required' using errcode = '42501'; end if;
+  if p_event_id is null or p_claim_token is null or p_mode is null or p_mode not in ('reject','hangup')
+    or nullif(btrim(p_reason), '') is null
+    or (p_accept_state is not null and p_accept_state not in ('not_attempted','attempting','accepted','failed','unknown')) then
+    raise exception 'phone_termination_arguments_invalid' using errcode = '22023';
+  end if;
+  select p.* into v_event from public.phone_events p where p.id = p_event_id for update;
+  if v_event.id is null then raise exception 'phone_event_not_found' using errcode = 'P0002'; end if;
+  if v_event.lifecycle_claim_token is distinct from p_claim_token or nullif(btrim(v_event.lifecycle_owner), '') is null then
+    raise exception 'phone_claim_lost' using errcode = '42501';
+  end if;
+  if v_event.provider_termination_state in ('pending','confirmed','unknown') then
+    return jsonb_build_object('should_attempt', false, 'openai_call_id', v_event.openai_call_id);
+  end if;
+  update public.phone_events p set
+    provider_accept_state = coalesce(p_accept_state, p.provider_accept_state),
+    provider_termination_state = 'pending', provider_termination_mode = p_mode,
+    lifecycle_last_error = left(p_reason, 400),
+    sideband_state = case when p.sideband_state = 'attaching' then 'failed' else p.sideband_state end,
+    lifecycle_updated_at = clock_timestamp(), lifecycle_reconcile_after = clock_timestamp() + interval '5 seconds'
+  where p.id = v_event.id;
+  update public.calls c set
+    status = 'error', ended_at = coalesce(c.ended_at, clock_timestamp()),
+    provider_termination_state = 'pending', provider_termination_mode = p_mode,
+    provider_termination_reason = left(p_reason, 400), provider_usage_state = 'unknown',
+    provider_termination_reconcile_after = clock_timestamp() + interval '1 minute',
+    provider_termination_reconcile_lease_until = clock_timestamp() + interval '1 minute'
+  where c.id = v_event.call_id;
+  return jsonb_build_object('should_attempt', true, 'openai_call_id', v_event.openai_call_id);
+end;
+$$;
+
+create or replace function public.complete_phone_termination(
+  p_event_id uuid,
+  p_claim_token uuid,
+  p_confirmed boolean,
+  p_error text
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_event public.phone_events;
+  v_rejected boolean;
+begin
+  if auth.role() <> 'service_role' then raise exception 'service_role_required' using errcode = '42501'; end if;
+  if p_event_id is null or p_claim_token is null or p_confirmed is null then
+    raise exception 'phone_termination_arguments_invalid' using errcode = '22023';
+  end if;
+  select p.* into v_event from public.phone_events p where p.id = p_event_id for update;
+  if v_event.id is null then raise exception 'phone_event_not_found' using errcode = 'P0002'; end if;
+  if v_event.lifecycle_claim_token is distinct from p_claim_token or nullif(btrim(v_event.lifecycle_owner), '') is null then
+    raise exception 'phone_claim_lost' using errcode = '42501';
+  end if;
+
+  -- A confirmed pre-accept reject is explicit no-usage evidence only when a
+  -- reconciliation worker reclaims the already-terminal event.
+  if v_event.lifecycle_state = 'rejected'
+    and v_event.provider_termination_state = 'confirmed'
+    and v_event.provider_termination_mode = 'reject'
+    and v_event.provider_accept_state in ('not_attempted','failed')
+    and p_confirmed then
+    update public.calls c set provider_usage_state = 'not_applicable'
+    where c.id = v_event.call_id and c.provider_usage_state = 'unknown';
+    update public.phone_events p set
+      lifecycle_reconcile_lease_until = null, lifecycle_reconcile_worker = null,
+      lifecycle_updated_at = clock_timestamp(), lifecycle_reconcile_after = clock_timestamp() + interval '100 years'
+    where p.id = v_event.id;
+    return true;
+  end if;
+
+  if v_event.provider_termination_state <> 'pending' then
+    raise exception 'phone_termination_transition_invalid' using errcode = '55000';
+  end if;
+  v_rejected := p_confirmed and v_event.provider_termination_mode = 'reject'
+    and v_event.provider_accept_state in ('not_attempted','failed');
+
+  update public.phone_events p set
+    status = case when v_rejected then 'rejected' else 'error' end,
+    lifecycle_state = case
+      when not p_confirmed then 'reconciliation_required'
+      when v_rejected then 'rejected'
+      else 'terminated'
+    end,
+    provider_termination_state = case when p_confirmed then 'confirmed' else 'unknown' end,
+    provider_terminated_at = case when p_confirmed then clock_timestamp() else null end,
+    lifecycle_last_error = left(coalesce(p_error, p.lifecycle_last_error), 400),
+    lifecycle_updated_at = clock_timestamp(),
+    lifecycle_reconcile_after = clock_timestamp() + case when p_confirmed and not v_rejected then interval '1 minute' else interval '5 seconds' end,
+    lifecycle_reconcile_lease_until = null,
+    lifecycle_reconcile_worker = null
+  where p.id = v_event.id;
+
+  update public.calls c set
+    provider_termination_state = case when p_confirmed then 'confirmed' else 'unknown' end,
+    provider_termination_last_error = case when p_confirmed then null else left(coalesce(p_error, 'provider_termination_unknown'), 400) end,
+    provider_terminated_at = case when p_confirmed then clock_timestamp() else c.provider_terminated_at end,
+    provider_termination_reconcile_after = clock_timestamp() + interval '1 minute',
+    provider_termination_reconcile_lease_until = null,
+    provider_termination_reconcile_worker = null
+  where c.id = v_event.call_id;
+  return true;
+end;
+$$;
+
+revoke all on function public.claim_phone_event(uuid,text) from public, anon, authenticated;
+grant execute on function public.claim_phone_event(uuid,text) to service_role;
+revoke all on function public.persist_phone_call(uuid,uuid,uuid,text) from public, anon, authenticated;
+grant execute on function public.persist_phone_call(uuid,uuid,uuid,text) to service_role;
+revoke all on function public.reserve_phone_call_budget(uuid,uuid,numeric) from public, anon, authenticated;
+grant execute on function public.reserve_phone_call_budget(uuid,uuid,numeric) to service_role;
+revoke all on function public.begin_phone_provider_accept(uuid,uuid) from public, anon, authenticated;
+grant execute on function public.begin_phone_provider_accept(uuid,uuid) to service_role;
+revoke all on function public.confirm_phone_provider_accept(uuid,uuid) from public, anon, authenticated;
+grant execute on function public.confirm_phone_provider_accept(uuid,uuid) to service_role;
+revoke all on function public.begin_phone_sideband(uuid,uuid) from public, anon, authenticated;
+grant execute on function public.begin_phone_sideband(uuid,uuid) to service_role;
+revoke all on function public.confirm_phone_sideband(uuid,uuid) from public, anon, authenticated;
+grant execute on function public.confirm_phone_sideband(uuid,uuid) to service_role;
+revoke all on function public.begin_phone_termination(uuid,uuid,text,text,text) from public, anon, authenticated;
+grant execute on function public.begin_phone_termination(uuid,uuid,text,text,text) to service_role;
+revoke all on function public.complete_phone_termination(uuid,uuid,boolean,text) from public, anon, authenticated;
+grant execute on function public.complete_phone_termination(uuid,uuid,boolean,text) to service_role;
+revoke all on function public.claim_phone_lifecycle_reconciliation(text) from public, anon, authenticated;
+grant execute on function public.claim_phone_lifecycle_reconciliation(text) to service_role;
+revoke all on function public.claim_provider_termination_reconciliation(text) from public, anon, authenticated;
+grant execute on function public.claim_provider_termination_reconciliation(text) to service_role;
+revoke all on function public.claim_budget_reconciliation(text) from public, anon, authenticated;
+grant execute on function public.claim_budget_reconciliation(text) to service_role;
+revoke all on function public.purge_ephemeral_call_data(timestamptz,timestamptz) from public, anon, authenticated;
+grant execute on function public.purge_ephemeral_call_data(timestamptz,timestamptz) to service_role;

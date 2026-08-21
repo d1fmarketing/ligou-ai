@@ -529,7 +529,6 @@ function assertExpectedLegacyLint(functions) {
     `${entry.function}|${String(issue.level).split(/\s+/)[0]}|${issue.message}`
   ))).sort();
   const expected = [
-    'public.claim_budget_reconciliation|warning|unused parameter "p_worker"',
     'public.decide_case|warning|unused variable "v_tenant"',
   ].sort();
   assert.deepEqual(actual, expected, "database lint introduced a new or changed warning/error");
