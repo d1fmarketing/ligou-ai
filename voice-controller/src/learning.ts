@@ -1,5 +1,6 @@
 // Local deterministic learning validators remain available, but the post-call model channel is disabled.
 import { minimizeAndRedact } from "../../supabase/functions/_shared/privacy.ts";
+import { supa } from "./rules.ts";
 
 const VALID_CATEGORY = new Set(["preco", "area", "agenda", "emergencia", "negociacao", "cliente", "procedimento", "geral"]);
 const VALID_ESCOPO = new Set(["geral", "servico", "localizacao", "cliente"]);
@@ -35,5 +36,14 @@ export function validateProposals(raw: unknown): Proposal[] {
 }
 
 export async function tickLearning(): Promise<number> {
-  return 0;
+  const { data, error } = await supa().from("calls").select("id").eq("learning_status", "pending").limit(100);
+  if (error) throw new Error("learning_skip_lookup_failed");
+  const ids = (data ?? []).map((row: any) => row.id).filter(Boolean);
+  if (!ids.length) return 0;
+  const { error: updateError } = await supa().from("calls").update({
+    learning_status: "skipped",
+    learning_skip_reason: "freeform_model_learning_disabled",
+  }).in("id", ids);
+  if (updateError) throw new Error("learning_skip_update_failed");
+  return ids.length;
 }

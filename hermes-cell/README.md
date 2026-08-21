@@ -9,15 +9,17 @@ controller→API server; não é credencial de modelo.
 
 ```bash
 cd hermes-cell
-cp .env.example .env  # TENANT_SLUG + HERMES_API_KEY interno + HERMES_IMAGE repository@sha256:...
+cp .env.example .env  # TENANT_ID UUID + TENANT_SLUG + HERMES_API_KEY + HERMES_IMAGE repository@sha256:...
 set -a; . ./.env; set +a
 node tenant-compose.mjs up -d
-docker exec -it "ligou-cell-$TENANT_SLUG" hermes auth add openai-codex --type oauth --no-browser
+docker exec -it "ligou-cell-$TENANT_ID" hermes auth add openai-codex --type oauth --no-browser
 bash health-state.sh
 ```
 
-`tenant-compose.mjs` é o caminho normal e obrigatório: ele deriva do slug um projeto Compose, container,
-volumes cognitivo/auth, rede e porta loopback distintos. Para configurar o controller da mesma empresa,
+`tenant-compose.mjs` é o caminho normal e obrigatório: o UUID imutável deriva projeto Compose, container,
+volumes cognitivo/auth, rede, paths de regras/backup/restore e rota distintos. O slug é apenas identidade de
+exibição vinculada ao UUID; reutilização do slug por outro UUID ou mudança de slug para o mesmo UUID falha
+fechada, impedindo herança de recursos após remoção/recriação. Para configurar o controller da mesma empresa,
 use o `hermes_url` retornado por `node tenant-compose.mjs --print-runtime`; não reutilize a URL de outra
 empresa. O Compose direto falha fechado porque esses nomes qualificados não têm defaults.
 

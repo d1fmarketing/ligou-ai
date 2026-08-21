@@ -11,6 +11,7 @@ HEALTH_TOOL="${ROOT}/hermes-cell/health-state.sh"
 IDENTITY_TOOL="${ROOT}/hermes-cell/tenant-identity.mjs"
 TENANT_COMPOSE="${ROOT}/hermes-cell/tenant-compose.mjs"
 TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
+TENANT_ID="${TENANT_ID:?set TENANT_ID}"
 IMAGE="${HERMES_IMAGE:?set immutable HERMES_IMAGE digest}"
 APPLY=0
 KEY=""
@@ -32,7 +33,7 @@ command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "node_required" >&2; exit 1; }
 [ -n "${LIGOU_BACKUP_MANIFEST_KEY:-}" ] || { echo "manifest_key_required" >&2; exit 1; }
 [[ "$IMAGE" =~ ^[^[:space:]@]+(:[^[:space:]@]+)?@sha256:[a-f0-9]{64}$ ]] || { echo "hermes_image_digest_required" >&2; exit 1; }
 
-IDENTITY_JSON="$("$NODE_BIN" "$IDENTITY_TOOL" --tenant "$TENANT" --json)"
+IDENTITY_JSON="$("$NODE_BIN" "$IDENTITY_TOOL" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --json)"
 identity_field() {
   "$NODE_BIN" -e 'const value=JSON.parse(process.argv[1]);const field=process.argv[2];if(!Object.hasOwn(value,field))process.exit(1);process.stdout.write(String(value[field]));' "$IDENTITY_JSON" "$1"
 }
@@ -47,23 +48,36 @@ CHECK_CELL=""
 CHECK_VOLUME=""
 CHECK_CREATED=0
 CHECK_STARTED=0
-PROMOTED=0
-RESTORE_COMPLETE=0
 INTERRUPTED=0
 
 cleanup() {
   local status=$?
   trap - EXIT INT TERM HUP
   set +e
-  if [ "$PROMOTED" -eq 1 ] && [ "$RESTORE_COMPLETE" -eq 0 ]; then
-    if rollback_activation; then
-      PROMOTED=0
-      docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
-      CHECK_CREATED=0
-      if [ "$INTERRUPTED" -eq 1 ]; then echo "restore_interrupted_rollback_applied" >&2; fi
+  if [ "$status" -ne 0 ] && [ -n "$CHECK_VOLUME" ]; then
+    local registry_volume
+    registry_volume="$("$NODE_BIN" "$IDENTITY_TOOL" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --field cognitive_volume 2>/dev/null || true)"
+    if [ "$registry_volume" = "$CHECK_VOLUME" ]; then
+      if rollback_activation; then
+        docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
+        CHECK_CREATED=0
+        if [ "$INTERRUPTED" -eq 1 ]; then echo "restore_interrupted_rollback_applied" >&2; fi
+      else
+        CHECK_CREATED=0
+        echo "restore_interrupted_rollback_failed" >&2
+      fi
+    elif [ "$registry_volume" = "$ACTIVE_COGNITIVE" ]; then
+      if recreate_cell && live_smoke; then
+        docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
+        CHECK_CREATED=0
+        if [ "$INTERRUPTED" -eq 1 ]; then echo "restore_interrupted_no_promotion" >&2; fi
+      else
+        CHECK_CREATED=0
+        echo "restore_interrupted_rollback_failed" >&2
+      fi
     else
       CHECK_CREATED=0
-      echo "restore_interrupted_rollback_failed" >&2
+      echo "restore_registry_state_unknown" >&2
     fi
   fi
   if [ "$CHECK_STARTED" -eq 1 ]; then docker rm -f "$CHECK_CELL" >/dev/null 2>&1; fi
@@ -84,23 +98,23 @@ if [ -n "$LOCAL_ARCHIVE" ] || [ -n "$LOCAL_MANIFEST" ]; then
 else
   BUCKET="${LIGOU_BACKUP_BUCKET:?set LIGOU_BACKUP_BUCKET}"
   if [ -z "$KEY" ]; then
-    KEY="$(aws s3 ls "s3://${BUCKET}/cells/${TENANT}/" \
+    KEY="$(aws s3 ls "s3://${BUCKET}/cells/${TENANT_ID}/" \
       | awk '{print $4}' | grep -E "^${ARCHIVE_PREFIX}-[0-9]{8}T[0-9]{6}Z[.]zip$" | sort | tail -1)"
     [ -n "$KEY" ] || { echo "backup_not_found" >&2; exit 1; }
   fi
   [[ "$KEY" =~ ^${ARCHIVE_PREFIX}-[0-9]{8}T[0-9]{6}Z[.]zip$ ]] || { echo "backup_key_invalid" >&2; exit 2; }
   ARCHIVE="${SCRATCH}/${KEY}"
   MANIFEST="${SCRATCH}/${KEY}.manifest.json"
-  aws s3 cp "s3://${BUCKET}/cells/${TENANT}/${KEY}" "$ARCHIVE" --only-show-errors
-  aws s3 cp "s3://${BUCKET}/cells/${TENANT}/${KEY}.manifest.json" "$MANIFEST" --only-show-errors
+  aws s3 cp "s3://${BUCKET}/cells/${TENANT_ID}/${KEY}" "$ARCHIVE" --only-show-errors
+  aws s3 cp "s3://${BUCKET}/cells/${TENANT_ID}/${KEY}.manifest.json" "$MANIFEST" --only-show-errors
 fi
 
-"$NODE_BIN" "$MANIFEST_TOOL" verify --archive "$ARCHIVE" --manifest "$MANIFEST" --tenant "$TENANT" --hermes-image "$IMAGE" >/dev/null
+"$NODE_BIN" "$MANIFEST_TOOL" verify --archive "$ARCHIVE" --manifest "$MANIFEST" --tenant "$TENANT_ID" --hermes-image "$IMAGE" >/dev/null
 "$NODE_BIN" "$ARCHIVE_TOOL" extract "$ARCHIVE" "${SCRATCH}/validated" >/dev/null
 ARCHIVE_ID="$("$NODE_BIN" -e 'const fs=require("node:fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(value.archive?.id||""));' "$MANIFEST")"
 [[ "$ARCHIVE_ID" =~ ^[a-f0-9]{64}$ ]] || { echo "archive_identity_invalid" >&2; exit 1; }
 if [ "$APPLY" -eq 1 ]; then
-  CHECK_VOLUME="ligou-${TENANT}-hermes-cognitive-stage-${ARCHIVE_ID}"
+  CHECK_VOLUME="ligou-${TENANT_ID}-hermes-cognitive-stage-${ARCHIVE_ID}"
   CHECK_CELL="${ARCHIVE_PREFIX}-restore-stage-${ARCHIVE_ID}"
 else
   CHECK_VOLUME="${ARCHIVE_PREFIX}-restore-check-$$"
@@ -166,16 +180,18 @@ live_smoke() {
     && docker exec "$CELL" hermes memory list --json >/dev/null \
     && docker exec "$CELL" hermes skills list --json >/dev/null \
     && docker exec "$CELL" hermes sessions list --json >/dev/null \
-    && TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$HEALTH_TOOL" >/dev/null
+    && TENANT_ID="$TENANT_ID" TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$HEALTH_TOOL" >/dev/null
 }
 
 activate_volume() {
   local next="$1" expected="$2"
-  "$NODE_BIN" "$IDENTITY_TOOL" --tenant "$TENANT" --activate-cognitive "$next" --expected "$expected" --json >/dev/null
+  if [ "${LIGOU_RESTORE_TEST_HARNESS:-0}" = 1 ] && [ "${LIGOU_RESTORE_TEST_FAIL_CAS:-0}" = 1 ] \
+    && [ "$next" = "$CHECK_VOLUME" ]; then return 1; fi
+  "$NODE_BIN" "$IDENTITY_TOOL" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --activate-cognitive "$next" --expected "$expected" --json >/dev/null
 }
 
 recreate_cell() {
-  TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$NODE_BIN" "$TENANT_COMPOSE" up -d --force-recreate >/dev/null
+  TENANT_ID="$TENANT_ID" TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$NODE_BIN" "$TENANT_COMPOSE" up -d --force-recreate >/dev/null
 }
 
 rollback_activation() {
@@ -191,7 +207,7 @@ test_interrupt() {
   fi
 }
 
-PROMOTED=1
+test_interrupt before_cas
 if ! activate_volume "$CHECK_VOLUME" "$ACTIVE_COGNITIVE"; then
   echo "restore_stage_activation_failed" >&2
   exit 1
@@ -200,9 +216,9 @@ test_interrupt registry_promotion
 
 if ! recreate_cell; then
   if rollback_activation; then
-    PROMOTED=0
     docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
     CHECK_CREATED=0
+    CHECK_VOLUME=""
     echo "restore_activation_failed_rollback_applied" >&2
   else
     echo "restore_activation_failed_rollback_failed" >&2
@@ -213,9 +229,9 @@ test_interrupt container_recreate
 
 if ! live_smoke; then
   if rollback_activation; then
-    PROMOTED=0
     docker volume rm "$CHECK_VOLUME" >/dev/null 2>&1 || true
     CHECK_CREATED=0
+    CHECK_VOLUME=""
     echo "restore_health_failed_rollback_applied" >&2
   else
     echo "restore_health_failed_rollback_failed" >&2
@@ -224,6 +240,5 @@ if ! live_smoke; then
 fi
 test_interrupt live_smoke
 
-RESTORE_COMPLETE=1
 CHECK_CREATED=0
 printf '{"ok":true,"mode":"apply","disposable":true,"staged_volume":true,"archive_id":"%s"}\n' "$ARCHIVE_ID"

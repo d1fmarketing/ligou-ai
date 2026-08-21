@@ -54,7 +54,13 @@ export async function hashCanonicalContact(contact: string, encodedKey = runtime
 }
 
 export async function hashLegacyCanonicalContact(contact: string): Promise<string> {
-  const canonical = canonicalContact(contact);
+  const raw = String(contact ?? "").trim().toLowerCase();
+  const canonical = raw.includes("@")
+    ? raw.replace(/\s+/g, "")
+    : (() => {
+        const digits = raw.replace(/\D/g, "");
+        return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+      })();
   if (!canonical || canonical.length > 320) throw new Error("contact_invalid");
   const digest = await crypto.subtle.digest("SHA-256", ownedBuffer(encoder.encode(canonical)));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");

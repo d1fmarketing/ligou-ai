@@ -249,9 +249,27 @@ export async function contactHash(contact: string, version?: number): Promise<st
   return (await contactHashIdentity(contact, version)).hash;
 }
 
-async function contactHashCandidates(contact: string): Promise<string[]> {
-  const hashes = [await hashLegacyCanonicalContact(contact)];
-  for (const version of [...configuredHashKeys().keys()].sort((a, b) => a - b)) hashes.push(await contactHash(contact, version));
+async function contactHashRequirements(tenantId: string): Promise<{ legacy: boolean; versions: number[] }> {
+  let legacy = false;
+  const versions = new Set<number>([currentHashVersion()]);
+  for (const table of ["contact_opt_outs", "communications"]) {
+    const { data, error } = await supa().from(table)
+      .select("hash_algorithm,hash_key_version").eq("tenant_id", tenantId);
+    if (error) throw new Error(`condition_lookup_failed: ${error.message}`);
+    for (const row of data ?? []) {
+      if (row.hash_algorithm === "sha256" && row.hash_key_version == null) legacy = true;
+      else if (row.hash_algorithm === "hmac-sha256" && Number.isSafeInteger(row.hash_key_version) && row.hash_key_version > 0) {
+        versions.add(Number(row.hash_key_version));
+      } else throw new Error("contact_hash_metadata_invalid");
+    }
+  }
+  return { legacy, versions: [...versions].sort((a, b) => a - b) };
+}
+
+async function contactHashCandidates(contact: string, requirements: { legacy: boolean; versions: number[] }): Promise<string[]> {
+  const hashes: string[] = [];
+  if (requirements.legacy) hashes.push(await hashLegacyCanonicalContact(contact));
+  for (const version of requirements.versions) hashes.push(await contactHash(contact, version));
   return [...new Set(hashes)];
 }
 
@@ -267,8 +285,17 @@ export async function checkCommunication(args: {
   tenantId: string; contact: string; channel: string; purpose: string; body: string;
   at?: Date; timezone?: string; priorConsent?: boolean;
 }): Promise<CommGateResult> {
-  const identity = await contactHashIdentity(args.contact);
-  const hashes = await contactHashCandidates(args.contact);
+  let identity;
+  let hashes;
+  try {
+    const requirements = await contactHashRequirements(args.tenantId);
+    identity = await contactHashIdentity(args.contact);
+    hashes = await contactHashCandidates(args.contact, requirements);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "contact_hash_history_unavailable";
+    return { allowed: false, reason: message === "contact_hash_key_version_unavailable"
+      ? "contact_hash_history_key_unavailable" : message };
+  }
 
   const power = await checkPower(args.tenantId, "hermes", "follow_up_message", args.channel, {
     channel: args.channel, purpose: args.purpose, at: args.at, timezone: args.timezone,

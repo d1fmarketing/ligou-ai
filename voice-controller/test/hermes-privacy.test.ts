@@ -22,7 +22,7 @@ afterAll(() => {
 });
 
 const TENANT = {
-  id: "tenant-1",
+  id: "11111111-1111-4111-8111-111111111111",
   slug: "rocha-plumbing",
   name: "Rocha Plumbing — call +1 (949) 555-0101",
   vertical: "plumbing",
@@ -90,7 +90,7 @@ describe("strict Hermes action output", () => {
       return new Response(JSON.stringify({ choices: [{ message: { content: '{"action":"open_team_case"}' } }] }), { status: 200 });
     }) as typeof fetch;
 
-    const result = await consultHermes({ id: "tenant-1", slug: "rocha-plumbing" }, context());
+    const result = await consultHermes({ id: TENANT.id, slug: "rocha-plumbing" }, context());
 
     expect(result).toEqual({
       status: "ok",
@@ -113,7 +113,7 @@ describe("strict Hermes action output", () => {
       globalThis.fetch = (async () => new Response(JSON.stringify({
         choices: [{ message: { content } }],
       }), { status: 200 })) as typeof fetch;
-      expect(await consultHermes({ id: "tenant-1", slug: "rocha-plumbing" }, context())).toEqual({ status: "unavailable" });
+      expect(await consultHermes({ id: TENANT.id, slug: "rocha-plumbing" }, context())).toEqual({ status: "unavailable" });
     });
   }
 
@@ -124,8 +124,8 @@ describe("strict Hermes action output", () => {
       urls.push(String(input));
       return new Response(JSON.stringify({ choices: [{ message: { content: '{"action":"continue_standard_flow"}' } }] }), { status: 200 });
     }) as typeof fetch;
-    await consultHermes({ id: "tenant-a", slug: "alpha-plumbing" }, context());
-    await consultHermes({ id: "tenant-b", slug: "beta-plumbing" }, context());
+    await consultHermes({ id: "22222222-2222-4222-8222-222222222222", slug: "alpha-plumbing" }, context());
+    await consultHermes({ id: "33333333-3333-4333-8333-333333333333", slug: "beta-plumbing" }, context());
     expect(urls).toHaveLength(2);
     expect(urls[0]).not.toBe(urls[1]);
     expect(urls.join("\n")).not.toContain(":9999");

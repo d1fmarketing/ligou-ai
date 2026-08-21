@@ -6,7 +6,7 @@ import { overlapsBusy } from "../src/calendar.ts";
 import { buildInstructions } from "../src/instructions.ts";
 
 const TENANT = {
-  id: "t-1", slug: "rocha-plumbing", name: "Rocha Plumbing LLC", vertical: "plumbing",
+  id: "11111111-1111-4111-8111-111111111111", slug: "rocha-plumbing", name: "Rocha Plumbing LLC", vertical: "plumbing",
   languages: ["en", "es"], timezone: "America/Los_Angeles", session_max_minutes: 15, owner_user_id: "u-1",
   auth_epoch: 1, policy_epoch: 1,
 };
@@ -76,7 +76,7 @@ afterAll(() => {
   _setClient(null); // never leak the mock into other suites (bun shares the module registry)
 });
 
-const cap = () => makeCapability("rocha-plumbing", "t-1", "call-1", 15);
+const cap = () => makeCapability("rocha-plumbing", TENANT.id, "call-1", 15);
 
 describe("quote_price", () => {
   test("quotes only from the approved table", async () => {
@@ -226,7 +226,7 @@ describe("create_async_case", () => {
     const row = inserted.find((i) => i.table === "approval_cases")!.row;
     expect(row.idempotency_key).toHaveLength(64);
     expect(row.evidence_quote).toContain("50% off"); // stored as data, never executed
-    expect(row.tenant_id).toBe("t-1");
+    expect(row.tenant_id).toBe(TENANT.id);
   });
   test("same request in same call is idempotent (same key)", async () => {
     await runTool(cap(), "create_async_case", { request: "X", price_quoted: 1 });
@@ -263,13 +263,13 @@ describe("capability boundary", () => {
     expect(r.body.error).toBe("tenant_mismatch");
   });
   test("denies a capability after a power revocation bumps auth epoch", async () => {
-    const c = makeCapability("rocha-plumbing", "t-1", "call-1", 15, "customer", { authEpoch: 0, policyEpoch: 1 });
+    const c = makeCapability("rocha-plumbing", TENANT.id, "call-1", 15, "customer", { authEpoch: 0, policyEpoch: 1 });
     const r = await runTool(c, "quote_price", { service_type: "drain_cleaning" });
     expect(r.ok).toBe(false);
     expect(r.body.error).toBe("authorization_epoch_stale");
   });
   test("denies a capability after effective policy changes", async () => {
-    const c = makeCapability("rocha-plumbing", "t-1", "call-1", 15, "customer", { authEpoch: 1, policyEpoch: 0 });
+    const c = makeCapability("rocha-plumbing", TENANT.id, "call-1", 15, "customer", { authEpoch: 1, policyEpoch: 0 });
     const r = await runTool(c, "quote_price", { service_type: "drain_cleaning" });
     expect(r.ok).toBe(false);
     expect(r.body.error).toBe("policy_epoch_stale");

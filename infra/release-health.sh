@@ -14,12 +14,14 @@ set -a
 set +a
 
 TENANT="${TENANT_SLUG:-}"
+TENANT_ID="${TENANT_ID:-}"
 PORT="${PORT:-8790}"
 CONTROLLER_STATE=unavailable
 SUPABASE_STATE=unavailable
 HERMES_STATE=unavailable
 
-if [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] && [[ "$PORT" =~ ^[0-9]{2,5}$ ]]; then
+if [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] \
+  && [[ "$TENANT_ID" =~ ^[a-f0-9-]{36}$ ]] && [[ "$PORT" =~ ^[0-9]{2,5}$ ]]; then
   CONTROLLER_RAW="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/health" 2>/dev/null || true)"
   if printf '%s' "$CONTROLLER_RAW" | grep -Eqi '"ok"[[:space:]]*:[[:space:]]*true' \
     && printf '%s' "$CONTROLLER_RAW" | grep -Eqi '"openai"[[:space:]]*:[[:space:]]*true'; then
@@ -36,7 +38,7 @@ if [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] && [[ "$PORT" =~ ^[0-9]{
     fi
   fi
 
-  if TENANT_SLUG="$TENANT" HERMES_HEALTH_URL="${HERMES_HEALTH_URL:-${HERMES_URL:-}}" \
+  if TENANT_ID="$TENANT_ID" TENANT_SLUG="$TENANT" HERMES_HEALTH_URL="${HERMES_HEALTH_URL:-${HERMES_URL:-}}" \
     "${ROOT}/hermes-cell/health-state.sh" >/dev/null 2>&1; then
     HERMES_STATE=ready
   fi

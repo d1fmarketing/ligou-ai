@@ -13,7 +13,7 @@ const EXCLUSIONS = [
   "**/*token*",
   "hermes-model-auth/**",
 ];
-const TENANT = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
+const TENANT = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const DIGEST_IMAGE = /^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/;
 const TOOLCHAIN = JSON.parse(readFileSync(new URL("./toolchain.json", import.meta.url), "utf8"));

@@ -8,6 +8,7 @@ NODE_BIN="${LIGOU_NODE_BIN:-node}"
 MANIFEST_TOOL="${ROOT}/infra/backup-manifest.mjs"
 IDENTITY_TOOL="${ROOT}/hermes-cell/tenant-identity.mjs"
 TENANT="${TENANT_SLUG:?set TENANT_SLUG}"
+TENANT_ID="${TENANT_ID:?set TENANT_ID}"
 BUCKET="${LIGOU_BACKUP_BUCKET:?set LIGOU_BACKUP_BUCKET}"
 SOURCE_ID="${LIGOU_BACKUP_SOURCE_ID:?set LIGOU_BACKUP_SOURCE_ID}"
 IMAGE="${HERMES_IMAGE:?set immutable HERMES_IMAGE digest}"
@@ -22,7 +23,7 @@ RETENTION_DAYS="${LIGOU_BACKUP_RETENTION_DAYS:-30}"
 [[ "$IMAGE" =~ ^[^[:space:]@]+(:[^[:space:]@]+)?@sha256:[a-f0-9]{64}$ ]] || { echo "hermes_image_digest_required" >&2; exit 1; }
 command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "node_required" >&2; exit 1; }
 
-IDENTITY_JSON="$("$NODE_BIN" "$IDENTITY_TOOL" --tenant "$TENANT" --json)"
+IDENTITY_JSON="$("$NODE_BIN" "$IDENTITY_TOOL" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --json)"
 identity_field() {
   "$NODE_BIN" -e 'const value=JSON.parse(process.argv[1]);const field=process.argv[2];if(!Object.hasOwn(value,field))process.exit(1);process.stdout.write(String(value[field]));' "$IDENTITY_JSON" "$1"
 }
@@ -54,13 +55,13 @@ trap - EXIT
 "$NODE_BIN" "$MANIFEST_TOOL" create \
   --archive "$LOCAL_ARCHIVE" \
   --manifest "$LOCAL_MANIFEST" \
-  --tenant "$TENANT" \
+  --tenant "$TENANT_ID" \
   --source "$SOURCE_ID" \
   --hermes-image "$IMAGE" \
   --created "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >/dev/null
 
-aws s3 cp "$LOCAL_ARCHIVE" "s3://${BUCKET}/cells/${TENANT}/${NAME}" --sse AES256 --only-show-errors
-aws s3 cp "$LOCAL_MANIFEST" "s3://${BUCKET}/cells/${TENANT}/${MANIFEST_NAME}" --sse AES256 --only-show-errors
+aws s3 cp "$LOCAL_ARCHIVE" "s3://${BUCKET}/cells/${TENANT_ID}/${NAME}" --sse AES256 --only-show-errors
+aws s3 cp "$LOCAL_MANIFEST" "s3://${BUCKET}/cells/${TENANT_ID}/${MANIFEST_NAME}" --sse AES256 --only-show-errors
 
 # Bounded local cleanup only. Remote retention is an S3 lifecycle policy.
 find "$WORK" -type f \( -name "hermes-${TENANT}-*.zip" -o -name "hermes-${TENANT}-*.zip.manifest.json" \) \
