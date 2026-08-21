@@ -475,6 +475,70 @@ async function onboardingEpochSemantics(connection, home) {
   `), "revoked answer invalidates capability"), "3:0");
 }
 
+async function expiredTransientRetention(connection, home) {
+  const ids = {
+    tenant: "42000000-0000-4000-8000-000000000001",
+    call: "42000000-0000-4000-8000-000000000002",
+    rule: "42000000-0000-4000-8000-000000000003",
+    group: "42000000-0000-4000-8000-000000000004",
+    power: "42000000-0000-4000-8000-000000000005",
+    expiredQuote: "42000000-0000-4000-8000-000000000006",
+    futureQuote: "42000000-0000-4000-8000-000000000007",
+  };
+  requireSuccess(await runSql(connection, home, `
+    insert into public.tenants (id, slug, name, status)
+    values ('${ids.tenant}', 'synthetic-retention', 'Synthetic Retention', 'active');
+    insert into public.calls (id, tenant_id, channel, session_type, status)
+    values ('${ids.call}', '${ids.tenant}', 'eval', 'customer', 'ended');
+    insert into public.rules (id, tenant_id, rule_group_id, version, origem, escopo, status, category, text, structured)
+    values ('${ids.rule}', '${ids.tenant}', '${ids.group}', 1, 'edicao_manual', 'servico', 'aprovado', 'preco',
+      'Synthetic retention price', '{"service_type":"plumbing","price_min":100}'::jsonb);
+    insert into public.powers (id, tenant_id, subject, capability, resource, monetary_limit)
+    values ('${ids.power}', '${ids.tenant}', 'voice_agent', 'create_booking', 'plumbing', 200);
+    insert into public.booking_quotes (id, token_hash, tenant_id, call_id, service_type, public_quote, rule_id, policy_epoch, expires_at)
+    select '${ids.expiredQuote}', 'retention-expired-quote', '${ids.tenant}', '${ids.call}', 'plumbing', 120, '${ids.rule}', t.policy_epoch, now() - interval '2 hours'
+    from public.tenants t where t.id = '${ids.tenant}';
+    insert into public.booking_quotes (id, token_hash, tenant_id, call_id, service_type, public_quote, rule_id, policy_epoch, expires_at)
+    select '${ids.futureQuote}', 'retention-future-quote', '${ids.tenant}', '${ids.call}', 'plumbing', 120, '${ids.rule}', t.policy_epoch, now() + interval '2 hours'
+    from public.tenants t where t.id = '${ids.tenant}';
+    insert into public.slot_offers (
+      token_hash, tenant_id, call_id, quote_id, service_type, slot_start, slot_end, local_display,
+      public_quote, geography, power_id, rule_id, policy_epoch, expires_at
+    )
+    select 'retention-expired-offer', '${ids.tenant}', '${ids.call}', '${ids.expiredQuote}', 'plumbing',
+      now() + interval '1 day', now() + interval '1 day 1 hour', 'Tomorrow', 120, 'Irvine',
+      '${ids.power}', '${ids.rule}', t.policy_epoch, now() - interval '2 hours'
+    from public.tenants t where t.id = '${ids.tenant}';
+    insert into public.slot_offers (
+      token_hash, tenant_id, call_id, quote_id, service_type, slot_start, slot_end, local_display,
+      public_quote, geography, power_id, rule_id, policy_epoch, expires_at
+    )
+    select 'retention-future-offer', '${ids.tenant}', '${ids.call}', '${ids.futureQuote}', 'plumbing',
+      now() + interval '2 days', now() + interval '2 days 1 hour', 'Later', 120, 'Irvine',
+      '${ids.power}', '${ids.rule}', t.policy_epoch, now() + interval '2 hours'
+    from public.tenants t where t.id = '${ids.tenant}';
+    insert into public.oauth_states (state, tenant_id, user_id, nonce_hash, redirect_uri, expires_at)
+    values
+      ('retention-expired-oauth', '${ids.tenant}', '42000000-0000-4000-8000-000000000020', 'expired-nonce', 'https://unit.invalid/callback', now() - interval '2 hours'),
+      ('retention-future-oauth', '${ids.tenant}', '42000000-0000-4000-8000-000000000021', 'future-nonce', 'https://unit.invalid/callback', now() + interval '2 hours');
+  `), "retention fixture");
+
+  const result = JSON.parse(scalar(await runSql(connection, home, serviceTransaction(`
+    select public.purge_ephemeral_call_data(now() - interval '30 days', now())::text;
+  `)), "retention RPC"));
+  assert.deepEqual({
+    oauth: result.oauth_states_deleted,
+    offers: result.slot_offers_deleted,
+    quotes: result.booking_quotes_deleted,
+  }, { oauth: 1, offers: 1, quotes: 1 });
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (select count(*) from public.oauth_states where state like 'retention-%')::text || ':' ||
+      (select count(*) from public.slot_offers where token_hash like 'retention-%')::text || ':' ||
+      (select count(*) from public.booking_quotes where token_hash like 'retention-%')::text
+  `), "retention preserved future rows"), "1:1:1");
+}
+
 async function bookingDeliveryRollback(connection, home) {
   const tenant = "50000000-0000-4000-8000-000000000001";
   const call = "50000000-0000-4000-8000-000000000030";
@@ -519,6 +583,7 @@ export async function runConcurrencySuite(env = process.env) {
     ["OAuth double-consume", oauthDoubleConsume],
     ["concurrent policy/power epoch invalidation", concurrentEpochInvalidation],
     ["onboarding effective policy epochs", onboardingEpochSemantics],
+    ["expired transient retention", expiredTransientRetention],
     ["booking-delivery transaction rollback", bookingDeliveryRollback],
   ];
   try {

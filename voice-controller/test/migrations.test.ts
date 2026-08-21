@@ -155,6 +155,20 @@ describe("privacy retention migration contract", () => {
   });
 });
 
+describe("expired transient retention migration contract", () => {
+  test("forward retention deletes expired OAuth states, slot offers, and unreferenced quotes", () => {
+    const sql = migrationSql("expired_transient_retention");
+    expect(sql).toContain("function public.purge_ephemeral_call_data(");
+    expect(sql).toContain("delete from public.oauth_states");
+    expect(sql).toContain("delete from public.slot_offers");
+    expect(sql).toContain("delete from public.booking_quotes");
+    expect(sql.indexOf("delete from public.slot_offers")).toBeLessThan(sql.indexOf("delete from public.booking_quotes"));
+    expect(sql).toContain("expires_at < p_transient_before");
+    expect(sql).toContain("not exists (select 1 from public.slot_offers");
+    expect(sql).not.toContain("delete from public.receipts");
+  });
+});
+
 describe("tenant owner provisioning migration contract", () => {
   test("only the service role can invoke the atomic owner binding RPC", () => {
     const sql = migrationSql("tenant_owner_provisioning");
@@ -252,6 +266,15 @@ describe("provider termination reconciliation migration contract", () => {
     expect(sql).toContain("for update of c skip locked");
     expect(sql).toContain("revoke all on function public.claim_provider_termination_reconciliation(text) from public, anon, authenticated");
     expect(sql).toContain("grant execute on function public.claim_provider_termination_reconciliation(text) to service_role");
+  });
+});
+
+describe("provider termination claim ordering repair migration contract", () => {
+  test("replaces the claim with the real calls timestamp column", () => {
+    const sql = migrationSql("provider_termination_claim_order");
+    expect(sql).toContain("function public.claim_provider_termination_reconciliation(p_worker text)");
+    expect(sql).toContain("order by c.started_at, c.id");
+    expect(sql).not.toContain("c.created_at");
   });
 });
 

@@ -12,6 +12,7 @@ const manifestTool = path.join(repoRoot, "infra/release-manifest.mjs");
 const hostDeploy = path.join(repoRoot, "infra/deploy-host.sh");
 const healthTool = path.join(repoRoot, "infra/release-health.sh");
 const deployScript = path.join(repoRoot, "infra/deploy.sh");
+const retentionScript = path.join(repoRoot, "infra/retention.sh");
 const RELEASE_KEY = "Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA=";
 const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de";
 
@@ -45,6 +46,7 @@ async function gitFixture(base) {
     "hermes-cell/config/cli-config.yaml": "model:\n  provider: openai-codex\n",
     "hermes-cell/docker-compose.yml": "services: {}\n",
     "supabase/functions/good/index.ts": "export {};\n",
+    "supabase/deno.json": "{\"imports\":{}}\n",
     "supabase/scripts/admin.ts": "admin-only\n",
     "supabase/tests/database/unsafe.sql": "test-only\n",
     "supabase/deno.lock": "fixture-deno-lock\n",
@@ -114,9 +116,17 @@ test("packaging exact commit excludes contamination and emits a signed immutable
         deno_lock_sha256: "a6bdca4284f70d2bbcb73089ab1431aba2c1b94dc3b48fb6b5b3134517cb606e",
         supabase_js: "2.112.3",
         postgres: "3.4.9",
+        edge_functions: body.runtime.dependencies.edge_functions,
       },
       hermes: { image: IMAGE },
     });
+    assert.deepEqual(Object.keys(body.runtime.dependencies.edge_functions), ["good"]);
+    assert.deepEqual(body.runtime.dependencies.edge_functions.good.files.map((entry) => entry.path), [
+      "supabase/deno.json",
+      "supabase/deno.lock",
+      "supabase/functions/good/index.ts",
+    ]);
+    assert.match(body.runtime.dependencies.edge_functions.good.composite_sha256, /^[a-f0-9]{64}$/);
     const verified = run(process.execPath, [manifestTool, "verify", "--artifact", artifact,
       "--manifest", manifest, "--commit", repo.commit], { env: { ...process.env, LIGOU_RELEASE_MANIFEST_KEY: RELEASE_KEY } });
     assert.equal(verified.status, 0, verified.stderr);
@@ -549,6 +559,30 @@ test("release health rejects a controller that is up without its voice credentia
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stdout, /"controller":"unavailable"/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("retention scheduler calls only the service-role RPC and returns sanitized counts", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-retention-scheduler-"));
+  try {
+    const bin = path.join(fixture, "bin");
+    const curlLog = path.join(fixture, "curl.log");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "curl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\nprintf '%s\\n' '{"transcripts_redacted":1,"browser_rows_deleted":2,"phone_rows_deleted":3,"oauth_states_deleted":4,"slot_offers_deleted":5,"booking_quotes_deleted":6,"completed_at":"2026-08-21T00:00:00Z"}'\n`);
+    await chmod(path.join(bin, "curl"), 0o755);
+    const envFile = path.join(fixture, "env");
+    await writeFile(envFile, "SUPABASE_URL='https://unit.invalid'\nSUPABASE_SECRET_KEY='synthetic-service-secret'\n");
+    const result = run("bash", [retentionScript], { env: {
+      PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile, LIGOU_NODE_BIN: process.execPath, CURL_LOG: curlLog,
+    } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), '{"ok":true,"transcripts":1,"transport":5,"oauth":4,"offers":5,"quotes":6}');
+    assert.doesNotMatch(result.stdout + result.stderr, /synthetic-service-secret|unit[.]invalid/);
+    const call = await readFile(curlLog, "utf8");
+    assert.match(call, /\/rest\/v1\/rpc\/purge_ephemeral_call_data/);
+    assert.match(call, /Authorization: Bearer synthetic-service-secret/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

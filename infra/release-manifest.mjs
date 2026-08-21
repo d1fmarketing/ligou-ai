@@ -3,6 +3,7 @@ import { readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { gunzipSync } from "node:zlib";
+import { computeEdgeReleaseIdentityFromFiles } from "./edge-release-identity.mjs";
 
 const EXCLUSIONS = [
   "**/.env*",
@@ -143,6 +144,18 @@ function artifactFile(artifact, name) {
   fail("release_runtime_evidence_missing");
 }
 
+function edgeArtifactFiles(artifact) {
+  const result = spawnSync("tar", ["-tzf", artifact], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  if (result.status !== 0) fail("release_artifact_listing_failed");
+  const selected = result.stdout.split("\n").filter((name) => (
+    name === "supabase/deno.json" || name === "supabase/deno.lock"
+    || /^supabase\/functions\/.*[.]ts$/.test(name)
+  ));
+  const files = new Map();
+  for (const name of selected) files.set(name, artifactFile(artifact, name));
+  return files;
+}
+
 function runtimeEvidence(artifact, hermesImage) {
   if (!DIGEST_IMAGE.test(hermesImage)) fail("release_hermes_image_digest_required");
   if (hermesImage !== PINNED_TOOLCHAIN.hermes_image) fail("release_hermes_image_not_approved");
@@ -172,6 +185,7 @@ function runtimeEvidence(artifact, hermesImage) {
       deno_lock_sha256: createHash("sha256").update(denoLock).digest("hex"),
       supabase_js: PINNED_TOOLCHAIN.dependencies.supabase_js,
       postgres: PINNED_TOOLCHAIN.dependencies.postgres,
+      edge_functions: computeEdgeReleaseIdentityFromFiles(edgeArtifactFiles(artifact)),
     },
     hermes: { image: hermesImage },
   };

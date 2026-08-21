@@ -1,0 +1,13 @@
+[Unit]
+Description=Ligou transient-data retention
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ligou
+Group=ligou
+ExecStart=/opt/ligou/app/infra/retention.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -332,38 +332,64 @@ test("backup script creates and uploads only the cognitive archive plus authenti
     await chmod(docker, 0o755);
     await chmod(aws, 0o755);
 
+    await mkdir(work, { recursive: true });
+    const staleUuidArchive = path.join(work, `hermes-${TENANT}-20000101T000000Z-deadbeef.zip`);
+    const staleUuidManifest = `${staleUuidArchive}.manifest.json`;
+    const staleSlugDecoy = path.join(work, `hermes-${TENANT_SLUG}-20000101T000000Z.zip`);
+    for (const candidate of [staleUuidArchive, staleUuidManifest, staleSlugDecoy]) {
+      await writeFile(candidate, "stale\n");
+      await utimes(candidate, new Date("2000-01-01T00:00:00Z"), new Date("2000-01-01T00:00:00Z"));
+    }
+
+    const backupEnv = {
+      PATH: `${bin}:/usr/bin:/bin`,
+      TENANT_ID: TENANT,
+      TENANT_SLUG,
+      LIGOU_BACKUP_BUCKET: "unit-backups",
+      LIGOU_BACKUP_SOURCE_ID: "ec2:i-test",
+      LIGOU_BACKUP_MANIFEST_KEY: KEY,
+      LIGOU_BACKUP_MANIFEST_KEY_ID: "test-v1",
+      LIGOU_BACKUP_RETENTION_DAYS: "1",
+      HERMES_IMAGE: IMAGE,
+      LIGOU_BACKUP_WORK_DIR: legacySharedWork,
+      LIGOU_TENANT_STATE_ROOT: stateRoot,
+      LIGOU_TENANT_REGISTRY: registry,
+      LIGOU_NODE_BIN: process.execPath,
+      DOCKER_LOG: dockerLog,
+      AWS_LOG: awsLog,
+      STUB_ARCHIVE: sourceArchive,
+    };
     const result = run("bash", [backupScript], {
       env: {
-        PATH: `${bin}:/usr/bin:/bin`,
-        TENANT_ID: TENANT,
-        TENANT_SLUG,
-        LIGOU_BACKUP_BUCKET: "unit-backups",
-        LIGOU_BACKUP_SOURCE_ID: "ec2:i-test",
-        LIGOU_BACKUP_MANIFEST_KEY: KEY,
-        LIGOU_BACKUP_MANIFEST_KEY_ID: "test-v1",
-        HERMES_IMAGE: IMAGE,
-        LIGOU_BACKUP_WORK_DIR: legacySharedWork,
-        LIGOU_TENANT_STATE_ROOT: stateRoot,
-        LIGOU_TENANT_REGISTRY: registry,
-        LIGOU_NODE_BIN: process.execPath,
-        DOCKER_LOG: dockerLog,
-        AWS_LOG: awsLog,
-        STUB_ARCHIVE: sourceArchive,
+        ...backupEnv,
       },
     });
     assert.equal(result.status, 0, result.stderr);
+    const second = run("bash", [backupScript], { env: backupEnv });
+    assert.equal(second.status, 0, second.stderr);
     const names = (await readdir(work)).sort();
     assert.deepEqual(await readdir(legacySharedWork), [], "legacy shared work override must not receive tenant backups");
-    assert.equal(names.filter((name) => name.endsWith(".zip")).length, 1);
-    assert.equal(names.filter((name) => name.endsWith(".manifest.json")).length, 1);
+    assert.equal(names.filter((name) => name.endsWith(".zip") && name.startsWith(`hermes-${TENANT}-`)).length, 2);
+    assert.equal(names.filter((name) => name.endsWith(".manifest.json") && name.startsWith(`hermes-${TENANT}-`)).length, 2);
+    assert.equal(names.includes(path.basename(staleUuidArchive)), false);
+    assert.equal(names.includes(path.basename(staleUuidManifest)), false);
+    assert.equal(names.includes(path.basename(staleSlugDecoy)), true);
     assert.equal(names.some((name) => name.endsWith(".sha256")), false);
-    const archive = path.join(work, names.find((name) => name.endsWith(".zip")));
-    const manifest = path.join(work, names.find((name) => name.endsWith(".manifest.json")));
+    assert.equal((await stat(work)).mode & 0o777, 0o700);
+    const generatedArchives = names.filter((name) => name.endsWith(".zip") && name.startsWith(`hermes-${TENANT}-`));
+    assert.equal(new Set(generatedArchives).size, 2);
+    for (const name of generatedArchives) {
+      assert.match(name, new RegExp(`^hermes-${TENANT}-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{32}[.]zip$`));
+      assert.equal((await stat(path.join(work, name))).mode & 0o777, 0o600);
+      assert.equal((await stat(path.join(work, `${name}.manifest.json`))).mode & 0o777, 0o600);
+    }
+    const archive = path.join(work, generatedArchives[0]);
+    const manifest = `${archive}.manifest.json`;
     const verified = run(process.execPath, [manifestTool, "verify", "--archive", archive,
       "--manifest", manifest, "--tenant", TENANT, "--hermes-image", IMAGE], { env: { ...process.env, LIGOU_BACKUP_MANIFEST_KEY: KEY } });
     assert.equal(verified.status, 0, verified.stderr);
     const uploads = await readFile(awsLog, "utf8");
-    assert.equal(uploads.split("\n").filter((line) => line.includes("s3 cp")).length, 2);
+    assert.equal(uploads.split("\n").filter((line) => line.includes("s3 cp")).length, 4);
     assert.match(uploads, new RegExp(`cells/${TENANT}/hermes-${TENANT}-`));
     assert.match(uploads, /[.]zip[.]manifest[.]json/);
     assert.doesNotMatch(await readFile(dockerLog, "utf8"), /model-auth|auth[.]json|[.]env/);

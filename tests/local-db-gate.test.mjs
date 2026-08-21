@@ -18,6 +18,26 @@ import {
   parseLocalStatus,
 } from "../scripts/local-db-gate.mjs";
 
+const rlsModule = await import("../supabase/tests/local-db-rls.mjs").catch(() => ({}));
+
+test("authenticated RLS gate accepts only the exact disposable REST identity", () => {
+  assert.equal(typeof rlsModule.assertLocalRlsEnvironment, "function");
+  const accepted = rlsModule.assertLocalRlsEnvironment({
+    apiUrl: "http://127.0.0.1:54321",
+    projectId: "ligou-v0-1-rc1",
+    serviceRoleKey: "synthetic-service-role",
+    publishableKey: "synthetic-publishable",
+  });
+  assert.equal(accepted.apiUrl, "http://127.0.0.1:54321");
+  for (const unsafe of [
+    { ...accepted, apiUrl: "https://production.invalid" },
+    { ...accepted, apiUrl: "http://127.0.0.1:6543" },
+    { ...accepted, projectId: "ligou-production" },
+  ]) {
+    assert.throws(() => rlsModule.assertLocalRlsEnvironment(unsafe), /disposable RLS identity/i);
+  }
+});
+
 test("local DB gate rejects non-loopback database hosts without echoing credentials", () => {
   const secret = "synthetic-password-that-must-not-leak";
 

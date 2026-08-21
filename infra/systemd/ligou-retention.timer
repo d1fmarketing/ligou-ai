@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Ligou transient-data retention
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 UTC
+RandomizedDelaySec=20m
+Persistent=true
+Unit=ligou-retention.service
+
+[Install]
+WantedBy=timers.target

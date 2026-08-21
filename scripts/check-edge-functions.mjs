@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { computeEdgeReleaseIdentity } from "../infra/edge-release-identity.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const config = path.join(root, "supabase/deno.json");
@@ -39,7 +40,9 @@ try {
     process.stderr.write(checked.stderr || "edge_function_check_failed\n");
     process.exit(1);
   }
-  process.stdout.write(`${JSON.stringify({ ok: true, deno: toolchain.deno, functions: entries.length, additional: additional.length, frozen: true })}\n`);
+  const identities = computeEdgeReleaseIdentity(root);
+  if (Object.keys(identities).length !== entries.length) throw new Error("edge_release_identity_incomplete");
+  process.stdout.write(`${JSON.stringify({ ok: true, deno: toolchain.deno, functions: entries.length, additional: additional.length, frozen: true, identities })}\n`);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }

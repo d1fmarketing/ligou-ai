@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { runConcurrencySuite } from "../supabase/tests/local-db-concurrency.mjs";
+import { runAuthenticatedRlsSuite } from "../supabase/tests/local-db-rls.mjs";
 import { runUpgradeRehearsal } from "../supabase/tests/local-db-upgrade-rehearsal.mjs";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -797,6 +798,20 @@ export async function runLocalDatabaseGate() {
     assertMigrationHistory(migrationFiles, finalHistoryOutput.split("\n").filter(Boolean));
 
     const fixture = await seedApplicationIntegrationFixture(connection, psqlBin, isolatedHome, databaseSecret);
+    const authenticatedRls = await runAuthenticatedRlsSuite({
+      apiUrl: runtime.apiUrl,
+      projectId: LOCAL_PROJECT_ID,
+      serviceRoleKey: runtime.serviceRoleKey,
+      publishableKey: runtime.publishableKey,
+      psqlBin,
+      home: isolatedHome,
+      pgHost: connection.hostname,
+      pgPort: connection.port,
+      pgDatabase: connection.pathname.slice(1),
+      pgUser: decodeURIComponent(connection.username),
+      pgPassword: databaseSecret,
+    });
+    assert.equal(authenticatedRls.tests, 9);
     const applicationEnv = {
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       HOME: path.join(runnerRoot, "application-home"),
@@ -838,7 +853,7 @@ export async function runLocalDatabaseGate() {
     assertMigrationHistory(migrationFiles, afterNoop);
 
     const lintRows = JSON.parse(await runSupabase([
-      "db", "lint", "--local", "--schema", "public", "--level", "warning", "--fail-on", "error",
+      "db", "lint", "--local", "--schema", "public", "--level", "warning", "--fail-on", "none",
     ], "database lint", [databaseSecret]));
     const advisorRows = JSON.parse(await runSupabase([
       "db", "advisors", "--local", "--type", "all", "--level", "info", "--fail-on", "warn",
@@ -866,6 +881,7 @@ export async function runLocalDatabaseGate() {
       applicationIntegrationTests,
       budgetRuntimeTests,
       startupTests,
+      authenticatedRlsTests: authenticatedRls.tests,
       migrationNoop: true,
       lint: assertExpectedLegacyLint(lintRows),
       advisors: issueCounts(advisorRows),

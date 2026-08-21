@@ -2,6 +2,7 @@
 # Consistent cognitive-state backup with an authenticated manifest. The separate Hermes model-auth
 # volume is never mounted at /opt/data and is forbidden by the manifest scanner.
 set -euo pipefail
+umask 077
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NODE_BIN="${LIGOU_NODE_BIN:-node}"
@@ -33,13 +34,15 @@ CELL="$(identity_field container_name)"
 ARCHIVE_PREFIX="$(identity_field archive_prefix)"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-NAME="${ARCHIVE_PREFIX}-${STAMP}.zip"
+NONCE="$($NODE_BIN -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))')"
+NAME="${ARCHIVE_PREFIX}-${STAMP}-${NONCE}.zip"
 MANIFEST_NAME="${NAME}.manifest.json"
 REMOTE_ARCHIVE="/tmp/${NAME}"
 LOCAL_ARCHIVE="${WORK}/${NAME}"
 LOCAL_MANIFEST="${WORK}/${MANIFEST_NAME}"
 
 mkdir -p "$WORK"
+chmod 700 "$WORK"
 "$NODE_BIN" "$IMAGE_TOOL" --container "$CELL" --expected "$IMAGE" >/dev/null
 
 cleanup_remote() {
@@ -49,6 +52,7 @@ trap cleanup_remote EXIT
 
 docker exec "$CELL" hermes backup -o "$REMOTE_ARCHIVE" >/dev/null
 docker cp "${CELL}:${REMOTE_ARCHIVE}" "$LOCAL_ARCHIVE" >/dev/null
+chmod 600 "$LOCAL_ARCHIVE"
 cleanup_remote
 trap - EXIT
 
@@ -64,7 +68,7 @@ aws s3 cp "$LOCAL_ARCHIVE" "s3://${BUCKET}/cells/${TENANT_ID}/${NAME}" --sse AES
 aws s3 cp "$LOCAL_MANIFEST" "s3://${BUCKET}/cells/${TENANT_ID}/${MANIFEST_NAME}" --sse AES256 --only-show-errors
 
 # Bounded local cleanup only. Remote retention is an S3 lifecycle policy.
-find "$WORK" -type f \( -name "hermes-${TENANT}-*.zip" -o -name "hermes-${TENANT}-*.zip.manifest.json" \) \
+find "$WORK" -type f \( -name "${ARCHIVE_PREFIX}-*.zip" -o -name "${ARCHIVE_PREFIX}-*.zip.manifest.json" \) \
   -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
 
 printf '{"ok":true,"tenant":"%s","archive":"%s","manifest":true}\n' "$TENANT" "$NAME"

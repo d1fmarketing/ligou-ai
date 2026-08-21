@@ -198,10 +198,10 @@ else
   BUCKET="${LIGOU_BACKUP_BUCKET:?set LIGOU_BACKUP_BUCKET}"
   if [ -z "$KEY" ]; then
     KEY="$(aws s3 ls "s3://${BUCKET}/cells/${TENANT_ID}/" \
-      | awk '{print $4}' | grep -E "^${ARCHIVE_PREFIX}-[0-9]{8}T[0-9]{6}Z[.]zip$" | sort | tail -1)"
+      | awk '{print $4}' | grep -E "^${ARCHIVE_PREFIX}-[0-9]{8}T[0-9]{6}Z(-[a-f0-9]{32})?[.]zip$" | sort | tail -1)"
     [ -n "$KEY" ] || { echo "backup_not_found" >&2; exit 1; }
   fi
-  [[ "$KEY" =~ ^${ARCHIVE_PREFIX}-[0-9]{8}T[0-9]{6}Z[.]zip$ ]] || { echo "backup_key_invalid" >&2; exit 2; }
+  [[ "$KEY" =~ ^${ARCHIVE_PREFIX}-[0-9]{8}T[0-9]{6}Z(-[a-f0-9]{32})?[.]zip$ ]] || { echo "backup_key_invalid" >&2; exit 2; }
   ARCHIVE="${SCRATCH}/${KEY}"
   MANIFEST="${SCRATCH}/${KEY}.manifest.json"
   aws s3 cp "s3://${BUCKET}/cells/${TENANT_ID}/${KEY}" "$ARCHIVE" --only-show-errors

@@ -59,3 +59,36 @@ test("frozen checker covers every function and forwards no caller environment", 
     await rm(fixture, { recursive: true, force: true });
   }
 });
+
+test("Edge release identity includes transitive shared modules plus Deno config and lock", async () => {
+  const identityModule = await import("../infra/edge-release-identity.mjs").catch(() => ({}));
+  assert.equal(typeof identityModule.computeEdgeReleaseIdentity, "function");
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-edge-identity-"));
+  try {
+    await mkdir(path.join(fixture, "supabase/functions/example"), { recursive: true });
+    await mkdir(path.join(fixture, "supabase/functions/_shared"), { recursive: true });
+    await writeFile(path.join(fixture, "supabase/deno.json"), '{"imports":{}}\n');
+    await writeFile(path.join(fixture, "supabase/deno.lock"), '{"version":"5"}\n');
+    await writeFile(path.join(fixture, "supabase/functions/example/index.ts"), 'import { a } from "../_shared/a.ts"; export { a };\n');
+    await writeFile(path.join(fixture, "supabase/functions/_shared/a.ts"), 'export { b as a } from "./b.ts";\n');
+    await writeFile(path.join(fixture, "supabase/functions/_shared/b.ts"), 'export const b = "one";\n');
+
+    const first = identityModule.computeEdgeReleaseIdentity(fixture);
+    assert.deepEqual(first.example.files.map((entry) => entry.path), [
+      "supabase/deno.json",
+      "supabase/deno.lock",
+      "supabase/functions/_shared/a.ts",
+      "supabase/functions/_shared/b.ts",
+      "supabase/functions/example/index.ts",
+    ]);
+    assert.match(first.example.composite_sha256, /^[a-f0-9]{64}$/);
+
+    await writeFile(path.join(fixture, "supabase/functions/_shared/b.ts"), 'export const b = "two";\n');
+    const second = identityModule.computeEdgeReleaseIdentity(fixture);
+    assert.notEqual(second.example.composite_sha256, first.example.composite_sha256);
+    await writeFile(path.join(fixture, "unrelated.txt"), "ignored\n");
+    assert.deepEqual(identityModule.computeEdgeReleaseIdentity(fixture), second);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
