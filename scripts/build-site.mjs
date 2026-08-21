@@ -5,6 +5,7 @@ import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { productionBuildEnv } from "./production-env.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputDir = process.env.LIGOU_SITE_OUTPUT_DIR ?? "client";
@@ -12,13 +13,14 @@ if (!/^[A-Za-z0-9_-]+$/.test(outputDir)) {
   throw new Error("LIGOU_SITE_OUTPUT_DIR must be a simple directory name");
 }
 const out = path.join(root, "dist", outputDir);
+const buildEnv = productionBuildEnv(process.env, outputDir);
 
-execFileSync("bun", ["run", "check"], { cwd: root, stdio: "inherit" });
+execFileSync("bun", ["run", "check"], { cwd: root, stdio: "inherit", env: buildEnv });
 execFileSync("npm", ["run", "build"], {
   cwd: path.join(root, "dashboard"),
   stdio: "inherit",
   // Vite must build with its default base "/dashboard/"; never inherit a stray override.
-  env: { ...process.env, LIGOU_BASE: "/dashboard/" },
+  env: buildEnv,
 });
 
 rmSync(out, { recursive: true, force: true });

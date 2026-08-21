@@ -462,6 +462,63 @@ test("restore imports into a disposable no-network/no-auth volume and runs all s
   }
 });
 
+test("restore rejects caller archive or manifest symlinks before validation or Docker", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-caller-symlink-"));
+  const outside = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-caller-target-"));
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const targetArchive = await makeArchive(outside);
+    const targetManifest = `${targetArchive}.manifest.json`;
+    assert.equal(createManifest(targetArchive, targetManifest).status, 0);
+    const archive = path.join(fixture, path.basename(targetArchive));
+    const manifest = path.join(fixture, path.basename(targetManifest));
+    await symlink(targetArchive, archive);
+    await symlink(targetManifest, manifest);
+    const bin = await stubCommands(fixture);
+    const result = run("bash", [restoreScript, "--archive", archive, "--manifest", manifest], {
+      env: restoreEnv(fixture, bin),
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /restore_input_symlink_forbidden/);
+    await assert.rejects(readFile(path.join(fixture, "docker.log"), "utf8"), { code: "ENOENT" });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("restore mounts only its owned captured archive after the caller path is swapped", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-caller-swap-"));
+  const holdReady = path.join(fixture, "import-ready");
+  const holdRelease = path.join(fixture, "import-release");
+  let running;
+  try {
+    await mkdir(path.join(fixture, "tmp"));
+    const archive = await makeArchive(fixture);
+    const manifest = `${archive}.manifest.json`;
+    assert.equal(createManifest(archive, manifest).status, 0);
+    const malicious = path.join(fixture, "malicious.zip");
+    await writeFile(malicious, "not-the-signed-archive");
+    const bin = await stubCommands(fixture);
+    running = runAsync("bash", [restoreScript, "--archive", archive, "--manifest", manifest], {
+      env: restoreEnv(fixture, bin, { HOLD_IMPORT_READY: holdReady, HOLD_IMPORT_RELEASE: holdRelease }),
+    });
+    await waitForPath(holdReady);
+    await rm(archive);
+    await symlink(malicious, archive);
+    await writeFile(holdRelease, "continue\n");
+    const result = await running.completed;
+    assert.equal(result.status, 0, result.stderr);
+    const log = await readFile(path.join(fixture, "docker.log"), "utf8");
+    assert.doesNotMatch(log, new RegExp(`source=${archive.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(log, /source=.*\/restore\/run\.[^,]+\/input[.]zip,target=\/restore\/input[.]zip/);
+  } finally {
+    await writeFile(holdRelease, "continue\n").catch(() => {});
+    if (running) await running.completed.catch(() => {});
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("disposable smoke failure never reaches the live cell", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-restore-smoke-fail-"));
   try {

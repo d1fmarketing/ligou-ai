@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -40,4 +42,51 @@ test("production site excludes the retired fragment/password auto-login path", {
   assert.doesNotMatch(productionOutput, /ligou\.test\.k/);
   assert.doesNotMatch(productionOutput, /#k=/);
   assert.match(productionOutput, /signInWithOtp/);
+});
+
+test("production Vite config ignores hostile dotenv files", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-vite-env-isolation-"));
+  try {
+    await mkdir(path.join(fixture, "src"));
+    await writeFile(path.join(fixture, "index.html"), '<div id="root"></div><script type="module" src="/src/main.jsx"></script>\n');
+    await writeFile(path.join(fixture, "src/main.jsx"), 'document.querySelector("#root").textContent = import.meta.env.VITE_HOSTILE_DOTENV_SENTINEL || "clean";\n');
+    await writeFile(path.join(fixture, ".env"), "VITE_HOSTILE_DOTENV_SENTINEL=must-not-enter-production-bundle\n");
+    await writeFile(path.join(fixture, ".env.local"), "VITE_HOSTILE_LOCAL_SENTINEL=must-not-enter-production-bundle-either\n");
+    const vite = path.resolve(new URL("../dashboard/node_modules/.bin/vite", import.meta.url).pathname);
+    await chmod(vite, 0o755);
+    const result = spawnSync(vite, ["build", "--config", path.resolve(new URL("../dashboard/vite.config.mjs", import.meta.url).pathname)], {
+      cwd: fixture,
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: fixture,
+        VITE_HOSTILE_CALLER_SENTINEL: "must-not-enter-from-caller",
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const assets = await readTextAssets(path.join(fixture, "dist/client"));
+    const output = assets.map((asset) => asset.text).join("\n");
+    assert.doesNotMatch(output, /must-not-enter-production-bundle|must-not-enter-from-caller/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("release build environment maps only explicit public build inputs", async () => {
+  const module = await import("../scripts/production-env.mjs").catch(() => ({}));
+  assert.equal(typeof module.productionBuildEnv, "function");
+  const env = module.productionBuildEnv({
+    PATH: "/synthetic/bin",
+    HOME: "/synthetic/home",
+    VITE_SUPABASE_URL: "https://caller.invalid",
+    SUPABASE_SECRET_KEY: "must-not-cross",
+    LIGOU_PUBLIC_SUPABASE_URL: "https://public.supabase.invalid",
+    LIGOU_PUBLIC_SUPABASE_FUNCTIONS_URL: "https://public.supabase.invalid/functions/v1",
+  }, "security-containment");
+  assert.equal(env.VITE_SUPABASE_URL, "https://public.supabase.invalid");
+  assert.equal(env.VITE_SUPABASE_FUNCTIONS_URL, "https://public.supabase.invalid/functions/v1");
+  assert.equal(env.VITE_SUPABASE_PUBLISHABLE_KEY, undefined);
+  assert.equal(env.SUPABASE_SECRET_KEY, undefined);
+  assert.equal(env.VITE_HOSTILE_CALLER_SENTINEL, undefined);
+  assert.equal(env.LIGOU_SITE_OUTPUT_DIR, "security-containment");
 });

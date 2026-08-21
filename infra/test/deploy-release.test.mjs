@@ -39,13 +39,21 @@ async function gitFixture(base) {
     "voice-controller/.env.production": "SECRET=forbidden\n",
     "voice-controller/._sidecar": "forbidden apple double\n",
     "voice-controller/private-backup.zip": "forbidden archive\n",
+    "voice-controller/scripts/prove-onboarding-e2e.ts": "destructive live proof\n",
+    "voice-controller/test/runtime.test.ts": "test-only\n",
     "hermes-cell/config/config.yaml": "model:\n  provider: openai-codex\n",
     "hermes-cell/config/cli-config.yaml": "model:\n  provider: openai-codex\n",
     "hermes-cell/docker-compose.yml": "services: {}\n",
     "supabase/functions/good/index.ts": "export {};\n",
+    "supabase/scripts/admin.ts": "admin-only\n",
+    "supabase/tests/database/unsafe.sql": "test-only\n",
     "supabase/deno.lock": "fixture-deno-lock\n",
     "supabase/.temp/project-ref": "forbidden temp\n",
     "infra/good.sh": "#!/bin/sh\nexit 0\n",
+    "infra/deploy.sh": "#!/bin/sh\necho live-deploy\n",
+    "infra/pull-env.sh": "#!/bin/sh\necho live-env\n",
+    "infra/package-release.mjs": "// builder-only\n",
+    "infra/test/proof.test.mjs": "// test-only\n",
     "infra/toolchain.json": JSON.stringify({
       node: "22.22.3", application_version: "0.1.0", bun: "1.2.13", deno: "2.9.4", supabase_cli: "2.115.0", hermes_image: IMAGE,
       dependencies: { supabase_js: "2.112.3", postgres: "3.4.9" },
@@ -80,6 +88,7 @@ test("packaging exact commit excludes contamination and emits a signed immutable
     assert.ok(entries.includes("voice-controller/src/good.ts"));
     assert.ok(entries.includes("supabase/functions/good/index.ts"));
     assert.doesNotMatch(entries.join("\n"), /(?:^|\/)\._|(?:^|\/)\.env|node_modules|(?:^|\/)dist\/|supabase\/\.temp|private-backup[.]zip/);
+    assert.doesNotMatch(entries.join("\n"), /prove-onboarding|\/test\/|supabase\/scripts\/|infra\/(?:deploy|pull-env|package-release)[.]/);
 
     const manifest = `${artifact}.manifest.json`;
     const created = createReleaseManifest(artifact, manifest, repo.commit);

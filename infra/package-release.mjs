@@ -6,6 +6,11 @@ import { spawnSync } from "node:child_process";
 const ALLOWED_ROOTS = new Set(["voice-controller", "hermes-cell", "supabase", "infra"]);
 const BUILD_OR_DEPENDENCY = new Set(["node_modules", "dist", "build", "coverage", ".next", ".turbo", ".cache", "vendor"]);
 const ARCHIVE = /\.(?:zip|tar|tgz|gz|7z|rar)$/i;
+const BUILDER_ONLY = new Set([
+  "infra/deploy.sh",
+  "infra/package-release.mjs",
+  "infra/pull-env.sh",
+]);
 
 function fail(code) {
   process.stderr.write(String(code) + "\n");
@@ -32,6 +37,13 @@ export function excludedReleasePath(candidate) {
   if (!ALLOWED_ROOTS.has(segments[0]) || segments.some((segment) => segment === "..")) return true;
   const lower = segments.map((segment) => segment.toLowerCase());
   const basename = lower.at(-1) ?? "";
+  const normalized = candidate.replace(/\/$/, "");
+  if (normalized.startsWith("voice-controller/scripts/")
+    || normalized.startsWith("voice-controller/test/")
+    || normalized.startsWith("supabase/scripts/")
+    || normalized.startsWith("supabase/tests/")
+    || normalized.startsWith("infra/test/")
+    || BUILDER_ONLY.has(normalized)) return true;
   if (lower.some((segment) => BUILD_OR_DEPENDENCY.has(segment))) return true;
   if (candidate.toLowerCase().startsWith("supabase/.temp/") || candidate.toLowerCase() === "supabase/.temp") return true;
   if (lower.some((segment) => segment === ".env" || segment.startsWith(".env."))) return true;

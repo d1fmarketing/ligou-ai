@@ -149,7 +149,6 @@ function verifyManifest(args) {
   })) fail("manifest_schema_invalid");
   if (manifest.schema !== "ligou.hermes.backup-manifest" || manifest.version !== 3
     || manifest.tenant !== args.tenant || !IDENTITY.test(manifest.source.identity)
-    || manifest.archive.name !== path.basename(args.archive)
     || manifest.archive.format !== "hermes-cognitive-zip"
     || manifest.archive.id !== manifest.archive.sha256
     || manifest.archive.cognitive_root !== "cognitive/"

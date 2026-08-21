@@ -16,6 +16,10 @@ const EXCLUSIONS = [
   "**/.hermes/**",
   "**/auth.json",
   "**/*.{zip,tar,tgz,gz,7z,rar}",
+  "voice-controller/{scripts,test}/**",
+  "supabase/{scripts,tests}/**",
+  "infra/test/**",
+  "infra/{deploy.sh,package-release.mjs,pull-env.sh}",
 ];
 const COMMIT = /^[a-f0-9]{40}$/;
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
@@ -91,6 +95,12 @@ function forbidden(candidate) {
   if (!new Set(["voice-controller", "hermes-cell", "supabase", "infra"]).has(lower[0])) return true;
   if (segments.some((segment) => segment === "..")) return true;
   const basename = lower.at(-1) ?? "";
+  if (normalized.startsWith("voice-controller/scripts/")
+    || normalized.startsWith("voice-controller/test/")
+    || normalized.startsWith("supabase/scripts/")
+    || normalized.startsWith("supabase/tests/")
+    || normalized.startsWith("infra/test/")
+    || new Set(["infra/deploy.sh", "infra/package-release.mjs", "infra/pull-env.sh"]).has(normalized)) return true;
   if (lower.some((segment) => ["node_modules", "dist", "build", "coverage", ".next", ".turbo", ".cache", "vendor", ".git", ".hermes", ".codex", ".ssh", "hermes-model-auth"].includes(segment))) return true;
   if (normalized.toLowerCase().startsWith("supabase/.temp/") || normalized.toLowerCase() === "supabase/.temp") return true;
   if (lower.some((segment) => segment === ".env" || segment.startsWith(".env.") || segment.startsWith("._"))) return true;

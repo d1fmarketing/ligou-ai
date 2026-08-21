@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NODE_BIN="${LIGOU_NODE_BIN:-node}"
 MANIFEST_TOOL="${ROOT}/infra/backup-manifest.mjs"
 ARCHIVE_TOOL="${ROOT}/infra/archive-safety.mjs"
+CAPTURE_TOOL="${ROOT}/infra/capture-restore-inputs.mjs"
 HEALTH_TOOL="${ROOT}/hermes-cell/health-state.sh"
 IDENTITY_TOOL="${ROOT}/hermes-cell/tenant-identity.mjs"
 TENANT_COMPOSE="${ROOT}/hermes-cell/tenant-compose.mjs"
@@ -187,10 +188,12 @@ remove_owned_inactive_stage() {
 }
 
 if [ -n "$LOCAL_ARCHIVE" ] || [ -n "$LOCAL_MANIFEST" ]; then
-  [ -n "$LOCAL_ARCHIVE" ] && [ -f "$LOCAL_ARCHIVE" ] || { echo "archive_required" >&2; exit 1; }
-  [ -n "$LOCAL_MANIFEST" ] && [ -f "$LOCAL_MANIFEST" ] || { echo "manifest_required" >&2; exit 1; }
-  ARCHIVE="$LOCAL_ARCHIVE"
-  MANIFEST="$LOCAL_MANIFEST"
+  [ -n "$LOCAL_ARCHIVE" ] && [ -n "$LOCAL_MANIFEST" ] || { echo "restore_local_pair_required" >&2; exit 1; }
+  CAPTURE_JSON="$($NODE_BIN "$CAPTURE_TOOL" --archive "$LOCAL_ARCHIVE" --manifest "$LOCAL_MANIFEST" --scratch "$SCRATCH")"
+  ARCHIVE="$($NODE_BIN -e 'const v=JSON.parse(process.argv[1]);process.stdout.write(String(v.archive||""));' "$CAPTURE_JSON")"
+  MANIFEST="$($NODE_BIN -e 'const v=JSON.parse(process.argv[1]);process.stdout.write(String(v.manifest||""));' "$CAPTURE_JSON")"
+  LOCAL_ARCHIVE=""
+  LOCAL_MANIFEST=""
 else
   BUCKET="${LIGOU_BACKUP_BUCKET:?set LIGOU_BACKUP_BUCKET}"
   if [ -z "$KEY" ]; then
