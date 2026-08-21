@@ -87,11 +87,13 @@ select extensions.ok(
       ('begin_phone_provider_accept(uuid,uuid)'),
       ('begin_phone_sideband(uuid,uuid)'),
       ('begin_phone_termination(uuid,uuid,text,text,text)'),
+      ('begin_provider_termination_attempt(uuid,text,text,text)'),
       ('claim_budget_reconciliation(text)'),
       ('claim_phone_event(uuid,text)'),
       ('claim_phone_lifecycle_reconciliation(text)'),
       ('claim_provider_termination_reconciliation(text)'),
       ('complete_phone_termination(uuid,uuid,boolean,text)'),
+      ('complete_provider_termination_attempt(uuid,uuid,boolean,text)'),
       ('confirm_phone_provider_accept(uuid,uuid)'),
       ('confirm_phone_sideband(uuid,uuid)'),
       ('claim_intent(text)'),
@@ -100,14 +102,18 @@ select extensions.ok(
       ('get_booking_confirmation(uuid,uuid,uuid)'),
       ('get_booking_provider_input(uuid)'),
       ('get_contact_hash_requirements(uuid)'),
+      ('heartbeat_phone_sideband(uuid,uuid)'),
       ('prepare_booking_provider_write(uuid,uuid)'),
       ('persist_phone_call(uuid,uuid,uuid,text)'),
+      ('finalize_phone_sideband(uuid,uuid,jsonb)'),
+      ('defer_phone_sideband_finalization(uuid,uuid,text)'),
       ('provision_tenant_owner(uuid,uuid)'),
       ('purge_ephemeral_call_data(timestamp with time zone,timestamp with time zone)'),
       ('record_booking_delivery(uuid,uuid,text,text,text,jsonb,text,jsonb,jsonb)'),
       ('release_health_state(uuid,text)'),
       ('reserve_call_budget(uuid,uuid,numeric)'),
       ('reserve_phone_call_budget(uuid,uuid,numeric)'),
+      ('repair_legacy_phone_links()'),
       ('settle_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
       ('transition_claimed_intent(uuid,uuid,text,text,integer)')
     ) expected(signature)
@@ -346,7 +352,8 @@ select extensions.ok(
       ('slot_offers', 'insert'),
       ('effective_rules', 'select'),
       ('connector_accounts', 'select'), ('connector_accounts', 'insert'), ('connector_accounts', 'update'),
-      ('oauth_states', 'select'), ('oauth_states', 'insert'), ('oauth_states', 'update')
+      ('oauth_states', 'select'), ('oauth_states', 'insert'), ('oauth_states', 'update'),
+      ('phone_lifecycle_legacy_conflicts', 'select'), ('phone_lifecycle_legacy_conflicts', 'insert'), ('phone_lifecycle_legacy_conflicts', 'update')
     ) required(relation, privilege)
     where not has_table_privilege('service_role', format('public.%I', relation), privilege)
   ),

@@ -371,6 +371,106 @@ describe("durable phone lifecycle migration contract", () => {
   });
 });
 
+describe("phone sideband recovery migration contract", () => {
+  test("adds renewable sideband ownership and at-most-once provider attempt identity", () => {
+    const sql = migrationSql("phone_sideband_recovery");
+    for (const column of [
+      "sideband_lease_until timestamptz",
+      "sideband_heartbeat_at timestamptz",
+      "provider_termination_attempt_id uuid",
+      "provider_termination_request_id text",
+      "provider_termination_attempted_at timestamptz",
+    ]) expect(sql).toContain(column);
+    expect(sql).toContain("'external_evidence_required'");
+    expect(sql).toContain("provider_termination_attempt_id is null");
+    expect(sql).toContain("sideband_lease_until <= clock_timestamp()");
+    expect(sql).toContain("provider_termination_state in ('pending','unknown')");
+    expect(sql).toContain("provider_termination_state = 'external_evidence_required'");
+    expect(sql).toContain("where p.lifecycle_state = 'active' and p.sideband_lease_until is null");
+  });
+
+  test("phone sideband opens, heartbeats, finalizes, and defers through fenced RPCs", () => {
+    const sql = migrationSql("phone_sideband_recovery");
+    for (const name of [
+      "begin_phone_sideband",
+      "confirm_phone_sideband",
+      "heartbeat_phone_sideband",
+      "finalize_phone_sideband",
+      "defer_phone_sideband_finalization",
+    ]) expect(sql).toContain(`function public.${name}`);
+    expect(sql).toContain("lifecycle_state = 'active'");
+    expect(sql).toContain("sideband_heartbeat_at = clock_timestamp()");
+    expect(sql).toContain("sideband_lease_until = clock_timestamp() + interval '15 seconds'");
+    expect(sql).toContain("lifecycle_state in ('active','sideband_attaching')");
+    expect(sql).toContain("lifecycle_state = 'reconciliation_required'");
+  });
+
+  test("generic and phone termination attempts are fenced before provider writes", () => {
+    const sql = migrationSql("phone_sideband_recovery");
+    for (const name of [
+      "begin_provider_termination_attempt",
+      "complete_provider_termination_attempt",
+      "begin_phone_termination",
+      "complete_phone_termination",
+      "claim_phone_lifecycle_reconciliation",
+      "claim_provider_termination_reconciliation",
+    ]) expect(sql).toContain(`function public.${name}`);
+    expect(sql).toContain("v_attempt uuid := gen_random_uuid()");
+    expect(sql).toContain("provider_termination_request_id = v_attempt::text");
+    expect(sql).toContain("provider_termination_state = 'pending'");
+    expect(sql).toContain("provider_termination_state = case when p_confirmed then 'confirmed' else 'external_evidence_required' end");
+  });
+
+  test("legacy orphan repair links unique compatible calls and quarantines unsafe matches", () => {
+    const sql = migrationSql("phone_sideband_recovery");
+    expect(sql).toContain("create table public.phone_lifecycle_legacy_conflicts");
+    expect(sql).toContain("function public.repair_legacy_phone_links()");
+    expect(sql).toContain("where p.call_id is null and p.handled_at is not null");
+    expect(sql).toContain("c.channel = 'phone' and c.openai_call_id = v_event.openai_call_id");
+    expect(sql).toContain("v_match_count = 1");
+    expect(sql).toContain("v_call.tenant_id is not distinct from v_event.tenant_id");
+    expect(sql).toContain("set call_id = v_call.id, tenant_id = coalesce(p.tenant_id, v_call.tenant_id)");
+    expect(sql).toContain("set phone_event_id = v_event.id");
+    expect(sql).toContain("set resolved_at = clock_timestamp()");
+    expect(sql).toContain("legacy_phone_provider_match_ambiguous");
+    expect(sql).not.toContain("delete from public.calls");
+    expect(sql.slice(0, sql.indexOf("function public.purge_ephemeral_call_data"))).not.toContain("delete from public.phone_events");
+  });
+
+  test("retention preserves an unlinked event whenever any call shares its provider id", () => {
+    const sql = migrationSql("phone_sideband_recovery");
+    expect(sql).toContain("function public.purge_ephemeral_call_data(");
+    expect(sql).toContain("not exists ( select 1 from public.calls orphan where orphan.openai_call_id = p.openai_call_id )");
+    expect(sql).not.toContain("p.lifecycle_state in ('external_evidence_required'");
+  });
+
+  test("every corrective RPC and conflict table remain service-role-only", () => {
+    const sql = migrationSql("phone_sideband_recovery");
+    const signatures = [
+      "public.begin_provider_termination_attempt(uuid,text,text,text)",
+      "public.complete_provider_termination_attempt(uuid,uuid,boolean,text)",
+      "public.begin_phone_termination(uuid,uuid,text,text,text)",
+      "public.complete_phone_termination(uuid,uuid,boolean,text)",
+      "public.begin_phone_sideband(uuid,uuid)",
+      "public.confirm_phone_sideband(uuid,uuid)",
+      "public.heartbeat_phone_sideband(uuid,uuid)",
+      "public.finalize_phone_sideband(uuid,uuid,jsonb)",
+      "public.defer_phone_sideband_finalization(uuid,uuid,text)",
+      "public.claim_phone_lifecycle_reconciliation(text)",
+      "public.claim_provider_termination_reconciliation(text)",
+      "public.repair_legacy_phone_links()",
+    ];
+    for (const signature of signatures) {
+      expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated`);
+      expect(sql).toContain(`grant execute on function ${signature} to service_role`);
+    }
+    expect(sql).toContain("security definer set search_path = ''");
+    expect(sql).toContain("auth.role() <> 'service_role'");
+    expect(sql).toContain("revoke all on table public.phone_lifecycle_legacy_conflicts from public, anon, authenticated, service_role");
+    expect(sql).toContain("grant select, insert, update on table public.phone_lifecycle_legacy_conflicts to service_role");
+  });
+});
+
 describe("service-role release health migration contract", () => {
   test("returns only exact sanitized tenant state and rejects every browser role", () => {
     const sql = migrationSql("release_health_state");

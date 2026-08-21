@@ -25,7 +25,11 @@ class SyntheticPhoneStore {
     provider_accept_state: "not_attempted",
     provider_termination_state: "not_required",
     provider_termination_mode: null,
+    provider_termination_attempt_id: null,
+    provider_termination_request_id: null,
+    provider_termination_attempted_at: null,
     sideband_state: "not_attached",
+    sideband_lease_until: null,
     lifecycle_last_error: null,
   };
   calls = new Map<string, any>();
@@ -34,6 +38,7 @@ class SyntheticPhoneStore {
   rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
   providerCalls: ProviderAction[] = [];
   providerUrls: string[] = [];
+  providerRequestIds: Array<string | null> = [];
   callInsertAttempts = 0;
   claimAttempts: string[] = [];
   failures = new Set<string>();
@@ -53,8 +58,9 @@ class SyntheticPhoneStore {
     } as any;
   }
 
-  fetch = async (input: string | URL | Request): Promise<Response> => {
+  fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     this.providerUrls.push(String(input));
+    this.providerRequestIds.push(new Headers(init?.headers).get("X-Client-Request-Id"));
     const action = String(input).split("/").at(-1) as ProviderAction;
     if (!(["accept", "reject", "hangup"] as string[]).includes(action)) throw new Error(`unexpected_provider_action:${action}`);
     this.providerCalls.push(action);
@@ -136,19 +142,24 @@ class SyntheticPhoneStore {
     if (name === "confirm_phone_sideband") {
       if (this.failures.has(name)) return { data: null, error: { message: "synthetic sideband persistence failure" } };
       if (!this.owns(args) || this.event.lifecycle_state !== "sideband_attaching") return { data: null, error: { message: "phone_claim_lost" } };
-      this.mutateEvent({ lifecycle_state: "active", sideband_state: "attached" });
+      this.mutateEvent({ lifecycle_state: "active", sideband_state: "attached", sideband_lease_until: "synthetic-future" });
       return { data: true, error: null };
     }
     if (name === "begin_phone_termination") {
       if (!this.owns(args)) return { data: null, error: { message: "phone_claim_lost" } };
-      if (["pending", "confirmed", "unknown"].includes(this.event.provider_termination_state)) {
+      if (this.event.provider_termination_attempt_id
+        || ["pending", "confirmed", "unknown", "external_evidence_required"].includes(this.event.provider_termination_state)) {
         return { data: { should_attempt: false }, error: null };
       }
       const mode = String(args.p_mode);
+      const attemptId = `80000000-0000-4000-8000-${String(++this.claimSequence).padStart(12, "0")}`;
       this.mutateEvent({
         provider_accept_state: args.p_accept_state ?? this.event.provider_accept_state,
         provider_termination_state: "pending",
         provider_termination_mode: mode,
+        provider_termination_attempt_id: attemptId,
+        provider_termination_request_id: attemptId,
+        provider_termination_attempted_at: "synthetic-now",
         lifecycle_last_error: args.p_reason,
         sideband_state: this.event.sideband_state === "attaching" ? "failed" : this.event.sideband_state,
       });
@@ -156,9 +167,16 @@ class SyntheticPhoneStore {
       if (call) Object.assign(call, {
         status: "error", provider_termination_state: "pending", provider_termination_mode: mode,
         provider_termination_reason: args.p_reason, provider_usage_state: "unknown",
+        provider_termination_attempt_id: attemptId, provider_termination_request_id: attemptId,
         duration_seconds: null, cost_estimate_usd: null,
       });
-      return { data: { should_attempt: true, openai_call_id: this.event.openai_call_id }, error: null };
+      return { data: {
+        should_attempt: true,
+        attempt_id: attemptId,
+        request_id: attemptId,
+        openai_call_id: this.event.openai_call_id,
+        provider_termination_mode: mode,
+      }, error: null };
     }
     if (name === "complete_phone_termination") {
       if (!this.owns(args)) return { data: null, error: { message: "phone_claim_lost" } };
@@ -172,27 +190,34 @@ class SyntheticPhoneStore {
         lifecycle_last_error: args.p_error ?? this.event.lifecycle_last_error,
       } : {
         status: "error",
-        lifecycle_state: "reconciliation_required",
-        provider_termination_state: "unknown",
+        lifecycle_state: "external_evidence_required",
+        provider_termination_state: "external_evidence_required",
         lifecycle_last_error: args.p_error,
       });
       const call = this.calls.get(this.event.call_id);
-      if (call) Object.assign(call, { provider_termination_state: confirmed ? "confirmed" : "unknown" });
+      if (call) Object.assign(call, { provider_termination_state: confirmed ? "confirmed" : "external_evidence_required" });
       return { data: true, error: null };
     }
     if (name === "claim_phone_lifecycle_reconciliation") {
       const worker = String(args.p_worker);
-      if (this.event.lifecycle_state !== "reconciliation_required") return { data: null, error: null };
+      const reclaimable = this.event.lifecycle_state === "reconciliation_required"
+        || (this.event.lifecycle_state === "active" && this.event.sideband_lease_until === "synthetic-expired");
+      if (this.event.provider_termination_attempt_id
+        || this.event.lifecycle_state === "external_evidence_required"
+        || !reclaimable) return { data: null, error: null };
       const token = `00000000-0000-4000-8000-${String(++this.claimSequence).padStart(12, "0")}`;
       this.mutateEvent({
         lifecycle_owner: worker,
         lifecycle_claim_token: token,
         provider_termination_state: "pending",
+        provider_termination_attempt_id: token,
+        provider_termination_request_id: token,
       });
       return { data: {
         event_id: this.event.id,
         claim_token: token,
         action: "terminate",
+        request_id: token,
         openai_call_id: this.event.openai_call_id,
         provider_termination_mode: this.event.provider_termination_mode,
       }, error: null };
@@ -279,12 +304,29 @@ function activate(store = new SyntheticPhoneStore()) {
   return store;
 }
 
+function successfulSideband(store: SyntheticPhoneStore, onAttach: () => void = () => {}) {
+  return (_cap: unknown, _callId: string, _model: string, options: any) => {
+    onAttach();
+    return {
+      ledger: {},
+      opened: (async () => {
+        const { data, error } = await store.rpc("confirm_phone_sideband", {
+          p_event_id: options.phone.eventId,
+          p_claim_token: options.phone.claimToken,
+        });
+        if (error || data !== true) throw new Error("phone_sideband_activation_failed");
+      })(),
+      cancel() {},
+    };
+  };
+}
+
 async function runPhone(store: SyntheticPhoneStore, options: Record<string, unknown> = {}, row: any = EVENT) {
   try {
     await handleIncoming(row, {
       workerId: "worker-a",
       fetchImpl: store.fetch,
-      attachSidebandImpl: () => ({}),
+      attachSidebandImpl: successfulSideband(store),
       ...options,
     } as any);
     return null;
@@ -306,6 +348,7 @@ describe("durable inbound phone lifecycle", () => {
     await runPhone(activeStore);
 
     expect(activeStore.providerCalls).toEqual(["reject"]);
+    expect(activeStore.providerRequestIds[0]).toMatch(/^80000000-0000-4000-8000-[0-9]{12}$/);
     expect(activeStore.event).toMatchObject({ status: "rejected", lifecycle_state: "rejected", provider_accept_state: "not_attempted" });
     expect(activeStore.calls.size).toBe(0);
     expect(activeStore.reservations.size).toBe(0);
@@ -330,14 +373,15 @@ describe("durable inbound phone lifecycle", () => {
     });
   });
 
-  test("4. ambiguous provider reject remains executable reconciliation without a calls row", async () => {
+  test("4. ambiguous provider reject requires external evidence without a calls row", async () => {
     activeStore.failures.add("persist_phone_call");
     activeStore.providerPlan.reject = new Error("reject transport unknown");
     await runPhone(activeStore);
 
     expect(activeStore.calls.size).toBe(0);
     expect(activeStore.event).toMatchObject({
-      status: "error", lifecycle_state: "reconciliation_required", provider_termination_state: "unknown", provider_termination_mode: "reject",
+      status: "error", lifecycle_state: "external_evidence_required",
+      provider_termination_state: "external_evidence_required", provider_termination_mode: "reject",
     });
     expect(activeStore.event.openai_call_id).toBe("rtc-1");
   });
@@ -358,21 +402,22 @@ describe("durable inbound phone lifecycle", () => {
     expect(activeStore.event.provider_termination_mode).toBe("hangup");
   });
 
-  test("7. ambiguous hangup persists reconciliation_required", async () => {
+  test("7. ambiguous hangup persists external_evidence_required", async () => {
     activeStore.failures.add("begin_phone_sideband");
     activeStore.providerPlan.hangup = new Response("unavailable", { status: 503 });
     await runPhone(activeStore);
 
     expect(activeStore.providerCalls).toEqual(["accept", "hangup"]);
     expect(activeStore.event).toMatchObject({
-      status: "error", lifecycle_state: "reconciliation_required", provider_termination_state: "unknown", provider_termination_mode: "hangup",
+      status: "error", lifecycle_state: "external_evidence_required",
+      provider_termination_state: "external_evidence_required", provider_termination_mode: "hangup",
     });
   });
 
   test("8. sideband is never attached after failed durable ownership", async () => {
     activeStore.failures.add("persist_phone_call");
     let sidebandAttaches = 0;
-    await runPhone(activeStore, { attachSidebandImpl: () => { sidebandAttaches += 1; return {}; } });
+    await runPhone(activeStore, { attachSidebandImpl: successfulSideband(activeStore, () => { sidebandAttaches += 1; }) });
 
     expect(sidebandAttaches).toBe(0);
     expect(activeStore.providerCalls).toEqual(["reject"]);
@@ -405,7 +450,7 @@ describe("durable inbound phone lifecycle", () => {
 
   test("11. phone-event status stays truthful through claim, persistence, reservation, accept, and sideband", async () => {
     let sidebandAttaches = 0;
-    const error = await runPhone(activeStore, { attachSidebandImpl: () => { sidebandAttaches += 1; return {}; } });
+    const error = await runPhone(activeStore, { attachSidebandImpl: successfulSideband(activeStore, () => { sidebandAttaches += 1; }) });
 
     expect(error).toBeNull();
     expect(sidebandAttaches).toBe(1);
@@ -427,9 +472,9 @@ describe("durable inbound phone lifecycle", () => {
       return new Response(null, { status: 200 });
     };
     let sidebandAttaches = 0;
-    const first = runPhone(activeStore, { workerId: "worker-a", attachSidebandImpl: () => { sidebandAttaches += 1; return {}; } });
+    const first = runPhone(activeStore, { workerId: "worker-a", attachSidebandImpl: successfulSideband(activeStore, () => { sidebandAttaches += 1; }) });
     await acceptStarted;
-    const second = runPhone(activeStore, { workerId: "worker-b", attachSidebandImpl: () => { sidebandAttaches += 1; return {}; } });
+    const second = runPhone(activeStore, { workerId: "worker-b", attachSidebandImpl: successfulSideband(activeStore, () => { sidebandAttaches += 1; }) });
     releaseAccept();
     await Promise.all([first, second]);
 
@@ -452,19 +497,21 @@ describe("durable inbound phone lifecycle", () => {
     expect(activeStore.reservations.get("call-1")?.status).toBe("active");
   });
 
-  test("14. phone-event reconciliation executes and idempotently confirms reject without a calls row", async () => {
+  test("14. ambiguous phone termination requires external evidence and is never posted twice", async () => {
     activeStore.failures.add("persist_phone_call");
     activeStore.providerPlan.reject = new Error("reject transport unknown");
     await runPhone(activeStore);
-    activeStore.providerPlan.reject = new Response(null, { status: 200 });
     const phone = await import("../src/phone.ts") as any;
 
     expect(typeof phone.reconcilePhoneLifecycles).toBe("function");
-    expect(await phone.reconcilePhoneLifecycles({ workerId: "reconciler-a", fetchImpl: activeStore.fetch })).toBe(1);
+    expect(await phone.reconcilePhoneLifecycles({ workerId: "reconciler-a", fetchImpl: activeStore.fetch })).toBe(0);
     expect(await phone.reconcilePhoneLifecycles({ workerId: "reconciler-b", fetchImpl: activeStore.fetch })).toBe(0);
     expect(activeStore.calls.size).toBe(0);
-    expect(activeStore.providerCalls).toEqual(["reject", "reject"]);
-    expect(activeStore.event).toMatchObject({ lifecycle_state: "rejected", provider_termination_state: "confirmed" });
+    expect(activeStore.providerCalls).toEqual(["reject"]);
+    expect(activeStore.event).toMatchObject({
+      lifecycle_state: "external_evidence_required",
+      provider_termination_state: "external_evidence_required",
+    });
   });
 
   test("15. attachSideband throw hangs up and never settles the reservation", async () => {
@@ -479,7 +526,7 @@ describe("durable inbound phone lifecycle", () => {
   test("16. sideband confirmation persistence failure hangs up after one attach", async () => {
     activeStore.failures.add("confirm_phone_sideband");
     let sidebandAttaches = 0;
-    await runPhone(activeStore, { attachSidebandImpl: () => { sidebandAttaches += 1; return {}; } });
+    await runPhone(activeStore, { attachSidebandImpl: successfulSideband(activeStore, () => { sidebandAttaches += 1; }) });
 
     expect(sidebandAttaches).toBe(1);
     expect(activeStore.providerCalls).toEqual(["accept", "hangup"]);
@@ -487,10 +534,29 @@ describe("durable inbound phone lifecycle", () => {
   });
 
   test("17. provider writes use the canonical claimed call id, never the untrusted realtime payload", async () => {
-    await runPhone(activeStore, { attachSidebandImpl: () => ({}) }, { ...EVENT, openai_call_id: "rtc-attacker" });
+    await runPhone(activeStore, { attachSidebandImpl: successfulSideband(activeStore) }, { ...EVENT, openai_call_id: "rtc-attacker" });
 
     expect(activeStore.providerCalls).toEqual(["accept"]);
     expect(activeStore.providerUrls[0]).toContain("/rtc-1/accept");
     expect(activeStore.providerUrls.join("\n")).not.toContain("rtc-attacker");
+  });
+
+  test("18. expired active sideband is reaped with one first hangup attempt", async () => {
+    activeStore.mutateEvent({
+      status: "accepted",
+      lifecycle_state: "active",
+      provider_accept_state: "accepted",
+      provider_termination_state: "active",
+      provider_termination_mode: "hangup",
+      provider_termination_attempt_id: null,
+      sideband_state: "attached",
+      sideband_lease_until: "synthetic-expired",
+    });
+    const phone = await import("../src/phone.ts") as any;
+
+    expect(await phone.reconcilePhoneLifecycles({ workerId: "reaper-a", fetchImpl: activeStore.fetch })).toBe(1);
+    expect(await phone.reconcilePhoneLifecycles({ workerId: "reaper-b", fetchImpl: activeStore.fetch })).toBe(0);
+    expect(activeStore.providerCalls).toEqual(["hangup"]);
+    expect(activeStore.event).toMatchObject({ lifecycle_state: "terminated", provider_termination_state: "confirmed" });
   });
 });

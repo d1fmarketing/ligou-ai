@@ -20,6 +20,7 @@ const originalWebSocket = globalThis.WebSocket;
 let fetchUrls: string[] = [];
 let callUpdates: any[] = [];
 let budgetUpdates: any[] = [];
+let providerAttempts = new Set<string>();
 
 function client() {
   return {
@@ -51,6 +52,21 @@ function client() {
       if (name === "settle_call_budget") {
         return Promise.resolve({ data: "reservation-1", error: null });
       }
+      if (name === "begin_provider_termination_attempt") {
+        const callId = String(args.p_call_id);
+        if (providerAttempts.has(callId)) return Promise.resolve({ data: { should_attempt: false }, error: null });
+        providerAttempts.add(callId);
+        return Promise.resolve({ data: {
+          should_attempt: true,
+          attempt_id: "91000000-0000-4000-8000-000000000001",
+          request_id: "91000000-0000-4000-8000-000000000001",
+          openai_call_id: args.p_openai_call_id,
+          provider_termination_mode: args.p_mode,
+        }, error: null });
+      }
+      if (name === "complete_provider_termination_attempt") {
+        return Promise.resolve({ data: true, error: null });
+      }
       return Promise.resolve({ data: null, error: null });
     },
   } as any;
@@ -66,6 +82,7 @@ beforeEach(() => {
   fetchUrls = [];
   callUpdates = [];
   budgetUpdates = [];
+  providerAttempts = new Set();
   invalidateTenant("rocha-plumbing");
   _setClient(client());
 });
@@ -217,7 +234,8 @@ describe("session budget lifecycle", () => {
 
     expect(providerCreationRequests()).toHaveLength(1);
     expect(fetchUrls.some((url) => url.endsWith("/rtc-ambiguous/hangup"))).toBe(true);
-    expect(callUpdates.some((row) => row.provider_termination_state === "confirmed")).toBe(true);
+    expect(rpcCalls.some((call) => call.name === "complete_provider_termination_attempt"
+      && call.args.p_confirmed === true)).toBe(true);
     assertUnknownProviderRemainsDiscoverable();
   });
 

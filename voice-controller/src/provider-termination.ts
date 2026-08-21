@@ -4,24 +4,53 @@ import { supa } from "./rules.ts";
 export type ProviderTerminationMode = "reject" | "hangup";
 export type FetchLike = typeof fetch;
 export type ProviderTerminationResult = { confirmed: boolean; error?: string };
+export const PROVIDER_TERMINATION_TIMEOUT_MS = 5_000;
 
 export async function requestProviderTermination(args: {
   openaiCallId: string | null;
   mode: ProviderTerminationMode;
+  requestId: string;
+  timeoutMs?: number;
   fetchImpl?: FetchLike;
 }): Promise<ProviderTerminationResult> {
   if (!args.openaiCallId) return { confirmed: false, error: "provider_call_id_unknown" };
-  const fetchImpl = args.fetchImpl ?? fetch;
-  try {
-    const response = await fetchImpl(
-      `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(args.openaiCallId)}/${args.mode}`,
-      { method: "POST", headers: { Authorization: `Bearer ${config.openaiKey}` } },
-    );
-    if (!response.ok) return { confirmed: false, error: `provider_${args.mode}_failed: ${response.status}` };
-    return { confirmed: true };
-  } catch (error) {
-    return { confirmed: false, error: `provider_${args.mode}_transport_unknown: ${String(error)}`.slice(0, 400) };
+  if (!args.requestId?.trim()) return { confirmed: false, error: "provider_request_id_required" };
+  const timeoutMs = args.timeoutMs ?? PROVIDER_TERMINATION_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs >= 15_000) {
+    return { confirmed: false, error: "provider_termination_timeout_invalid" };
   }
+  const fetchImpl = args.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const request = (async (): Promise<ProviderTerminationResult> => {
+    try {
+      const response = await fetchImpl(
+      `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(args.openaiCallId)}/${args.mode}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config.openaiKey}`,
+            "X-Client-Request-Id": args.requestId,
+          },
+          signal: controller.signal,
+        },
+      );
+      if (!response.ok) return { confirmed: false, error: `provider_${args.mode}_failed: ${response.status}` };
+      return { confirmed: true };
+    } catch (error) {
+      if (controller.signal.aborted) return { confirmed: false, error: `provider_${args.mode}_timeout` };
+      return { confirmed: false, error: `provider_${args.mode}_transport_unknown: ${String(error)}`.slice(0, 400) };
+    }
+  })();
+  const timeout = new Promise<ProviderTerminationResult>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve({ confirmed: false, error: `provider_${args.mode}_timeout` });
+    }, timeoutMs);
+  });
+  const result = await Promise.race([request, timeout]);
+  if (timer) clearTimeout(timer);
+  return result;
 }
 
 export async function terminateProviderCall(args: {
@@ -32,28 +61,30 @@ export async function terminateProviderCall(args: {
   fetchImpl?: FetchLike;
 }): Promise<{ confirmed: boolean; error?: string }> {
   const s = supa();
-  const pending = await s.from("calls").update({
-    provider_termination_state: "pending",
-    provider_termination_mode: args.mode,
-    provider_termination_reason: args.reason,
-    provider_termination_last_error: null,
-  }).eq("id", args.callId);
-  if (pending.error) return { confirmed: false, error: `termination_state_write_failed: ${pending.error.message}` };
+  const { data: attempt, error: beginError } = await s.rpc("begin_provider_termination_attempt", {
+    p_call_id: args.callId,
+    p_openai_call_id: args.openaiCallId,
+    p_mode: args.mode,
+    p_reason: args.reason,
+  });
+  if (beginError || !attempt) return { confirmed: false, error: `termination_state_write_failed: ${beginError?.message ?? "attempt_missing"}` };
+  const claimed = attempt as any;
+  if (claimed.should_attempt !== true) return { confirmed: false, error: "provider_termination_already_attempted" };
 
   const result = await requestProviderTermination({
-    openaiCallId: args.openaiCallId,
-    mode: args.mode,
+    openaiCallId: claimed.openai_call_id ? String(claimed.openai_call_id) : args.openaiCallId,
+    mode: claimed.provider_termination_mode === "reject" ? "reject" : "hangup",
+    requestId: String(claimed.request_id ?? ""),
     fetchImpl: args.fetchImpl,
   });
-  if (result.confirmed) {
-    const confirmed = await s.from("calls").update({
-      provider_termination_state: "confirmed",
-      provider_termination_last_error: null,
-      provider_terminated_at: new Date().toISOString(),
-    }).eq("id", args.callId);
-    if (confirmed.error) return { confirmed: false, error: `termination_confirmation_write_failed: ${confirmed.error.message}` };
-    return { confirmed: true };
+  const { data: completed, error: completeError } = await s.rpc("complete_provider_termination_attempt", {
+    p_call_id: args.callId,
+    p_attempt_id: String(claimed.attempt_id ?? ""),
+    p_confirmed: result.confirmed,
+    p_error: result.error ?? null,
+  });
+  if (completeError || completed !== true) {
+    return { confirmed: false, error: `termination_confirmation_write_failed: ${completeError?.message ?? "attempt_not_completed"}` };
   }
-  await s.from("calls").update({ provider_termination_state: "unknown", provider_termination_last_error: result.error }).eq("id", args.callId);
   return result;
 }

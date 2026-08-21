@@ -297,10 +297,98 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
     assert.deepEqual(idempotent, { tenant_id: tenantId, mode: "apply", eligible: 0, migrated: 0 });
     assertions += 1;
 
+    successful(await runPsql(connection, home, `
+      insert into public.tenants (id, slug, name, status)
+      values ('60000000-0000-4000-8000-000000000101', 'synthetic-upgrade-cross', 'Synthetic Upgrade Cross', 'active');
+      insert into public.calls (
+        id, tenant_id, channel, session_type, status, ended_at, openai_call_id,
+        provider_termination_state, provider_termination_mode, provider_usage_state
+      ) values
+        ('60000000-0000-4000-8000-000000000110', '${tenantId}', 'phone', 'customer', 'active', null,
+          'legacy-phone-active', 'active', 'hangup', 'unknown'),
+        ('60000000-0000-4000-8000-000000000111', '${tenantId}', 'phone', 'customer', 'error', now() - interval '1 hour',
+          'legacy-phone-terminal', 'confirmed', 'hangup', 'unknown'),
+        ('60000000-0000-4000-8000-000000000112', '60000000-0000-4000-8000-000000000101', 'phone', 'customer', 'active', null,
+          'legacy-phone-cross', 'active', 'hangup', 'unknown');
+      insert into public.phone_events (
+        id, openai_call_id, status, tenant_id, handled_at, created_at
+      ) values
+        ('60000000-0000-4000-8000-000000000120', 'legacy-phone-active', 'accepted', '${tenantId}', now() - interval '2 hours', now() - interval '2 hours'),
+        ('60000000-0000-4000-8000-000000000121', 'legacy-phone-terminal', 'error', '${tenantId}', now() - interval '2 hours', now() - interval '2 hours'),
+        ('60000000-0000-4000-8000-000000000122', 'legacy-phone-cross', 'accepted', '${tenantId}', now() - interval '2 hours', now() - interval '2 hours'),
+        ('60000000-0000-4000-8000-000000000123', 'new-phone-pending', 'pending', '${tenantId}', null, now());
+    `), "legacy phone asymmetry seed", connection.password);
+    assertions += 1;
+
     for (const fileName of allMigrations.slice(throughRetirement.length)) await stage(fileName);
     await beforeDestructive("remaining timestamp migrations");
     await runSupabase(["migration", "up", "--local", "--include-all"], "remaining timestamp migrations");
     assertHistory(allMigrations, await history(connection, home));
+    assertions += 1;
+
+    assert.equal(successful(await runPsql(connection, home, `
+      select
+        (select call_id = '60000000-0000-4000-8000-000000000110'::uuid from public.phone_events where id = '60000000-0000-4000-8000-000000000120')::text || ':' ||
+        (select phone_event_id = '60000000-0000-4000-8000-000000000120'::uuid from public.calls where id = '60000000-0000-4000-8000-000000000110')::text || ':' ||
+        (select call_id = '60000000-0000-4000-8000-000000000111'::uuid from public.phone_events where id = '60000000-0000-4000-8000-000000000121')::text || ':' ||
+        (select phone_event_id = '60000000-0000-4000-8000-000000000121'::uuid from public.calls where id = '60000000-0000-4000-8000-000000000111')::text;
+    `), "legacy phone unique-link proof", connection.password).trim(), "true:true:true:true");
+    assertions += 1;
+
+    assert.equal(successful(await runPsql(connection, home, `
+      select
+        (select call_id is null from public.phone_events where id = '60000000-0000-4000-8000-000000000122')::text || ':' ||
+        (select reason from public.phone_lifecycle_legacy_conflicts where event_id = '60000000-0000-4000-8000-000000000122') || ':' ||
+        (select provider_termination_state from public.calls where id = '60000000-0000-4000-8000-000000000112') || ':' ||
+        (select status || '/' || lifecycle_state || '/' || (handled_at is null)::text || '/' || (call_id is null)::text
+          from public.phone_events where id = '60000000-0000-4000-8000-000000000123');
+    `), "legacy phone cross-tenant and pending proof", connection.password).trim(),
+      "true:legacy_phone_provider_match_cross_tenant:external_evidence_required:pending/pending/true/true");
+    assertions += 1;
+
+    successful(await runPsql(connection, home, `
+      begin;
+      drop index public.calls_openai_call_id_unique;
+      insert into public.calls (id, tenant_id, channel, session_type, status, openai_call_id)
+      values
+        ('60000000-0000-4000-8000-000000000130', '${tenantId}', 'phone', 'customer', 'active', 'legacy-phone-duplicate'),
+        ('60000000-0000-4000-8000-000000000131', '${tenantId}', 'phone', 'customer', 'active', 'legacy-phone-duplicate');
+      insert into public.phone_events (id, openai_call_id, status, tenant_id, handled_at)
+      values ('60000000-0000-4000-8000-000000000132', 'legacy-phone-duplicate', 'error', '${tenantId}', now());
+      set local role service_role;
+      select set_config('request.jwt.claim.role', 'service_role', true);
+      select public.repair_legacy_phone_links();
+      reset role;
+      do $$ begin
+        if (select reason from public.phone_lifecycle_legacy_conflicts where event_id = '60000000-0000-4000-8000-000000000132')
+          <> 'legacy_phone_provider_match_ambiguous' then raise exception 'duplicate_phone_fixture_not_quarantined'; end if;
+        if exists (select 1 from public.phone_events where id = '60000000-0000-4000-8000-000000000132' and call_id is not null)
+          then raise exception 'duplicate_phone_fixture_linked'; end if;
+      end $$;
+      rollback;
+    `), "legacy phone duplicate quarantine proof", connection.password);
+    assertions += 1;
+
+    successful(await runPsql(connection, home, `
+      begin;
+      update public.phone_events set tenant_id = '60000000-0000-4000-8000-000000000101'
+      where id = '60000000-0000-4000-8000-000000000122';
+      set local role service_role;
+      select set_config('request.jwt.claim.role', 'service_role', true);
+      select public.repair_legacy_phone_links();
+      reset role;
+      do $$ begin
+        if not exists (
+          select 1 from public.phone_events p join public.calls c on c.id = p.call_id and c.phone_event_id = p.id
+          where p.id = '60000000-0000-4000-8000-000000000122'
+        ) then raise exception 'resolved_phone_fixture_not_linked'; end if;
+        if not exists (
+          select 1 from public.phone_lifecycle_legacy_conflicts
+          where event_id = '60000000-0000-4000-8000-000000000122' and resolved_at is not null
+        ) then raise exception 'resolved_phone_fixture_not_marked'; end if;
+      end $$;
+      rollback;
+    `), "legacy phone conflict resolution proof", connection.password);
     assertions += 1;
 
     assert.equal(successful(await runPsql(connection, home, `

@@ -4,7 +4,7 @@ import { config, emptyUsage, sessionCostUsd, type UsageTotals } from "./config.t
 import { runTool, type Capability } from "./tools.ts";
 import { supa } from "./rules.ts";
 import { finalizeTerminalBudget, type BudgetOutcome } from "./budget.ts";
-import type { FetchLike } from "./provider-termination.ts";
+import { requestProviderTermination, type FetchLike, type ProviderTerminationMode } from "./provider-termination.ts";
 
 export interface SessionLedger {
   callId: string;
@@ -33,6 +33,17 @@ export function sessionCostCapUsd(_model: string): number {
 const live = new Map<string, SessionLedger>();
 export const liveSessions = live;
 
+export interface SidebandControl {
+  ledger: SessionLedger;
+  opened: Promise<void>;
+  cancel(reason?: string): void;
+}
+
+export interface SidebandOptions {
+  phone?: { eventId: string; claimToken: string };
+  fetchImpl?: FetchLike;
+}
+
 export function terminalStatusForReason(
   current: SessionLedger["status"],
   reason: string,
@@ -41,7 +52,12 @@ export function terminalStatusForReason(
   return reason === "caller_hung_up" ? "ended" : "error";
 }
 
-export function attachSideband(cap: Capability, openaiCallId: string, model: string): SessionLedger {
+export function attachSideband(
+  cap: Capability,
+  openaiCallId: string,
+  model: string,
+  options: SidebandOptions = {},
+): SidebandControl {
   const ledger: SessionLedger = {
     callId: cap.callId,
     openaiCallId,
@@ -59,8 +75,6 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
     toolLog: [],
     status: "active",
   };
-  live.set(cap.callId, ledger);
-
   // Root-cause discipline (2026-08-19 incident): a WS close is NOT the end of the call — the WebRTC leg
   // lives independently. We finalize only on terminal states (deadline/budget kill, or retries exhausted);
   // any other close triggers a reattach, because the call may still be in progress with live tools.
@@ -68,26 +82,131 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
   let attaches = 0;
   let everOpened = false;
   let terminal = false;
+  let cancelled = false;
+  let finalizing = false;
+  let phoneActive = false;
   let ws: WebSocket | null = null;
+  let deadline: ReturnType<typeof setTimeout> | null = null;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let heartbeatInFlight = false;
+  const retryTimers = new Set<ReturnType<typeof setTimeout>>();
+  let openedSettled = false;
+  let resolveOpened!: () => void;
+  let rejectOpened!: (error: Error) => void;
+  const opened = new Promise<void>((resolve, reject) => {
+    resolveOpened = resolve;
+    rejectOpened = reject;
+  });
+  void opened.catch(() => {});
 
-  const finalize = async (reason: string) => {
-    if (!live.has(cap.callId)) return; // already finalized
-    console.log(`sideband finalize call=${cap.callId.slice(0, 8)} reason=${reason} status=${ledger.status} tools=${ledger.toolLog.length}`);
-    ledger.status = terminalStatusForReason(ledger.status, reason);
-    live.delete(cap.callId);
-    await persistLedger(cap, ledger).catch((e) => console.error("persist failed", e));
+  const clearRuntimeTimers = () => {
+    if (deadline) clearTimeout(deadline);
+    if (heartbeat) clearInterval(heartbeat);
+    deadline = null;
+    heartbeat = null;
+    for (const timer of retryTimers) clearTimeout(timer);
+    retryTimers.clear();
   };
 
-  const deadlineMs = cap.expiresAt - Date.now();
-  const deadline = setTimeout(() => {
+  const cancel = (_reason = "cancelled") => {
+    if (cancelled) return;
+    cancelled = true;
     terminal = true;
-    ledger.status = "killed_deadline";
-    ledger.transcript.push({ role: "system", text: "session ended: max duration reached", at: new Date().toISOString() });
-    try { ws?.close(); } catch {}
-    void finalize("deadline");
-  }, Math.max(deadlineMs, 5_000));
+    clearRuntimeTimers();
+    live.delete(cap.callId);
+    if (!openedSettled) {
+      openedSettled = true;
+      rejectOpened(new Error("phone_sideband_cancelled"));
+    }
+    const socket = ws;
+    ws = null;
+    try { socket?.close(); } catch {}
+  };
+
+  const finalize = async (reason: string) => {
+    if (cancelled || finalizing || !live.has(cap.callId)) return;
+    finalizing = true;
+    terminal = true;
+    clearRuntimeTimers();
+    if (!openedSettled) {
+      openedSettled = true;
+      rejectOpened(new Error("phone_sideband_closed_before_open"));
+    }
+    const socket = ws;
+    ws = null;
+    try { socket?.close(); } catch {}
+    console.log(`sideband finalize call=${cap.callId.slice(0, 8)} reason=${reason} status=${ledger.status} tools=${ledger.toolLog.length}`);
+    ledger.status = terminalStatusForReason(ledger.status, reason);
+    let persisted = false;
+    try {
+      persisted = await persistLedger(cap, ledger, options.fetchImpl, options.phone);
+    } catch (error) {
+      console.error("persist failed", error);
+    }
+    if (!persisted && options.phone) {
+      await supa().rpc("defer_phone_sideband_finalization", {
+        p_event_id: options.phone.eventId,
+        p_claim_token: options.phone.claimToken,
+        p_error: `sideband_terminal_persistence_failed:${reason}`,
+      }).catch(() => ({ data: null, error: { message: "defer_failed" } }));
+    }
+    live.delete(cap.callId);
+  };
+
+  const startHeartbeat = () => {
+    if (!options.phone || heartbeat || cancelled) return;
+    heartbeat = setInterval(() => {
+      if (heartbeatInFlight || cancelled || finalizing) return;
+      heartbeatInFlight = true;
+      void (async () => {
+        try {
+          const { data, error } = await supa().rpc("heartbeat_phone_sideband", {
+            p_event_id: options.phone!.eventId,
+            p_claim_token: options.phone!.claimToken,
+          });
+          if (!error && data === true) return;
+          ledger.status = "error";
+          ledger.transcript.push({ role: "system", text: "sideband heartbeat failed", at: new Date().toISOString() });
+          await finalize("sideband_heartbeat_failed");
+        } catch {
+          await finalize("sideband_heartbeat_failed");
+        } finally {
+          heartbeatInFlight = false;
+        }
+      })();
+    }, 5_000);
+  };
+
+  const activateOpenedSocket = async (sock: WebSocket) => {
+    if (cancelled) return;
+    if (options.phone && !phoneActive) {
+      const { data, error } = await supa().rpc("confirm_phone_sideband", {
+        p_event_id: options.phone.eventId,
+        p_claim_token: options.phone.claimToken,
+      });
+      if (error || data !== true) {
+        if (!openedSettled) {
+          openedSettled = true;
+          rejectOpened(Object.assign(new Error("phone_sideband_activation_failed"), { detail: error?.message }));
+        }
+        cancel("phone_sideband_activation_failed");
+        return;
+      }
+      phoneActive = true;
+      startHeartbeat();
+    }
+    sock.send(JSON.stringify({
+      type: "session.update",
+      session: { type: "realtime", audio: { input: { transcription: { model: "gpt-live-transcribe" } } } },
+    }));
+    if (!openedSettled) {
+      openedSettled = true;
+      resolveOpened();
+    }
+  };
 
   const connect = () => {
+    if (cancelled || terminal) return;
     attaches += 1;
     const attempt = attaches;
     let openedThisAttempt = false;
@@ -98,13 +217,15 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
     ws = sock;
 
     sock.addEventListener("open", () => {
+      if (cancelled) return;
       openedThisAttempt = true;
       everOpened = true;
       console.log(`sideband OPEN call=${cap.callId.slice(0, 8)} rtc=${openaiCallId} attempt=${attempt}`);
-      sock.send(JSON.stringify({
-        type: "session.update",
-        session: { type: "realtime", audio: { input: { transcription: { model: "gpt-live-transcribe" } } } },
-      }));
+      void activateOpenedSocket(sock).catch((error) => {
+        ledger.status = "error";
+        ledger.transcript.push({ role: "system", text: `sideband setup failed: ${String(error)}`, at: new Date().toISOString() });
+        void finalize("sideband_session_update_failed");
+      });
     });
 
     sock.addEventListener("message", (ev) => {
@@ -120,6 +241,7 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
     });
 
     sock.addEventListener("close", (ev: any) => {
+      if (cancelled) return;
       console.log(`sideband CLOSE call=${cap.callId.slice(0, 8)} code=${ev?.code} attempt=${attempt} opened=${openedThisAttempt} terminal=${terminal}`);
       if (terminal || ledger.status !== "active") { clearTimeout(deadline); void finalize("terminal_close"); return; }
       ledger.providerUsageEvidence.continuous = false;
@@ -138,13 +260,38 @@ export function attachSideband(cap: Capability, openaiCallId: string, model: str
       }
       // call not visible yet (peer still connecting) or transient drop -> retry with backoff
       const delay = openedThisAttempt ? 500 : Math.min(1_000 * 2 ** (attempt - 1), 8_000);
-      setTimeout(() => { if (!terminal && live.has(cap.callId)) connect(); }, delay);
+      const retry = setTimeout(() => {
+        retryTimers.delete(retry);
+        if (!terminal && !cancelled && live.has(cap.callId)) {
+          try { connect(); } catch { void finalize("sideband_reconnect_failed"); }
+        }
+      }, delay);
+      retryTimers.add(retry);
     });
     sock.addEventListener("error", () => { /* close follows */ });
   };
 
-  connect();
-  return ledger;
+  try {
+    connect();
+    live.set(cap.callId, ledger);
+    const deadlineMs = cap.expiresAt - Date.now();
+    deadline = setTimeout(() => {
+      if (cancelled) return;
+      terminal = true;
+      ledger.status = "killed_deadline";
+      ledger.transcript.push({ role: "system", text: "session ended: max duration reached", at: new Date().toISOString() });
+      try { ws?.close(); } catch {}
+      void finalize("deadline");
+    }, Math.max(deadlineMs, 5_000));
+  } catch (error) {
+    if (!openedSettled) {
+      openedSettled = true;
+      resolveOpened();
+    }
+    cancel("sideband_setup_failed");
+    throw error;
+  }
+  return { ledger, opened, cancel };
 }
 
 export async function handleEvent(cap: Capability, ledger: SessionLedger, ws: WebSocket, msg: any) {
@@ -256,13 +403,70 @@ function validatedProviderUsage(value: unknown): UsageTotals | null {
   return { textIn: textIn!, audioIn: audioIn!, textInCached: textInCached!, audioInCached: audioInCached!, textOut: textOut!, audioOut: audioOut! };
 }
 
-export async function persistLedger(cap: Capability, ledger: SessionLedger, fetchImpl?: FetchLike) {
+export async function persistLedger(
+  cap: Capability,
+  ledger: SessionLedger,
+  fetchImpl?: FetchLike,
+  phone?: { eventId: string; claimToken: string },
+) {
   const durationS = Math.round((Date.now() - ledger.startedAt) / 1000);
   const usageResolved = ledger.providerUsageEvidence.continuous === true
     && ledger.providerUsageEvidence.terminal === true;
   const cost = usageResolved ? Number(sessionCostUsd(ledger.model, ledger.usage).toFixed(4)) : null;
   const s = supa();
   const providerNeedsTermination = ledger.status !== "ended";
+  const outcome: BudgetOutcome = ledger.status === "ended"
+    ? "ended"
+    : ledger.status === "killed_deadline"
+      ? "killed_deadline"
+      : ledger.status === "killed_budget"
+        ? "killed_budget"
+        : "error";
+  const providerUsageEvidence = usageResolved ? {
+    source: "response.done.usage",
+    event_count: ledger.providerUsageEvidence.eventCount,
+    last_response_id: ledger.providerUsageEvidence.lastResponseId,
+    last_received_at: ledger.providerUsageEvidence.lastReceivedAt,
+    continuous: true,
+    terminal: true,
+  } : null;
+
+  if (phone) {
+    const { data, error } = await s.rpc("finalize_phone_sideband", {
+      p_event_id: phone.eventId,
+      p_claim_token: phone.claimToken,
+      p_terminal: {
+        status: ledger.status,
+        duration_seconds: durationS,
+        transcript: ledger.transcript,
+        usage_tokens: usageResolved ? ledger.usage : null,
+        cost_estimate_usd: cost,
+        provider_usage_state: usageResolved ? "resolved" : "unknown",
+        provider_usage_evidence: providerUsageEvidence,
+        outcome,
+        detail: { tools: ledger.toolLog, model: ledger.model },
+      },
+    });
+    if (error || !data) return false;
+    const finalization = data as any;
+    if (finalization.should_attempt === true) {
+      const termination = await requestProviderTermination({
+        openaiCallId: finalization.openai_call_id ? String(finalization.openai_call_id) : ledger.openaiCallId,
+        mode: finalization.provider_termination_mode === "reject" ? "reject" : "hangup",
+        requestId: String(finalization.request_id ?? ""),
+        fetchImpl,
+      });
+      const { data: completed, error: completeError } = await s.rpc("complete_phone_termination", {
+        p_event_id: phone.eventId,
+        p_claim_token: phone.claimToken,
+        p_confirmed: termination.confirmed,
+        p_error: termination.error ?? null,
+      });
+      if (completeError || completed !== true) return false;
+    }
+    return true;
+  }
+
   const terminalWrite = await s.from("calls").update({
     status: ledger.status,
     ended_at: new Date().toISOString(),
@@ -275,23 +479,9 @@ export async function persistLedger(cap: Capability, ledger: SessionLedger, fetc
     provider_termination_mode: "hangup",
     provider_termination_reason: providerNeedsTermination ? `sideband_${ledger.status}` : "caller_hung_up",
     provider_usage_state: usageResolved ? "resolved" : "unknown",
-    provider_usage_evidence: usageResolved ? {
-      source: "response.done.usage",
-      event_count: ledger.providerUsageEvidence.eventCount,
-      last_response_id: ledger.providerUsageEvidence.lastResponseId,
-      last_received_at: ledger.providerUsageEvidence.lastReceivedAt,
-      continuous: true,
-      terminal: true,
-    } : null,
+    provider_usage_evidence: providerUsageEvidence,
   }).eq("id", cap.callId);
   if (terminalWrite.error) return false;
-  const outcome: BudgetOutcome = ledger.status === "ended"
-    ? "ended"
-    : ledger.status === "killed_deadline"
-      ? "killed_deadline"
-      : ledger.status === "killed_budget"
-        ? "killed_budget"
-        : "error";
   return await finalizeTerminalBudget({
     tenantId: cap.tenantId,
     callId: cap.callId,

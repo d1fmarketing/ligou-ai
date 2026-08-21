@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { finalizeTerminalBudget, reconcileBudgetReservations, reconcileProviderTerminations } from "../src/budget.ts";
+import { requestProviderTermination, terminateProviderCall } from "../src/provider-termination.ts";
 import { _setClient } from "../src/rules.ts";
 
 let settleAttempts = 0;
@@ -8,10 +9,27 @@ let claimRow: any;
 let deferError: any;
 let terminationClaim: any;
 let callUpdates: any[] = [];
+let providerRpcCalls: Array<{ name: string; args?: Record<string, unknown> }> = [];
+let providerAttemptStarted = false;
 
 function client() {
   return {
-    rpc(name: string) {
+    rpc(name: string, args?: Record<string, unknown>) {
+      providerRpcCalls.push({ name, args });
+      if (name === "begin_provider_termination_attempt") {
+        if (providerAttemptStarted) return Promise.resolve({ data: { should_attempt: false }, error: null });
+        providerAttemptStarted = true;
+        return Promise.resolve({ data: {
+          should_attempt: true,
+          attempt_id: "90000000-0000-4000-8000-000000000001",
+          request_id: "90000000-0000-4000-8000-000000000001",
+          openai_call_id: args?.p_openai_call_id,
+          provider_termination_mode: args?.p_mode,
+        }, error: null });
+      }
+      if (name === "complete_provider_termination_attempt") {
+        return Promise.resolve({ data: true, error: null });
+      }
       if (name === "claim_provider_termination_reconciliation") {
         const row = terminationClaim;
         terminationClaim = null;
@@ -51,6 +69,8 @@ beforeEach(() => {
   deferError = null;
   terminationClaim = null;
   callUpdates = [];
+  providerRpcCalls = [];
+  providerAttemptStarted = false;
   claimRow = {
     reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
     actual_cost_usd: 0, minutes: 0, outcome: "startup_error",
@@ -62,6 +82,52 @@ beforeEach(() => {
 afterAll(() => _setClient(null));
 
 describe("durable budget reconciliation", () => {
+  test("provider termination carries a durable request id and times out below its lease", async () => {
+    let posts = 0;
+    let requestId: string | null = null;
+    let signal: AbortSignal | null = null;
+    const pending = requestProviderTermination({
+      openaiCallId: "rtc-timeout",
+      mode: "hangup",
+      requestId: "90000000-0000-4000-8000-000000000099",
+      timeoutMs: 10,
+      fetchImpl: async (_input, init) => {
+        posts += 1;
+        requestId = new Headers(init?.headers).get("X-Client-Request-Id");
+        signal = init?.signal as AbortSignal;
+        return await new Promise<Response>(() => {});
+      },
+    } as any);
+    const result = await Promise.race([
+      pending,
+      new Promise((resolve) => setTimeout(() => resolve("outer_timeout"), 80)),
+    ]);
+
+    expect(result).not.toBe("outer_timeout");
+    expect(result).toMatchObject({ confirmed: false, error: "provider_hangup_timeout" });
+    expect(posts).toBe(1);
+    expect(requestId).toBe("90000000-0000-4000-8000-000000000099");
+    expect(signal?.aborted).toBe(true);
+  });
+
+  test("a persisted provider termination attempt permits at most one POST", async () => {
+    let posts = 0;
+    const fetchImpl = async () => { posts += 1; return new Response(null, { status: 200 }); };
+
+    expect((await terminateProviderCall({
+      callId: "call-at-most-once", openaiCallId: "rtc-at-most-once", mode: "hangup",
+      reason: "synthetic_first", fetchImpl,
+    })).confirmed).toBe(true);
+    expect((await terminateProviderCall({
+      callId: "call-at-most-once", openaiCallId: "rtc-at-most-once", mode: "hangup",
+      reason: "synthetic_retry", fetchImpl,
+    })).confirmed).toBe(false);
+
+    expect(posts).toBe(1);
+    expect(providerRpcCalls.filter((call) => call.name === "begin_provider_termination_attempt")).toHaveLength(2);
+    expect(providerRpcCalls.filter((call) => call.name === "complete_provider_termination_attempt")).toHaveLength(1);
+  });
+
   test("omitting the runtime usage-resolution flag cannot settle", async () => {
     const settled = await finalizeTerminalBudget({
       tenantId: "tenant-1",
@@ -148,7 +214,8 @@ describe("durable budget reconciliation", () => {
     })).toBe(1);
 
     expect(urls).toEqual(["https://api.openai.com/v1/realtime/calls/rtc-no-reservation/reject"]);
-    expect(callUpdates.some((row) => row.provider_termination_state === "confirmed")).toBe(true);
+    expect(providerRpcCalls.some((call) => call.name === "complete_provider_termination_attempt"
+      && call.args?.p_confirmed === true)).toBe(true);
     expect(settleAttempts).toBe(0);
   });
 });

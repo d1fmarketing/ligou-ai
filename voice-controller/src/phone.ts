@@ -5,7 +5,7 @@ import { config } from "./config.ts";
 import { buildInstructions } from "./instructions.ts";
 import { loadTenant, supa } from "./rules.ts";
 import { makeCapability, toolSchemas } from "./tools.ts";
-import { attachSideband } from "./sideband.ts";
+import { attachSideband, type SidebandControl } from "./sideband.ts";
 import {
   requestProviderTermination,
   type FetchLike,
@@ -24,6 +24,7 @@ type PhoneTerminationClaim = {
   event_id: string;
   claim_token: string;
   action: "terminate" | "resolve_not_applicable";
+  request_id?: string;
   openai_call_id: string | null;
   provider_termination_mode: ProviderTerminationMode;
 };
@@ -69,7 +70,7 @@ async function terminatePhoneLifecycle(args: {
   acceptState: PhoneAcceptState;
   fetchImpl: FetchLike;
 }): Promise<boolean> {
-  const intent = await requiredRpc<{ should_attempt: boolean; openai_call_id?: string | null }>(
+  const intent = await requiredRpc<{ should_attempt: boolean; request_id?: string; openai_call_id?: string | null }>(
     "begin_phone_termination",
     {
       p_event_id: args.eventId,
@@ -84,6 +85,7 @@ async function terminatePhoneLifecycle(args: {
   const result = await requestProviderTermination({
     openaiCallId: intent.openai_call_id ?? args.openaiCallId,
     mode: args.mode,
+    requestId: String(intent.request_id ?? ""),
     fetchImpl: args.fetchImpl,
   });
   await completeTermination({
@@ -232,19 +234,17 @@ export async function handleIncoming(row: any, runtime: PhoneRuntime = {}) {
     throw error;
   }
 
+  let sideband: SidebandControl | null = null;
   try {
-    attachSidebandImpl(cap, context.openaiCallId!, config.model);
+    sideband = attachSidebandImpl(cap, context.openaiCallId!, config.model, {
+      phone: { eventId: context.eventId, claimToken: context.claimToken },
+      fetchImpl,
+    });
+    if (!sideband?.opened || typeof sideband.cancel !== "function") throw new Error("phone_sideband_control_invalid");
+    await sideband.opened;
   } catch (error) {
+    sideband?.cancel("phone_hangup_before_sideband_active");
     await terminate("hangup", "sideband_attach_failed", "accepted");
-    throw error;
-  }
-  try {
-    await requiredRpc<boolean>("confirm_phone_sideband", {
-      p_event_id: context.eventId,
-      p_claim_token: context.claimToken,
-    }, "phone_sideband_persistence_failed");
-  } catch (error) {
-    await terminate("hangup", "phone_sideband_persistence_failed", "accepted");
     throw error;
   }
 }
@@ -262,6 +262,7 @@ export async function reconcilePhoneLifecycles(runtime: Pick<PhoneRuntime, "work
   const result = await requestProviderTermination({
     openaiCallId: claim.openai_call_id,
     mode: claim.provider_termination_mode,
+    requestId: String(claim.request_id ?? ""),
     fetchImpl,
   });
   await completeTermination({

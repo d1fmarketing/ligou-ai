@@ -251,7 +251,8 @@ function run(command, args, { cwd, env, input } = {}) {
 
 function successful(result, label, secrets = []) {
   if (result.code !== 0) {
-    throw new Error(`${label} failed: ${sanitize(result.stderr, secrets) || "command exited non-zero"}`);
+    const detail = [result.stdout, result.stderr].filter(Boolean).join("\n");
+    throw new Error(`${label} failed: ${sanitize(detail, secrets) || "command exited non-zero"}`);
   }
   return result.stdout;
 }
