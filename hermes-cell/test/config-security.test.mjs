@@ -207,7 +207,7 @@ test("token-free health wrapper returns state only and never forwards or prints 
     await mkdir(bin);
     const docker = path.join(bin, "docker");
     const curl = path.join(bin, "curl");
-    await writeFile(docker, "#!/bin/sh\nprintf '%s\\n' '{\"authenticated\":true,\"access_token\":\"sensitive-oauth-token\"}'\n");
+    await writeFile(docker, "#!/bin/sh\nprintf '%s\\n' \"${AUTH_PAYLOAD:-{\\\"provider\\\":\\\"openai-codex\\\",\\\"authenticated\\\":true,\\\"access_token\\\":\\\"sensitive-oauth-token\\\"}}\"\n");
     await writeFile(curl, `#!/bin/sh\nprintf '%s\\n' "$*" > ${JSON.stringify(curlLog)}\nprintf '%s\\n' '{"ok":true,"model":"private-model-detail"}'\n`);
     await chmod(docker, 0o755);
     await chmod(curl, 0o755);
@@ -226,6 +226,38 @@ test("token-free health wrapper returns state only and never forwards or prints 
     assert.equal(result.stdout.trim(), '{"ok":true,"provider":"openai-codex","auth":"ready","api":"ready"}');
     assert.doesNotMatch(result.stdout + result.stderr, /sensitive-oauth-token|private-model-detail/);
     assert.doesNotMatch(await readFile(curlLog, "utf8"), /authorization|bearer/i);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("token-free health rejects negative and malformed auth prose", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-hermes-auth-negative-"));
+  const bin = path.join(fixture, "bin");
+  try {
+    await mkdir(bin);
+    await writeFile(path.join(bin, "docker"), "#!/bin/sh\nprintf '%s\\n' \"$AUTH_PAYLOAD\"\n");
+    await writeFile(path.join(bin, "curl"), "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true}'\n");
+    await chmod(path.join(bin, "docker"), 0o755);
+    await chmod(path.join(bin, "curl"), 0o755);
+    for (const payload of [
+      "not logged in",
+      "logged in",
+      '{"provider":"openai-codex","authenticated":false}',
+      '{"provider":"other","authenticated":true}',
+      '{"authenticated":true}',
+      '{malformed',
+    ]) {
+      const result = spawnSync("bash", [health], {
+        encoding: "utf8",
+        env: {
+          PATH: `${bin}:/usr/bin:/bin`, TENANT_SLUG: "test-tenant", AUTH_PAYLOAD: payload,
+          HERMES_HEALTH_URL: "http://127.0.0.1:28642/health", LIGOU_NODE_BIN: process.execPath,
+        },
+      });
+      assert.notEqual(result.status, 0, payload);
+      assert.match(result.stdout, /"auth":"unavailable"/);
+    }
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

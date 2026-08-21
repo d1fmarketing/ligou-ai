@@ -18,7 +18,8 @@ else
 fi
 
 AUTH_RAW="$(docker exec "$CELL" hermes auth status openai-codex --json 2>/dev/null || true)"
-if printf '%s' "$AUTH_RAW" | grep -Eqi '"authenticated"[[:space:]]*:[[:space:]]*true|logged[[:space:]]+in'; then
+if printf '%s' "$AUTH_RAW" | "$NODE_BIN" -e '
+let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{try{const v=JSON.parse(raw);process.exit(v?.provider==="openai-codex"&&v?.authenticated===true?0:1)}catch{process.exit(1)}});' ; then
   AUTH_STATE=ready
 else
   AUTH_STATE=unavailable
