@@ -547,6 +547,24 @@ button:disabled {
   line-height: var(--leading-body);
 }
 
+/* Voz de display da landing nos títulos — corpo, chat e cards seguem Archivo. */
+.page-heading h1,
+.memory-heading-copy h1,
+.approvals-heading-copy h1,
+.view-header h1,
+.login-card h1,
+.dialog-heading h2,
+.inspector-content > h2 {
+  font-family: var(--font-display);
+  font-weight: 700;
+}
+
+.memory-empty h2,
+.approvals-empty h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+}
+
 .conversation {
   display: flex;
   flex-direction: column;
