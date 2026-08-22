@@ -33,7 +33,7 @@ function Intro4({onDone}) {
     <div className="intro__panel">
       <div className="intro4__mark"><AgentNodeMark size={86}/></div>
       {txt === 0 ? <div className="intro__t" key="a">Ligou?</div> : <div className="intro__t" key="b"><span className="acc">Atendido.</span></div>}
-      <span className="intro__cap">ligou.ai · agente operacional</span>
+      <span className="intro__cap">ligou.ai · agente operacional de inteligência artificial</span>
       <div className="intro__bar"></div>
     </div>
   </div>;
@@ -175,7 +175,7 @@ function Hero() {
     {band !== 'mid' ? art : null}
     <Container className="hero4-grid" style={{maxWidth: 1500}}>
       <div className="hero4-copy hd" style={{'--d': '40ms'}}>
-        <div className="hd" style={{'--d': '60ms'}}><span className="h4-eyebrow">Agente operacional para negócios de serviços</span></div>
+        <div className="hd" style={{'--d': '60ms'}}><span className="h4-eyebrow">Agente operacional de inteligência artificial para negócios de serviços</span></div>
         <h1>
           <span className="lmask"><span className="ln" style={{'--d': '160ms'}}>Ligou?</span></span>
           <span className="lmask"><span className="ln" style={{'--d': '290ms'}}><span className="acc">Atendido.</span></span></span>
@@ -270,7 +270,7 @@ function Scene() {
         </div>
         <div className="iv-memory__copy">
           <span className="iv-memory__approval">Aprovação de nova regra</span>
-          <p><strong>Não é uma secretária eletrônica.</strong> É um agente com memória operacional permanente.</p>
+          <p><strong>Não é uma secretária eletrônica.</strong> É um agente de inteligência artificial com memória operacional permanente.</p>
           <p>Cada atendimento amplia o histórico do Ligou. Quando aparece uma situação nova, ele pergunta; depois que você aprova, a resposta vira uma regra permanente do seu negócio — até você decidir alterar ou apagar.</p>
         </div>
       </aside></Reveal>
@@ -446,7 +446,7 @@ function Faq() {
   const qs = [
     ['Ele pode inventar um preço ou uma resposta?', 'Não. O Ligou só informa preços, condições e políticas que você aprovou. Quando não tem uma resposta autorizada, coleta as informações, avisa que a equipe confirma e pergunta para você. A resposta só vira regra depois da sua aprovação.'],
     ['E se o cliente quiser falar comigo?', 'Você escolhe: quando transferir na hora, quando só receber aviso, e quando deixar o Ligou concluir sozinho.'],
-    ['Ele fala que é inteligência artificial?', 'Ele se apresenta como assistente virtual da sua empresa: "Hi, you\u2019ve reached [Your Business]. I\u2019m their virtual assistant — how can I help?" A conversa é natural, mas a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.'],
+    ['Ele fala que é inteligência artificial?', 'Sim. Ele se apresenta como o agente de inteligência artificial da sua empresa: "Hi, you\u2019ve reached [Your Business]. I\u2019m their AI assistant — how can I help?" A conversa é natural, e a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.'],
     ['Preciso falar inglês ou espanhol para ensinar o Ligou?', 'Não. A entrevista, os ajustes e a aprovação são em português. O Ligou atende em inglês, espanhol ou português e envia o resumo para você em português.'],
     ['E se eu quiser cancelar?', 'Você cancela pelo painel, sem multa e sem precisar falar com vendedor.']
   ];
