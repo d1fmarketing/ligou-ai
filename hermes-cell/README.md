@@ -28,10 +28,9 @@ resolve o slug no registro travado de tenants e confere slug, container e rota a
 ambiente de processo não escolhem a célula. O canal pós-chamada de aprendizado livre está desativado; somente
 validação local/determinística permanece até existir um contrato fechado separado e comprovado.
 
-O OAuth global fica em `hermes-model-auth:/root/.hermes`. O estado cognitivo fica num profile separado,
-`hermes-cognitive:/root/.hermes/profiles/default`, com `HERMES_HOME` apontando para esse profile. O Hermes
-consegue usar o OAuth global como fallback sem colocar `auth.json` dentro do profile; nunca copie auth para o
-volume cognitivo nem inclua o volume de auth num backup. `health-state.sh` consome o status bruto localmente e retorna somente estados
+O estado cognitivo fica em `hermes-cognitive:/opt/data`. O OAuth fica separadamente em
+`hermes-model-auth:/root/.hermes`; nunca copie `auth.json` para `/opt/data` e nunca inclua o volume de auth
+num backup cognitivo. `health-state.sh` consome o status bruto localmente e retorna somente estados
 `ready/unavailable`, sem token, identidade ou detalhe do modelo.
 
 Antes de subir ou empacotar:

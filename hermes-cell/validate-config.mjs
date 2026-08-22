@@ -48,10 +48,7 @@ for (const required of [
 }
 if (!compose.includes("image: ${HERMES_IMAGE:?")) fail("hermes_image_digest_required");
 
-if (!/HERMES_HOME:\s*\/root\/\.hermes\/profiles\/default/i.test(compose)) {
-  fail("cognitive_profile_required");
-}
-const cognitive = compose.match(/^\s*-\s*([a-z0-9_-]+):\/root\/\.hermes\/profiles\/default\b/im)?.[1];
+const cognitive = compose.match(/^\s*-\s*([a-z0-9_-]+):\/opt\/data\b/im)?.[1];
 const modelAuth = compose.match(/^\s*-\s*([a-z0-9_-]+):\/root\/\.hermes\b/im)?.[1];
 if (!cognitive || !modelAuth || cognitive === modelAuth) fail("state_auth_volume_separation_required");
 if (new RegExp("(?:" + modelAuth + "|/root/\\.hermes|auth\\.json)", "i").test(backup)) {
