@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -202,6 +203,30 @@ export async function runAuthenticatedRlsSuite(options) {
   assert.equal(receiptsA.response.ok, true);
   assert.equal(receiptsA.body.length, 1);
   assert.equal(receiptsA.body[0].tenant_id, bootTenantA, "owner sees only their own provisioning receipt"); checks++;
+
+  // --- V0.2 M2 interview suggestions: owner approves the batch, others cannot ---
+  const suggestedA = randomUUID();
+  psql(env, `
+    insert into public.rules (id, tenant_id, origem, escopo, status, category, text, structured)
+    values ('${suggestedA}', '${bootTenantA}', 'onboarding', 'servico', 'sugerido', 'preco',
+            'Basic visit: public quote $200.',
+            '{"service_type":"basic_visit","price_min":200,"price_target":200,"duration_min":60}'::jsonb);`);
+  const decideByB = await rest(tokenB, "/rest/v1/rpc/decide_rule", {
+    method: "POST", body: JSON.stringify({ p_rule: suggestedA, p_decision: "aprovado" }),
+  });
+  assert.equal(decideByB.response.ok, false, "another owner must not decide this tenant's suggestion"); checks++;
+
+  const decideByA = await rest(tokenA, "/rest/v1/rpc/decide_rule", {
+    method: "POST", body: JSON.stringify({ p_rule: suggestedA, p_decision: "aprovado" }),
+  });
+  assert.equal(decideByA.response.ok, true, `owner approval failed: ${decideByA.safeError()}`); checks++;
+  const effectiveAfter = await rest(tokenA, `/rest/v1/effective_rules?select=id,category&tenant_id=eq.${bootTenantA}`);
+  assert.equal(effectiveAfter.response.ok, true);
+  assert.equal(effectiveAfter.body.length, 1, "approved interview suggestion becomes effective policy"); checks++;
+  const decideAgain = await rest(tokenA, "/rest/v1/rpc/decide_rule", {
+    method: "POST", body: JSON.stringify({ p_rule: suggestedA, p_decision: "aprovado" }),
+  });
+  assert.equal(decideAgain.response.ok, false, "a decided suggestion cannot be decided twice"); checks++;
 
   return { suite: "authenticated-rest-rls-bola", tests: checks, passed: checks };
 }
