@@ -467,6 +467,56 @@ test("backup script creates and uploads only the cognitive archive plus authenti
   }
 });
 
+test("backup script cleans up the raw archive when normalization rejects it", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-rawleak-"));
+  try {
+    // Raw layout containing auth material: the normalizer must reject it, and the
+    // rejected raw archive must not be orphaned in the tenant work dir (it would
+    // never match the retention glob and would accumulate forever).
+    const sourceArchive = await makeArchive(fixture, { root: "", forbidden: true });
+    const bin = path.join(fixture, "bin");
+    const stateRoot = path.join(fixture, "tenants");
+    const work = path.join(stateRoot, TENANT, "backups");
+    const registry = path.join(fixture, "tenant-registry.json");
+    const dockerLog = path.join(fixture, "docker.log");
+    const awsLog = path.join(fixture, "aws.log");
+    await mkdir(bin);
+    const docker = path.join(bin, "docker");
+    await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-${TENANT}","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}'; exit 0 ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]'; exit 0 ;;\nesac\nif [ "$1" = cp ]; then cp "$STUB_ARCHIVE" "$3"; exit 0; fi\nexit 0\n`);
+    await writeFile(path.join(bin, "aws"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AWS_LOG\"\nexit 0\n");
+    await chmod(docker, 0o755);
+    await chmod(path.join(bin, "aws"), 0o755);
+    const result = run("bash", [backupScript], {
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`,
+        TENANT_ID: TENANT,
+        TENANT_SLUG,
+        LIGOU_BACKUP_BUCKET: "unit-backups",
+        LIGOU_BACKUP_SOURCE_ID: "ec2:i-test",
+        LIGOU_BACKUP_MANIFEST_KEY: KEY,
+        LIGOU_BACKUP_MANIFEST_KEY_ID: "test-v1",
+        HERMES_IMAGE: IMAGE,
+        LIGOU_TENANT_STATE_ROOT: stateRoot,
+        LIGOU_TENANT_REGISTRY: registry,
+        LIGOU_NODE_BIN: process.execPath,
+        DOCKER_LOG: dockerLog,
+        AWS_LOG: awsLog,
+        STUB_ARCHIVE: sourceArchive,
+      },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /normalize_forbidden_path/);
+    const names = await readdir(work);
+    assert.equal(names.some((name) => name.startsWith("raw-")), false, `raw archive leaked: ${names.join(",")}`);
+    assert.equal(names.some((name) => name.endsWith(".zip.tmp")), false, `scratch leaked: ${names.join(",")}`);
+    assert.equal(names.some((name) => name.endsWith(".zip")), false, `unsigned zip leaked: ${names.join(",")}`);
+    const uploads = await readFile(awsLog, "utf8").catch(() => "");
+    assert.doesNotMatch(uploads, /s3 cp/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("backup refuses to create or sign when the actual running Hermes digest mismatches", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-running-image-"));
   try {

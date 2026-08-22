@@ -61,8 +61,10 @@ trap - EXIT
 # The raw hermes archive has no single root; the manifest/restore contract requires
 # everything under cognitive/. The normalizer also re-applies the archive-safety
 # name/type/size rules fail-closed before anything is signed.
+trap 'rm -f "$RAW_ARCHIVE" "${LOCAL_ARCHIVE}.tmp"' EXIT
 python3 "${ROOT}/infra/normalize-cognitive-archive.py" --input "$RAW_ARCHIVE" --output "$LOCAL_ARCHIVE" >/dev/null
 rm -f "$RAW_ARCHIVE"
+trap - EXIT
 chmod 600 "$LOCAL_ARCHIVE"
 
 "$NODE_BIN" "$MANIFEST_TOOL" create \
@@ -77,7 +79,8 @@ aws s3 cp "$LOCAL_ARCHIVE" "s3://${BUCKET}/cells/${TENANT_ID}/${NAME}" --sse AES
 aws s3 cp "$LOCAL_MANIFEST" "s3://${BUCKET}/cells/${TENANT_ID}/${MANIFEST_NAME}" --sse AES256 --only-show-errors
 
 # Bounded local cleanup only. Remote retention is an S3 lifecycle policy.
-find "$WORK" -type f \( -name "${ARCHIVE_PREFIX}-*.zip" -o -name "${ARCHIVE_PREFIX}-*.zip.manifest.json" \) \
+find "$WORK" -type f \( -name "${ARCHIVE_PREFIX}-*.zip" -o -name "${ARCHIVE_PREFIX}-*.zip.manifest.json" \
+  -o -name "raw-${ARCHIVE_PREFIX}-*.zip" -o -name "${ARCHIVE_PREFIX}-*.zip.tmp" \) \
   -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
 
 printf '{"ok":true,"tenant":"%s","archive":"%s","manifest":true}\n' "$TENANT" "$NAME"
