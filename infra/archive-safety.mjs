@@ -45,7 +45,20 @@ function forbiddenEntry(entry) {
   if (lower.some((segment) => [".hermes", ".codex", ".ssh", "hermes-model-auth", "model-auth", "credentials", "secrets", "tokens"].includes(segment))) return true;
   if (lower.some((segment) => segment === ".env" || segment.startsWith(".env."))) return true;
   if (["auth.json", "credentials.json", "id_rsa", "id_ed25519", "docker.sock"].includes(basename)) return true;
-  if (lower.some((segment) => /credential|secret|access[_-]?token|refresh[_-]?token/.test(segment))) return true;
+  const sensitivePattern = /credential|secret|access[_-]?token|refresh[_-]?token/;
+  const sensitiveIndexes = lower.flatMap((segment, index) => (sensitivePattern.test(segment) ? [index] : []));
+  if (sensitiveIndexes.length > 0) {
+    // Mirror of the normalizer's narrow skills exemption: tenant skills
+    // legitimately ship code files whose basename mentions credentials/tokens.
+    // Only that exact shape passes; sensitive directory segments, non-code
+    // extensions and paths outside skills/ stay forbidden.
+    const skillsIndex = lower[0] === "cognitive" ? 1 : 0;
+    const onlyBasename = !entry.endsWith("/")
+      && sensitiveIndexes.length === 1 && sensitiveIndexes[0] === lower.length - 1;
+    const skillCode = onlyBasename && lower[skillsIndex] === "skills"
+      && /\.(?:py|md|ts|js|mjs|sh|txt|ya?ml)$/.test(basename);
+    if (!skillCode) return true;
+  }
   if (/\.(?:zip|tar|tgz|gz|7z|rar)$/.test(basename)) return true;
   return false;
 }

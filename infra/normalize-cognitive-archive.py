@@ -24,6 +24,7 @@ FORBIDDEN_SEGMENTS = {
 }
 FORBIDDEN_BASENAMES = {"auth.json", "credentials.json", "id_rsa", "id_ed25519", "docker.sock"}
 SENSITIVE_SEGMENT = re.compile(r"credential|secret|access[_-]?token|refresh[_-]?token")
+SKILL_CODE_BASENAME = re.compile(r"\.(?:py|md|ts|js|mjs|sh|txt|ya?ml)$")
 NESTED_ARCHIVE = re.compile(r"\.(?:zip|tar|tgz|gz|7z|rar)$")
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -46,8 +47,17 @@ def validate_name(name):
         fail("normalize_forbidden_path")
     if lower[-1] in FORBIDDEN_BASENAMES:
         fail("normalize_forbidden_path")
-    if any(SENSITIVE_SEGMENT.search(segment) for segment in lower):
-        fail("normalize_forbidden_path")
+    sensitive_hits = [index for index, segment in enumerate(lower) if SENSITIVE_SEGMENT.search(segment)]
+    if sensitive_hits:
+        # Skills legitimately ship code whose NAME mentions credentials/tokens
+        # (e.g. git-credential-token.py). Exempt only a sensitively-named code
+        # file directly identified by its basename under skills/; sensitive
+        # directory segments, non-code extensions and paths outside skills/
+        # keep failing closed. Content-level auth is caught by the leak scan.
+        only_basename = sensitive_hits == [len(lower) - 1] and not name.endswith("/")
+        skill_code = only_basename and lower[0] == "skills" and SKILL_CODE_BASENAME.search(lower[-1])
+        if not skill_code:
+            fail("normalize_forbidden_path")
     if not name.endswith("/") and NESTED_ARCHIVE.search(lower[-1]):
         fail("normalize_forbidden_path")
 

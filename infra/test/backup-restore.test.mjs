@@ -164,6 +164,12 @@ test("raw hermes backup zips are normalized under cognitive/ before manifest sig
     await writeFile(path.join(payload, "config.yaml"), "model: synthetic\n");
     await writeFile(path.join(payload, "skills/index.json"), "[]");
     await writeFile(path.join(payload, "sessions/index.json"), "[]");
+    // Real tenant skills legitimately ship code whose NAME mentions credentials or
+    // tokens (observed in production: git-credential-token.py). The fuzzy
+    // sensitive-name rule must exempt code files under skills/ while auth stores,
+    // .env and data files keep failing closed.
+    await mkdir(path.join(payload, "skills/github/github-auth/scripts"), { recursive: true });
+    await writeFile(path.join(payload, "skills/github/github-auth/scripts/git-credential-token.py"), "print('helper')\n");
     const raw = path.join(fixture, "raw.zip");
     const zipped = run("zip", ["-qr", raw, "."], { cwd: payload });
     assert.equal(zipped.status, 0, zipped.stderr);
@@ -179,6 +185,8 @@ test("raw hermes backup zips are normalized under cognitive/ before manifest sig
     assert.ok(names.every((name) => name === "cognitive/" || name.startsWith("cognitive/")), names.join(","));
     assert.ok(names.includes("cognitive/state.db"));
     assert.ok(names.includes("cognitive/memory/"), "empty memory dir must survive normalization");
+    assert.ok(names.includes("cognitive/skills/github/github-auth/scripts/git-credential-token.py"),
+      "sensitively-named skill code must survive normalization");
 
     const inspected = run(process.execPath, [archiveTool, "inspect", normalized]);
     assert.equal(inspected.status, 0, inspected.stderr);
@@ -210,6 +218,24 @@ test("raw hermes backup zips are normalized under cognitive/ before manifest sig
     const rejectedLink = run("python3", [normalizeTool, "--input", hostileLink, "--output", path.join(fixture, "out-link.zip")]);
     assert.notEqual(rejectedLink.status, 0);
     assert.match(rejectedLink.stderr, /normalize_non_regular_entry/);
+    await rm(path.join(payload, "link-to-state"));
+
+    // The skills exemption stays narrow: sensitive names outside skills/, sensitive
+    // data extensions inside skills/, and sensitive directory segments all fail.
+    for (const hostilePath of [
+      "config/git-credential-token.py",
+      "skills/x/access_token.json",
+      "skills/my-credentials-dir/notes.md",
+    ]) {
+      const zipName = path.join(fixture, `hostile-${path.basename(hostilePath)}.zip`);
+      await mkdir(path.join(payload, path.dirname(hostilePath)), { recursive: true });
+      await writeFile(path.join(payload, hostilePath), "x\n");
+      assert.equal(run("zip", ["-qr", zipName, "."], { cwd: payload }).status, 0);
+      const rejectedSensitive = run("python3", [normalizeTool, "--input", zipName, "--output", `${zipName}.out.zip`]);
+      assert.notEqual(rejectedSensitive.status, 0, `${hostilePath} must be rejected`);
+      assert.match(rejectedSensitive.stderr, /normalize_forbidden_path/);
+      await rm(path.join(payload, hostilePath));
+    }
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
