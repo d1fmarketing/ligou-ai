@@ -33,7 +33,7 @@ const PINNED_TOOLCHAIN = {
   bun: "1.2.13",
   deno: "2.9.4",
   supabase_cli: "2.115.0",
-  hermes_image: "330140023537.dkr.ecr.us-east-1.amazonaws.com/ligou/hermes-agent@sha256:4803c95855d5efd24da761ba15f574b82ab218f9f61d8b780e7a812e473fb008",
+  hermes_image: "330140023537.dkr.ecr.us-east-1.amazonaws.com/ligou/hermes-agent@sha256:7ae8423fb1a64110008e746c5571864fcd8d9e167659d48f96b9b4a5a8181f33",
   dependencies: { supabase_js: "2.112.3", postgres: "3.4.9" },
 };
 
