@@ -24,6 +24,7 @@ RETENTION_DAYS="${LIGOU_BACKUP_RETENTION_DAYS:-30}"
 [ -n "${LIGOU_BACKUP_MANIFEST_KEY:-}" ] || { echo "manifest_key_required" >&2; exit 1; }
 [[ "$IMAGE" =~ ^[^[:space:]@]+(:[^[:space:]@]+)?@sha256:[a-f0-9]{64}$ ]] || { echo "hermes_image_digest_required" >&2; exit 1; }
 command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "node_required" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "python3_required" >&2; exit 1; }
 
 IDENTITY_JSON="$("$NODE_BIN" "$IDENTITY_TOOL" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --json)"
 identity_field() {
@@ -51,10 +52,18 @@ cleanup_remote() {
 trap cleanup_remote EXIT
 
 docker exec "$CELL" hermes backup -o "$REMOTE_ARCHIVE" >/dev/null
-docker cp "${CELL}:${REMOTE_ARCHIVE}" "$LOCAL_ARCHIVE" >/dev/null
-chmod 600 "$LOCAL_ARCHIVE"
+RAW_ARCHIVE="${WORK}/raw-${NAME}"
+docker cp "${CELL}:${REMOTE_ARCHIVE}" "$RAW_ARCHIVE" >/dev/null
+chmod 600 "$RAW_ARCHIVE"
 cleanup_remote
 trap - EXIT
+
+# The raw hermes archive has no single root; the manifest/restore contract requires
+# everything under cognitive/. The normalizer also re-applies the archive-safety
+# name/type/size rules fail-closed before anything is signed.
+python3 "${ROOT}/infra/normalize-cognitive-archive.py" --input "$RAW_ARCHIVE" --output "$LOCAL_ARCHIVE" >/dev/null
+rm -f "$RAW_ARCHIVE"
+chmod 600 "$LOCAL_ARCHIVE"
 
 "$NODE_BIN" "$MANIFEST_TOOL" create \
   --archive "$LOCAL_ARCHIVE" \

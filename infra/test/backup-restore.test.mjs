@@ -43,9 +43,11 @@ async function waitForPath(target, timeoutMs = 5_000) {
   throw new Error(`timed_out_waiting_for:${target}`);
 }
 
-async function makeArchive(base, { forbidden = false, corruptSqlite = false } = {}) {
+async function makeArchive(base, { forbidden = false, corruptSqlite = false, root = "cognitive" } = {}) {
+  // root: "cognitive" mirrors an already-normalized archive; "" mirrors the raw
+  // layout `hermes backup` actually emits (entries at the top level).
   const payload = path.join(base, "payload");
-  const cognitive = path.join(payload, "cognitive");
+  const cognitive = root ? path.join(payload, root) : payload;
   await mkdir(path.join(cognitive, "memory"), { recursive: true });
   await mkdir(path.join(cognitive, "skills"), { recursive: true });
   await mkdir(path.join(cognitive, "sessions"), { recursive: true });
@@ -141,6 +143,73 @@ test("archive with an unexpected top-level root is rejected", async () => {
     const result = createManifest(archive, `${archive}.manifest.json`);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /archive_cognitive_root_required/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("raw hermes backup zips are normalized under cognitive/ before manifest signing", async () => {
+  const normalizeTool = path.join(repoRoot, "infra/normalize-cognitive-archive.py");
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-normalize-"));
+  try {
+    // The real `hermes backup` archive has no cognitive/ root: config, state and
+    // per-domain directories sit at the top level, and an empty memory/ dir is legal.
+    const payload = path.join(fixture, "payload");
+    await mkdir(path.join(payload, "memory"), { recursive: true });
+    await mkdir(path.join(payload, "skills"), { recursive: true });
+    await mkdir(path.join(payload, "sessions"), { recursive: true });
+    const database = path.join(payload, "state.db");
+    const created = run("sqlite3", [database, "create table state (id integer primary key, value text); insert into state(value) values ('synthetic');"]);
+    assert.equal(created.status, 0, created.stderr);
+    await writeFile(path.join(payload, "config.yaml"), "model: synthetic\n");
+    await writeFile(path.join(payload, "skills/index.json"), "[]");
+    await writeFile(path.join(payload, "sessions/index.json"), "[]");
+    const raw = path.join(fixture, "raw.zip");
+    const zipped = run("zip", ["-qr", raw, "."], { cwd: payload });
+    assert.equal(zipped.status, 0, zipped.stderr);
+
+    const normalized = path.join(fixture, "normalized.zip");
+    const result = run("python3", [normalizeTool, "--input", raw, "--output", normalized]);
+    assert.equal(result.status, 0, result.stderr);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.ok, true);
+    assert.ok(summary.files >= 4);
+
+    const names = run("unzip", ["-Z1", normalized]).stdout.trim().split("\n");
+    assert.ok(names.every((name) => name === "cognitive/" || name.startsWith("cognitive/")), names.join(","));
+    assert.ok(names.includes("cognitive/state.db"));
+    assert.ok(names.includes("cognitive/memory/"), "empty memory dir must survive normalization");
+
+    const inspected = run(process.execPath, [archiveTool, "inspect", normalized]);
+    assert.equal(inspected.status, 0, inspected.stderr);
+    const manifest = `${normalized}.manifest.json`;
+    const signed = createManifest(normalized, manifest, { LIGOU_BACKUP_MANIFEST_KEY_ID: "test-v1" });
+    assert.equal(signed.status, 0, signed.stderr);
+
+    // Fail-closed parity with archive-safety: auth material, nested archives and
+    // symlinks in the raw archive abort normalization instead of being repacked.
+    const hostileAuth = path.join(fixture, "hostile-auth.zip");
+    await writeFile(path.join(payload, "auth.json"), '{"access_token":"forbidden-value"}');
+    assert.equal(run("zip", ["-qr", hostileAuth, "."], { cwd: payload }).status, 0);
+    const rejectedAuth = run("python3", [normalizeTool, "--input", hostileAuth, "--output", path.join(fixture, "out-auth.zip")]);
+    assert.notEqual(rejectedAuth.status, 0);
+    assert.match(rejectedAuth.stderr, /normalize_forbidden_path/);
+    await rm(path.join(payload, "auth.json"));
+
+    const hostileNested = path.join(fixture, "hostile-nested.zip");
+    await writeFile(path.join(payload, "nested.zip"), "PK");
+    assert.equal(run("zip", ["-qr", hostileNested, "."], { cwd: payload }).status, 0);
+    const rejectedNested = run("python3", [normalizeTool, "--input", hostileNested, "--output", path.join(fixture, "out-nested.zip")]);
+    assert.notEqual(rejectedNested.status, 0);
+    assert.match(rejectedNested.stderr, /normalize_forbidden_path/);
+    await rm(path.join(payload, "nested.zip"));
+
+    const hostileLink = path.join(fixture, "hostile-link.zip");
+    await symlink("state.db", path.join(payload, "link-to-state"));
+    assert.equal(run("zip", ["-qry", hostileLink, "."], { cwd: payload }).status, 0);
+    const rejectedLink = run("python3", [normalizeTool, "--input", hostileLink, "--output", path.join(fixture, "out-link.zip")]);
+    assert.notEqual(rejectedLink.status, 0);
+    assert.match(rejectedLink.stderr, /normalize_non_regular_entry/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -315,7 +384,7 @@ test("backup creation rejects credential and model-auth paths", async () => {
 test("backup script creates and uploads only the cognitive archive plus authenticated manifest", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-script-"));
   try {
-    const sourceArchive = await makeArchive(fixture);
+    const sourceArchive = await makeArchive(fixture, { root: "" });
     const bin = path.join(fixture, "bin");
     const legacySharedWork = path.join(fixture, "shared-work");
     const stateRoot = path.join(fixture, "tenants");
