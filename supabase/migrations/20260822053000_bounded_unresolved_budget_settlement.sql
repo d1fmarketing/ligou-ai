@@ -167,6 +167,7 @@ begin
     'provider_termination_mode', v_call.provider_termination_mode,
     'provider_termination_reason', v_call.provider_termination_reason,
     'provider_terminated_at', v_call.provider_terminated_at,
+    'provider_termination_attempted_at', v_call.provider_termination_attempted_at,
     'provider_usage_state', v_call.provider_usage_state,
     'openai_call_id', v_call.openai_call_id
   );

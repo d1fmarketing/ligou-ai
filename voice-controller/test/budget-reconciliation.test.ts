@@ -317,6 +317,40 @@ describe("durable budget reconciliation", () => {
     expect(reapCalls[0].p_grace_minutes).toBeGreaterThanOrEqual(60);
   });
 
+  test("an exhausted at-most-once termination stops blocking the bounded settlement", async () => {
+    // The single permitted hangup POST was already spent and never confirmed. No
+    // further POST is allowed and no read-back exists, so the termination outcome
+    // is permanently unknowable — holding the budget forever is the worse answer.
+    claimRow = {
+      reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
+      actual_cost_usd: 0, minutes: 2, outcome: "error",
+      provider_termination_state: "unknown", provider_termination_mode: "hangup",
+      provider_termination_attempted_at: "2026-08-22T05:20:00.000Z",
+      provider_usage_state: "unknown", openai_call_id: "rtc-exhausted",
+      reconcile_attempts: 48, reserved_cost_usd: 1,
+    };
+
+    expect(await reconcileBudgetReservations()).toBe(1);
+    expect(unresolvedSettlements).toHaveLength(1);
+    expect(unresolvedSettlements[0].p_outcome).toBe("error");
+    // 2 minutes at 1.00 USD per the configured 15-minute ceiling.
+    expect(unresolvedSettlements[0].p_estimated_cost).toBeCloseTo(0.1333, 4);
+  });
+
+  test("an unknown termination that was never attempted still retries instead of settling", async () => {
+    claimRow = {
+      reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
+      actual_cost_usd: 0, minutes: 2, outcome: "error",
+      provider_termination_state: "unknown", provider_termination_mode: "hangup",
+      provider_termination_attempted_at: null,
+      provider_usage_state: "unknown", openai_call_id: "rtc-never-attempted",
+      reconcile_attempts: 48, reserved_cost_usd: 1,
+    };
+
+    expect(await reconcileBudgetReservations(async () => new Response(null, { status: 500 }))).toBe(0);
+    expect(unresolvedSettlements).toHaveLength(0);
+  });
+
   test("the reaper reports zero rather than throwing when the RPC is unavailable", async () => {
     reapResult = null;
     expect(await reapAbandonedCalls()).toBe(0);

@@ -140,7 +140,11 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
     : undefined;
 
   const usageResolved = providerUsageState === "resolved" || providerUsageState === "not_applicable";
-  if (!usageResolved && !needsTermination
+  // At-most-once already spent the single permitted termination POST and the
+  // outcome never confirmed. No further POST is allowed and no read-back exists,
+  // so the outcome is permanently unknowable rather than merely pending.
+  const terminationExhausted = providerState === "unknown" && row.provider_termination_attempted_at != null;
+  if (!usageResolved && (!needsTermination || terminationExhausted)
     && Number(row.reconcile_attempts ?? 0) >= UNRESOLVED_SETTLEMENT_MIN_ATTEMPTS) {
     // A call whose media never carried usage events leaves provider usage unknown
     // forever. Holding the full reservation would silently consume the tenant's
@@ -163,6 +167,7 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
         reservation_id: row.reservation_id,
         settlement_basis: "reservation_rate_estimate",
         provider_usage_state: providerUsageState ?? "unknown",
+        provider_termination_state: providerState,
       },
     });
     if (settleError) {
