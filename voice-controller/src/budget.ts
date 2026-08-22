@@ -143,7 +143,11 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
   // At-most-once already spent the single permitted termination POST and the
   // outcome never confirmed. No further POST is allowed and no read-back exists,
   // so the outcome is permanently unknowable rather than merely pending.
-  const terminationExhausted = providerState === "unknown" && row.provider_termination_attempted_at != null;
+  // Exhaustion is "an attempt was durably recorded", not any single state: the one
+  // POST may end in unknown, pending, or external_evidence_required, and at-most-once
+  // forbids another either way.
+  const terminationExhausted = row.provider_termination_attempt_id != null
+    && providerState !== "confirmed" && providerState !== "not_required";
   if (!usageResolved && (!needsTermination || terminationExhausted)
     && Number(row.reconcile_attempts ?? 0) >= UNRESOLVED_SETTLEMENT_MIN_ATTEMPTS) {
     // A call whose media never carried usage events leaves provider usage unknown

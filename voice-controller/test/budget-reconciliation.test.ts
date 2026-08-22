@@ -326,6 +326,7 @@ describe("durable budget reconciliation", () => {
       actual_cost_usd: 0, minutes: 2, outcome: "error",
       provider_termination_state: "unknown", provider_termination_mode: "hangup",
       provider_termination_attempted_at: "2026-08-22T05:20:00.000Z",
+      provider_termination_attempt_id: "8aa3b407-25b1-45a8-a68c-35ab1b9e7538",
       provider_usage_state: "unknown", openai_call_id: "rtc-exhausted",
       reconcile_attempts: 48, reserved_cost_usd: 1,
     };
@@ -334,6 +335,26 @@ describe("durable budget reconciliation", () => {
     expect(unresolvedSettlements).toHaveLength(1);
     expect(unresolvedSettlements[0].p_outcome).toBe("error");
     // 2 minutes at 1.00 USD per the configured 15-minute ceiling.
+    expect(unresolvedSettlements[0].p_estimated_cost).toBeCloseTo(0.1333, 4);
+  });
+
+  test("an ambiguous attempt awaiting external evidence also settles at the bound", async () => {
+    // The real production shape: the single POST timed out, so the design parks the
+    // call in external_evidence_required. That evidence may never arrive, and the
+    // reservation must not be held hostage to it.
+    claimRow = {
+      reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
+      actual_cost_usd: 0, minutes: 2, outcome: "error",
+      provider_termination_state: "external_evidence_required",
+      provider_termination_mode: "hangup",
+      provider_termination_attempted_at: "2026-08-22T05:31:44.028Z",
+      provider_termination_attempt_id: "8aa3b407-25b1-45a8-a68c-35ab1b9e7538",
+      provider_usage_state: "unknown", openai_call_id: "rtc-evidence",
+      reconcile_attempts: 48, reserved_cost_usd: 1,
+    };
+
+    expect(await reconcileBudgetReservations()).toBe(1);
+    expect(unresolvedSettlements).toHaveLength(1);
     expect(unresolvedSettlements[0].p_estimated_cost).toBeCloseTo(0.1333, 4);
   });
 
