@@ -97,6 +97,13 @@ describe("strict Hermes action output", () => {
       action: "open_team_case",
       guidance: "Apologize briefly and open a team-review case.",
     });
+    const sent = JSON.parse(requestBody);
+    const systemPrompt = sent.messages?.[0]?.content ?? "";
+    expect(systemPrompt).toContain("complete response MUST be exactly one of these five byte strings");
+    for (const action of ["continue_standard_flow", "open_team_case", "confirm_schedule_later", "offer_language_choice", "offer_accessibility_support"]) {
+      expect(systemPrompt).toContain(`{\"action\":\"${action}\"}`);
+    }
+    expect(systemPrompt).toContain("Map customer_upset to open_team_case");
     expect(requestBody).not.toMatch(/949|owner@|Oak|149|225|price_min|floor|caller said/i);
     expect(JSON.stringify(result)).not.toContain("choices");
   });

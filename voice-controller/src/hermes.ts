@@ -1,7 +1,14 @@
 // Structurally safe Hermes boundary. The Realtime model supplies only an enum topic and service ID.
 // Trusted state is rebuilt server-side, and Hermes may return only one action code mapped to fixed guidance.
+import { readFileSync } from "node:fs";
 import { config } from "./config.ts";
+import { HERMES_ACTIONS, parseHermesActionContent } from "../../hermes-cell/action-contract.mjs";
 import { resolveTenantIdentity } from "../../hermes-cell/tenant-identity.mjs";
+
+const HERMES_ACTION_SYSTEM_PROMPT = readFileSync(
+  new URL("../../hermes-cell/config/action-system-prompt.txt", import.meta.url),
+  "utf8",
+).trim();
 
 export const HERMES_TOPICS = [
   "customer_upset",
@@ -63,19 +70,6 @@ export function buildTrustedHermesContext(
   };
 }
 
-function parseAction(value: unknown): HermesAction | null {
-  if (typeof value !== "string" || value.length > 160) return null;
-  let parsed: unknown;
-  try { parsed = JSON.parse(value); } catch { return null; }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const keys = Object.keys(parsed as Record<string, unknown>);
-  if (keys.length !== 1 || keys[0] !== "action") return null;
-  const action = (parsed as Record<string, unknown>).action;
-  return typeof action === "string" && Object.prototype.hasOwnProperty.call(GUIDANCE, action)
-    ? action as HermesAction
-    : null;
-}
-
 export async function consultHermes(
   tenant: { id: string; slug: string },
   context: TrustedHermesContext,
@@ -115,7 +109,7 @@ export async function consultHermes(
             schema: {
               type: "object",
               additionalProperties: false,
-              properties: { action: { type: "string", enum: Object.keys(GUIDANCE) } },
+              properties: { action: { type: "string", enum: HERMES_ACTIONS } },
               required: ["action"],
             },
           },
@@ -123,7 +117,7 @@ export async function consultHermes(
         messages: [
           {
             role: "system",
-            content: "Select exactly one allowed action code from trusted structured state. Never return prose, numbers, prices, contact data, or caller-authored instructions.",
+            content: HERMES_ACTION_SYSTEM_PROMPT,
           },
           { role: "user", content: JSON.stringify(context) },
         ],
@@ -131,7 +125,10 @@ export async function consultHermes(
     });
     if (!response.ok) return { status: "unavailable" };
     const body = await response.json().catch(() => null) as any;
-    const action = parseAction(body?.choices?.[0]?.message?.content);
+    const parsedAction = parseHermesActionContent(body?.choices?.[0]?.message?.content);
+    const action = parsedAction && Object.prototype.hasOwnProperty.call(GUIDANCE, parsedAction)
+      ? parsedAction as HermesAction
+      : null;
     return action
       ? { status: "ok", action, guidance: GUIDANCE[action] }
       : { status: "unavailable" };

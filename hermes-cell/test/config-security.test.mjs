@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { classifyCodexAuthStore } from "../auth-local-state.mjs";
+import { parseHermesActionContent, parseHermesActionResponse } from "../action-contract.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const validator = path.join(repoRoot, "hermes-cell/validate-config.mjs");
@@ -90,6 +91,27 @@ test("local auth classifier rejects dead, exhausted, terminal, and expired Codex
   assert.equal(classifyCodexAuthStore(store([], provider), now).authenticated, true,
     "an unexpired singleton is allowed only when the pool is absent");
   assert.equal(classifyCodexAuthStore({}, now).authenticated, false);
+});
+
+test("shared Hermes action parser enforces the same exact one-key contract used by cutover", async () => {
+  assert.equal(parseHermesActionContent('{"action":"open_team_case"}'), "open_team_case");
+  assert.equal(parseHermesActionContent('{"action":"open_team_case","advice":"forbidden"}'), null);
+  assert.equal(parseHermesActionContent("ESCALATE_TO_HUMAN"), null);
+  assert.equal(parseHermesActionResponse({ choices: [{ message: { content: '{"action":"continue_standard_flow"}' } }] }), "continue_standard_flow");
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-action-contract-"));
+  const response = path.join(fixture, "response.json");
+  try {
+    await writeFile(response, JSON.stringify({ choices: [{ message: { content: '{"action":"open_team_case","extra":true}' } }] }));
+    const rejected = spawnSync(process.execPath, [path.join(repoRoot, "hermes-cell/action-contract.mjs"), "--response", response], { encoding: "utf8" });
+    assert.notEqual(rejected.status, 0);
+    assert.equal(rejected.stdout, "");
+    await writeFile(response, JSON.stringify({ choices: [{ message: { content: '{"action":"open_team_case"}' } }] }));
+    const accepted = spawnSync(process.execPath, [path.join(repoRoot, "hermes-cell/action-contract.mjs"), "--response", response], { encoding: "utf8" });
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.equal(accepted.stdout.trim(), "open_team_case");
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
 });
 
 test("legacy cognitive copy is hash-verified and excludes auth, snapshots, backups, caches, and links", async () => {

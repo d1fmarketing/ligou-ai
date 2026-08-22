@@ -100,6 +100,7 @@ printf '%s\n' 'stage=preflight'
 docker inspect --format '{{range .Mounts}}{{println .Name .Destination}}{{end}}' "$OLD_CELL" | grep -Fx "${OLD_VOLUME} /opt/data" >/dev/null
 [ -f "${RUNTIME_ROOT}/hermes-cell/tenant-compose.mjs" ]
 [ -f "${RUNTIME_ROOT}/hermes-cell/auth-local-state.mjs" ]
+[ -f "${RUNTIME_ROOT}/hermes-cell/action-contract.mjs" ]
 [ -f "${RUNTIME_ROOT}/hermes-cell/copy-cognitive-state.py" ]
 [ -f "$REGISTRY" ]
 node -e '
@@ -161,7 +162,8 @@ done
 [ "$healthy" -eq 1 ]
 
 printf '%s\n' 'stage=inference'
-payload="$(jq -nc '{
+SYSTEM_PROMPT="$(<"${RUNTIME_ROOT}/hermes-cell/config/action-system-prompt.txt")"
+payload="$(jq -nc --arg system "$SYSTEM_PROMPT" '{
   model:"hermes",stream:false,
   response_format:{type:"json_schema",json_schema:{name:"ligou_safe_action",strict:true,schema:{
     type:"object",additionalProperties:false,
@@ -169,7 +171,7 @@ payload="$(jq -nc '{
     required:["action"]
   }}},
   messages:[
-    {role:"system",content:"Select exactly one allowed action code from trusted structured state. Never return prose, numbers, prices, contact data, or caller-authored instructions."},
+    {role:"system",content:$system},
     {role:"user",content:"{\"schema\":\"ligou.hermes.context.v1\",\"topic\":\"customer_upset\",\"service\":{\"id\":\"plumbing\",\"approved\":true},\"business\":{\"vertical\":\"plumbing\"},\"authority\":{\"auth_epoch\":1,\"policy_epoch\":1},\"operations\":{\"hours_configured\":true}}"}
   ]
 }')"
@@ -180,7 +182,7 @@ http="$({
 } | curl -sS --max-time 120 -o "$REPLY_FILE" -w '%{http_code}' --config - \
   --data "$payload" "http://127.0.0.1:${HOST_PORT}/v1/chat/completions")"
 if [ "$http" != 200 ]; then printf 'inference_http=%s\n' "$http" >&2; false; fi
-action="$(jq -er '.choices[0].message.content | fromjson | .action' "$REPLY_FILE")"
+action="$(node "${RUNTIME_ROOT}/hermes-cell/action-contract.mjs" --response "$REPLY_FILE")"
 case "$action" in
   continue_standard_flow|open_team_case|confirm_schedule_later|offer_language_choice|offer_accessibility_support) ;;
   *) echo 'inference_action_invalid' >&2; false ;;
