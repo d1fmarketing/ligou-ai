@@ -57,30 +57,33 @@
 /* ═══ 1. Design tokens ═══════════════════════════════════════ */
 :root {
   font-family: "Archivo", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: #041d27;
-  background: #fafaf8;
+  color: var(--ink-950);
+  background: var(--paper);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   color-scheme: light;
+  /* Paleta alinhada ao design system da landing (_ds/tokens/colors.css).
+     Exceção deliberada: --text-muted fica AA (≥4.5:1) — o tom claro da
+     landing vive em --text-faint, decorativo apenas. */
   --ink-950: #041d27;
-  --ink-900: #0b2936;
-  --ink-800: #123645;
-  --ink-700: #274b59;
-  --text-secondary: #516873;
-  --text-muted: #6f838c;
-  --paper: #fafaf8;
-  --paper-warm: #f5f5f1;
+  --ink-900: #082f3d;
+  --ink-800: #0c3a4a;
+  --ink-700: #223d4b;
+  --text-secondary: #48656e;
+  --text-muted: #5b727c;
+  --paper: #fbfcf8;
+  --paper-warm: #f3f5ee;
   --white: #ffffff;
   --orange: #ff5a36;
   --orange-dark: #b83216;
-  --orange-soft: #fff0ea;
-  --teal: #0b756a;
+  --orange-soft: #fff1ec;
+  --teal: #0b655a;
   --teal-bright: #46c2af;
-  --teal-soft: #e7f3ef;
-  --border: rgba(4, 29, 39, 0.12);
-  --border-strong: rgba(4, 29, 39, 0.22);
-  --shadow-soft: 0 12px 32px rgba(4, 29, 39, 0.08);
-  --shadow-float: 0 18px 54px rgba(4, 29, 39, 0.17);
+  --teal-soft: #eaf7f2;
+  --border: rgba(4, 29, 39, 0.08);
+  --border-strong: rgba(4, 29, 39, 0.18);
+  --shadow-soft: 0 1px 2px rgba(4, 29, 39, 0.04), 0 8px 24px -12px rgba(4, 29, 39, 0.16);
+  --shadow-float: 0 24px 48px -16px rgba(4, 29, 39, 0.28);
   --nav-height: 77px;
   --header-height: 62px;
   --type-micro: 0.625rem;
@@ -210,8 +213,17 @@ svg {
 }
 
 :focus-visible {
-  outline: 3px solid #147f73;
+  outline: 3px solid var(--focus-ring-color);
   outline-offset: 3px;
+}
+
+/* Sobre navy, o teal-700 some (≈1.8:1) — containers escuros trocam o anel. */
+.mobile-header,
+.sidebar,
+.approval-card,
+.approvals-detail,
+.context-inspector {
+  --focus-ring-color: var(--teal-bright);
 }
 
 button:disabled {
