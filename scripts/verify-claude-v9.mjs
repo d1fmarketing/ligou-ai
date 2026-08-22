@@ -47,10 +47,11 @@ const applicationSource = await readFile(
   path.join(root, "src/runtime/ligou-app9.jsx"),
   "utf8",
 );
-assert(applicationSource.includes("Agente operacional de inteligência artificial"), "AI category descriptor missing from hero eyebrow (brand guide: premissa não reabrir; forma curta aprovada por RJ 2026-08-22)");
+const normalizeNbsp = (text) => text.replace(/\u00A0/g, " ");
+assert(normalizeNbsp(applicationSource).includes("Agente operacional de inteligência artificial"), "AI category descriptor missing from hero eyebrow (brand guide: premissa não reabrir; forma curta aprovada por RJ 2026-08-22)");
 assert(applicationSource.includes("agente de inteligência artificial da sua empresa"), "transparent AI self-identification missing (brand guide p.19/24)");
 assert(!applicationSource.includes("virtual assistant") && !applicationSource.includes("assistente virtual"), "softened 'virtual assistant' label must not return");
-assert(html.includes("Agente operacional de inteligência artificial"), "AI category descriptor missing from no-JS hero");
+assert(normalizeNbsp(html).includes("Agente operacional de inteligência artificial"), "AI category descriptor missing from no-JS hero");
 assert(applicationSource.includes("Você ensina em português · Ele atende em inglês, espanhol e português"), "owner-taught multilingual hero claim missing");
 assert(applicationSource.includes("Preciso falar inglês ou espanhol para ensinar o Ligou?"), "owner-taught multilingual FAQ missing");
 assert(applicationSource.includes("Memória permanente do seu negócio"), "permanent business memory message missing");

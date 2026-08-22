@@ -175,7 +175,7 @@ function Hero() {
     {band !== 'mid' ? art : null}
     <Container className="hero4-grid" style={{maxWidth: 1500}}>
       <div className="hero4-copy hd" style={{'--d': '40ms'}}>
-        <div className="hd" style={{'--d': '60ms'}}><span className="h4-eyebrow">Agente operacional de inteligência artificial</span></div>
+        <div className="hd" style={{'--d': '60ms'}}><span className="h4-eyebrow">Agente operacional de inteligência artificial</span></div>
         <h1>
           <span className="lmask"><span className="ln" style={{'--d': '160ms'}}>Ligou?</span></span>
           <span className="lmask"><span className="ln" style={{'--d': '290ms'}}><span className="acc">Atendido.</span></span></span>
