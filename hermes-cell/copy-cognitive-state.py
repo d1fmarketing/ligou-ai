@@ -113,8 +113,8 @@ def main() -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source / relative, target, follow_symlinks=False)
 
-    _destination_dirs, destination_files = inventory(destination)
-    if destination_files != source_files:
+    destination_dirs, destination_files = inventory(destination)
+    if destination_dirs != source_dirs or destination_files != source_files:
         raise RuntimeError("cognitive_copy_verification_failed")
     if any(path.name.lower() == "auth.json" for path in destination.rglob("*")):
         raise RuntimeError("cognitive_auth_forbidden")
@@ -123,8 +123,6 @@ def main() -> None:
     for required in ("memories", "skills", "sessions"):
         prefix = f"{required}/"
         counts[required] = sum(1 for relative, _size, _digest in source_files if relative.startswith(prefix))
-        if counts[required] < 1:
-            raise RuntimeError("cognitive_required_state_empty")
     print(json.dumps({
         "ok": True,
         "files": len(source_files),

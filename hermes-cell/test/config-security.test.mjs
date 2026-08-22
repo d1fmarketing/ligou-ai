@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -119,6 +119,12 @@ test("legacy cognitive copy is hash-verified and excludes auth, snapshots, backu
     await assert.rejects(readFile(path.join(destination, "auth.json"), "utf8"));
     await assert.rejects(readFile(path.join(destination, "stale.txt"), "utf8"));
     await assert.rejects(readFile(path.join(destination, "state-snapshots/old/auth.json"), "utf8"));
+
+    await rm(path.join(source, "memories/MEMORY.md"));
+    const emptyMemory = spawnSync("python3", [cognitiveCopy, "--source", source, "--destination", destination], { encoding: "utf8" });
+    assert.equal(emptyMemory.status, 0, emptyMemory.stderr);
+    assert.equal(JSON.parse(emptyMemory.stdout).required.memories, 0);
+    await access(path.join(destination, "memories"));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
