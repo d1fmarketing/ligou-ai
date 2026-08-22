@@ -493,6 +493,53 @@ test("backup script creates and uploads only the cognitive archive plus authenti
   }
 });
 
+test("archive-safety applies the same narrow skills name exemption on cognitive archives", async () => {
+  // Direct probes of forbiddenEntry's mirror of the normalizer exemption, so the
+  // two hand-written validators cannot silently diverge.
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-safety-exemption-"));
+  try {
+    const payload = path.join(fixture, "payload");
+    const cognitive = path.join(payload, "cognitive");
+    await mkdir(path.join(cognitive, "skills/x"), { recursive: true });
+    const database = path.join(cognitive, "state.db");
+    const created = run("sqlite3", [database, "create table state (id integer primary key, value text); insert into state(value) values ('synthetic');"]);
+    assert.equal(created.status, 0, created.stderr);
+    const zipUp = async (name) => {
+      const archive = path.join(fixture, name);
+      const zipped = run("zip", ["-qr", archive, "."], { cwd: payload });
+      assert.equal(zipped.status, 0, zipped.stderr);
+      return archive;
+    };
+
+    await writeFile(path.join(cognitive, "skills/x/git-credential-token.py"), "print('helper')\n");
+    const accepted = run(process.execPath, [archiveTool, "inspect", await zipUp("accept.zip")]);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    await rm(path.join(cognitive, "skills/x/git-credential-token.py"));
+
+    const hostile = [
+      ["config/git-credential-token.py", "file"],
+      ["skills/x/access_token.json", "file"],
+      ["skills/my-credentials-dir/notes.md", "file"],
+      ["skills/access-tokens-dir", "dir"],
+      ["skills/credential-helper.py", "dir"],
+    ];
+    for (const [relative, kind] of hostile) {
+      const target = path.join(cognitive, relative);
+      if (kind === "dir") await mkdir(target, { recursive: true });
+      else {
+        await mkdir(path.dirname(target), { recursive: true });
+        await writeFile(target, "x\n");
+      }
+      const rejected = run(process.execPath, [archiveTool, "inspect", await zipUp(`reject-${relative.replaceAll("/", "_")}.zip`)]);
+      assert.notEqual(rejected.status, 0, `${relative} (${kind}) must be rejected`);
+      assert.match(rejected.stderr, /archive_forbidden_path/);
+      await rm(target, { recursive: true, force: true });
+    }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("backup script cleans up the raw archive when normalization rejects it", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-backup-rawleak-"));
   try {

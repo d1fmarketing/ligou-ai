@@ -3,15 +3,25 @@ import { readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { inspectArchive } from "./archive-safety.mjs";
 
+// Signed statement of what can never appear in the archive. Must stay truthful
+// against archive-safety's actual rules: the fuzzy credential/secret/token name
+// rule has a narrow carve-out for code-file basenames under skills/, so it is
+// declared as a policy line rather than absolute globs.
 const EXCLUSIONS = [
   "**/.env*",
   "**/auth.json",
+  "**/credentials.json",
+  "**/id_rsa",
+  "**/id_ed25519",
   "**/.hermes/**",
   "**/.codex/**",
-  "**/*credential*",
-  "**/*secret*",
-  "**/*token*",
+  "**/.ssh/**",
+  "**/credentials/**",
+  "**/secrets/**",
+  "**/tokens/**",
   "hermes-model-auth/**",
+  "**/model-auth/**",
+  "name-policy: segments matching credential|secret|access_token|refresh_token are forbidden except a code/text-extension basename under skills/",
 ];
 const TENANT = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
