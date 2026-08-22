@@ -15,6 +15,7 @@ import { VoicePanel } from "./voice/VoicePanel.jsx";
 import { supabase, supabaseConfigured } from "./lib/supabase.js";
 import { resolveFunctionsBase } from "./runtime-config.js";
 import { runOwnerBootstrap } from "./auth/bootstrap.js";
+import { defaultSessionType, onboardingCta } from "./voice/panel-copy.js";
 import { signInWithGoogle } from "./auth/google.js";
 import { stripProviderFields } from "./auth/session-storage.js";
 
@@ -247,9 +248,21 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
       setDialog(null);
       if (successMessage) setToast({ kind: "success", text: successMessage });
     } catch (error) {
+      await refresh().catch(() => {});
       setToast({ kind: "warning", text: error?.message || "A ação não pôde ser concluída nesta demonstração." });
     }
   }, [refresh]);
+
+  const [deciding, setDeciding] = useState(false);
+  const decideSuggestion = useCallback(async (action, successMessage) => {
+    if (deciding) return;
+    setDeciding(true);
+    try {
+      await perform(action, successMessage);
+    } finally {
+      setDeciding(false);
+    }
+  }, [deciding, perform]);
 
   const sendMessage = async (text) => {
     setSending(true);
@@ -322,7 +335,10 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
             pendingApproval={pendingApproval}
             sending={sending}
             onSend={sendMessage}
-            onVoice={() => setDialog({ type: "voice" })}
+            onVoice={() => setDialog({ type: "voice", sessionType: defaultSessionType(tenant?.status) })}
+            onboardingCtaLabel={onboardingCta(tenant?.status)}
+            onStartOnboarding={() => setDialog({ type: "voice", sessionType: "onboarding" })}
+            prototype={!supabaseConfigured}
             onApprove={openApproval}
             onAdjust={openAdjustment}
             onReject={openRejection}
@@ -337,6 +353,23 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
             setFilter={setMemoryFilter}
             onEdit={openMemoryEdit}
             onRevoke={openMemoryRevoke}
+            decisionBusy={deciding}
+            onApproveSuggestion={(entry) => decideSuggestion(async () => {
+              const result = await gateway.approveMemory(entry.id);
+              if (result?.warning) throw new Error(result.warning);
+            }, "Sugestão aprovada — o Ligou já passa a usar esta regra.")}
+            onRejectSuggestion={(entry) => decideSuggestion(async () => {
+              const result = await gateway.rejectMemory(entry.id);
+              if (result?.warning) throw new Error(result.warning);
+            }, "Sugestão rejeitada. Nada mudou na memória ativa.")}
+            onApproveAllSuggestions={(suggested) => decideSuggestion(async () => {
+              let approved = 0;
+              for (const entry of suggested) {
+                const result = await gateway.approveMemory(entry.id);
+                if (result?.warning) throw new Error(`Aprovadas ${approved} de ${suggested.length}. Falha: ${result.warning}`);
+                approved += 1;
+              }
+            }, "Lote aprovado — regras ativas na memória. Se houver uma conversa de voz aberta, reinicie-a para valer as novas regras.")}
           />
         ) : null}
         {route === "poderes" && supabaseConfigured ? (
@@ -412,7 +445,7 @@ function DashboardDialog({
         </Dialog>
       );
     }
-    return <VoicePanel onClose={onClose} />;
+    return <VoicePanel onClose={onClose} initialSessionType={dialog.sessionType ?? "owner_browser"} />;
   }
 
   if (dialog.type === "approve") {

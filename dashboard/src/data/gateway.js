@@ -7,6 +7,7 @@ import {
   rejectApprovalTransition,
   revokeMemoryTransition,
   sendMessageTransition,
+  decideMemoryTransition,
   updateMemoryTransition,
 } from "./model.js";
 
@@ -196,6 +197,14 @@ export function createDashboardGateway(storage = globalThis.localStorage) {
 
     updateMemory(memoryId, patch) {
       return mutate((state) => updateMemoryTransition(state, memoryId, patch));
+    },
+
+    approveMemory(memoryId) {
+      return mutate((state) => decideMemoryTransition(state, memoryId, "aprovado"));
+    },
+
+    rejectMemory(memoryId) {
+      return mutate((state) => decideMemoryTransition(state, memoryId, "rejeitado"));
     },
 
     revokeMemory(memoryId, reason) {

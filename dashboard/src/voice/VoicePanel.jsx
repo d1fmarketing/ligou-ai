@@ -3,15 +3,18 @@ import { IconMicrophone2, IconPhoneOff } from "@tabler/icons-react";
 import { Dialog } from "../components/Dialog.jsx";
 import { supabase } from "../lib/supabase.js";
 import { startVoiceSession } from "./session.js";
+import { statusLineFor } from "./panel-copy.js";
 
-// Live voice panel: talk to the agent as if you were a caller. Cases created mid-call surface here in realtime.
-export function VoicePanel({ onClose }) {
+// Live voice panel: role-play a caller or run the Portuguese onboarding interview.
+// Cases and interview suggestions created mid-call surface here in realtime.
+export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
   const [status, setStatus] = useState("idle"); // idle | connecting | live | ended | error
   const [error, setError] = useState(null);
   const [lines, setLines] = useState([]);
   const [liveCases, setLiveCases] = useState([]);
+  const [liveSuggestions, setLiveSuggestions] = useState([]);
   const [model, setModel] = useState("gpt-realtime-2.1");
-  const [sessionType, setSessionType] = useState("owner_browser");
+  const [sessionType, setSessionType] = useState(initialSessionType);
   const sessionRef = useRef(null);
 
   useEffect(() => {
@@ -20,6 +23,10 @@ export function VoicePanel({ onClose }) {
       .channel("voice-panel-cases")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "approval_cases" }, (payload) => {
         setLiveCases((prev) => [payload.new, ...prev].slice(0, 5));
+      })
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "rules" }, (payload) => {
+        if (payload.new?.status !== "sugerido") return;
+        setLiveSuggestions((prev) => [payload.new, ...prev].slice(0, 8));
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
@@ -40,7 +47,7 @@ export function VoicePanel({ onClose }) {
         model,
         sessionType,
         onEvent: (ev) => setLines((prev) => [...prev.slice(-30), ev]),
-        onEnd: (reason) => setStatus(reason === "deadline" ? "ended" : "ended"),
+        onEnd: () => setStatus("ended"),
       });
       setStatus("live");
     } catch (e) {
@@ -54,8 +61,17 @@ export function VoicePanel({ onClose }) {
     setStatus("ended");
   }
 
+  const interviewing = sessionType === "onboarding";
+
   return (
-    <Dialog open title="Falar com o Ligou" description="Converse por voz como se fosse um cliente. Casos abertos durante a chamada aparecem aqui ao vivo." onClose={() => { hangup(); onClose(); }}>
+    <Dialog
+      open
+      title={interviewing ? "Entrevista de onboarding" : "Falar com o Ligou"}
+      description={interviewing
+        ? "O Ligou te entrevista em português e registra cada regra como sugestão. Você aprova o lote na aba Memória."
+        : "Converse por voz como se fosse um cliente. Casos abertos durante a chamada aparecem aqui ao vivo."}
+      onClose={() => { hangup(); onClose(); }}
+    >
       <div className="voice-live">
         {status === "idle" || status === "error" || status === "ended" ? (
           <div className="voice-live-start">
@@ -75,14 +91,20 @@ export function VoicePanel({ onClose }) {
               </select>
             </label>
             <button type="button" className="voice-live-button" onClick={begin}>
-              <IconMicrophone2 aria-hidden="true" /> {status === "ended" ? "Ligar de novo" : "Iniciar chamada"}
+              <IconMicrophone2 aria-hidden="true" /> {status === "ended" ? "Ligar de novo" : (interviewing ? "Começar entrevista" : "Iniciar chamada")}
             </button>
-            {status === "ended" ? <p className="voice-live-note">Chamada encerrada. Resumo e custo aparecem no histórico.</p> : null}
+            {status === "ended" ? (
+              <p className="voice-live-note">
+                {interviewing
+                  ? "Entrevista encerrada. Aprove as sugestões na aba Memória para o Ligou passar a usá-las."
+                  : "Chamada encerrada. Resumo e custo aparecem no histórico."}
+              </p>
+            ) : null}
             {error ? <p className="voice-live-error">{error}</p> : null}
           </div>
         ) : (
           <div className="voice-live-active">
-            <p className="voice-live-status">{status === "connecting" ? "Conectando…" : "Ao vivo — fale em inglês ou espanhol"}</p>
+            <p className="voice-live-status">{status === "connecting" ? "Conectando…" : statusLineFor(sessionType)}</p>
             <div className="voice-live-transcript" aria-live="polite">
               {lines.map((l, i) => (
                 <p key={i} className={l.kind === "agent" ? "line-agent" : "line-caller"}>
@@ -95,6 +117,17 @@ export function VoicePanel({ onClose }) {
             </button>
           </div>
         )}
+        {interviewing && liveSuggestions.length > 0 ? (
+          <div className="voice-live-cases">
+            <h3>Sugestões registradas nesta entrevista · {liveSuggestions.length}</h3>
+            {liveSuggestions.map((r) => (
+              <div key={r.id} className="voice-live-case">
+                <span className="case-badge">{r.category}</span>
+                <p>{r.text}</p>
+              </div>
+            ))}
+          </div>
+        ) : null}
         {liveCases.length > 0 ? (
           <div className="voice-live-cases">
             <h3>Casos abertos nesta conversa</h3>

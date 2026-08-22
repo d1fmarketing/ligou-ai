@@ -322,6 +322,32 @@ export function revokeMemoryTransition(state, memoryId, rawReason) {
   };
 }
 
+export function decideMemoryTransition(state, memoryId, decision) {
+  if (!["aprovado", "rejeitado"].includes(decision)) {
+    throw new Error("Escolha aprovar ou rejeitar a sugestão.");
+  }
+  const next = beginMutation(state);
+  const entry = findMemory(next, memoryId);
+  if (entry.status !== "sugerida") {
+    throw new Error("Somente sugestões pendentes podem ser decididas.");
+  }
+
+  entry.version += 1;
+  entry.status = decision === "aprovado" ? "ativa" : "rejeitada";
+  entry.updatedAt = next.updatedAt;
+  appendActivity(
+    next,
+    decision === "aprovado" ? "memory.approved" : "memory.rejected",
+    `Sugestão “${entry.text}” ${decision === "aprovado" ? "aprovada" : "rejeitada"}.`,
+    { memoryId: entry.id, version: entry.version },
+  );
+
+  return {
+    state: finishMutation(next),
+    entry: cloneState(entry),
+  };
+}
+
 function normalizeApprovalMode(value) {
   const normalized = searchText(String(value || ""));
   if (["case", "caso", "somente este caso", "single"].includes(normalized)) {

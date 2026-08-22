@@ -83,10 +83,15 @@ export function MemoryView({
   setFilter,
   onEdit,
   onRevoke,
+  onApproveSuggestion,
+  onRejectSuggestion,
+  onApproveAllSuggestions,
+  decisionBusy = false,
 }) {
   const activeFilter = normalizedFilter(filter);
   const filteredEntries = visibleEntries(entries, query, filter);
   const categories = [...new Set(entries.map((entry) => entry?.category).filter(Boolean))];
+  const suggested = entries.filter((entry) => entryStatus(entry) === 'sugerida');
 
   const updateStatus = (status) => {
     if (filter && typeof filter === 'object') {
@@ -118,6 +123,24 @@ export function MemoryView({
           <span>{entries.length === 1 ? 'regra' : 'regras'}</span>
         </div>
       </header>
+
+      {suggested.length > 0 && onApproveAllSuggestions ? (
+        <div className="memory-suggestion-banner" role="status">
+          <IconShieldCheck aria-hidden="true" />
+          <p>
+            <strong>{suggested.length === 1 ? '1 sugestão da entrevista aguarda' : `${suggested.length} sugestões da entrevista aguardam`} sua aprovação.</strong>{' '}
+            Aprovadas, viram regras ativas que o Ligou passa a usar nas conversas.
+          </p>
+          <button
+            className="button button--primary"
+            type="button"
+            disabled={decisionBusy}
+            onClick={() => onApproveAllSuggestions(suggested)}
+          >
+            {decisionBusy ? 'Aprovando…' : 'Aprovar todas'}
+          </button>
+        </div>
+      ) : null}
 
       <div className="memory-tools">
         <label className="memory-search">
@@ -243,9 +266,40 @@ export function MemoryView({
                       <dt>Aprovação</dt>
                       <dd>{readable(entry.approval || entry.approvedBy, status === 'sugerida' ? 'Aguardando aprovação' : 'Rafael')}</dd>
                     </div>
+                    {typeof entry.structured?.price_target === 'number' ? (
+                      <div>
+                        <dt>Preço aplicado</dt>
+                        <dd>
+                          {typeof entry.structured?.price_min === 'number' && entry.structured.price_min !== entry.structured.price_target
+                            ? `$${entry.structured.price_min} – $${entry.structured.price_target}`
+                            : `Fixo: $${entry.structured.price_target}`}
+                        </dd>
+                      </div>
+                    ) : null}
                   </dl>
 
                   <footer className="memory-card-actions">
+                    {status === 'sugerida' && onApproveSuggestion ? (
+                      <button
+                        className="memory-approve-button button button--primary"
+                        type="button"
+                        disabled={decisionBusy}
+                        onClick={() => onApproveSuggestion(entry)}
+                      >
+                        <IconShieldCheck aria-hidden="true" />
+                        Aprovar
+                      </button>
+                    ) : null}
+                    {status === 'sugerida' && onRejectSuggestion ? (
+                      <button
+                        className="memory-reject-button"
+                        type="button"
+                        disabled={decisionBusy}
+                        onClick={() => onRejectSuggestion(entry)}
+                      >
+                        Rejeitar
+                      </button>
+                    ) : null}
                     <button
                       className="memory-edit-button"
                       type="button"

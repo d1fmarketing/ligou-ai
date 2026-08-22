@@ -1466,6 +1466,75 @@ button:disabled {
   color: #8f2e1d;
 }
 
+.memory-card-actions .memory-approve-button {
+  border-color: var(--orange);
+  background: var(--orange);
+  color: #fff;
+}
+
+.memory-card-actions .memory-approve-button:hover {
+  background: var(--orange-dark);
+  border-color: var(--orange-dark);
+}
+
+.memory-card-actions .memory-reject-button {
+  color: #8f2e1d;
+}
+
+.memory-suggestion-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--orange);
+  border-radius: 14px;
+  background: var(--orange-soft);
+}
+
+.memory-suggestion-banner > svg {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  color: var(--orange-dark);
+}
+
+.memory-suggestion-banner p {
+  flex: 1;
+  margin: 0;
+  font-size: var(--type-small);
+  line-height: 1.4;
+}
+
+.memory-suggestion-banner .button {
+  flex-shrink: 0;
+}
+
+.onboarding-cta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--orange);
+  border-radius: 14px;
+  background: var(--orange-soft);
+}
+
+.onboarding-cta p {
+  flex: 1 1 260px;
+  margin: 0;
+  font-size: var(--type-small);
+  line-height: 1.45;
+}
+
+.onboarding-cta .button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .memory-empty,
 .approvals-empty {
   display: grid;

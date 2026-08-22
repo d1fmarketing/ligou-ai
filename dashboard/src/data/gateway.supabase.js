@@ -1,6 +1,7 @@
 // Real gateway: same 10 async signatures as gateway.js, backed by Supabase (owner-scoped RLS + hardened RPCs).
 // The prototype's model.js remains the vocabulary; here every decision flows through server RPCs.
 import { supabase } from "../lib/supabase.js";
+import { decideMemoryVia } from "./memory-decisions.js";
 
 const SCOPE_TO_DB = {
   service: "servico", "serviço": "servico", servico: "servico",
@@ -33,6 +34,7 @@ function mapRuleGroups(rules) {
       title: latest.category === "preco" ? `Preço · ${latest.structured?.service_type ?? ""}` : latest.category,
       text: latest.text,
       category: latest.category,
+      structured: latest.structured ?? null,
       status,
       origin: { onboarding: "Entrevista de onboarding", escalacao: "Aprovação de caso", edicao_manual: "Edição manual", aprendizado: "Aprendizado em chamada" }[latest.origem] ?? latest.origem,
       scope: latest.escopo,
@@ -212,6 +214,26 @@ export function createSupabaseGateway() {
       if (error) return { state: (await fetchAll()).state, warning: error.message };
       const { state } = await fetchAll();
       return { state, entry: state.memory.find((m) => m.id === data) ?? null, receipt: { id: data } };
+    },
+
+    async approveMemory(memoryId) {
+      try {
+        const newVersionId = await decideMemoryVia(supabase, memoryId, "aprovado");
+        const { state } = await fetchAll();
+        return { state, entry: state.memory.find((m) => m.id === newVersionId) ?? null };
+      } catch (e) {
+        return { state: (await fetchAll()).state, warning: e.message };
+      }
+    },
+
+    async rejectMemory(memoryId) {
+      try {
+        await decideMemoryVia(supabase, memoryId, "rejeitado");
+        const { state } = await fetchAll();
+        return { state, entry: null };
+      } catch (e) {
+        return { state: (await fetchAll()).state, warning: e.message };
+      }
     },
 
     async listApprovals({ search, query, status } = {}) {

@@ -122,6 +122,9 @@ export function ChatView({
   sending,
   onSend,
   onVoice,
+  onboardingCtaLabel = null,
+  onStartOnboarding,
+  prototype = false,
   onApprove,
   onAdjust,
   onReject,
@@ -138,14 +141,31 @@ export function ChatView({
     await onSend(text);
   };
 
+  const today = useMemo(
+    () => new Date().toLocaleDateString("pt-BR", { day: "numeric", month: "long", year: "numeric" }),
+    [],
+  );
+
   return (
     <section className="chat-view" aria-labelledby="chat-title">
       <header className="page-heading chat-heading">
-        <span className="prototype-badge">Protótipo <i aria-hidden="true">·</i> dados de exemplo</span>
+        {prototype ? <span className="prototype-badge">Protótipo <i aria-hidden="true">·</i> dados de exemplo</span> : null}
         <h1 id="chat-title">Conversa Operacional</h1>
         <span className="heading-rule" aria-hidden="true" />
-        <p>15 de agosto de 2026</p>
+        <p>{prototype ? "15 de agosto de 2026" : today}</p>
       </header>
+
+      {onboardingCtaLabel && onStartOnboarding ? (
+        <div className="onboarding-cta" role="status">
+          <p>
+            <strong>Seu Ligou ainda está em onboarding.</strong>{" "}
+            Numa conversa curta em português, ele te entrevista e monta a primeira versão do atendimento.
+          </p>
+          <button className="button button--primary" type="button" onClick={onStartOnboarding}>
+            <IconMicrophone2 aria-hidden="true" /> {onboardingCtaLabel}
+          </button>
+        </div>
+      ) : null}
 
       <div className="conversation" aria-live="polite" aria-relevant="additions text">
         {initialMessages[0] ? <ChatMessage message={initialMessages[0]} /> : null}
@@ -183,7 +203,7 @@ export function ChatView({
         ) : (
           <button className="voice-demo-button" type="button" onClick={onVoice}>
             <IconMicrophone2 aria-hidden="true" />
-            <span>Voz · demo</span>
+            <span>{prototype ? "Voz · demo" : "Voz"}</span>
           </button>
         )}
         {sending ? <span className="sending-status"><IconMessageCircle2 aria-hidden="true" /> Respondendo…</span> : null}
