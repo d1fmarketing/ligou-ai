@@ -14,7 +14,7 @@ function looksLikeSessionPayload(value) {
   return SESSION_MARKERS.some((marker) => String(value).includes(marker));
 }
 
-function stripProviderFields(node) {
+export function stripProviderFields(node) {
   if (typeof node !== "object" || node === null) return node;
   if (Array.isArray(node)) return node.map(stripProviderFields);
   const output = {};
@@ -44,7 +44,7 @@ export function createCustodyStorage({ persistent, temporary }) {
         parsed = JSON.parse(text);
       } catch {
         // Fail closed: an opaque payload that mentions provider tokens is never persisted.
-        if (text.includes("provider_token")) return;
+        if (text.includes("provider_token") || text.includes("provider_refresh_token")) return;
         persistent.setItem(key, text);
         return;
       }

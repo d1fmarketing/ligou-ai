@@ -572,6 +572,37 @@ async function bookingDeliveryRollback(connection, home) {
   `), "booking delivery rollback invariant"), "0:0:0:proposed:running");
 }
 
+async function handoffIntentDoubleConsume(connection, home) {
+  const uid = "61000000-0000-4000-8000-000000000001";
+  const tenant = "61000000-0000-4000-8000-000000000002";
+  const intent = "61000000-0000-4000-8000-000000000003";
+  const nonceHash = "b".repeat(64);
+  requireSuccess(await runSql(connection, home, `
+    insert into auth.users (id, email) values ('${uid}', 'handoff-race@example.invalid');
+    insert into public.tenants (id, slug, name, owner_user_id, status, bootstrap_origin)
+    values ('${tenant}', 'handoff-race', 'Handoff Race', '${uid}', 'onboarding', 'v0_2_google');
+    insert into public.connector_handoff_intents (id, tenant_id, user_id, kind, nonce_hash, expires_at)
+    values ('${intent}', '${tenant}', '${uid}', 'login', '${nonceHash}', now() + interval '10 minutes');
+  `), "handoff double-consume fixture");
+  const consumeSql = serviceTransaction(`
+select pg_sleep(0.2);
+select 'CONSUMED:' || kind from public.consume_connector_handoff('${intent}', '${nonceHash}', '${tenant}', '${uid}');
+`);
+  const first = startSql(connection, home, consumeSql);
+  const second = startSql(connection, home, consumeSql);
+  const [resultA, resultB] = await Promise.all([first.done, second.done]);
+  const outcomes = [resultA, resultB].map((result) => (
+    result.code === 0 && result.stdout.includes("CONSUMED:login") ? "consumed" : "rejected"
+  ));
+  assert.deepEqual(outcomes.sort(), ["consumed", "rejected"],
+    `exactly one concurrent consumer may win: ${resultA.stderr} | ${resultB.stderr}`);
+  const loser = resultA.code === 0 ? resultB : resultA;
+  assert.match(loser.stderr, /handoff_intent_invalid/);
+  assert.equal(scalar(await runSql(connection, home, `
+    select (consumed_at is not null)::text from public.connector_handoff_intents where id = '${intent}';
+  `), "handoff intent consumed exactly once"), "true");
+}
+
 async function concurrentOwnerBootstrap(connection, home) {
   const uid = "60000000-0000-4000-8000-000000000001";
   requireSuccess(await runSql(connection, home, `
@@ -623,6 +654,7 @@ export async function runConcurrencySuite(env = process.env) {
     ["onboarding effective policy epochs", onboardingEpochSemantics],
     ["expired transient retention", expiredTransientRetention],
     ["concurrent owner bootstrap single tenant", concurrentOwnerBootstrap],
+    ["handoff intent double-consume", handoffIntentDoubleConsume],
     ["booking-delivery transaction rollback", bookingDeliveryRollback],
   ];
   try {

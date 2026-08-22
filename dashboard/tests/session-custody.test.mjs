@@ -3,7 +3,7 @@
 // bootstrap hands the token to the Edge function exactly once.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createCustodyStorage } from "../src/auth/session-storage.js";
+import { createCustodyStorage, stripProviderFields } from "../src/auth/session-storage.js";
 import { runOwnerBootstrap } from "../src/auth/bootstrap.js";
 
 function memoryStore() {
@@ -72,6 +72,25 @@ test("an unparseable payload mentioning provider tokens is dropped, never persis
   const temporary = memoryStore();
   const storage = createCustodyStorage({ persistent, temporary });
   storage.setItem(SESSION_KEY, "not-json provider_token=ya29.secret");
+  assert.equal(persistent.getItem(SESSION_KEY), null);
+});
+
+test("the React-state session shape never carries provider tokens", () => {
+  const raw = JSON.parse(sessionJson());
+  const stripped = stripProviderFields(raw);
+  assert.equal(stripped.access_token, "sb-access-token");
+  assert.equal(stripped.user.id, "11111111-1111-4111-8111-111111111111");
+  assert.equal("provider_token" in stripped, false);
+  assert.equal("provider_refresh_token" in stripped, false);
+  // The original object is not mutated — the caller decides what to keep where.
+  assert.equal(raw.provider_token, "ya29.provider-access-secret");
+});
+
+test("an unparseable payload mentioning only the refresh token is also dropped", () => {
+  const persistent = memoryStore();
+  const temporary = memoryStore();
+  const storage = createCustodyStorage({ persistent, temporary });
+  storage.setItem(SESSION_KEY, "not-json provider_refresh_token=1//secret");
   assert.equal(persistent.getItem(SESSION_KEY), null);
 });
 

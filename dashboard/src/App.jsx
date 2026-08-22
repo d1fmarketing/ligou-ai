@@ -16,6 +16,7 @@ import { supabase, supabaseConfigured } from "./lib/supabase.js";
 import { resolveFunctionsBase } from "./runtime-config.js";
 import { runOwnerBootstrap } from "./auth/bootstrap.js";
 import { signInWithGoogle } from "./auth/google.js";
+import { stripProviderFields } from "./auth/session-storage.js";
 
 const ROUTES = new Set(["ligou", "memoria", "aprovacoes", "poderes", "conta"]);
 
@@ -61,6 +62,9 @@ export function App() {
 
   useEffect(() => {
     if (!supabaseConfigured) { setSession(null); return undefined; }
+    // Capture the one-shot provider tokens into the ref, then store only a
+    // provider-stripped session in React state: the raw tokens must never be
+    // reachable through state, DevTools, or anything that serializes it.
     const capture = (s) => {
       if (s?.provider_token) {
         providerTokensRef.current = {
@@ -68,9 +72,10 @@ export function App() {
           providerRefreshToken: s.provider_refresh_token ?? null,
         };
       }
+      return s ? stripProviderFields(s) : null;
     };
-    supabase.auth.getSession().then(({ data }) => { capture(data.session); setSession(data.session ?? null); });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => { capture(s); setSession(s ?? null); });
+    supabase.auth.getSession().then(({ data }) => { setSession(capture(data.session)); });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => { setSession(capture(s)); });
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -101,8 +106,9 @@ export function App() {
         });
         cleanOAuthCallbackUrl();
         if (tokens?.providerToken) {
-          // Rotate the in-memory session so no provider token survives the handoff.
-          supabase.auth.refreshSession().catch(() => {});
+          // Rotate the library's in-memory session so no provider token survives
+          // the handoff; awaited so a failure is known before the UI proceeds.
+          await supabase.auth.refreshSession().catch(() => {});
         }
         if (result.action === "reauth_consent") {
           await signInWithGoogle(supabase, {
