@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: d34f073f8f14c2b87d43c58d78edc38e288a4f2952fc88b04fd19e71f965feeb
+ * Source SHA-256: 855b27bf5c628d2fef5c48650d4bf60a8952c822e24454fd8e623ae9ffd7cf8d
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -347,7 +347,7 @@ function Hero() {
     style: { "--d": "60ms" }
   }, React.createElement("span", {
     className: "h4-eyebrow"
-  }, "Agente operacional de inteligência artificial")), React.createElement("h1", null, React.createElement("span", {
+  }, "Agente operacional de inteligência artificial")), React.createElement("h1", null, React.createElement("span", {
     className: "lmask"
   }, React.createElement("span", {
     className: "ln",
