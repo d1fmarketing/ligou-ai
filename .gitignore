@@ -23,3 +23,4 @@ output/
 *~
 supabase/.temp/
 supabase/.branches/
+__pycache__/
