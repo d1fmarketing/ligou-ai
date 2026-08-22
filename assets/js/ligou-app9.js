@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 0806269e2e6ddc6b740de5639d1ddef69b6803edf630e02a8ce48caecc4f2f53
+ * Source SHA-256: 363e3615085c4df63d759d19fa1897cb6a2c14fb8af11161c2788dd9a7325e04
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -77,7 +77,7 @@ function Intro4({ onDone }) {
     className: "acc"
   }, "Atendido.")), React.createElement("span", {
     className: "intro__cap"
-  }, "ligou.ai · agente operacional"), React.createElement("div", {
+  }, "ligou.ai · agente operacional de inteligência artificial"), React.createElement("div", {
     className: "intro__bar"
   })));
 }
@@ -334,7 +334,7 @@ function Hero() {
     style: { "--d": "60ms" }
   }, React.createElement("span", {
     className: "h4-eyebrow"
-  }, "Agente operacional para negócios de serviços")), React.createElement("h1", null, React.createElement("span", {
+  }, "Agente operacional de inteligência artificial para negócios de serviços")), React.createElement("h1", null, React.createElement("span", {
     className: "lmask"
   }, React.createElement("span", {
     className: "ln",
@@ -609,7 +609,7 @@ function Scene() {
     className: "iv-memory__copy"
   }, React.createElement("span", {
     className: "iv-memory__approval"
-  }, "Aprovação de nova regra"), React.createElement("p", null, React.createElement("strong", null, "Não é uma secretária eletrônica."), " É um agente com memória operacional permanente."), React.createElement("p", null, "Cada atendimento amplia o histórico do Ligou. Quando aparece uma situação nova, ele pergunta; depois que você aprova, a resposta vira uma regra permanente do seu negócio — até você decidir alterar ou apagar."))))));
+  }, "Aprovação de nova regra"), React.createElement("p", null, React.createElement("strong", null, "Não é uma secretária eletrônica."), " É um agente de inteligência artificial com memória operacional permanente."), React.createElement("p", null, "Cada atendimento amplia o histórico do Ligou. Quando aparece uma situação nova, ele pergunta; depois que você aprova, a resposta vira uma regra permanente do seu negócio — até você decidir alterar ou apagar."))))));
 }
 function CallDemo() {
   const [mrun, setMrun] = React.useState(0);
@@ -1658,7 +1658,7 @@ function Faq() {
   const qs = [
     ["Ele pode inventar um preço ou uma resposta?", "Não. O Ligou só informa preços, condições e políticas que você aprovou. Quando não tem uma resposta autorizada, coleta as informações, avisa que a equipe confirma e pergunta para você. A resposta só vira regra depois da sua aprovação."],
     ["E se o cliente quiser falar comigo?", "Você escolhe: quando transferir na hora, quando só receber aviso, e quando deixar o Ligou concluir sozinho."],
-    ["Ele fala que é inteligência artificial?", 'Ele se apresenta como assistente virtual da sua empresa: "Hi, you’ve reached [Your Business]. I’m their virtual assistant — how can I help?" A conversa é natural, mas a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.'],
+    ["Ele fala que é inteligência artificial?", 'Sim. Ele se apresenta como o agente de inteligência artificial da sua empresa: "Hi, you’ve reached [Your Business]. I’m their AI assistant — how can I help?" A conversa é natural, e a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.'],
     ["Preciso falar inglês ou espanhol para ensinar o Ligou?", "Não. A entrevista, os ajustes e a aprovação são em português. O Ligou atende em inglês, espanhol ou português e envia o resumo para você em português."],
     ["E se eu quiser cancelar?", "Você cancela pelo painel, sem multa e sem precisar falar com vendedor."]
   ];
