@@ -1977,7 +1977,7 @@ button:disabled {
 .dialog-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: var(--z-dialog);
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -1993,6 +1993,18 @@ button:disabled {
   border-radius: 22px 22px 16px 16px;
   background: var(--white);
   box-shadow: 0 24px 80px rgba(4, 29, 39, 0.32);
+  animation: dialog-rise var(--dur-med) var(--ease-out);
+}
+
+@keyframes dialog-rise {
+  from {
+    transform: translateY(14px);
+    opacity: 0.4;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
 }
 
 .dialog-panel--large {
@@ -2805,8 +2817,9 @@ button:disabled {
     font-size: var(--type-body);
   }
 
+  /* Degrau intermediário: 5 colunas só quando cabem de verdade (≥960px). */
   .memory-metadata {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .approvals-workspace {
@@ -2848,6 +2861,10 @@ button:disabled {
 }
 
 @media (min-width: 960px) {
+  .memory-metadata {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
   .approvals-workspace {
     grid-template-columns: minmax(240px, 0.7fr) minmax(400px, 1.3fr);
     align-items: start;
