@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconAlertTriangle, IconCheck, IconRefresh, IconX } from "@tabler/icons-react";
 import { AppShell } from "./components/AppShell.jsx";
 import { ApprovalCard } from "./components/ApprovalCard.jsx";
@@ -9,13 +9,15 @@ import { ApprovalsView } from "./views/ApprovalsView.jsx";
 import { ChatView } from "./views/ChatView.jsx";
 import { MemoryView } from "./views/MemoryView.jsx";
 import { PowersView } from "./views/PowersView.jsx";
-import { CalendarConnection } from "./views/CalendarConnection.jsx";
+import { SettingsView } from "./views/SettingsView.jsx";
 import { Login } from "./auth/Login.jsx";
 import { VoicePanel } from "./voice/VoicePanel.jsx";
 import { supabase, supabaseConfigured } from "./lib/supabase.js";
-import { calendarTenantId } from "./runtime-config.js";
+import { resolveFunctionsBase } from "./runtime-config.js";
+import { runOwnerBootstrap } from "./auth/bootstrap.js";
+import { signInWithGoogle } from "./auth/google.js";
 
-const ROUTES = new Set(["ligou", "memoria", "aprovacoes", "poderes"]);
+const ROUTES = new Set(["ligou", "memoria", "aprovacoes", "poderes", "conta"]);
 
 function routeFromHash() {
   const route = window.location.hash.replace("#", "");
@@ -43,29 +45,127 @@ function Toast({ toast, onClose }) {
   );
 }
 
+function cleanOAuthCallbackUrl() {
+  const { search, pathname, hash } = window.location;
+  if (/[?&](code|error|error_description)=/.test(search)) {
+    window.history.replaceState(null, "", `${pathname}${hash && ROUTES.has(hash.slice(1)) ? hash : ""}`);
+  }
+}
+
 export function App() {
   const [session, setSession] = useState(undefined); // undefined = checking
+  const [boot, setBoot] = useState({ status: "idle" });
+  // Provider tokens are delivered exactly once by supabase-js on sign-in; they are
+  // held only in this ref until the handoff and never enter React state.
+  const providerTokensRef = useRef(null);
+
   useEffect(() => {
     if (!supabaseConfigured) { setSession(null); return undefined; }
-    const claim = (s) => {
-      if (!s?.access_token) return;
-      const url = import.meta.env.VITE_CONTROLLER_URL || "http://127.0.0.1:8790";
-      fetch(`${url}/claim`, { method: "POST", headers: { Authorization: `Bearer ${s.access_token}` } }).catch(() => {});
+    const capture = (s) => {
+      if (s?.provider_token) {
+        providerTokensRef.current = {
+          providerToken: s.provider_token,
+          providerRefreshToken: s.provider_refresh_token ?? null,
+        };
+      }
     };
-    supabase.auth.getSession().then(({ data }) => { setSession(data.session ?? null); claim(data.session); });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => { setSession(s); claim(s); });
+    supabase.auth.getSession().then(({ data }) => { capture(data.session); setSession(data.session ?? null); });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => { capture(s); setSession(s ?? null); });
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!supabaseConfigured) return undefined;
+    if (session === undefined) return undefined;
+    if (!session) {
+      providerTokensRef.current = null;
+      setBoot({ status: "idle" });
+      return undefined;
+    }
+    if (boot.status === "running") return undefined;
+    if (boot.status === "ready" && boot.userId === session.user?.id) return undefined;
+    let cancelled = false;
+    (async () => {
+      setBoot({ status: "running", stage: "tenant" });
+      try {
+        const tokens = providerTokensRef.current;
+        providerTokensRef.current = null;
+        const result = await runOwnerBootstrap({
+          client: supabase,
+          session,
+          providerToken: tokens?.providerToken ?? null,
+          providerRefreshToken: tokens?.providerRefreshToken ?? null,
+          functionsBase: resolveFunctionsBase(import.meta.env.VITE_SUPABASE_FUNCTIONS_URL, import.meta.env.VITE_SUPABASE_URL),
+          flagStorage: window.sessionStorage,
+          onStage: (stage) => { if (!cancelled) setBoot((prev) => ({ ...prev, status: "running", stage })); },
+        });
+        cleanOAuthCallbackUrl();
+        if (tokens?.providerToken) {
+          // Rotate the in-memory session so no provider token survives the handoff.
+          supabase.auth.refreshSession().catch(() => {});
+        }
+        if (result.action === "reauth_consent") {
+          await signInWithGoogle(supabase, {
+            origin: window.location.origin,
+            baseUrl: import.meta.env.BASE_URL,
+            withConsent: true,
+          });
+          return;
+        }
+        supabaseGateway.setTenant(result.tenant.tenant_id);
+        if (!cancelled) {
+          setBoot({ status: "ready", userId: session.user?.id, tenant: result.tenant, connector: result.connector });
+        }
+      } catch (error) {
+        cleanOAuthCallbackUrl();
+        if (!cancelled) setBoot({ status: "error", message: error?.message || "bootstrap_failed" });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [session, boot.status, boot.userId]);
 
   if (!supabaseConfigured) return <AppInner />; // prototype mode: no env, no auth, no voice
   if (session === undefined) return null;
   if (!session) return <Login />;
-  return <AppInner />;
+  if (boot.status === "error") {
+    return (
+      <main className="error-screen">
+        <IconAlertTriangle aria-hidden="true" />
+        <h1>Não foi possível preparar sua conta</h1>
+        <p>{boot.message}</p>
+        <div className="dialog-actions">
+          <button className="button button--primary" type="button" onClick={() => window.location.reload()}>Tentar novamente</button>
+          <button className="button button--ghost" type="button" onClick={() => supabase.auth.signOut()}>Sair</button>
+        </div>
+      </main>
+    );
+  }
+  if (boot.status !== "ready") {
+    return (
+      <main className="loading-screen">
+        <img src={`${import.meta.env.BASE_URL}assets/ligou-avatar-v1.png`} alt="" />
+        <p>{boot.stage === "calendar" ? "Conectando sua agenda do Google…" : "Preparando sua conta…"}</p>
+      </main>
+    );
+  }
+  return (
+    <AppInner
+      user={session.user}
+      tenant={{
+        id: boot.tenant.tenant_id,
+        name: boot.tenant.name,
+        timezone: boot.tenant.timezone,
+        status: boot.tenant.status,
+        operational_mode: boot.tenant.operational_mode,
+      }}
+      onLogout={() => supabase.auth.signOut()}
+    />
+  );
 }
 
 const gateway = supabaseConfigured ? supabaseGateway : dashboardGateway;
 
-function AppInner() {
+function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
   const [route, setRoute] = useState(routeFromHash);
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -223,10 +323,10 @@ function AppInner() {
           />
         ) : null}
         {route === "poderes" && supabaseConfigured ? (
-          <>
-            <CalendarConnection onToast={setToast} tenantId={calendarTenantId(state)} />
-            <PowersView onToast={setToast} />
-          </>
+          <PowersView onToast={setToast} />
+        ) : null}
+        {route === "conta" && supabaseConfigured && tenant ? (
+          <SettingsView user={user} tenant={tenant} onToast={setToast} onLogout={onLogout} />
         ) : null}
         {route === "aprovacoes" ? (
           <ApprovalsView

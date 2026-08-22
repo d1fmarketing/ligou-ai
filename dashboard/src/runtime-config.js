@@ -37,7 +37,7 @@ export function resolveFunctionsBase(configuredBase, supabaseUrl) {
   return absoluteFunctionsUrl(`${base.origin}/functions/v1`);
 }
 
-export function magicLinkRedirectUrl(origin, baseUrl) {
+export function dashboardRedirectUrl(origin, baseUrl) {
   let parsedOrigin;
   try { parsedOrigin = new URL(origin); } catch { throw new Error("dashboard_origin_invalid"); }
   if (parsedOrigin.pathname !== "/" || parsedOrigin.search || parsedOrigin.hash
@@ -45,4 +45,10 @@ export function magicLinkRedirectUrl(origin, baseUrl) {
     throw new Error("dashboard_base_invalid");
   }
   return `${parsedOrigin.origin}${baseUrl}`;
+}
+
+export function calendarScopesGranted(scopes) {
+  const granted = new Set(String(scopes ?? "").split(/\s+/).filter(Boolean));
+  return granted.has("https://www.googleapis.com/auth/calendar.events")
+    && granted.has("https://www.googleapis.com/auth/calendar.freebusy");
 }

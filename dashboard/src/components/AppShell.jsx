@@ -6,6 +6,7 @@ import {
   IconCircleCheck,
   IconRefresh,
   IconRobot,
+  IconSettings,
   IconUserCircle,
 } from "@tabler/icons-react";
 
@@ -14,6 +15,7 @@ const destinations = [
   { id: "memoria", label: "Memória", icon: IconBrain },
   { id: "aprovacoes", label: "Aprovações", icon: IconCircleCheck },
   { id: "poderes", label: "Poderes", icon: IconShieldBolt },
+  { id: "conta", label: "Conta", icon: IconSettings },
 ];
 
 function Brand() {

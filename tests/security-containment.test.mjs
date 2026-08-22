@@ -26,7 +26,7 @@ async function readTextAssets(directory, relative = "") {
   return assets;
 }
 
-test("production site excludes the retired fragment/password auto-login path", {
+test("production site ships Google-only login: no password, magic-link, code, or #k path", {
   skip: process.env.LIGOU_SITE_OUTPUT_DIR !== "security-containment",
 }, async () => {
   const outputDir = process.env.LIGOU_SITE_OUTPUT_DIR;
@@ -39,9 +39,19 @@ test("production site excludes the retired fragment/password auto-login path", {
   assert.ok(assets.some((asset) => asset.path.endsWith(".js")));
   assert.doesNotMatch(productionOutput, /VITE_TEST_AUTOLOGIN/);
   assert.doesNotMatch(productionOutput, /signInWithPassword/);
+  assert.doesNotMatch(productionOutput, /signInWithOtp/);
+  assert.doesNotMatch(productionOutput, /verifyOtp/);
   assert.doesNotMatch(productionOutput, /ligou\.test\.k/);
   assert.doesNotMatch(productionOutput, /#k=/);
-  assert.match(productionOutput, /signInWithOtp/);
+  assert.match(productionOutput, /signInWithOAuth/);
+  assert.match(productionOutput, /Continuar com Google/);
+
+  // The client construction is env-gated and dead-code-eliminated in env-less
+  // builds, so the PKCE and custody-storage wiring is pinned at source level.
+  const clientSource = await readFile(new URL("../dashboard/src/lib/supabase.js", import.meta.url), "utf8");
+  assert.match(clientSource, /flowType:\s*"pkce"/);
+  assert.match(clientSource, /storage:\s*browserCustodyStorage\(\)/);
+  assert.match(clientSource, /detectSessionInUrl:\s*true/);
 });
 
 test("production Vite config ignores hostile dotenv files", async () => {

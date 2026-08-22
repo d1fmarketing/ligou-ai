@@ -74,17 +74,22 @@ function mapCase(c) {
   };
 }
 
+// The tenant identity comes exclusively from the authoritative bootstrap
+// (ensure_owner_tenant); this gateway never picks "the first tenant row".
+let activeTenantId = null;
+
 async function fetchAll() {
+  if (!activeTenantId) return { state: null, warning: "Sua conta ainda não terminou de carregar. Recarregue a página." };
   const [{ data: tenants, error: te }, { data: rules }, { data: cases }, { data: calls }, { data: notifications }] = await Promise.all([
-    supabase.from("tenants").select("*").limit(1),
-    supabase.from("rules").select("*").order("created_at", { ascending: true }),
-    supabase.from("approval_cases").select("*").order("created_at", { ascending: false }).limit(50),
-    supabase.from("calls").select("id,channel,session_type,started_at,ended_at,duration_seconds,summary_pt,summary_status,cost_estimate_usd,model,status").order("started_at", { ascending: false }).limit(20),
-    supabase.from("notifications").select("*").order("created_at", { ascending: false }).limit(20),
+    supabase.from("tenants").select("*").eq("id", activeTenantId),
+    supabase.from("rules").select("*").eq("tenant_id", activeTenantId).order("created_at", { ascending: true }),
+    supabase.from("approval_cases").select("*").eq("tenant_id", activeTenantId).order("created_at", { ascending: false }).limit(50),
+    supabase.from("calls").select("id,channel,session_type,started_at,ended_at,duration_seconds,summary_pt,summary_status,cost_estimate_usd,model,status").eq("tenant_id", activeTenantId).order("started_at", { ascending: false }).limit(20),
+    supabase.from("notifications").select("*").eq("tenant_id", activeTenantId).order("created_at", { ascending: false }).limit(20),
   ]);
   if (te) throw new Error(te.message);
   const tenant = tenants?.[0];
-  if (!tenant) return { state: null, warning: "Nenhuma empresa vinculada a este login ainda. Inicie uma chamada de voz para reivindicar o tenant de teste." };
+  if (!tenant) return { state: null, warning: "Não foi possível carregar a sua empresa. Saia e entre novamente." };
 
   const approvals = (cases ?? []).map(mapCase);
   const memory = mapRuleGroups(rules ?? []);
@@ -146,6 +151,10 @@ async function fetchAll() {
 export function createSupabaseGateway() {
   let channel = null;
   return {
+    setTenant(tenantId) {
+      activeTenantId = typeof tenantId === "string" && tenantId ? tenantId : null;
+    },
+
     async loadState() {
       try { return await fetchAll(); } catch (e) { return { state: null, warning: e.message }; }
     },
