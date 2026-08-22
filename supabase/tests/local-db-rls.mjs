@@ -128,6 +128,81 @@ export async function runAuthenticatedRlsSuite(options) {
     method: "POST", body: JSON.stringify({ p_tenant: "72000000-0000-4000-8000-000000000001" }),
   });
   assert.equal(crossStatus.response.ok, false); checks++;
+
+  // --- V0.2 M1 owner tenant bootstrap + custody surface ---
+  const anonBootstrap = await jsonRequest(`${env.apiUrl}/rest/v1/rpc/ensure_owner_tenant`, {
+    method: "POST",
+    headers: { apikey: env.publishableKey, "Content-Type": "application/json" },
+    body: "{}",
+  }, [env.serviceRoleKey, env.publishableKey]);
+  assert.equal(anonBootstrap.response.ok, false, "unauthenticated bootstrap must be denied"); checks++;
+
+  const bootstrapA1 = await rest(tokenA, "/rest/v1/rpc/ensure_owner_tenant", { method: "POST", body: "{}" });
+  assert.equal(bootstrapA1.response.ok, true, `bootstrap A failed: ${bootstrapA1.safeError()}`);
+  assert.match(String(bootstrapA1.body?.tenant_id ?? ""), /^[a-f0-9-]{36}$/i);
+  assert.equal(bootstrapA1.body.created, true);
+  assert.equal(bootstrapA1.body.status, "onboarding");
+  assert.equal(bootstrapA1.body.operational_mode, "simulation_only"); checks++;
+  const bootTenantA = bootstrapA1.body.tenant_id;
+
+  const bootstrapB1 = await rest(tokenB, "/rest/v1/rpc/ensure_owner_tenant", { method: "POST", body: "{}" });
+  assert.equal(bootstrapB1.response.ok, true);
+  assert.equal(bootstrapB1.body.created, true);
+  assert.notEqual(bootstrapB1.body.tenant_id, bootTenantA, "two users must receive two distinct tenants"); checks++;
+  const bootTenantB = bootstrapB1.body.tenant_id;
+
+  const bootstrapA2 = await rest(tokenA, "/rest/v1/rpc/ensure_owner_tenant", { method: "POST", body: "{}" });
+  assert.equal(bootstrapA2.response.ok, true);
+  assert.equal(bootstrapA2.body.created, false, "repeated bootstrap must not create");
+  assert.equal(bootstrapA2.body.tenant_id, bootTenantA, "repeated bootstrap must return the same tenant"); checks++;
+
+  const forgedBootstrap = await rest(tokenA, "/rest/v1/rpc/ensure_owner_tenant", {
+    method: "POST", body: JSON.stringify({ tenant_id: bootTenantB }),
+  });
+  assert.equal(forgedBootstrap.response.ok, false, "browser-supplied tenant identity must be rejected"); checks++;
+
+  const tenantsAfterA = await rest(tokenA, "/rest/v1/tenants?select=id");
+  assert.equal(tenantsAfterA.response.ok, true);
+  const idsA = tenantsAfterA.body.map((row) => row.id).sort();
+  assert.deepEqual(idsA, ["71000000-0000-4000-8000-000000000001", bootTenantA].sort(),
+    "owner sees exactly the assigned tenants: no synthetic claim, no cross-tenant row"); checks++;
+
+  const bootStatusA = await rest(tokenA, "/rest/v1/rpc/get_connector_status", {
+    method: "POST", body: JSON.stringify({ p_tenant: bootTenantA }),
+  });
+  assert.equal(bootStatusA.response.ok, true);
+  assert.equal(bootStatusA.body.length, 1);
+  assert.equal(bootStatusA.body[0].provider, "google_calendar");
+  assert.equal(bootStatusA.body[0].status, "reconnect_required"); checks++;
+
+  const crossHandoff = await rest(tokenA, "/rest/v1/rpc/begin_connector_handoff", {
+    method: "POST", body: JSON.stringify({ p_tenant: bootTenantB, p_kind: "login", p_nonce_hash: "a".repeat(64) }),
+  });
+  assert.equal(crossHandoff.response.ok, false, "handoff intent for another owner's tenant must be denied"); checks++;
+
+  const ownHandoff = await rest(tokenA, "/rest/v1/rpc/begin_connector_handoff", {
+    method: "POST", body: JSON.stringify({ p_tenant: bootTenantA, p_kind: "login", p_nonce_hash: "a".repeat(64) }),
+  });
+  assert.equal(ownHandoff.response.ok, true);
+  assert.match(String(ownHandoff.body?.intent_id ?? ""), /^[a-f0-9-]{36}$/i);
+  const intentsDirect = await rest(tokenA, "/rest/v1/connector_handoff_intents?select=id");
+  assert.equal(intentsDirect.response.ok, false, "handoff intent table must be unreachable"); checks++;
+
+  const crossTestState = await rest(tokenA, "/rest/v1/rpc/get_calendar_test_state", {
+    method: "POST", body: JSON.stringify({ p_tenant: bootTenantB }),
+  });
+  assert.equal(crossTestState.response.ok, false);
+  const ownTestState = await rest(tokenA, "/rest/v1/rpc/get_calendar_test_state", {
+    method: "POST", body: JSON.stringify({ p_tenant: bootTenantA }),
+  });
+  assert.equal(ownTestState.response.ok, true);
+  assert.equal(ownTestState.body.outcome, null); checks++;
+
+  const receiptsA = await rest(tokenA, "/rest/v1/tenant_provisioning_receipts?select=tenant_id,owner_user_id");
+  assert.equal(receiptsA.response.ok, true);
+  assert.equal(receiptsA.body.length, 1);
+  assert.equal(receiptsA.body[0].tenant_id, bootTenantA, "owner sees only their own provisioning receipt"); checks++;
+
   return { suite: "authenticated-rest-rls-bola", tests: checks, passed: checks };
 }
 

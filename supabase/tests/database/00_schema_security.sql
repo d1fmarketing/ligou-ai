@@ -1,7 +1,7 @@
 begin;
 
 create extension if not exists pgtap with schema extensions;
-select extensions.plan(24);
+select extensions.plan(27);
 
 select extensions.ok(
   not exists (
@@ -59,9 +59,12 @@ select extensions.ok(
   ) = array(
     select signature from (values
       ('adjust_case(uuid,text)'),
+      ('begin_connector_handoff(uuid,text,text)'),
       ('decide_case(uuid,text,text,text,jsonb,text,text)'),
       ('decide_rule(uuid,text)'),
       ('edit_rule(uuid,text)'),
+      ('ensure_owner_tenant()'),
+      ('get_calendar_test_state(uuid)'),
       ('get_connector_status(uuid)'),
       ('grant_power(uuid,text,text,text,jsonb,numeric,timestamp with time zone)'),
       ('revoke_power(uuid)'),
@@ -82,6 +85,7 @@ select extensions.ok(
   ) = array(
     select signature from (values
       ('authorize_booking_intent(uuid,uuid,uuid,uuid,uuid,numeric,integer,integer,jsonb,text)'),
+      ('begin_calendar_test_attempt(uuid,text,text,text,text,text)'),
       ('begin_provider_write(uuid,uuid)'),
       ('booking_provider_input(uuid)'),
       ('begin_phone_provider_accept(uuid,uuid)'),
@@ -97,6 +101,7 @@ select extensions.ok(
       ('confirm_phone_provider_accept(uuid,uuid)'),
       ('confirm_phone_sideband(uuid,uuid)'),
       ('claim_intent(text)'),
+      ('consume_connector_handoff(uuid,text,uuid,uuid)'),
       ('consume_oauth_state(text,text,uuid,uuid,text)'),
       ('consume_slot_offer(uuid,uuid,text,integer,integer,text,text)'),
       ('get_booking_confirmation(uuid,uuid,uuid)'),
@@ -109,12 +114,15 @@ select extensions.ok(
       ('defer_phone_sideband_finalization(uuid,uuid,text)'),
       ('provision_tenant_owner(uuid,uuid)'),
       ('purge_ephemeral_call_data(timestamp with time zone,timestamp with time zone)'),
+      ('reap_abandoned_calls(integer)'),
       ('record_booking_delivery(uuid,uuid,text,text,text,jsonb,text,jsonb,jsonb)'),
+      ('record_calendar_test_result(uuid,text,text,jsonb,text)'),
       ('release_health_state(uuid,text)'),
       ('reserve_call_budget(uuid,uuid,numeric)'),
       ('reserve_phone_call_budget(uuid,uuid,numeric)'),
       ('repair_legacy_phone_links()'),
       ('settle_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
+      ('settle_unresolved_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
       ('transition_claimed_intent(uuid,uuid,text,text,integer)')
     ) expected(signature)
     order by signature
@@ -168,11 +176,13 @@ select extensions.ok(
       ('contact_opt_outs'),
       ('effective_rules'),
       ('notifications'),
+      ('owner_profiles'),
       ('powers'),
       ('receipts'),
       ('rules'),
       ('skill_candidates'),
       ('skill_pipeline_events'),
+      ('tenant_provisioning_receipts'),
       ('tenants'),
       ('usage_ledger')
     ) expected(relation)
@@ -216,6 +226,43 @@ select extensions.ok(
   and not has_table_privilege('anon', 'public.oauth_states', 'select,insert,update,delete')
   and not has_table_privilege('authenticated', 'public.oauth_states', 'select,insert,update,delete'),
   'connector tables are inaccessible to anon and authenticated'
+);
+
+select extensions.ok(
+  not has_table_privilege('anon', 'public.connector_handoff_intents', 'select,insert,update,delete')
+  and not has_table_privilege('authenticated', 'public.connector_handoff_intents', 'select,insert,update,delete')
+  and not has_table_privilege('anon', 'public.calendar_test_receipts', 'select,insert,update,delete')
+  and not has_table_privilege('authenticated', 'public.calendar_test_receipts', 'select,insert,update,delete'),
+  'handoff intents and calendar test receipts are inaccessible to anon and authenticated'
+);
+
+select extensions.ok(
+  exists (
+    select 1
+    from pg_index i
+    join pg_class c on c.oid = i.indexrelid
+    where c.relname = 'tenants_one_v0_2_tenant_per_owner'
+      and i.indisunique
+      and i.indpred is not null
+  ),
+  'one V0.2 bootstrap tenant per owner is enforced by a partial unique index'
+);
+
+select extensions.ok(
+  exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.tenants'::regclass
+      and conname = 'tenants_status_check'
+      and convalidated
+      and pg_get_constraintdef(oid) like '%onboarding%'
+  )
+  and exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.tenants'::regclass
+      and conname = 'tenants_operational_mode_check'
+      and convalidated
+  ),
+  'tenant lifecycle and operational mode constraints are valid'
 );
 
 select extensions.ok(
@@ -286,7 +333,8 @@ select extensions.ok(
     'powers_auth_epoch',
     'rules_append_only',
     'rules_policy_epoch',
-    'slot_offers_private_policy_guard'
+    'slot_offers_private_policy_guard',
+    'tenant_provisioning_receipts_append_only'
   ],
   'booking, append-only, and authority epoch triggers exist'
 );
@@ -352,6 +400,9 @@ select extensions.ok(
       ('slot_offers', 'insert'),
       ('effective_rules', 'select'),
       ('connector_accounts', 'select'), ('connector_accounts', 'insert'), ('connector_accounts', 'update'),
+      ('connector_handoff_intents', 'select'), ('connector_handoff_intents', 'insert'), ('connector_handoff_intents', 'update'),
+      ('calendar_test_receipts', 'select'), ('calendar_test_receipts', 'insert'), ('calendar_test_receipts', 'update'),
+      ('owner_profiles', 'select'),
       ('oauth_states', 'select'), ('oauth_states', 'insert'), ('oauth_states', 'update'),
       ('phone_lifecycle_legacy_conflicts', 'select'), ('phone_lifecycle_legacy_conflicts', 'insert'), ('phone_lifecycle_legacy_conflicts', 'update')
     ) required(relation, privilege)

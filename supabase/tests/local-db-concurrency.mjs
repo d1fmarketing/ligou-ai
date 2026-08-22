@@ -572,6 +572,44 @@ async function bookingDeliveryRollback(connection, home) {
   `), "booking delivery rollback invariant"), "0:0:0:proposed:running");
 }
 
+async function concurrentOwnerBootstrap(connection, home) {
+  const uid = "60000000-0000-4000-8000-000000000001";
+  requireSuccess(await runSql(connection, home, `
+    insert into auth.users (id, email, raw_user_meta_data)
+    values ('${uid}', 'boot-race@example.invalid', '{"name":"Race Owner"}');
+  `), "bootstrap race fixture");
+  const authenticatedBootstrapSql = `
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '${uid}', true);
+select set_config('request.jwt.claim.role', 'authenticated', true);
+select pg_sleep(0.3);
+select 'TENANT:' || (public.ensure_owner_tenant() ->> 'tenant_id');
+commit;
+`;
+  const first = startSql(connection, home, authenticatedBootstrapSql);
+  const second = startSql(connection, home, authenticatedBootstrapSql);
+  const [resultA, resultB] = await Promise.all([first.done, second.done]);
+  const tenantOf = (result, label) => {
+    const line = requireSuccess(result, label).split("\n").find((row) => row.startsWith("TENANT:"));
+    assert.ok(line, `${label} produced no tenant`);
+    return line.slice("TENANT:".length);
+  };
+  const tenantA = tenantOf(resultA, "concurrent bootstrap session A");
+  const tenantB = tenantOf(resultB, "concurrent bootstrap session B");
+  assert.equal(tenantA, tenantB, "concurrent bootstrap must converge on one tenant");
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (select count(*) from public.tenants where owner_user_id = '${uid}' and bootstrap_origin = 'v0_2_google')::text || ':' ||
+      (select count(*) from public.tenant_provisioning_receipts where owner_user_id = '${uid}')::text || ':' ||
+      (select count(*) from public.connector_accounts c
+         join public.tenants t on t.id = c.tenant_id
+         where t.owner_user_id = '${uid}' and c.status = 'reconnect_required')::text || ':' ||
+      (select status from public.tenants where id = '${tenantA}') || ':' ||
+      (select operational_mode from public.tenants where id = '${tenantA}')
+  `), "bootstrap race invariant"), "1:1:1:onboarding:simulation_only");
+}
+
 export async function runConcurrencySuite(env = process.env) {
   const connection = connectionFromEnvironment(env);
   const isolatedHome = await mkdtemp(path.join(os.tmpdir(), "ligou-rc1-psql-home-"));
@@ -584,6 +622,7 @@ export async function runConcurrencySuite(env = process.env) {
     ["concurrent policy/power epoch invalidation", concurrentEpochInvalidation],
     ["onboarding effective policy epochs", onboardingEpochSemantics],
     ["expired transient retention", expiredTransientRetention],
+    ["concurrent owner bootstrap single tenant", concurrentOwnerBootstrap],
     ["booking-delivery transaction rollback", bookingDeliveryRollback],
   ];
   try {
