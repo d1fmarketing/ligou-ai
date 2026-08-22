@@ -1,0 +1,8 @@
+{
+  "schema": "ligou.hermes-derived-image.v1",
+  "base_image": "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de",
+  "base_source_commit": "e624e9fde561e1add9388384012b295fde669ade",
+  "context_sha256": "21882dcc9c1e10d94ef02f3a496834bbf095153792f47e9c7d9c8be2440141c2",
+  "image": "330140023537.dkr.ecr.us-east-1.amazonaws.com/ligou/hermes-agent@sha256:4803c95855d5efd24da761ba15f574b82ab218f9f61d8b780e7a812e473fb008",
+  "tag": "auth-home-e624e9f-v1"
+}

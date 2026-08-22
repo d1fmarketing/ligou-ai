@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { resolveTenantIdentity } from "./tenant-identity.mjs";
 
 const DIGEST_IMAGE = /^[^\s@]+(?:[:][^\s@]+)?@sha256:[a-f0-9]{64}$/;
+const PRIVATE_ECR_IMAGE = /^(?<registry>[0-9]{12}[.]dkr[.]ecr[.](?<region>[a-z0-9-]+)[.]amazonaws[.]com)\/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$/;
 const approvedImage = JSON.parse(readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../infra/toolchain.json"), "utf8")).hermes_image;
 
 function fail(code) {
@@ -17,6 +18,32 @@ export function tenantRuntime(tenantId, tenantSlug, image = "") {
     ...resolveTenantIdentity(tenantId, tenantSlug),
     image,
   };
+}
+
+function imageExists(image) {
+  return spawnSync("docker", ["image", "inspect", image], { stdio: "ignore" }).status === 0;
+}
+
+function ensureImageAvailable(image) {
+  if (imageExists(image)) return;
+  const ecr = image.match(PRIVATE_ECR_IMAGE);
+  if (!ecr?.groups?.registry || !ecr?.groups?.region) fail("hermes_image_unavailable");
+  const password = spawnSync("aws", ["ecr", "get-login-password", "--region", ecr.groups.region], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    maxBuffer: 1024 * 1024,
+  });
+  if (password.status !== 0 || !password.stdout?.trim()) fail("hermes_ecr_login_failed");
+  const login = spawnSync("docker", ["login", "--username", "AWS", "--password-stdin", ecr.groups.registry], {
+    input: password.stdout,
+    encoding: "utf8",
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+  if (login.status !== 0) fail("hermes_ecr_login_failed");
+  const pull = spawnSync("docker", ["pull", image], { stdio: "inherit" });
+  const verified = pull.status === 0 && imageExists(image);
+  spawnSync("docker", ["logout", ecr.groups.registry], { stdio: "ignore" });
+  if (!verified) fail("hermes_image_pull_failed");
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -42,6 +69,7 @@ if (isMain) {
   if (!DIGEST_IMAGE.test(runtime.image)) fail("hermes_image_digest_required");
   if (runtime.image !== approvedImage) fail("hermes_image_not_approved");
   if (!process.env.HERMES_API_KEY) fail("hermes_api_key_required");
+  ensureImageAvailable(runtime.image);
   const composeFile = path.join(path.dirname(fileURLToPath(import.meta.url)), "docker-compose.yml");
   const result = spawnSync("docker", ["compose", "--project-name", runtime.compose_project, "--file", composeFile, ...args], {
     stdio: "inherit",

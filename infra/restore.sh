@@ -149,9 +149,9 @@ cell_active() {
 
 live_smoke() {
   cell_active \
-    && docker exec "$CELL" hermes memory list --json >/dev/null \
-    && docker exec "$CELL" hermes skills list --json >/dev/null \
-    && docker exec "$CELL" hermes sessions list --json >/dev/null \
+    && docker exec "$CELL" hermes memory status >/dev/null \
+    && docker exec "$CELL" hermes skills list --source all >/dev/null \
+    && docker exec "$CELL" hermes sessions list --limit 1 >/dev/null \
     && TENANT_ID="$TENANT_ID" TENANT_SLUG="$TENANT" HERMES_IMAGE="$IMAGE" "$HEALTH_TOOL" >/dev/null
 }
 
@@ -227,18 +227,27 @@ fi
 
 docker volume create "$CHECK_VOLUME" >/dev/null
 CHECK_CREATED=1
-if ! docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-  --cap-drop ALL --security-opt no-new-privileges:true \
+if ! docker run --rm --network none --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --tmpfs /opt/model-auth:rw,noexec,nosuid,nodev,size=1m,mode=0700 \
+  --user 10000:10000 --cap-drop ALL --security-opt no-new-privileges:true \
+  -e HOME=/opt/data -e HERMES_HOME=/opt/data -e HERMES_AUTH_HOME=/opt/model-auth \
   --mount "type=volume,source=${CHECK_VOLUME},target=/opt/data" \
   --mount "type=bind,source=${ARCHIVE},target=/restore/input.zip,readonly" \
-  "$IMAGE" hermes import /restore/input.zip --yes >/dev/null; then
+  --entrypoint /opt/hermes/.venv/bin/hermes \
+  "$IMAGE" import /restore/input.zip --force >/dev/null; then
   echo "disposable_import_failed" >&2
   exit 1
 fi
 
-docker run -d --name "$CHECK_CELL" --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-  --cap-drop ALL --security-opt no-new-privileges:true \
+docker run -d --name "$CHECK_CELL" --network none --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --tmpfs /opt/model-auth:rw,noexec,nosuid,nodev,size=1m,mode=0700 \
+  --user 10000:10000 --cap-drop ALL --security-opt no-new-privileges:true \
+  -e HOME=/opt/data -e HERMES_HOME=/opt/data -e HERMES_AUTH_HOME=/opt/model-auth \
+  -e API_SERVER_ENABLED=true -e API_SERVER_HOST=127.0.0.1 -e API_SERVER_KEY=restore-disposable-only \
   --mount "type=volume,source=${CHECK_VOLUME},target=/opt/data" \
+  --entrypoint /opt/hermes/.venv/bin/hermes \
   "$IMAGE" gateway run >/dev/null
 CHECK_STARTED=1
 
@@ -254,10 +263,10 @@ for _attempt in 1 2 3 4 5 6 7 8 9 10; do
 done
 
 if [ "$disposable_health" -ne 1 ] \
-  || ! docker exec "$CHECK_CELL" sh -c 'test ! -e /root/.hermes/auth.json' >/dev/null \
-  || ! docker exec "$CHECK_CELL" hermes memory list --json >/dev/null \
-  || ! docker exec "$CHECK_CELL" hermes skills list --json >/dev/null \
-  || ! docker exec "$CHECK_CELL" hermes sessions list --json >/dev/null; then
+  || ! docker exec "$CHECK_CELL" sh -c 'test ! -e /opt/model-auth/auth.json && test ! -e /opt/data/auth.json' >/dev/null \
+  || ! docker exec "$CHECK_CELL" hermes memory status >/dev/null \
+  || ! docker exec "$CHECK_CELL" hermes skills list --source all >/dev/null \
+  || ! docker exec "$CHECK_CELL" hermes sessions list --limit 1 >/dev/null; then
   echo "disposable_smoke_failed" >&2
   exit 1
 fi

@@ -14,7 +14,7 @@ const backupScript = path.join(repoRoot, "infra/backup.sh");
 const KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 const TENANT = "11111111-1111-4111-8111-111111111111";
 const TENANT_SLUG = "test-tenant";
-const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de";
+const IMAGE = "330140023537.dkr.ecr.us-east-1.amazonaws.com/ligou/hermes-agent@sha256:4803c95855d5efd24da761ba15f574b82ab218f9f61d8b780e7a812e473fb008";
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: "utf8", ...options });
@@ -435,7 +435,23 @@ async function stubCommands(fixture) {
   const curl = path.join(bin, "curl");
   const aws = path.join(bin, "aws");
   const sleep = path.join(bin, "sleep");
-  await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$DOCKER_LOG"\ncase "$*" in\n  *"volume inspect"*) if [ -n "\${STAGE_EXISTS_ONCE_MARKER:-}" ] && [ ! -e "$STAGE_EXISTS_ONCE_MARKER" ]; then : > "$STAGE_EXISTS_ONCE_MARKER"; exit 0; fi; exit 1 ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]' ;;\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-${TENANT}","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}' ;;\n  *"inspect --format"*) printf '%s\\n' 'true' ;;\n  *"auth status openai-codex"*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\nif [ -n "\${HOLD_IMPORT_READY:-}" ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'hermes import'; then\n  : > "$HOLD_IMPORT_READY"\n  while [ ! -e "$HOLD_IMPORT_RELEASE" ]; do /bin/sleep 0.02; done\nfi\nif [ "\${FAIL_DISPOSABLE_IMPORT:-0}" = 1 ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'hermes import'; then exit 1; fi\nif [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi\nexit 0\n`);
+  await writeFile(docker, `#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_LOG"
+case "$*" in
+  *"volume inspect"*) if [ -n "\${STAGE_EXISTS_ONCE_MARKER:-}" ] && [ ! -e "$STAGE_EXISTS_ONCE_MARKER" ]; then : > "$STAGE_EXISTS_ONCE_MARKER"; exit 0; fi; exit 1 ;;
+  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\n' '["${IMAGE}"]' ;;
+  *'inspect --format {{json .}}'*) printf '%s\n' '{"Name":"/ligou-cell-${TENANT}","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}' ;;
+  *"inspect --format"*) printf '%s\n' 'true' ;;
+  *"auth status openai-codex"*) printf '%s\n' '{"provider":"openai-codex","authenticated":true}' ;;
+esac
+if [ -n "\${HOLD_IMPORT_READY:-}" ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'import /restore/input.zip'; then
+  : > "$HOLD_IMPORT_READY"
+  while [ ! -e "$HOLD_IMPORT_RELEASE" ]; do /bin/sleep 0.02; done
+fi
+if [ "\${FAIL_DISPOSABLE_IMPORT:-0}" = 1 ] && echo "$*" | grep -q 'run --rm' && echo "$*" | grep -q 'import /restore/input.zip'; then exit 1; fi
+if [ "\${FAIL_DISPOSABLE_SESSIONS:-0}" = 1 ] && echo "$*" | grep -q 'restore-' && echo "$*" | grep -q 'sessions list'; then exit 1; fi
+exit 0
+`);
   await writeFile(curl, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CURL_LOG"\nif [ "\${CURL_MODE:-ok}" = fail ]; then printf '%s\\n' '{"ok":false}'; elif [ -n "\${CURL_FAIL_ONCE_MARKER:-}" ] && [ ! -e "$CURL_FAIL_ONCE_MARKER" ]; then : > "$CURL_FAIL_ONCE_MARKER"; printf '%s\\n' '{"ok":false}'; else printf '%s\\n' '{"ok":true}'; fi\n`);
   await writeFile(aws, "#!/bin/sh\nprintf '%s\\n' 'unexpected aws call' >&2\nexit 99\n");
   await writeFile(sleep, "#!/bin/sh\nexit 0\n");
@@ -477,10 +493,19 @@ test("restore imports into a disposable no-network/no-auth volume and runs all s
     const log = await readFile(path.join(fixture, "docker.log"), "utf8");
     assert.match(log, /--network none/);
     assert.doesNotMatch(log, /--env-file|hermes-model-auth|\/root\/\.hermes:|GOOGLE_|SUPABASE_|AWS_/);
-    assert.match(log, /memory list --json/);
-    assert.match(log, /skills list --json/);
-    assert.match(log, /sessions list --json/);
-    assert.match(log, /test ! -e \/root\/\.hermes\/auth\.json/);
+    assert.equal((log.match(/-e HERMES_AUTH_HOME=\/opt\/model-auth/g) ?? []).length, 2);
+    assert.equal((log.match(/--tmpfs \/opt\/model-auth:rw,noexec,nosuid,nodev,size=1m,mode=0700/g) ?? []).length, 2);
+    assert.equal((log.match(/--user 10000:10000 --cap-drop ALL/g) ?? []).length, 2);
+    assert.equal((log.match(/--entrypoint \/opt\/hermes\/\.venv\/bin\/hermes/g) ?? []).length, 2);
+    assert.match(log, /import \/restore\/input\.zip --force/);
+    assert.doesNotMatch(log, /import \/restore\/input\.zip --yes/);
+    assert.match(log, /-e API_SERVER_ENABLED=true -e API_SERVER_HOST=127\.0\.0\.1 -e API_SERVER_KEY=restore-disposable-only/);
+    assert.match(log, /memory status/);
+    assert.match(log, /skills list --source all/);
+    assert.match(log, /sessions list --limit 1/);
+    assert.doesNotMatch(log, /(?:memory|skills|sessions) list --json/);
+    assert.match(log, /test ! -e \/opt\/model-auth\/auth\.json/);
+    assert.match(log, /test ! -e \/opt\/data\/auth\.json/);
     assert.match(log, new RegExp(`rm -f hermes-${TENANT}-restore-check-`));
     assert.match(log, /volume rm/);
   } finally {

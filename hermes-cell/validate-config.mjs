@@ -49,9 +49,10 @@ for (const required of [
 if (!compose.includes("image: ${HERMES_IMAGE:?")) fail("hermes_image_digest_required");
 
 const cognitive = compose.match(/^\s*-\s*([a-z0-9_-]+):\/opt\/data\b/im)?.[1];
-const modelAuth = compose.match(/^\s*-\s*([a-z0-9_-]+):\/root\/\.hermes\b/im)?.[1];
+const modelAuth = compose.match(/^\s*-\s*([a-z0-9_-]+):\/opt\/model-auth\b/im)?.[1];
 if (!cognitive || !modelAuth || cognitive === modelAuth) fail("state_auth_volume_separation_required");
-if (new RegExp("(?:" + modelAuth + "|/root/\\.hermes|auth\\.json)", "i").test(backup)) {
+if (!/HERMES_AUTH_HOME:\s*\/opt\/model-auth/.test(compose)) fail("auth_home_separation_required");
+if (new RegExp("(?:" + modelAuth + "|/opt/model-auth|/root/\\.hermes|auth\\.json)", "i").test(backup)) {
   fail("backup_includes_model_auth");
 }
 

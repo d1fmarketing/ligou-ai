@@ -21,9 +21,10 @@ services:
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: 0.0.0.0            # container-internal; host publish is loopback-only below
       API_SERVER_KEY: ${HERMES_API_KEY:?set in .env}
+      HERMES_AUTH_HOME: /opt/model-auth    # patched runtime: every auth read/write/refresh stays off cognitive state
     volumes:
       - hermes-cognitive:/opt/data                              # memory, skills, sessions; cognitive backup scope
-      - hermes-model-auth:/root/.hermes                         # Codex OAuth only; never part of cognitive backups
+      - hermes-model-auth:/opt/model-auth                       # Codex OAuth only; never part of cognitive backups
       - ${HERMES_PROJECTED_RULES_PATH:?launch with node tenant-compose.mjs}:/opt/projected-rules:ro
       - ./config/config.yaml:/opt/data/config.yaml:ro          # THE config hermes reads (model+provider+gates)
       - ./config/cli-config.yaml:/opt/data/cli-config.yaml:ro   # CLI-side pin (kept in sync)

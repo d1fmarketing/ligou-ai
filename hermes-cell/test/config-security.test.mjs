@@ -11,7 +11,9 @@ const validator = path.join(repoRoot, "hermes-cell/validate-config.mjs");
 const health = path.join(repoRoot, "hermes-cell/health-state.sh");
 const tenantCompose = path.join(repoRoot, "hermes-cell/tenant-compose.mjs");
 const tenantIdentity = path.join(repoRoot, "hermes-cell/tenant-identity.mjs");
-const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de";
+const authPatch = path.join(repoRoot, "hermes-cell/image/patch-auth-home.py");
+const imageDockerfile = path.join(repoRoot, "hermes-cell/image/Dockerfile");
+const IMAGE = "330140023537.dkr.ecr.us-east-1.amazonaws.com/ligou/hermes-agent@sha256:4803c95855d5efd24da761ba15f574b82ab218f9f61d8b780e7a812e473fb008";
 const TENANT_A = "11111111-1111-4111-8111-111111111111";
 const TENANT_B = "22222222-2222-4222-8222-222222222222";
 const TENANT_C = "33333333-3333-4333-8333-333333333333";
@@ -32,6 +34,28 @@ test("repository Hermes config is OAuth-only with separate cognitive and model-a
     volumes: { cognitive: "HERMES_COGNITIVE_VOLUME", model_auth: "HERMES_MODEL_AUTH_VOLUME" },
     cognitive_backup_excludes_model_auth: true,
   });
+});
+
+test("production compose routes every Hermes auth write outside cognitive state", async () => {
+  const compose = await readFile(path.join(repoRoot, "hermes-cell/docker-compose.yml"), "utf8");
+  assert.match(compose, /HERMES_AUTH_HOME:\s*\/opt\/model-auth/);
+  assert.match(compose, /hermes-cognitive:\/opt\/data(?:\s|$)/m);
+  assert.match(compose, /hermes-model-auth:\/opt\/model-auth(?:\s|$)/m);
+  assert.doesNotMatch(compose, /hermes-model-auth:\/root\/\.hermes/);
+});
+
+test("derived Hermes image patches active auth, locks, fallback, login, and refresh to HERMES_AUTH_HOME", async () => {
+  const [dockerfile, patcher] = await Promise.all([
+    readFile(imageDockerfile, "utf8"),
+    readFile(authPatch, "utf8"),
+  ]);
+  assert.match(dockerfile, /^ARG HERMES_BASE_IMAGE\nFROM \$\{HERMES_BASE_IMAGE\}/m);
+  assert.match(dockerfile, /patch-auth-home\.py/);
+  assert.match(patcher, /HERMES_AUTH_HOME/);
+  assert.match(patcher, /def _auth_file_path\(\)/);
+  assert.match(patcher, /global_auth_fallback/);
+  assert.match(patcher, /auth_home_must_be_absolute/);
+  assert.match(patcher, /auth_home_must_not_equal_hermes_home/);
 });
 
 test("normal tenant launcher gives two tenants isolated project, volumes, paths, backup identity, and route", async () => {
@@ -212,6 +236,55 @@ test("normal tenant launcher rejects an unapproved immutable image before Docker
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /hermes_image_not_approved/);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("tenant launcher pulls a missing private ECR digest with ephemeral IAM login and logs out", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-tenant-ecr-"));
+  const bin = path.join(fixture, "bin");
+  const commandLog = path.join(fixture, "commands.log");
+  const pulled = path.join(fixture, "pulled");
+  try {
+    await mkdir(bin);
+    await writeFile(path.join(bin, "aws"), "#!/bin/sh\nprintf '%s\\n' 'synthetic-ecr-password-never-log'\n");
+    await writeFile(path.join(bin, "docker"), `#!/bin/sh
+printf '%s\n' "$*" >> "$COMMAND_LOG"
+case "$1 $2" in
+  'image inspect') [ -e "$PULLED_MARKER" ] ;;
+  'login --username') IFS= read -r secret; [ -n "$secret" ]; printf '%s\n' 'login_input_present=true' >> "$COMMAND_LOG" ;;
+  'pull ${IMAGE}') : > "$PULLED_MARKER" ;;
+  'logout 330140023537.dkr.ecr.us-east-1.amazonaws.com') : ;;
+  'compose --project-name') : ;;
+  *) exit 91 ;;
+esac
+`);
+    await chmod(path.join(bin, "aws"), 0o755);
+    await chmod(path.join(bin, "docker"), 0o755);
+    const result = spawnSync(process.execPath, [tenantCompose, "config"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:/usr/bin:/bin`,
+        TENANT_ID: TENANT_A,
+        TENANT_SLUG: "ecr-test",
+        HERMES_API_KEY: "synthetic-local-key",
+        HERMES_IMAGE: IMAGE,
+        LIGOU_TENANT_REGISTRY: path.join(fixture, "registry.json"),
+        LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
+        COMMAND_LOG: commandLog,
+        PULLED_MARKER: pulled,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const log = await readFile(commandLog, "utf8");
+    assert.match(log, /image inspect .*@sha256:/);
+    assert.match(log, /login --username AWS --password-stdin 330140023537\.dkr\.ecr\.us-east-1\.amazonaws\.com/);
+    assert.match(log, /login_input_present=true/);
+    assert.match(log, /pull 330140023537\.dkr\.ecr\.us-east-1\.amazonaws\.com\/ligou\/hermes-agent@sha256:/);
+    assert.match(log, /logout 330140023537\.dkr\.ecr\.us-east-1\.amazonaws\.com/);
+    assert.doesNotMatch(result.stdout + result.stderr + log, /synthetic-ecr-password-never-log/);
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

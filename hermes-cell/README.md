@@ -28,8 +28,9 @@ resolve o slug no registro travado de tenants e confere slug, container e rota a
 ambiente de processo não escolhem a célula. O canal pós-chamada de aprendizado livre está desativado; somente
 validação local/determinística permanece até existir um contrato fechado separado e comprovado.
 
-O estado cognitivo fica em `hermes-cognitive:/opt/data`. O OAuth fica separadamente em
-`hermes-model-auth:/root/.hermes`; nunca copie `auth.json` para `/opt/data` e nunca inclua o volume de auth
+O estado cognitivo fica em `hermes-cognitive:/opt/data`. A imagem Ligou fixa `HERMES_AUTH_HOME=/opt/model-auth`,
+e o OAuth fica separadamente em `hermes-model-auth:/opt/model-auth`. Login, lock, pool e refresh usam essa raiz;
+nunca copie `auth.json` para `/opt/data` e nunca inclua o volume de auth
 num backup cognitivo. `health-state.sh` consome o status bruto localmente e retorna somente estados
 `ready/unavailable`, sem token, identidade ou detalhe do modelo.
 

@@ -18,7 +18,7 @@ const closureTool = path.join(repoRoot, "infra/bootstrap-module-closure.mjs");
 const isolationGuard = path.join(repoRoot, "infra/test/helpers/bootstrap-isolation-guard.mjs");
 const retentionScript = path.join(repoRoot, "infra/retention.sh");
 const RELEASE_KEY = "Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA=";
-const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de";
+const IMAGE = "330140023537.dkr.ecr.us-east-1.amazonaws.com/ligou/hermes-agent@sha256:4803c95855d5efd24da761ba15f574b82ab218f9f61d8b780e7a812e473fb008";
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: "utf8", ...options });
