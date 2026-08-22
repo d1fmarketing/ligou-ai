@@ -4,7 +4,7 @@
 
 Este é um procedimento de operador futuro; não registra deploy executado. Só prossiga com autoridade explícita, projeto-alvo confirmado, revisão do commit/manifesto e janela de rollback. Nunca cole valores de segredo em terminal gravado, tickets ou Git.
 
-As funções são `browser-session`, `google-connect`, `google-callback` e `accept-call`. A identidade de release é composta: inclui o `index.ts`, dependências locais transitivas sob `_shared`, `supabase/deno.json` e `supabase/deno.lock`.
+As funções são `browser-session`, `google-connect`, `google-callback`, `accept-call` e, desde o V0.2 M1, `google-handoff` e `calendar-test`. A identidade de release é composta: inclui o `index.ts`, dependências locais transitivas sob `_shared`, `supabase/deno.json` e `supabase/deno.lock`.
 
 | Função | SHA-256 composto |
 |---|---|
@@ -12,6 +12,10 @@ As funções são `browser-session`, `google-connect`, `google-callback` e `acce
 | `google-connect` | `51d2d2f5dfd161afca4a498aa4d0878fe5a41531a132fa52780feee417200afa` |
 | `google-callback` | `a88b25b51fd2fb3918a20c5a9619150b9e693e8ebc16d6cf22e05b63031650b1` |
 | `accept-call` | `49301741f474acc64a53e810678993128309c67cb3402748e5584b1364267253` |
+| `google-handoff` | `5a03d52f35c672b6b8e15ba806a5f0e6f910b89247c79819d2f74b5caa63f70c` |
+| `calendar-test` | `62c5d58aa9d650e3d248047485f7bee1ddcdd6a43d3f7c138a6f8b386399bc16` |
+
+`google-handoff` e `calendar-test` importam apenas `_shared/handoff-core.ts`, `_shared/calendar-test-core.ts`, `_shared/tenant-ownership-id.ts` e `_shared/connector-crypto.ts` — o fechamento das quatro funções legadas permanece intocado, então as identidades acima delas não mudam com o M1.
 
 Recalcule pelo código, sem editar a tabela manualmente:
 
