@@ -38,6 +38,22 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "Familjen Grotesk";
+  src: url("/fonts/familjen-grotesk-600.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Familjen Grotesk";
+  src: url("/fonts/familjen-grotesk-700.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* ═══ 1. Design tokens ═══════════════════════════════════════ */
 :root {
   font-family: "Archivo", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -77,6 +93,40 @@
   --leading-compact: 1.35;
   --leading-body: 1.5;
   --tracking-label: 0.1em;
+  /* Display: mesma voz da landing (Familjen só existe em 600/700 — peso sempre explícito) */
+  --font-display: "Familjen Grotesk", "Archivo", system-ui, sans-serif;
+  --track-display: -0.03em;
+  /* Decorativo apenas — nunca texto corrido (2.4:1 sobre papel) */
+  --text-faint: #9db3b8;
+  /* Raio (escala da landing) */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+  --radius-pill: 999px;
+  /* Espaço (ritmo 4pt) */
+  --space-2xs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  /* Movimento (tokens da landing; o kill-switch de reduced-motion segue global) */
+  --ease-out: cubic-bezier(0.22, 0.8, 0.36, 1);
+  --dur-fast: 140ms;
+  --dur-med: 240ms;
+  /* Elevação z (ladder existente, agora nomeada) */
+  --z-sidebar: 40;
+  --z-composer: 44;
+  --z-bottom-nav: 45;
+  --z-header: 50;
+  --z-menu: 70;
+  --z-dialog: 100;
+  --z-toast: 150;
+  --z-skip: 200;
+  /* Foco: teal-700 sobre papel; containers escuros sobrepõem com teal-bright */
+  --focus-ring-color: #0b655a;
 }
 
 * {
