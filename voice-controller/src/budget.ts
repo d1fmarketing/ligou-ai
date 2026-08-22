@@ -1,3 +1,4 @@
+import { config } from "./config.ts";
 import { supa } from "./rules.ts";
 import { terminateProviderCall, type FetchLike, type ProviderTerminationMode } from "./provider-termination.ts";
 
@@ -104,6 +105,8 @@ export async function finalizeTerminalBudget(args: {
   }
 }
 
+const UNRESOLVED_SETTLEMENT_MIN_ATTEMPTS = 20;
+
 export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promise<number> {
   const { data: claim, error } = await supa().rpc("claim_budget_reconciliation", {
     p_worker: `budget-${process.pid}`,
@@ -122,6 +125,39 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
       }
     : undefined;
 
+  const usageResolved = providerUsageState === "resolved" || providerUsageState === "not_applicable";
+  if (!usageResolved && !needsTermination
+    && Number(row.reconcile_attempts ?? 0) >= UNRESOLVED_SETTLEMENT_MIN_ATTEMPTS) {
+    // A call whose media never carried usage events leaves provider usage unknown
+    // forever. Holding the full reservation would silently consume the tenant's
+    // daily budget, so once the call is durably terminal at the provider we settle
+    // at the same rate the reservation was priced at, using the duration we do know.
+    const reservedCost = Number(row.reserved_cost_usd ?? 0);
+    // The reservation is a flat session ceiling; its implied rate is that ceiling
+    // divided by the session length it was sized for.
+    const reservedMinutes = Number(row.reserved_minutes ?? config.sessionMaxMinutes ?? 0);
+    const rate = reservedMinutes > 0 ? reservedCost / reservedMinutes : 0;
+    const estimated = Math.min(reservedCost, Number((Number(row.minutes ?? 0) * rate).toFixed(4)));
+    const { error: settleError } = await supa().rpc("settle_unresolved_call_budget", {
+      p_tenant: String(row.tenant_id),
+      p_call: String(row.call_id),
+      p_estimated_cost: estimated,
+      p_minutes: Number(row.minutes ?? 0),
+      p_outcome: String(row.outcome),
+      p_detail: {
+        reconciled: true,
+        reservation_id: row.reservation_id,
+        settlement_basis: "reservation_rate_estimate",
+        provider_usage_state: providerUsageState ?? "unknown",
+      },
+    });
+    if (settleError) {
+      await deferBudgetReconciliation(String(row.call_id), settleError.message ?? "unresolved_settlement_failed");
+      return 0;
+    }
+    return 1;
+  }
+
   return await finalizeTerminalBudget({
     tenantId: String(row.tenant_id),
     callId: String(row.call_id),
@@ -131,7 +167,7 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
     detail: { reconciled: true, reservation_id: row.reservation_id },
     provider,
     fetchImpl,
-    usageResolved: providerUsageState === "resolved" || providerUsageState === "not_applicable",
+    usageResolved,
   }) ? 1 : 0;
 }
 

@@ -11,6 +11,7 @@ let terminationClaim: any;
 let callUpdates: any[] = [];
 let providerRpcCalls: Array<{ name: string; args?: Record<string, unknown> }> = [];
 let providerAttemptStarted = false;
+let unresolvedSettlements: any[] = [];
 
 function client() {
   return {
@@ -37,6 +38,10 @@ function client() {
       }
       if (name === "claim_budget_reconciliation") {
         return Promise.resolve({ data: claimRow, error: null });
+      }
+      if (name === "settle_unresolved_call_budget") {
+        unresolvedSettlements.push(args ?? {});
+        return Promise.resolve({ data: "reservation-1", error: null });
       }
       if (name === "settle_call_budget") {
         settleAttempts += 1;
@@ -71,6 +76,7 @@ beforeEach(() => {
   callUpdates = [];
   providerRpcCalls = [];
   providerAttemptStarted = false;
+  unresolvedSettlements = [];
   claimRow = {
     reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
     actual_cost_usd: 0, minutes: 0, outcome: "startup_error",
@@ -217,5 +223,77 @@ describe("durable budget reconciliation", () => {
     expect(providerRpcCalls.some((call) => call.name === "complete_provider_termination_attempt"
       && call.args?.p_confirmed === true)).toBe(true);
     expect(settleAttempts).toBe(0);
+  });
+
+  test("a terminal call whose provider usage never resolves settles at a bounded rate instead of holding forever", async () => {
+    // Media that never connects produces no usage events, so usage stays unknown.
+    // Holding the full reservation forever silently consumes the daily budget, so
+    // after a bounded number of attempts the reservation settles at the same rate
+    // it was reserved at, priced by the duration we do durably know.
+    claimRow = {
+      reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
+      actual_cost_usd: 0, minutes: 37 / 60, outcome: "ended",
+      provider_termination_state: "confirmed", provider_termination_mode: "hangup",
+      provider_usage_state: "unknown", openai_call_id: "rtc-unresolved",
+      reconcile_attempts: 24, reserved_cost_usd: 1.5, reserved_minutes: 15,
+    };
+
+    expect(await reconcileBudgetReservations()).toBe(1);
+
+    expect(unresolvedSettlements).toHaveLength(1);
+    expect(unresolvedSettlements[0].p_call).toBe("call-1");
+    expect(unresolvedSettlements[0].p_tenant).toBe("tenant-1");
+    expect(unresolvedSettlements[0].p_outcome).toBe("ended");
+    // 37s at the reservation rate of 1.5 USD per 15 minutes = 0.10 USD/min.
+    expect(unresolvedSettlements[0].p_estimated_cost).toBeCloseTo(0.0617, 4);
+    expect(settleAttempts).toBe(0);
+    expect(deferred).toHaveLength(0);
+  });
+
+  test("unresolved usage keeps deferring while attempts remain under the bound or termination is unconfirmed", async () => {
+    claimRow = {
+      reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
+      actual_cost_usd: 0, minutes: 0.5, outcome: "ended",
+      provider_termination_state: "confirmed", provider_termination_mode: "hangup",
+      provider_usage_state: "unknown", openai_call_id: "rtc-early",
+      reconcile_attempts: 3, reserved_cost_usd: 1.5, reserved_minutes: 15,
+    };
+    expect(await reconcileBudgetReservations()).toBe(0);
+    expect(unresolvedSettlements).toHaveLength(0);
+    expect(deferred).toHaveLength(1);
+
+    deferred = [];
+    claimRow = { ...claimRow, reconcile_attempts: 40, provider_termination_state: "unknown" };
+    // Termination still unconfirmed: an ambiguous provider reply must not unlock settlement.
+    expect(await reconcileBudgetReservations(async () => new Response(null, { status: 500 }))).toBe(0);
+    expect(unresolvedSettlements).toHaveLength(0);
+  });
+
+  test("a claim without an explicit reserved length prices at the configured session ceiling", async () => {
+    claimRow = {
+      reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
+      actual_cost_usd: 0, minutes: 3, outcome: "ended",
+      provider_termination_state: "not_required", provider_termination_mode: null,
+      provider_usage_state: "unknown", openai_call_id: null,
+      reconcile_attempts: 20, reserved_cost_usd: 1.5,
+    };
+
+    expect(await reconcileBudgetReservations()).toBe(1);
+
+    // 3 minutes at 1.5 USD per the configured 15-minute ceiling = 0.30 USD.
+    expect(unresolvedSettlements[0].p_estimated_cost).toBeCloseTo(0.3, 4);
+  });
+
+  test("the estimate can never exceed the amount actually reserved", async () => {
+    claimRow = {
+      reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
+      actual_cost_usd: 0, minutes: 999, outcome: "ended",
+      provider_termination_state: "confirmed", provider_termination_mode: "hangup",
+      provider_usage_state: "unknown", openai_call_id: "rtc-long",
+      reconcile_attempts: 20, reserved_cost_usd: 1.5, reserved_minutes: 15,
+    };
+
+    expect(await reconcileBudgetReservations()).toBe(1);
+    expect(unresolvedSettlements[0].p_estimated_cost).toBe(1.5);
   });
 });
