@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { classifyCodexAuthStore } from "../auth-local-state.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const validator = path.join(repoRoot, "hermes-cell/validate-config.mjs");
@@ -56,6 +57,38 @@ test("derived Hermes image patches active auth, locks, fallback, login, and refr
   assert.match(patcher, /global_auth_fallback/);
   assert.match(patcher, /auth_home_must_be_absolute/);
   assert.match(patcher, /auth_home_must_not_equal_hermes_home/);
+});
+
+test("local auth classifier rejects dead, exhausted, terminal, and expired Codex credentials", () => {
+  const now = 1_787_360_000;
+  const jwt = (exp) => `header.${Buffer.from(JSON.stringify({ exp })).toString("base64url")}.signature`;
+  const row = (overrides = {}) => ({
+    auth_type: "oauth",
+    access_token: jwt(now + 3600),
+    refresh_token: "synthetic-refresh-token",
+    last_status: "ok",
+    ...overrides,
+  });
+  const provider = {
+    tokens: { access_token: jwt(now + 3600), refresh_token: "synthetic-refresh-token" },
+  };
+  const store = (rows, providerState = provider) => ({
+    providers: { "openai-codex": providerState },
+    credential_pool: { "openai-codex": rows },
+  });
+
+  assert.equal(classifyCodexAuthStore(store([row()]), now).authenticated, true);
+  assert.equal(classifyCodexAuthStore(store([row({ last_status: "dead" })]), now).authenticated, false,
+    "a preserved singleton must not override a DEAD pool row");
+  assert.equal(classifyCodexAuthStore(store([row({ last_status: "exhausted", last_error_code: 401 })]), now).authenticated, false);
+  assert.equal(classifyCodexAuthStore(store([row({ access_token: jwt(now - 1) })]), now).authenticated, false);
+  assert.equal(classifyCodexAuthStore(store([], {
+    ...provider,
+    last_auth_error: { relogin_required: true },
+  }), now).authenticated, false);
+  assert.equal(classifyCodexAuthStore(store([], provider), now).authenticated, true,
+    "an unexpired singleton is allowed only when the pool is absent");
+  assert.equal(classifyCodexAuthStore({}, now).authenticated, false);
 });
 
 test("normal tenant launcher gives two tenants isolated project, volumes, paths, backup identity, and route", async () => {
@@ -315,6 +348,10 @@ test("config validator rejects an API-key reasoning credential", async () => {
 });
 
 test("token-free health wrapper returns state only and never forwards or prints OAuth material", async () => {
+  const healthSource = await readFile(health, "utf8");
+  assert.match(healthSource, /ligou_auth_local_state/);
+  assert.match(healthSource, /auth-local-state\.mjs/);
+  assert.doesNotMatch(healthSource, /hermes auth status openai-codex --json/);
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-hermes-health-"));
   const bin = path.join(fixture, "bin");
   const curlLog = path.join(fixture, "curl-args");

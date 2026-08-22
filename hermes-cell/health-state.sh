@@ -11,6 +11,7 @@ fi
 NODE_BIN="${LIGOU_NODE_BIN:-node}"
 EXPECTED_IMAGE="${HERMES_IMAGE:?set immutable HERMES_IMAGE digest}"
 IMAGE_TOOL="$(cd "$(dirname "$0")" && pwd)/verify-running-image.mjs"
+AUTH_TOOL="$(cd "$(dirname "$0")" && pwd)/auth-local-state.mjs"
 IDENTITY_JSON="$("$NODE_BIN" "$(cd "$(dirname "$0")" && pwd)/tenant-identity.mjs" --tenant-id "$TENANT_ID" --tenant-slug "$TENANT" --json)" \
   || { echo '{"ok":false,"provider":"openai-codex","auth":"invalid_tenant","api":"unknown"}'; exit 1; }
 identity_field() { "$NODE_BIN" -e 'const v=JSON.parse(process.argv[1]);process.stdout.write(String(v[process.argv[2]]||""));' "$IDENTITY_JSON" "$1"; }
@@ -28,7 +29,11 @@ if ! "$NODE_BIN" "$IMAGE_TOOL" --container "$CELL" --expected "$EXPECTED_IMAGE" 
   exit 1
 fi
 
-AUTH_RAW="$(docker exec "$CELL" hermes auth status openai-codex --json 2>/dev/null || true)"
+# ligou_auth_local_state executes inside the container; auth.json never crosses stdout.
+AUTH_RAW="$(docker exec -i \
+  -e LIGOU_AUTH_STATE_CLI=1 \
+  -e "LIGOU_AUTH_PROBE_LABEL=auth status openai-codex" \
+  "$CELL" node --input-type=module < "$AUTH_TOOL" 2>/dev/null || true)"
 if printf '%s' "$AUTH_RAW" | "$NODE_BIN" -e '
 let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{try{const v=JSON.parse(raw);process.exit(v?.provider==="openai-codex"&&v?.authenticated===true?0:1)}catch{process.exit(1)}});' ; then
   AUTH_STATE=ready
