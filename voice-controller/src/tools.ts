@@ -7,6 +7,7 @@ import { checkPower, normalizeGeography } from "./powers.ts";
 import { issueQuote, issueSlotOffers, readQuote } from "./offers.ts";
 import { CUSTOMER_OUTCOME } from "./customer-language.ts";
 import { buildTrustedHermesContext, consultHermes, HERMES_TOPICS } from "./hermes.ts";
+import { mintSimulationSlots } from "./simulation.ts";
 
 export interface Capability {
   actor: "CALLER";
@@ -18,6 +19,7 @@ export interface Capability {
   allowedTools: string[];
   authEpoch: number;
   policyEpoch: number;
+  simulation: boolean; // simulation_only tenant: role-play never reaches offers/powers/provider
 }
 
 export function makeCapability(
@@ -26,7 +28,7 @@ export function makeCapability(
   callId: string,
   maxMinutes: number,
   sessionType: "customer" | "owner_browser" | "onboarding" = "customer",
-  epochs: { authEpoch: number; policyEpoch: number } = { authEpoch: 1, policyEpoch: 1 },
+  epochs: { authEpoch: number; policyEpoch: number; simulation?: boolean } = { authEpoch: 1, policyEpoch: 1 },
 ): Capability {
   const allowedTools = sessionType === "onboarding"
     ? ["get_business_info", "record_interview_answer"]
@@ -41,6 +43,7 @@ export function makeCapability(
     allowedTools,
     authEpoch: epochs.authEpoch,
     policyEpoch: epochs.policyEpoch,
+    simulation: epochs.simulation === true,
   };
 }
 
@@ -322,6 +325,23 @@ export async function runTool(cap: Capability, name: string, args: Record<string
           });
         }
         const freeCandidates = candidates.filter((c) => !overlapsBusy(c.start, c.end, intervals));
+        if (cap.simulation) {
+          // Simulation: real rules, real quote, real free/busy — but slots never
+          // enter the offers ledger and no booking power is consulted or required.
+          // The approved service area IS still rehearsed, so the owner sees the
+          // agent refuse geographies the business does not serve.
+          const areaRule = rules.find((r) => r.category === "area");
+          const cities = Array.isArray((areaRule?.structured as any)?.cities)
+            ? ((areaRule?.structured as any).cities as unknown[]).map((c) => normalizeGeography(String(c)))
+            : [];
+          if (cities.length && !cities.includes(geography)) {
+            return done({ status: "needs_owner", reason: "geography_not_served", say: CUSTOMER_OUTCOME.needsTeam });
+          }
+          const chosen = freeCandidates.slice(0, 3);
+          if (!chosen.length) return done({ status: "no_slots", timezone: tz, say: CUSTOMER_OUTCOME.noSlots });
+          const slots = mintSimulationSlots(cap.callId, cap.tenantId, svc, Number(quote.public_quote), chosen);
+          return done({ status: "ok", timezone: tz, simulated: true, slots, note: "Offer at most two options at a time; say the local text and pass only the matching slot_token to propose_booking." });
+        }
         const authorized: Array<{ start: string; end: string; local: string; powerId: string }> = [];
         for (const candidate of freeCandidates) {
           const power = await checkPower(cap.tenantId, "voice_agent", "create_booking", svc, {
@@ -393,6 +413,21 @@ export async function runTool(cap: Capability, name: string, args: Record<string
         const topic = String(args.topic ?? "outro");
         const ruleText = String(args.rule_text ?? "").slice(0, 600);
         if (!ruleText) return done({ error: "rule_text_required" }, false);
+        let structured = (args.structured as Record<string, unknown>) ?? null;
+        // A price with a target but no floor becomes non-negotiable at the target:
+        // a conservative floor the owner can widen later. Without one, evaluate_offer
+        // and check_availability would refuse the approved rule with needs_owner.
+        // Only a real positive number qualifies — junk targets must stay fail-closed
+        // (needs_owner), never become an enforceable $0 floor.
+        if (
+          structured &&
+          typeof structured.price_target === "number" &&
+          Number.isFinite(structured.price_target) &&
+          structured.price_target > 0 &&
+          structured.price_min == null
+        ) {
+          structured = { ...structured, price_min: structured.price_target };
+        }
         const { data, error } = await supa().from("rules").insert({
           tenant_id: cap.tenantId,
           origem: "onboarding",
@@ -400,7 +435,7 @@ export async function runTool(cap: Capability, name: string, args: Record<string
           status: "sugerido",
           category: TOPIC_CATEGORY[topic] ?? "geral",
           text: ruleText,
-          structured: (args.structured as Record<string, unknown>) ?? null,
+          structured,
           evidence_quote: args.owner_words ? String(args.owner_words).slice(0, 1000) : null,
           related_call_id: cap.callId,
         }).select("id").single();

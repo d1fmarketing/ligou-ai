@@ -1,14 +1,45 @@
 // Booking flow — the deterministic hands. The model proposes; these functions verify grants, bands, and idempotency.
 // close_deal never claims success without an ACCEPTED receipt (with read-back proof) — tri-state, unknown never resends.
 import { createHash } from "node:crypto";
-import { loadTenant, priceRules, supa } from "./rules.ts";
+import { loadTenant, priceRules, supa, type Rule, type Tenant } from "./rules.ts";
 import { checkPower, normalizeGeography } from "./powers.ts";
 import type { Capability } from "./tools.ts";
 import { opaqueTokenHash } from "./offers.ts";
 import { CUSTOMER_OUTCOME } from "./customer-language.ts";
+import { consumeSimulationSlot, createSimulationBooking, markSimulationBookingClosed, readSimulationBooking } from "./simulation.ts";
 
 const DENY_SAY = CUSTOMER_OUTCOME.needsTeam;
 const PENDING_SAY = CUSTOMER_OUTCOME.bookingPending;
+
+// Simulation close: the price floor from the APPROVED rules is still enforced —
+// below-floor closes open a real approval case (that is the product behavior the
+// owner is rehearsing) — but nothing is written to bookings, intents, powers or
+// the provider, and the agent is told to present the result as practice.
+async function closeSimulatedDeal(cap: Capability, tenant: Tenant, rules: Rule[], bookingId: string) {
+  const booking = readSimulationBooking(cap.callId, bookingId);
+  if (!booking) return { status: "invalid", error: "booking_not_found" };
+  if (tenant.auth_epoch !== cap.authEpoch) return { status: "denied", error: "authorization_epoch_stale" };
+  if (tenant.policy_epoch !== cap.policyEpoch) return { status: "denied", error: "policy_epoch_stale" };
+  const band = priceRules(rules).find((s) => s.service_type === booking.serviceType);
+  const floor = band?.price_min != null ? Number(band.price_min) : NaN;
+  if (!band || !Number.isFinite(floor) || booking.price < floor) {
+    const caseIdem = createHash("sha256").update(`${cap.callId}:close-case:${bookingId}:${booking.price}`).digest("hex");
+    const { data: kase } = await supa().from("approval_cases").upsert({
+      tenant_id: tenant.id, call_id: cap.callId,
+      request: `Close attempt below policy (simulation): ${booking.serviceType} for $${booking.price}`,
+      proposed_action: `Book ${booking.serviceType} at ${booking.slotStart} for $${booking.price}`,
+      client_name: booking.clientName, contact: booking.contact,
+      price_quoted: booking.price, urgency: "normal", idempotency_key: caseIdem,
+    }, { onConflict: "idempotency_key" }).select("id").single();
+    return { status: "pending_approval", case_id: kase?.id, simulated: true, say: DENY_SAY };
+  }
+  markSimulationBookingClosed(bookingId);
+  return {
+    status: "simulated_confirmed", receipt: "simulated", simulated: true,
+    slot_local: booking.local,
+    say: "Simulation mode: tell them the appointment WOULD now be locked in for that time — nothing was written to the real calendar. Remind the owner this was practice.",
+  };
+}
 
 export async function proposeBooking(cap: Capability, args: Record<string, unknown>) {
   const { tenant } = await loadTenant(cap.tenantSlug);
@@ -18,6 +49,17 @@ export async function proposeBooking(cap: Capability, args: Record<string, unkno
   if (!slotToken) return { status: "invalid_offer", error: "slot_token_required" };
   if (tenant.auth_epoch !== cap.authEpoch) return { status: "denied", error: "authorization_epoch_stale" };
   if (tenant.policy_epoch !== cap.policyEpoch) return { status: "denied", error: "policy_epoch_stale" };
+  if (cap.simulation) {
+    // Simulation: the slot lives only in this process; consuming it never touches
+    // the offers ledger and creates no bookings row.
+    const slot = consumeSimulationSlot(cap.callId, slotToken);
+    if (!slot) return { status: "invalid_offer", error: "slot_offer_not_found", say: DENY_SAY };
+    const bookingId = createSimulationBooking(cap.callId, slot, clientName, contact);
+    return {
+      status: "proposed", booking_id: bookingId, simulated: true,
+      say: "Confirm the details out loud with the caller (service, time, price), then use close_deal to finalize.",
+    };
+  }
   const { data: consumed, error } = await supa().rpc("consume_slot_offer", {
     p_tenant: tenant.id,
     p_call: cap.callId,
@@ -38,6 +80,8 @@ export async function closeDeal(cap: Capability, args: Record<string, unknown>) 
   const { tenant, rules } = await loadTenant(cap.tenantSlug);
   const bookingId = String(args.booking_id ?? "");
   if (!bookingId) return { status: "invalid", error: "booking_id required" };
+
+  if (cap.simulation) return closeSimulatedDeal(cap, tenant, rules, bookingId);
 
   const { data: booking } = await supa()
     .from("bookings").select("*").eq("id", bookingId).eq("tenant_id", tenant.id).eq("call_id", cap.callId).single();

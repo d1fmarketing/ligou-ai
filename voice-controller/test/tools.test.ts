@@ -394,10 +394,18 @@ describe("instructions builder", () => {
   });
 
   test("no Realtime session type receives the private floor", () => {
-    for (const sessionType of ["customer", "owner_browser", "onboarding"] as const) {
+    // Caller-facing sessions must never even name the floor. The onboarding
+    // interview is with the OWNER — the structured field name is required so the
+    // model can record the floor the owner states — but no floor VALUE from the
+    // existing rules may leak there either.
+    for (const sessionType of ["customer", "owner_browser"] as const) {
       const snapshot = buildInstructions(TENANT as any, RULES as any, sessionType);
       expect(snapshot, sessionType).not.toMatch(/\b(?:price_min|minimum acceptable|private floor)\b/i);
       expect(snapshot, sessionType).not.toContain("$149");
     }
+    const onboarding = buildInstructions(TENANT as any, RULES as any, "onboarding");
+    expect(onboarding).not.toMatch(/\b(?:minimum acceptable|private floor)\b/i);
+    expect(onboarding).not.toContain("$149");
+    expect(onboarding).not.toContain("149");
   });
 });

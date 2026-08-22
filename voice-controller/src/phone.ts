@@ -223,7 +223,11 @@ export async function handleIncoming(row: any, runtime: PhoneRuntime = {}) {
       callId,
       tenant.session_max_minutes ?? config.sessionMaxMinutes,
       "customer",
-      { authEpoch: tenant.auth_epoch, policyEpoch: tenant.policy_epoch },
+      {
+        authEpoch: tenant.auth_epoch,
+        policyEpoch: tenant.policy_epoch,
+        simulation: tenant.operational_mode === "simulation_only",
+      },
     );
     await requiredRpc<boolean>("begin_phone_sideband", {
       p_event_id: context.eventId,

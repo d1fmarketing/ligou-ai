@@ -28,12 +28,21 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
     `Deliver your audio response fast, but do not sound rushed. In an emergency, stay calm and lead with the safety instruction.`
   );
 
-  // 2 — language lock (official prompting-guide pattern, verbatim core)
-  layers.push(
-    `LANGUAGE: Default to English unless the user clearly uses another language. ` +
-    `Supported caller languages: English and Spanish. Switch languages only when the user explicitly asks or provides a substantive utterance in another language. ` +
-    `Do not infer language from accent, names, isolated foreign words, or filler sounds. Once switched, stay in that language until the caller changes.`
-  );
+  // 2 — language lock (official prompting-guide pattern, verbatim core).
+  // The onboarding interview is with the OWNER and runs in Brazilian Portuguese.
+  if (sessionType === "onboarding") {
+    layers.push(
+      `LANGUAGE: Conduza toda a conversa em português do Brasil. ` +
+      `Troque de idioma somente se o dono pedir explicitamente. ` +
+      `Não infira idioma por sotaque, nomes ou palavras isoladas em outra língua.`
+    );
+  } else {
+    layers.push(
+      `LANGUAGE: Default to English unless the user clearly uses another language. ` +
+      `Supported caller languages: English and Spanish. Switch languages only when the user explicitly asks or provides a substantive utterance in another language. ` +
+      `Do not infer language from accent, names, isolated foreign words, or filler sounds. Once switched, stay in that language until the caller changes.`
+    );
+  }
 
   // 3 — inviolable rules (stable)
   layers.push(
@@ -68,6 +77,13 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
   );
 
   // 5 — dynamic tail (session type; keep small and LAST)
+  if (tenant.operational_mode === "simulation_only" && sessionType !== "onboarding") {
+    layers.push(
+      `SIMULATION MODE: This business is not live yet — bookings are practice only. ` +
+      `close_deal returns status "simulated_confirmed" instead of "confirmed"; when it does, tell the caller the appointment WOULD be locked in, and make clear nothing touched the real calendar. ` +
+      `Everything else (prices, availability, rules) is the business's real configuration.`
+    );
+  }
   if (sessionType === "owner_browser") {
     layers.push(`SESSION: This is the business owner testing you from the dashboard. They may speak Portuguese to you — answer the owner in Portuguese; still role-play customer calls in English/Spanish when they pretend to be a caller.`);
   } else if (sessionType === "onboarding") {
@@ -79,7 +95,8 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
       `2) Quais cidades/regiões atende; 3) Como funciona a agenda (dias, horários); ` +
       `4) O que fazer numa emergência (e se cobra taxa); 5) Alguma regra ou exceção importante. ` +
       `A cada fato confirmado, chame record_interview_answer com a regra em inglês operacional + as palavras do dono como evidência. ` +
-      `Preços SEMPRE com structured {service_type, price_target, duration_min}. ` +
+      `Para cada serviço com preço, pergunte também o MÍNIMO que ele aceita em negociação. ` +
+      `Preços SEMPRE com structured {service_type, price_min, price_target, duration_min}; sem mínimo informado, omita price_min. ` +
       `Ao final, recapitule o que registrou e explique que ele aprova o lote na aba Memória do painel.`
     );
   } else {
