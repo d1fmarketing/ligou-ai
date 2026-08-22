@@ -3,7 +3,7 @@
 import { config } from "./config.ts";
 import { supa } from "./rules.ts";
 import { calendarPort } from "./calendar.ts";
-import { reconcileBudgetReservations, reconcileProviderTerminations } from "./budget.ts";
+import { reapAbandonedCalls, reconcileBudgetReservations, reconcileProviderTerminations } from "./budget.ts";
 import { randomUUID } from "node:crypto";
 
 const WORKER_ID = `worker-${process.pid}`;
@@ -173,6 +173,7 @@ export function startWorkerLoop() {
     try { await reconcileProviderTerminations(); } catch (e) { console.error("provider termination reconciliation", e); }
   };
   setInterval(loop, 1_000);
+  setInterval(() => reapAbandonedCalls().catch((e) => console.error("abandoned call reaper", e)), 60_000);
   setInterval(() => tickUsageAlerts().catch((e) => console.error("usage", e)), 60_000);
   console.log("action worker loop started");
 }

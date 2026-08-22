@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { finalizeTerminalBudget, reconcileBudgetReservations, reconcileProviderTerminations } from "../src/budget.ts";
+import { finalizeTerminalBudget, reapAbandonedCalls, reconcileBudgetReservations, reconcileProviderTerminations } from "../src/budget.ts";
 import { requestProviderTermination, terminateProviderCall } from "../src/provider-termination.ts";
 import { _setClient } from "../src/rules.ts";
 
@@ -12,6 +12,8 @@ let callUpdates: any[] = [];
 let providerRpcCalls: Array<{ name: string; args?: Record<string, unknown> }> = [];
 let providerAttemptStarted = false;
 let unresolvedSettlements: any[] = [];
+let reapCalls: any[] = [];
+let reapResult: any = 0;
 
 function client() {
   return {
@@ -38,6 +40,10 @@ function client() {
       }
       if (name === "claim_budget_reconciliation") {
         return Promise.resolve({ data: claimRow, error: null });
+      }
+      if (name === "reap_abandoned_calls") {
+        reapCalls.push(args ?? {});
+        return Promise.resolve({ data: reapResult, error: null });
       }
       if (name === "settle_unresolved_call_budget") {
         unresolvedSettlements.push(args ?? {});
@@ -77,6 +83,8 @@ beforeEach(() => {
   providerRpcCalls = [];
   providerAttemptStarted = false;
   unresolvedSettlements = [];
+  reapCalls = [];
+  reapResult = 0;
   claimRow = {
     reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
     actual_cost_usd: 0, minutes: 0, outcome: "startup_error",
@@ -295,5 +303,22 @@ describe("durable budget reconciliation", () => {
 
     expect(await reconcileBudgetReservations()).toBe(1);
     expect(unresolvedSettlements[0].p_estimated_cost).toBe(1.5);
+  });
+
+  test("calls left active by a dead controller are reaped so their budget can reconcile", async () => {
+    // A controller restart abandons its in-flight calls: nothing transitions them
+    // out of 'active', so the reconciliation claim (which requires a terminal call)
+    // never sees them and their reservations are held forever. Production had 115
+    // such calls, three of them holding a reservation each.
+    reapResult = 3;
+    expect(await reapAbandonedCalls()).toBe(3);
+    expect(reapCalls).toHaveLength(1);
+    // The grace window must be well beyond the longest legitimate session.
+    expect(reapCalls[0].p_grace_minutes).toBeGreaterThanOrEqual(60);
+  });
+
+  test("the reaper reports zero rather than throwing when the RPC is unavailable", async () => {
+    reapResult = null;
+    expect(await reapAbandonedCalls()).toBe(0);
   });
 });

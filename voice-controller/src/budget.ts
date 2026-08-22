@@ -106,6 +106,20 @@ export async function finalizeTerminalBudget(args: {
 }
 
 const UNRESOLVED_SETTLEMENT_MIN_ATTEMPTS = 20;
+const ABANDONED_CALL_GRACE_MINUTES = 120;
+
+// A controller restart leaves its in-flight calls in 'active' forever: nothing
+// transitions them, so budget reconciliation (which only claims terminal calls)
+// never reaches their reservations and the dashboard shows them as in progress.
+// The RPC only touches calls older than a grace window far beyond any legitimate
+// session, and marks the provider side for the existing at-most-once hangup path.
+export async function reapAbandonedCalls(): Promise<number> {
+  const { data, error } = await supa().rpc("reap_abandoned_calls", {
+    p_grace_minutes: ABANDONED_CALL_GRACE_MINUTES,
+  });
+  if (error || data === null || data === undefined) return 0;
+  return Number(data) || 0;
+}
 
 export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promise<number> {
   const { data: claim, error } = await supa().rpc("claim_budget_reconciliation", {
