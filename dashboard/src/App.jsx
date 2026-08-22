@@ -5,6 +5,7 @@ import { ApprovalCard } from "./components/ApprovalCard.jsx";
 import { Dialog } from "./components/Dialog.jsx";
 import { dashboardGateway } from "./data/gateway.js";
 import { supabaseGateway } from "./data/gateway.supabase.js";
+import { requireSuccess } from "./data/gateway-outcome.js";
 import { ApprovalsView } from "./views/ApprovalsView.jsx";
 import { ChatView } from "./views/ChatView.jsx";
 import { MemoryView } from "./views/MemoryView.jsx";
@@ -354,14 +355,8 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
             onEdit={openMemoryEdit}
             onRevoke={openMemoryRevoke}
             decisionBusy={deciding}
-            onApproveSuggestion={(entry) => decideSuggestion(async () => {
-              const result = await gateway.approveMemory(entry.id);
-              if (result?.warning) throw new Error(result.warning);
-            }, "Sugestão aprovada — o Ligou já passa a usar esta regra.")}
-            onRejectSuggestion={(entry) => decideSuggestion(async () => {
-              const result = await gateway.rejectMemory(entry.id);
-              if (result?.warning) throw new Error(result.warning);
-            }, "Sugestão rejeitada. Nada mudou na memória ativa.")}
+            onApproveSuggestion={(entry) => decideSuggestion(() => requireSuccess(gateway.approveMemory(entry.id)), "Sugestão aprovada — o Ligou já passa a usar esta regra.")}
+            onRejectSuggestion={(entry) => decideSuggestion(() => requireSuccess(gateway.rejectMemory(entry.id)), "Sugestão rejeitada. Nada mudou na memória ativa.")}
             onApproveAllSuggestions={(suggested) => decideSuggestion(async () => {
               let approved = 0;
               for (const entry of suggested) {
@@ -395,13 +390,13 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
         onClose={() => setDialog(null)}
         onSendVoice={(phrase) => perform(() => gateway.sendMessage(phrase), "Frase demonstrativa enviada ao Ligou.")}
         onApprove={(id, decision) => perform(
-          () => gateway.approveApproval(id, decision),
+          () => requireSuccess(gateway.approveApproval(id, decision)),
           decision.mode === "rule" ? "Decisão aprovada e salva na Memória." : "Decisão aprovada somente para este caso.",
         )}
-        onAdjust={(id, text) => perform(() => gateway.adjustApproval(id, text), "Proposta ajustada e mantida para sua aprovação.")}
-        onReject={(id) => perform(() => gateway.rejectApproval(id), "Proposta recusada sem alterar a Memória.")}
-        onUpdateMemory={(id, patch) => perform(() => gateway.updateMemory(id, patch), "Regra atualizada com uma nova versão.")}
-        onRevokeMemory={(id) => perform(() => gateway.revokeMemory(id), "Regra retirada da memória ativa. Recibo local preservado.")}
+        onAdjust={(id, text) => perform(() => requireSuccess(gateway.adjustApproval(id, text)), "Proposta ajustada e mantida para sua aprovação.")}
+        onReject={(id) => perform(() => requireSuccess(gateway.rejectApproval(id)), "Proposta recusada sem alterar a Memória.")}
+        onUpdateMemory={(id, patch) => perform(() => requireSuccess(gateway.updateMemory(id, patch)), "Regra atualizada com uma nova versão.")}
+        onRevokeMemory={(id) => perform(() => requireSuccess(gateway.revokeMemory(id)), "Regra retirada da memória ativa. Recibo local preservado.")}
         onReset={() => perform(() => gateway.resetPrototype(), "Dados de exemplo restaurados.")}
       />
 
