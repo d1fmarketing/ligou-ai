@@ -79,17 +79,26 @@ export function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // One bootstrap per authenticated user, guarded by a ref rather than effect
+  // cleanup: the effect re-runs on every new session object (sign-in, token
+  // refresh — including the rotation the bootstrap itself awaits), and a
+  // cleanup-based cancellation would cancel its own in-flight run. Stale
+  // completions are discarded by comparing the user id recorded at start.
+  const bootRunRef = useRef({ userId: null, started: false });
   useEffect(() => {
-    if (!supabaseConfigured) return undefined;
-    if (session === undefined) return undefined;
+    if (!supabaseConfigured) return;
+    if (session === undefined) return;
     if (!session) {
       providerTokensRef.current = null;
+      bootRunRef.current = { userId: null, started: false };
       setBoot({ status: "idle" });
-      return undefined;
+      return;
     }
-    if (boot.status === "running") return undefined;
-    if (boot.status === "ready" && boot.userId === session.user?.id) return undefined;
-    let cancelled = false;
+    const userId = session.user?.id ?? null;
+    if (!userId) return;
+    if (bootRunRef.current.started && bootRunRef.current.userId === userId) return;
+    bootRunRef.current = { userId, started: true };
+    const stillCurrent = () => bootRunRef.current.started && bootRunRef.current.userId === userId;
     (async () => {
       setBoot({ status: "running", stage: "tenant" });
       try {
@@ -102,7 +111,7 @@ export function App() {
           providerRefreshToken: tokens?.providerRefreshToken ?? null,
           functionsBase: resolveFunctionsBase(import.meta.env.VITE_SUPABASE_FUNCTIONS_URL, import.meta.env.VITE_SUPABASE_URL),
           flagStorage: window.sessionStorage,
-          onStage: (stage) => { if (!cancelled) setBoot((prev) => ({ ...prev, status: "running", stage })); },
+          onStage: (stage) => { if (stillCurrent()) setBoot((prev) => ({ ...prev, status: "running", stage })); },
         });
         cleanOAuthCallbackUrl();
         if (tokens?.providerToken) {
@@ -116,19 +125,21 @@ export function App() {
             baseUrl: import.meta.env.BASE_URL,
             withConsent: true,
           });
-          return;
+          return; // the page is navigating to Google
         }
         supabaseGateway.setTenant(result.tenant.tenant_id);
-        if (!cancelled) {
-          setBoot({ status: "ready", userId: session.user?.id, tenant: result.tenant, connector: result.connector });
+        if (stillCurrent()) {
+          setBoot({ status: "ready", userId, tenant: result.tenant, connector: result.connector });
         }
       } catch (error) {
         cleanOAuthCallbackUrl();
-        if (!cancelled) setBoot({ status: "error", message: error?.message || "bootstrap_failed" });
+        if (stillCurrent()) {
+          bootRunRef.current = { userId: null, started: false }; // allow a retry after the error screen
+          setBoot({ status: "error", message: error?.message || "bootstrap_failed" });
+        }
       }
     })();
-    return () => { cancelled = true; };
-  }, [session, boot.status, boot.userId]);
+  }, [session]);
 
   if (!supabaseConfigured) return <AppInner />; // prototype mode: no env, no auth, no voice
   if (session === undefined) return null;
