@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -14,6 +14,7 @@ const tenantCompose = path.join(repoRoot, "hermes-cell/tenant-compose.mjs");
 const tenantIdentity = path.join(repoRoot, "hermes-cell/tenant-identity.mjs");
 const authPatch = path.join(repoRoot, "hermes-cell/image/patch-auth-home.py");
 const imageDockerfile = path.join(repoRoot, "hermes-cell/image/Dockerfile");
+const cognitiveCopy = path.join(repoRoot, "hermes-cell/copy-cognitive-state.py");
 const IMAGE = "330140023537.dkr.ecr.us-east-1.amazonaws.com/ligou/hermes-agent@sha256:7ae8423fb1a64110008e746c5571864fcd8d9e167659d48f96b9b4a5a8181f33";
 const TENANT_A = "11111111-1111-4111-8111-111111111111";
 const TENANT_B = "22222222-2222-4222-8222-222222222222";
@@ -89,6 +90,38 @@ test("local auth classifier rejects dead, exhausted, terminal, and expired Codex
   assert.equal(classifyCodexAuthStore(store([], provider), now).authenticated, true,
     "an unexpired singleton is allowed only when the pool is absent");
   assert.equal(classifyCodexAuthStore({}, now).authenticated, false);
+});
+
+test("legacy cognitive copy is hash-verified and excludes auth, snapshots, backups, caches, and links", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-cognitive-copy-"));
+  const source = path.join(fixture, "source");
+  const destination = path.join(fixture, "destination");
+  try {
+    for (const relative of ["memories", "skills/demo", "sessions", "state-snapshots/old", "home/.cache/wheels", "backups"]) {
+      await mkdir(path.join(source, relative), { recursive: true });
+    }
+    await mkdir(destination);
+    await writeFile(path.join(source, "memories/MEMORY.md"), "memory\n");
+    await writeFile(path.join(source, "skills/demo/SKILL.md"), "skill\n");
+    await writeFile(path.join(source, "sessions/session.json"), "{}\n");
+    await writeFile(path.join(source, "state.db"), "synthetic-state\n");
+    await writeFile(path.join(source, "auth.json"), '{"refresh_token":"forbidden"}\n');
+    await writeFile(path.join(source, "state-snapshots/old/auth.json"), "forbidden\n");
+    await writeFile(path.join(source, "backups/old.zip"), "forbidden\n");
+    await symlink("../../memories", path.join(source, "home/.cache/wheels/cached"));
+    await writeFile(path.join(destination, "stale.txt"), "remove\n");
+    const result = spawnSync("python3", [cognitiveCopy, "--source", source, "--destination", destination], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const proof = JSON.parse(result.stdout);
+    assert.equal(proof.ok, true);
+    assert.deepEqual(proof.required, { memories: 1, sessions: 1, skills: 1 });
+    assert.equal(await readFile(path.join(destination, "memories/MEMORY.md"), "utf8"), "memory\n");
+    await assert.rejects(readFile(path.join(destination, "auth.json"), "utf8"));
+    await assert.rejects(readFile(path.join(destination, "stale.txt"), "utf8"));
+    await assert.rejects(readFile(path.join(destination, "state-snapshots/old/auth.json"), "utf8"));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
 });
 
 test("normal tenant launcher gives two tenants isolated project, volumes, paths, backup identity, and route", async () => {
