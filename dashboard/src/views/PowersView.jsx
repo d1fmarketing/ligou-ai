@@ -50,7 +50,13 @@ export function PowersView({ onToast }) {
     load();
   }
 
-  if (powers === null) return <section className="powers-view"><p>Carregando poderes…</p></section>;
+  if (powers === null) {
+    return (
+      <section className="powers-view">
+        <p className="view-loading" role="status">Carregando poderes…</p>
+      </section>
+    );
+  }
 
   const active = powers.filter((p) => !p.revoked_at);
   const revoked = powers.filter((p) => p.revoked_at);
@@ -81,7 +87,7 @@ export function PowersView({ onToast }) {
             </article>
           );
         })}
-        {active.length === 0 ? <p>Nenhum poder ativo — o agente só responde perguntas e abre casos.</p> : null}
+        {active.length === 0 ? <p className="powers-empty" role="status">Nenhum poder ativo — o agente só responde perguntas e abre casos.</p> : null}
       </div>
       {revoked.length > 0 ? (
         <details className="powers-revoked">

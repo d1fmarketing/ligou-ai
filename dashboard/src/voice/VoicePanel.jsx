@@ -104,8 +104,16 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
           </div>
         ) : (
           <div className="voice-live-active">
-            <p className="voice-live-status">{status === "connecting" ? "Conectando…" : statusLineFor(sessionType)}</p>
+            <p className={`voice-live-status ${status === "connecting" ? "is-connecting" : "is-live"}`}>
+              <span className="voice-live-dot" aria-hidden="true" />
+              {status === "connecting" ? "Conectando…" : statusLineFor(sessionType)}
+            </p>
             <div className="voice-live-transcript" aria-live="polite">
+              {lines.length === 0 ? (
+                <p className="voice-live-hint">
+                  {status === "connecting" ? "Preparando o áudio…" : "Pode falar — o Ligou está ouvindo."}
+                </p>
+              ) : null}
               {lines.map((l, i) => (
                 <p key={i} className={l.kind === "agent" ? "line-agent" : "line-caller"}>
                   <strong>{l.kind === "agent" ? "Ligou" : "Você"}:</strong> {l.text}
