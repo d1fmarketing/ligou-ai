@@ -55,6 +55,18 @@ describe("test event window", () => {
     expect(Date.parse(window.startIso)).toBe(Date.parse("2026-08-22T19:00:00.000Z"));
     expect(window.startIso).toContain("+00:00");
   });
+
+  test("a real-world clock with sub-second remainder still yields a well-formed offset", () => {
+    // Regression: Intl truncates to seconds, so a fractional now leaked a
+    // fractional offset ("-07:0.0087…") that Google rejected with 400.
+    const now = Date.parse("2026-08-22T18:30:00.000Z") + 527.13333333;
+    const window = nextTenantHourWindow(now, "America/Los_Angeles");
+    expect(window.startIso).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/);
+    expect(window.endIso).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/);
+    expect(window.startIso).toContain("T12:00:00-07:00");
+    expect(Date.parse(window.startIso)).toBe(Date.parse("2026-08-22T19:00:00.000Z"));
+    expect(Number.isFinite(Date.parse(window.endIso))).toBe(true);
+  });
 });
 
 describe("read-back normalization and verification", () => {

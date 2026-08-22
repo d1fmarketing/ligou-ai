@@ -290,6 +290,7 @@ Deno.serve(async (req) => {
 
     // decision === "proceed": the single allowed POST for this attempt.
     let insertStatus: number;
+    let insertReason = "";
     try {
       const insertRes = await fetch(`${CALENDAR_BASE}/calendars/${calendarPath}/events`, {
         method: "POST",
@@ -303,6 +304,14 @@ Deno.serve(async (req) => {
         }),
       });
       insertStatus = insertRes.status;
+      if (!insertRes.ok) {
+        // Provider reasons are short enum-like strings (never token material);
+        // keep only a sanitized slice so failures are diagnosable.
+        const detail = await insertRes.json().catch(() => null);
+        const reason = detail?.error?.errors?.[0]?.reason ?? detail?.error?.status ?? "";
+        const message = detail?.error?.message ?? "";
+        insertReason = `${reason}:${message}`.replace(/[^\w :._-]/g, "").slice(0, 120);
+      }
     } catch {
       // The request may or may not have reached Google: unknown, never re-POST.
       await recordResult("reconciliation_required", null, "insert_outcome_unknown:network");
@@ -315,8 +324,8 @@ Deno.serve(async (req) => {
       return reply({ outcome: "reconciliation_required", event_id: eventId, detail: "insert_outcome_unknown" });
     }
     if (classification === "failed") {
-      await recordResult("failed", null, `insert_rejected:${insertStatus}`);
-      return reply({ outcome: "failed", event_id: eventId, detail: `insert_rejected:${insertStatus}` }, 502);
+      await recordResult("failed", null, `insert_rejected:${insertStatus}:${insertReason}`);
+      return reply({ outcome: "failed", event_id: eventId, detail: `insert_rejected:${insertStatus}:${insertReason}` }, 502);
     }
     // created or duplicate (idempotent replay of the deterministic id): exact read-back decides.
     return await verifyAndAccept(classification);

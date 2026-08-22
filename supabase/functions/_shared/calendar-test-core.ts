@@ -16,6 +16,11 @@ export async function deterministicTestEventId(tenantId: string): Promise<string
 }
 
 function timeZoneOffsetMs(atMs: number, timeZone: string): number {
+  // Intl formatting truncates to whole seconds, so the input must be snapped to
+  // a whole second and the result to whole minutes — otherwise a real-world
+  // Date.now() with a sub-second remainder leaks fractional minutes into the
+  // offset and corrupts the RFC3339 suffix (e.g. "-07:0.0087…").
+  const wholeSecondMs = Math.floor(atMs / 1000) * 1000;
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone,
     hourCycle: "h23",
@@ -27,7 +32,7 @@ function timeZoneOffsetMs(atMs: number, timeZone: string): number {
     second: "2-digit",
   });
   const parts: Record<string, string> = {};
-  for (const part of formatter.formatToParts(new Date(atMs))) parts[part.type] = part.value;
+  for (const part of formatter.formatToParts(new Date(wholeSecondMs))) parts[part.type] = part.value;
   const asUtc = Date.UTC(
     Number(parts.year),
     Number(parts.month) - 1,
@@ -36,7 +41,7 @@ function timeZoneOffsetMs(atMs: number, timeZone: string): number {
     Number(parts.minute),
     Number(parts.second),
   );
-  return asUtc - atMs;
+  return Math.round((asUtc - wholeSecondMs) / 60_000) * 60_000;
 }
 
 function offsetSuffix(offsetMs: number): string {
