@@ -3,6 +3,7 @@ import { IconAlertTriangle, IconCheck, IconRefresh, IconX } from "@tabler/icons-
 import { AppShell } from "./components/AppShell.jsx";
 import { ApprovalCard } from "./components/ApprovalCard.jsx";
 import { Dialog } from "./components/Dialog.jsx";
+import { ErrorScreen, LoadingScreen, LockedView } from "./components/screens.jsx";
 import { dashboardGateway } from "./data/gateway.js";
 import { supabaseGateway } from "./data/gateway.supabase.js";
 import { requireSuccess } from "./data/gateway-outcome.js";
@@ -144,27 +145,21 @@ export function App() {
   }, [session]);
 
   if (!supabaseConfigured) return <AppInner />; // prototype mode: no env, no auth, no voice
-  if (session === undefined) return null;
+  if (session === undefined) return <LoadingScreen>Abrindo o painel…</LoadingScreen>;
   if (!session) return <Login />;
   if (boot.status === "error") {
     return (
-      <main className="error-screen">
-        <IconAlertTriangle aria-hidden="true" />
-        <h1>Não foi possível preparar sua conta</h1>
-        <p>{boot.message}</p>
-        <div className="dialog-actions">
-          <button className="button button--primary" type="button" onClick={() => window.location.reload()}>Tentar novamente</button>
-          <button className="button button--ghost" type="button" onClick={() => supabase.auth.signOut()}>Sair</button>
-        </div>
-      </main>
+      <ErrorScreen title="Não foi possível preparar sua conta" detail={boot.message}>
+        <button className="button button--primary" type="button" onClick={() => window.location.reload()}>Tentar novamente</button>
+        <button className="button button--ghost" type="button" onClick={() => supabase.auth.signOut()}>Sair</button>
+      </ErrorScreen>
     );
   }
   if (boot.status !== "ready") {
     return (
-      <main className="loading-screen">
-        <img src={`${import.meta.env.BASE_URL}assets/ligou-avatar-v1.png`} alt="" />
-        <p>{boot.stage === "calendar" ? "Conectando sua agenda do Google…" : "Preparando sua conta…"}</p>
-      </main>
+      <LoadingScreen>
+        {boot.stage === "calendar" ? "Conectando sua agenda do Google…" : "Preparando sua conta…"}
+      </LoadingScreen>
     );
   }
   return (
@@ -284,23 +279,16 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
   const openMemoryRevoke = (entry) => setDialog({ type: "memory-revoke", entry });
 
   if (loading) {
-    return (
-      <main className="loading-screen">
-        <img src={`${import.meta.env.BASE_URL}assets/ligou-avatar-v1.png`} alt="" />
-        <p>Preparando o painel do Ligou…</p>
-      </main>
-    );
+    return <LoadingScreen>Preparando o painel do Ligou…</LoadingScreen>;
   }
 
   if (!state) {
     return (
-      <main className="error-screen">
-        <IconAlertTriangle aria-hidden="true" />
-        <h1>O painel não carregou</h1>
+      <ErrorScreen title="O painel não carregou">
         <button className="button button--primary" type="button" onClick={() => window.location.reload()}>
           Tentar novamente
         </button>
-      </main>
+      </ErrorScreen>
     );
   }
 
@@ -367,11 +355,22 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
             }, "Lote aprovado — regras ativas na memória. Se houver uma conversa de voz aberta, reinicie-a para valer as novas regras.")}
           />
         ) : null}
-        {route === "poderes" && supabaseConfigured ? (
-          <PowersView onToast={setToast} />
+        {route === "poderes" ? (
+          supabaseConfigured ? (
+            <PowersView onToast={setToast} />
+          ) : (
+            <LockedView
+              title="Poderes"
+              description="Você concede poderes, não aprova cada ação. O Ligou age sozinho dentro do que está concedido; fora disso, abre um caso para você."
+            />
+          )
         ) : null}
-        {route === "conta" && supabaseConfigured && tenant ? (
-          <SettingsView user={user} tenant={tenant} onToast={setToast} onLogout={onLogout} />
+        {route === "conta" ? (
+          supabaseConfigured && tenant ? (
+            <SettingsView user={user} tenant={tenant} onToast={setToast} onLogout={onLogout} />
+          ) : (
+            <LockedView title="Conta" description="Sua conta Google e a conexão com a agenda." />
+          )
         ) : null}
         {route === "aprovacoes" ? (
           <ApprovalsView
