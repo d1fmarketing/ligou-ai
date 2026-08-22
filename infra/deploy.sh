@@ -81,7 +81,7 @@ export AWS_DEFAULT_REGION="$REGION"
 COMMAND_ID="$(aws ssm send-command \
   --instance-ids "$INSTANCE" \
   --document-name AWS-RunShellScript \
-  --comment "ligou release ${RELEASE_ID}" \
+  --comment "ligou release ${COMMIT}" \
   --parameters "$PARAMETERS" \
   --query Command.CommandId --output text)"
 [[ "$COMMAND_ID" =~ ^[A-Za-z0-9-]{3,128}$ ]] || { echo "deploy_command_id_invalid" >&2; exit 1; }
