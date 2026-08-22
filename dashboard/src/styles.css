@@ -1322,7 +1322,8 @@ button:disabled {
   font-weight: 700;
 }
 
-.memory-search-label {
+.memory-search-label,
+.memory-category-filter > span {
   color: var(--text-secondary);
   font-size: var(--type-micro);
   font-weight: 800;
@@ -1558,9 +1559,10 @@ button:disabled {
   line-height: 1.35;
 }
 
+/* Sempre em pares: decisões (Aprovar|Rejeitar) e gestão (Editar|Apagar). */
 .memory-card-actions {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-top: 12px;
 }
@@ -2786,23 +2788,32 @@ button:disabled {
     font-size: var(--type-title);
   }
 
+  /* Duas linhas limpas: busca + categoria em cima, estado embaixo. */
   .memory-tools {
-    grid-template-columns: minmax(250px, 1fr) minmax(320px, 1.2fr);
+    grid-template-columns: minmax(0, 1fr) 220px;
+    grid-template-areas:
+      "search category"
+      "filters filters";
     align-items: end;
     padding: 18px;
   }
 
-  .memory-filter-group {
-    grid-template-columns: 1fr auto;
-    align-items: end;
-  }
-
-  .memory-filter-heading {
-    grid-column: 1 / -1;
+  .memory-search {
+    grid-area: search;
   }
 
   .memory-category-filter {
-    min-width: 180px;
+    grid-area: category;
+  }
+
+  .memory-filter-group {
+    grid-area: filters;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
   }
 
   .memory-card > article {

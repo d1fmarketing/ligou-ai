@@ -42,6 +42,11 @@ function entryStatus(entry) {
   return entry?.status || 'sugerida';
 }
 
+function displayDate(value, fallback) {
+  const raw = readable(value, fallback);
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw.split('-').reverse().join('/') : raw;
+}
+
 function normalizedFilter(filter) {
   if (filter && typeof filter === 'object') {
     return {
@@ -157,7 +162,7 @@ export function MemoryView({
           </span>
         </label>
 
-        <div className="memory-filter-group" aria-labelledby="memory-filter-label">
+        <div className="memory-filter-group" role="group" aria-labelledby="memory-filter-label">
           <span className="memory-filter-heading" id="memory-filter-label">
             <IconAdjustmentsHorizontal aria-hidden="true" />
             Filtrar por estado
@@ -176,19 +181,19 @@ export function MemoryView({
               </button>
             ))}
           </div>
-
-          <label className="memory-category-filter">
-            <span>Categoria</span>
-            <select value={activeFilter.category} onChange={(event) => updateCategory(event.target.value)}>
-              <option value="all">Todas as categorias</option>
-              {categories.map((category) => (
-                <option value={category} key={category}>
-                  {category}
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
+
+        <label className="memory-category-filter">
+          <span>Categoria</span>
+          <select value={activeFilter.category} onChange={(event) => updateCategory(event.target.value)}>
+            <option value="all">Todas as categorias</option>
+            {categories.map((category) => (
+              <option value={category} key={category}>
+                {category}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
       <div className="memory-results-heading" aria-live="polite">
@@ -260,7 +265,7 @@ export function MemoryView({
                     </div>
                     <div>
                       <dt>Vigência</dt>
-                      <dd>{readable(entry.validity || entry.effectiveFrom, 'Permanente')}</dd>
+                      <dd>{displayDate(entry.validity || entry.effectiveFrom, 'Permanente')}</dd>
                     </div>
                     <div>
                       <dt>Aprovação</dt>
