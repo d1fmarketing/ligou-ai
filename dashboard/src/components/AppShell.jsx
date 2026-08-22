@@ -36,6 +36,7 @@ function DestinationLink({ destination, active, pendingCount }) {
       className={`destination-link ${active ? "is-active" : ""}`}
       href={`#${destination.id}`}
       aria-current={active ? "page" : undefined}
+      onClick={active ? () => window.scrollTo({ top: 0 }) : undefined}
     >
       <span className="destination-icon">
         {destination.id === "ligou" ? (
@@ -130,7 +131,7 @@ export function AppShell({ route, pendingCount, business, onReset, children, ins
         </button>
       </aside>
 
-      <main className="workspace" id="main-content">
+      <main className="workspace" id="main-content" tabIndex={-1}>
         {children}
       </main>
 

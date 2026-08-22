@@ -32,32 +32,48 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
     return () => { supabase.removeChannel(channel); };
   }, []);
 
-  useEffect(() => () => { sessionRef.current?.end?.(); }, []);
+  // Encerrar durante o "Conectando…" acontece antes de sessionRef existir; o
+  // cancelledRef garante que a sessão que resolver depois seja fechada na hora
+  // (mic solto) em vez de ressuscitar a chamada.
+  const cancelledRef = useRef(false);
+
+  useEffect(() => () => { cancelledRef.current = true; sessionRef.current?.end?.(); }, []);
 
   async function begin() {
+    cancelledRef.current = false;
     setStatus("connecting");
     setError(null);
     setLines([]);
+    setLiveCases([]);
+    setLiveSuggestions([]);
     try {
       const { data } = await supabase.auth.getSession();
       const token = data?.session?.access_token;
       if (!token) throw new Error("Sessão expirada — entre novamente.");
-      sessionRef.current = await startVoiceSession({
+      const session = await startVoiceSession({
         accessToken: token,
         model,
         sessionType,
         onEvent: (ev) => setLines((prev) => [...prev.slice(-30), ev]),
         onEnd: () => setStatus("ended"),
       });
+      if (cancelledRef.current) {
+        session?.end?.();
+        return;
+      }
+      sessionRef.current = session;
       setStatus("live");
     } catch (e) {
+      if (cancelledRef.current) return;
       setError(e.message);
       setStatus("error");
     }
   }
 
   function hangup() {
+    cancelledRef.current = true;
     sessionRef.current?.end?.();
+    sessionRef.current = null;
     setStatus("ended");
   }
 

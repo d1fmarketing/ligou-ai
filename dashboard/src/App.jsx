@@ -33,11 +33,15 @@ function unwrapState(result) {
 }
 
 function Toast({ toast, onClose }) {
+  // Depender só de `toast`: um onClose recriado a cada render do AppInner
+  // reiniciaria o timer em qualquer digitação e o aviso nunca sumiria.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     if (!toast) return undefined;
-    const timer = window.setTimeout(onClose, 4200);
+    const timer = window.setTimeout(() => onCloseRef.current(), 4200);
     return () => window.clearTimeout(timer);
-  }, [toast, onClose]);
+  }, [toast]);
 
   if (!toast) return null;
   return (
@@ -218,7 +222,12 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
   }, [refresh]);
 
   useEffect(() => {
-    const handleHashChange = () => setRoute(routeFromHash());
+    const handleHashChange = () => {
+      setRoute(routeFromHash());
+      // Voltar/avançar do browser troca a rota por baixo de um modal aberto;
+      // fecha diálogos de decisão — mas nunca o de voz (derrubaria a chamada).
+      setDialog((current) => (current && current.type !== "voice" ? null : current));
+    };
     window.addEventListener("hashchange", handleHashChange);
     if (!window.location.hash || !ROUTES.has(window.location.hash.slice(1))) {
       window.history.replaceState(null, "", "#ligou");
@@ -265,8 +274,10 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
     try {
       await gateway.sendMessage(text);
       await refresh();
+      return true;
     } catch (error) {
       setToast({ kind: "warning", text: error?.message || "Não foi possível enviar a mensagem." });
+      return false;
     } finally {
       setSending(false);
     }
@@ -420,6 +431,9 @@ function DashboardDialog({
   const [duration, setDuration] = useState("permanent");
   const [adjustment, setAdjustment] = useState("");
   const [memoryText, setMemoryText] = useState("");
+  // A ação primária cobre vários roundtrips; sem trava, o segundo clique (ou
+  // Enter) repete a RPC já decidida e o sucesso vira toast de aviso.
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     setApprovalMode("case");
@@ -427,7 +441,18 @@ function DashboardDialog({
     setDuration("permanent");
     setAdjustment(dialog?.approval?.proposedAction || "");
     setMemoryText(dialog?.entry?.text || "");
+    setBusy(false);
   }, [dialog]);
+
+  const run = async (action, ...args) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await action(...args);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (!dialog) return null;
 
@@ -448,7 +473,7 @@ function DashboardDialog({
       <Dialog open title="Aprovar esta decisão" description={`Defina se a decisão para ${approval.clientName} vale só agora ou também vira uma regra.`} onClose={onClose}>
         <form className="dialog-form" onSubmit={(event) => {
           event.preventDefault();
-          onApprove(approval.id, { mode: approvalMode, scope, duration });
+          run(onApprove, approval.id, { mode: approvalMode, scope, duration });
         }}>
           <fieldset className="choice-grid">
             <legend>Como aplicar?</legend>
@@ -481,7 +506,7 @@ function DashboardDialog({
           ) : null}
           <div className="dialog-actions">
             <button className="button button--ghost" type="button" onClick={onClose}>Cancelar</button>
-            <button className="button button--primary" type="submit">Confirmar aprovação</button>
+            <button className="button button--primary" type="submit" disabled={busy}>Confirmar aprovação</button>
           </div>
         </form>
       </Dialog>
@@ -494,14 +519,14 @@ function DashboardDialog({
       <Dialog open title="Ajustar proposta" description="O pedido continuará pendente até você aprovar a versão ajustada." onClose={onClose}>
         <form className="dialog-form" onSubmit={(event) => {
           event.preventDefault();
-          if (adjustment.trim()) onAdjust(approval.id, adjustment.trim());
+          if (adjustment.trim()) run(onAdjust, approval.id, adjustment.trim());
         }}>
           <label>Nova proposta
             <textarea value={adjustment} onChange={(event) => setAdjustment(event.target.value)} rows="5" required />
           </label>
           <div className="dialog-actions">
             <button className="button button--ghost" type="button" onClick={onClose}>Cancelar</button>
-            <button className="button button--primary" type="submit">Salvar ajuste</button>
+            <button className="button button--primary" type="submit" disabled={busy}>Salvar ajuste</button>
           </div>
         </form>
       </Dialog>
@@ -515,7 +540,7 @@ function DashboardDialog({
           <p>Recusar o pedido de <strong>{dialog.approval.clientName}</strong>?</p>
           <div className="dialog-actions">
             <button className="button button--ghost" type="button" onClick={onClose}>Voltar</button>
-            <button className="button button--danger" type="button" onClick={() => onReject(dialog.approval.id)}>Recusar proposta</button>
+            <button className="button button--danger" type="button" disabled={busy} onClick={() => run(onReject, dialog.approval.id)}>Recusar proposta</button>
           </div>
         </div>
       </Dialog>
@@ -528,7 +553,7 @@ function DashboardDialog({
       <Dialog open title="Editar regra" description={`A versão ${entry.version || 1} continuará no histórico local.`} onClose={onClose} size="large">
         <form className="dialog-form" onSubmit={(event) => {
           event.preventDefault();
-          if (memoryText.trim() && memoryText.trim() !== entry.text) onUpdateMemory(entry.id, { text: memoryText.trim() });
+          if (memoryText.trim() && memoryText.trim() !== entry.text) run(onUpdateMemory, entry.id, { text: memoryText.trim() });
         }}>
           <div className="comparison-grid">
             <div><span>Antes · v{entry.version || 1}</span><p>{entry.text}</p></div>
@@ -536,7 +561,7 @@ function DashboardDialog({
           </div>
           <div className="dialog-actions">
             <button className="button button--ghost" type="button" onClick={onClose}>Cancelar</button>
-            <button className="button button--primary" type="submit" disabled={memoryText.trim() === entry.text}>Criar nova versão</button>
+            <button className="button button--primary" type="submit" disabled={busy || memoryText.trim() === entry.text}>Criar nova versão</button>
           </div>
         </form>
       </Dialog>
@@ -550,7 +575,7 @@ function DashboardDialog({
           <blockquote>{dialog.entry.text}</blockquote>
           <div className="dialog-actions">
             <button className="button button--ghost" type="button" onClick={onClose}>Cancelar</button>
-            <button className="button button--danger" type="button" onClick={() => onRevokeMemory(dialog.entry.id)}>Apagar da memória</button>
+            <button className="button button--danger" type="button" disabled={busy} onClick={() => run(onRevokeMemory, dialog.entry.id)}>Apagar da memória</button>
           </div>
         </div>
       </Dialog>
@@ -564,7 +589,7 @@ function DashboardDialog({
           <p>Esta ação reinicia conversas, regras e aprovações do protótipo.</p>
           <div className="dialog-actions">
             <button className="button button--ghost" type="button" onClick={onClose}>Cancelar</button>
-            <button className="button button--primary" type="button" onClick={onReset}><IconRefresh aria-hidden="true" /> Restaurar</button>
+            <button className="button button--primary" type="button" disabled={busy} onClick={() => run(onReset)}><IconRefresh aria-hidden="true" /> Restaurar</button>
           </div>
         </div>
       </Dialog>

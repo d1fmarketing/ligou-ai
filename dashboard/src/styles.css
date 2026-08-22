@@ -382,9 +382,18 @@ button:disabled {
   padding-bottom: calc(var(--nav-height) + 24px + env(safe-area-inset-bottom, 0px));
 }
 
-/* Só a conversa precisa de folga extra: o composer fixo flutua sobre ela. */
-.workspace:has(> .chat-view) {
-  padding-bottom: calc(var(--nav-height) + 100px + env(safe-area-inset-bottom, 0px));
+/* Só a conversa precisa de folga extra (o composer fixo flutua sobre ela) —
+   e SÓ no mobile: no desktop o :has (0-2-0) venceria o reset do workspace. */
+@media (max-width: 767px) {
+  .workspace:has(> .chat-view) {
+    padding-bottom: calc(var(--nav-height) + 100px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Âncora do auto-scroll do chat: no mobile o composer fixo + nav cobrem o pé
+   da tela, então o alvo precisa dessa folga para a última mensagem aparecer. */
+.conversation-end {
+  scroll-margin-bottom: calc(var(--nav-height) + 116px + env(safe-area-inset-bottom, 0px));
 }
 
 .bottom-nav {
@@ -746,6 +755,16 @@ button:disabled {
 .timeline-content--prompt .message-bubble {
   padding-top: 10px;
   padding-bottom: 6px;
+}
+
+/* Avatar das respostas do agente — só aparece em conversa corrida (depois
+   das 3 mensagens do timeline), então nenhum screenshot parado o exercita. */
+.message-row > .timeline-avatar-node {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+  margin-top: 4px;
+  border-radius: 50%;
 }
 
 .message-bubble {
@@ -1133,10 +1152,30 @@ button:disabled {
   color: #b9c9cf;
 }
 
+/* Slot único para enviar/voz: os dois se sobrepõem e o maior define a
+   largura — o input nunca redimensiona no meio da digitação. */
+.composer-action {
+  display: grid;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-items: end;
+}
+
+.composer-action > * {
+  grid-area: 1 / 1;
+}
+
+.composer-action > [data-hidden] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .composer {
   position: fixed;
   right: 12px;
-  bottom: calc(var(--nav-height) + 10px + env(safe-area-inset-bottom, 0px));
+  /* Folga de 10px sobre a ALTURA REAL do nav (48px de conteúdo + inset),
+     sem contar o safe-area duas vezes — o nav já o absorve no padding. */
+  bottom: calc(max(var(--nav-height), 48px + max(4px, env(safe-area-inset-bottom, 0px))) + 10px);
   left: 12px;
   z-index: var(--z-composer);
   display: flex;
@@ -2398,7 +2437,7 @@ button:disabled {
 .voice-live-transcript .line-agent strong { color: var(--teal); }
 .voice-live-transcript .line-caller { background: var(--teal-soft); }
 .voice-live-transcript .line-caller strong { color: var(--ink-700); }
-.voice-live-hint { padding: 10px 0; border: 0; background: none; color: var(--text-muted); text-align: center; }
+.voice-live-transcript .voice-live-hint { padding: 10px 0; border: 0; background: none; color: var(--text-muted); text-align: center; }
 
 .voice-live-hangup { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; background: var(--orange-dark); color: var(--white); border: 0; border-radius: var(--radius-pill); padding: 12px 22px; font: inherit; font-weight: 600; cursor: pointer; justify-self: center; transition: background-color var(--dur-fast) var(--ease-out); }
 .voice-live-hangup:hover { background: color-mix(in srgb, var(--orange-dark), #000 10%); }
@@ -2708,6 +2747,11 @@ button:disabled {
     flex: 1;
   }
 
+  /* No desktop o composer fica no fluxo — a âncora só precisa de respiro. */
+  .conversation-end {
+    scroll-margin-bottom: 16px;
+  }
+
   .chat-view .composer {
     margin-top: auto;
   }
@@ -2779,7 +2823,10 @@ button:disabled {
   }
 
   .memory-view,
-  .approvals-view {
+  .approvals-view,
+  .powers-view,
+  .settings-view,
+  .locked-view {
     padding: 36px 32px 48px;
   }
 
@@ -3028,9 +3075,9 @@ button:disabled {
     box-shadow: none;
   }
 
+  /* Coluna flex (herdada de ≥768): o grid de 3 linhas fixas quebrava quando
+     o CTA de onboarding vira o 4º filho — flex é à prova de estado. */
   .chat-view {
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto;
     width: 100%;
     max-width: 780px;
     min-height: 100vh;

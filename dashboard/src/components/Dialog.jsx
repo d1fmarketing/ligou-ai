@@ -53,7 +53,11 @@ export function Dialog({ open, title, description, onClose, children, size = "me
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
       document.body.classList.remove("dialog-open");
-      returnFocusRef.current?.focus?.();
+      // O gatilho pode ter desmontado (ex.: card de aprovação resolvido);
+      // sem fallback o foco de teclado cai no body e o leitor se perde.
+      const trigger = returnFocusRef.current;
+      if (trigger?.isConnected) trigger.focus?.();
+      else document.getElementById("main-content")?.focus?.();
     };
   }, [open, onClose]);
 

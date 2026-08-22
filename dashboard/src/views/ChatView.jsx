@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   IconArrowRight,
   IconChecks,
@@ -133,12 +133,36 @@ export function ChatView({
   const initialMessages = useMemo(() => messages.slice(0, 3), [messages]);
   const recentMessages = useMemo(() => messages.slice(3), [messages]);
 
+  // New messages land below the fold; follow them — but only when the owner
+  // is already at the tail or just sent something. Never yank someone who
+  // scrolled up to reread history. First render stays at the top (approved).
+  const conversationEndRef = useRef(null);
+  const seenCountRef = useRef(messages.length);
+  const followNextRef = useRef(false);
+  const inputRef = useRef(null);
+  useEffect(() => {
+    if (messages.length > seenCountRef.current) {
+      const doc = document.scrollingElement;
+      const nearBottom = doc.scrollHeight - window.scrollY - window.innerHeight < 160;
+      if (followNextRef.current || nearBottom) {
+        const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+        conversationEndRef.current?.scrollIntoView({ block: "end", behavior: reduced ? "auto" : "smooth" });
+      }
+      followNextRef.current = false;
+    }
+    seenCountRef.current = messages.length;
+  }, [messages.length]);
+
   const submit = async (event) => {
     event.preventDefault();
     const text = draft.trim();
     if (!text || sending) return;
     setDraft("");
-    await onSend(text);
+    followNextRef.current = true;
+    inputRef.current?.focus();
+    const delivered = await onSend(text);
+    // A falha honesta devolve o texto — ninguém redigita mensagem perdida.
+    if (delivered === false) setDraft((current) => current || text);
   };
 
   const today = useMemo(
@@ -182,6 +206,7 @@ export function ChatView({
         {recentMessages.map((message, index) => (
           <ChatMessage key={message.id || `recent-${index}`} message={message} />
         ))}
+        <span ref={conversationEndRef} className="conversation-end" aria-hidden="true" />
       </div>
 
       <form className="composer" onSubmit={submit}>
@@ -191,21 +216,36 @@ export function ChatView({
         <label className="sr-only" htmlFor="chat-input">Fale com o Ligou em português</label>
         <input
           id="chat-input"
+          ref={inputRef}
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           placeholder="Fale com o Ligou..."
           autoComplete="off"
         />
-        {draft.trim() ? (
-          <button className="composer-send" type="submit" disabled={sending} aria-label="Enviar mensagem">
+        {/* Os dois botões ocupam o MESMO slot: o input não muda de largura
+            (e o caret não pula) quando digitar troca voz por enviar. */}
+        <span className="composer-action">
+          <button
+            className="composer-send"
+            type="submit"
+            disabled={sending}
+            aria-label="Enviar mensagem"
+            data-hidden={draft.trim() ? undefined : "true"}
+            tabIndex={draft.trim() ? 0 : -1}
+          >
             <IconSend aria-hidden="true" />
           </button>
-        ) : (
-          <button className="voice-demo-button" type="button" onClick={onVoice}>
+          <button
+            className="voice-demo-button"
+            type="button"
+            onClick={onVoice}
+            data-hidden={draft.trim() ? "true" : undefined}
+            tabIndex={draft.trim() ? -1 : 0}
+          >
             <IconMicrophone2 aria-hidden="true" />
             <span>{prototype ? "Voz · demo" : "Voz"}</span>
           </button>
-        )}
+        </span>
         {sending ? <span className="sending-status"><IconMessageCircle2 aria-hidden="true" /> Respondendo…</span> : null}
       </form>
     </section>

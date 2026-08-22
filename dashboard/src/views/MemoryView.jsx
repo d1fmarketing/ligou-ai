@@ -309,7 +309,7 @@ export function MemoryView({
                       className="memory-edit-button"
                       type="button"
                       onClick={() => onEdit?.(entry)}
-                      disabled={isRevoked}
+                      disabled={isRevoked || decisionBusy}
                     >
                       <IconEdit aria-hidden="true" />
                       Editar regra
@@ -318,7 +318,7 @@ export function MemoryView({
                       className="memory-revoke-button"
                       type="button"
                       onClick={() => onRevoke?.(entry)}
-                      disabled={isRevoked}
+                      disabled={isRevoked || decisionBusy}
                     >
                       <IconTrash aria-hidden="true" />
                       {isRevoked ? 'Regra revogada' : 'Apagar da memória'}
