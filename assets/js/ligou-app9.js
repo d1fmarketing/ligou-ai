@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: f2fa1df919673191334ced01506e8897b1667371e2d44ec104821b91d4b77b09
+ * Source SHA-256: 363e3615085c4df63d759d19fa1897cb6a2c14fb8af11161c2788dd9a7325e04
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -15,10 +15,7 @@ function Container({ style, className = "", children }) {
 function SectionHead({ eyebrow, title, lede, center }) {
   return React.createElement("div", {
     style: { display: "flex", flexDirection: "column", gap: 14, marginBottom: 44, alignItems: center ? "center" : "flex-start", textAlign: center ? "center" : "left" }
-  }, React.createElement(Reveal, null, React.createElement(Eyebrow, {
-    className: eyebrow ? undefined : "eyebrow-mark",
-    "aria-hidden": eyebrow ? undefined : true
-  }, eyebrow)), React.createElement(Reveal, {
+  }, React.createElement(Reveal, null, React.createElement(Eyebrow, null, eyebrow)), React.createElement(Reveal, {
     delay: 90
   }, React.createElement("h2", {
     style: { fontSize: "var(--size-display)", fontWeight: "var(--weight-black)", letterSpacing: "var(--track-display)", lineHeight: "var(--leading-display)" }
@@ -80,7 +77,7 @@ function Intro4({ onDone }) {
     className: "acc"
   }, "Atendido.")), React.createElement("span", {
     className: "intro__cap"
-  }, "ligou.ai · agente operacional"), React.createElement("div", {
+  }, "ligou.ai · agente operacional de inteligência artificial"), React.createElement("div", {
     className: "intro__bar"
   })));
 }
@@ -185,25 +182,15 @@ function Nav() {
     id: "faq"
   }, "Controle"), React.createElement(L, {
     id: "preco"
-  }, "Preço")), React.createElement("div", {
-    className: "nav4-actions"
-  }, React.createElement("a", {
-    className: "nav4-client",
-    href: "/dashboard/",
-    "aria-label": "Área do cliente"
-  }, React.createElement("span", {
-    className: "nav4-client-long"
-  }, "Área do cliente"), React.createElement("span", {
-    className: "nav4-client-short",
-    "aria-hidden": "true"
-  }, "Área")), React.createElement("span", {
+  }, "Preço")), React.createElement("span", {
+    style: { marginLeft: "auto" },
     className: "nav4-cta"
   }, React.createElement(Button, {
     size: "sm",
     variant: "accent",
     href: "#prova",
     style: { whiteSpace: "nowrap" }
-  }, "Falar com o Ligou")))));
+  }, "Falar com o Ligou"))));
 }
 const HERO_MEDIA = {
   ultrawide: {
@@ -347,7 +334,7 @@ function Hero() {
     style: { "--d": "60ms" }
   }, React.createElement("span", {
     className: "h4-eyebrow"
-  }, "Agente operacional para negócios de serviços")), React.createElement("h1", null, React.createElement("span", {
+  }, "Agente operacional de inteligência artificial para negócios de serviços")), React.createElement("h1", null, React.createElement("span", {
     className: "lmask"
   }, React.createElement("span", {
     className: "ln",
@@ -454,9 +441,8 @@ function Scene() {
   }, React.createElement("div", {
     className: "iv-head"
   }, React.createElement(Reveal, null, React.createElement("span", {
-    className: "h4-eyebrow eyebrow-mark",
-    "aria-hidden": "true"
-  })), React.createElement(Reveal, {
+    className: "h4-eyebrow"
+  }, "A diferença")), React.createElement(Reveal, {
     delay: 80
   }, React.createElement("h2", null, "O Ligou não é configurado.", React.createElement("br", null), "Ele é contratado.")), React.createElement(Reveal, {
     delay: 150
@@ -623,7 +609,7 @@ function Scene() {
     className: "iv-memory__copy"
   }, React.createElement("span", {
     className: "iv-memory__approval"
-  }, "Aprovação de nova regra"), React.createElement("p", null, React.createElement("strong", null, "Não é uma secretária eletrônica."), " É um agente com memória operacional permanente."), React.createElement("p", null, "Cada atendimento amplia o histórico do Ligou. Quando aparece uma situação nova, ele pergunta; depois que você aprova, a resposta vira uma regra permanente do seu negócio — até você decidir alterar ou apagar."))))));
+  }, "Aprovação de nova regra"), React.createElement("p", null, React.createElement("strong", null, "Não é uma secretária eletrônica."), " É um agente de inteligência artificial com memória operacional permanente."), React.createElement("p", null, "Cada atendimento amplia o histórico do Ligou. Quando aparece uma situação nova, ele pergunta; depois que você aprova, a resposta vira uma regra permanente do seu negócio — até você decidir alterar ou apagar."))))));
 }
 function CallDemo() {
   const [mrun, setMrun] = React.useState(0);
@@ -634,10 +620,7 @@ function CallDemo() {
     className: "p7"
   }, React.createElement(Container, {
     style: { maxWidth: 1500 }
-  }, React.createElement(Eyebrow, {
-    className: "eyebrow-mark",
-    "aria-hidden": "true"
-  }), React.createElement("h2", {
+  }, React.createElement(Eyebrow, null, "Prova do produto"), React.createElement("h2", {
     className: "p7-title"
   }, "Quando a regra exige decisão,", React.createElement("br", null), "ele traz a exceção pronta."), React.createElement("p", {
     className: "p7-sub p7-bridge"
@@ -1066,7 +1049,7 @@ function CallDemo() {
     className: "p7-bub"
   }, React.createElement("span", {
     className: "p7-blbl"
-  }, "Ligou · Inglês"), "I’ve sent your request to the team.", React.createElement("br", null), "The team will contact you as soon as they confirm."), React.createElement("span", {
+  }, "Ligou · Inglês"), "I’ve sent your request to the team.", React.createElement("br", null), "You’ll receive a text as soon as they confirm."), React.createElement("span", {
     className: "p7-ts"
   }, "00:10")), React.createElement("aside", {
     className: "p7-drawer"
@@ -1474,7 +1457,7 @@ function CallDemo() {
     className: "lc-ts"
   }, "00:10")), React.createElement("div", {
     className: "lc-bub"
-  }, "I’ve sent your request to the team. The team will contact you as soon as they confirm."))), React.createElement("div", {
+  }, "I’ve sent your request to the team. You’ll receive a text as soon as they confirm."))), React.createElement("div", {
     className: "lc-ev lc-i",
     style: { "--lcd": "2.35s" }
   }, React.createElement("span", {
@@ -1598,10 +1581,7 @@ function Dor() {
   }, React.createElement(Container, {
     className: "dor-ct",
     style: { padding: "64px 32px 88px", display: "flex", flexDirection: "column", gap: 26 }
-  }, React.createElement(Reveal, null, React.createElement(Eyebrow, {
-    className: "eyebrow-mark",
-    "aria-hidden": "true"
-  })), React.createElement(Reveal, {
+  }, React.createElement(Reveal, null, React.createElement(Eyebrow, null, "A dor")), React.createElement(Reveal, {
     delay: 80
   }, React.createElement("h2", {
     className: "dorbig"
@@ -1627,6 +1607,7 @@ function Faz() {
     "data-screen-label": "O que ele faz",
     style: { marginTop: 116 }
   }, React.createElement(Container, null, React.createElement(SectionHead, {
+    eyebrow: "Numa ligação",
     title: "O que ele faz quando o telefone toca."
   }), mobile ? React.createElement(Reveal, null, React.createElement("div", {
     className: "checklist"
@@ -1677,7 +1658,7 @@ function Faq() {
   const qs = [
     ["Ele pode inventar um preço ou uma resposta?", "Não. O Ligou só informa preços, condições e políticas que você aprovou. Quando não tem uma resposta autorizada, coleta as informações, avisa que a equipe confirma e pergunta para você. A resposta só vira regra depois da sua aprovação."],
     ["E se o cliente quiser falar comigo?", "Você escolhe: quando transferir na hora, quando só receber aviso, e quando deixar o Ligou concluir sozinho."],
-    ["Ele fala que é inteligência artificial?", 'Ele se apresenta como assistente virtual da sua empresa: "Hi, you’ve reached [Your Business]. I’m their virtual assistant — how can I help?" A conversa é natural, mas a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.'],
+    ["Ele fala que é inteligência artificial?", 'Sim. Ele se apresenta como o agente de inteligência artificial da sua empresa: "Hi, you’ve reached [Your Business]. I’m their AI assistant — how can I help?" A conversa é natural, e a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.'],
     ["Preciso falar inglês ou espanhol para ensinar o Ligou?", "Não. A entrevista, os ajustes e a aprovação são em português. O Ligou atende em inglês, espanhol ou português e envia o resumo para você em português."],
     ["E se eu quiser cancelar?", "Você cancela pelo painel, sem multa e sem precisar falar com vendedor."]
   ];
@@ -1699,6 +1680,7 @@ function Faq() {
   }, React.createElement(Container, {
     style: { maxWidth: 880 }
   }, React.createElement(SectionHead, {
+    eyebrow: "Perguntas diretas",
     title: "O que todo dono pergunta."
   }), mobile ? React.createElement(Reveal, null, React.createElement("div", null, qs.map((qa, i) => React.createElement(React.Fragment, {
     key: qa[0]
@@ -1827,12 +1809,9 @@ function Footer() {
     style: { height: 34, borderRadius: "50%" }
   }), React.createElement("span", {
     style: { fontFamily: "var(--font-display)", fontWeight: 800, fontSize: 24, letterSpacing: "-0.02em" }
-  }, "Ligou"), React.createElement("a", {
-    className: "footer-client",
-    href: "/dashboard/"
-  }, "Área do cliente"), React.createElement("span", {
+  }, "Ligou"), React.createElement("span", {
     className: "footer-links",
-    style: { display: "flex", gap: 10, flexWrap: "wrap", fontSize: 14, alignItems: "center" }
+    style: { display: "flex", gap: 10, flexWrap: "wrap", marginLeft: "auto", fontSize: 14, alignItems: "center" }
   }, React.createElement("a", {
     href: "https://ligou.ai",
     style: a
