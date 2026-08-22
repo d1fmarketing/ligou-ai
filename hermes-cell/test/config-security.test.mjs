@@ -11,6 +11,7 @@ const validator = path.join(repoRoot, "hermes-cell/validate-config.mjs");
 const health = path.join(repoRoot, "hermes-cell/health-state.sh");
 const tenantCompose = path.join(repoRoot, "hermes-cell/tenant-compose.mjs");
 const tenantIdentity = path.join(repoRoot, "hermes-cell/tenant-identity.mjs");
+const composeFile = path.join(repoRoot, "hermes-cell/docker-compose.yml");
 const IMAGE = "docker.io/nousresearch/hermes-agent@sha256:d597ca1f766ff23ff86437fe5e0f36a6049166ce91df917d9577d7418f0767de";
 const TENANT_A = "11111111-1111-4111-8111-111111111111";
 const TENANT_B = "22222222-2222-4222-8222-222222222222";
@@ -32,6 +33,16 @@ test("repository Hermes config is OAuth-only with separate cognitive and model-a
     volumes: { cognitive: "HERMES_COGNITIVE_VOLUME", model_auth: "HERMES_MODEL_AUTH_VOLUME" },
     cognitive_backup_excludes_model_auth: true,
   });
+});
+
+test("Hermes profile layout keeps global Codex auth outside the cognitive profile", async () => {
+  const compose = await readFile(composeFile, "utf8");
+  assert.match(compose, /HERMES_HOME:\s*\/root\/.hermes\/profiles\/default/);
+  assert.match(compose, /hermes-model-auth:\/root\/.hermes(?:\s|$)/m);
+  assert.match(compose, /hermes-cognitive:\/root\/.hermes\/profiles\/default(?:\s|$)/m);
+  assert.match(compose, /config\.yaml:\/root\/.hermes\/profiles\/default\/config\.yaml:ro/);
+  assert.match(compose, /cli-config\.yaml:\/root\/.hermes\/profiles\/default\/cli-config\.yaml:ro/);
+  assert.doesNotMatch(compose, /hermes-cognitive:\/opt\/data/);
 });
 
 test("normal tenant launcher gives two tenants isolated project, volumes, paths, backup identity, and route", async () => {

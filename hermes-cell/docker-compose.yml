@@ -9,7 +9,7 @@ services:
     container_name: ${HERMES_CONTAINER_NAME:?launch with node tenant-compose.mjs}
     command: gateway run                  # persistent service, never the interactive CLI
     restart: unless-stopped
-    read_only: false                      # hermes writes its own state under /opt/data
+    read_only: false                      # Hermes writes tenant cognition only inside the profile mount
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
@@ -18,15 +18,16 @@ services:
     mem_limit: 2g
     cpus: "1.5"
     environment:
+      HERMES_HOME: /root/.hermes/profiles/default
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: 0.0.0.0            # container-internal; host publish is loopback-only below
       API_SERVER_KEY: ${HERMES_API_KEY:?set in .env}
     volumes:
-      - hermes-cognitive:/opt/data                              # memory, skills, sessions; cognitive backup scope
-      - hermes-model-auth:/root/.hermes                         # Codex OAuth only; never part of cognitive backups
+      - hermes-model-auth:/root/.hermes                         # global auth root, outside every cognitive profile
+      - hermes-cognitive:/root/.hermes/profiles/default         # memory, skills, sessions; cognitive backup scope
       - ${HERMES_PROJECTED_RULES_PATH:?launch with node tenant-compose.mjs}:/opt/projected-rules:ro
-      - ./config/config.yaml:/opt/data/config.yaml:ro          # THE config hermes reads (model+provider+gates)
-      - ./config/cli-config.yaml:/opt/data/cli-config.yaml:ro   # CLI-side pin (kept in sync)
+      - ./config/config.yaml:/root/.hermes/profiles/default/config.yaml:ro          # active profile config
+      - ./config/cli-config.yaml:/root/.hermes/profiles/default/cli-config.yaml:ro   # CLI-side pin
     ports:
       - "127.0.0.1:${HERMES_HOST_PORT:?launch with node tenant-compose.mjs}:8642" # tenant route, loopback only
     networks: [cell]
