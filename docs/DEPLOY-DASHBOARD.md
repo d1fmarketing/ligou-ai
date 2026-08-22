@@ -22,6 +22,15 @@ cd dist/client && vercel deploy --prod --yes
 
 ## Notas
 
+- `site:build` **apaga e recria** `dist/client/`, levando junto o `.vercel/project.json`. O relink
+  funciona pelo nome da pasta (`client`), mas para deploy sem ambiguidade recrie o arquivo antes:
+  `{"projectId":"prj_lWeapZCZqtv32BlfHAuylDzqO20g","orgId":"team_Kt6PAU2cglJsc1PmybP6F5Oh","projectName":"client"}`.
+- Deploy não-interativo (sem risco de o CLI abrir browser de login): passe o token lido de
+  `~/Library/Application Support/com.vercel.cli/auth.json` via `vercel deploy --prod --yes --token <token>`.
+  O projeto `client` **não tem git link** — push no GitHub nunca publica; só este comando publica.
+- A landing tem fonte no branch `codex/ligou-dashboard`; mudanças de copy entram lá e aqui
+  (os dois têm `verify-claude-v9.mjs` + manifesto de hashes que precisam de rebuild após editar).
+  Mapa geral do repo: `docs/REPO-MAPA-2026-08-22.md` no branch `codex/final`.
 - O build do dashboard usa o base padrão `/dashboard/` — `scripts/build-site.mjs` fixa `LIGOU_BASE`
   para nenhum override vazar do shell.
 - `VITE_SESSION_URL` (em `dashboard/.env.local`) aponta para a Edge Function; é o que faz o botão de
