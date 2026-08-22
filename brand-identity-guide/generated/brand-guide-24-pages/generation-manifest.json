@@ -1,0 +1,327 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-08-18T18:49:51.644Z",
+  "project": "Ligou Brand Identity Guide — 24 pages",
+  "status": "review_set_not_yet_user_approved",
+  "generator": {
+    "service": "Higgsfield MCP",
+    "model": "gpt_image_2",
+    "provider": "OpenAI",
+    "aspect_ratio": "16:9",
+    "resolution": "4k",
+    "pixel_dimensions": "3840x2160",
+    "quality": "high",
+    "native_text_generation": true,
+    "post_processing": "none"
+  },
+  "output_directory": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted",
+  "source_references": [
+    {
+      "filename": "ligou-brand-board-v1-approved.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/brand-board/ligou-brand-board-v1-approved.png"
+    },
+    {
+      "filename": "ligou-hero-approved-reference.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/site-scenes/ligou-hero-approved-reference.png"
+    },
+    {
+      "filename": "ligou-agent-current-site.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/agent/current-site/ligou-agent-current-site.png"
+    },
+    {
+      "filename": "ligou-agent-full-body-master.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/agent/master-references/ligou-agent-full-body-master.png"
+    },
+    {
+      "filename": "ligou-agent-node-options-reference.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/logos/pending-agent-node/ligou-agent-node-options-reference.png"
+    },
+    {
+      "filename": "ligou-product-proof-approved-reference.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/site-scenes/ligou-product-proof-approved-reference.png"
+    },
+    {
+      "filename": "ligou-agent-atendendo-master.webp",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/agent/action-poses/ligou-agent-atendendo-master.webp"
+    },
+    {
+      "filename": "ligou-agent-operando-master.webp",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/agent/action-poses/ligou-agent-operando-master.webp"
+    },
+    {
+      "filename": "ligou-agent-aprovacao-master.webp",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/agent/action-poses/ligou-agent-aprovacao-master.webp"
+    },
+    {
+      "filename": "ligou-hero-art-desktop.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/site-scenes/ligou-hero-art-desktop.png"
+    },
+    {
+      "filename": "ligou-hero-art-mobile.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/site-scenes/ligou-hero-art-mobile.png"
+    },
+    {
+      "filename": "ligou-phone-channel-badge.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/assets/logos/channel-badge/ligou-phone-channel-badge.png"
+    }
+  ],
+  "credit_summary": {
+    "accepted_pages": 288,
+    "rejected_background": 12,
+    "total_spent_across_full_workflow": 300,
+    "remaining_balance_after_workflow": 4581.98
+  },
+  "accepted_outputs": [
+    {
+      "page": 1,
+      "job_id": "deb62f61-53cf-44b1-bc3a-89253320009d",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_181032_deb62f61-53cf-44b1-bc3a-89253320009d.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/01-cover.png",
+      "sha256": "b193ff0f43a9a6acf845d7dc0f8b291d19ff8b4a5d94df781d9d60d4e2f3d889",
+      "prompt": "Create the FINAL COMPLETE page 1 cover of the Ligou Brand Identity Guide as one native generated image. Use the first reference as the visual base and preserve its deep petrol background, orange operational line, teal nodes, composition, premium lighting, and the Ligou robot on the right. Preserve the robot identity exactly. Do not replace, redesign, duplicate, crop awkwardly, or remove the agent.\n\nRender ALL typography inside the generated image. The following is the complete and exact text. Copy it letter-for-letter, preserving capitalization, accents, punctuation, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nLigou\nBRAND IDENTITY GUIDE\nLigou? Atendido.\nAgente operacional de inteligência artificial para negócios de serviços.\n\nTYPOGRAPHY AND LAYOUT:\n- Put the exact Agent Node symbol from option 1 of the logo-options reference beside the word “Ligou” in the upper-left. Do not use any of the other nine logo options.\n- Use a premium bold geometric sans-serif closely matching Archivo, with crisp professional typesetting.\n- “BRAND IDENTITY GUIDE” is the primary editorial title on the left.\n- “Ligou? Atendido.” is the expressive brand signature, with “Atendido.” in #FF5A36 orange.\n- The subtitle is smaller but clearly legible in paper white.\n- Keep generous margins and high contrast. All text must stay completely inside the canvas and away from the robot.\n- No extra captions, numbers, labels, watermarks, pseudo-text, lorem ipsum, or decorative lettering.\n\nThis must look like a finished 4K landscape brand-book cover, not a website screenshot and not a blank background.",
+      "attempt": 1
+    },
+    {
+      "page": 2,
+      "job_id": "01001c5a-4251-4c23-9e75-5338d2f16a52",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_181350_01001c5a-4251-4c23-9e75-5338d2f16a52.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/02-how-to-use-this-guide.png",
+      "sha256": "cdd8a52458e3abe827222a8f7386e829f1e1508da9f5d446cfa354bd11cc9176",
+      "prompt": "Create the FINAL COMPLETE page 2 of the Ligou Brand Identity Guide as one native generated image. Use the completed page 1 reference as the exact visual-system anchor: same premium editorial quality, Archivo-like typography, deep petrol #041D27, paper #FBFCF8, orange #FF5A36, teal #46C2AF, restrained operational line, generous margins, and precise grid. This is a 4K 16:9 brand-book page, not a website screenshot.\n\nRender ALL typography inside the generated image. The following is the complete and exact text. Copy it letter-for-letter, preserving capitalization, accents, punctuation, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nUma marca para trabalhar no mundo real.\n\nEste guia define como o Ligou, um agente operacional de inteligência artificial, se apresenta, fala e age em todos os pontos de contato. Ele protege uma ideia simples: inteligência artificial deve virar trabalho concluído, com regras claras e o dono no controle. As orientações valem para produto, site, vendas, suporte, conteúdo e materiais internos. Quando uma aplicação não estiver prevista, preserve primeiro a essência, a legibilidade e a honestidade da marca.\n\n01 Essência\n02 Linguagem\n03 Identidade visual\n04 Aplicações\n\nLAYOUT:\n- A refined paper-light editorial spread with one deep-petrol structural panel or band.\n- Large title at upper left; body copy beneath it in a highly readable text column.\n- Present the four numbered sections as four clean editorial modules connected subtly by the orange operational line.\n- Use the Ligou agent as a restrained visual presence on the right, preserving exact identity, or use a close crop derived from the references. Do not redesign the robot.\n- Use the exact Agent Node symbol from page 1 as a small brand marker only.\n- All text must be fully legible, inside safe margins, and never overlap the agent or line.\n- No extra captions, numbers, labels, logos, watermarks, pseudo-text, or lorem ipsum.",
+      "attempt": 1
+    },
+    {
+      "page": 3,
+      "job_id": "e49e0747-1c5f-4b6e-a67b-206aecbc5a9c",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_181350_e49e0747-1c5f-4b6e-a67b-206aecbc5a9c.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/03-brand-in-one-sentence.png",
+      "sha256": "5bcc62e8d6c8fc6a724e4e0b664086b50fd97dcc584e8ffb4d62b461250c315c",
+      "prompt": "Create the FINAL COMPLETE page 3 of the Ligou Brand Identity Guide as one native generated image. Use the completed page 1 reference as the exact visual-system anchor: same premium editorial quality, Archivo-like typography, deep petrol #041D27, paper #FBFCF8, orange #FF5A36, teal #46C2AF, restrained operational line, generous margins, and precise grid. This is a 4K 16:9 brand-book page, not a website screenshot.\n\nRender ALL typography inside the generated image. The following is the complete and exact text. Copy it letter-for-letter, preserving capitalization, accents, punctuation, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nO agente de inteligência artificial\nque atende, executa e sabe\nquando perguntar.\n\nO Ligou é um agente operacional de inteligência artificial para empresas de serviços. Ele recebe a conversa, consulta as regras aprovadas do negócio, executa o que está autorizado e devolve ao dono um resultado claro em português. Quando falta uma decisão, ele não inventa: reúne o contexto e pede aprovação.\n\nEsta é uma definição de posicionamento. Cada material público deve usar apenas capacidades que estejam realmente disponíveis e verificadas.\n\nLAYOUT:\n- A sophisticated editorial positioning page with a light paper text field and a deep-petrol visual field, or an equally disciplined split composition.\n- Put the headline on the left in large bold type with “inteligência artificial” clearly readable.\n- Body paragraph in a comfortable readable column.\n- The final positioning note is smaller but still fully legible, separated by a thin orange rule.\n- Show the Ligou agent prominently on the right, preserving exact identity from the full-body and current-site references: dark petrol satin body, rounded dark face, two vertical mint eyes, mint smile, one antenna with orange tip, integrated headset, orange telephone badge. No redesign, no duplicate robot.\n- Use subtle visual cues for receiving, executing, and asking approval, but do not add any new words or labels.\n- Use the exact Agent Node symbol from page 1 as a small brand marker only.\n- All text must be fully inside the canvas and never overlap the agent.\n- No extra captions, numbers, labels, logos, watermarks, pseudo-text, or lorem ipsum.",
+      "attempt": 1
+    },
+    {
+      "page": 4,
+      "job_id": "0579fcae-a887-485d-b63f-b727aa03e05f",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_182904_0579fcae-a887-485d-b63f-b727aa03e05f.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/04-audience.png",
+      "sha256": "853e9bf9d28e909196134a1f302d34e4ac54667f73798385954e3c309af8daed",
+      "prompt": "Create the FINAL COMPLETE page 4 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nFeito para quem trabalha com as mãos ocupadas.\n\nNosso público principal é o dono brasileiro de uma empresa de serviços nos Estados Unidos. Ele pode estar no telhado, dirigindo, pintando uma casa ou atendendo outro cliente quando o telefone toca. Fala português; inglês e espanhol são fricções operacionais, não escolhas estéticas. Ele precisa de menos ferramentas para administrar e de mais trabalho resolvido com clareza.\n\nLimpeza · Pintura · Roofing · Landscaping · HVAC · Encanamento · Elétrica\n\nPAGE-SPECIFIC ART DIRECTION:\nUse a light editorial field with a compact Ligou agent on the right and a restrained visual suggestion of real field-service work: roof, service van, paint, tools, and an incoming call, without fake company names or logos. Title and paragraph on the left; the service segments form one clean footer line.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 5,
+      "job_id": "40052534-5d8c-46bc-b921-78e98d7be742",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_182901_40052534-5d8c-46bc-b921-78e98d7be742.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/05-problem.png",
+      "sha256": "7f8f1b31006fc1eb1f437ad6f8398875686df25a00317f76e79cc27b4e2e11ff",
+      "prompt": "Create the FINAL COMPLETE page 5 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nA próxima empresa está a um toque de distância.\n\nUma ligação perdida pode ser um trabalho perdido. O cliente não vê a agenda cheia, a equipe reduzida ou a dificuldade com o idioma. Ele apenas precisa de uma resposta agora. O Ligou nasce para impedir que a operação pare no telefone e para transformar cada conversa em um próximo passo claro.\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate a dramatic but restrained editorial cause-and-effect page. Use a deep-petrol visual field with one incoming phone moment and an orange line moving toward the Ligou agent; use a paper text field for the exact copy. No fear tactics, fake urgency counters, or invented statistics.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 6,
+      "job_id": "9509a19f-8a82-42e0-b041-c7826c55200d",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_182902_9509a19f-8a82-42e0-b041-c7826c55200d.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/06-promise.png",
+      "sha256": "37dc25e33bec36a60fbc5efdd335a15b30c2e3248a0957aa84788a3015e4aa52",
+      "prompt": "Create the FINAL COMPLETE page 6 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nLigou? Atendido.\n\nSeu cliente liga. O agente de inteligência artificial Ligou entende a necessidade, consulta as regras do seu negócio, encaminha o próximo passo e registra o que aconteceu. Você recebe o resumo em português e só entra quando sua decisão realmente importa. O resultado é alívio com controle: menos interrupção, sem perder autoridade.\n\nCliente fala → Regra consultada → Ação executada → Resultado em português\n\nPAGE-SPECIFIC ART DIRECTION:\nUse a confident deep-petrol statement page. Make “Ligou? Atendido.” the dominant headline with “Atendido.” in orange. Visualize the exact four-step chain across the page with refined nodes and the Ligou agent as the operator, preserving identity. Keep the paragraph readable and separate.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 7,
+      "job_id": "a90f9946-1c69-4eea-b54b-92c5641631de",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_182902_a90f9946-1c69-4eea-b54b-92c5641631de.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/07-positioning.png",
+      "sha256": "7d55914529412149817e30988affa0b5e719533d2cb27dd53ef7dca50c3a66fb",
+      "prompt": "Create the FINAL COMPLETE page 7 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nInteligência artificial que opera, não apenas conversa.\n\nO Ligou é um agente de inteligência artificial. Ele não deve parecer uma secretária genérica, um tradutor, um chatbot ou um call center digital. Atendimento é a porta de entrada; operação é o diferencial. O valor da marca aparece quando a conversa encontra memória, regras autorizadas e ferramentas capazes de produzir um resultado. O Ligou usa IA para trabalhar dentro de limites claros e deixar exceções visíveis.\n\nSOMOS\nIA operacional · Bilíngue · Contextual · Controlada · Transparente\n\nNÃO SOMOS\nHumano disfarçado · Mascote infantil · Improvisador · Ferramenta genérica · Promessa sem prova\n\nPAGE-SPECIFIC ART DIRECTION:\nUse a rigorous split editorial comparison. Put the main positioning statement and paragraph in a paper field. Present SOMOS and NÃO SOMOS as two strongly differentiated modules with accessible contrast, no red alarm styling, and no invented icons. Include the exact Ligou agent only as a restrained proof of the operational identity.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 8,
+      "job_id": "8f3da081-fe18-442b-b684-a8d9102dc18c",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_182901_8f3da081-fe18-442b-b684-a8d9102dc18c.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/08-essence.png",
+      "sha256": "90cf4e01d8ee8ae48333abcfcd00306c49e52140a073db0f94e036a28e8a756c",
+      "prompt": "Create the FINAL COMPLETE page 8 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nAlívio com controle.\n\nA emoção central do Ligou é o alívio de saber que o trabalho continua, combinado com a segurança de que as decisões continuam pertencendo ao dono. A marca não usa medo, urgência artificial ou deslumbramento tecnológico. Ela transmite presença, competência e calma em movimento.\n\nALÍVIO\nCONTROLE\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate an elegant emotional-essence spread. Use a calm paper field meeting a deep-petrol field, joined by one continuous orange line. The words ALÍVIO and CONTROLE should balance opposite sides and feel equally important. The Ligou agent may appear calmly between them, never playful or alarming.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 9,
+      "job_id": "e3e26e71-90dc-4d89-88e3-302cc788253c",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_183335_e3e26e71-90dc-4d89-88e3-302cc788253c.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/09-personality.png",
+      "sha256": "9bbc0654cede7eb96bea7af0e7a3de8d6936a0a75af53dfd70a9dff7141000a7",
+      "prompt": "Create the FINAL COMPLETE page 9 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, quotation marks, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nCompetente. Calmo. Operacional. Transparente.\n\nCompetente, sem ser arrogante.\nCalmo, sem ser passivo.\nOperacional, sem soar mecânico.\nTransparente, sem transformar cada interação em explicação técnica.\nPróximo, sem fingir ser humano.\n\nO agente de IA Ligou demonstra inteligência pelo trabalho bem conduzido, não por dizer que é inteligente.\n\nPAGE-SPECIFIC ART DIRECTION:\nUse a calm personality matrix on a paper field with five balanced trait modules and one composed Ligou agent portrait. Create visual rhythm without making the agent childish. Highlight the positive traits in petrol and the “sem ser” contrasts in restrained secondary text.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 10,
+      "job_id": "f6856a0a-bf1b-42d0-8ed9-dc51aaea2006",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_183335_f6856a0a-bf1b-42d0-8ed9-dc51aaea2006.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/10-voice.png",
+      "sha256": "65642f1749b4004e9dec318401f5b971b0b5b85a2080f9192fce5dc32a00ffe0",
+      "prompt": "Create the FINAL COMPLETE page 10 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, quotation marks, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nFale de trabalho, não de tecnologia.\n\nA voz do agente de inteligência artificial Ligou é direta, concreta e respeitosa. A marca nunca esconde que o produto é IA; ela apenas evita transformar toda conversa em jargão técnico. Prefere verbos de ação, frases curtas e resultados observáveis. Explica o necessário no idioma de quem está ouvindo. Evita exageros, superlativos vazios e promessas universais. Quando existe uma limitação, ela é dita com clareza e acompanhada do próximo passo possível.\n\nComeçar pelo resultado.\nNomear a ação e o responsável.\nDistinguir exemplo, sugestão, aprovação e execução.\nNunca esconder incerteza atrás de linguagem confiante.\n\nPAGE-SPECIFIC ART DIRECTION:\nUse a strong editorial voice-guide page. Place the title and paragraph in a readable column, then show the four principles as clean numbered or bulleted modules linked by the orange line. A restrained Agent Node marker is enough; the robot can be absent or small.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 11,
+      "job_id": "2f1ecdf0-7f97-4484-a3f4-5b15b7621460",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_183335_2f1ecdf0-7f97-4484-a3f4-5b15b7621460.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/11-tone.png",
+      "sha256": "bea796328631056673034fc2228385909b2582506f5d6f04fad7c3f99f36de60",
+      "prompt": "Create the FINAL COMPLETE page 11 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, quotation marks, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nA mesma personalidade, ajustada ao momento.\n\nMARKETING — confiante e concreto\n“Seu cliente liga. O Ligou consulta suas regras e encaminha o próximo passo.”\n\nAPRESENTAÇÃO DO AGENTE — transparente\n“Oi, eu sou o Ligou, o agente de inteligência artificial da empresa. Como posso ajudar?”\n\nPEDIDO DE APROVAÇÃO — objetivo\n“Encontrei uma exceção. Aqui está o contexto e a decisão que preciso de você.”\n\nLIMITAÇÃO — honesto\n“Ainda não consigo concluir essa etapa. Posso registrar o caso e encaminhar com o contexto.”\n\nSUCESSO — sereno\n“Agendamento confirmado. O resumo já está pronto.”\n\nSUPORTE — responsável\n“Entendi o que aconteceu. Vou separar o que já foi confirmado do que ainda precisa de verificação.”\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate a clear tone-by-context editorial grid with six modules, each with its heading and exact quotation. Use accessible type sizes and strong hierarchy. Use orange only for small markers and teal for calm confirmations. No decorative robot needed beyond a small Agent Node marker.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 12,
+      "job_id": "91ea4980-3263-41e3-b97f-17ed1db8eaa2",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_183335_91ea4980-3263-41e3-b97f-17ed1db8eaa2.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/12-message-hierarchy.png",
+      "sha256": "ed86eb93b4ede986b6fd98f509a6a3d86a4ce33a5447e2ce393b4acb4ba24861",
+      "prompt": "Create the FINAL COMPLETE page 12 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, quotation marks, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nUma ideia principal, provas em camadas.\n\nA assinatura é Ligou? Atendido. O descritor é Agente operacional de inteligência artificial para negócios de serviços. Em inglês: Operational AI agent for service businesses. A categoria é IA; o diferencial é operação. A mensagem de apoio explica o fluxo: o cliente fala, o Ligou consulta regras, encaminha a ação e o dono recebe o resultado em português. Toda comunicação deve preservar essa ordem: promessa curta, mecanismo compreensível e prova honesta.\n\nLigou? Atendido.\nAgente operacional de inteligência artificial para negócios de serviços.\nCliente fala → regras → ação → resultado em português.\nDemo primeiro. Compra depois.\n\nPAGE-SPECIFIC ART DIRECTION:\nBuild a refined four-level message hierarchy or pyramid. Make the signature dominant, then descriptor, proof chain, and CTA principle in descending scale. Keep the paragraph readable beside or above the hierarchy. Use only the supplied text and no invented marketing claims.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 13,
+      "job_id": "498b491f-89d5-4505-a9b5-6348b875d600",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_183335_498b491f-89d5-4505-a9b5-6348b875d600.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/13-visual-idea.png",
+      "sha256": "a932eaf6e07b135184ea7cc970e089dc15e34129802f58e756f1fccf7689e3f6",
+      "prompt": "Create the FINAL COMPLETE page 13 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, quotation marks, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nA linha telefônica operacional.\n\nUma linha laranja percorre o sistema visual e conecta conversa, regra, ação e resultado. Ela não é enfeite: mostra continuidade operacional. O azul-petróleo dá estabilidade, o teal confirma estados controlados e o papel claro mantém a marca legível no celular e sob luz do dia. Seções escuras criam ênfase; não dominam todo o sistema.\n\nEN / ES → regras e ação → PT\n\nPAGE-SPECIFIC ART DIRECTION:\nMake the orange operational line the visual protagonist across a paper-to-petrol spread. Show refined nodes for conversation, rules, action, and result without adding labels. Use the exact EN / ES → regras e ação → PT statement prominently. Include the Ligou agent as a restrained operator, preserving identity.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 14,
+      "job_id": "40c88557-2053-4a37-87df-9c933ce2b928",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_183801_40c88557-2053-4a37-87df-9c933ce2b928.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/14-logo-architecture.png",
+      "sha256": "82a7b7d2bc4039f34b32ecea600968f63bd35fcf7dd5aa53b206cd7688732e20",
+      "prompt": "Create the FINAL COMPLETE page 14 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve source brand assets faithfully. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, hex codes, ratios, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nUma marca corporativa. Um badge de canal.\n\nA marca corporativa identifica o Ligou como sistema operacional. O handset laranja no peito do agente identifica o canal telefônico. Esses dois papéis não devem ser confundidos. A v9 usa o Agent Node no header, enquanto A Linha permanece como candidato vetorial anterior. Esta página só será finalizada depois da escolha explícita de uma única marca corporativa.\n\nAGENT NODE — atual na v9\nA LINHA — candidato anterior\nHANDSET — badge de canal\nDECISÃO PENDENTE\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate a controlled three-column comparison. Reproduce Agent Node from option 1 of the supplied logo-options board, never another option. Show A Linha as the documented prior candidate: one continuous orange entry line, a tilted loop, and an endpoint dot; do not treat it as approved. Show the orange phone handset badge separately from the corporate marks. Make DECISÃO PENDENTE unmistakable.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 15,
+      "job_id": "8252bd61-bfd4-4d12-81ee-da94f6fefaf2",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_183801_8252bd61-bfd4-4d12-81ee-da94f6fefaf2.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/15-logo-usage.png",
+      "sha256": "d08d1f81781b746765b2d7045716e8f71c865097483c268a2cf96398070c581d",
+      "prompt": "Create the FINAL COMPLETE page 15 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve source brand assets faithfully. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, hex codes, ratios, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nConsistência antes de variação.\n\nDepois de congelada, a marca deve ter versões principal, horizontal, símbolo isolado, monocromática escura e monocromática clara. O espaço livre, o tamanho mínimo e os fundos permitidos serão definidos a partir do master aprovado. Nunca distorcer, girar, redesenhar, trocar cores, adicionar efeitos ou combinar o logo corporativo com o badge telefônico sem uma regra explícita.\n\nCORRETO\nVersão principal\nSímbolo isolado\nMonocromática escura\nMonocromática clara\n\nINCORRETO\nNão distorcer\nNão girar\nNão trocar cores\nNão adicionar efeitos\nNão combinar logo e badge sem regra\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate a professional logo-usage standards page with CORRETO and INCORRETO columns. Use the exact Agent Node marker only as the illustrative mark. Show clean correct variations and clearly crossed or separated incorrect treatments without inventing new brand marks. Do not state numeric clear-space or minimum-size values.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 16,
+      "job_id": "ae59e144-a605-4780-96f9-8b33f2b4949d",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_183801_ae59e144-a605-4780-96f9-8b33f2b4949d.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/16-core-colors.png",
+      "sha256": "2df9f5165610b04a3d840013e40f237f6d2808b6b1c43738f94a4d5808f8bab2",
+      "prompt": "Create the FINAL COMPLETE page 16 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve source brand assets faithfully. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, hex codes, ratios, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nPetrol para confiança. Laranja para ação. Teal para controle.\n\nO azul-petróleo é a base de autoridade e profundidade. O laranja sinaliza ação, telefonia e pontos de decisão. O teal comunica atividade controlada, confirmação e regras aprovadas. O papel claro mantém a leitura humana e cotidiana. Nenhuma cor deve existir apenas para decorar; cada uma tem um papel reconhecível.\n\nINK 950 — #041D27\nINK 900 — #082F3D\nORANGE 500 — #FF5A36\nTEAL 400 — #46C2AF\nTEAL 500 — #3EAEA0\nPAPER — #FBFCF8\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate a precise premium color-palette page with six large swatches. Each swatch must display its exact name and hex code exactly once. Use a clean grid and show one small Ligou agent material sample without adding text.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 17,
+      "job_id": "11f8c19f-26d9-4da8-b274-fa3e003b86f1",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_183801_11f8c19f-26d9-4da8-b274-fa3e003b86f1.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/17-accessibility.png",
+      "sha256": "d8b63b2a937bd109f786a23d21c22a337b73e81437aca66d2e57fa81f389102e",
+      "prompt": "Create the FINAL COMPLETE page 17 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve source brand assets faithfully. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, hex codes, ratios, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nA cor também precisa trabalhar.\n\nA paleta estendida cria hierarquia, estados e superfícies sem perder identidade. O laranja principal funciona sobre fundos escuros, mas não deve ser usado em texto pequeno sobre papel claro. Nessa situação, use o laranja profundo #B83216. O teal claro funciona com excelente contraste no petróleo. Cor nunca é o único indicador de sucesso, alerta ou erro: texto e forma devem carregar o mesmo significado.\n\n#041D27 / #FBFCF8 — 16.84:1\n#FF5A36 / #041D27 — 5.59:1\n#FF5A36 / #FBFCF8 — 3.01:1 — não usar em texto pequeno\n#0B655A / #FBFCF8 — 6.74:1\n#46C2AF / #041D27 — 7.93:1\n#B83216 / #FBFCF8 — 5.81:1\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate an accessible contrast standards page with six paired-color modules. Render every hex code and ratio exactly. Make the 3.01:1 warning visually clear through both text and an icon, never color alone. Do not invent WCAG labels not supplied in the text.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 18,
+      "job_id": "a34dc472-1277-4051-bc0a-f24916966be9",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_183802_a34dc472-1277-4051-bc0a-f24916966be9.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/18-typography.png",
+      "sha256": "60e95f7415689ca1bb6f7a6a9c016ab800363b08979b35be187adfb692f2aa82",
+      "prompt": "Create the FINAL COMPLETE page 18 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve source brand assets faithfully. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, hex codes, ratios, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nClareza operacional com presença editorial.\n\nA tipografia precisa ser direta no celular, forte nas manchetes e confortável em textos de orientação. O site atual usa Archivo em todo o sistema, com peso 800 para display e 400–600 para leitura e controles. Uma proposta anterior usava Familjen Grotesk nos títulos e reservava uma mono para dados reais. O Brand Guide só congelará uma dessas direções depois da aprovação.\n\nATUAL NA V9\nArchivo — display e corpo\n\nPROPOSTA HISTÓRICA\nFamiljen Grotesk — display\nArchivo — corpo\nMartian Mono — dados\n\nDECISÃO PENDENTE\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate a refined typography comparison page. The left or upper section demonstrates the current Archivo-only system; the contrasting section demonstrates the historical Familjen Grotesk + Archivo + Martian Mono proposal. Preserve the exact labels and make DECISÃO PENDENTE prominent. Do not claim either option is final.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 19,
+      "job_id": "0bb3c36a-7808-4f9e-b0cb-fed31f91d74c",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_184245_0bb3c36a-7808-4f9e-b0cb-fed31f91d74c.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/19-agent-identity.png",
+      "sha256": "ebece1054558edec658cde3a0bc9755660c0d8e0ebb0d373829cb9c4a7617ab0",
+      "prompt": "Create the FINAL COMPLETE page 19 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity, anatomy, materials, face, antenna, headset, and orange chest badge exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nUm rosto para o agente de inteligência artificial — nunca um humano disfarçado.\n\nO Ligou dá um rosto reconhecível a um agente de inteligência artificial. Sua face arredondada escura, olhos e sorriso mint, antena única com ponta laranja, fones integrados e corpo azul-petróleo tornam a IA próxima sem fingir que ela é humana. A expressão é calma e competente. Os materiais têm acabamento 3D premium e tátil, sem virar brinquedo ou personagem infantil. O agente se identifica com transparência como inteligência artificial da empresa.\n\nFACE\nOLHOS\nANTENA\nHEADSET\nBADGE\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate a premium character anatomy page using the exact full-body Ligou master and current portrait references. Show one full figure and one face close-up. Use five precise callouts labeled only FACE, OLHOS, ANTENA, HEADSET, BADGE. Do not alter proportions, pose anatomy, colors, or badge.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 20,
+      "job_id": "54c709c1-b3c6-47b3-9adc-539385779554",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_184245_54c709c1-b3c6-47b3-9adc-539385779554.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/20-agent-states.png",
+      "sha256": "37c5f94e4bfea12cfc39a8b6723896d5b6d25a3f740b3dea45ecc4de8e774c7d",
+      "prompt": "Create the FINAL COMPLETE page 20 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity, anatomy, materials, face, antenna, headset, and orange chest badge exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nAtendendo. Operando. Pedindo aprovação.\n\nToda aparição do agente precisa explicar uma função.\n\nATENDENDO\nEscuta, acolhe e identifica a necessidade.\n\nOPERANDO\nConsulta regras e ferramentas para encaminhar o trabalho.\n\nPEDINDO APROVAÇÃO\nInterrompe com propósito quando uma decisão pertence ao dono.\n\nO agente nunca aparece apenas para preencher espaço.\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate a three-column character-state page. Use the supplied three exact action-pose masters in order: attending, operating, approval. Preserve the same robot identity in all three. Each pose gets its exact heading and description. Do not add tools to the attending or approval poses; preserve the operating props from its source.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 21,
+      "job_id": "d7a7be43-9db7-4844-a647-b74974c6b990",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_184245_d7a7be43-9db7-4844-a647-b74974c6b990.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/21-imagery.png",
+      "sha256": "88bfe389032a90c71c26508cdcb2a073d522928d1720436e412ced4b0a2ffd47",
+      "prompt": "Create the FINAL COMPLETE page 21 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity, anatomy, materials, face, antenna, headset, and orange chest badge exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nMostrar causa e efeito, não futurismo genérico.\n\nAs imagens do agente de inteligência artificial Ligou mostram trabalho em sequência: chamada recebida, regra consultada, agenda atualizada e resultado devolvido. O cenário deve parecer específico a negócios de serviço nos Estados Unidos, com luz, objetos e interfaces coerentes.\n\nEVITAR\nCircuitos abstratos\nCérebros digitais\nRobôs genéricos\nCidades futuristas\nBrilho tecnológico excessivo\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate an imagery art-direction page contrasting one approved operational scene with a restrained avoid-list panel. Use the supplied hero and product-proof references to show real cause and effect: call, rule, schedule, result. Do not generate the prohibited generic-futurism clichés in the approved scene; the avoid list can use simple crossed abstract symbols, not new text.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 22,
+      "job_id": "90d9f162-b4ec-4b92-bd1c-92600507097c",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_184245_90d9f162-b4ec-4b92-bd1c-92600507097c.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/22-motion.png",
+      "sha256": "0f3d6394a3d9648e097abd9edabdb918e01a5343ec3f871546412fa12fb98877",
+      "prompt": "Create the FINAL COMPLETE page 22 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity, anatomy, materials, face, antenna, headset, and orange chest badge exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nMovimento que explica.\n\nLinhas, nós, cards e transições devem revelar relação entre eventos. O movimento organiza a leitura; não existe para demonstrar tecnologia. A linha laranja conecta, o teal confirma e o espaço em branco deixa o resultado respirar. Em movimento reduzido ou sem JavaScript, a história permanece completa e compreensível.\n\nLINHA\nConecta.\n\nNÓS\nExplicam.\n\nCARDS\nOrganizam.\n\nFALLBACK\nPreserva a história.\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate a sophisticated motion-language storyboard without adding new labels. Show four static editorial modules — line, nodes, cards, fallback — connected in sequence, conveying motion through spacing and progression rather than blur. Keep the agent small or absent. Use the page 13 visual-language anchor.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 23,
+      "job_id": "1b439061-0bef-4ba7-9eef-cdcace4810ac",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_184245_1b439061-0bef-4ba7-9eef-cdcace4810ac.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/23-applications.png",
+      "sha256": "07170db84e2743de32fa8bf89f64d6295374bb35f184005fdde35410dbe5e058",
+      "prompt": "Create the FINAL COMPLETE page 23 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity, anatomy, materials, face, antenna, headset, and orange chest badge exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nUma identidade, vários pontos de contato.\n\nSite, demonstração, painel, apresentação, proposta comercial, social, suporte e avatar devem parecer partes da mesma operação. Cada primeira apresentação precisa deixar claro que o Ligou é um agente de IA; depois disso, cada aplicação pode adaptar escala e densidade sem perder a marca, o agente, as cores e a voz. O CTA principal deve dizer exatamente o que acontece. Um mockup ilustrativo deve ser identificado como exemplo.\n\nSITE\nDEMO\nPAINEL\nAPRESENTAÇÃO\nPROPOSTA\nSOCIAL\nSUPORTE\nAVATAR\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate a premium applications ecosystem page with eight clean mockup frames labeled exactly. They should feel like one coherent Ligou system, using the exact Agent Node, palette, typography, and agent. Any illustrative UI inside frames must contain no readable pseudo-text; use simple shapes while preserving the eight supplied labels.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    },
+    {
+      "page": 24,
+      "job_id": "ae66cc17-a612-4153-ace0-74d4d012c2c2",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_184245_ae66cc17-a612-4153-ace0-74d4d012c2c2.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/brand-guide-24-pages/accepted/24-governance.png",
+      "sha256": "24e1064300e45833676a49a09a0e3389823668dbfb829534ed8604e44b300094",
+      "prompt": "Create the FINAL COMPLETE page 24 of the Ligou Brand Identity Guide as one native generated image. Use the supplied completed Ligou guide pages as the exact visual-system anchors: premium editorial layout, Archivo-like typography, paper #FBFCF8, deep petrol #041D27, orange #FF5A36, teal #46C2AF, restrained operational line, Agent Node marker, generous margins, and precise grid. Preserve the Ligou robot identity, anatomy, materials, face, antenna, headset, and orange chest badge exactly whenever shown. 4K landscape 16:9. Not a website screenshot.\n\nRender ALL typography inside this generated image. Copy the following complete text letter-for-letter, preserving Portuguese accents, capitalization, punctuation, symbols, and line breaks. Do not translate, paraphrase, abbreviate, omit, duplicate, or add any other words:\n\nConfiança exige disciplina.\n\nO Ligou é transparente sobre ser inteligência artificial e não usa a categoria IA como licença para exagerar. Não inventa estados, métricas, clientes, depoimentos ou capacidades. Não promete integração, telefonia, memória ou execução sem prova atual. Todo ativo tem versão, origem e status de aprovação. Toda exceção visual ou verbal é documentada. A marca termina onde começou: uma promessa simples, sustentada por comportamento consistente.\n\nNão inventar estados.\nNão inventar métricas.\nNão inventar clientes.\nNão inventar depoimentos.\nNão inventar capacidades.\nTodo ativo tem versão, origem e aprovação.\n\nLigou? Atendido.\n\nPAGE-SPECIFIC ART DIRECTION:\nCreate the closing governance page with a deep-petrol field, the exact Ligou agent in a calm front-facing stance, and a disciplined checklist. End with “Ligou? Atendido.” as the final signature, with “Atendido.” in orange. Serious, confident, and clean; no fake seals or certifications.\n\nAll text must be crisp, fully legible, inside safe margins, and must not overlap imagery. Use only the exact words above. No extra captions, page numbers, labels, logos, watermarks, pseudo-text, lorem ipsum, fake metrics, testimonials, client logos, or invented claims.",
+      "attempt": 1
+    }
+  ],
+  "rejected_outputs": [
+    {
+      "page": 1,
+      "job_id": "a3561d90-4e26-4aed-b56f-12af7d28e511",
+      "result_url": "https://d8j0ntlcm91z4.cloudfront.net/user_2zHWFlBUJTNxdG7ciMDQnx3RlZm/hf_20260818_175911_a3561d90-4e26-4aed-b56f-12af7d28e511.png",
+      "local_path": "/Users/d1f/Desktop/Ligou.AI/brand-identity-guide/generated/pages-01-03/higgsfield-backgrounds/page-01-cover-background.png",
+      "reason": "Text-free background superseded after user correction; never included in the 24-page review set.",
+      "prompt": "Create a premium 16:9 landscape background for page 1, the cover of the Ligou Brand Identity Guide. This image will receive exact deterministic typography afterward. DO NOT render any text, letters, numbers, wordmarks, logos, UI labels, captions, signatures, or watermarks.\n\nPreserve the Ligou robot identity exactly from the references: compact premium 3D robot; dark petrol-blue satin body; rounded rectangular dark face screen; exactly two vertical mint-green capsule eyes; one curved mint smile; exactly one centered antenna with orange tip; integrated round side headset earcups; restrained orange circular telephone badge on the chest; calm, competent, operational personality. Do not redesign the character.\n\nArt direction: sophisticated editorial brand-book cover, not a website screenshot. Deep petrol background using #041D27 and #04182A, subtle tactile grain, restrained teal #46C2AF nodes, and one thin orange #FF5A36 operational line connecting small points. Premium soft cinematic studio lighting with controlled reflections. Place the agent on the right third, full or three-quarter figure, with generous quiet negative space across the left two-thirds and upper-left for title typography. Strong balance, luxurious but approachable, clear visual hierarchy.\n\nUse the approved hero reference for mood and materials; use the current agent and brand board for exact character identity; use only option 1 “Agent Node” as abstract motif inspiration from the logo-options sheet, but do not draw any logo or text. No other logo options. No additional robots, no humans, no generic sci-fi circuits, no neon overload, no clutter, no phone handset floating as a logo."
+    }
+  ],
+  "reference_upload_failures": [
+    {
+      "filenames": [
+        "ligou-a-linha-mark.svg",
+        "ligou-a-linha-line.svg"
+      ],
+      "stage": "media_confirm",
+      "request_id": "b37d6024-750c-4b35-a54a-80c5f5585399",
+      "reason": "Higgsfield could not confirm SVG files as image generation media. Page 14 keeps A Linha explicitly labeled as a prior candidate and uses its documented visual description; no manual compositing was performed."
+    }
+  ],
+  "verification": {
+    "accepted_page_count": 24,
+    "all_accepted_dimensions": "3840x2160",
+    "all_accepted_files_are_native_higgsfield_outputs": true,
+    "manual_overlay": false,
+    "compositor": false,
+    "crop_resize_or_padding": false,
+    "pdf_created": false,
+    "visual_review": "Completed for all 24 pages: text presence, accents, punctuation, Agent Node, agent identity, palette, layout coherence, and pending-decision labels.",
+    "pending_identity_decisions_on_pages": [
+      14,
+      18
+    ]
+  }
+}

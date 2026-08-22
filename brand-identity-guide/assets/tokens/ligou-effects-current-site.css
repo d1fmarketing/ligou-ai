@@ -1,0 +1,7 @@
+:root{
+--shadow-soft:0 1px 2px rgba(4,29,39,.04),0 8px 24px -12px rgba(4,29,39,.16);
+--shadow-float:0 24px 48px -16px rgba(4,29,39,.28);
+--ease-out:cubic-bezier(.22,.8,.36,1);/* @kind other */
+--dur-fast:140ms;/* @kind other */
+--dur-med:240ms;/* @kind other */
+}

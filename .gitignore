@@ -21,3 +21,6 @@ output/
 .idea/
 *.swp
 *~
+
+# Derivable render scratch (brand guide page renders etc.)
+tmp/
