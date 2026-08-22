@@ -3,7 +3,8 @@
 // full per-tenant session config, SDP exchange proxied to OpenAI, sideband attach. The browser never sees any key.
 import { config } from "./config.ts";
 import { buildInstructions, type SessionType } from "./instructions.ts";
-import { loadTenant, supa } from "./rules.ts";
+import { supa } from "./rules.ts";
+import { resolveSessionTenant } from "./session-tenant.ts";
 import { makeCapability, toolSchemas } from "./tools.ts";
 import { attachSideband, liveSessions } from "./sideband.ts";
 import { requireTenantOwner } from "../../supabase/functions/_shared/tenant-ownership.ts";
@@ -25,11 +26,8 @@ async function verifyOwner(authHeader: string | null): Promise<{ userId: string 
   return user?.id ? { userId: user.id } : null;
 }
 
-export async function startSession(userId: string, sessionType: SessionType, sdpOffer: string, modelOverride?: string) {
-  const ownedTenant = await requireTenantOwner(supa(), config.defaultTenantSlug, userId);
-  const { tenant, rules } = await loadTenant(config.defaultTenantSlug);
-  // The ownership read is intentionally fresh and occurs before any call or reservation write.
-  tenant.owner_user_id = ownedTenant.owner_user_id;
+export async function startSession(userId: string, sessionType: SessionType, sdpOffer: string, modelOverride?: string, tenantId?: string) {
+  const { tenant, rules } = await resolveSessionTenant(userId, tenantId);
 
   const ALLOWED_MODELS = new Set(["gpt-realtime", "gpt-realtime-2.1", "gpt-realtime-2.1-mini"]);
   // Primary model, then automatic fallback (RJ 2026-08-19: 2.1 primary, mini as fallback).
@@ -92,6 +90,7 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   const cap = makeCapability(tenant.slug, tenant.id, call.id, maxMinutes, sessionType, {
     authEpoch: tenant.auth_epoch,
     policyEpoch: tenant.policy_epoch,
+    simulation: tenant.operational_mode === "simulation_only",
   });
 
   // Unified interface (official server flow): ONE multipart POST with the STANDARD key. No ephemeral ek_ —

@@ -6,7 +6,7 @@ import { config } from "./config.ts";
 import { supa } from "./rules.ts";
 import type { SessionType } from "./instructions.ts";
 
-type StartSession = (userId: string, sessionType: SessionType, sdpOffer: string, modelOverride?: string) => Promise<{ sdp: string; call_id: string }>;
+type StartSession = (userId: string, sessionType: SessionType, sdpOffer: string, modelOverride?: string, tenantId?: string) => Promise<{ sdp: string; call_id: string }>;
 
 export function startBrowserRequestListener(startSession: StartSession) {
   if (!config.openaiKey) return;
@@ -32,7 +32,15 @@ async function handle(row: any, startSession: StartSession) {
   if (!claimed?.length) return; // another controller instance won the race
 
   try {
-    const out = await startSession(row.user_id, (row.session_type ?? "owner_browser") as SessionType, row.offer_sdp, row.model_override ?? undefined);
+    // The row's tenant_id is what the Edge Function resolved for the AUTHENTICATED
+    // owner; startSession re-verifies ownership against a fresh read.
+    const out = await startSession(
+      row.user_id,
+      (row.session_type ?? "owner_browser") as SessionType,
+      row.offer_sdp,
+      row.model_override ?? undefined,
+      row.tenant_id ?? undefined,
+    );
     await supa().from("browser_session_requests")
       .update({ status: "ready", answer_sdp: out.sdp, call_id: out.call_id }).eq("id", row.id);
   } catch (e: any) {
@@ -40,3 +48,6 @@ async function handle(row: any, startSession: StartSession) {
       .update({ status: "error", error: String(e?.message ?? e).slice(0, 400) }).eq("id", row.id);
   }
 }
+
+// test seam: exercised directly by the tenancy suite
+export const _handleBrowserRequest = handle;

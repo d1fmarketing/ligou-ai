@@ -23,6 +23,8 @@ export interface Tenant {
   owner_user_id: string | null;
   auth_epoch: number;
   policy_epoch: number;
+  status: string;
+  operational_mode: string;
 }
 
 let client: SupabaseClient | null = null;
@@ -35,16 +37,16 @@ export function _setClient(c: SupabaseClient | null) { client = c; }
 
 const tenantCache = new Map<string, { authEpoch: number; policyEpoch: number; rules: Rule[] }>();
 
-export async function loadTenant(slug: string): Promise<{ tenant: Tenant; rules: Rule[] }> {
+async function loadTenantRow(column: "slug" | "id", value: string): Promise<{ tenant: Tenant; rules: Rule[] }> {
   const s = supa();
-  const { data: tenant, error: te } = await s.from("tenants").select("*").eq("slug", slug).single();
-  if (te || !tenant) throw new Error(`tenant_not_found: ${slug}`);
+  const { data: tenant, error: te } = await s.from("tenants").select("*").eq(column, value).single();
+  if (te || !tenant) throw new Error(`tenant_not_found: ${value}`);
   const typedTenant = tenant as Tenant;
   if (!Number.isInteger(typedTenant.auth_epoch) || !Number.isInteger(typedTenant.policy_epoch)) {
     throw new Error("tenant_authority_epochs_missing");
   }
 
-  const hit = tenantCache.get(slug);
+  const hit = tenantCache.get(typedTenant.slug);
   if (hit && hit.authEpoch === typedTenant.auth_epoch && hit.policyEpoch === typedTenant.policy_epoch) {
     return { tenant: typedTenant, rules: hit.rules };
   }
@@ -55,12 +57,20 @@ export async function loadTenant(slug: string): Promise<{ tenant: Tenant; rules:
     .eq("tenant_id", typedTenant.id);
   if (re) throw new Error(`rules_load_failed: ${re.message}`);
   const effectiveRules = (rules ?? []) as Rule[];
-  tenantCache.set(slug, {
+  tenantCache.set(typedTenant.slug, {
     authEpoch: typedTenant.auth_epoch,
     policyEpoch: typedTenant.policy_epoch,
     rules: effectiveRules,
   });
   return { tenant: typedTenant, rules: effectiveRules };
+}
+
+export async function loadTenant(slug: string): Promise<{ tenant: Tenant; rules: Rule[] }> {
+  return loadTenantRow("slug", slug);
+}
+
+export async function loadTenantById(id: string): Promise<{ tenant: Tenant; rules: Rule[] }> {
+  return loadTenantRow("id", id);
 }
 
 export function invalidateTenant(slug: string) { tenantCache.delete(slug); }

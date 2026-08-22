@@ -6,7 +6,7 @@
 // Deploy: supabase functions deploy browser-session --no-verify-jwt   (JWT is verified explicitly below)
 // Secrets: SERVICE_KEY=sb_secret_...  (SUPABASE_URL is injected by the platform)
 import { createClient } from "@supabase/supabase-js";
-import { requireTenantOwner } from "../_shared/tenant-ownership.ts";
+import { resolveOwnedTenantForSession } from "../_shared/owned-tenant.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -33,10 +33,12 @@ Deno.serve(async (req) => {
   const body = await req.json().catch(() => ({}));
   if (!body.sdp) return Response.json({ error: "sdp_required" }, { status: 400, headers: CORS });
 
-  // 2) read-only ownership verification. The operator RPC is the only owner-assignment authority.
+  // 2) read-only ownership resolution: the caller's OWN self-service tenant first,
+  // the legacy env-slug tenant as fallback. Owner assignment still belongs solely
+  // to the bootstrap RPC and the operator RPC.
   let tenant;
   try {
-    tenant = await requireTenantOwner(supa, DEFAULT_TENANT, user.id);
+    tenant = await resolveOwnedTenantForSession(supa, user.id, DEFAULT_TENANT);
   } catch (error: any) {
     return Response.json({ error: error?.message ?? "ownership_check_failed" }, { status: error?.status ?? 500, headers: CORS });
   }
