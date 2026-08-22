@@ -828,6 +828,77 @@ test("release health performs controller, safe Supabase read, and token-free Her
   }
 });
 
+test("release health waits out controller startup before declaring failure", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-release-health-wait-"));
+  try {
+    const bin = path.join(fixture, "bin");
+    const countFile = path.join(fixture, "controller-attempts");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "curl"), `#!/bin/sh\ncase "$*" in\n  *'127.0.0.1:8790/health'*)\n    n=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)\n    n=$((n + 1))\n    printf '%s' "$n" > "$COUNT_FILE"\n    if [ "$n" -lt 3 ]; then exit 7; fi\n    printf '%s\\n' '{"ok":true,"openai":true}' ;;\n  *'/rest/v1/rpc/release_health_state'*) printf '%s\\n' '{"ok":true,"tenant_id":"11111111-1111-4111-8111-111111111111","tenant_slug":"test-tenant","status":"active"}' ;;\n  *) printf '%s\\n' '{"ok":true}' ;;\nesac\n`);
+    await writeFile(path.join(bin, "docker"), `#!/bin/sh\ncase "$*" in\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-11111111-1111-4111-8111-111111111111","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}' ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]' ;;\n  *'auth status openai-codex'*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\n`);
+    await chmod(path.join(bin, "curl"), 0o755);
+    await chmod(path.join(bin, "docker"), 0o755);
+    const envFile = path.join(fixture, "env");
+    await writeFile(envFile, [
+      "SUPABASE_URL='https://unit.invalid'",
+      "SUPABASE_SECRET_KEY='synthetic-service-secret'",
+      "TENANT_SLUG='test-tenant'",
+      "TENANT_ID='11111111-1111-4111-8111-111111111111'",
+      "PORT='8790'",
+      `HERMES_IMAGE='${IMAGE}'`,
+    ].join("\n"));
+    const result = run("bash", [healthTool], {
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile, COUNT_FILE: countFile, LIGOU_NODE_BIN: process.execPath,
+        LIGOU_CONTROLLER_HEALTH_DEADLINE_S: "10",
+        LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
+        LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), '{"ok":true,"controller":"ready","supabase":"ready","hermes":"ready"}');
+    assert.equal((await readFile(countFile, "utf8")).trim(), "3");
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("release health bounds the controller startup wait and still fails closed", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-release-health-deadline-"));
+  try {
+    const bin = path.join(fixture, "bin");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "curl"), `#!/bin/sh\ncase "$*" in\n  *'127.0.0.1:8790/health'*) exit 7 ;;\n  *'/rest/v1/rpc/release_health_state'*) printf '%s\\n' '{"ok":true,"tenant_id":"11111111-1111-4111-8111-111111111111","tenant_slug":"test-tenant","status":"active"}' ;;\n  *) printf '%s\\n' '{"ok":true}' ;;\nesac\n`);
+    await writeFile(path.join(bin, "docker"), `#!/bin/sh\ncase "$*" in\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-11111111-1111-4111-8111-111111111111","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}' ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]' ;;\n  *'auth status openai-codex'*) printf '%s\\n' '{"provider":"openai-codex","authenticated":true}' ;;\nesac\n`);
+    await chmod(path.join(bin, "curl"), 0o755);
+    await chmod(path.join(bin, "docker"), 0o755);
+    const envFile = path.join(fixture, "env");
+    await writeFile(envFile, [
+      "SUPABASE_URL='https://unit.invalid'",
+      "SUPABASE_SECRET_KEY='synthetic-service-secret'",
+      "TENANT_SLUG='test-tenant'",
+      "TENANT_ID='11111111-1111-4111-8111-111111111111'",
+      "PORT='8790'",
+      `HERMES_IMAGE='${IMAGE}'`,
+    ].join("\n"));
+    const started = Date.now();
+    const result = run("bash", [healthTool], {
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`, LIGOU_ENV_FILE: envFile, LIGOU_NODE_BIN: process.execPath,
+        LIGOU_CONTROLLER_HEALTH_DEADLINE_S: "2",
+        LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants"),
+        LIGOU_TENANT_REGISTRY: path.join(fixture, "tenant-registry.json"),
+      },
+    });
+    const elapsedMs = Date.now() - started;
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /"controller":"unavailable"/);
+    assert.ok(elapsedMs < 15_000, `bounded wait exceeded: ${elapsedMs}ms`);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("release health rejects a controller that is up without its voice credential", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-release-controller-key-"));
   try {

@@ -22,11 +22,22 @@ HERMES_STATE=unavailable
 
 if [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] \
   && [[ "$TENANT_ID" =~ ^[a-f0-9-]{36}$ ]] && [[ "$PORT" =~ ^[0-9]{2,5}$ ]]; then
-  CONTROLLER_RAW="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/health" 2>/dev/null || true)"
-  if printf '%s' "$CONTROLLER_RAW" | "${LIGOU_NODE_BIN:-node}" -e '
+  # systemd reports the service started at exec time, before the socket binds, so the
+  # first probe after a restart can hit connection-refused. Poll with a bounded deadline
+  # instead of failing the release on that startup race.
+  CONTROLLER_DEADLINE="${LIGOU_CONTROLLER_HEALTH_DEADLINE_S:-20}"
+  [[ "$CONTROLLER_DEADLINE" =~ ^[0-9]{1,3}$ ]] || CONTROLLER_DEADLINE=20
+  CONTROLLER_WAIT_START="$SECONDS"
+  while :; do
+    CONTROLLER_RAW="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/health" 2>/dev/null || true)"
+    if printf '%s' "$CONTROLLER_RAW" | "${LIGOU_NODE_BIN:-node}" -e '
 let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{try{const v=JSON.parse(raw);process.exit(v&&!Array.isArray(v)&&typeof v==="object"&&v.ok===true&&v.openai===true?0:1)}catch{process.exit(1)}});'; then
-    CONTROLLER_STATE=ready
-  fi
+      CONTROLLER_STATE=ready
+      break
+    fi
+    [ $((SECONDS - CONTROLLER_WAIT_START)) -lt "$CONTROLLER_DEADLINE" ] || break
+    sleep 1
+  done
 
   if [[ "${SUPABASE_URL:-}" =~ ^https://[A-Za-z0-9.-]+/?$ ]] && [ -n "${SUPABASE_SECRET_KEY:-}" ]; then
     SUPABASE_RAW="$(curl -fsS --max-time 5 \
