@@ -1,5 +1,4 @@
 import { readFileSync, realpathSync } from "node:fs";
-import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const HERMES_ACTIONS = Object.freeze([

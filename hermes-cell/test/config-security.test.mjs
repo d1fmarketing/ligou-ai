@@ -118,6 +118,21 @@ test("hermes-cell CLI tools still run when invoked through a symlinked release p
     ], { encoding: "utf8" });
     assert.equal(action.status, 0, action.stderr);
     assert.equal(action.stdout.trim(), "open_team_case");
+
+    // The remaining CLI entrypoints must also detect main-hood through the symlink:
+    // with no args each fails closed with its usage error. The old fail-open bug
+    // exited 0 with empty output instead.
+    const argless = [
+      ["hermes-cell/tenant-compose.mjs", /tenant_id_invalid/],
+      ["hermes-cell/verify-running-image.mjs", /running_image_arguments_invalid/],
+      ["infra/archive-safety.mjs", /usage: archive-safety/],
+      ["infra/capture-restore-inputs.mjs", /restore_capture_arguments_invalid/],
+    ];
+    for (const [tool, expected] of argless) {
+      const result = spawnSync(process.execPath, [path.join(link, tool)], { encoding: "utf8" });
+      assert.notEqual(result.status, 0, `${tool} exited 0 through symlink`);
+      assert.match(result.stderr, expected, `${tool} stderr through symlink`);
+    }
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
