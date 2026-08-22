@@ -62,14 +62,15 @@ aws s3 cp "$ARTIFACT" "s3://${BUCKET}/${S3_PREFIX}/release.tar.gz" --only-show-e
 aws s3 cp "$MANIFEST" "s3://${BUCKET}/${S3_PREFIX}/release.tar.gz.manifest.json" --only-show-errors
 
 REMOTE_COMMAND="set -euo pipefail; \
-ART=/tmp/ligou-${RELEASE_ID}.tar.gz; \
-MAN=/tmp/ligou-${RELEASE_ID}.manifest.json; \
+REL_DIR=\$(mktemp -d /tmp/ligou-release.XXXXXX); \
+ART=\$REL_DIR/release.tar.gz; \
+MAN=\$REL_DIR/release.tar.gz.manifest.json; \
 aws s3 cp s3://${BUCKET}/${S3_PREFIX}/release.tar.gz \$ART --only-show-errors; \
 aws s3 cp s3://${BUCKET}/${S3_PREFIX}/release.tar.gz.manifest.json \$MAN --only-show-errors; \
 ACTUAL=\$(sha256sum \$ART | awk '{print \$1}'); \
 [ \"\$ACTUAL\" = ${ARTIFACT_HASH} ] || { echo release_bootstrap_hash_mismatch >&2; exit 1; }; \
 BOOT=\$(mktemp -d /tmp/ligou-bootstrap.XXXXXX); \
-trap 'rm -rf \"\$BOOT\" \"\$ART\" \"\$MAN\"' EXIT; \
+trap 'rm -rf \"\$BOOT\" \"\$REL_DIR\"' EXIT; \
 tar -xzf \$ART -C \$BOOT infra/deploy-host.sh ${BOOTSTRAP_MODULES}; \
 chmod 700 \$BOOT/infra/deploy-host.sh; \
 set -a; . /opt/ligou/env; set +a; \
