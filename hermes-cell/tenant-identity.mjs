@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -147,7 +147,12 @@ export function activateTenantCognitiveVolume(tenantId, tenantSlug, nextVolume, 
   return resolveTenantIdentity(tenantId, tenantSlug, options);
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const isMain = (() => {
+  // Production invokes these tools through the /opt/ligou/current symlink while Node
+  // resolves the main module by realpath, so compare realpaths or the CLI no-ops.
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; }
+})();
 if (isMain) {
   try {
     const args = process.argv.slice(2), idAt = args.indexOf("--tenant-id"), slugAt = args.indexOf("--tenant-slug");

@@ -93,6 +93,36 @@ test("local auth classifier rejects dead, exhausted, terminal, and expired Codex
   assert.equal(classifyCodexAuthStore({}, now).authenticated, false);
 });
 
+test("hermes-cell CLI tools still run when invoked through a symlinked release path", async () => {
+  // Production invokes tools via /opt/ligou/current -> releases/<id>. Node resolves the
+  // main module through realpath, so a path.resolve(argv[1]) identity check silently
+  // no-ops (exit 0, empty stdout) through the symlink — a fail-open defect.
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-symlink-cli-"));
+  try {
+    const link = path.join(fixture, "current");
+    await symlink(repoRoot, link);
+    const registry = path.join(fixture, "registry.json");
+    const identity = spawnSync(process.execPath, [
+      path.join(link, "hermes-cell/tenant-identity.mjs"),
+      "--tenant-id", "11111111-1111-4111-8111-111111111111",
+      "--tenant-slug", "test-tenant", "--json",
+    ], { encoding: "utf8", env: { ...process.env, LIGOU_TENANT_REGISTRY: registry, LIGOU_TENANT_STATE_ROOT: path.join(fixture, "tenants") } });
+    assert.equal(identity.status, 0, identity.stderr);
+    const parsed = JSON.parse(identity.stdout);
+    assert.equal(parsed.container_name, "ligou-cell-11111111-1111-4111-8111-111111111111");
+
+    const response = path.join(fixture, "response.json");
+    await writeFile(response, JSON.stringify({ choices: [{ message: { content: '{"action":"open_team_case"}' } }] }));
+    const action = spawnSync(process.execPath, [
+      path.join(link, "hermes-cell/action-contract.mjs"), "--response", response,
+    ], { encoding: "utf8" });
+    assert.equal(action.status, 0, action.stderr);
+    assert.equal(action.stdout.trim(), "open_team_case");
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("shared Hermes action parser enforces the same exact one-key contract used by cutover", async () => {
   assert.equal(parseHermesActionContent('{"action":"open_team_case"}'), "open_team_case");
   assert.equal(parseHermesActionContent('{"action":"open_team_case","advice":"forbidden"}'), null);

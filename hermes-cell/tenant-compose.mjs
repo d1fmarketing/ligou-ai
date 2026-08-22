@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveTenantIdentity } from "./tenant-identity.mjs";
@@ -46,7 +46,12 @@ function ensureImageAvailable(image) {
   if (!verified) fail("hermes_image_pull_failed");
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const isMain = (() => {
+  // Production invokes these tools through the /opt/ligou/current symlink while Node
+  // resolves the main module by realpath, so compare realpaths or the CLI no-ops.
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; }
+})();
 if (isMain) {
   const tenantId = process.env.TENANT_ID ?? "";
   const tenantSlug = process.env.TENANT_SLUG ?? "";

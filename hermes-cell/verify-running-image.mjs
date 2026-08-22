@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,7 +35,12 @@ function docker(args) {
   return result.stdout.trim();
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const isMain = (() => {
+  // Production invokes these tools through the /opt/ligou/current symlink while Node
+  // resolves the main module by realpath, so compare realpaths or the CLI no-ops.
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; }
+})();
 if (isMain) {
   const args = process.argv.slice(2);
   if (args.length !== 4 || args[0] !== "--container" || args[2] !== "--expected") {

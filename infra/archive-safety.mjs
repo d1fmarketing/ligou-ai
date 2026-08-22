@@ -207,7 +207,12 @@ export function extractAndScan(archive, destination) {
   return expected;
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const isMain = (() => {
+  // Production invokes these tools through the /opt/ligou/current symlink while Node
+  // resolves the main module by realpath, so compare realpaths or the CLI no-ops.
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; }
+})();
 if (isMain) {
   try {
     const [command, archive, destination] = process.argv.slice(2);

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,7 +25,12 @@ export function parseHermesActionResponse(value) {
   return parseHermesActionContent(value?.choices?.[0]?.message?.content);
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const isMain = (() => {
+  // Production invokes these tools through the /opt/ligou/current symlink while Node
+  // resolves the main module by realpath, so compare realpaths or the CLI no-ops.
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; }
+})();
 if (isMain) {
   if (process.argv.length !== 4 || process.argv[2] !== "--response") process.exit(2);
   let action = null;
