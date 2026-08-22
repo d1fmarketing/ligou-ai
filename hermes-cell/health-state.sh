@@ -44,7 +44,7 @@ fi
 # Deliberately no Authorization header: this endpoint may report state only.
 API_RAW="$(curl -fsS --max-time 5 "$HEALTH_URL" 2>/dev/null || true)"
 if printf '%s' "$API_RAW" | "$NODE_BIN" -e '
-let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{try{const v=JSON.parse(raw);process.exit(v&&!Array.isArray(v)&&typeof v==="object"&&v.ok===true?0:1)}catch{process.exit(1)}});'; then
+let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{try{const v=JSON.parse(raw);const ready=v&&!Array.isArray(v)&&typeof v==="object"&&(v.ok===true||v.status==="ok");process.exit(ready?0:1)}catch{process.exit(1)}});'; then
   API_STATE=ready
 else
   API_STATE=unavailable

@@ -399,7 +399,7 @@ test("token-free health wrapper returns state only and never forwards or prints 
     const docker = path.join(bin, "docker");
     const curl = path.join(bin, "curl");
     await writeFile(docker, `#!/bin/sh\ncase "$*" in\n  *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-${TENANT_A}","Config":{"Image":"${IMAGE}"},"Image":"sha256:${"a".repeat(64)}","State":{"Running":true}}' ;;\n  *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]' ;;\n  *'auth status openai-codex'*) printf '%s\\n' "\${AUTH_PAYLOAD:-{\\\"provider\\\":\\\"openai-codex\\\",\\\"authenticated\\\":true,\\\"access_token\\\":\\\"sensitive-oauth-token\\\"}}" ;;\nesac\n`);
-    await writeFile(curl, `#!/bin/sh\nprintf '%s\\n' "$*" > ${JSON.stringify(curlLog)}\nprintf '%s\\n' '{"ok":true,"model":"private-model-detail"}'\n`);
+    await writeFile(curl, `#!/bin/sh\nprintf '%s\\n' "$*" > ${JSON.stringify(curlLog)}\nprintf '%s\\n' '{"status":"ok","model":"private-model-detail"}'\n`);
     await chmod(docker, 0o755);
     await chmod(curl, 0o755);
 
