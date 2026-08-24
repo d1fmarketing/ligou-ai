@@ -17,6 +17,7 @@ export const unitTestFiles = [
   "test/budget-sql-fixture.test.ts",
   "test/budget-reconciliation.test.ts",
   "test/sideband-settlement.test.ts",
+  "test/sideband-continuation.test.ts",
   "test/phone-budget.test.ts",
   "test/calendar-authority.test.ts",
   "test/worker-authority.test.ts",

@@ -22,6 +22,10 @@ export interface SessionLedger {
   transcript: Array<{ role: "caller" | "agent" | "system"; text: string; at: string }>;
   toolLog: Array<{ name: string; ok: boolean; durationMs: number }>;
   status: "active" | "ended" | "killed_deadline" | "killed_budget" | "error";
+  /** True while OpenAI is streaming a response; `response.create` is illegal in that window. */
+  responseActive?: boolean;
+  /** A tool output was delivered and the model still owes the conversation its next turn. */
+  continuationWanted?: boolean;
 }
 
 /** Plan v4 §8: reserving quota only gates FUTURE sessions — a live session that runs up the bill must be cut.
@@ -322,6 +326,17 @@ export function attachSideband(
   return { ledger, opened, cancel };
 }
 
+/** One continuation per owed turn, and only while no response is streaming. The interview
+ *  stalled in production (call ec929149) because a per-item `response.create` raced the
+ *  still-active response and the rejection was treated as terminal. */
+function maybeContinueResponse(ledger: SessionLedger, ws: WebSocket) {
+  if (!ledger.continuationWanted || ledger.responseActive || ledger.status !== "active") return;
+  ledger.continuationWanted = false;
+  ledger.responseActive = true;
+  ws.send(JSON.stringify({ type: "response.create" }));
+  console.log(`sideband continue call=${ledger.callId.slice(0, 8)} (response.create after tool output)`);
+}
+
 export async function handleEvent(
   cap: Capability,
   ledger: SessionLedger,
@@ -331,6 +346,9 @@ export async function handleEvent(
 ) {
   if (!isCurrent()) return;
   switch (msg.type) {
+    case "response.created":
+      ledger.responseActive = true;
+      break;
     case "conversation.item.input_audio_transcription.completed":
       if (msg.transcript) ledger.transcript.push({ role: "caller", text: msg.transcript, at: new Date().toISOString() });
       break;
@@ -352,7 +370,9 @@ export async function handleEvent(
           item: { type: "function_call_output", call_id: item.call_id, output: JSON.stringify(result.body) },
         }));
         if (!isCurrent()) return;
-        ws.send(JSON.stringify({ type: "response.create" }));
+        console.log(`sideband tool call=${ledger.callId.slice(0, 8)} name=${item.name} ok=${result.ok} response_active=${ledger.responseActive === true}`);
+        ledger.continuationWanted = true;
+        maybeContinueResponse(ledger, ws);
       }
       break;
     }
@@ -384,6 +404,8 @@ export async function handleEvent(
         console.warn(`budget kill: call ${ledger.callId} spent $${spent.toFixed(2)} (cap $${cap.toFixed(2)})`);
         try { ws.close(); } catch {}
       }
+      ledger.responseActive = false;
+      maybeContinueResponse(ledger, ws);
       break;
     }
     case "session.ended": {
@@ -397,11 +419,22 @@ export async function handleEvent(
       try { ws.close(); } catch {}
       break;
     }
-    case "error":
+    case "error": {
       ledger.transcript.push({ role: "system", text: `openai error: ${msg.error?.message ?? "?"}`, at: new Date().toISOString() });
+      const code = typeof msg.error?.code === "string" ? msg.error.code : "";
+      const message = typeof msg.error?.message === "string" ? msg.error.message : "";
+      // A continuation that raced a still-streaming response is a coordination error, not a
+      // session failure: keep the session, and re-request the turn once that response finishes.
+      if (code === "conversation_already_has_active_response" || /already has an active response/i.test(message)) {
+        ledger.responseActive = true;
+        ledger.continuationWanted = true;
+        console.warn(`sideband continuation deferred call=${ledger.callId.slice(0, 8)} (response still active)`);
+        break;
+      }
       ledger.status = "error";
       try { ws.close(); } catch {}
       break;
+    }
   }
 }
 
