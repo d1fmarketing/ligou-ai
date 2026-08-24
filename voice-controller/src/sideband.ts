@@ -26,6 +26,8 @@ export interface SessionLedger {
   responseActive?: boolean;
   /** A tool output was delivered and the model still owes the conversation its next turn. */
   continuationWanted?: boolean;
+  /** Function calls still executing from the current batch; the continuation waits for all outputs. */
+  pendingToolCalls?: number;
 }
 
 /** Plan v4 §8: reserving quota only gates FUTURE sessions — a live session that runs up the bill must be cut.
@@ -219,6 +221,15 @@ export function attachSideband(
       session: { type: "realtime", audio: { input: { transcription: { model: "gpt-live-transcribe" } } } },
     }));
     if (!ownsSocket(sock)) return;
+    // A fresh socket has no knowledge of a response that was streaming when the previous
+    // one dropped, and OpenAI does not replay missed events: a stale `responseActive`
+    // would wedge the continuation forever. Clear the streaming flags and re-request any
+    // turn the model still owes; an over-eager create is absorbed by the recoverable
+    // `conversation_already_has_active_response` path.
+    ledger.responseActive = false;
+    ledger.pendingToolCalls = 0;
+    maybeContinueResponse(ledger, sock);
+    if (!ownsSocket(sock)) return;
     if (!openedSettled) {
       openedSettled = true;
       resolveOpened();
@@ -331,6 +342,7 @@ export function attachSideband(
  *  still-active response and the rejection was treated as terminal. */
 function maybeContinueResponse(ledger: SessionLedger, ws: WebSocket) {
   if (!ledger.continuationWanted || ledger.responseActive || ledger.status !== "active") return;
+  if ((ledger.pendingToolCalls ?? 0) > 0) return;
   ledger.continuationWanted = false;
   ledger.responseActive = true;
   ws.send(JSON.stringify({ type: "response.create" }));
@@ -359,19 +371,25 @@ export async function handleEvent(
       const item = msg.item;
       if (item?.type === "function_call") {
         if (!isCurrent()) return;
-        let args: Record<string, unknown> = {};
-        try { args = JSON.parse(item.arguments ?? "{}"); } catch {}
-        const result = await runTool(cap, item.name, args);
+        ledger.pendingToolCalls = (ledger.pendingToolCalls ?? 0) + 1;
+        try {
+          let args: Record<string, unknown> = {};
+          try { args = JSON.parse(item.arguments ?? "{}"); } catch {}
+          const result = await runTool(cap, item.name, args);
+          if (!isCurrent()) return;
+          ledger.toolLog.push({ name: item.name, ok: result.ok, durationMs: result.durationMs });
+          if (!isCurrent()) return;
+          ws.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: { type: "function_call_output", call_id: item.call_id, output: JSON.stringify(result.body) },
+          }));
+          if (!isCurrent()) return;
+          console.log(`sideband tool call=${ledger.callId.slice(0, 8)} name=${item.name} ok=${result.ok} response_active=${ledger.responseActive === true}`);
+          ledger.continuationWanted = true;
+        } finally {
+          ledger.pendingToolCalls = Math.max(0, (ledger.pendingToolCalls ?? 1) - 1);
+        }
         if (!isCurrent()) return;
-        ledger.toolLog.push({ name: item.name, ok: result.ok, durationMs: result.durationMs });
-        if (!isCurrent()) return;
-        ws.send(JSON.stringify({
-          type: "conversation.item.create",
-          item: { type: "function_call_output", call_id: item.call_id, output: JSON.stringify(result.body) },
-        }));
-        if (!isCurrent()) return;
-        console.log(`sideband tool call=${ledger.callId.slice(0, 8)} name=${item.name} ok=${result.ok} response_active=${ledger.responseActive === true}`);
-        ledger.continuationWanted = true;
         maybeContinueResponse(ledger, ws);
       }
       break;

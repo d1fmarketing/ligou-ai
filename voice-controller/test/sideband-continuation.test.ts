@@ -8,7 +8,7 @@
 // never be terminal.
 import { describe, expect, test } from "bun:test";
 import { emptyUsage } from "../src/config.ts";
-import { handleEvent, type SessionLedger } from "../src/sideband.ts";
+import { attachSideband, handleEvent, liveSessions, type SessionLedger } from "../src/sideband.ts";
 import { makeCapability } from "../src/tools.ts";
 
 const cap = makeCapability("rocha-plumbing", "tenant-1", "call-1", 15, "onboarding", {
@@ -119,5 +119,69 @@ describe("sideband response continuation", () => {
     await handleEvent(cap, l, ws as any, { type: "error", error: { code: "server_error", message: "boom" } });
     expect(l.status).toBe("error");
     expect(ws.closed).toBe(1);
+  });
+
+  test("a tool batch straddling response.done continues exactly once, after the last output", async () => {
+    const l = ledger();
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    // Both tool calls are still executing when the parent response finishes.
+    const p1 = handleEvent(cap, l, ws as any, functionCallDone("fc_1"));
+    const p2 = handleEvent(cap, l, ws as any, functionCallDone("fc_2"));
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    await p1;
+    await p2;
+    expect(sentTypes(ws)).toEqual(["conversation.item.create", "conversation.item.create", "response.create"]);
+    expect(l.status).toBe("active");
+  });
+});
+
+describe("sideband reattach continuation state", () => {
+  test("a reattached socket clears stale streaming flags and re-requests the owed turn", async () => {
+    class SyntheticWebSocket {
+      static instances: SyntheticWebSocket[] = [];
+      listeners = new Map<string, Array<(event: any) => void>>();
+      sent: string[] = [];
+      constructor() { SyntheticWebSocket.instances.push(this); }
+      addEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+      }
+      send(payload: string) { this.sent.push(payload); }
+      close() { this.emit("close", { code: 1000 }); }
+      emit(type: string, event: any = {}) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+    const reattachCap = makeCapability("rocha-plumbing", "tenant-1", "call-reattach", 15, "onboarding", {
+      authEpoch: 1, policyEpoch: 1,
+    });
+    const originalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    try {
+      const control = attachSideband(reattachCap, "rtc-reattach", "gpt-realtime-2.1");
+      SyntheticWebSocket.instances[0]!.emit("open");
+      await control.opened;
+
+      // The socket drops mid-response with a turn still owed from a delivered tool output.
+      control.ledger.responseActive = true;
+      control.ledger.continuationWanted = true;
+      control.ledger.pendingToolCalls = 0;
+      SyntheticWebSocket.instances[0]!.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+
+      const second = SyntheticWebSocket.instances[1];
+      expect(second).toBeDefined();
+      second!.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const types = second!.sent.map((raw) => JSON.parse(raw).type);
+      expect(types.filter((t) => t === "response.create")).toHaveLength(1);
+      expect(control.ledger.pendingToolCalls).toBe(0);
+      expect(control.ledger.status).toBe("active");
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete("call-reattach");
+      globalThis.WebSocket = originalWebSocket;
+    }
   });
 });
