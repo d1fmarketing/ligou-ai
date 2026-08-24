@@ -121,6 +121,32 @@ describe("sideband response continuation", () => {
     expect(ws.closed).toBe(1);
   });
 
+  test("a stale tool call from a superseded socket cannot corrupt the new generation's batch counter", async () => {
+    const l = ledger();
+    let socketACurrent = true;
+    const isSocketA = () => socketACurrent;
+    const wsA = socket();
+    const wsB = socket();
+
+    // fc_X is still executing on socket A when the socket drops and a reattach resets the counter.
+    const pX = handleEvent(cap, l, wsA as any, functionCallDone("fc_X"), isSocketA);
+    socketACurrent = false;
+    l.responseActive = false;
+    l.pendingToolCalls = 0;
+
+    // A fresh batch of two tool calls streams on socket B; its response finishes while both run.
+    const pCreated = handleEvent(cap, l, wsB as any, { type: "response.created" });
+    const pY = handleEvent(cap, l, wsB as any, functionCallDone("fc_Y"));
+    const pZ = handleEvent(cap, l, wsB as any, functionCallDone("fc_Z"));
+    const pDone = handleEvent(cap, l, wsB as any, { type: "response.done", response: {} });
+    await Promise.all([pX, pCreated, pY, pZ, pDone]);
+
+    // The stale fc_X must neither speak on the old socket nor release socket B's continuation early.
+    expect(wsA.sent).toHaveLength(0);
+    expect(sentTypes(wsB)).toEqual(["conversation.item.create", "conversation.item.create", "response.create"]);
+    expect(l.pendingToolCalls).toBe(0);
+  });
+
   test("a tool batch straddling response.done continues exactly once, after the last output", async () => {
     const l = ledger();
     const ws = socket();

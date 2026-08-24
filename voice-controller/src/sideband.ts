@@ -387,7 +387,10 @@ export async function handleEvent(
           console.log(`sideband tool call=${ledger.callId.slice(0, 8)} name=${item.name} ok=${result.ok} response_active=${ledger.responseActive === true}`);
           ledger.continuationWanted = true;
         } finally {
-          ledger.pendingToolCalls = Math.max(0, (ledger.pendingToolCalls ?? 1) - 1);
+          // The counter belongs to the current socket generation: activateOpenedSocket
+          // resets it on reattach, so a stale call from a superseded socket must not
+          // decrement the new generation's batch.
+          if (isCurrent()) ledger.pendingToolCalls = Math.max(0, (ledger.pendingToolCalls ?? 1) - 1);
         }
         if (!isCurrent()) return;
         maybeContinueResponse(ledger, ws);
