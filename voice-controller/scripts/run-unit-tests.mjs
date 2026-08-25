@@ -34,6 +34,7 @@ export const unitTestFiles = [
   "test/accept-call-edge.test.ts",
   "test/learning.test.ts",
   "test/skills.test.ts",
+  "test/onboarding-coverage.test.ts",
   "test/unit-runner.test.ts",
 ];
 

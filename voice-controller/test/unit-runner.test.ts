@@ -32,6 +32,15 @@ test("unit runner starts every unit file in its own Bun process", () => {
   expect(runs.every((run) => run.options.env.OPENAI_API_KEY === "synthetic-unit-test-key")).toBe(true);
 });
 
+test("canonical unit runner starts onboarding coverage once in an isolated process", () => {
+  const runs: Array<{ args: string[]; options: { cwd: string } }> = [];
+  runUnitTests((_command, args, options) => runs.push({ args, options }));
+
+  const coverageRuns = runs.filter((run) => run.args[1].endsWith("/test/onboarding-coverage.test.ts"));
+  expect(coverageRuns).toHaveLength(1);
+  expect(coverageRuns[0]!.options.cwd).toMatch(/^\/tmp\/ligou-unit-test-/);
+});
+
 test("unit runner keeps an invoker dotenv sentinel out of the actual Bun test process", () => {
   const invoker = mkdtempSync("/tmp/ligou-unit-dotenv-");
   const probe = path.join(invoker, "dotenv-probe.test.ts");
