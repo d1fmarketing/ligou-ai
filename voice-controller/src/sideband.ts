@@ -564,11 +564,14 @@ export async function handleEvent(
         const rawDelay = Number(process.env.LIGOU_RECAP_PUSH_DELAY_MS ?? 1_200);
         const delay = Number.isFinite(rawDelay) && rawDelay >= 0 ? rawDelay : 1_200;
         if (ledger.recapPushTimer) clearTimeout(ledger.recapPushTimer);
+        // The bound counts SCHEDULED attempts, not successful fires: otherwise a caller
+        // whose brief remarks keep cancelling pushes would let this loop forever
+        // (review finding on 79b1169).
+        ledger.recapPushes = (ledger.recapPushes ?? 0) + 1;
         ledger.recapPushTimer = setTimeout(() => {
           ledger.recapPushTimer = null;
           if (!isCurrent() || ledger.status !== "active" || !ledger.pendingRecapAfterRecords
             || ledger.responseActive || (ledger.pendingToolCalls ?? 0) > 0 || ledger.agentEndRequested) return;
-          ledger.recapPushes = (ledger.recapPushes ?? 0) + 1;
           console.log(`sideband recap push call=${ledger.callId.slice(0, 8)} n=${ledger.recapPushes}`);
           try {
             ws.send(JSON.stringify({ type: "response.create" }));

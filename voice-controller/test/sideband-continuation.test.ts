@@ -502,20 +502,22 @@ describe("agent speaks first and the owed recap is pushed", () => {
     expect(l.recapPushes).toBe(1);
 
     // Turn 2: another promise, but the owner starts talking before the push fires.
+    // The cancelled attempt still consumes a slot — the bound counts schedules, not fires.
     await handleEvent(cap, l, ws as any, { type: "response.created" });
     await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    expect(l.recapPushes).toBe(2);
     await handleEvent(cap, l, ws as any, { type: "input_audio_buffer.speech_started" });
     await new Promise((resolve) => setTimeout(resolve, 90));
     expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(1);
 
-    // Turns 3-4: idle again — pushes continue up to the bound of 3, then stop.
-    for (const _ of [2, 3, 4]) {
+    // Turns 3-4: idle again — one final push remains, then the bound stops everything.
+    for (const _ of [3, 4]) {
       await handleEvent(cap, l, ws as any, { type: "response.created" });
       await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
       await new Promise((resolve) => setTimeout(resolve, 90));
     }
     expect(l.recapPushes).toBe(3);
-    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(3);
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(2);
 
     // A substantive recap clears the debt — no further pushes get scheduled.
     await handleEvent(cap, l, ws as any, { type: "response.created" });
