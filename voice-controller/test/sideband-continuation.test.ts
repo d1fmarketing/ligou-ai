@@ -52,12 +52,15 @@ function sentTypes(ws: { sent: string[] }): string[] {
 // The tool name is deliberately not in the capability's allowlist: runTool fails closed
 // without any database access, and the continuation contract must not depend on the
 // tool's own outcome.
-function functionCallDone(callId: string, name = "not_a_real_tool", args = "{}") {
+function functionCallDone(callId: string, name = "not_a_real_tool", args = "{}", responseId?: string) {
   return {
     type: "response.output_item.done",
+    response_id: responseId,
     item: { type: "function_call", name, call_id: callId, arguments: args },
   };
 }
+
+const LONG_RECAP = "Resumo completo: desentupimento 225 dólares com mínimo de 175 e uma hora; conserto de vazamento 320 com mínimo 260 e noventa minutos; diagnóstico hidráulico 129 fixo sem desconto. Atendemos Novato, San Rafael e Petaluma, de segunda a sábado das 8 às 18, nunca domingo. Aprove tudo na aba Memória. Até mais!";
 
 describe("sideband response continuation", () => {
   test("multiple tool calls inside one active response yield exactly one response.create, after response.done", async () => {
@@ -299,7 +302,8 @@ describe("agent-initiated session end (end_session)", () => {
       await handleEvent(recapCap, l, ws as any, { type: "response.created" });
       await handleEvent(recapCap, l, ws as any, {
         type: "response.output_audio_transcript.done",
-        transcript: "Resumo: desentupimento 225 com mínimo 175… Aprove na aba Memória. Até mais!",
+        response_id: "resp_recap",
+        transcript: LONG_RECAP,
       });
       expect(l.pendingRecapAfterRecords).toBe(false);
       await handleEvent(recapCap, l, ws as any, functionCallDone("fc_end2", "end_session"));
@@ -315,6 +319,49 @@ describe("agent-initiated session end (end_session)", () => {
     }
   });
 
+  test("a short promise in a later response does not satisfy the recap gate (test-4 replay)", async () => {
+    process.env.LIGOU_AGENT_END_GRACE_MS = "40";
+    const l = ledger();
+    const ws = socket();
+    // Response A: "vou registrar" ack + the registration itself.
+    l.pendingRecapAfterRecords = true;
+    l.recapBlockedResponseId = "resp_a";
+    l.postRecordSpeechChars = 0;
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio_transcript.done",
+      response_id: "resp_a",
+      transcript: "Certo, vou registrar essas regras extras como políticas operacionais.",
+    });
+    // Response B: the promise, then a bare end_session in the same breath.
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio_transcript.done",
+      response_id: "resp_b",
+      transcript: "Vou recapitular tudo rapidinho para você aprovar, e já encerramos.",
+    });
+    expect(l.pendingRecapAfterRecords).toBe(true);
+    await handleEvent(cap, l, ws as any, functionCallDone("fc_end", "end_session", "{}", "resp_b"));
+    expect(l.agentEndRequested).toBeUndefined();
+    const rejected = JSON.parse(ws.sent.filter((raw) => JSON.parse(raw).type === "conversation.item.create").at(-1)!);
+    expect(JSON.parse(rejected.item.output).error).toBe("recap_required");
+
+    // Response C: the real, substantive recap — now the close is honored.
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio_transcript.done",
+      response_id: "resp_c",
+      transcript: LONG_RECAP,
+    });
+    expect(l.pendingRecapAfterRecords).toBe(false);
+    await handleEvent(cap, l, ws as any, functionCallDone("fc_end2", "end_session", "{}", "resp_c"));
+    expect(l.agentEndRequested).toBe(true);
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(l.status).toBe("ended");
+    expect(ws.closed).toBe(1);
+  });
+
   test("the recap gate is best-effort: after two refusals, or a text turn, end_session is honored", async () => {
     process.env.LIGOU_AGENT_END_GRACE_MS = "40";
     // Two refusals cap the guard even when no transcript event ever arrives.
@@ -328,10 +375,10 @@ describe("agent-initiated session end (end_session)", () => {
     await handleEvent(cap, l, ws as any, functionCallDone("fc_e3", "end_session"));
     expect(l.agentEndRequested).toBe(true);
 
-    // A text-modality turn also clears the pending recap.
+    // A substantive text-modality turn also clears the pending recap.
     const l2 = ledger();
     l2.pendingRecapAfterRecords = true;
-    await handleEvent(cap, l2, socket() as any, { type: "response.output_text.done", text: "Resumo: tudo registrado." });
+    await handleEvent(cap, l2, socket() as any, { type: "response.output_text.done", response_id: "resp_t", text: LONG_RECAP });
     expect(l2.pendingRecapAfterRecords).toBe(false);
   });
 

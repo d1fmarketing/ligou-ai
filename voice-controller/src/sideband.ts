@@ -28,9 +28,16 @@ export interface SessionLedger {
   continuationWanted?: boolean;
   /** Function calls still executing from the current batch; the continuation waits for all outputs. */
   pendingToolCalls?: number;
-  /** Rules were recorded and the owner has not heard the agent speak since: end_session
-   *  is refused until at least one spoken agent turn follows the last registration. */
+  /** Rules were recorded and the owner has not heard a substantive spoken recap since:
+   *  end_session is refused until enough agent speech follows the last registration. */
   pendingRecapAfterRecords?: boolean;
+  /** The response that carried the last registration: its own audio (the "vou registrar"
+   *  ack) must not count as the recap. */
+  recapBlockedResponseId?: string;
+  /** Agent speech accumulated after the last registration, in characters. Test 4 proved a
+   *  short promise ("vou recapitular… e já encerramos", 66 chars) can precede a bare
+   *  end_session — only substantive speech clears the gate. */
+  postRecordSpeechChars?: number;
   /** How many times end_session was refused for a missing recap. The guard is
    *  best-effort: a broken transcription pipeline must not hold the call hostage. */
   recapRefusals?: number;
@@ -366,6 +373,18 @@ function maybeContinueResponse(ledger: SessionLedger, ws: WebSocket) {
   console.log(`sideband continue call=${ledger.callId.slice(0, 8)} (response.create after tool output)`);
 }
 
+/** Agent speech counts toward the recap only when it is substantive and belongs to a
+ *  response AFTER the one that carried the last registration — the pre-registration ack
+ *  and short promises ("vou recapitular…") never clear the gate. */
+function creditRecapSpeech(ledger: SessionLedger, responseId: unknown, text: string) {
+  if (!ledger.pendingRecapAfterRecords) return;
+  if (typeof responseId === "string" && responseId === ledger.recapBlockedResponseId) return;
+  const raw = Number(process.env.LIGOU_RECAP_MIN_CHARS ?? 200);
+  const threshold = Number.isFinite(raw) && raw > 0 ? raw : 200;
+  ledger.postRecordSpeechChars = (ledger.postRecordSpeechChars ?? 0) + text.length;
+  if (ledger.postRecordSpeechChars >= threshold) ledger.pendingRecapAfterRecords = false;
+}
+
 /** Reattach-safe twin of maybeContinueResponse: once end_session was honored and the
  *  farewell response is no longer streaming (and no tool of its batch is pending),
  *  schedule the graceful close exactly once per socket generation. */
@@ -404,12 +423,12 @@ export async function handleEvent(
     case "response.output_audio_transcript.done":
       if (msg.transcript) {
         ledger.transcript.push({ role: "agent", text: msg.transcript, at: new Date().toISOString() });
-        ledger.pendingRecapAfterRecords = false;
+        creditRecapSpeech(ledger, msg.response_id, msg.transcript);
       }
       break;
     case "response.output_text.done":
       // A text-modality turn also counts as the agent addressing the owner.
-      if (msg.text) ledger.pendingRecapAfterRecords = false;
+      if (msg.text) creditRecapSpeech(ledger, msg.response_id, String(msg.text));
       break;
     case "response.output_item.done": {
       const item = msg.item;
@@ -438,7 +457,11 @@ export async function handleEvent(
             };
             console.log(`sideband end_session deferred call=${ledger.callId.slice(0, 8)} (recap required)`);
           }
-          if (item.name === "record_interview_answer" && result.ok) ledger.pendingRecapAfterRecords = true;
+          if (item.name === "record_interview_answer" && result.ok) {
+            ledger.pendingRecapAfterRecords = true;
+            ledger.recapBlockedResponseId = typeof msg.response_id === "string" ? msg.response_id : "unknown";
+            ledger.postRecordSpeechChars = 0;
+          }
           ledger.toolLog.push({ name: item.name, ok: result.ok, durationMs: result.durationMs });
           if (!isCurrent()) return;
           ws.send(JSON.stringify({
