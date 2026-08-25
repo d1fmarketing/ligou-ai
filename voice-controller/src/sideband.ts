@@ -30,6 +30,8 @@ export interface SessionLedger {
   pendingToolCalls?: number;
   /** The model called end_session: close gracefully after its farewell response finishes. */
   agentEndRequested?: boolean;
+  /** The graceful close is already scheduled for the current socket generation. */
+  agentEndScheduled?: boolean;
   /** The session was ended by the agent, so the provider call is still live and needs the audited hangup. */
   agentEnded?: boolean;
 }
@@ -232,7 +234,9 @@ export function attachSideband(
     // `conversation_already_has_active_response` path.
     ledger.responseActive = false;
     ledger.pendingToolCalls = 0;
+    ledger.agentEndScheduled = false;
     maybeContinueResponse(ledger, sock);
+    maybeScheduleAgentEnd(ledger, sock, () => ownsSocket(sock));
     if (!ownsSocket(sock)) return;
     if (!openedSettled) {
       openedSettled = true;
@@ -345,12 +349,35 @@ export function attachSideband(
  *  stalled in production (call ec929149) because a per-item `response.create` raced the
  *  still-active response and the rejection was treated as terminal. */
 function maybeContinueResponse(ledger: SessionLedger, ws: WebSocket) {
+  // Once the agent asked to end the session, the goodbye was its last turn: never
+  // prompt another response, even for late sibling tool outputs.
+  if (ledger.agentEndRequested) return;
   if (!ledger.continuationWanted || ledger.responseActive || ledger.status !== "active") return;
   if ((ledger.pendingToolCalls ?? 0) > 0) return;
   ledger.continuationWanted = false;
   ledger.responseActive = true;
   ws.send(JSON.stringify({ type: "response.create" }));
   console.log(`sideband continue call=${ledger.callId.slice(0, 8)} (response.create after tool output)`);
+}
+
+/** Reattach-safe twin of maybeContinueResponse: once end_session was honored and the
+ *  farewell response is no longer streaming (and no tool of its batch is pending),
+ *  schedule the graceful close exactly once per socket generation. */
+function maybeScheduleAgentEnd(ledger: SessionLedger, ws: WebSocket, isCurrent: () => boolean = () => true) {
+  if (!ledger.agentEndRequested || ledger.agentEndScheduled) return;
+  if (ledger.status !== "active" || ledger.responseActive) return;
+  if ((ledger.pendingToolCalls ?? 0) > 0) return;
+  ledger.agentEndScheduled = true;
+  const raw = Number(process.env.LIGOU_AGENT_END_GRACE_MS ?? 5_000);
+  const grace = Number.isFinite(raw) && raw >= 0 ? raw : 5_000;
+  setTimeout(() => {
+    if (ledger.status !== "active" || !isCurrent()) return;
+    ledger.status = "ended";
+    ledger.agentEnded = true;
+    ledger.transcript.push({ role: "system", text: "session ended: interview completed by agent (end_session)", at: new Date().toISOString() });
+    console.log(`sideband agent end call=${ledger.callId.slice(0, 8)} (end_session honored)`);
+    try { ws.close(); } catch {}
+  }, grace);
 }
 
 export async function handleEvent(
@@ -403,6 +430,7 @@ export async function handleEvent(
         }
         if (!isCurrent()) return;
         maybeContinueResponse(ledger, ws);
+        maybeScheduleAgentEnd(ledger, ws, isCurrent);
       }
       break;
     }
@@ -436,19 +464,7 @@ export async function handleEvent(
       }
       ledger.responseActive = false;
       maybeContinueResponse(ledger, ws);
-      if (ledger.agentEndRequested && ledger.status === "active" && (ledger.pendingToolCalls ?? 0) === 0) {
-        // The farewell response is done streaming; give client playback a short grace, then
-        // end the session. The audited provider hangup runs in finalize (agentEnded flag).
-        const grace = Number(process.env.LIGOU_AGENT_END_GRACE_MS ?? 5_000);
-        setTimeout(() => {
-          if (ledger.status !== "active" || !isCurrent()) return;
-          ledger.status = "ended";
-          ledger.agentEnded = true;
-          ledger.transcript.push({ role: "system", text: "session ended: interview completed by agent (end_session)", at: new Date().toISOString() });
-          console.log(`sideband agent end call=${ledger.callId.slice(0, 8)} (end_session honored)`);
-          try { ws.close(); } catch {}
-        }, Number.isFinite(grace) && grace >= 0 ? grace : 5_000);
-      }
+      maybeScheduleAgentEnd(ledger, ws, isCurrent);
       break;
     }
     case "session.ended": {

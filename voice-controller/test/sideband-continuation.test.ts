@@ -215,6 +215,37 @@ describe("agent-initiated session end (end_session)", () => {
     expect(l.agentEnded).toBeUndefined();
   });
 
+  test("end_session wins over a sibling tool still executing at response.done: outputs delivered, no extra turn, then close", async () => {
+    process.env.LIGOU_AGENT_END_GRACE_MS = "40";
+    const l = ledger();
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    const pSibling = handleEvent(cap, l, ws as any, functionCallDone("fc_rec"));
+    const pEnd = handleEvent(cap, l, ws as any, functionCallDone("fc_end", "end_session"));
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    await pSibling;
+    await pEnd;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(sentTypes(ws).filter((t) => t === "conversation.item.create")).toHaveLength(2);
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(0);
+    expect(l.status).toBe("ended");
+    expect(ws.closed).toBe(1);
+  });
+
+  test("a pending continuation from a sibling tool is suppressed once end_session is honored", async () => {
+    process.env.LIGOU_AGENT_END_GRACE_MS = "40";
+    const l = ledger();
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, functionCallDone("fc_rec"));
+    await handleEvent(cap, l, ws as any, functionCallDone("fc_end", "end_session"));
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(0);
+    expect(l.status).toBe("ended");
+    expect(ws.closed).toBe(1);
+  });
+
   test("an agent-ended call still gets the audited provider hangup; a caller hangup does not", async () => {
     const rows: any[] = [];
     _setClient({
@@ -298,6 +329,66 @@ describe("sideband reattach continuation state", () => {
     } finally {
       liveSessions.delete("call-reattach");
       globalThis.WebSocket = originalWebSocket;
+    }
+  });
+
+  test("a reattach mid-farewell still schedules the agent end (no lost close)", async () => {
+    process.env.LIGOU_AGENT_END_GRACE_MS = "40";
+    class SyntheticWebSocket {
+      static instances: SyntheticWebSocket[] = [];
+      listeners = new Map<string, Array<(event: any) => void>>();
+      sent: string[] = [];
+      closed = 0;
+      constructor() { SyntheticWebSocket.instances.push(this); }
+      addEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+      }
+      send(payload: string) { this.sent.push(payload); }
+      close() { this.closed += 1; this.emit("close", { code: 1000 }); }
+      emit(type: string, event: any = {}) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+    const endCap = makeCapability("rocha-plumbing", "tenant-1", "call-end-reattach", 15, "onboarding", {
+      authEpoch: 1, policyEpoch: 1,
+    });
+    _setClient({
+      from() {
+        const api: any = {
+          update() { return api; }, eq() { return api; }, insert() { return api; },
+          then(resolve: (value: unknown) => unknown) { return Promise.resolve({ data: null, error: null }).then(resolve); },
+        };
+        return api;
+      },
+      rpc() { return Promise.resolve({ data: "reservation-1", error: null }); },
+    } as any);
+    const originalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    try {
+      const control = attachSideband(endCap, "rtc-end-reattach", "gpt-realtime-2.1", {
+        fetchImpl: async () => new Response(null, { status: 200 }),
+      });
+      SyntheticWebSocket.instances[0]!.emit("open");
+      await control.opened;
+
+      // end_session was honored on socket A while its farewell was still streaming; then the socket drops.
+      control.ledger.agentEndRequested = true;
+      control.ledger.responseActive = true;
+      SyntheticWebSocket.instances[0]!.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+
+      const second = SyntheticWebSocket.instances[1];
+      expect(second).toBeDefined();
+      second!.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(second!.sent.map((raw) => JSON.parse(raw).type).filter((t) => t === "response.create")).toHaveLength(0);
+      expect(control.ledger.status).toBe("ended");
+      expect(control.ledger.agentEnded).toBe(true);
+    } finally {
+      liveSessions.delete("call-end-reattach");
+      globalThis.WebSocket = originalWebSocket;
+      _setClient(null);
     }
   });
 });
