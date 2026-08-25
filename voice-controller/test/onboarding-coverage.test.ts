@@ -5,12 +5,27 @@ import {
   canonicalCoverage,
   createCoverage,
   evaluateCoverage,
+  recordDirectedFollowUp,
+} from "../src/onboarding-coverage.ts";
+import type {
+  CoverageFact,
+  CoverageField,
 } from "../src/onboarding-coverage.ts";
 
 const identity = { tenantId: "tenant-1", callId: "call-1" };
 
-function answer(field: any, value: unknown, subject?: string) {
-  return { field, subject, disposition: "answered" as const, value, ownerWords: "resposta do dono" };
+function answer(
+  field: CoverageField,
+  value: unknown,
+  subject?: string,
+): CoverageFact {
+  return {
+    field,
+    subject,
+    disposition: "answered" as const,
+    value,
+    ownerWords: "resposta do dono",
+  };
 }
 
 function coveredUniversal(snapshot = createCoverage(identity)) {
@@ -43,10 +58,16 @@ function coveredUniversal(snapshot = createCoverage(identity)) {
     "authority.emergency": "owner_review",
     "authority.out_of_area": "owner_review",
   };
-  return Object.entries(values).reduce((next, [field, value]) => applyCoverageFact(next, answer(field, value)), snapshot);
+  return Object.entries(values).reduce(
+    (next, [field, value]) => applyCoverageFact(next, answer(field, value)),
+    snapshot,
+  );
 }
 
-function completeService(snapshot: ReturnType<typeof createCoverage>, subject = "limpeza de ralo") {
+function completeService(
+  snapshot: ReturnType<typeof createCoverage>,
+  subject = "limpeza de ralo",
+) {
   const facts = [
     answer("service.name_synonyms", [subject], subject),
     answer("service.price_mode", "fixed", subject),
@@ -66,7 +87,9 @@ describe("onboarding coverage", () => {
   test("starts incomplete and five generic records cannot complete five topics", () => {
     const fresh = createCoverage(identity);
     expect(evaluateCoverage(fresh).readyForReview).toBe(false);
-    expect(evaluateCoverage(fresh).missingRequired).toContainEqual({ field: "business.customer_types" });
+    expect(evaluateCoverage(fresh).missingRequired).toContainEqual({
+      field: "business.customer_types",
+    });
 
     let generic = fresh;
     for (let index = 0; index < 5; index += 1) {
@@ -82,41 +105,88 @@ describe("onboarding coverage", () => {
 
   test("requires catalog closure and every required detail of each discovered service", () => {
     let snapshot = completeService(coveredUniversal());
-    snapshot = applyCoverageFact(snapshot, answer("service.catalog_closure", true));
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.catalog_closure", true),
+    );
     expect(evaluateCoverage(snapshot).readyForReview).toBe(true);
 
-    const withoutClosure = applyCoverageFact(snapshot, answer("service.catalog_closure", false));
+    const withoutClosure = applyCoverageFact(
+      snapshot,
+      answer("service.catalog_closure", false),
+    );
     expect(evaluateCoverage(withoutClosure).readyForReview).toBe(false);
-    expect(evaluateCoverage(withoutClosure).missingRequired).toContainEqual({ field: "service.catalog_closure" });
+    expect(evaluateCoverage(withoutClosure).missingRequired).toContainEqual({
+      field: "service.catalog_closure",
+    });
 
-    const twoServices = applyCoverageFact(snapshot, answer("service.name_synonyms", ["instalação"], "instalação"));
-    expect(evaluateCoverage(twoServices).missingRequired).toContainEqual({ field: "service.duration", subject: "instalacao" });
+    const twoServices = applyCoverageFact(
+      snapshot,
+      answer("service.name_synonyms", ["instalação"], "instalação"),
+    );
+    expect(evaluateCoverage(twoServices).missingRequired).toContainEqual({
+      field: "service.duration",
+      subject: "instalacao",
+    });
   });
 
   test("accepts zero target but keeps invalid prices and inverted floors ambiguous", () => {
     let snapshot = createCoverage(identity);
-    snapshot = applyCoverageFact(snapshot, answer("service.name_synonyms", ["consulta"], "consulta"));
-    const zero = applyCoverageFact(snapshot, answer("service.price_target", 0, "consulta"));
-    expect(evaluateCoverage(zero).answered).toContainEqual({ field: "service.price_target", subject: "consulta" });
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    const zero = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 0, "consulta"),
+    );
+    expect(evaluateCoverage(zero).answered).toContainEqual({
+      field: "service.price_target",
+      subject: "consulta",
+    });
 
     for (const value of [-1, "120", Number.NaN]) {
-      const invalid = applyCoverageFact(snapshot, answer("service.price_target", value, "consulta"));
-      expect(evaluateCoverage(invalid).ambiguous).toContainEqual({ field: "service.price_target", subject: "consulta" });
+      const invalid = applyCoverageFact(
+        snapshot,
+        answer("service.price_target", value, "consulta"),
+      );
+      expect(evaluateCoverage(invalid).ambiguous).toContainEqual({
+        field: "service.price_target",
+        subject: "consulta",
+      });
     }
 
     const inverted = applyCoverageFact(
-      applyCoverageFact(snapshot, answer("service.price_target", 100, "consulta")),
+      applyCoverageFact(
+        snapshot,
+        answer("service.price_target", 100, "consulta"),
+      ),
       answer("service.negotiation", { floor: 101 }, "consulta"),
     );
-    expect(evaluateCoverage(inverted).ambiguous).toContainEqual({ field: "service.negotiation", subject: "consulta" });
+    expect(evaluateCoverage(inverted).ambiguous).toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
   });
 
   test("accepts conservative service exceptions but does not let a required field be skipped", () => {
     let snapshot = createCoverage(identity);
-    snapshot = applyCoverageFact(snapshot, answer("service.name_synonyms", ["consulta"], "consulta"));
-    snapshot = applyCoverageFact(snapshot, answer("service.price_target", 100, "consulta"));
-    snapshot = applyCoverageFact(snapshot, answer("service.negotiation", "non_negotiable", "consulta"));
-    expect(evaluateCoverage(snapshot).answered).toContainEqual({ field: "service.negotiation", subject: "consulta" });
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 100, "consulta"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.negotiation", "non_negotiable", "consulta"),
+    );
+    expect(evaluateCoverage(snapshot).answered).toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
 
     const review = applyCoverageFact(snapshot, {
       field: "service.duration",
@@ -124,86 +194,536 @@ describe("onboarding coverage", () => {
       disposition: "owner_review_required",
       value: null,
       ownerWords: "não sei ainda",
+      ruleText: "Não confirmar autonomamente; encaminhar a duração ao dono.",
     });
-    expect(evaluateCoverage(review).ownerReviewRequired).toContainEqual({ field: "service.duration", subject: "consulta" });
-    expect(evaluateCoverage(review).missingRequired).not.toContainEqual({ field: "service.duration", subject: "consulta" });
+    expect(evaluateCoverage(review).ownerReviewRequired).toContainEqual({
+      field: "service.duration",
+      subject: "consulta",
+    });
+    expect(evaluateCoverage(review).missingRequired).not.toContainEqual({
+      field: "service.duration",
+      subject: "consulta",
+    });
 
-    const skipped = applyCoverageFact(snapshot, { ...answer("service.duration", 60, "consulta"), disposition: "skipped" as any });
-    expect(evaluateCoverage(skipped).missingRequired).toContainEqual({ field: "service.duration", subject: "consulta" });
+    const skipped = applyCoverageFact(snapshot, {
+      ...answer("service.duration", 60, "consulta"),
+      disposition: "skipped",
+    } as unknown as CoverageFact);
+    expect(evaluateCoverage(skipped).missingRequired).toContainEqual({
+      field: "service.duration",
+      subject: "consulta",
+    });
   });
 
   test("does not require a public target when a service price itself requires owner review", () => {
     let snapshot = createCoverage(identity);
-    snapshot = applyCoverageFact(snapshot, answer("service.name_synonyms", ["consulta"], "consulta"));
-    snapshot = applyCoverageFact(snapshot, answer("service.price_mode", "owner_review", "consulta"));
-    expect(evaluateCoverage(snapshot).missingRequired).not.toContainEqual({ field: "service.price_target", subject: "consulta" });
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_mode", "owner_review", "consulta"),
+    );
+    expect(evaluateCoverage(snapshot).missingRequired).not.toContainEqual({
+      field: "service.price_target",
+      subject: "consulta",
+    });
   });
 
   test("selects the same next Portuguese question regardless of insertion order and records multi-field answers", () => {
-    expect(evaluateCoverage(createCoverage(identity)).nextQuestion?.field).toBe("service.catalog_closure");
+    expect(evaluateCoverage(createCoverage(identity)).nextQuestion?.field).toBe(
+      "service.catalog_closure",
+    );
 
-    const first = applyCoverageFact(createCoverage(identity), answer("area.coverage", ["Irvine"]));
-    const second = applyCoverageFact(createCoverage(identity), answer("business.customer_types", ["residencial"]));
-    const reversed = applyCoverageFact(second, answer("area.coverage", ["Irvine"]));
-    const normal = applyCoverageFact(first, answer("business.customer_types", ["residencial"]));
-    expect(evaluateCoverage(normal).nextQuestion).toEqual(evaluateCoverage(reversed).nextQuestion);
+    const first = applyCoverageFact(
+      createCoverage(identity),
+      answer("area.coverage", ["Irvine"]),
+    );
+    const second = applyCoverageFact(
+      createCoverage(identity),
+      answer("business.customer_types", ["residencial"]),
+    );
+    const reversed = applyCoverageFact(
+      second,
+      answer("area.coverage", ["Irvine"]),
+    );
+    const normal = applyCoverageFact(
+      first,
+      answer("business.customer_types", ["residencial"]),
+    );
+    expect(evaluateCoverage(normal).nextQuestion).toEqual(
+      evaluateCoverage(reversed).nextQuestion,
+    );
 
     const both = applyCoverageFact(createCoverage(identity), {
       field: "business.customer_types",
       disposition: "answered",
-      value: { fields: { "business.customer_types": ["residencial"], "business.excluded_work": "nenhum" } },
+      value: {
+        fields: {
+          "business.customer_types": ["residencial"],
+          "business.excluded_work": "nenhum",
+        },
+      },
       ownerWords: "atendemos residência e não excluímos serviços",
     });
-    expect(evaluateCoverage(both).answered).toEqual(expect.arrayContaining([
-      { field: "business.customer_types" },
-      { field: "business.excluded_work" },
-    ]));
+    expect(evaluateCoverage(both).answered).toEqual(
+      expect.arrayContaining([
+        { field: "business.customer_types" },
+        { field: "business.excluded_work" },
+      ]),
+    );
     expect(both.revision).toBe(1);
   });
 
   test("moves past an unresolved group after two directed attempts without marking it answered", () => {
-    let snapshot = applyCoverageFact(createCoverage(identity), answer("service.name_synonyms", ["consulta"], "consulta"));
-    snapshot = applyCoverageFact(snapshot, answer("service.catalog_closure", true));
-    snapshot = applyCoverageFact(snapshot, answer("service.price_target", -1, "consulta"));
-    snapshot = applyCoverageFact(snapshot, answer("service.price_target", -1, "consulta"));
+    let snapshot = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.catalog_closure", true),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", -1, "consulta"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", -1, "consulta"),
+    );
+    snapshot = recordDirectedFollowUp(snapshot, {
+      field: "service.price_target",
+      subject: "consulta",
+    });
+    snapshot = recordDirectedFollowUp(snapshot, {
+      field: "service.price_target",
+      subject: "consulta",
+    });
     const progress = evaluateCoverage(snapshot);
-    expect(progress.ambiguous).toContainEqual({ field: "service.price_target", subject: "consulta" });
+    expect(progress.ambiguous).toContainEqual({
+      field: "service.price_target",
+      subject: "consulta",
+    });
     expect(progress.nextQuestion?.field).not.toBe("service.price_target");
   });
 
   test("attempt limits keep unresolved fields incomplete and a new service reopens catalog closure", () => {
     let snapshot = createCoverage(identity);
-    snapshot = applyCoverageFact(snapshot, answer("service.catalog_closure", true));
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.catalog_closure", true),
+    );
     for (let index = 0; index < 12; index += 1) {
-      snapshot = applyCoverageFact(snapshot, answer("service.price_target", -1, "consulta"));
+      snapshot = applyCoverageFact(
+        snapshot,
+        answer("service.price_target", -1, "consulta"),
+      );
     }
     expect(evaluateCoverage(snapshot).readyForReview).toBe(false);
-    expect(evaluateCoverage(snapshot).ambiguous).toContainEqual({ field: "service.price_target", subject: "consulta" });
-    expect(evaluateCoverage(snapshot).nextQuestion).toBeNull();
+    expect(evaluateCoverage(snapshot).ambiguous).toContainEqual({
+      field: "service.price_target",
+      subject: "consulta",
+    });
+    expect(snapshot.followUps).toBe(0);
 
-    const reopened = applyCoverageFact(snapshot, answer("service.name_synonyms", ["consulta"], "consulta"));
-    expect(evaluateCoverage(reopened).missingRequired).toContainEqual({ field: "service.catalog_closure" });
+    const reopened = applyCoverageFact(
+      snapshot,
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    expect(evaluateCoverage(reopened).missingRequired).toContainEqual({
+      field: "service.catalog_closure",
+    });
   });
 
   test("increments revision on a correction, invalidates readiness, caps service discovery, and canonicalizes stably", () => {
-    const ready = applyCoverageFact(completeService(coveredUniversal()), answer("service.catalog_closure", true));
+    const ready = applyCoverageFact(
+      completeService(coveredUniversal()),
+      answer("service.catalog_closure", true),
+    );
     expect(evaluateCoverage(ready).readyForReview).toBe(true);
-    const corrected = applyCoverageFact(ready, answer("business.customer_types", ["comercial"]));
+    const corrected = applyCoverageFact(
+      ready,
+      answer("business.customer_types", ["comercial"]),
+    );
     expect(corrected.revision).toBe(ready.revision + 1);
     expect(evaluateCoverage(corrected).summaryInvalidated).toBe(true);
 
     let capped = createCoverage(identity);
     for (let index = 0; index < 21; index += 1) {
-      capped = applyCoverageFact(capped, answer("service.name_synonyms", [`serviço ${index}`], `serviço ${index}`));
+      capped = applyCoverageFact(
+        capped,
+        answer(
+          "service.name_synonyms",
+          [`serviço ${index}`],
+          `serviço ${index}`,
+        ),
+      );
     }
     expect(capped.services).toHaveLength(20);
-    expect(evaluateCoverage(capped).ownerReviewRequired).toContainEqual({ field: "service.catalog_closure" });
+    expect(evaluateCoverage(capped).ambiguous).toContainEqual({
+      field: "service.catalog_closure",
+    });
 
-    const left = applyCoverageFact(createCoverage(identity), answer("area.coverage", ["Irvine"]));
-    const right = applyCoverageFact(createCoverage(identity), answer("business.customer_types", ["residencial"]));
-    const canonicalA = canonicalCoverage(applyCoverageFact(left, answer("business.customer_types", ["residencial"])));
-    const canonicalB = canonicalCoverage(applyCoverageFact(right, answer("area.coverage", ["Irvine"])));
+    const left = applyCoverageFact(
+      createCoverage(identity),
+      answer("area.coverage", ["Irvine"]),
+    );
+    const right = applyCoverageFact(
+      createCoverage(identity),
+      answer("business.customer_types", ["residencial"]),
+    );
+    const canonicalA = canonicalCoverage(
+      applyCoverageFact(
+        left,
+        answer("business.customer_types", ["residencial"]),
+      ),
+    );
+    const canonicalB = canonicalCoverage(
+      applyCoverageFact(right, answer("area.coverage", ["Irvine"])),
+    );
     expect(canonicalA).toBe(canonicalB);
-    expect(buildSummaryAnchors(ready)).toEqual(expect.arrayContaining(["business.customer_types", "service:limpeza_de_ralo:service.duration"]));
+    expect(buildSummaryAnchors(ready).join("\n")).toContain(
+      "Serviço limpeza de ralo: preço 120",
+    );
+  });
+
+  test("does not accept not-applicable for required or catalog closure fields", () => {
+    const required = applyCoverageFact(createCoverage(identity), {
+      field: "business.customer_types",
+      disposition: "not_applicable",
+      value: null,
+      ownerWords: "não se aplica",
+    });
+    expect(evaluateCoverage(required).missingRequired).toContainEqual({
+      field: "business.customer_types",
+    });
+
+    const catalog = applyCoverageFact(createCoverage(identity), {
+      field: "service.catalog_closure",
+      disposition: "not_applicable",
+      value: null,
+      ownerWords: "não se aplica",
+    });
+    expect(evaluateCoverage(catalog).missingRequired).toContainEqual({
+      field: "service.catalog_closure",
+    });
+  });
+
+  test("requires owner evidence and a conservative suggested rule before owner review safely covers a field", () => {
+    const missingEvidence = applyCoverageFact(createCoverage(identity), {
+      field: "authority.book",
+      disposition: "owner_review_required",
+      value: null,
+      ownerWords: "",
+      ruleText: "Não agendar autonomamente; encaminhar a decisão ao dono.",
+    });
+    expect(evaluateCoverage(missingEvidence).missingRequired).toContainEqual({
+      field: "authority.book",
+    });
+
+    const fabricatedRule = applyCoverageFact(createCoverage(identity), {
+      field: "authority.book",
+      disposition: "owner_review_required",
+      value: null,
+      ownerWords: "não sei",
+      ruleText: "revisar depois",
+    });
+    expect(evaluateCoverage(fabricatedRule).missingRequired).toContainEqual({
+      field: "authority.book",
+    });
+
+    const safe = applyCoverageFact(createCoverage(identity), {
+      field: "authority.book",
+      disposition: "owner_review_required",
+      value: null,
+      ownerWords: "não sei se pode agendar",
+      ruleText: "Não agendar autonomamente; encaminhar toda decisão ao dono.",
+    });
+    expect(evaluateCoverage(safe).ownerReviewRequired).toContainEqual({
+      field: "authority.book",
+    });
+    expect(safe.cells["authority.book"]).toMatchObject({
+      safeRestriction:
+        "Não agendar autonomamente; encaminhar toda decisão ao dono.",
+    });
+  });
+
+  test("exposes active required and conditional fields without fabricating review readiness", () => {
+    let snapshot = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_mode", "owner_review", "consulta"),
+    );
+    const progress = evaluateCoverage(snapshot);
+    expect(progress.requiredFields).toContainEqual({
+      field: "service.duration",
+      subject: "consulta",
+    });
+    expect(progress.conditionalFields).not.toContainEqual({
+      field: "service.price_target",
+      subject: "consulta",
+    });
+    expect(progress.conditionalFields).not.toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
+    const fixed = evaluateCoverage(
+      applyCoverageFact(
+        snapshot,
+        answer("service.price_mode", "fixed", "consulta"),
+      ),
+    );
+    expect(fixed.conditionalFields).toEqual(
+      expect.arrayContaining([
+        { field: "service.price_target", subject: "consulta" },
+        { field: "service.negotiation", subject: "consulta" },
+      ]),
+    );
+    expect(progress.readyForReview).toBe(false);
+  });
+
+  test("uses the mandated deterministic priority from current ambiguity through commercial policy", () => {
+    let snapshot = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["primeiro"], "primeiro"),
+    );
+    expect(evaluateCoverage(snapshot).nextQuestion?.field).toBe(
+      "service.catalog_closure",
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.catalog_closure", true),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.duration", -1, "primeiro"),
+    );
+    expect(evaluateCoverage(snapshot).nextQuestion).toMatchObject({
+      field: "service.duration",
+      subject: "primeiro",
+    });
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.duration", 30, "primeiro"),
+    );
+    expect(evaluateCoverage(snapshot).nextQuestion).toMatchObject({
+      field: "service.price_mode",
+      subject: "primeiro",
+    });
+
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_mode", "fixed", "primeiro"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 100, "primeiro"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.negotiation", "non_negotiable", "primeiro"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.inclusions_exclusions", "mão de obra", "primeiro"),
+    );
+    snapshot = applyCoverageFact(snapshot, {
+      field: "service.materials_parts",
+      subject: "primeiro",
+      disposition: "not_applicable",
+      value: null,
+      ownerWords: "sem peças",
+    });
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.warranty", "30 dias", "primeiro"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.emergency_eligibility", false, "primeiro"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.escalation", "dono", "primeiro"),
+    );
+    expect(evaluateCoverage(snapshot).nextQuestion?.field).toBe(
+      "emergency.types",
+    );
+
+    for (const field of [
+      "emergency.types",
+      "emergency.safety_escalation",
+      "emergency.after_hours",
+      "emergency.fee_authority",
+      "authority.quote_price",
+      "authority.negotiate_floor",
+      "authority.read_calendar",
+      "authority.book",
+      "authority.reschedule_cancel",
+      "authority.charge_fee",
+      "authority.emergency",
+      "authority.out_of_area",
+    ] as CoverageField[]) {
+      const value =
+        field === "emergency.types" ? ["vazamento"] : "revisão do dono";
+      snapshot = applyCoverageFact(snapshot, answer(field, value));
+    }
+    expect(evaluateCoverage(snapshot).nextQuestion?.field).toBe(
+      "area.coverage",
+    );
+
+    for (const field of [
+      "area.coverage",
+      "area.out_of_area_policy",
+      "area.travel_fee",
+      "schedule.business_hours",
+      "schedule.same_day_lead_time",
+      "schedule.capacity_buffer",
+      "schedule.reschedule_cancel",
+      "schedule.holidays",
+    ] as CoverageField[]) {
+      const value = field === "area.coverage" ? ["Irvine"] : "regra definida";
+      snapshot = applyCoverageFact(snapshot, answer(field, value));
+    }
+    expect(evaluateCoverage(snapshot).nextQuestion?.field).toBe(
+      "policy.payment_estimate",
+    );
+  });
+
+  test("makes bundled facts order independent when a floor depends on its public price", () => {
+    const base = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    const first = applyCoverageFact(base, {
+      field: "service.price_target",
+      subject: "consulta",
+      disposition: "answered",
+      value: {
+        fields: {
+          "service.price_target": 100,
+          "service.negotiation": { floor: 90 },
+        },
+      },
+      ownerWords: "preço cem e mínimo noventa",
+    });
+    const reversed = applyCoverageFact(base, {
+      field: "service.price_target",
+      subject: "consulta",
+      disposition: "answered",
+      value: {
+        fields: {
+          "service.negotiation": { floor: 90 },
+          "service.price_target": 100,
+        },
+      },
+      ownerWords: "preço cem e mínimo noventa",
+    });
+    expect(canonicalCoverage(first)).toBe(canonicalCoverage(reversed));
+    expect(evaluateCoverage(first).ambiguous).not.toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
+  });
+
+  test("counts only directed follow-up transitions, capped per group and globally", () => {
+    let snapshot = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.catalog_closure", true),
+    );
+    for (let index = 0; index < 20; index += 1)
+      snapshot = applyCoverageFact(
+        snapshot,
+        answer("service.price_target", -1, "consulta"),
+      );
+    expect(snapshot.followUps).toBe(0);
+    snapshot = recordDirectedFollowUp(snapshot, {
+      field: "service.price_target",
+      subject: "consulta",
+    });
+    snapshot = recordDirectedFollowUp(snapshot, {
+      field: "service.price_target",
+      subject: "consulta",
+    });
+    const exhaustedGroup = recordDirectedFollowUp(snapshot, {
+      field: "service.price_target",
+      subject: "consulta",
+    });
+    expect(exhaustedGroup.followUps).toBe(2);
+    expect(evaluateCoverage(exhaustedGroup).readyForReview).toBe(false);
+
+    let global = createCoverage(identity);
+    for (let index = 0; index < 12; index += 1)
+      global = recordDirectedFollowUp(global, {
+        field: "business.customer_types",
+      });
+    expect(global.followUps).toBe(2);
+    for (const field of [
+      "business.excluded_work",
+      "business.languages_tone",
+      "area.coverage",
+      "area.out_of_area_policy",
+      "area.travel_fee",
+      "schedule.business_hours",
+      "schedule.same_day_lead_time",
+      "schedule.capacity_buffer",
+      "schedule.reschedule_cancel",
+      "schedule.holidays",
+    ] as CoverageField[]) {
+      global = recordDirectedFollowUp(global, { field });
+    }
+    expect(global.followUps).toBe(12);
+    expect(evaluateCoverage(global).nextQuestion).toBeNull();
+  });
+
+  test("uses factual values for transcript anchors and canonicalizes nested structured values", () => {
+    let snapshot = applyCoverageFact(
+      completeService(coveredUniversal()),
+      answer("service.catalog_closure", true),
+    );
+    const anchors = buildSummaryAnchors(snapshot);
+    expect(anchors.join("\n")).toContain("limpeza de ralo");
+    expect(anchors.join("\n")).toContain("120");
+    expect(anchors.join("\n")).toContain("60");
+    expect(anchors.join("\n")).toContain("Irvine");
+    expect(anchors.join("\n")).toContain("seg-sex 08:00-18:00");
+    expect(anchors.join("\n")).toContain("911 para risco imediato");
+    expect(anchors.join("\n")).toContain("Taxas: owner_review");
+    expect(anchors.join("\n")).toContain("Autonomia: owner_review");
+
+    const nestedA = applyCoverageFact(
+      createCoverage(identity),
+      answer("policy.payment_estimate", {
+        alpha: { first: 1, second: 2 },
+        beta: [3, { yes: true, no: false }],
+      }),
+    );
+    const nestedB = applyCoverageFact(
+      createCoverage(identity),
+      answer("policy.payment_estimate", {
+        beta: [3, { no: false, yes: true }],
+        alpha: { second: 2, first: 1 },
+      }),
+    );
+    expect(canonicalCoverage(nestedA)).toBe(canonicalCoverage(nestedB));
+  });
+
+  test("does not invalidate a summary during ordinary incomplete collection", () => {
+    let snapshot = createCoverage(identity);
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("business.customer_types", ["residencial"]),
+    );
+    snapshot = applyCoverageFact(snapshot, answer("area.coverage", ["Irvine"]));
+    expect(evaluateCoverage(snapshot).summaryInvalidated).toBe(false);
   });
 });
