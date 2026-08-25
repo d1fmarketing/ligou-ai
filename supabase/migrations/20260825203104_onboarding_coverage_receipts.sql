@@ -322,7 +322,7 @@ begin
     p_call
   ) returning id into v_rule_id;
 
-  v_readback := p_coverage || jsonb_build_object(
+  v_readback := (p_coverage - 'snapshot_digest') || jsonb_build_object(
     'schema_version', 1,
     'tenant_id', p_tenant,
     'call_id', p_call,

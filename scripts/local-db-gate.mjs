@@ -816,7 +816,7 @@ export async function runLocalDatabaseGate() {
       pgUser: decodeURIComponent(connection.username),
       pgPassword: databaseSecret,
     });
-    assert.equal(authenticatedRls.tests, 24);
+    assert.equal(authenticatedRls.tests, 30);
     const applicationEnv = {
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       HOME: path.join(runnerRoot, "application-home"),

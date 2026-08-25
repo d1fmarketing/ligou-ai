@@ -839,6 +839,7 @@ describe("onboarding coverage receipt migration contract", () => {
     expect(sql).toContain("'ligou.v0_2.onboarding:' || p_tenant::text || ':' || p_call::text");
     expect(sql).toContain("for update of c, t, br");
     expect(sql.indexOf("pg_advisory_xact_lock(hashtextextended(")).toBeLessThan(sql.indexOf("select br.id into v_request_id"));
+    expect(sql).toContain("v_readback := (p_coverage - 'snapshot_digest') || jsonb_build_object(");
     expect(sql).toContain("revoke all on function public.record_onboarding_answer");
     expect(sql).toContain("from public, anon, authenticated");
     expect(sql).toContain("grant execute on function public.record_onboarding_answer");

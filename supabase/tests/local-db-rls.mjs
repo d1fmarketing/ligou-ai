@@ -127,9 +127,9 @@ export async function runAuthenticatedRlsSuite(options) {
   assert.equal(ownCalls.response.ok, true); assert.equal(ownCalls.body.length, 1); checks++;
   const ownReceipts = await rest(tokenA, "/rest/v1/receipts?select=tenant_id,kind&order=tenant_id");
   assert.equal(ownReceipts.response.ok, true);
-  assert.deepEqual(ownReceipts.body, [{ tenant_id: "71000000-0000-4000-8000-000000000001", kind: "onboarding_coverage" }]);
+  assert.deepEqual(ownReceipts.body, [{ tenant_id: "71000000-0000-4000-8000-000000000001", kind: "onboarding_coverage" }]); checks++;
   const crossReceipts = await rest(tokenA, "/rest/v1/receipts?select=id&tenant_id=eq.72000000-0000-4000-8000-000000000001");
-  assert.equal(crossReceipts.response.ok, true); assert.deepEqual(crossReceipts.body, []);
+  assert.equal(crossReceipts.response.ok, true); assert.deepEqual(crossReceipts.body, []); checks++;
   const crossRules = await rest(tokenB, "/rest/v1/effective_rules?select=id&tenant_id=eq.71000000-0000-4000-8000-000000000001");
   assert.equal(crossRules.response.ok, true); assert.deepEqual(crossRules.body, []); checks++;
   const ownRules = await rest(tokenB, "/rest/v1/effective_rules?select=id&tenant_id=eq.72000000-0000-4000-8000-000000000001");
@@ -170,7 +170,7 @@ export async function runAuthenticatedRlsSuite(options) {
     }],
   ]) {
     const denied = await rest(tokenA, `/rest/v1/rpc/${rpc}`, { method: "POST", body: JSON.stringify(body) });
-    assert.equal(denied.response.ok, false, `authenticated must not execute ${rpc}`);
+    assert.equal(denied.response.ok, false, `authenticated must not execute ${rpc}`); checks++;
   }
 
   // --- V0.2 M1 owner tenant bootstrap + custody surface ---
@@ -282,11 +282,11 @@ export async function runAuthenticatedRlsSuite(options) {
   const staleDecision = await rest(tokenA, "/rest/v1/rpc/decide_rule", {
     method: "POST", body: JSON.stringify({ p_rule: correctedOld, p_decision: "aprovado" }),
   });
-  assert.equal(staleDecision.response.ok, false, "a corrected-away suggested version must fail closed");
+  assert.equal(staleDecision.response.ok, false, "a corrected-away suggested version must fail closed"); checks++;
   const latestDecision = await rest(tokenA, "/rest/v1/rpc/decide_rule", {
     method: "POST", body: JSON.stringify({ p_rule: correctedLatest, p_decision: "aprovado" }),
   });
-  assert.equal(latestDecision.response.ok, true, `latest corrected suggestion failed: ${latestDecision.safeError()}`);
+  assert.equal(latestDecision.response.ok, true, `latest corrected suggestion failed: ${latestDecision.safeError()}`); checks++;
 
   return { suite: "authenticated-rest-rls-bola", tests: checks, passed: checks };
 }

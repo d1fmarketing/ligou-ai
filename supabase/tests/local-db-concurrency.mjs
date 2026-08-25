@@ -834,6 +834,14 @@ async function onboardingReceiptSecurityAndIdempotency(connection, home) {
   assert.match(incompleteApproval.stderr, /onboarding_coverage_incomplete/);
 
   const factTwo = onboardingFact("area.coverage", "Atender somente Irvine.", "Irvine.");
+  const forwardedCoverage = {
+    ...first.coverage,
+    revision: 2,
+    complete: true,
+    snapshot: { ...first.coverage.snapshot, revision: 2 },
+    progress: { missingRequired: [], ambiguous: [] },
+    next_action: { type: "prepare_summary" },
+  };
   const answerTwo = {
     tenantId: ids.tenant,
     callId: ids.call,
@@ -843,7 +851,7 @@ async function onboardingReceiptSecurityAndIdempotency(connection, home) {
     expectedRevision: 1,
     fact: factTwo,
     ruleGroupId: first.rule_group_id,
-    coverage: coverageSnapshot(ids.tenant, ids.call, 2, true),
+    coverage: forwardedCoverage,
   };
   const complete = JSON.parse(scalar(await runSql(connection, home, serviceTransaction(onboardingAnswerSql(answerTwo))), "complete onboarding answer"));
   assert.equal(complete.revision, 2);
@@ -900,6 +908,39 @@ async function onboardingReceiptSecurityAndIdempotency(connection, home) {
   assert.equal(approvals[0].approval_receipt_id, approvals[1].approval_receipt_id);
   assert.deepEqual(approvals.map((item) => item.status).sort(), ["recorded", "reused"]);
 
+  const arbitraryDigest = "9".repeat(64);
+  const factThree = onboardingFact("schedule.holidays", "Encaminhar feriados ao dono.", "Vamos revisar feriados.");
+  const arbitraryCoverage = {
+    ...complete.coverage,
+    revision: 3,
+    snapshot_digest: arbitraryDigest,
+    snapshot: { ...complete.coverage.snapshot, revision: 3 },
+    progress: { missingRequired: [], ambiguous: [] },
+    next_action: { type: "prepare_summary" },
+  };
+  const third = JSON.parse(scalar(await runSql(connection, home, serviceTransaction(onboardingAnswerSql({
+    tenantId: ids.tenant,
+    callId: ids.call,
+    ownerId: ids.owner,
+    providerToolCallId: "tool-answer-arbitrary-prior-digest",
+    answerHash: sha256(JSON.stringify(factThree)),
+    expectedRevision: 2,
+    fact: factThree,
+    ruleGroupId: first.rule_group_id,
+    coverage: arbitraryCoverage,
+  }))), "arbitrary prior digest onboarding answer"));
+  assert.notEqual(third.snapshot_digest, arbitraryDigest);
+  assert.equal(scalar(await runSql(connection, home, `
+    select bool_and(
+      r.readback->>'snapshot_digest' = encode(extensions.digest(
+        convert_to((r.readback - 'snapshot_digest')::text, 'UTF8'), 'sha256'
+      ), 'hex')
+    )::text
+    from public.receipts r
+    where r.id in ('${complete.coverage_receipt_id}', '${third.coverage_receipt_id}');
+  `), "coverage digest canonicalization invariant"), "true",
+  "stored digests must depend only on canonical readback with the reserved digest removed");
+
   assert.equal(scalar(await runSql(connection, home, `
     select
       (select count(*) from public.rules where tenant_id = '${ids.tenant}' and status = 'sugerido')::text || ':' ||
@@ -911,7 +952,7 @@ async function onboardingReceiptSecurityAndIdempotency(connection, home) {
       (select auth_epoch::text || '/' || policy_epoch::text || '/' || operational_mode from public.tenants where id = '${ids.tenant}') || ':' ||
       (select count(*) from public.bookings where tenant_id = '${ids.tenant}')::text || ':' ||
       (select count(*) from public.action_intents where tenant_id = '${ids.tenant}')::text
-  `), "onboarding no-authority invariant"), "2:1:2:1:0:0:1/1/simulation_only:0:0");
+  `), "onboarding no-authority invariant"), "3:1:3:1:0:0:1/1/simulation_only:0:0");
 
   const approvalLock = startSql(connection, home, `
     begin;
@@ -923,8 +964,8 @@ async function onboardingReceiptSecurityAndIdempotency(connection, home) {
   await approvalLock.waitFor("APPROVAL_TERMINAL_RACE_LOCK_HELD");
   const racedApproval = startSql(connection, home, serviceTransaction(onboardingApprovalSql({
     tenantId: ids.tenant, callId: ids.call, ownerId: ids.owner,
-    providerToolCallId: "approval-terminal-race", expectedRevision: 2,
-    expectedDigest: complete.snapshot_digest, ownerWords: "Aprovo durante o encerramento.",
+    providerToolCallId: "approval-terminal-race", expectedRevision: 3,
+    expectedDigest: third.snapshot_digest, ownerWords: "Aprovo durante o encerramento.",
   })));
   await waitForOnboardingAdvisoryBlock(connection, home, "approval-terminal-race");
   requireSuccess(await runSql(connection, home, `
@@ -948,8 +989,8 @@ async function onboardingReceiptSecurityAndIdempotency(connection, home) {
   const racedAnswer = startSql(connection, home, serviceTransaction(onboardingAnswerSql({
     tenantId: ids.tenant, callId: ids.call, ownerId: ids.owner,
     providerToolCallId: "answer-terminal-race", answerHash: sha256(JSON.stringify(terminalFact)),
-    expectedRevision: 2, fact: terminalFact, ruleGroupId: first.rule_group_id,
-    coverage: coverageSnapshot(ids.tenant, ids.call, 3, true),
+    expectedRevision: 3, fact: terminalFact, ruleGroupId: first.rule_group_id,
+    coverage: coverageSnapshot(ids.tenant, ids.call, 4, true),
   })));
   await waitForOnboardingAdvisoryBlock(connection, home, "answer-terminal-race");
   requireSuccess(await runSql(connection, home, `
@@ -967,7 +1008,7 @@ async function onboardingReceiptSecurityAndIdempotency(connection, home) {
       (select count(*) from public.rules where tenant_id = '${ids.tenant}')::text || ':' ||
       (select count(*) from public.receipts where tenant_id = '${ids.tenant}' and kind = 'onboarding_coverage')::text || ':' ||
       (select count(*) from public.receipts where tenant_id = '${ids.tenant}' and kind = 'onboarding_voice_approval')::text;
-  `), "terminal-race rollback invariant"), "2:2:1");
+  `), "terminal-race rollback invariant"), "3:3:1");
 }
 
 async function concurrentOnboardingAnswerRevisions(connection, home) {
