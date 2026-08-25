@@ -1383,22 +1383,64 @@ describe("Task 4 review fixes", () => {
   });
 
   test("general Portuguese negation beats assent", () => {
-    let lifecycle = finishSummary();
-    ({ lifecycle } = step(lifecycle, {
-      type: "caller.speech_started",
-      turnId: "negated-confirmation",
-      socketGeneration: 1,
-      elapsedMs: 70,
-    }));
-    const negated = step(lifecycle, {
-      type: "caller.transcript.completed",
-      turnId: "negated-confirmation",
-      transcript: "Não confirmo esse resumo.",
-      socketGeneration: 1,
-      elapsedMs: 71,
-    });
-    expect(negated.lifecycle.phase).toBe("collecting");
-    expect(negated.lifecycle.approvalCandidate).toBeUndefined();
+    const negativeMatrix = [
+      "Não confirmo esse resumo.",
+      "Não está tudo correto.",
+      "Isso não está tudo correto.",
+      "não, confirmo",
+      "Nunca confirmo esse resumo.",
+      "Eu não posso confirmar.",
+      "Jamais aprovo isso.",
+      "Tampouco confirmo esse resumo.",
+      "De jeito nenhum aprovo isso.",
+    ];
+    for (const [index, transcript] of negativeMatrix.entries()) {
+      let lifecycle = finishSummary();
+      const turnId = `negated-confirmation-${index}`;
+      ({ lifecycle } = step(lifecycle, {
+        type: "caller.speech_started",
+        turnId,
+        socketGeneration: 1,
+        elapsedMs: 70,
+      }));
+      const negated = step(lifecycle, {
+        type: "caller.transcript.completed",
+        turnId,
+        transcript,
+        socketGeneration: 1,
+        elapsedMs: 71,
+      });
+      expect(negated.lifecycle.phase).toBe("collecting");
+      expect(negated.lifecycle.approvalCandidate).toBeUndefined();
+    }
+
+    const assentMatrix = [
+      "Aprovado.",
+      "Está tudo correto.",
+      "Não tenho correções. Está tudo correto.",
+    ];
+    for (const [index, transcript] of assentMatrix.entries()) {
+      let lifecycle = finishSummary();
+      const turnId = `valid-confirmation-${index}`;
+      ({ lifecycle } = step(lifecycle, {
+        type: "caller.speech_started",
+        turnId,
+        socketGeneration: 1,
+        elapsedMs: 72,
+      }));
+      const approved = step(lifecycle, {
+        type: "caller.transcript.completed",
+        turnId,
+        transcript,
+        socketGeneration: 1,
+        elapsedMs: 73,
+      });
+      expect(approved.lifecycle.phase).toBe("awaiting_owner_approval");
+      expect(approved.lifecycle.approvalCandidate).toMatchObject({
+        turnId,
+        ownerWords: transcript,
+      });
+    }
   });
 
   test("a caller turn ID is consumed by its first completed transcript", () => {
@@ -1569,6 +1611,103 @@ describe("Task 4 review fixes", () => {
     ).toHaveLength(1);
   });
 
+  test("duplicate approval changed is state-identical while the same refresh is active", () => {
+    const failure = {
+      type: "approval.persistence_failed" as const,
+      toolCallId: "approval-tool-1",
+      code: "changed" as const,
+      safeDetail: "coverage snapshot changed",
+      elapsedMs: 73,
+    };
+    const first = step(approvalPersisting().lifecycle, failure);
+    expect(first.lifecycle.snapshotRefresh).toBeDefined();
+    const duplicate = step(first.lifecycle, failure);
+    expect(duplicate.lifecycle).toBe(first.lifecycle);
+    expect(duplicate.commands).toEqual([]);
+    expect(duplicate.lifecycle.phase).toBe("snapshot_preparing");
+  });
+
+  test("coverage revision 43 cancels refresh 41 so replayed result 42 cannot overwrite it", () => {
+    const changed = step(approvalPersisting().lifecycle, {
+      type: "approval.persistence_failed",
+      toolCallId: "approval-tool-1",
+      code: "changed",
+      safeDetail: "coverage snapshot changed",
+      elapsedMs: 73,
+    });
+    const requestId = changed.lifecycle.snapshotRefresh!.requestId;
+    const advanced = step(changed.lifecycle, {
+      type: "coverage.changed",
+      revision: 43,
+      digest: "digest-43",
+      complete: true,
+      missing: [],
+      ambiguous: [],
+      elapsedMs: 74,
+    });
+    expect(advanced.lifecycle.coverage).toMatchObject({
+      revision: 43,
+      digest: "digest-43",
+      complete: true,
+    });
+    expect(advanced.lifecycle.snapshotRefresh).toBeUndefined();
+
+    const stale = step(advanced.lifecycle, {
+      type: "snapshot.refresh_loaded",
+      requestId,
+      result: authoritativeSnapshot(42, "digest-42"),
+      elapsedMs: 75,
+    });
+    expect(stale.lifecycle).toBe(advanced.lifecycle);
+    expect(stale.lifecycle.coverage).toMatchObject({
+      revision: 43,
+      digest: "digest-43",
+    });
+    expect(commandTypes(stale.commands)).not.toContain("prepare_summary");
+    expect(stale.commands).toContainEqual(
+      expect.objectContaining({
+        type: "telemetry",
+        name: "invariant.violation",
+        outcome: "stale_snapshot_refresh_result",
+      }),
+    );
+  });
+
+  test("correlated refresh must be newer than current lifecycle coverage as well as rejected coverage", () => {
+    const changed = step(approvalPersisting().lifecycle, {
+      type: "approval.persistence_failed",
+      toolCallId: "approval-tool-1",
+      code: "changed",
+      safeDetail: "coverage snapshot changed",
+      elapsedMs: 73,
+    });
+    const concurrent = structuredClone(changed.lifecycle);
+    concurrent.coverage = {
+      revision: 42,
+      digest: "digest-42-current",
+      complete: true,
+      missing: [],
+      ambiguous: [],
+    };
+    const notNewer = step(concurrent, {
+      type: "snapshot.refresh_loaded",
+      requestId: concurrent.snapshotRefresh!.requestId,
+      result: authoritativeSnapshot(42, "digest-42-result"),
+      elapsedMs: 74,
+    });
+    expect(notNewer.lifecycle.phase).toBe("blocked");
+    expect(notNewer.lifecycle.coverage).toMatchObject({
+      revision: 42,
+      digest: "digest-42-current",
+    });
+    expect(notNewer.commands).toContainEqual(
+      expect.objectContaining({
+        type: "block",
+        code: "snapshot_refresh_not_newer",
+      }),
+    );
+  });
+
   test("advisory timer returns the exact lifecycle object with no revision or command", () => {
     const lifecycle = approvalPersisting().lifecycle;
     const before = JSON.stringify(lifecycle);
@@ -1583,6 +1722,39 @@ describe("Task 4 review fixes", () => {
       lifecycle.lifecycleRevision,
     );
     expect(result.commands).toEqual([]);
+  });
+
+  test("post-closed timer preserves exact state and emits only sanitized invariant telemetry", () => {
+    const lifecycle = {
+      ...createOnboardingLifecycle(callId),
+      phase: "closed" as const,
+      lifecycleRevision: 88,
+      socketGeneration: 4,
+      providerTerminationConfirmed: true,
+    };
+    const before = JSON.stringify(lifecycle);
+    const result = step(lifecycle, {
+      type: "timer.elapsed",
+      name: "secret-looking-timer-name",
+      elapsedMs: 9000,
+    });
+    expect(result.lifecycle).toBe(lifecycle);
+    expect(JSON.stringify(result.lifecycle)).toBe(before);
+    expect(result.commands).toEqual([
+      {
+        type: "telemetry",
+        name: "invariant.violation",
+        callIdPrefix: "7f58ee06",
+        socketGeneration: 4,
+        lifecycleRevision: 88,
+        phase: "closed",
+        elapsedMs: 9000,
+        outcome: "event_after_closed",
+      },
+    ]);
+    expect(JSON.stringify(result.commands)).not.toContain(
+      "secret-looking-timer-name",
+    );
   });
 });
 

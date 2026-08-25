@@ -586,20 +586,54 @@ function ownerReplyKind(
   const normalized = normalizeText(transcript)
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
+  const clauses = normalized
+    .split(/[.!?;\n]+/)
+    .map((clause) => clause.match(/[a-z0-9]+/g) ?? [])
+    .filter((clause) => clause.length > 0);
+  const containsSequence = (tokens: string[], sequence: string[]) =>
+    sequence.length <= tokens.length &&
+    tokens.some((_token, start) =>
+      sequence.every((expected, offset) => tokens[start + offset] === expected),
+    );
+  const explicitAssent = (tokens: string[]) =>
+    [
+      ["aprovado"],
+      ["aprovada"],
+      ["aprovo"],
+      ["confirmo"],
+      ["esta", "correto"],
+      ["esta", "correta"],
+      ["esta", "tudo", "correto"],
+      ["esta", "tudo", "correta"],
+      ["tudo", "certo"],
+      ["tudo", "correto"],
+      ["pode", "confirmar"],
+    ].some((sequence) => containsSequence(tokens, sequence));
+  const assentMarker = (tokens: string[]) =>
+    explicitAssent(tokens) ||
+    tokens.some(
+      (token) => token.startsWith("confirm") || token.startsWith("aprov"),
+    );
+  const negation = (tokens: string[]) =>
+    tokens.some((token) =>
+      [
+        "nao",
+        "nunca",
+        "jamais",
+        "nem",
+        "tampouco",
+        "nenhum",
+        "nenhuma",
+      ].includes(token)
+    );
   if (
-    /\b(nao|nunca|jamais)\s+(?:[a-z0-9]+\s+){0,2}(?:confirmo|aprovo|aprovad[oa]?|esta correto|esta certa|pode confirmar)\b/.test(
-      normalized,
-    ) ||
+    clauses.some((clause) => negation(clause) && assentMarker(clause)) ||
     /\b(nao aprovado|nao aprovo|nao esta correto|nao esta certa|incorret|errad|corrig|correcao|mude|altere|mas)\b/.test(
       normalized,
     )
   )
     return "correction";
-  if (
-    /\b(aprovado|aprovo|esta correto|esta tudo correto|tudo certo|confirmo|pode confirmar)\b/.test(
-      normalized,
-    )
-  )
+  if (clauses.some(explicitAssent))
     return "approval";
   return "ambiguous";
 }
@@ -815,8 +849,24 @@ export function reduceOnboarding(
   current: OnboardingLifecycle,
   event: OnboardingEvent,
 ): { lifecycle: OnboardingLifecycle; commands: OnboardingCommand[] } {
-  if (event.type === "timer.elapsed")
+  if (
+    event.type === "approval.persistence_failed" &&
+    event.code === "changed" &&
+    current.snapshotRefresh?.toolCallId === event.toolCallId
+  )
     return { lifecycle: current, commands: [] };
+
+  if (event.type === "timer.elapsed")
+    return current.phase === "closed"
+      ? {
+          lifecycle: current,
+          commands: [
+            telemetry(current, "invariant.violation", event, {
+              outcome: "event_after_closed",
+            }),
+          ],
+        }
+      : { lifecycle: current, commands: [] };
 
   if (
     event.type === "snapshot.refresh_loaded" &&
@@ -1063,6 +1113,11 @@ export function reduceOnboarding(
       }
       if (lifecycle.summary)
         lifecycle.invalidatedSummaryRevision = lifecycle.summary.revision;
+      if (
+        lifecycle.snapshotRefresh &&
+        event.revision > lifecycle.snapshotRefresh.rejectedRevision
+      )
+        delete lifecycle.snapshotRefresh;
       delete lifecycle.summary;
       delete lifecycle.approval;
       delete lifecycle.signoff;
@@ -1217,6 +1272,7 @@ export function reduceOnboarding(
       const evaluated = evaluateCoverage(event.result.coverage);
       if (
         event.result.revision <= refresh.rejectedRevision ||
+        event.result.revision <= lifecycle.coverage.revision ||
         event.result.digest === refresh.rejectedDigest ||
         !event.result.receiptId ||
         event.result.rules.length === 0 ||
