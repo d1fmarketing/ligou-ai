@@ -174,6 +174,103 @@ function beginSummary(lifecycle = snapshotReady().lifecycle) {
   }).lifecycle;
 }
 
+function beginSummaryWithAnchors(requiredAnchors: string[]) {
+  let lifecycle = coverageReady().lifecycle;
+  ({ lifecycle } = step(lifecycle, {
+    type: "snapshot.loaded",
+    result: {
+      ok: true,
+      receiptId: "coverage-receipt-41",
+      revision: 41,
+      digest: "digest-41",
+      coverage: completeCoverage(),
+      rules: [
+        {
+          id: "rule-anchor",
+          ruleGroupId: "rule-group-anchor",
+          version: 1,
+          structured: { coverage_field: "area.coverage" },
+        },
+      ],
+      requiredAnchors,
+      durationMs: 12,
+    },
+    elapsedMs: 52,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.intent_sent",
+    intentKey: "summary:digest-41",
+    socketGeneration: 1,
+    elapsedMs: 53,
+  }));
+  return step(lifecycle, {
+    type: "response.created",
+    responseId: "response-summary-41",
+    intentKey: "summary:digest-41",
+    socketGeneration: 1,
+    elapsedMs: 54,
+  }).lifecycle;
+}
+
+function proveSummaryTranscript(
+  lifecycle: OnboardingLifecycle,
+  transcript: string,
+): OnboardingLifecycle {
+  for (const event of [
+    {
+      type: "response.transcript.done",
+      responseId: "response-summary-41",
+      transcript,
+      socketGeneration: 1,
+      elapsedMs: 60,
+    },
+    {
+      type: "response.output_audio.done",
+      responseId: "response-summary-41",
+      socketGeneration: 1,
+      elapsedMs: 61,
+    },
+    {
+      type: "response.done",
+      responseId: "response-summary-41",
+      socketGeneration: 1,
+      elapsedMs: 62,
+    },
+    {
+      type: "output_audio_buffer.stopped",
+      responseId: "response-summary-41",
+      socketGeneration: 1,
+      elapsedMs: 63,
+    },
+  ] as OnboardingEvent[])
+    ({ lifecycle } = step(lifecycle, event));
+  return lifecycle;
+}
+
+function authoritativeSnapshot(revision: number, digest: string) {
+  return {
+    ok: true as const,
+    receiptId: `coverage-receipt-${revision}`,
+    revision,
+    digest,
+    coverage: completeCoverage(revision),
+    rules: [
+      {
+        id: `rule-${revision}`,
+        ruleGroupId: "rule-group-area",
+        version: revision,
+        structured: { coverage_field: "area.coverage" },
+      },
+    ],
+    requiredAnchors: [
+      "Área: Irvine",
+      "Horário: segunda a sexta, 08:00 às 18:00",
+      "Segurança: ligar 911 em risco imediato",
+    ],
+    durationMs: 12,
+  };
+}
+
 function validSummaryTranscript() {
   return [
     "Área: Irvine.",
@@ -755,8 +852,9 @@ describe("onboarding lifecycle forbidden transitions", () => {
       providerTerminationConfirmed: true,
     };
     const result = step(closed, {
-      type: "timer.elapsed",
-      name: "legacy_recap_watchdog",
+      type: "response.done",
+      responseId: "response-after-close",
+      socketGeneration: 0,
       elapsedMs: 10_000,
     });
     expect(result.lifecycle).toEqual(closed);
@@ -1174,6 +1272,317 @@ describe("canonical 7f58ee06 cadence", () => {
     expect(summaryCommands(afterSnapshot.commands)).toHaveLength(1);
     const duplicateSnapshot = snapshotReady(afterSnapshot.lifecycle);
     expect(summaryCommands(duplicateSnapshot.commands)).toHaveLength(0);
+  });
+});
+
+describe("Task 4 review fixes", () => {
+  const factArgs = {
+    topic: "precos",
+    field: "service.price_target",
+    subject: "consulta",
+    disposition: "answered",
+    rule_text: "Preço sugerido: 120.",
+    structured: { value: 120 },
+    owner_words: "cento e vinte",
+  };
+
+  function admittedAndAckedTool() {
+    let lifecycle = startCollecting();
+    ({ lifecycle } = step(lifecycle, {
+      type: "tool.called",
+      toolCallId: "fact-review-1",
+      name: "record_interview_answer",
+      args: factArgs,
+      providerResponseId: "response-review-fact",
+      batchHash: "review-fact-batch",
+      socketGeneration: 1,
+      elapsedMs: 10,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "tool.executed",
+      toolCallId: "fact-review-1",
+      output: "{}",
+      resultHash: "review-result",
+      elapsedMs: 11,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "tool.output_sent",
+      toolCallId: "fact-review-1",
+      socketGeneration: 1,
+      elapsedMs: 12,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "tool.output_acked",
+      toolCallId: "fact-review-1",
+      outputItemId: "tool-output:fact-review-1",
+      socketGeneration: 1,
+      elapsedMs: 13,
+    }));
+    return lifecycle;
+  }
+
+  test("complete coverage waits when an admitted call has no closed batch", () => {
+    const completed = step(admittedAndAckedTool(), {
+      type: "coverage.changed",
+      revision: 41,
+      digest: "digest-41",
+      complete: true,
+      missing: [],
+      ambiguous: [],
+      elapsedMs: 14,
+    });
+    expect(completed.lifecycle.phase).toBe("coverage_check");
+    expect(commandTypes(completed.commands)).not.toContain("prepare_summary");
+    expect(summaryCommands(completed.commands)).toHaveLength(0);
+  });
+
+  test("complete coverage waits through reattach until the closed batch parent response is terminal", () => {
+    let lifecycle = admittedAndAckedTool();
+    ({ lifecycle } = step(lifecycle, {
+      type: "tool.batch_closed",
+      providerResponseId: "response-review-fact",
+      batchHash: "review-fact-batch",
+      toolCallIds: ["fact-review-1"],
+      elapsedMs: 14,
+    }));
+    let result = step(lifecycle, {
+      type: "coverage.changed",
+      revision: 41,
+      digest: "digest-41",
+      complete: true,
+      missing: [],
+      ambiguous: [],
+      elapsedMs: 15,
+    });
+    lifecycle = result.lifecycle;
+    expect(commandTypes(result.commands)).not.toContain("prepare_summary");
+
+    result = step(lifecycle, {
+      type: "socket.attached",
+      socketGeneration: 2,
+      elapsedMs: 16,
+    });
+    lifecycle = result.lifecycle;
+    expect(commandTypes(result.commands)).not.toContain("prepare_summary");
+    expect(lifecycle.phase).toBe("coverage_check");
+
+    result = step(lifecycle, {
+      type: "response.done",
+      responseId: "response-review-fact",
+      socketGeneration: 2,
+      elapsedMs: 17,
+    });
+    expect(
+      result.commands.filter(
+        (command) =>
+          command.type === "prepare_summary" &&
+          command.revision === 41 &&
+          command.digest === "digest-41",
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("general Portuguese negation beats assent", () => {
+    let lifecycle = finishSummary();
+    ({ lifecycle } = step(lifecycle, {
+      type: "caller.speech_started",
+      turnId: "negated-confirmation",
+      socketGeneration: 1,
+      elapsedMs: 70,
+    }));
+    const negated = step(lifecycle, {
+      type: "caller.transcript.completed",
+      turnId: "negated-confirmation",
+      transcript: "Não confirmo esse resumo.",
+      socketGeneration: 1,
+      elapsedMs: 71,
+    });
+    expect(negated.lifecycle.phase).toBe("collecting");
+    expect(negated.lifecycle.approvalCandidate).toBeUndefined();
+  });
+
+  test("a caller turn ID is consumed by its first completed transcript", () => {
+    let lifecycle = finishSummary();
+    ({ lifecycle } = step(lifecycle, {
+      type: "caller.speech_started",
+      turnId: "replayed-owner-turn",
+      socketGeneration: 1,
+      elapsedMs: 70,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "caller.transcript.completed",
+      turnId: "replayed-owner-turn",
+      transcript: "Obrigado.",
+      socketGeneration: 1,
+      elapsedMs: 71,
+    }));
+    const replay = step(lifecycle, {
+      type: "caller.transcript.completed",
+      turnId: "replayed-owner-turn",
+      transcript: "Aprovado, está tudo correto.",
+      socketGeneration: 1,
+      elapsedMs: 72,
+    });
+    expect(replay.lifecycle.phase).toBe("awaiting_owner_approval");
+    expect(replay.lifecycle.approvalCandidate).toBeUndefined();
+    expect(replay.commands).toContainEqual(
+      expect.objectContaining({
+        type: "telemetry",
+        name: "onboarding.approval.rejected",
+        outcome: "not_fresh_after_summary_playback",
+      }),
+    );
+  });
+
+  test("matches factual anchors by normalized token boundaries", () => {
+    const anchors = ["Preço público: 120", "Área: São José"];
+    const numericSubstring = proveSummaryTranscript(
+      beginSummaryWithAnchors(anchors),
+      "Preço público: 1200. Área: São José. Você confirma que está correto?",
+    );
+    expect(numericSubstring.phase).toBe("summary_speaking");
+    expect(numericSubstring.summary?.validated).toBe(false);
+
+    const locationSubstring = proveSummaryTranscript(
+      beginSummaryWithAnchors(anchors),
+      "Preço público: 120. Área: São Joséville. Você confirma que está correto?",
+    );
+    expect(locationSubstring.phase).toBe("summary_speaking");
+    expect(locationSubstring.summary?.validated).toBe(false);
+
+    const punctuationAccentCaseVariant = proveSummaryTranscript(
+      beginSummaryWithAnchors(anchors),
+      "PRECO PUBLICO — 120! AREA / SAO JOSE. Voce confirma que esta correto?",
+    );
+    expect(punctuationAccentCaseVariant.phase).toBe(
+      "awaiting_owner_approval",
+    );
+    expect(punctuationAccentCaseVariant.summary?.validated).toBe(true);
+  });
+
+  test("approval changed refreshes and prepares only the correlated latest snapshot", () => {
+    let lifecycle = approvalPersisting().lifecycle;
+    let result = step(lifecycle, {
+      type: "approval.persistence_failed",
+      toolCallId: "approval-tool-1",
+      code: "changed",
+      safeDetail: "coverage snapshot changed",
+      elapsedMs: 73,
+    });
+    lifecycle = result.lifecycle;
+    expect(commandTypes(result.commands)).not.toContain("prepare_summary");
+    const refresh = result.commands.find(
+      (command) => (command as { type: string }).type === "refresh_snapshot",
+    ) as unknown as { type: "refresh_snapshot"; requestId: string } | undefined;
+    expect(refresh?.requestId).toBeString();
+
+    ({ lifecycle } = step(lifecycle, {
+      type: "tool.executed",
+      toolCallId: "approval-tool-1",
+      output: JSON.stringify({ status: "snapshot_changed" }),
+      resultHash: "approval-changed-result",
+      elapsedMs: 74,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "tool.output_sent",
+      toolCallId: "approval-tool-1",
+      socketGeneration: 1,
+      elapsedMs: 75,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "tool.output_acked",
+      toolCallId: "approval-tool-1",
+      outputItemId: "tool-output:approval-tool-1",
+      socketGeneration: 1,
+      elapsedMs: 76,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "tool.batch_closed",
+      providerResponseId: "response-approval-tool",
+      batchHash: "approval-batch-hash",
+      toolCallIds: ["approval-tool-1"],
+      elapsedMs: 77,
+    }));
+    result = step(lifecycle, {
+      type: "response.done",
+      responseId: "response-approval-tool",
+      socketGeneration: 1,
+      elapsedMs: 78,
+    });
+    lifecycle = result.lifecycle;
+    expect(
+      result.commands.some(
+        (command) =>
+          command.type === "prepare_summary" && command.digest === "digest-41",
+      ),
+    ).toBe(false);
+
+    const beforeStale = lifecycle;
+    result = step(lifecycle, {
+      type: "snapshot.refresh_loaded",
+      requestId: "stale-refresh-request",
+      result: authoritativeSnapshot(42, "digest-42"),
+      elapsedMs: 79,
+    } as OnboardingEvent);
+    expect(result.lifecycle).toBe(beforeStale);
+    expect(commandTypes(result.commands)).not.toContain("prepare_summary");
+
+    result = step(lifecycle, {
+      type: "snapshot.refresh_loaded",
+      requestId: refresh!.requestId,
+      result: authoritativeSnapshot(42, "digest-42"),
+      elapsedMs: 80,
+    } as OnboardingEvent);
+    lifecycle = result.lifecycle;
+    expect(lifecycle.coverage).toMatchObject({
+      revision: 42,
+      digest: "digest-42",
+      complete: true,
+    });
+    expect(
+      result.commands.filter(
+        (command) =>
+          command.type === "prepare_summary" &&
+          command.revision === 42 &&
+          command.digest === "digest-42",
+      ),
+    ).toHaveLength(1);
+    expect(
+      result.commands.some(
+        (command) =>
+          command.type === "prepare_summary" && command.digest === "digest-41",
+      ),
+    ).toBe(false);
+
+    const current = step(lifecycle, {
+      type: "snapshot.loaded",
+      result: authoritativeSnapshot(42, "digest-42"),
+      elapsedMs: 81,
+    });
+    expect(current.lifecycle.phase).toBe("summary_speaking");
+    expect(
+      current.commands.filter(
+        (command) =>
+          command.type === "request_response" &&
+          command.intentKey === "summary:digest-42",
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("advisory timer returns the exact lifecycle object with no revision or command", () => {
+    const lifecycle = approvalPersisting().lifecycle;
+    const before = JSON.stringify(lifecycle);
+    const result = step(lifecycle, {
+      type: "timer.elapsed",
+      name: "legacy_recap_watchdog",
+      elapsedMs: 1200,
+    });
+    expect(result.lifecycle).toBe(lifecycle);
+    expect(JSON.stringify(result.lifecycle)).toBe(before);
+    expect(result.lifecycle.lifecycleRevision).toBe(
+      lifecycle.lifecycleRevision,
+    );
+    expect(result.commands).toEqual([]);
   });
 });
 

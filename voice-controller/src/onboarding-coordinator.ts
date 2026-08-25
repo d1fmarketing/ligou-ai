@@ -97,6 +97,13 @@ export interface PersistedApproval {
   digest: string;
 }
 
+export interface SnapshotRefreshRequest {
+  requestId: string;
+  toolCallId: string;
+  rejectedRevision: number;
+  rejectedDigest: string;
+}
+
 export interface ResponseIntentReceipt {
   intentKey: string;
   purpose: ResponsePurpose;
@@ -117,8 +124,10 @@ export interface OnboardingLifecycle {
   terminalResponseIds: string[];
   preparedSnapshotDigests: string[];
   freshCallerTurnIds: string[];
+  consumedCallerTurnIds: string[];
   approvalCandidate?: ApprovalCandidate;
   approval?: PersistedApproval;
+  snapshotRefresh?: SnapshotRefreshRequest;
   summary?: SummaryProof;
   signoff?: SignoffProof;
   invalidatedSummaryRevision?: number;
@@ -230,6 +239,12 @@ export type OnboardingCommand =
       digest: string;
     }
   | {
+      type: "refresh_snapshot";
+      requestId: string;
+      afterRevision: number;
+      rejectedDigest: string;
+    }
+  | {
       type: "request_response";
       intentKey: string;
       purpose: ResponsePurpose;
@@ -311,6 +326,11 @@ export type OnboardingEvent =
       };
     })
   | (TimedEvent & { type: "snapshot.loaded"; result: SnapshotResult })
+  | (TimedEvent & {
+      type: "snapshot.refresh_loaded";
+      requestId: string;
+      result: SnapshotResult;
+    })
   | (SocketEvent & {
       type: "caller.speech_started";
       turnId: string;
@@ -484,22 +504,33 @@ function batchIsReady(
   );
 }
 
+function everyAdmittedCallIsInAReadyBatch(
+  lifecycle: OnboardingLifecycle,
+): boolean {
+  return Object.values(lifecycle.toolOutbox).every((receipt) => {
+    const batch = lifecycle.toolBatches[
+      batchKey(receipt.providerResponseId, receipt.batchHash)
+    ];
+    return (
+      batch !== undefined &&
+      batch.toolCallIds.includes(receipt.toolCallId) &&
+      batchIsReady(lifecycle, batch)
+    );
+  });
+}
+
 function maybeAdvanceCoverage(
   lifecycle: OnboardingLifecycle,
   commands: OnboardingCommand[],
   event: TimedEvent,
 ): void {
+  if (lifecycle.snapshotRefresh) return;
   const readyBatches = Object.values(lifecycle.toolBatches).filter(
     (batch) => batchIsReady(lifecycle, batch) && !batch.continuationRequested,
   );
   if (lifecycle.coverage.complete) {
     if (lifecycle.activeResponseId) return;
-    if (
-      Object.values(lifecycle.toolOutbox).some(
-        (receipt) => receipt.state !== "output_acked",
-      )
-    )
-      return;
+    if (!everyAdmittedCallIsInAReadyBatch(lifecycle)) return;
     const digest = lifecycle.coverage.digest;
     if (!digest || lifecycle.preparedSnapshotDigests.includes(digest)) return;
     lifecycle.phase = "snapshot_preparing";
@@ -556,6 +587,9 @@ function ownerReplyKind(
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
   if (
+    /\b(nao|nunca|jamais)\s+(?:[a-z0-9]+\s+){0,2}(?:confirmo|aprovo|aprovad[oa]?|esta correto|esta certa|pode confirmar)\b/.test(
+      normalized,
+    ) ||
     /\b(nao aprovado|nao aprovo|nao esta correto|nao esta certa|incorret|errad|corrig|correcao|mude|altere|mas)\b/.test(
       normalized,
     )
@@ -570,11 +604,31 @@ function ownerReplyKind(
   return "ambiguous";
 }
 
+function normalizedBoundaryTokens(value: string): string[] {
+  return normalizeText(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .match(/[a-z0-9]+/g) ?? [];
+}
+
+function containsAnchorTokens(transcript: string[], anchor: string[]): boolean {
+  if (anchor.length === 0 || anchor.length > transcript.length) return false;
+  for (let start = 0; start <= transcript.length - anchor.length; start += 1)
+    if (anchor.every((token, offset) => transcript[start + offset] === token))
+      return true;
+  return false;
+}
+
 function summaryTranscriptValid(summary: SummaryProof): boolean {
   const transcript = normalizeText(summary.transcript);
+  const transcriptTokens = normalizedBoundaryTokens(transcript);
   if (
     summary.requiredAnchors.some(
-      (anchor) => !transcript.includes(normalizeText(anchor)),
+      (anchor) =>
+        !containsAnchorTokens(
+          transcriptTokens,
+          normalizedBoundaryTokens(anchor),
+        ),
     )
   )
     return false;
@@ -751,6 +805,7 @@ export function createOnboardingLifecycle(callId: string): OnboardingLifecycle {
     terminalResponseIds: [],
     preparedSnapshotDigests: [],
     freshCallerTurnIds: [],
+    consumedCallerTurnIds: [],
     requestedHangupKeys: [],
     providerTerminationConfirmed: false,
   };
@@ -760,6 +815,22 @@ export function reduceOnboarding(
   current: OnboardingLifecycle,
   event: OnboardingEvent,
 ): { lifecycle: OnboardingLifecycle; commands: OnboardingCommand[] } {
+  if (event.type === "timer.elapsed")
+    return { lifecycle: current, commands: [] };
+
+  if (
+    event.type === "snapshot.refresh_loaded" &&
+    current.snapshotRefresh?.requestId !== event.requestId
+  )
+    return {
+      lifecycle: current,
+      commands: [
+        telemetry(current, "invariant.violation", event, {
+          outcome: "stale_snapshot_refresh_result",
+        }),
+      ],
+    };
+
   if (current.phase === "closed")
     return {
       lifecycle: current,
@@ -1040,6 +1111,14 @@ export function reduceOnboarding(
       break;
     }
     case "snapshot.loaded": {
+      if (lifecycle.snapshotRefresh) {
+        commands.push(
+          telemetry(lifecycle, "invariant.violation", event, {
+            outcome: "uncorrelated_snapshot_during_refresh",
+          }),
+        );
+        break;
+      }
       if (!event.result.ok) {
         lifecycle.phase = "blocked";
         commands.push({
@@ -1114,11 +1193,72 @@ export function reduceOnboarding(
       });
       break;
     }
+    case "snapshot.refresh_loaded": {
+      const refresh = lifecycle.snapshotRefresh!;
+      if (!event.result.ok) {
+        delete lifecycle.snapshotRefresh;
+        lifecycle.phase = "blocked";
+        commands.push({
+          type: "block",
+          code: event.result.code,
+          safeDetail: event.result.safeDetail,
+          recoverable: true,
+        });
+        commands.push(
+          telemetry(lifecycle, "onboarding.snapshot.blocked", {
+            elapsedMs: event.result.durationMs,
+          }, {
+            errorCode: event.result.code,
+            outcome: "approval_refresh_unavailable",
+          }),
+        );
+        break;
+      }
+      const evaluated = evaluateCoverage(event.result.coverage);
+      if (
+        event.result.revision <= refresh.rejectedRevision ||
+        event.result.digest === refresh.rejectedDigest ||
+        !event.result.receiptId ||
+        event.result.rules.length === 0 ||
+        event.result.requiredAnchors.length === 0 ||
+        !evaluated.readyForReview
+      ) {
+        delete lifecycle.snapshotRefresh;
+        block(
+          lifecycle,
+          commands,
+          event,
+          "snapshot_refresh_not_newer",
+          "refreshed snapshot was not a newer complete authoritative revision",
+        );
+        break;
+      }
+      lifecycle.coverage = {
+        revision: event.result.revision,
+        digest: event.result.digest,
+        complete: true,
+        missing: structuredClone(evaluated.missingRequired),
+        ambiguous: structuredClone(evaluated.ambiguous),
+        ...(evaluated.nextQuestion
+          ? { nextQuestion: structuredClone(evaluated.nextQuestion) }
+          : {}),
+      };
+      delete lifecycle.snapshotRefresh;
+      lifecycle.phase = "coverage_check";
+      commands.push(
+        telemetry(lifecycle, "onboarding.coverage.changed", {
+          elapsedMs: event.result.durationMs,
+        }, { outcome: "approval_refresh_authoritative" }),
+      );
+      maybeAdvanceCoverage(lifecycle, commands, event);
+      break;
+    }
     case "caller.speech_started": {
       if (
         lifecycle.phase === "awaiting_owner_approval" &&
         lifecycle.summary?.validated === true &&
         lifecycle.summary.playbackStopped &&
+        !lifecycle.consumedCallerTurnIds.includes(event.turnId) &&
         !lifecycle.freshCallerTurnIds.includes(event.turnId)
       )
         lifecycle.freshCallerTurnIds.push(event.turnId);
@@ -1136,6 +1276,12 @@ export function reduceOnboarding(
         );
         break;
       }
+      lifecycle.freshCallerTurnIds = lifecycle.freshCallerTurnIds.filter(
+        (turnId) => turnId !== event.turnId,
+      );
+      lifecycle.consumedCallerTurnIds.push(event.turnId);
+      if (lifecycle.consumedCallerTurnIds.length > 500)
+        lifecycle.consumedCallerTurnIds.shift();
       const kind = ownerReplyKind(event.transcript);
       if (kind === "correction") {
         lifecycle.invalidatedSummaryRevision = lifecycle.summary?.revision;
@@ -1465,16 +1611,37 @@ export function reduceOnboarding(
     }
     case "approval.persistence_failed": {
       if (event.code === "changed") {
+        const rejected = lifecycle.summary;
+        if (!rejected) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "approval_refresh_without_summary",
+            "changed approval did not have a rejected summary identity",
+            event.toolCallId,
+          );
+          break;
+        }
+        const requestId =
+          `snapshot-refresh:${event.toolCallId}:` +
+          `${rejected.revision}:${rejected.digest}`;
         delete lifecycle.summary;
         delete lifecycle.approvalCandidate;
+        lifecycle.freshCallerTurnIds = [];
         lifecycle.phase = "snapshot_preparing";
-        const digest = lifecycle.coverage.digest;
-        if (digest)
-          commands.push({
-            type: "prepare_summary",
-            revision: lifecycle.coverage.revision,
-            digest,
-          });
+        lifecycle.snapshotRefresh = {
+          requestId,
+          toolCallId: event.toolCallId,
+          rejectedRevision: rejected.revision,
+          rejectedDigest: rejected.digest,
+        };
+        commands.push({
+          type: "refresh_snapshot",
+          requestId,
+          afterRevision: rejected.revision,
+          rejectedDigest: rejected.digest,
+        });
       } else {
         lifecycle.phase = "blocked";
         commands.push({
@@ -1549,11 +1716,8 @@ export function reduceOnboarding(
       );
       break;
     }
-    case "timer.elapsed": {
-      // Timer events are deliberately advisory. No timer can advance coverage,
-      // credit audio, approve, sign off, or terminate an onboarding call.
+    case "timer.elapsed":
       break;
-    }
   }
 
   return { lifecycle, commands };
