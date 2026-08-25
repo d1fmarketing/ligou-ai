@@ -41,6 +41,17 @@ test("canonical unit runner starts onboarding coverage once in an isolated proce
   expect(coverageRuns[0]!.options.cwd).toMatch(/^\/tmp\/ligou-unit-test-/);
 });
 
+test("canonical unit runner starts onboarding lifecycle once in an isolated process", () => {
+  const runs: Array<{ args: string[]; options: { cwd: string } }> = [];
+  runUnitTests((_command, args, options) => runs.push({ args, options }));
+
+  const coordinatorRuns = runs.filter((run) =>
+    run.args[1].endsWith("/test/onboarding-coordinator.test.ts")
+  );
+  expect(coordinatorRuns).toHaveLength(1);
+  expect(coordinatorRuns[0]!.options.cwd).toMatch(/^\/tmp\/ligou-unit-test-/);
+});
+
 test("unit runner keeps an invoker dotenv sentinel out of the actual Bun test process", () => {
   const invoker = mkdtempSync("/tmp/ligou-unit-dotenv-");
   const probe = path.join(invoker, "dotenv-probe.test.ts");

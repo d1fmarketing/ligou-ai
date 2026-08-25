@@ -20,9 +20,18 @@ export interface CoordinatedLedger {
   greetingRequested?: boolean;
   executedToolCallIds?: string[];
   phase?: string;
+  requestedResponseIntentKeys?: string[];
 }
 
-export type ResponseIntent = "greeting" | "tool_continuation" | "recap_push";
+export type LegacyResponseIntent = "greeting" | "tool_continuation" | "recap_push";
+export interface ApplicationResponseIntent {
+  intentKey: string;
+  purpose: "greeting" | "tool_continuation" | "summary" | "final_signoff";
+  instructions?: string;
+  snapshotDigest?: string;
+  approvalReceiptId?: string;
+}
+export type ResponseIntent = LegacyResponseIntent | ApplicationResponseIntent;
 
 type WsLike = { send(payload: string): void };
 
@@ -44,31 +53,61 @@ export function setPhase(ledger: CoordinatedLedger, phase: string) {
  *  response is active, tools are pending, the session is terminal, or the
  *  intent's idempotency key was already consumed. */
 export function requestResponse(ledger: CoordinatedLedger, ws: WsLike, intent: ResponseIntent): boolean {
+  const applicationIntent = typeof intent === "object" ? intent : undefined;
+  const intentName = applicationIntent?.purpose ?? intent;
+  const intentKey = applicationIntent?.intentKey;
+  if (intentKey && ledger.requestedResponseIntentKeys?.includes(intentKey)) return false;
   // No live intent, no noise: a consumed/absent idempotency key is a silent no-op.
-  if (intent === "greeting" && ledger.greetingRequested) return false;
-  if (intent === "tool_continuation" && !ledger.continuationWanted) return false;
+  if (!applicationIntent && intent === "greeting" && ledger.greetingRequested) return false;
+  if (!applicationIntent && intent === "tool_continuation" && !ledger.continuationWanted) return false;
   if (ledger.status !== "active" || ledger.agentEndRequested) return false;
   if (ledger.responseActive) {
-    evt("response.denied", { call: id8(ledger), intent, reason: "response_active" });
+    evt("response.denied", { call: id8(ledger), intent: intentName, intent_key: intentKey, reason: "response_active" });
     return false;
   }
   if ((ledger.pendingToolCalls ?? 0) > 0) {
-    evt("response.denied", { call: id8(ledger), intent, reason: "tools_pending" });
+    evt("response.denied", { call: id8(ledger), intent: intentName, intent_key: intentKey, reason: "tools_pending" });
     return false;
   }
-  if (intent === "greeting") ledger.greetingRequested = true;
-  else if (intent === "tool_continuation") ledger.continuationWanted = false;
+  if (!applicationIntent && intent === "greeting") ledger.greetingRequested = true;
+  else if (!applicationIntent && intent === "tool_continuation") ledger.continuationWanted = false;
+  const frame = applicationIntent
+    ? {
+        type: "response.create",
+        response: {
+          ...(applicationIntent.instructions
+            ? { instructions: applicationIntent.instructions }
+            : {}),
+          metadata: {
+            intent_key: applicationIntent.intentKey,
+            purpose: applicationIntent.purpose,
+            ...(applicationIntent.snapshotDigest
+              ? { snapshot_digest: applicationIntent.snapshotDigest }
+              : {}),
+            ...(applicationIntent.approvalReceiptId
+              ? { approval_receipt_id: applicationIntent.approvalReceiptId }
+              : {}),
+          },
+        },
+      }
+    : { type: "response.create" };
   try {
-    ws.send(JSON.stringify({ type: "response.create" }));
+    ws.send(JSON.stringify(frame));
   } catch {
     // Nothing left the socket: put the idempotency key back so a reattach can
     // legitimately retry the owed turn.
-    if (intent === "greeting") ledger.greetingRequested = false;
-    if (intent === "tool_continuation") ledger.continuationWanted = true;
+    if (!applicationIntent && intent === "greeting") ledger.greetingRequested = false;
+    if (!applicationIntent && intent === "tool_continuation") ledger.continuationWanted = true;
     return false;
   }
+  if (intentKey) {
+    const keys = ledger.requestedResponseIntentKeys ??
+      (ledger.requestedResponseIntentKeys = []);
+    keys.push(intentKey);
+    if (keys.length > 500) keys.shift();
+  }
   ledger.responseActive = true;
-  evt("response.requested", { call: id8(ledger), intent });
+  evt("response.requested", { call: id8(ledger), intent: intentName, intent_key: intentKey });
   return true;
 }
 

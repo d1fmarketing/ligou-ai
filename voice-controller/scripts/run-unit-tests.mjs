@@ -36,6 +36,7 @@ export const unitTestFiles = [
   "test/skills.test.ts",
   "test/onboarding-coverage.test.ts",
   "test/onboarding-store.test.ts",
+  "test/onboarding-coordinator.test.ts",
   "test/unit-runner.test.ts",
 ];
 
