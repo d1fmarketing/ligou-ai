@@ -436,6 +436,96 @@ afterAll(() => {
   _setClient(null);
 });
 
+describe("agent speaks first and the owed recap is pushed", () => {
+  test("a browser session greets on first attach only — never again on reattach", async () => {
+    class SyntheticWebSocket {
+      static instances: SyntheticWebSocket[] = [];
+      listeners = new Map<string, Array<(event: any) => void>>();
+      sent: string[] = [];
+      constructor() { SyntheticWebSocket.instances.push(this); }
+      addEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+      }
+      send(payload: string) { this.sent.push(payload); }
+      close() { this.emit("close", { code: 1000 }); }
+      emit(type: string, event: any = {}) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+    const greetCap = makeCapability("rocha-plumbing", "tenant-1", "call-greet", 15, "onboarding", {
+      authEpoch: 1, policyEpoch: 1,
+    });
+    const originalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    try {
+      const control = attachSideband(greetCap, "rtc-greet", "gpt-realtime-2.1");
+      SyntheticWebSocket.instances[0]!.emit("open");
+      await control.opened;
+      const first = SyntheticWebSocket.instances[0]!;
+      expect(first.sent.map((raw) => JSON.parse(raw).type).filter((t) => t === "response.create")).toHaveLength(1);
+      expect(control.ledger.greetingRequested).toBe(true);
+      expect(control.ledger.responseActive).toBe(true);
+
+      // Drop and reattach: the greeting must not repeat (no owed turn either).
+      control.ledger.responseActive = false;
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1];
+      expect(second).toBeDefined();
+      second!.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(second!.sent.map((raw) => JSON.parse(raw).type).filter((t) => t === "response.create")).toHaveLength(0);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete("call-greet");
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+
+  test("promise-turns while a recap is owed get bounded pushes; user speech cancels the pending push", async () => {
+    process.env.LIGOU_RECAP_PUSH_DELAY_MS = "40";
+    const l = ledger();
+    const ws = socket();
+    l.pendingRecapAfterRecords = true;
+    l.recapBlockedResponseId = "resp_a";
+
+    // Turn 1: a short promise ("vou recapitular…") and then silence.
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio_transcript.done", response_id: "resp_b",
+      transcript: "Vou recapitular tudo rapidinho para você validar.",
+    });
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(0);
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(1);
+    expect(l.recapPushes).toBe(1);
+
+    // Turn 2: another promise, but the owner starts talking before the push fires.
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    await handleEvent(cap, l, ws as any, { type: "input_audio_buffer.speech_started" });
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(1);
+
+    // Turns 3-4: idle again — pushes continue up to the bound of 3, then stop.
+    for (const _ of [2, 3, 4]) {
+      await handleEvent(cap, l, ws as any, { type: "response.created" });
+      await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+      await new Promise((resolve) => setTimeout(resolve, 90));
+    }
+    expect(l.recapPushes).toBe(3);
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(3);
+
+    // A substantive recap clears the debt — no further pushes get scheduled.
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio_transcript.done", response_id: "resp_final", transcript: LONG_RECAP,
+    });
+    expect(l.pendingRecapAfterRecords).toBe(false);
+  });
+});
+
 describe("sideband reattach continuation state", () => {
   test("a reattached socket clears stale streaming flags and re-requests the owed turn", async () => {
     class SyntheticWebSocket {

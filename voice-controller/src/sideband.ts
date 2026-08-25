@@ -43,6 +43,12 @@ export interface SessionLedger {
   /** How many times end_session was refused for a missing recap. The guard is
    *  best-effort: a broken transcription pipeline must not hold the call hostage. */
   recapRefusals?: number;
+  /** The initial agent-speaks-first greeting was requested (once per call, ever). */
+  greetingRequested?: boolean;
+  /** Bounded pushes that force the promised recap when the model stalls on
+   *  meta-announcements ("vou recapitular") instead of speaking it (E2E test 6). */
+  recapPushes?: number;
+  recapPushTimer?: ReturnType<typeof setTimeout> | null;
   /** The model called end_session: close gracefully after its farewell response finishes. */
   agentEndRequested?: boolean;
   /** The graceful close is already scheduled for the current socket generation. */
@@ -250,8 +256,19 @@ export function attachSideband(
     ledger.responseActive = false;
     ledger.pendingToolCalls = 0;
     ledger.agentEndScheduled = false;
+    if (ledger.recapPushTimer) { clearTimeout(ledger.recapPushTimer); ledger.recapPushTimer = null; }
     maybeContinueResponse(ledger, sock);
     maybeScheduleAgentEnd(ledger, sock, () => ownsSocket(sock));
+    if (!ownsSocket(sock)) return;
+    if (!options.phone && !ledger.greetingRequested) {
+      // The agent speaks first. Without an initial response.create the realtime session
+      // sits in silence until the caller says something (E2E test 6, P0): the browser
+      // owner would answer a "connected" call and hear nothing.
+      ledger.greetingRequested = true;
+      sock.send(JSON.stringify({ type: "response.create" }));
+      ledger.responseActive = true;
+      console.log(`sideband greeting call=${cap.callId.slice(0, 8)} (agent speaks first)`);
+    }
     if (!ownsSocket(sock)) return;
     if (!openedSettled) {
       openedSettled = true;
@@ -428,6 +445,10 @@ export async function handleEvent(
     case "conversation.item.input_audio_transcription.completed":
       if (msg.transcript) ledger.transcript.push({ role: "caller", text: msg.transcript, at: new Date().toISOString() });
       break;
+    case "input_audio_buffer.speech_started":
+      // The owner is talking: an owed-recap push must not talk over them.
+      if (ledger.recapPushTimer) { clearTimeout(ledger.recapPushTimer); ledger.recapPushTimer = null; }
+      break;
     case "response.output_audio_transcript.done":
       if (msg.transcript) {
         ledger.transcript.push({ role: "agent", text: msg.transcript, at: new Date().toISOString() });
@@ -527,6 +548,34 @@ export async function handleEvent(
       ledger.responseActive = false;
       maybeContinueResponse(ledger, ws);
       maybeScheduleAgentEnd(ledger, ws, isCurrent);
+      // E2E test 6: after the final registrations the model produced promise-turns
+      // ("vou recapitular…") and then waited for the owner, so the recap never came.
+      // While a recap is owed, an idle turn gets a bounded push; a real user utterance
+      // (speech_started) cancels the pending push so a clarification can be answered.
+      if (
+        ledger.pendingRecapAfterRecords
+        && ledger.status === "active"
+        && !ledger.agentEndRequested
+        && !ledger.continuationWanted
+        && !ledger.responseActive
+        && (ledger.pendingToolCalls ?? 0) === 0
+        && (ledger.recapPushes ?? 0) < 3
+      ) {
+        const rawDelay = Number(process.env.LIGOU_RECAP_PUSH_DELAY_MS ?? 1_200);
+        const delay = Number.isFinite(rawDelay) && rawDelay >= 0 ? rawDelay : 1_200;
+        if (ledger.recapPushTimer) clearTimeout(ledger.recapPushTimer);
+        ledger.recapPushTimer = setTimeout(() => {
+          ledger.recapPushTimer = null;
+          if (!isCurrent() || ledger.status !== "active" || !ledger.pendingRecapAfterRecords
+            || ledger.responseActive || (ledger.pendingToolCalls ?? 0) > 0 || ledger.agentEndRequested) return;
+          ledger.recapPushes = (ledger.recapPushes ?? 0) + 1;
+          console.log(`sideband recap push call=${ledger.callId.slice(0, 8)} n=${ledger.recapPushes}`);
+          try {
+            ws.send(JSON.stringify({ type: "response.create" }));
+            ledger.responseActive = true;
+          } catch { /* socket gone; reattach path re-evaluates */ }
+        }, delay);
+      }
       break;
     }
     case "session.ended": {
