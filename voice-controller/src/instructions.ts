@@ -99,6 +99,7 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
       `Preços SEMPRE com structured {service_type, price_min, price_target, duration_min}; sem mínimo informado, omita price_min. ` +
       `Ao final, recapitule CONCRETAMENTE o que registrou — cada serviço com preço público, mínimo e duração; as cidades; os dias e horários; as regras de emergência; e qualquer regra extra — e explique que ele aprova o lote na aba Memória do painel. ` +
       `Depois da recapitulação, despeça-se UMA única vez e chame end_session para encerrar a chamada. ` +
+      `NUNCA chame end_session logo depois de registrar regras sem antes ter FALADO o resumo em voz alta — registrar e desligar na mesma respiração deixa o dono no silêncio. ` +
       `Não fique trocando despedidas: se o dono só agradecer ou se despedir, isso confirma o encerramento — chame end_session imediatamente.`
     );
   } else {

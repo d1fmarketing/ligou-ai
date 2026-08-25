@@ -28,6 +28,9 @@ export interface SessionLedger {
   continuationWanted?: boolean;
   /** Function calls still executing from the current batch; the continuation waits for all outputs. */
   pendingToolCalls?: number;
+  /** Rules were recorded and the owner has not heard the agent speak since: end_session
+   *  is refused until at least one spoken agent turn follows the last registration. */
+  pendingRecapAfterRecords?: boolean;
   /** The model called end_session: close gracefully after its farewell response finishes. */
   agentEndRequested?: boolean;
   /** The graceful close is already scheduled for the current socket generation. */
@@ -396,7 +399,10 @@ export async function handleEvent(
       if (msg.transcript) ledger.transcript.push({ role: "caller", text: msg.transcript, at: new Date().toISOString() });
       break;
     case "response.output_audio_transcript.done":
-      if (msg.transcript) ledger.transcript.push({ role: "agent", text: msg.transcript, at: new Date().toISOString() });
+      if (msg.transcript) {
+        ledger.transcript.push({ role: "agent", text: msg.transcript, at: new Date().toISOString() });
+        ledger.pendingRecapAfterRecords = false;
+      }
       break;
     case "response.output_item.done": {
       const item = msg.item;
@@ -406,8 +412,24 @@ export async function handleEvent(
         try {
           let args: Record<string, unknown> = {};
           try { args = JSON.parse(item.arguments ?? "{}"); } catch {}
-          const result = await runTool(cap, item.name, args);
+          let result = await runTool(cap, item.name, args);
           if (!isCurrent()) return;
+          // Test-3 defect (call e9d10384): after registering the final rules the model called
+          // end_session in its next response without ever speaking the promised recap, and the
+          // call hung up in silence. State-machine invariant: registering and hanging up must
+          // have a spoken agent turn between them.
+          if (item.name === "end_session" && result.ok && ledger.pendingRecapAfterRecords) {
+            result = {
+              ok: false,
+              body: {
+                error: "recap_required",
+                message: "O dono ainda não ouviu o resumo depois dos últimos registros. Fale AGORA, em voz alta, o resumo completo do que registrou (todos os serviços com preços, mínimos e durações, cidades, horários, emergências e regras), oriente a aprovação na aba Memória, despeça-se e só então chame end_session de novo.",
+              },
+              durationMs: result.durationMs,
+            };
+            console.log(`sideband end_session deferred call=${ledger.callId.slice(0, 8)} (recap required)`);
+          }
+          if (item.name === "record_interview_answer" && result.ok) ledger.pendingRecapAfterRecords = true;
           ledger.toolLog.push({ name: item.name, ok: result.ok, durationMs: result.durationMs });
           if (!isCurrent()) return;
           ws.send(JSON.stringify({

@@ -52,10 +52,10 @@ function sentTypes(ws: { sent: string[] }): string[] {
 // The tool name is deliberately not in the capability's allowlist: runTool fails closed
 // without any database access, and the continuation contract must not depend on the
 // tool's own outcome.
-function functionCallDone(callId: string, name = "not_a_real_tool") {
+function functionCallDone(callId: string, name = "not_a_real_tool", args = "{}") {
   return {
     type: "response.output_item.done",
-    item: { type: "function_call", name, call_id: callId, arguments: "{}" },
+    item: { type: "function_call", name, call_id: callId, arguments: args },
   };
 }
 
@@ -244,6 +244,75 @@ describe("agent-initiated session end (end_session)", () => {
     expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(0);
     expect(l.status).toBe("ended");
     expect(ws.closed).toBe(1);
+  });
+
+  test("end_session is refused until the agent speaks after the last recorded rule (test-3 stall)", async () => {
+    process.env.LIGOU_AGENT_END_GRACE_MS = "40";
+    const RECAP_TENANT = {
+      id: "tenant-1", slug: "recap-plumbing", name: "Recap Plumbing", vertical: "plumbing",
+      languages: ["en"], timezone: "America/Los_Angeles", session_max_minutes: 15,
+      owner_user_id: "u-1", auth_epoch: 1, policy_epoch: 1,
+    };
+    _setClient({
+      from(table: string) {
+        const api: any = {
+          select() { return api; }, eq() { return api; }, insert() { return api; },
+          update() { return api; }, upsert() { return api; },
+          single: async () => (table === "tenants"
+            ? { data: RECAP_TENANT, error: null }
+            : { data: { id: "rule-1" }, error: null }),
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({ data: [], error: null }).then(resolve);
+          },
+        };
+        return api;
+      },
+      rpc() { return Promise.resolve({ data: "reservation-1", error: null }); },
+    } as any);
+    const recapCap = makeCapability("recap-plumbing", "tenant-1", "call-recap", 15, "onboarding", {
+      authEpoch: 1, policyEpoch: 1,
+    });
+    try {
+      const l = ledger();
+      const ws = socket();
+
+      // Final rules land, then the model tries to hang up without speaking the recap.
+      await handleEvent(recapCap, l, ws as any, { type: "response.created" });
+      await handleEvent(recapCap, l, ws as any, functionCallDone("fc_rec", "record_interview_answer",
+        JSON.stringify({ topic: "outro", rule_text: "Never negotiate below approved minimums." })));
+      expect(l.pendingRecapAfterRecords).toBe(true);
+      await handleEvent(recapCap, l, ws as any, { type: "response.done", response: {} });
+      await handleEvent(recapCap, l, ws as any, { type: "response.created" });
+      await handleEvent(recapCap, l, ws as any, functionCallDone("fc_end1", "end_session"));
+      const rejected = JSON.parse(ws.sent.filter((raw) => JSON.parse(raw).type === "conversation.item.create").at(-1)!);
+      expect(JSON.parse(rejected.item.output).error).toBe("recap_required");
+      expect(l.agentEndRequested).toBeUndefined();
+
+      // The refusal prompts a new turn instead of silence (one continuation after the
+      // record, one after the refused end_session).
+      await handleEvent(recapCap, l, ws as any, { type: "response.done", response: {} });
+      expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(2);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      expect(l.status).toBe("active");
+
+      // The agent speaks the recap; a second end_session is now honored.
+      await handleEvent(recapCap, l, ws as any, { type: "response.created" });
+      await handleEvent(recapCap, l, ws as any, {
+        type: "response.output_audio_transcript.done",
+        transcript: "Resumo: desentupimento 225 com mínimo 175… Aprove na aba Memória. Até mais!",
+      });
+      expect(l.pendingRecapAfterRecords).toBe(false);
+      await handleEvent(recapCap, l, ws as any, functionCallDone("fc_end2", "end_session"));
+      expect(l.agentEndRequested).toBe(true);
+      await handleEvent(recapCap, l, ws as any, { type: "response.done", response: {} });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      expect(l.status).toBe("ended");
+      expect(l.agentEnded).toBe(true);
+      expect(ws.closed).toBe(1);
+      expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(2);
+    } finally {
+      _setClient(null);
+    }
   });
 
   test("an agent-ended call still gets the audited provider hangup; a caller hangup does not", async () => {
