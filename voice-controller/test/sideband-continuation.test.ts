@@ -6,7 +6,7 @@
 // handler killed the session. The interview must be self-driving: exactly one
 // continuation, issued only once no response is active, and that provider error must
 // never be terminal.
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { emptyUsage } from "../src/config.ts";
 import { _setClient } from "../src/rules.ts";
 import { attachSideband, handleEvent, liveSessions, persistLedger, type SessionLedger } from "../src/sideband.ts";
@@ -61,6 +61,25 @@ function functionCallDone(callId: string, name = "not_a_real_tool", args = "{}",
 }
 
 const LONG_RECAP = "Resumo completo: desentupimento 225 dólares com mínimo de 175 e uma hora; conserto de vazamento 320 com mínimo 260 e noventa minutos; diagnóstico hidráulico 129 fixo sem desconto. Atendemos Novato, San Rafael e Petaluma, de segunda a sábado das 8 às 18, nunca domingo. Aprove tudo na aba Memória. Até mais!";
+
+afterEach(() => { _setClient(null); });
+
+// The end_session refusal and the recap push both read the persisted snapshot; a fast
+// empty-rules client keeps those paths instant in unit tests.
+function emptyRulesClient() {
+  return {
+    from() {
+      const api: any = {
+        select() { return api; }, eq() { return api; },
+        then(resolve: (value: unknown) => unknown) {
+          return Promise.resolve({ data: [], error: null }).then(resolve);
+        },
+      };
+      return api;
+    },
+    rpc() { return Promise.resolve({ data: null, error: null }); },
+  } as any;
+}
 
 describe("sideband response continuation", () => {
   test("multiple tool calls inside one active response yield exactly one response.create, after response.done", async () => {
@@ -321,6 +340,7 @@ describe("agent-initiated session end (end_session)", () => {
 
   test("a short promise in a later response does not satisfy the recap gate (test-4 replay)", async () => {
     process.env.LIGOU_AGENT_END_GRACE_MS = "40";
+    _setClient(emptyRulesClient());
     const l = ledger();
     const ws = socket();
     // Response A: "vou registrar" ack + the registration itself.
@@ -381,6 +401,7 @@ describe("agent-initiated session end (end_session)", () => {
 
   test("the recap gate is best-effort: after two refusals, or a text turn, end_session is honored", async () => {
     process.env.LIGOU_AGENT_END_GRACE_MS = "40";
+    _setClient(emptyRulesClient());
     // Two refusals cap the guard even when no transcript event ever arrives.
     const l = ledger();
     const ws = socket();
@@ -484,6 +505,7 @@ describe("agent speaks first and the owed recap is pushed", () => {
 
   test("promise-turns while a recap is owed get bounded pushes; user speech cancels the pending push", async () => {
     process.env.LIGOU_RECAP_PUSH_DELAY_MS = "40";
+    _setClient(emptyRulesClient());
     const l = ledger();
     const ws = socket();
     l.pendingRecapAfterRecords = true;
@@ -525,6 +547,134 @@ describe("agent speaks first and the owed recap is pushed", () => {
       type: "response.output_audio_transcript.done", response_id: "resp_final", transcript: LONG_RECAP,
     });
     expect(l.pendingRecapAfterRecords).toBe(false);
+  });
+});
+
+describe("response coordinator invariants (voice-orchestration contract)", () => {
+  const COORD_TENANT = {
+    id: "tenant-1", slug: "coord-plumbing", name: "Coord Plumbing", vertical: "plumbing",
+    languages: ["en"], timezone: "America/Los_Angeles", session_max_minutes: 15,
+    owner_user_id: "u-1", auth_epoch: 1, policy_epoch: 1,
+  };
+  function recordingClient(ruleRows: Array<Record<string, unknown>> = []) {
+    const inserts: Array<Record<string, unknown>> = [];
+    const client = {
+      from(table: string) {
+        const api: any = {
+          select() { return api; }, eq() { return api; },
+          insert(row: any) { inserts.push({ table, ...row }); return api; },
+          update() { return api; }, upsert() { return api; },
+          single: async () => (table === "tenants"
+            ? { data: COORD_TENANT, error: null }
+            : { data: { id: `row-${inserts.length}` }, error: null }),
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({ data: table === "rules" ? ruleRows : [], error: null }).then(resolve);
+          },
+        };
+        return api;
+      },
+      rpc() { return Promise.resolve({ data: "reservation-1", error: null }); },
+    } as any;
+    return { client, inserts };
+  }
+  const coordCap = () => makeCapability("coord-plumbing", "tenant-1", "call-coord", 15, "onboarding", {
+    authEpoch: 1, policyEpoch: 1,
+  });
+
+  test("a duplicated response.output_item.done runs the tool once, sends one output, earns one continuation", async () => {
+    const { client, inserts } = recordingClient();
+    _setClient(client);
+    const c = coordCap();
+    const l = ledger();
+    const ws = socket();
+    const fc = functionCallDone("fc_dup", "record_interview_answer",
+      JSON.stringify({ topic: "outro", rule_text: "Never negotiate below approved minimums." }), "resp_a");
+    await handleEvent(c, l, ws as any, { type: "response.created" });
+    await handleEvent(c, l, ws as any, fc);
+    await handleEvent(c, l, ws as any, fc); // replayed event, same call_id
+    await handleEvent(c, l, ws as any, { type: "response.done", response: {} });
+
+    expect(inserts.filter((row) => row.table === "rules")).toHaveLength(1);
+    const outputs = ws.sent.map((raw) => JSON.parse(raw))
+      .filter((f) => f.type === "conversation.item.create" && f.item?.type === "function_call_output");
+    expect(outputs).toHaveLength(1);
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(1);
+    expect(l.executedToolCallIds).toEqual(["fc_dup"]);
+  });
+
+  test("the forced recap turn injects the persisted snapshot before the response", async () => {
+    process.env.LIGOU_RECAP_PUSH_DELAY_MS = "40";
+    const { client } = recordingClient([
+      { category: "preco", text: "Drain cleaning 225 target, 175 floor.", structured: { service_type: "drain_cleaning", price_min: 175, price_target: 225 } },
+      { category: "area", text: "Serve only Novato, San Rafael, Petaluma.", structured: null },
+    ]);
+    _setClient(client);
+    const l = ledger();
+    const ws = socket();
+    l.pendingRecapAfterRecords = true;
+    l.recapBlockedResponseId = "resp_a";
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const frames = ws.sent.map((raw) => JSON.parse(raw));
+    const snapshotItem = frames.find((f) => f.type === "conversation.item.create" && f.item?.role === "system");
+    expect(snapshotItem).toBeDefined();
+    expect(snapshotItem.item.content[0].text).toContain("DADOS REGISTRADOS NESTA ENTREVISTA");
+    expect(snapshotItem.item.content[0].text).toContain("drain_cleaning");
+    // The snapshot precedes the pushed response.create.
+    const snapIdx = frames.indexOf(snapshotItem);
+    const createIdx = frames.findIndex((f) => f.type === "response.create");
+    expect(createIdx).toBeGreaterThan(snapIdx);
+  });
+
+  test("text-only onboarding: records → owed recap → grounded summary turn → honored close (Layer B)", async () => {
+    process.env.LIGOU_RECAP_PUSH_DELAY_MS = "40";
+    process.env.LIGOU_AGENT_END_GRACE_MS = "40";
+    const { client, inserts } = recordingClient([
+      { category: "preco", text: "Drain cleaning 225/175/60.", structured: { service_type: "drain_cleaning", price_min: 175, price_target: 225, duration_min: 60 } },
+    ]);
+    _setClient(client);
+    const c = coordCap();
+    const l = ledger();
+    const ws = socket();
+
+    // Five topics: each turn registers and continues exactly once.
+    for (let topic = 0; topic < 5; topic += 1) {
+      await handleEvent(c, l, ws as any, { type: "response.created" });
+      await handleEvent(c, l, ws as any, functionCallDone(`fc_t${topic}`, "record_interview_answer",
+        JSON.stringify({ topic: "outro", rule_text: `Rule for topic ${topic}.` }), `resp_t${topic}`));
+      await handleEvent(c, l, ws as any, { type: "response.done", response: {} });
+    }
+    expect(inserts.filter((row) => row.table === "rules")).toHaveLength(5);
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(5);
+    expect(l.pendingRecapAfterRecords).toBe(true);
+
+    // The model idles on a promise: the coordinator forces the grounded summary turn.
+    await handleEvent(c, l, ws as any, { type: "response.created" });
+    await handleEvent(c, l, ws as any, {
+      type: "response.output_audio_transcript.done", response_id: "resp_promise",
+      transcript: "Vou recapitular tudo rapidinho.",
+    });
+    await handleEvent(c, l, ws as any, { type: "response.done", response: {} });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(l.phase).toBe("summarizing");
+
+    // The pushed turn speaks the real summary; the owner approves; the close is honored.
+    await handleEvent(c, l, ws as any, {
+      type: "response.output_audio_transcript.done", response_id: "resp_summary", transcript: LONG_RECAP,
+    });
+    expect(l.pendingRecapAfterRecords).toBe(false);
+    await handleEvent(c, l, ws as any, { type: "response.done", response: {} });
+    await handleEvent(c, l, ws as any, { type: "response.created" });
+    await handleEvent(c, l, ws as any, functionCallDone("fc_end", "end_session", "{}", "resp_end"));
+    expect(l.agentEndRequested).toBe(true);
+    await handleEvent(c, l, ws as any, { type: "response.done", response: {} });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(l.status).toBe("ended");
+    expect(l.agentEnded).toBe(true);
+    expect(l.phase).toBe("closing");
+    expect(ws.closed).toBe(1);
   });
 });
 

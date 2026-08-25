@@ -103,7 +103,16 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
     try {
       const form = new FormData();
       form.set("sdp", sdpOffer);
-      form.set("session", JSON.stringify({ type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto", audio: { output: { voice: config.voice } } }));
+      // One explicit turn-control mode (voice-orchestration contract): semantic VAD with
+      // low eagerness owns ordinary user turns — server-created responses, native
+      // barge-in. The application never creates a response for a normal user turn.
+      form.set("session", JSON.stringify({
+        type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto",
+        audio: {
+          input: { turn_detection: { type: "semantic_vad", eagerness: "low", create_response: true, interrupt_response: true } },
+          output: { voice: config.voice },
+        },
+      }));
       const callRes = await fetch("https://api.openai.com/v1/realtime/calls", {
         method: "POST",
         headers: { Authorization: `Bearer ${config.openaiKey}` },

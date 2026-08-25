@@ -5,6 +5,7 @@ import { runTool, type Capability } from "./tools.ts";
 import { supa } from "./rules.ts";
 import { finalizeTerminalBudget, type BudgetOutcome } from "./budget.ts";
 import { requestProviderTermination, type FetchLike, type ProviderTerminationMode } from "./provider-termination.ts";
+import { admitToolCall, evt, requestResponse, setPhase } from "./response-coordinator.ts";
 
 export interface SessionLedger {
   callId: string;
@@ -45,6 +46,10 @@ export interface SessionLedger {
   recapRefusals?: number;
   /** The initial agent-speaks-first greeting was requested (once per call, ever). */
   greetingRequested?: boolean;
+  /** Provider tool call_ids already executed — the coordinator's exactly-once dedup. */
+  executedToolCallIds?: string[];
+  /** Coarse lifecycle phase for telemetry (greeting/collecting/summarizing/closing/closed). */
+  phase?: string;
   /** Bounded pushes that force the promised recap when the model stalls on
    *  meta-announcements ("vou recapitular") instead of speaking it (E2E test 6). */
   recapPushes?: number;
@@ -179,6 +184,7 @@ export function attachSideband(
     ws = null;
     try { socket?.close(); } catch {}
     console.log(`sideband finalize call=${cap.callId.slice(0, 8)} reason=${reason} status=${ledger.status} tools=${ledger.toolLog.length}`);
+    setPhase(ledger, "closed");
     ledger.status = terminalStatusForReason(ledger.status, reason);
     let persisted = false;
     try {
@@ -245,7 +251,17 @@ export function attachSideband(
     if (!ownsSocket(sock)) return;
     sock.send(JSON.stringify({
       type: "session.update",
-      session: { type: "realtime", audio: { input: { transcription: { model: "gpt-live-transcribe" } } } },
+      // turn_detection is re-asserted here because session.update semantics for nested
+      // audio.input objects are not merge-guaranteed — both sites carry the same config.
+      session: {
+        type: "realtime",
+        audio: {
+          input: {
+            transcription: { model: "gpt-live-transcribe" },
+            turn_detection: { type: "semantic_vad", eagerness: "low", create_response: true, interrupt_response: true },
+          },
+        },
+      },
     }));
     if (!ownsSocket(sock)) return;
     // A fresh socket has no knowledge of a response that was streaming when the previous
@@ -260,14 +276,11 @@ export function attachSideband(
     maybeContinueResponse(ledger, sock);
     maybeScheduleAgentEnd(ledger, sock, () => ownsSocket(sock));
     if (!ownsSocket(sock)) return;
-    if (!options.phone && !ledger.greetingRequested) {
+    if (!options.phone && requestResponse(ledger, sock, "greeting")) {
       // The agent speaks first. Without an initial response.create the realtime session
       // sits in silence until the caller says something (E2E test 6, P0): the browser
       // owner would answer a "connected" call and hear nothing.
-      ledger.greetingRequested = true;
-      sock.send(JSON.stringify({ type: "response.create" }));
-      ledger.responseActive = true;
-      console.log(`sideband greeting call=${cap.callId.slice(0, 8)} (agent speaks first)`);
+      setPhase(ledger, "greeting");
     }
     if (!ownsSocket(sock)) return;
     if (!openedSettled) {
@@ -381,15 +394,41 @@ export function attachSideband(
  *  stalled in production (call ec929149) because a per-item `response.create` raced the
  *  still-active response and the rejection was treated as terminal. */
 function maybeContinueResponse(ledger: SessionLedger, ws: WebSocket) {
-  // Once the agent asked to end the session, the goodbye was its last turn: never
-  // prompt another response, even for late sibling tool outputs.
-  if (ledger.agentEndRequested) return;
-  if (!ledger.continuationWanted || ledger.responseActive || ledger.status !== "active") return;
-  if ((ledger.pendingToolCalls ?? 0) > 0) return;
-  ledger.continuationWanted = false;
-  ledger.responseActive = true;
-  ws.send(JSON.stringify({ type: "response.create" }));
-  console.log(`sideband continue call=${ledger.callId.slice(0, 8)} (response.create after tool output)`);
+  // The coordinator owns eligibility (active response, pending tools, terminal
+  // status, the consumed batch key) — this helper is just the call site.
+  requestResponse(ledger, ws, "tool_continuation");
+}
+
+/** The persisted snapshot of THIS call's registered suggestions: the deterministic
+ *  source for the spoken final summary (never the model's memory of the transcript).
+ *  Sanitized: category + operational text + structured values only. */
+async function fetchCallSnapshot(cap: Capability): Promise<Array<Record<string, unknown>> | null> {
+  // Best-effort grounding: a slow or unavailable read must never stall the voice
+  // lifecycle, so the query races a short deadline and failure degrades to null.
+  try {
+    const query = (async () => {
+      const { data, error } = await supa()
+        .from("rules")
+        .select("category,text,structured")
+        .eq("related_call_id", cap.callId)
+        .eq("status", "sugerido");
+      if (error || !Array.isArray(data) || data.length === 0) return null;
+      return data as Array<Record<string, unknown>>;
+    })();
+    const deadline = new Promise<null>((resolve) => {
+      const t = setTimeout(() => resolve(null), 1_500);
+      (t as any).unref?.();
+    });
+    return await Promise.race([query, deadline]);
+  } catch {
+    return null;
+  }
+}
+
+function snapshotMessage(rows: Array<Record<string, unknown>>): string {
+  const lines = rows.map((r) =>
+    `- [${r.category}] ${String(r.text ?? "").slice(0, 200)}${r.structured ? " " + JSON.stringify(r.structured) : ""}`);
+  return `DADOS REGISTRADOS NESTA ENTREVISTA (fonte oficial — fale o resumo a partir DESTES dados, não da sua memória):\n${lines.join("\n")}`;
 }
 
 /** Agent speech counts toward the recap only when it is substantive and belongs to a
@@ -425,7 +464,8 @@ function maybeScheduleAgentEnd(ledger: SessionLedger, ws: WebSocket, isCurrent: 
     ledger.status = "ended";
     ledger.agentEnded = true;
     ledger.transcript.push({ role: "system", text: "session ended: interview completed by agent (end_session)", at: new Date().toISOString() });
-    console.log(`sideband agent end call=${ledger.callId.slice(0, 8)} (end_session honored)`);
+    setPhase(ledger, "closing");
+    evt("closing.started", { call: ledger.callId.slice(0, 8), reason: "end_session_honored" });
     try { ws.close(); } catch {}
   }, grace);
 }
@@ -463,7 +503,11 @@ export async function handleEvent(
       const item = msg.item;
       if (item?.type === "function_call") {
         if (!isCurrent()) return;
+        // Exactly-once per provider call_id: a duplicated/replayed event must not
+        // re-run persistence, re-send an output or earn a second continuation.
+        if (!admitToolCall(ledger, item.call_id)) break;
         ledger.pendingToolCalls = (ledger.pendingToolCalls ?? 0) + 1;
+        if (ledger.phase === "greeting" || ledger.phase == null) setPhase(ledger, "collecting");
         try {
           let args: Record<string, unknown> = {};
           try { args = JSON.parse(item.arguments ?? "{}"); } catch {}
@@ -476,15 +520,19 @@ export async function handleEvent(
           if (item.name === "end_session" && result.ok && ledger.pendingRecapAfterRecords
             && (ledger.recapRefusals ?? 0) < 2) {
             ledger.recapRefusals = (ledger.recapRefusals ?? 0) + 1;
+            // Ground the demanded summary in the persisted snapshot, not transcript memory.
+            const snapshotRows = await fetchCallSnapshot(cap);
+            if (!isCurrent()) return;
             result = {
               ok: false,
               body: {
                 error: "recap_required",
                 message: "O dono ainda não ouviu o resumo depois dos últimos registros. Fale AGORA, em voz alta, o resumo completo do que registrou (todos os serviços com preços, mínimos e durações, cidades, horários, emergências e regras), oriente a aprovação na aba Memória, despeça-se e só então chame end_session de novo.",
+                ...(snapshotRows ? { registered_rules: snapshotRows } : {}),
               },
               durationMs: result.durationMs,
             };
-            console.log(`sideband end_session deferred call=${ledger.callId.slice(0, 8)} (recap required)`);
+            evt("close.refused", { call: ledger.callId.slice(0, 8), reason: "recap_required", refusals: ledger.recapRefusals });
           }
           if (item.name === "record_interview_answer" && result.ok) {
             ledger.pendingRecapAfterRecords = true;
@@ -498,7 +546,10 @@ export async function handleEvent(
             item: { type: "function_call_output", call_id: item.call_id, output: JSON.stringify(result.body) },
           }));
           if (!isCurrent()) return;
-          console.log(`sideband tool call=${ledger.callId.slice(0, 8)} name=${item.name} ok=${result.ok} response_active=${ledger.responseActive === true}`);
+          evt("tool.completed", {
+            call: ledger.callId.slice(0, 8), name: item.name, ok: result.ok,
+            ms: result.durationMs, response_active: ledger.responseActive === true,
+          });
           if (item.name === "end_session" && result.ok) {
             // The farewell is the last turn: no continuation, close after the response finishes.
             ledger.agentEndRequested = true;
@@ -570,13 +621,26 @@ export async function handleEvent(
         ledger.recapPushes = (ledger.recapPushes ?? 0) + 1;
         ledger.recapPushTimer = setTimeout(() => {
           ledger.recapPushTimer = null;
-          if (!isCurrent() || ledger.status !== "active" || !ledger.pendingRecapAfterRecords
-            || ledger.responseActive || (ledger.pendingToolCalls ?? 0) > 0 || ledger.agentEndRequested) return;
-          console.log(`sideband recap push call=${ledger.callId.slice(0, 8)} n=${ledger.recapPushes}`);
-          try {
-            ws.send(JSON.stringify({ type: "response.create" }));
-            ledger.responseActive = true;
-          } catch { /* socket gone; reattach path re-evaluates */ }
+          void (async () => {
+            const eligible = () => isCurrent() && ledger.status === "active" && ledger.pendingRecapAfterRecords === true
+              && !ledger.responseActive && (ledger.pendingToolCalls ?? 0) === 0 && !ledger.agentEndRequested;
+            if (!eligible()) return;
+            // Deterministic summary: inject the persisted snapshot so the forced turn
+            // reads from the database, then request the response via the coordinator.
+            const snapshotRows = await fetchCallSnapshot(cap);
+            if (!eligible()) return;
+            try {
+              if (snapshotRows) {
+                ws.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: { type: "message", role: "system", content: [{ type: "input_text", text: snapshotMessage(snapshotRows) }] },
+                }));
+              }
+            } catch { return; }
+            evt("summary.requested", { call: ledger.callId.slice(0, 8), push: ledger.recapPushes, snapshot: snapshotRows?.length ?? 0 });
+            setPhase(ledger, "summarizing");
+            requestResponse(ledger, ws, "recap_push");
+          })();
         }, delay);
       }
       break;
