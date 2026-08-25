@@ -362,6 +362,23 @@ describe("agent-initiated session end (end_session)", () => {
     expect(ws.closed).toBe(1);
   });
 
+  test("short utterances across turns never sum into a fake recap", async () => {
+    const l = ledger();
+    const ws = socket();
+    l.pendingRecapAfterRecords = true;
+    l.recapBlockedResponseId = "resp_a";
+    // Three ~80-char turns in three different responses: 240 chars total, none substantive.
+    const chatter = "Só um instante enquanto eu organizo tudo aqui pra você, tá bom? Já volto com o resumo.";
+    for (const rid of ["resp_b", "resp_c", "resp_d"]) {
+      await handleEvent(cap, l, ws as any, { type: "response.output_audio_transcript.done", response_id: rid, transcript: chatter });
+    }
+    expect(l.pendingRecapAfterRecords).toBe(true);
+    // One substantive response (even split across two transcript items) does clear it.
+    await handleEvent(cap, l, ws as any, { type: "response.output_audio_transcript.done", response_id: "resp_e", transcript: LONG_RECAP.slice(0, 150) });
+    await handleEvent(cap, l, ws as any, { type: "response.output_audio_transcript.done", response_id: "resp_e", transcript: LONG_RECAP.slice(150) });
+    expect(l.pendingRecapAfterRecords).toBe(false);
+  });
+
   test("the recap gate is best-effort: after two refusals, or a text turn, end_session is honored", async () => {
     process.env.LIGOU_AGENT_END_GRACE_MS = "40";
     // Two refusals cap the guard even when no transcript event ever arrives.

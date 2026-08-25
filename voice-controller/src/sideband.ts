@@ -34,10 +34,12 @@ export interface SessionLedger {
   /** The response that carried the last registration: its own audio (the "vou registrar"
    *  ack) must not count as the recap. */
   recapBlockedResponseId?: string;
-  /** Agent speech accumulated after the last registration, in characters. Test 4 proved a
-   *  short promise ("vou recapitular… e já encerramos", 66 chars) can precede a bare
-   *  end_session — only substantive speech clears the gate. */
+  /** Agent speech accumulated after the last registration, in characters — within ONE
+   *  response only (short utterances across turns must never sum into a fake recap).
+   *  Test 4 proved a 66-char promise can precede a bare end_session. */
   postRecordSpeechChars?: number;
+  /** The response currently being credited; switching responses resets the credit. */
+  recapCreditResponseId?: string;
   /** How many times end_session was refused for a missing recap. The guard is
    *  best-effort: a broken transcription pipeline must not hold the call hostage. */
   recapRefusals?: number;
@@ -378,9 +380,15 @@ function maybeContinueResponse(ledger: SessionLedger, ws: WebSocket) {
  *  and short promises ("vou recapitular…") never clear the gate. */
 function creditRecapSpeech(ledger: SessionLedger, responseId: unknown, text: string) {
   if (!ledger.pendingRecapAfterRecords) return;
-  if (typeof responseId === "string" && responseId === ledger.recapBlockedResponseId) return;
+  const rid = typeof responseId === "string" ? responseId : "unknown";
+  if (rid === (ledger.recapBlockedResponseId ?? "unknown")) return;
   const raw = Number(process.env.LIGOU_RECAP_MIN_CHARS ?? 200);
   const threshold = Number.isFinite(raw) && raw > 0 ? raw : 200;
+  // The credit is per response: a chain of short turns must never sum into a fake recap.
+  if (ledger.recapCreditResponseId !== rid) {
+    ledger.recapCreditResponseId = rid;
+    ledger.postRecordSpeechChars = 0;
+  }
   ledger.postRecordSpeechChars = (ledger.postRecordSpeechChars ?? 0) + text.length;
   if (ledger.postRecordSpeechChars >= threshold) ledger.pendingRecapAfterRecords = false;
 }
