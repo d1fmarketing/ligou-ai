@@ -88,6 +88,16 @@ export async function runAuthenticatedRlsSuite(options) {
     values
       ('71000000-0000-4000-8000-000000000001', 'edicao_manual', 'geral', 'aprovado', 'geral', 'Alpha rule'),
       ('72000000-0000-4000-8000-000000000001', 'edicao_manual', 'geral', 'aprovado', 'geral', 'Beta rule');
+    insert into public.receipts (tenant_id, call_id, kind, outcome, external_id, readback, payload_hash, detail)
+    values
+      ('71000000-0000-4000-8000-000000000001', '71000000-0000-4000-8000-000000000002',
+       'onboarding_coverage', 'accepted', '${"a".repeat(64)}',
+       '{"schema_version":1,"call_id":"71000000-0000-4000-8000-000000000002","revision":1,"complete":false,"snapshot_digest":"${"c".repeat(64)}","authority":{"rules_approved":false,"powers_granted":false,"operational_mode_changed":false}}'::jsonb,
+       '${"b".repeat(64)}', '{"answer_hash":"${"d".repeat(64)}"}'::jsonb),
+      ('72000000-0000-4000-8000-000000000001', '72000000-0000-4000-8000-000000000002',
+       'onboarding_coverage', 'accepted', '${"e".repeat(64)}',
+       '{"schema_version":1,"call_id":"72000000-0000-4000-8000-000000000002","revision":1,"complete":false,"snapshot_digest":"${"f".repeat(64)}","authority":{"rules_approved":false,"powers_granted":false,"operational_mode_changed":false}}'::jsonb,
+       '${"1".repeat(64)}', '{"answer_hash":"${"2".repeat(64)}"}'::jsonb);
   `);
 
   const signIn = async (email) => {
@@ -115,6 +125,11 @@ export async function runAuthenticatedRlsSuite(options) {
   assert.equal(crossCalls.response.ok, true); assert.deepEqual(crossCalls.body, []); checks++;
   const ownCalls = await rest(tokenA, "/rest/v1/calls?select=id&tenant_id=eq.71000000-0000-4000-8000-000000000001");
   assert.equal(ownCalls.response.ok, true); assert.equal(ownCalls.body.length, 1); checks++;
+  const ownReceipts = await rest(tokenA, "/rest/v1/receipts?select=tenant_id,kind&order=tenant_id");
+  assert.equal(ownReceipts.response.ok, true);
+  assert.deepEqual(ownReceipts.body, [{ tenant_id: "71000000-0000-4000-8000-000000000001", kind: "onboarding_coverage" }]);
+  const crossReceipts = await rest(tokenA, "/rest/v1/receipts?select=id&tenant_id=eq.72000000-0000-4000-8000-000000000001");
+  assert.equal(crossReceipts.response.ok, true); assert.deepEqual(crossReceipts.body, []);
   const crossRules = await rest(tokenB, "/rest/v1/effective_rules?select=id&tenant_id=eq.71000000-0000-4000-8000-000000000001");
   assert.equal(crossRules.response.ok, true); assert.deepEqual(crossRules.body, []); checks++;
   const ownRules = await rest(tokenB, "/rest/v1/effective_rules?select=id&tenant_id=eq.72000000-0000-4000-8000-000000000001");
@@ -129,6 +144,34 @@ export async function runAuthenticatedRlsSuite(options) {
     method: "POST", body: JSON.stringify({ p_tenant: "72000000-0000-4000-8000-000000000001" }),
   });
   assert.equal(crossStatus.response.ok, false); checks++;
+
+  for (const [rpc, body] of [
+    ["record_onboarding_answer", {
+      p_tenant: "71000000-0000-4000-8000-000000000001",
+      p_call: "71000000-0000-4000-8000-000000000002",
+      p_owner: userA,
+      p_provider_tool_call_id: "forbidden-tool",
+      p_event_key: "0".repeat(64),
+      p_answer_hash: "1".repeat(64),
+      p_expected_revision: 0,
+      p_fact: {},
+      p_rule_group_id: null,
+      p_coverage: {},
+    }],
+    ["record_onboarding_voice_approval", {
+      p_tenant: "71000000-0000-4000-8000-000000000001",
+      p_call: "71000000-0000-4000-8000-000000000002",
+      p_owner: userA,
+      p_provider_tool_call_id: "forbidden-approval",
+      p_event_key: "2".repeat(64),
+      p_expected_revision: 1,
+      p_expected_digest: "3".repeat(64),
+      p_owner_words: "Aprovado.",
+    }],
+  ]) {
+    const denied = await rest(tokenA, `/rest/v1/rpc/${rpc}`, { method: "POST", body: JSON.stringify(body) });
+    assert.equal(denied.response.ok, false, `authenticated must not execute ${rpc}`);
+  }
 
   // --- V0.2 M1 owner tenant bootstrap + custody surface ---
   const anonBootstrap = await jsonRequest(`${env.apiUrl}/rest/v1/rpc/ensure_owner_tenant`, {
@@ -227,6 +270,23 @@ export async function runAuthenticatedRlsSuite(options) {
     method: "POST", body: JSON.stringify({ p_rule: suggestedA, p_decision: "aprovado" }),
   });
   assert.equal(decideAgain.response.ok, false, "a decided suggestion cannot be decided twice"); checks++;
+
+  const correctedGroup = randomUUID();
+  const correctedOld = randomUUID();
+  const correctedLatest = randomUUID();
+  psql(env, `
+    insert into public.rules (id, tenant_id, rule_group_id, version, origem, escopo, status, category, text)
+    values
+      ('${correctedOld}', '${bootTenantA}', '${correctedGroup}', 1, 'onboarding', 'geral', 'sugerido', 'agenda', 'Old answer'),
+      ('${correctedLatest}', '${bootTenantA}', '${correctedGroup}', 2, 'onboarding', 'geral', 'sugerido', 'agenda', 'Corrected answer');`);
+  const staleDecision = await rest(tokenA, "/rest/v1/rpc/decide_rule", {
+    method: "POST", body: JSON.stringify({ p_rule: correctedOld, p_decision: "aprovado" }),
+  });
+  assert.equal(staleDecision.response.ok, false, "a corrected-away suggested version must fail closed");
+  const latestDecision = await rest(tokenA, "/rest/v1/rpc/decide_rule", {
+    method: "POST", body: JSON.stringify({ p_rule: correctedLatest, p_decision: "aprovado" }),
+  });
+  assert.equal(latestDecision.response.ok, true, `latest corrected suggestion failed: ${latestDecision.safeError()}`);
 
   return { suite: "authenticated-rest-rls-bola", tests: checks, passed: checks };
 }

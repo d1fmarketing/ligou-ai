@@ -812,3 +812,67 @@ describe("unapplied Task 4 receipt migration boundary contract", () => {
     expect(sql).not.toContain("delete from public.receipts");
   });
 });
+
+describe("onboarding coverage receipt migration contract", () => {
+  test("adds append-only coverage and voice acknowledgement receipts without a parallel state table", () => {
+    const sql = migrationSql("onboarding_coverage_receipts");
+
+    expect(sql).toContain("onboarding_coverage");
+    expect(sql).toContain("onboarding_voice_approval");
+    expect(sql).toContain("receipts_onboarding_event_key_unique");
+    expect(sql).toContain("receipts_onboarding_coverage_revision_unique");
+    expect(sql).toContain("receipts_onboarding_answer_hash_unique");
+    expect(sql).toContain("receipts_onboarding_approval_snapshot_unique");
+    expect(sql).toContain("receipts_onboarding_shape_check");
+    expect(sql).not.toContain("create table public.onboarding");
+  });
+
+  test("records controller coverage atomically through a service-role-only definer RPC", () => {
+    const sql = migrationSql("onboarding_coverage_receipts");
+
+    expect(sql).toContain("function public.record_onboarding_answer");
+    expect(sql).toContain("p_expected_revision integer");
+    expect(sql).toContain("p_coverage jsonb");
+    expect(sql).toContain("security definer set search_path = ''");
+    expect(sql).toContain("current_setting('request.jwt.claim.role', true)");
+    expect(sql).toContain("pg_advisory_xact_lock(hashtextextended(");
+    expect(sql).toContain("'ligou.v0_2.onboarding:' || p_tenant::text || ':' || p_call::text");
+    expect(sql).toContain("for update of c, t, br");
+    expect(sql.indexOf("pg_advisory_xact_lock(hashtextextended(")).toBeLessThan(sql.indexOf("select br.id into v_request_id"));
+    expect(sql).toContain("revoke all on function public.record_onboarding_answer");
+    expect(sql).toContain("from public, anon, authenticated");
+    expect(sql).toContain("grant execute on function public.record_onboarding_answer");
+    expect(sql).toContain("to service_role");
+  });
+
+  test("records voice acknowledgement without changing authority or operational state", () => {
+    const sql = migrationSql("onboarding_coverage_receipts");
+    const start = sql.indexOf("create or replace function public.record_onboarding_voice_approval");
+    const end = sql.indexOf("revoke all on function public.record_onboarding_voice_approval", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const approval = sql.slice(start, end);
+
+    expect(approval).toContain("security definer set search_path = ''");
+    expect(approval).toContain("onboarding_voice_approval");
+    expect(approval).toContain("for update of c, t, br");
+    expect(approval.indexOf("pg_advisory_xact_lock(hashtextextended(")).toBeLessThan(approval.indexOf("select br.id into v_request_id"));
+    expect(approval).not.toContain("decide_rule");
+    expect(approval).not.toContain("grant_power");
+    expect(approval).not.toContain("update public.tenants");
+    expect(approval).not.toContain("insert into public.bookings");
+    expect(approval).not.toContain("update public.bookings");
+    expect(approval).not.toContain("insert into public.action_intents");
+    expect(approval).not.toContain("update public.action_intents");
+    expect(sql).toContain("revoke all on function public.record_onboarding_voice_approval");
+    expect(sql).toContain("grant execute on function public.record_onboarding_voice_approval");
+  });
+
+  test("prevents approving a corrected-away suggested rule", () => {
+    const sql = migrationSql("onboarding_coverage_receipts");
+    expect(sql).toContain("create or replace function public.decide_rule");
+    expect(sql).toContain("stale_rule_version");
+    expect(sql).toContain("r.rule_group_id = v_rule.rule_group_id");
+    expect(sql).toContain("r.version > v_rule.version");
+  });
+});

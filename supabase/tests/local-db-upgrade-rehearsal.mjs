@@ -328,6 +328,18 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
 
     assert.equal(successful(await runPsql(connection, home, `
       select
+        (select count(*) = 1 from public.receipts where id = '60000000-0000-4000-8000-000000000005')::text || ':' ||
+        (select pg_get_constraintdef(oid) like '%onboarding_coverage%onboarding_voice_approval%'
+          from pg_constraint where conrelid = 'public.receipts'::regclass and conname = 'receipts_kind_check')::text || ':' ||
+        (to_regprocedure('public.record_onboarding_answer(uuid,uuid,uuid,text,text,text,integer,jsonb,uuid,jsonb)') is not null)::text || ':' ||
+        (to_regprocedure('public.record_onboarding_voice_approval(uuid,uuid,uuid,text,text,integer,text,text)') is not null)::text || ':' ||
+        (select convalidated from pg_constraint
+          where conrelid = 'public.receipts'::regclass and conname = 'receipts_onboarding_shape_check')::text;
+    `), "onboarding receipt forward-upgrade proof", connection.password).trim(), "true:true:true:true:true");
+    assertions += 1;
+
+    assert.equal(successful(await runPsql(connection, home, `
+      select
         (select call_id = '60000000-0000-4000-8000-000000000110'::uuid from public.phone_events where id = '60000000-0000-4000-8000-000000000120')::text || ':' ||
         (select phone_event_id = '60000000-0000-4000-8000-000000000120'::uuid from public.calls where id = '60000000-0000-4000-8000-000000000110')::text || ':' ||
         (select call_id = '60000000-0000-4000-8000-000000000111'::uuid from public.phone_events where id = '60000000-0000-4000-8000-000000000121')::text || ':' ||

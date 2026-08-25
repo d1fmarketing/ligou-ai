@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -122,6 +123,100 @@ end $$;
 ${statement}
 commit;
 `;
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function onboardingEventKey(kind, tenantId, callId, providerToolCallId) {
+  return sha256(`ligou.v0_2.${kind}:v1:${tenantId}:${callId}:${providerToolCallId}`);
+}
+
+function jsonb(value) {
+  return `$json$${JSON.stringify(value)}$json$::jsonb`;
+}
+
+function coverageSnapshot(tenantId, callId, revision, complete) {
+  return {
+    schema_version: 1,
+    tenant_id: tenantId,
+    call_id: callId,
+    revision,
+    complete,
+    snapshot: {
+      tenantId,
+      callId,
+      revision,
+      services: [],
+      cells: {},
+      followUps: 0,
+      followUpGroups: {},
+      summaryInvalidated: true,
+    },
+    progress: {
+      missingRequired: complete ? [] : [{ field: "area.coverage" }],
+      ambiguous: [],
+    },
+    selected_rule_ids: [],
+    next_action: complete
+      ? { type: "prepare_summary" }
+      : { type: "ask", field: "area.coverage", question_pt: "Qual é a área atendida?" },
+    authority: {
+      rules_approved: false,
+      powers_granted: false,
+      operational_mode_changed: false,
+    },
+  };
+}
+
+function onboardingFact(field, ruleText, ownerWords) {
+  return {
+    topic: "outro",
+    field,
+    subject: null,
+    disposition: "answered",
+    rule_text: ruleText,
+    structured: { value: ownerWords },
+    owner_words: ownerWords,
+  };
+}
+
+function onboardingAnswerSql({
+  tenantId, callId, ownerId, providerToolCallId, answerHash, expectedRevision,
+  fact, coverage, eventKey = onboardingEventKey("onboarding_answer", tenantId, callId, providerToolCallId),
+  ruleGroupId = null,
+}) {
+  return `select public.record_onboarding_answer(
+    '${tenantId}', '${callId}', '${ownerId}', '${providerToolCallId}', '${eventKey}', '${answerHash}',
+    ${expectedRevision}, ${jsonb(fact)}, ${ruleGroupId ? `'${ruleGroupId}'::uuid` : "null::uuid"}, ${jsonb(coverage)}
+  )::text;`;
+}
+
+function onboardingApprovalSql({
+  tenantId, callId, ownerId, providerToolCallId, expectedRevision, expectedDigest, ownerWords,
+  eventKey = onboardingEventKey("onboarding_voice_approval", tenantId, callId, providerToolCallId),
+}) {
+  return `select public.record_onboarding_voice_approval(
+    '${tenantId}', '${callId}', '${ownerId}', '${providerToolCallId}', '${eventKey}',
+    ${expectedRevision}, '${expectedDigest}', '${ownerWords.replaceAll("'", "''")}'
+  )::text;`;
+}
+
+async function waitForOnboardingAdvisoryBlock(connection, home, queryMarker) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const waiting = scalar(await runSql(connection, home, `
+      select count(*)::text
+      from pg_stat_activity
+      where datname = current_database()
+        and query like '%${queryMarker}%'
+        and wait_event_type = 'Lock'
+        and wait_event = 'advisory';
+    `), "onboarding advisory wait probe");
+    if (waiting === "1") return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`onboarding RPC did not block on advisory lock: ${queryMarker}`);
 }
 
 const slot = {
@@ -641,6 +736,283 @@ commit;
   `), "bootstrap race invariant"), "1:1:1:onboarding:simulation_only");
 }
 
+async function onboardingReceiptSecurityAndIdempotency(connection, home) {
+  const ids = {
+    owner: "80000000-0000-4000-8000-000000000001",
+    otherOwner: "80000000-0000-4000-8000-000000000002",
+    tenant: "80000000-0000-4000-8000-000000000010",
+    otherTenant: "80000000-0000-4000-8000-000000000011",
+    liveTenant: "80000000-0000-4000-8000-000000000012",
+    call: "80000000-0000-4000-8000-000000000020",
+    nonOnboardingCall: "80000000-0000-4000-8000-000000000021",
+    terminalCall: "80000000-0000-4000-8000-000000000022",
+    liveCall: "80000000-0000-4000-8000-000000000023",
+  };
+  requireSuccess(await runSql(connection, home, `
+    insert into auth.users (id, email) values
+      ('${ids.owner}', 'onboarding-owner@example.invalid'),
+      ('${ids.otherOwner}', 'onboarding-other@example.invalid');
+    insert into public.tenants (id, slug, name, owner_user_id, status, operational_mode) values
+      ('${ids.tenant}', 'synthetic-onboarding-receipts', 'Synthetic Onboarding Receipts', '${ids.owner}', 'onboarding', 'simulation_only'),
+      ('${ids.otherTenant}', 'synthetic-onboarding-other', 'Synthetic Onboarding Other', '${ids.otherOwner}', 'onboarding', 'simulation_only'),
+      ('${ids.liveTenant}', 'synthetic-onboarding-live', 'Synthetic Onboarding Live', '${ids.owner}', 'onboarding', 'live');
+    insert into public.calls (id, tenant_id, channel, session_type, status) values
+      ('${ids.call}', '${ids.tenant}', 'browser', 'onboarding', 'active'),
+      ('${ids.nonOnboardingCall}', '${ids.tenant}', 'browser', 'owner_browser', 'active'),
+      ('${ids.terminalCall}', '${ids.tenant}', 'browser', 'onboarding', 'ended'),
+      ('${ids.liveCall}', '${ids.liveTenant}', 'browser', 'onboarding', 'active');
+    insert into public.browser_session_requests
+      (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp, call_id, handled_at)
+    values
+      ('${ids.tenant}', '${ids.owner}', 'onboarding', 'offer-valid', 'ready', 'answer-valid', '${ids.call}', now()),
+      ('${ids.tenant}', '${ids.owner}', 'owner_browser', 'offer-owner', 'ready', 'answer-owner', '${ids.nonOnboardingCall}', now()),
+      ('${ids.tenant}', '${ids.owner}', 'onboarding', 'offer-terminal', 'ready', 'answer-terminal', '${ids.terminalCall}', now()),
+      ('${ids.liveTenant}', '${ids.owner}', 'onboarding', 'offer-live', 'ready', 'answer-live', '${ids.liveCall}', now());
+  `), "onboarding receipt fixture");
+
+  const factOne = onboardingFact("business.customer_types", "Atender clientes residenciais.", "Atendemos residenciais.");
+  const hashOne = sha256(JSON.stringify(factOne));
+  const answerOne = {
+    tenantId: ids.tenant,
+    callId: ids.call,
+    ownerId: ids.owner,
+    providerToolCallId: "tool-answer-one",
+    answerHash: hashOne,
+    expectedRevision: 0,
+    fact: factOne,
+    coverage: coverageSnapshot(ids.tenant, ids.call, 1, false),
+  };
+  const first = JSON.parse(scalar(await runSql(connection, home, serviceTransaction(onboardingAnswerSql(answerOne))), "first onboarding answer"));
+  assert.equal(first.status, "recorded");
+  assert.equal(first.revision, 1);
+  assert.equal(first.complete, false);
+  const replay = JSON.parse(scalar(await runSql(connection, home, serviceTransaction(onboardingAnswerSql(answerOne))), "exact onboarding replay"));
+  assert.equal(replay.status, "reused");
+  assert.equal(replay.rule_id, first.rule_id);
+  assert.equal(replay.coverage_receipt_id, first.coverage_receipt_id);
+
+  const mismatch = await runSql(connection, home, serviceTransaction(onboardingAnswerSql({
+    ...answerOne,
+    fact: { ...factOne, rule_text: "Changed payload under the same provider event." },
+  })));
+  assert.notEqual(mismatch.code, 0);
+  assert.match(mismatch.stderr, /onboarding_event_payload_mismatch/);
+
+  const semantic = JSON.parse(scalar(await runSql(connection, home, serviceTransaction(onboardingAnswerSql({
+    ...answerOne,
+    providerToolCallId: "tool-answer-semantic-replay",
+    expectedRevision: 1,
+    coverage: coverageSnapshot(ids.tenant, ids.call, 2, false),
+  }))), "semantic onboarding replay"));
+  assert.equal(semantic.status, "reused");
+  assert.equal(semantic.rule_id, first.rule_id);
+  assert.equal(semantic.coverage_receipt_id, first.coverage_receipt_id);
+
+  const keyMismatchFact = onboardingFact("business.excluded_work", "Não atender telhados.", "Não fazemos telhados.");
+  const keyMismatch = await runSql(connection, home, serviceTransaction(onboardingAnswerSql({
+    ...answerOne,
+    providerToolCallId: "tool-answer-key-mismatch",
+    eventKey: "0".repeat(64),
+    answerHash: sha256(JSON.stringify(keyMismatchFact)),
+    expectedRevision: 1,
+    fact: keyMismatchFact,
+    coverage: coverageSnapshot(ids.tenant, ids.call, 2, false),
+  })));
+  assert.notEqual(keyMismatch.code, 0);
+  assert.match(keyMismatch.stderr, /onboarding_event_key_mismatch/);
+
+  const incompleteApproval = await runSql(connection, home, serviceTransaction(onboardingApprovalSql({
+    tenantId: ids.tenant,
+    callId: ids.call,
+    ownerId: ids.owner,
+    providerToolCallId: "approval-incomplete",
+    expectedRevision: 1,
+    expectedDigest: first.snapshot_digest,
+    ownerWords: "Aprovado.",
+  })));
+  assert.notEqual(incompleteApproval.code, 0);
+  assert.match(incompleteApproval.stderr, /onboarding_coverage_incomplete/);
+
+  const factTwo = onboardingFact("area.coverage", "Atender somente Irvine.", "Irvine.");
+  const answerTwo = {
+    tenantId: ids.tenant,
+    callId: ids.call,
+    ownerId: ids.owner,
+    providerToolCallId: "tool-answer-two",
+    answerHash: sha256(JSON.stringify(factTwo)),
+    expectedRevision: 1,
+    fact: factTwo,
+    ruleGroupId: first.rule_group_id,
+    coverage: coverageSnapshot(ids.tenant, ids.call, 2, true),
+  };
+  const complete = JSON.parse(scalar(await runSql(connection, home, serviceTransaction(onboardingAnswerSql(answerTwo))), "complete onboarding answer"));
+  assert.equal(complete.revision, 2);
+  assert.equal(complete.complete, true);
+
+  const digestMismatch = await runSql(connection, home, serviceTransaction(onboardingApprovalSql({
+    tenantId: ids.tenant,
+    callId: ids.call,
+    ownerId: ids.owner,
+    providerToolCallId: "approval-digest-mismatch",
+    expectedRevision: 2,
+    expectedDigest: "0".repeat(64),
+    ownerWords: "Aprovado.",
+  })));
+  assert.notEqual(digestMismatch.code, 0);
+  assert.match(digestMismatch.stderr, /onboarding_snapshot_changed/);
+
+  for (const invalid of [
+    { label: "cross tenant", tenantId: ids.otherTenant, callId: ids.call, ownerId: ids.otherOwner },
+    { label: "wrong owner request", tenantId: ids.tenant, callId: ids.call, ownerId: ids.otherOwner },
+    { label: "non-onboarding", tenantId: ids.tenant, callId: ids.nonOnboardingCall, ownerId: ids.owner },
+    { label: "terminal call", tenantId: ids.tenant, callId: ids.terminalCall, ownerId: ids.owner },
+    { label: "live tenant", tenantId: ids.liveTenant, callId: ids.liveCall, ownerId: ids.owner },
+  ]) {
+    const fact = onboardingFact("business.excluded_work", `Rejected ${invalid.label}.`, "Nada.");
+    const failed = await runSql(connection, home, serviceTransaction(onboardingAnswerSql({
+      ...invalid,
+      providerToolCallId: `invalid-${invalid.label.replaceAll(" ", "-")}`,
+      answerHash: sha256(JSON.stringify(fact)),
+      expectedRevision: 0,
+      fact,
+      coverage: coverageSnapshot(invalid.tenantId, invalid.callId, 1, false),
+    })));
+    assert.notEqual(failed.code, 0, `${invalid.label} onboarding answer must fail`);
+    assert.match(failed.stderr, /onboarding_call_not_owner_bound/);
+  }
+
+  const [approvalA, approvalB] = await Promise.all([
+    runSql(connection, home, serviceTransaction(onboardingApprovalSql({
+      tenantId: ids.tenant, callId: ids.call, ownerId: ids.owner,
+      providerToolCallId: "approval-concurrent-a", expectedRevision: 2,
+      expectedDigest: complete.snapshot_digest, ownerWords: "Sim, está aprovado.",
+    }))),
+    runSql(connection, home, serviceTransaction(onboardingApprovalSql({
+      tenantId: ids.tenant, callId: ids.call, ownerId: ids.owner,
+      providerToolCallId: "approval-concurrent-b", expectedRevision: 2,
+      expectedDigest: complete.snapshot_digest, ownerWords: "Aprovo esse resumo.",
+    }))),
+  ]);
+  const approvals = [
+    JSON.parse(scalar(approvalA, "first concurrent voice approval")),
+    JSON.parse(scalar(approvalB, "second concurrent voice approval")),
+  ];
+  assert.equal(approvals[0].approval_receipt_id, approvals[1].approval_receipt_id);
+  assert.deepEqual(approvals.map((item) => item.status).sort(), ["recorded", "reused"]);
+
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (select count(*) from public.rules where tenant_id = '${ids.tenant}' and status = 'sugerido')::text || ':' ||
+      (select count(distinct rule_group_id) from public.rules where tenant_id = '${ids.tenant}')::text || ':' ||
+      (select count(*) from public.receipts where tenant_id = '${ids.tenant}' and kind = 'onboarding_coverage')::text || ':' ||
+      (select count(*) from public.receipts where tenant_id = '${ids.tenant}' and kind = 'onboarding_voice_approval')::text || ':' ||
+      (select count(*) from public.effective_rules where tenant_id = '${ids.tenant}')::text || ':' ||
+      (select count(*) from public.powers where tenant_id = '${ids.tenant}')::text || ':' ||
+      (select auth_epoch::text || '/' || policy_epoch::text || '/' || operational_mode from public.tenants where id = '${ids.tenant}') || ':' ||
+      (select count(*) from public.bookings where tenant_id = '${ids.tenant}')::text || ':' ||
+      (select count(*) from public.action_intents where tenant_id = '${ids.tenant}')::text
+  `), "onboarding no-authority invariant"), "2:1:2:1:0:0:1/1/simulation_only:0:0");
+
+  const approvalLock = startSql(connection, home, `
+    begin;
+    select pg_advisory_xact_lock(hashtextextended('ligou.v0_2.onboarding:${ids.tenant}:${ids.call}', 0));
+    select 'APPROVAL_TERMINAL_RACE_LOCK_HELD';
+    select pg_sleep(1.5);
+    commit;
+  `);
+  await approvalLock.waitFor("APPROVAL_TERMINAL_RACE_LOCK_HELD");
+  const racedApproval = startSql(connection, home, serviceTransaction(onboardingApprovalSql({
+    tenantId: ids.tenant, callId: ids.call, ownerId: ids.owner,
+    providerToolCallId: "approval-terminal-race", expectedRevision: 2,
+    expectedDigest: complete.snapshot_digest, ownerWords: "Aprovo durante o encerramento.",
+  })));
+  await waitForOnboardingAdvisoryBlock(connection, home, "approval-terminal-race");
+  requireSuccess(await runSql(connection, home, `
+    update public.calls set status = 'ended', ended_at = now() where id = '${ids.call}';
+  `), "approval terminal transition");
+  const [approvalLockResult, racedApprovalResult] = await Promise.all([approvalLock.done, racedApproval.done]);
+  requireSuccess(approvalLockResult, "approval terminal race lock");
+
+  requireSuccess(await runSql(connection, home, `
+    update public.calls set status = 'active', ended_at = null where id = '${ids.call}';
+  `), "answer terminal race reset");
+  const answerLock = startSql(connection, home, `
+    begin;
+    select pg_advisory_xact_lock(hashtextextended('ligou.v0_2.onboarding:${ids.tenant}:${ids.call}', 0));
+    select 'ANSWER_TERMINAL_RACE_LOCK_HELD';
+    select pg_sleep(1.5);
+    commit;
+  `);
+  await answerLock.waitFor("ANSWER_TERMINAL_RACE_LOCK_HELD");
+  const terminalFact = onboardingFact("schedule.holidays", "Encaminhar feriados ao dono.", "Vamos revisar feriados.");
+  const racedAnswer = startSql(connection, home, serviceTransaction(onboardingAnswerSql({
+    tenantId: ids.tenant, callId: ids.call, ownerId: ids.owner,
+    providerToolCallId: "answer-terminal-race", answerHash: sha256(JSON.stringify(terminalFact)),
+    expectedRevision: 2, fact: terminalFact, ruleGroupId: first.rule_group_id,
+    coverage: coverageSnapshot(ids.tenant, ids.call, 3, true),
+  })));
+  await waitForOnboardingAdvisoryBlock(connection, home, "answer-terminal-race");
+  requireSuccess(await runSql(connection, home, `
+    update public.calls set status = 'ended', ended_at = now() where id = '${ids.call}';
+  `), "answer terminal transition");
+  const [answerLockResult, racedAnswerResult] = await Promise.all([answerLock.done, racedAnswer.done]);
+  requireSuccess(answerLockResult, "answer terminal race lock");
+
+  assert.notEqual(racedApprovalResult.code, 0, "approval must recheck active onboarding after waiting for its call lock");
+  assert.match(racedApprovalResult.stderr, /onboarding_call_not_owner_bound/);
+  assert.notEqual(racedAnswerResult.code, 0, "answer must recheck active onboarding after waiting for its call lock");
+  assert.match(racedAnswerResult.stderr, /onboarding_call_not_owner_bound/);
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (select count(*) from public.rules where tenant_id = '${ids.tenant}')::text || ':' ||
+      (select count(*) from public.receipts where tenant_id = '${ids.tenant}' and kind = 'onboarding_coverage')::text || ':' ||
+      (select count(*) from public.receipts where tenant_id = '${ids.tenant}' and kind = 'onboarding_voice_approval')::text;
+  `), "terminal-race rollback invariant"), "2:2:1");
+}
+
+async function concurrentOnboardingAnswerRevisions(connection, home) {
+  const owner = "81000000-0000-4000-8000-000000000001";
+  const tenant = "81000000-0000-4000-8000-000000000010";
+  const call = "81000000-0000-4000-8000-000000000020";
+  requireSuccess(await runSql(connection, home, `
+    insert into auth.users (id, email) values ('${owner}', 'onboarding-race@example.invalid');
+    insert into public.tenants (id, slug, name, owner_user_id, status, operational_mode)
+    values ('${tenant}', 'synthetic-onboarding-race', 'Synthetic Onboarding Race', '${owner}', 'onboarding', 'simulation_only');
+    insert into public.calls (id, tenant_id, channel, session_type, status)
+    values ('${call}', '${tenant}', 'browser', 'onboarding', 'active');
+    insert into public.browser_session_requests
+      (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp, call_id, handled_at)
+    values ('${tenant}', '${owner}', 'onboarding', 'offer-race', 'ready', 'answer-race', '${call}', now());
+  `), "concurrent onboarding fixture");
+  const firstFact = onboardingFact("business.customer_types", "Atender residenciais.", "Residenciais.");
+  const secondFact = onboardingFact("area.coverage", "Atender Irvine.", "Irvine.");
+  const first = startSql(connection, home, serviceTransaction(`
+    ${onboardingAnswerSql({
+      tenantId: tenant, callId: call, ownerId: owner, providerToolCallId: "race-answer-one",
+      answerHash: sha256(JSON.stringify(firstFact)), expectedRevision: 0, fact: firstFact,
+      coverage: coverageSnapshot(tenant, call, 1, false),
+    })}
+    select 'ONBOARDING_LOCK_HELD';
+    select pg_sleep(0.75);
+  `));
+  await first.waitFor("ONBOARDING_LOCK_HELD");
+  const secondStartedAt = Date.now();
+  const second = runSql(connection, home, serviceTransaction(onboardingAnswerSql({
+    tenantId: tenant, callId: call, ownerId: owner, providerToolCallId: "race-answer-two",
+    answerHash: sha256(JSON.stringify(secondFact)), expectedRevision: 1, fact: secondFact,
+    coverage: coverageSnapshot(tenant, call, 2, true),
+  })));
+  const [firstResult, secondResult] = await Promise.all([first.done, second]);
+  requireSuccess(firstResult, "first serialized onboarding answer");
+  requireSuccess(secondResult, "second serialized onboarding answer");
+  assert.ok(Date.now() - secondStartedAt >= 500, "the second onboarding answer must wait on the shared call lock");
+  assert.equal(scalar(await runSql(connection, home, `
+    select count(*)::text || ':' || min((readback->>'revision')::int)::text || ':' || max((readback->>'revision')::int)::text || ':' ||
+      (select count(*) from public.rules where tenant_id = '${tenant}')::text
+    from public.receipts where tenant_id = '${tenant}' and call_id = '${call}' and kind = 'onboarding_coverage'
+  `), "serialized onboarding revision invariant"), "2:1:2:2");
+}
+
 export async function runConcurrencySuite(env = process.env) {
   const connection = connectionFromEnvironment(env);
   const isolatedHome = await mkdtemp(path.join(os.tmpdir(), "ligou-rc1-psql-home-"));
@@ -656,6 +1028,8 @@ export async function runConcurrencySuite(env = process.env) {
     ["concurrent owner bootstrap single tenant", concurrentOwnerBootstrap],
     ["handoff intent double-consume", handoffIntentDoubleConsume],
     ["booking-delivery transaction rollback", bookingDeliveryRollback],
+    ["onboarding receipt security and idempotency", onboardingReceiptSecurityAndIdempotency],
+    ["concurrent onboarding answer revisions", concurrentOnboardingAnswerRevisions],
   ];
   try {
     for (const [, test] of tests) await test(connection, isolatedHome);
