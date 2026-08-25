@@ -822,7 +822,8 @@ export function buildSummaryAnchors(snapshot: CoverageSnapshot): string[] {
         value.mode === "non_negotiable"
       )
         anchors.push("Mínimo: não negociável");
-    }
+    } else if (negotiation?.state === "owner_review_required")
+      anchors.push(`Negociação: ${negotiation.safeRestriction}`);
     if (duration) anchors.push(`Duração: ${duration} minutos`);
   }
   const area = valueFor(snapshot, "area.coverage");

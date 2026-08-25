@@ -1025,6 +1025,9 @@ describe("onboarding coverage", () => {
       field: "service.negotiation",
       subject: "consulta",
     });
+    expect(buildSummaryAnchors(snapshot)).toContain(
+      "Negociação: Não executar nem confirmar negociação do serviço autonomamente; encaminhar a decisão ao dono.",
+    );
     expect(buildSummaryAnchors(snapshot).join("\n")).not.toMatch(
       /não negociável/i,
     );
