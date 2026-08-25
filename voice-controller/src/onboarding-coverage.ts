@@ -531,6 +531,28 @@ function applyOne(
       ? { state: "not_applicable", attempts }
       : missing(attempts);
   else if (fact.disposition !== "answered") cell = missing(attempts);
+  else if (
+    fact.field === "service.negotiation" &&
+    fact.value === "owner_review"
+  )
+    cell =
+      fact.ownerWords.trim().length > 0
+        ? {
+            state: "owner_review_required",
+            attempts,
+            safeRestriction: safeRestrictionFor(fact.field),
+          }
+        : missing(attempts);
+  else if (
+    fact.field === "service.negotiation" &&
+    fact.value === "non_negotiable" &&
+    fact.ownerWords.trim().length === 0
+  )
+    cell = {
+      state: "ambiguous",
+      attempts,
+      reason: "non_negotiable_requires_owner_words",
+    };
   else {
     const error = validAnswer(
       fact.field,
@@ -721,6 +743,24 @@ export function canonicalCoverage(snapshot: CoverageSnapshot): string {
     }),
   );
 }
+function scalarKeyOrder(key: string): number {
+  const normalized = key.toLowerCase();
+  if (["day", "days", "weekdays"].includes(normalized)) return 0;
+  if (
+    ["open", "opens", "opening", "start", "starts"].includes(normalized)
+  )
+    return 1;
+  if (
+    ["close", "closes", "closing", "end", "ends"].includes(normalized)
+  )
+    return 2;
+  return 3;
+}
+function compareScalarKeys(left: string, right: string): number {
+  const byMeaning = scalarKeyOrder(left) - scalarKeyOrder(right);
+  if (byMeaning !== 0) return byMeaning;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
 function scalarValues(value: unknown): string[] {
   if (typeof value === "string") {
     if (value === "non_negotiable") return ["não negociável"];
@@ -732,9 +772,9 @@ function scalarValues(value: unknown): string[] {
   if (typeof value === "boolean") return [value ? "sim" : "não"];
   if (Array.isArray(value)) return value.flatMap(scalarValues);
   if (value && typeof value === "object")
-    return Object.values(value as Record<string, unknown>).flatMap(
-      scalarValues,
-    );
+    return Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => compareScalarKeys(left, right))
+      .flatMap(([, nested]) => scalarValues(nested));
   return [];
 }
 function valueFor(

@@ -1000,4 +1000,110 @@ describe("onboarding coverage", () => {
     });
     expect(canonicalCoverage(first)).toBe(canonicalCoverage(reversed));
   });
+
+  test("routes an answered owner-review negotiation through the registry-owned restriction", () => {
+    let snapshot = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    snapshot = applyCoverageFact(snapshot, {
+      field: "service.negotiation",
+      subject: "consulta",
+      disposition: "answered",
+      value: "owner_review",
+      ownerWords: "somente o dono decide",
+      ruleText: "negociar livremente",
+    });
+
+    expect(snapshot.cells["service:consulta:service.negotiation"]).toEqual({
+      state: "owner_review_required",
+      attempts: 1,
+      safeRestriction:
+        "Não executar nem confirmar negociação do serviço autonomamente; encaminhar a decisão ao dono.",
+    });
+    expect(evaluateCoverage(snapshot).answered).not.toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
+    expect(buildSummaryAnchors(snapshot).join("\n")).not.toMatch(
+      /não negociável/i,
+    );
+  });
+
+  test("does not cover an owner-review negotiation without explicit owner words", () => {
+    let snapshot = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    snapshot = applyCoverageFact(snapshot, {
+      field: "service.negotiation",
+      subject: "consulta",
+      disposition: "answered",
+      value: "owner_review",
+      ownerWords: "   ",
+    });
+
+    expect(evaluateCoverage(snapshot).missingRequired).toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
+    expect(evaluateCoverage(snapshot).ownerReviewRequired).not.toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
+  });
+
+  test("does not cover an answered non-negotiable value without explicit owner words", () => {
+    let snapshot = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 120, "consulta"),
+    );
+    snapshot = applyCoverageFact(snapshot, {
+      field: "service.negotiation",
+      subject: "consulta",
+      disposition: "answered",
+      value: "non_negotiable",
+      ownerWords: "  ",
+    });
+
+    expect(evaluateCoverage(snapshot).ambiguous).toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
+    expect(evaluateCoverage(snapshot).answered).not.toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
+    expect(buildSummaryAnchors(snapshot).join("\n")).not.toMatch(
+      /não negociável/i,
+    );
+  });
+
+  test("orders structured business-hour anchors by meaning and sorted fallback keys", () => {
+    const first = applyCoverageFact(
+      createCoverage(identity),
+      answer("schedule.business_hours", {
+        notes: { zeta: "fim", alpha: "início" },
+        hours: { closes: "18:00", opens: "08:00" },
+        days: ["seg", "ter"],
+      }),
+    );
+    const reversed = applyCoverageFact(
+      createCoverage(identity),
+      answer("schedule.business_hours", {
+        days: ["seg", "ter"],
+        hours: { opens: "08:00", closes: "18:00" },
+        notes: { alpha: "início", zeta: "fim" },
+      }),
+    );
+
+    expect(buildSummaryAnchors(first)).toEqual([
+      "Horário: seg, ter, 08:00, 18:00, início, fim",
+    ]);
+    expect(buildSummaryAnchors(first)).toEqual(buildSummaryAnchors(reversed));
+  });
 });
