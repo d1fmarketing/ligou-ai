@@ -364,6 +364,7 @@ describe("onboarding coverage", () => {
     expect(capped.services).toHaveLength(20);
     expect(evaluateCoverage(capped).ownerReviewRequired).toContainEqual({
       field: "service.catalog_overflow",
+      applicationOwned: true,
     });
 
     const left = applyCoverageFact(
@@ -430,7 +431,9 @@ describe("onboarding coverage", () => {
       ownerWords: "não sei",
       ruleText: "revisar depois",
     });
-    expect(evaluateCoverage(modelRuleIsIgnored).ownerReviewRequired).toContainEqual({
+    expect(
+      evaluateCoverage(modelRuleIsIgnored).ownerReviewRequired,
+    ).toContainEqual({
       field: "authority.book",
     });
 
@@ -685,7 +688,7 @@ describe("onboarding coverage", () => {
     expect(evaluateCoverage(global).nextQuestion).toBeNull();
   });
 
-  test("uses factual values for transcript anchors and canonicalizes nested structured values", () => {
+  test("uses factual values for transcript anchors", () => {
     let snapshot = applyCoverageFact(
       completeService(coveredUniversal()),
       answer("service.catalog_closure", true),
@@ -699,22 +702,6 @@ describe("onboarding coverage", () => {
     expect(anchors.join("\n")).toContain("911 para risco imediato");
     expect(anchors.join("\n")).toContain("Taxas: revisão do dono");
     expect(anchors.join("\n")).toContain("Autonomia: revisão do dono");
-
-    const nestedA = applyCoverageFact(
-      createCoverage(identity),
-      answer("policy.payment_estimate", {
-        alpha: { first: 1, second: 2 },
-        beta: [3, { yes: true, no: false }],
-      }),
-    );
-    const nestedB = applyCoverageFact(
-      createCoverage(identity),
-      answer("policy.payment_estimate", {
-        beta: [3, { no: false, yes: true }],
-        alpha: { second: 2, first: 1 },
-      }),
-    );
-    expect(canonicalCoverage(nestedA)).toBe(canonicalCoverage(nestedB));
   });
 
   test("does not invalidate a summary during ordinary incomplete collection", () => {
@@ -740,17 +727,33 @@ describe("onboarding coverage", () => {
     expect(cell).not.toMatchObject({
       safeRestriction: "Não exigir revisão do dono; agir com autonomia.",
     });
-    expect((cell as Extract<typeof cell, { state: "owner_review_required" }>).safeRestriction).toMatch(/não executar|não confirmar/i);
+    expect(
+      (cell as Extract<typeof cell, { state: "owner_review_required" }>)
+        .safeRestriction,
+    ).toMatch(/não executar|não confirmar/i);
   });
 
   test("preserves catalog overflow as registry-owned owner review after a later closure", () => {
     let snapshot = createCoverage(identity);
     for (let index = 0; index < 21; index += 1) {
-      snapshot = applyCoverageFact(snapshot, answer("service.name_synonyms", [`serviço ${index}`], `serviço ${index}`));
+      snapshot = applyCoverageFact(
+        snapshot,
+        answer(
+          "service.name_synonyms",
+          [`serviço ${index}`],
+          `serviço ${index}`,
+        ),
+      );
     }
-    snapshot = applyCoverageFact(snapshot, answer("service.catalog_closure", true));
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.catalog_closure", true),
+    );
     expect(snapshot.catalogOverflow?.services).toContain("servico_20");
-    expect(evaluateCoverage(snapshot).ownerReviewRequired).toContainEqual({ field: "service.catalog_overflow" });
+    expect(evaluateCoverage(snapshot).ownerReviewRequired).toContainEqual({
+      field: "service.catalog_overflow",
+      applicationOwned: true,
+    });
     expect(evaluateCoverage(snapshot).catalogNormallyComplete).toBe(false);
   });
 
@@ -780,15 +783,24 @@ describe("onboarding coverage", () => {
     ];
     for (const field of fields) {
       for (const value of [{}, true, 1, [], ""]) {
-        const snapshot = applyCoverageFact(createCoverage(identity), answer(field, value));
+        const snapshot = applyCoverageFact(
+          createCoverage(identity),
+          answer(field, value),
+        );
         expect(evaluateCoverage(snapshot).ambiguous).toContainEqual({ field });
       }
     }
   });
 
   test("turns an explicit non-negotiable disposition into a target-bound conservative floor", () => {
-    let snapshot = applyCoverageFact(createCoverage(identity), answer("service.name_synonyms", ["consulta"], "consulta"));
-    snapshot = applyCoverageFact(snapshot, answer("service.price_target", 120, "consulta"));
+    let snapshot = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 120, "consulta"),
+    );
     snapshot = applyCoverageFact(snapshot, {
       field: "service.negotiation",
       subject: "consulta",
@@ -796,24 +808,196 @@ describe("onboarding coverage", () => {
       value: null,
       ownerWords: "não negociamos",
     });
-    expect(snapshot.cells["service:consulta:service.negotiation"]).toMatchObject({ state: "answered", value: 120 });
-    expect(buildSummaryAnchors(snapshot).join("\n")).toMatch(/não negociável.*120/i);
+    expect(
+      snapshot.cells["service:consulta:service.negotiation"],
+    ).toMatchObject({
+      state: "answered",
+      value: { mode: "non_negotiable", floor: 120 },
+    });
+    expect(buildSummaryAnchors(snapshot).join("\n")).toMatch(
+      /não negociável.*120/i,
+    );
 
     const withoutTarget = applyCoverageFact(
-      applyCoverageFact(createCoverage(identity), answer("service.name_synonyms", ["consulta"], "consulta")),
-      { field: "service.negotiation", subject: "consulta", disposition: "not_applicable", value: null, ownerWords: "não negociamos" },
+      applyCoverageFact(
+        createCoverage(identity),
+        answer("service.name_synonyms", ["consulta"], "consulta"),
+      ),
+      {
+        field: "service.negotiation",
+        subject: "consulta",
+        disposition: "not_applicable",
+        value: null,
+        ownerWords: "não negociamos",
+      },
     );
-    expect(evaluateCoverage(withoutTarget).ambiguous).toContainEqual({ field: "service.negotiation", subject: "consulta" });
+    expect(evaluateCoverage(withoutTarget).ambiguous).toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
   });
 
   test("returns Portuguese scalar anchors without enum or nested JSON blobs", () => {
-    let snapshot = applyCoverageFact(createCoverage(identity), answer("service.name_synonyms", ["consulta"], "consulta"));
-    snapshot = applyCoverageFact(snapshot, answer("service.price_target", 120, "consulta"));
-    snapshot = applyCoverageFact(snapshot, { field: "service.negotiation", subject: "consulta", disposition: "not_applicable", value: null, ownerWords: "não negociamos" });
-    snapshot = applyCoverageFact(snapshot, answer("policy.payment_estimate", { nested: { private: "never-json" } }));
+    let snapshot = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 120, "consulta"),
+    );
+    snapshot = applyCoverageFact(snapshot, {
+      field: "service.negotiation",
+      subject: "consulta",
+      disposition: "not_applicable",
+      value: null,
+      ownerWords: "não negociamos",
+    });
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("policy.payment_estimate", { nested: { private: "never-json" } }),
+    );
     const anchors = buildSummaryAnchors(snapshot);
     expect(anchors.join("\n")).toMatch(/não negociável/i);
     expect(anchors.join("\n")).not.toContain("non_negotiable");
     expect(anchors.join("\n")).not.toContain('{"nested"');
+  });
+
+  test("rejects empty, non-string, and unknown entries in registry list fields", () => {
+    const cases: Array<[CoverageField, unknown]> = [
+      ["business.customer_types", [{}]],
+      ["business.customer_types", [false]],
+      ["business.customer_types", [""]],
+      ["business.customer_types", ["desconhecido"]],
+      ["area.coverage", [{}]],
+      ["area.coverage", [false]],
+      ["area.coverage", [""]],
+      ["emergency.types", [{}]],
+      ["emergency.types", [false]],
+      ["emergency.types", [""]],
+      ["service.name_synonyms", [{}]],
+      ["service.name_synonyms", [false]],
+      ["service.name_synonyms", [""]],
+    ];
+    for (const [field, value] of cases) {
+      const snapshot = applyCoverageFact(
+        createCoverage(identity),
+        answer(
+          field,
+          value,
+          field === "service.name_synonyms" ? "consulta" : undefined,
+        ),
+      );
+      expect(evaluateCoverage(snapshot).ambiguous).toContainEqual(
+        field === "service.name_synonyms"
+          ? { field, subject: "consulta" }
+          : { field },
+      );
+    }
+  });
+
+  test("anchors a negotiable floor differently from the explicit non-negotiable path", () => {
+    let negotiable = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    negotiable = applyCoverageFact(
+      negotiable,
+      answer("service.price_target", 120, "consulta"),
+    );
+    negotiable = applyCoverageFact(
+      negotiable,
+      answer(
+        "service.negotiation",
+        { mode: "negotiable", floor: 90 },
+        "consulta",
+      ),
+    );
+    expect(buildSummaryAnchors(negotiable).join("\n")).toContain("Mínimo: 90");
+    expect(buildSummaryAnchors(negotiable).join("\n")).not.toMatch(
+      /não negociável/i,
+    );
+
+    const nonNegotiable = applyCoverageFact(negotiable, {
+      field: "service.negotiation",
+      subject: "consulta",
+      disposition: "not_applicable",
+      value: null,
+      ownerWords: "não negociamos",
+    });
+    expect(buildSummaryAnchors(nonNegotiable).join("\n")).toMatch(
+      /não negociável.*120/i,
+    );
+  });
+
+  test("does not derive a non-negotiable floor without owner evidence", () => {
+    let snapshot = applyCoverageFact(
+      createCoverage(identity),
+      answer("service.name_synonyms", ["consulta"], "consulta"),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 120, "consulta"),
+    );
+    snapshot = applyCoverageFact(snapshot, {
+      field: "service.negotiation",
+      subject: "consulta",
+      disposition: "not_applicable",
+      value: null,
+      ownerWords: "  ",
+    });
+    expect(evaluateCoverage(snapshot).ambiguous).toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
+    expect(buildSummaryAnchors(snapshot).join("\n")).not.toMatch(
+      /não negociável/i,
+    );
+  });
+
+  test("keeps catalog overflow internal and rejects it as an input fact", () => {
+    const invalid = applyCoverageFact(createCoverage(identity), {
+      field: "service.catalog_overflow",
+      disposition: "owner_review_required",
+      value: null,
+      ownerWords: "tentar burlar",
+    } as unknown as CoverageFact);
+    expect(invalid).toEqual(createCoverage(identity));
+
+    let overflow = createCoverage(identity);
+    for (let index = 0; index < 21; index += 1)
+      overflow = applyCoverageFact(
+        overflow,
+        answer(
+          "service.name_synonyms",
+          [`serviço ${index}`],
+          `serviço ${index}`,
+        ),
+      );
+    expect(evaluateCoverage(overflow).ownerReviewRequired).toContainEqual({
+      field: "service.catalog_overflow",
+      applicationOwned: true,
+    });
+  });
+
+  test("canonicalizes nested key order through a valid structured business-hours value", () => {
+    const first = applyCoverageFact(
+      createCoverage(identity),
+      answer("schedule.business_hours", {
+        days: ["seg", "ter"],
+        hours: { closes: "18:00", opens: "08:00" },
+      }),
+    );
+    const reversed = applyCoverageFact(
+      createCoverage(identity),
+      answer("schedule.business_hours", {
+        hours: { opens: "08:00", closes: "18:00" },
+        days: ["seg", "ter"],
+      }),
+    );
+    expect(evaluateCoverage(first).answered).toContainEqual({
+      field: "schedule.business_hours",
+    });
+    expect(canonicalCoverage(first)).toBe(canonicalCoverage(reversed));
   });
 });

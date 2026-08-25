@@ -27,7 +27,6 @@ export type CoverageField =
   | "authority.emergency"
   | "authority.out_of_area"
   | "service.catalog_closure"
-  | "service.catalog_overflow"
   | "service.name_synonyms"
   | "service.price_mode"
   | "service.price_target"
@@ -64,6 +63,9 @@ export interface CoverageRef {
   field: CoverageField;
   subject?: string;
 }
+export type CoverageProgressRef =
+  | CoverageRef
+  | { field: "service.catalog_overflow"; applicationOwned: true };
 export interface CoverageQuestion extends CoverageRef {
   questionPt: string;
 }
@@ -90,7 +92,7 @@ export interface CoverageProgress {
   missingRequired: CoverageRef[];
   ambiguous: CoverageRef[];
   answered: CoverageRef[];
-  ownerReviewRequired: CoverageRef[];
+  ownerReviewRequired: CoverageProgressRef[];
   notApplicable: CoverageRef[];
   nextQuestion: CoverageQuestion | null;
   catalogNormallyComplete: boolean;
@@ -178,6 +180,7 @@ const textFields = new Set<CoverageField>([
   "service.warranty",
   "service.escalation",
 ]);
+const customerTypes = new Set(["residencial", "comercial", "ambos"]);
 const restrictionSubjects: Record<CoverageField, string> = {
   "business.customer_types": "tipos de clientes",
   "business.excluded_work": "serviços excluídos",
@@ -207,7 +210,6 @@ const restrictionSubjects: Record<CoverageField, string> = {
   "authority.emergency": "decisão de emergência",
   "authority.out_of_area": "decisão fora da área",
   "service.catalog_closure": "fechamento do catálogo",
-  "service.catalog_overflow": "catálogo acima de vinte serviços",
   "service.name_synonyms": "nomes do serviço",
   "service.price_mode": "modo de preço",
   "service.price_target": "preço público",
@@ -221,11 +223,11 @@ const restrictionSubjects: Record<CoverageField, string> = {
 };
 const safeRestrictionFor = (field: CoverageField) =>
   `Não executar nem confirmar ${restrictionSubjects[field]} autonomamente; encaminhar a decisão ao dono.`;
+const catalogOverflowRestriction =
+  "Não aceitar, precificar ou agendar serviços além dos vinte primeiros autonomamente; encaminhar o catálogo ao dono.";
 const templates: Record<CoverageField, string> = {
   "service.catalog_closure":
     "Há mais algum serviço que devemos cadastrar antes de encerrar o catálogo?",
-  "service.catalog_overflow":
-    "O catálogo excede vinte serviços e precisa de revisão do dono.",
   "business.customer_types": "Quais tipos de clientes vocês atendem?",
   "business.excluded_work": "Que tipos de trabalho vocês não realizam?",
   "business.languages_tone":
@@ -280,6 +282,7 @@ const templates: Record<CoverageField, string> = {
     "Este serviço pode ser tratado como emergência?",
   "service.escalation": "Em que situação este serviço exige aprovação do dono?",
 };
+const inputFields = new Set<string>(Object.keys(templates));
 const isServiceField = (field: CoverageField) =>
   field.startsWith("service.") && field !== "service.catalog_closure";
 const keyFor = (field: CoverageField, subject?: string) =>
@@ -363,6 +366,33 @@ function ready(snapshot: CoverageSnapshot): boolean {
     covered(snapshot.cells[keyFor(ref.field, ref.subject)] ?? missing()),
   );
 }
+function nonEmptyStrings(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((item) => typeof item === "string" && item.trim().length > 0)
+  );
+}
+function validBusinessHours(value: unknown): boolean {
+  if (typeof value === "string") return value.trim().length > 0;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const hours = value as { days?: unknown; hours?: unknown };
+  if (!nonEmptyStrings(hours.days)) return false;
+  if (typeof hours.hours === "string") return hours.hours.trim().length > 0;
+  if (
+    !hours.hours ||
+    typeof hours.hours !== "object" ||
+    Array.isArray(hours.hours)
+  )
+    return false;
+  const window = hours.hours as { opens?: unknown; closes?: unknown };
+  return (
+    typeof window.opens === "string" &&
+    window.opens.trim().length > 0 &&
+    typeof window.closes === "string" &&
+    window.closes.trim().length > 0
+  );
+}
 function validAnswer(
   field: CoverageField,
   value: unknown,
@@ -409,17 +439,19 @@ function validAnswer(
     return typeof value === "boolean"
       ? null
       : "emergency_eligibility_must_be_boolean";
-  if (
-    [
-      "business.customer_types",
-      "area.coverage",
-      "emergency.types",
-      "service.name_synonyms",
-    ].includes(field)
-  )
-    return Array.isArray(value) && value.length > 0
+  if (field === "schedule.business_hours")
+    return validBusinessHours(value) ? null : "must_be_business_hours";
+  if (field === "business.customer_types")
+    return nonEmptyStrings(value) &&
+      value.every((item) => customerTypes.has(item.trim().toLowerCase()))
       ? null
-      : "must_be_nonempty_list";
+      : "must_be_known_customer_types";
+  if (
+    ["area.coverage", "emergency.types", "service.name_synonyms"].includes(
+      field,
+    )
+  )
+    return nonEmptyStrings(value) ? null : "must_be_nonempty_string_list";
   if (textFields.has(field))
     return typeof value === "string" && value.trim().length > 0
       ? null
@@ -430,6 +462,7 @@ function applyOne(
   snapshot: CoverageSnapshot,
   fact: CoverageFact,
 ): CoverageSnapshot {
+  if (!inputFields.has(fact.field)) return snapshot;
   const subject =
     fact.subject && isServiceField(fact.field)
       ? normalizeSubject(fact.subject)
@@ -443,11 +476,8 @@ function applyOne(
       return {
         ...snapshot,
         catalogOverflow: {
-          services: [
-            ...(snapshot.catalogOverflow?.services ?? []),
-            subject,
-          ],
-          safeRestriction: safeRestrictionFor("service.catalog_overflow"),
+          services: [...(snapshot.catalogOverflow?.services ?? []), subject],
+          safeRestriction: catalogOverflowRestriction,
           ownerWords: fact.ownerWords,
         },
         currentSubject: subject,
@@ -465,22 +495,37 @@ function applyOne(
   let cell: CoverageCell;
   if (fact.disposition === "owner_review_required")
     cell =
-      fact.ownerWords.trim().length > 0 && fact.field !== "service.catalog_closure"
+      fact.ownerWords.trim().length > 0 &&
+      fact.field !== "service.catalog_closure"
         ? {
             state: "owner_review_required",
             attempts,
             safeRestriction: safeRestrictionFor(fact.field),
           }
         : missing(attempts);
-  else if (fact.disposition === "not_applicable" && fact.field === "service.negotiation") {
+  else if (
+    fact.disposition === "not_applicable" &&
+    fact.field === "service.negotiation"
+  ) {
     const target = subject
       ? cells[keyFor("service.price_target", subject)]
       : undefined;
     const price = target?.state === "answered" ? target.value : undefined;
     cell =
-      typeof price === "number" && Number.isFinite(price) && price >= 0
-        ? { state: "answered", attempts, value: price }
-        : { state: "ambiguous", attempts, reason: "non_negotiable_requires_public_target" };
+      fact.ownerWords.trim().length > 0 &&
+      typeof price === "number" &&
+      Number.isFinite(price) &&
+      price >= 0
+        ? {
+            state: "answered",
+            attempts,
+            value: { mode: "non_negotiable", floor: price },
+          }
+        : {
+            state: "ambiguous",
+            attempts,
+            reason: "non_negotiable_requires_public_target",
+          };
   } else if (fact.disposition === "not_applicable")
     cell = notApplicableFields.has(fact.field)
       ? { state: "not_applicable", attempts }
@@ -493,11 +538,23 @@ function applyOne(
       { ...snapshot, cells },
       subject,
     );
+    const storedValue =
+      fact.field === "service.negotiation" && error === null
+        ? typeof fact.value === "string"
+          ? { mode: "non_negotiable" }
+          : {
+              mode: "negotiable",
+              floor:
+                typeof fact.value === "number"
+                  ? fact.value
+                  : (fact.value as { floor: number }).floor,
+            }
+        : fact.value;
     cell = error
       ? fact.field === "service.catalog_closure"
         ? missing(attempts)
         : { state: "ambiguous", attempts, reason: error }
-      : { state: "answered", attempts, value: fact.value };
+      : { state: "answered", attempts, value: storedValue };
   }
   cells[key] = cell;
   return {
@@ -585,17 +642,23 @@ export function evaluateCoverage(snapshot: CoverageSnapshot): CoverageProgress {
           (ref) =>
             (snapshot.followUpGroups[keyFor(ref.field, ref.subject)] ?? 0) < 2,
         );
-  const ownerReviewRequired = Object.entries(snapshot.cells)
+  const ownerReviewRequired: CoverageProgressRef[] = Object.entries(
+    snapshot.cells,
+  )
     .filter(([, cell]) => cell.state === "owner_review_required")
     .map(([key]) => refForKey(key));
   if (snapshot.catalogOverflow) {
-    ownerReviewRequired.push({ field: "service.catalog_overflow" });
+    ownerReviewRequired.push({
+      field: "service.catalog_overflow",
+      applicationOwned: true,
+    });
   }
   return {
     readyForReview:
       missingRequired.length === 0 &&
       ambiguous.length === 0 &&
-      (!snapshot.catalogOverflow || snapshot.catalogOverflow.ownerWords.trim().length > 0),
+      (!snapshot.catalogOverflow ||
+        snapshot.catalogOverflow.ownerWords.trim().length > 0),
     requiredFields: active.required,
     conditionalFields: active.conditional,
     missingRequired,
@@ -664,11 +727,14 @@ function scalarValues(value: unknown): string[] {
     if (value === "owner_review") return ["revisão do dono"];
     return value.trim() ? [value.trim()] : [];
   }
-  if (typeof value === "number" && Number.isFinite(value)) return [String(value)];
+  if (typeof value === "number" && Number.isFinite(value))
+    return [String(value)];
   if (typeof value === "boolean") return [value ? "sim" : "não"];
   if (Array.isArray(value)) return value.flatMap(scalarValues);
   if (value && typeof value === "object")
-    return Object.values(value as Record<string, unknown>).flatMap(scalarValues);
+    return Object.values(value as Record<string, unknown>).flatMap(
+      scalarValues,
+    );
   return [];
 }
 function valueFor(
@@ -695,10 +761,27 @@ export function buildSummaryAnchors(snapshot: CoverageSnapshot): string[] {
     anchors.push(`Serviço: ${name}`);
     if (price) anchors.push(`Preço público: ${price}`);
     if (negotiation?.state === "answered") {
-      const minimum = scalarValues(negotiation.value).join(", ");
-      if (typeof negotiation.value === "number")
-        anchors.push(`Mínimo: não negociável (${minimum})`);
-      else if (minimum) anchors.push(`Mínimo: ${minimum}`);
+      const value = negotiation.value as { mode?: unknown; floor?: unknown };
+      if (
+        value &&
+        typeof value === "object" &&
+        value.mode === "non_negotiable" &&
+        typeof value.floor === "number"
+      )
+        anchors.push(`Mínimo: não negociável (${value.floor})`);
+      else if (
+        value &&
+        typeof value === "object" &&
+        value.mode === "negotiable" &&
+        typeof value.floor === "number"
+      )
+        anchors.push(`Mínimo: ${value.floor}`);
+      else if (
+        value &&
+        typeof value === "object" &&
+        value.mode === "non_negotiable"
+      )
+        anchors.push("Mínimo: não negociável");
     }
     if (duration) anchors.push(`Duração: ${duration} minutos`);
   }
