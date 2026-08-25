@@ -27,6 +27,7 @@ export type CoverageField =
   | "authority.emergency"
   | "authority.out_of_area"
   | "service.catalog_closure"
+  | "service.catalog_overflow"
   | "service.name_synonyms"
   | "service.price_mode"
   | "service.price_target"
@@ -75,6 +76,11 @@ export interface CoverageSnapshot {
   cells: Record<string, CoverageCell>;
   followUps: number;
   followUpGroups: Record<string, number>;
+  catalogOverflow?: {
+    services: string[];
+    safeRestriction: string;
+    ownerWords: string;
+  };
   summaryInvalidated: boolean;
 }
 export interface CoverageProgress {
@@ -87,6 +93,7 @@ export interface CoverageProgress {
   ownerReviewRequired: CoverageRef[];
   notApplicable: CoverageRef[];
   nextQuestion: CoverageQuestion | null;
+  catalogNormallyComplete: boolean;
   summaryInvalidated: boolean;
 }
 
@@ -141,9 +148,84 @@ const notApplicableFields = new Set<CoverageField>([
   "area.travel_fee",
   "service.materials_parts",
 ]);
+const textFields = new Set<CoverageField>([
+  "business.excluded_work",
+  "business.languages_tone",
+  "area.out_of_area_policy",
+  "area.travel_fee",
+  "schedule.business_hours",
+  "schedule.same_day_lead_time",
+  "schedule.capacity_buffer",
+  "schedule.reschedule_cancel",
+  "schedule.holidays",
+  "emergency.safety_escalation",
+  "emergency.after_hours",
+  "emergency.fee_authority",
+  "policy.payment_estimate",
+  "policy.warranty_materials",
+  "policy.access_cancellation",
+  "policy.complaints_returns",
+  "authority.quote_price",
+  "authority.negotiate_floor",
+  "authority.read_calendar",
+  "authority.book",
+  "authority.reschedule_cancel",
+  "authority.charge_fee",
+  "authority.emergency",
+  "authority.out_of_area",
+  "service.inclusions_exclusions",
+  "service.materials_parts",
+  "service.warranty",
+  "service.escalation",
+]);
+const restrictionSubjects: Record<CoverageField, string> = {
+  "business.customer_types": "tipos de clientes",
+  "business.excluded_work": "serviços excluídos",
+  "business.languages_tone": "idioma e tom",
+  "area.coverage": "área atendida",
+  "area.out_of_area_policy": "pedidos fora da área",
+  "area.travel_fee": "taxa de deslocamento",
+  "schedule.business_hours": "horário comercial",
+  "schedule.same_day_lead_time": "antecedência no mesmo dia",
+  "schedule.capacity_buffer": "capacidade e intervalo",
+  "schedule.reschedule_cancel": "remarcação e cancelamento",
+  "schedule.holidays": "feriados",
+  "emergency.types": "tipos de emergência",
+  "emergency.safety_escalation": "orientação de segurança",
+  "emergency.after_hours": "atendimento fora do horário",
+  "emergency.fee_authority": "taxa de emergência",
+  "policy.payment_estimate": "pagamento e orçamento",
+  "policy.warranty_materials": "garantia e materiais",
+  "policy.access_cancellation": "acesso e cancelamento",
+  "policy.complaints_returns": "reclamações e retornos",
+  "authority.quote_price": "informação de preço",
+  "authority.negotiate_floor": "negociação",
+  "authority.read_calendar": "consulta da agenda",
+  "authority.book": "agendamento",
+  "authority.reschedule_cancel": "remarcação ou cancelamento",
+  "authority.charge_fee": "confirmação de taxa",
+  "authority.emergency": "decisão de emergência",
+  "authority.out_of_area": "decisão fora da área",
+  "service.catalog_closure": "fechamento do catálogo",
+  "service.catalog_overflow": "catálogo acima de vinte serviços",
+  "service.name_synonyms": "nomes do serviço",
+  "service.price_mode": "modo de preço",
+  "service.price_target": "preço público",
+  "service.negotiation": "negociação do serviço",
+  "service.duration": "duração do serviço",
+  "service.inclusions_exclusions": "inclusões e exclusões",
+  "service.materials_parts": "materiais e peças",
+  "service.warranty": "garantia do serviço",
+  "service.emergency_eligibility": "elegibilidade de emergência",
+  "service.escalation": "escalonamento do serviço",
+};
+const safeRestrictionFor = (field: CoverageField) =>
+  `Não executar nem confirmar ${restrictionSubjects[field]} autonomamente; encaminhar a decisão ao dono.`;
 const templates: Record<CoverageField, string> = {
   "service.catalog_closure":
     "Há mais algum serviço que devemos cadastrar antes de encerrar o catálogo?",
+  "service.catalog_overflow":
+    "O catálogo excede vinte serviços e precisa de revisão do dono.",
   "business.customer_types": "Quais tipos de clientes vocês atendem?",
   "business.excluded_work": "Que tipos de trabalho vocês não realizam?",
   "business.languages_tone":
@@ -338,20 +420,11 @@ function validAnswer(
     return Array.isArray(value) && value.length > 0
       ? null
       : "must_be_nonempty_list";
-  return value !== null &&
-    value !== undefined &&
-    !(typeof value === "string" && value.trim().length === 0)
-    ? null
-    : "must_be_nonempty";
-}
-function conservativeRule(fact: CoverageFact): boolean {
-  const rule = fact.ruleText?.trim() ?? "";
-  return (
-    fact.ownerWords.trim().length > 0 &&
-    rule.length > 0 &&
-    /dono|owner|aprova|revis/i.test(rule) &&
-    /n[aã]o|sem|nunca|proibid|autonom/i.test(rule)
-  );
+  if (textFields.has(field))
+    return typeof value === "string" && value.trim().length > 0
+      ? null
+      : "must_be_nonempty_text";
+  return "unknown_field_validator";
 }
 function applyOne(
   snapshot: CoverageSnapshot,
@@ -367,14 +440,16 @@ function applyOne(
   const services = [...snapshot.services];
   if (subject && !services.includes(subject)) {
     if (services.length >= 20) {
-      cells["service.catalog_closure"] = {
-        state: "ambiguous",
-        attempts: (cells["service.catalog_closure"]?.attempts ?? 0) + 1,
-        reason: "catalog_limit_requires_owner_review",
-      };
       return {
         ...snapshot,
-        cells,
+        catalogOverflow: {
+          services: [
+            ...(snapshot.catalogOverflow?.services ?? []),
+            subject,
+          ],
+          safeRestriction: safeRestrictionFor("service.catalog_overflow"),
+          ownerWords: fact.ownerWords,
+        },
         currentSubject: subject,
         revision: snapshot.revision + 1,
         summaryInvalidated: previouslyReady || snapshot.summaryInvalidated,
@@ -390,14 +465,23 @@ function applyOne(
   let cell: CoverageCell;
   if (fact.disposition === "owner_review_required")
     cell =
-      conservativeRule(fact) && fact.field !== "service.catalog_closure"
+      fact.ownerWords.trim().length > 0 && fact.field !== "service.catalog_closure"
         ? {
             state: "owner_review_required",
             attempts,
-            safeRestriction: fact.ruleText!.trim(),
+            safeRestriction: safeRestrictionFor(fact.field),
           }
         : missing(attempts);
-  else if (fact.disposition === "not_applicable")
+  else if (fact.disposition === "not_applicable" && fact.field === "service.negotiation") {
+    const target = subject
+      ? cells[keyFor("service.price_target", subject)]
+      : undefined;
+    const price = target?.state === "answered" ? target.value : undefined;
+    cell =
+      typeof price === "number" && Number.isFinite(price) && price >= 0
+        ? { state: "answered", attempts, value: price }
+        : { state: "ambiguous", attempts, reason: "non_negotiable_requires_public_target" };
+  } else if (fact.disposition === "not_applicable")
     cell = notApplicableFields.has(fact.field)
       ? { state: "not_applicable", attempts }
       : missing(attempts);
@@ -501,8 +585,17 @@ export function evaluateCoverage(snapshot: CoverageSnapshot): CoverageProgress {
           (ref) =>
             (snapshot.followUpGroups[keyFor(ref.field, ref.subject)] ?? 0) < 2,
         );
+  const ownerReviewRequired = Object.entries(snapshot.cells)
+    .filter(([, cell]) => cell.state === "owner_review_required")
+    .map(([key]) => refForKey(key));
+  if (snapshot.catalogOverflow) {
+    ownerReviewRequired.push({ field: "service.catalog_overflow" });
+  }
   return {
-    readyForReview: missingRequired.length === 0 && ambiguous.length === 0,
+    readyForReview:
+      missingRequired.length === 0 &&
+      ambiguous.length === 0 &&
+      (!snapshot.catalogOverflow || snapshot.catalogOverflow.ownerWords.trim().length > 0),
     requiredFields: active.required,
     conditionalFields: active.conditional,
     missingRequired,
@@ -510,13 +603,12 @@ export function evaluateCoverage(snapshot: CoverageSnapshot): CoverageProgress {
     answered: Object.entries(snapshot.cells)
       .filter(([, cell]) => cell.state === "answered")
       .map(([key]) => refForKey(key)),
-    ownerReviewRequired: Object.entries(snapshot.cells)
-      .filter(([, cell]) => cell.state === "owner_review_required")
-      .map(([key]) => refForKey(key)),
+    ownerReviewRequired,
     notApplicable: Object.entries(snapshot.cells)
       .filter(([, cell]) => cell.state === "not_applicable")
       .map(([key]) => refForKey(key)),
     nextQuestion: next ? questionFor(next) : null,
+    catalogNormallyComplete: !snapshot.catalogOverflow,
     summaryInvalidated: snapshot.summaryInvalidated,
   };
 }
@@ -562,14 +654,22 @@ export function canonicalCoverage(snapshot: CoverageSnapshot): string {
       cells,
       followUps: snapshot.followUps,
       followUpGroups: snapshot.followUpGroups,
+      catalogOverflow: snapshot.catalogOverflow,
     }),
   );
 }
-function display(value: unknown): string {
-  if (Array.isArray(value)) return value.map(display).join(", ");
+function scalarValues(value: unknown): string[] {
+  if (typeof value === "string") {
+    if (value === "non_negotiable") return ["não negociável"];
+    if (value === "owner_review") return ["revisão do dono"];
+    return value.trim() ? [value.trim()] : [];
+  }
+  if (typeof value === "number" && Number.isFinite(value)) return [String(value)];
+  if (typeof value === "boolean") return [value ? "sim" : "não"];
+  if (Array.isArray(value)) return value.flatMap(scalarValues);
   if (value && typeof value === "object")
-    return JSON.stringify(canonicalValue(value));
-  return String(value);
+    return Object.values(value as Record<string, unknown>).flatMap(scalarValues);
+  return [];
 }
 function valueFor(
   snapshot: CoverageSnapshot,
@@ -578,7 +678,7 @@ function valueFor(
 ): string | undefined {
   const cell = snapshot.cells[keyFor(field, subject)];
   return cell?.state === "answered"
-    ? display(cell.value)
+    ? scalarValues(cell.value).join(", ") || undefined
     : cell?.state === "owner_review_required"
       ? cell.safeRestriction
       : undefined;
@@ -590,11 +690,17 @@ export function buildSummaryAnchors(snapshot: CoverageSnapshot): string[] {
       valueFor(snapshot, "service.name_synonyms", subject) ??
       subject.replace(/_/g, " ");
     const price = valueFor(snapshot, "service.price_target", subject);
-    const minimum = valueFor(snapshot, "service.negotiation", subject);
+    const negotiation = snapshot.cells[keyFor("service.negotiation", subject)];
     const duration = valueFor(snapshot, "service.duration", subject);
-    anchors.push(
-      `Serviço ${name}:${price ? ` preço ${price}` : ""}${minimum ? ` mínimo ${minimum}` : ""}${duration ? ` duração ${duration}` : ""}`.trim(),
-    );
+    anchors.push(`Serviço: ${name}`);
+    if (price) anchors.push(`Preço público: ${price}`);
+    if (negotiation?.state === "answered") {
+      const minimum = scalarValues(negotiation.value).join(", ");
+      if (typeof negotiation.value === "number")
+        anchors.push(`Mínimo: não negociável (${minimum})`);
+      else if (minimum) anchors.push(`Mínimo: ${minimum}`);
+    }
+    if (duration) anchors.push(`Duração: ${duration} minutos`);
   }
   const area = valueFor(snapshot, "area.coverage");
   const schedule = valueFor(snapshot, "schedule.business_hours");
