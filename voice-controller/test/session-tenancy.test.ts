@@ -132,19 +132,21 @@ describe("browser request handling", () => {
     const client = {
       from(table: string) {
         const filters: Record<string, unknown> = {};
+        let mutation: "insert" | "update" | null = null;
         const api: any = {
           insert(row: Record<string, unknown>) {
+            mutation = "insert";
             operations.push({ operation: "insert", table, row });
             return api;
           },
           select() {
             return api;
           },
-          single: async () => ({
-            data: { id: "direct-request-1" },
-            error: null,
-          }),
+          single: async () => mutation === "insert"
+            ? { data: { id: "direct-request-1" }, error: null }
+            : { data: { id: "direct-request-1" }, error: null },
           update(patch: Record<string, unknown>) {
+            mutation = "update";
             operations.push({ operation: "update", table, patch, filters });
             return api;
           },
@@ -176,8 +178,12 @@ describe("browser request handling", () => {
           rules: [],
         }),
         startSessionImpl: async (...args: unknown[]) => {
-          starts.push(args);
+          starts.push(args.slice(0, 5));
           operations.push({ operation: "start" });
+          const registerCleanup = args[5] as
+            | ((control: { cancel(reason: string): Promise<void> }) => void)
+            | undefined;
+          registerCleanup?.({ cancel: async () => {} });
           return { sdp: "answer-sdp", call_id: "call-direct-1" };
         },
       },
@@ -216,7 +222,7 @@ describe("browser request handling", () => {
           answer_sdp: "answer-sdp",
           call_id: "call-direct-1",
         },
-        filters: { id: "direct-request-1" },
+        filters: { id: "direct-request-1", status: "processing" },
       },
     ]);
   });

@@ -63,12 +63,17 @@ type DirectSessionResult = {
   call_id: string;
   [key: string]: unknown;
 };
+export interface DirectSessionCleanup {
+  callId: string;
+  cancel(reason: string): Promise<void>;
+}
 type StartSessionLike = (
   userId: string,
   sessionType: SessionType,
   sdpOffer: string,
   modelOverride?: string,
   tenantId?: string,
+  registerCleanup?: (cleanup: DirectSessionCleanup) => void,
 ) => Promise<DirectSessionResult>;
 
 export async function startDirectSessionRequest(
@@ -119,6 +124,7 @@ export async function startDirectSessionRequest(
       status: 503,
     });
 
+  let sessionCleanup: DirectSessionCleanup | null = null;
   try {
     const result = await startSessionImpl(
       args.userId,
@@ -126,38 +132,58 @@ export async function startDirectSessionRequest(
       args.sdpOffer,
       args.modelOverride,
       tenant.id,
+      (cleanup) => {
+        sessionCleanup = cleanup;
+      },
     );
-    const readyWrite = await client
+    const { data: readyRow, error: readyError } = await client
       .from("browser_session_requests")
       .update({
         status: "ready",
         answer_sdp: result.sdp,
         call_id: result.call_id,
       })
-      .eq("id", requestRow.id);
-    if (readyWrite.error)
+      .eq("id", requestRow.id)
+      .eq("status", "processing")
+      .select("id")
+      .single();
+    if (readyError || readyRow?.id !== requestRow.id)
       throw Object.assign(
         new Error("direct_onboarding_request_ready_failed"),
         { status: 503 },
       );
     return result;
   } catch (error) {
+    const primaryMessage = String(
+      error instanceof Error ? error.message : error,
+    ).slice(0, 400);
+    if (sessionCleanup) {
+      try {
+        await sessionCleanup.cancel(primaryMessage);
+      } catch {}
+    }
     try {
       await client
         .from("browser_session_requests")
         .update({
           status: "error",
-          error: String(
-            error instanceof Error ? error.message : error,
-          ).slice(0, 400),
+          error: primaryMessage,
         })
-        .eq("id", requestRow.id);
+        .eq("id", requestRow.id)
+        .eq("status", "processing");
     } catch {}
     throw error;
   }
 }
 
-export async function startSession(userId: string, sessionType: SessionType, sdpOffer: string, modelOverride?: string, tenantId?: string) {
+export async function startSession(
+  userId: string,
+  sessionType: SessionType,
+  sdpOffer: string,
+  modelOverride?: string,
+  tenantId?: string,
+  registerCleanup?: (cleanup: DirectSessionCleanup) => void,
+) {
   const { tenant, rules } = await resolveSessionTenant(userId, tenantId);
 
   const ALLOWED_MODELS = new Set(["gpt-realtime", "gpt-realtime-2.1", "gpt-realtime-2.1-mini"]);
@@ -308,7 +334,20 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
     provider_usage_state: "unknown",
   }).eq("id", call.id);
   try {
-    attachSideband(cap, openaiCallId, usedModel);
+    const sidebandControl = attachSideband(cap, openaiCallId, usedModel);
+    let cleanupStarted = false;
+    registerCleanup?.({
+      callId: call.id,
+      async cancel(reason: string) {
+        if (cleanupStarted) return;
+        cleanupStarted = true;
+        sidebandControl.cancel(reason);
+        await settleStartupFailure(reason, "unknown", {
+          openaiCallId,
+          mode: "hangup",
+        });
+      },
+    });
   } catch (error) {
     await settleStartupFailure("sideband_attach_failed", "unknown", { openaiCallId, mode: "hangup" });
     throw error;

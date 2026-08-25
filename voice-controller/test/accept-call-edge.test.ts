@@ -51,18 +51,20 @@ test("direct onboarding marks its exact proof row error when session startup fai
   const client = {
     from() {
       const filters: Record<string, unknown> = {};
+      let mutation: "insert" | "update" | null = null;
       const api: any = {
         insert() {
+          mutation = "insert";
           return api;
         },
         select() {
           return api;
         },
-        single: async () => ({
-          data: { id: "direct-request-error" },
-          error: null,
-        }),
+        single: async () => mutation === "insert"
+          ? { data: { id: "direct-request-error" }, error: null }
+          : { data: { id: "direct-request-error" }, error: null },
         update(patch: Record<string, unknown>) {
+          mutation = "update";
           updates.push({ patch, filters });
           return api;
         },
@@ -103,9 +105,117 @@ test("direct onboarding marks its exact proof row error when session startup fai
   expect(updates).toEqual([
     {
       patch: { status: "error", error: "provider startup failed" },
-      filters: { id: "direct-request-error" },
+      filters: { id: "direct-request-error", status: "processing" },
     },
   ]);
+});
+
+test("direct onboarding rejects non-durable ready proof and cancels the created live session once", async () => {
+  const startDirectSessionRequest = (serverModule as any)
+    .startDirectSessionRequest;
+  const scenarios = [
+    { name: "zero rows", result: { data: null, error: null } },
+    {
+      name: "wrong id",
+      result: { data: { id: "wrong-request" }, error: null },
+    },
+    {
+      name: "status mismatch",
+      result: { data: null, error: { message: "no rows" } },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const updates: Array<{
+      patch: Record<string, unknown>;
+      filters: Record<string, unknown>;
+    }> = [];
+    let mutation: "insert" | "ready" | "error" | null = null;
+    const client = {
+      from() {
+        const filters: Record<string, unknown> = {};
+        const api: any = {
+          insert() {
+            mutation = "insert";
+            return api;
+          },
+          select() {
+            return api;
+          },
+          single: async () => mutation === "insert"
+            ? { data: { id: "direct-request-proof" }, error: null }
+            : scenario.result,
+          update(patch: Record<string, unknown>) {
+            mutation = patch.status === "ready" ? "ready" : "error";
+            updates.push({ patch, filters });
+            return api;
+          },
+          eq(column: string, value: unknown) {
+            filters[column] = value;
+            return api;
+          },
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({ data: null, error: null }).then(resolve);
+          },
+        };
+        return api;
+      },
+    };
+    const cancellations: Array<{ callId: string; reason: string }> = [];
+
+    await expect(
+      startDirectSessionRequest(
+        {
+          userId: "owner-a",
+          sessionType: "onboarding",
+          sdpOffer: "offer-sdp",
+        },
+        {
+          client,
+          nowIso: () => "2026-08-25T12:00:00.000Z",
+          resolveSessionTenantImpl: async () => ({
+            tenant: {
+              id: "22222222-2222-4222-8222-222222222222",
+            },
+            rules: [],
+          }),
+          startSessionImpl: async (...args: unknown[]) => {
+            const registerCleanup = args[5] as (
+              control: { cancel(reason: string): Promise<void> },
+            ) => void;
+            registerCleanup({
+              cancel: async (reason: string) => {
+                cancellations.push({ callId: "call-proof", reason });
+              },
+            });
+            return { sdp: "must-not-return", call_id: "call-proof" };
+          },
+        },
+      ),
+    ).rejects.toThrow("direct_onboarding_request_ready_failed");
+
+    expect(cancellations, scenario.name).toEqual([
+      {
+        callId: "call-proof",
+        reason: "direct_onboarding_request_ready_failed",
+      },
+    ]);
+    expect(updates[0], scenario.name).toEqual({
+      patch: {
+        status: "ready",
+        answer_sdp: "must-not-return",
+        call_id: "call-proof",
+      },
+      filters: { id: "direct-request-proof", status: "processing" },
+    });
+    expect(updates[1], scenario.name).toEqual({
+      patch: {
+        status: "error",
+        error: "direct_onboarding_request_ready_failed",
+      },
+      filters: { id: "direct-request-proof", status: "processing" },
+    });
+  }
 });
 
 test("direct customer sessions retain the existing path without request-proof writes", async () => {
