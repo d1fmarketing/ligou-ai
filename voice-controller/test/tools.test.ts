@@ -65,7 +65,16 @@ function mockSupabase() {
           return api;
         },
         then(resolve: (value: unknown) => unknown) {
-          return Promise.resolve({ data: table === "effective_rules" ? RULES : table === "powers" ? POWERS : [], error: null }).then(resolve);
+          return Promise.resolve({
+            data: table === "effective_rules"
+              ? RULES
+              : table === "powers"
+                ? POWERS
+                : table === "receipts" && coverageReceipt
+                  ? [coverageReceipt]
+                  : [],
+            error: null,
+          }).then(resolve);
         },
       };
       return api;

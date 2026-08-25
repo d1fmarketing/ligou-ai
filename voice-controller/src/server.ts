@@ -58,6 +58,105 @@ export function makeBrowserSessionCapability(args: {
   );
 }
 
+type DirectSessionResult = {
+  sdp: string;
+  call_id: string;
+  [key: string]: unknown;
+};
+type StartSessionLike = (
+  userId: string,
+  sessionType: SessionType,
+  sdpOffer: string,
+  modelOverride?: string,
+  tenantId?: string,
+) => Promise<DirectSessionResult>;
+
+export async function startDirectSessionRequest(
+  args: {
+    userId: string;
+    sessionType: SessionType;
+    sdpOffer: string;
+    modelOverride?: string;
+  },
+  dependencies: {
+    client?: any;
+    nowIso?: () => string;
+    resolveSessionTenantImpl?: typeof resolveSessionTenant;
+    startSessionImpl?: StartSessionLike;
+  } = {},
+): Promise<DirectSessionResult> {
+  const startSessionImpl = dependencies.startSessionImpl ?? startSession;
+  // Preserve the established direct customer/owner-browser path. Only
+  // onboarding persistence needs the durable browser request proof required by
+  // the service-role RPCs.
+  if (args.sessionType !== "onboarding")
+    return await startSessionImpl(
+      args.userId,
+      args.sessionType,
+      args.sdpOffer,
+      args.modelOverride,
+    );
+
+  const client = dependencies.client ?? supa();
+  const resolveSessionTenantImpl =
+    dependencies.resolveSessionTenantImpl ?? resolveSessionTenant;
+  const { tenant } = await resolveSessionTenantImpl(args.userId);
+  const { data: requestRow, error: insertError } = await client
+    .from("browser_session_requests")
+    .insert({
+      tenant_id: tenant.id,
+      user_id: args.userId,
+      session_type: "onboarding",
+      model_override: args.modelOverride ?? null,
+      offer_sdp: args.sdpOffer,
+      status: "processing",
+      handled_at: (dependencies.nowIso ?? (() => new Date().toISOString()))(),
+    })
+    .select("id")
+    .single();
+  if (insertError || !requestRow?.id)
+    throw Object.assign(new Error("direct_onboarding_request_insert_failed"), {
+      status: 503,
+    });
+
+  try {
+    const result = await startSessionImpl(
+      args.userId,
+      "onboarding",
+      args.sdpOffer,
+      args.modelOverride,
+      tenant.id,
+    );
+    const readyWrite = await client
+      .from("browser_session_requests")
+      .update({
+        status: "ready",
+        answer_sdp: result.sdp,
+        call_id: result.call_id,
+      })
+      .eq("id", requestRow.id);
+    if (readyWrite.error)
+      throw Object.assign(
+        new Error("direct_onboarding_request_ready_failed"),
+        { status: 503 },
+      );
+    return result;
+  } catch (error) {
+    try {
+      await client
+        .from("browser_session_requests")
+        .update({
+          status: "error",
+          error: String(
+            error instanceof Error ? error.message : error,
+          ).slice(0, 400),
+        })
+        .eq("id", requestRow.id);
+    } catch {}
+    throw error;
+  }
+}
+
 export async function startSession(userId: string, sessionType: SessionType, sdpOffer: string, modelOverride?: string, tenantId?: string) {
   const { tenant, rules } = await resolveSessionTenant(userId, tenantId);
 
@@ -254,7 +353,12 @@ if (import.meta.main) {
           if (!owner) return Response.json({ error: "unauthorized" }, { status: 401, headers: CORS });
           const body = (await req.json()) as { sdp?: string; session_type?: SessionType; model?: string };
           if (!body.sdp) return Response.json({ error: "sdp_required" }, { status: 400, headers: CORS });
-          const out = await startSession(owner.userId, body.session_type ?? "owner_browser", body.sdp, body.model);
+          const out = await startDirectSessionRequest({
+            userId: owner.userId,
+            sessionType: body.session_type ?? "owner_browser",
+            sdpOffer: body.sdp,
+            modelOverride: body.model,
+          });
           return Response.json(out, { headers: CORS });
         } catch (e: any) {
           const status = e?.status ?? 500;

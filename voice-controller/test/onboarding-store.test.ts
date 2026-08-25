@@ -62,6 +62,8 @@ function receipt(
 
 class SupabaseBoundaryFake {
   receiptRows: ReceiptRow[] = [];
+  receiptReadSequences: ReceiptRow[][] = [];
+  receiptSetReads = 0;
   eventReceiptRows = new Map<string, ReceiptRow>();
   receiptError: QueryError | null = null;
   ruleRows: RuleRow[] = [];
@@ -72,6 +74,7 @@ class SupabaseBoundaryFake {
     error: null,
   };
   receiptNeverResolves = false;
+  ignoreRuleInFilter = false;
 
   client() {
     const boundary = this;
@@ -79,6 +82,7 @@ class SupabaseBoundaryFake {
       from(table: string) {
         const filters: Array<[string, unknown]> = [];
         let selected = "";
+        let limitValue: number | undefined;
         const query: any = {
           select(columns: string) {
             selected = columns;
@@ -95,7 +99,8 @@ class SupabaseBoundaryFake {
           order() {
             return query;
           },
-          limit() {
+          limit(value: number) {
+            limitValue = value;
             return query;
           },
           maybeSingle() {
@@ -118,6 +123,22 @@ class SupabaseBoundaryFake {
             });
           },
           then(resolve: (result: unknown) => unknown) {
+            if (table === "receipts") {
+              if (boundary.receiptNeverResolves) return new Promise(() => {});
+              const rows = boundary.receiptReadSequences.length > 0
+                ? boundary.receiptReadSequences[
+                    Math.min(
+                      boundary.receiptSetReads,
+                      boundary.receiptReadSequences.length - 1,
+                    )
+                  ]!
+                : boundary.receiptRows;
+              boundary.receiptSetReads += 1;
+              return Promise.resolve({
+                data: rows.slice(0, limitValue),
+                error: boundary.receiptError,
+              }).then(resolve);
+            }
             if (table !== "rules") {
               return Promise.resolve({
                 data: null,
@@ -130,8 +151,17 @@ class SupabaseBoundaryFake {
             expect(filters).toContainEqual(["tenant_id", TENANT_ID]);
             expect(filters).toContainEqual(["related_call_id", CALL_ID]);
             expect(filters).toContainEqual(["origem", "onboarding"]);
+            const requestedIds = filters.find(
+              ([column]) => column === "id:in",
+            )?.[1];
+            const rows =
+              Array.isArray(requestedIds) && !boundary.ignoreRuleInFilter
+                ? boundary.ruleRows.filter((row) =>
+                    requestedIds.includes(row.id)
+                  )
+                : boundary.ruleRows;
             return Promise.resolve({
-              data: boundary.ruleRows,
+              data: rows,
               error: boundary.ruleError,
             }).then(resolve);
           },
@@ -374,6 +404,121 @@ describe("recordOnboardingAnswer", () => {
     });
   });
 
+  test("selects the numeric maximum coverage revision even when its created_at is earlier", async () => {
+    const fake = new SupabaseBoundaryFake();
+    const revisionOne = receipt({
+      revision: 1,
+      snapshot: emptySnapshot(1),
+      complete: false,
+      selected_rule_ids: [],
+      snapshot_digest: "1".repeat(64),
+    });
+    const revisionTwo: ReceiptRow = {
+      id: "44444444-4444-4444-8444-444444444446",
+      readback: {
+        ...revisionOne.readback,
+        revision: 2,
+        snapshot: emptySnapshot(2),
+        snapshot_digest: "2".repeat(64),
+      },
+    };
+    // The stale row is first, exactly as a created_at DESC query can return it
+    // when revision N+1 committed with an earlier caller-supplied timestamp.
+    fake.receiptRows = [revisionOne, revisionTwo];
+    fake.ruleRows = [];
+    fake.rpcResult = {
+      data: {
+        status: "recorded",
+        rule_id: "r-3",
+        rule_group_id: "g-3",
+        coverage_receipt_id: "coverage-3",
+        revision: 3,
+        snapshot_digest: "3".repeat(64),
+        complete: false,
+        missing: [],
+        ambiguous: [],
+        next_action: { type: "ask", field: "service.catalog_closure" },
+        coverage: {},
+      },
+      error: null,
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 25,
+      timeoutMs: 100,
+    });
+
+    await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-after-stale-order",
+      AREA_FACT,
+    );
+
+    expect(fake.rpcCalls[0]?.args).toMatchObject({
+      p_expected_revision: 2,
+      p_coverage: { revision: 3, snapshot: { revision: 3 } },
+    });
+  });
+
+  test("persists the full JSON-safe snapshot without dropping flags or sorting service discovery order", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.receiptRows = [
+      receipt({
+        complete: false,
+        selected_rule_ids: [],
+        snapshot: {
+          ...emptySnapshot(1),
+          services: ["z_service", "a_service"],
+          currentSubject: "z_service",
+          summaryInvalidated: true,
+          catalogOverflow: {
+            services: ["overflow_z", "overflow_a"],
+            safeRestriction: "Owner review only.",
+            ownerWords: "Revisar depois.",
+          },
+        },
+      }),
+    ];
+    fake.ruleRows = [];
+    fake.rpcResult = {
+      data: {
+        status: "recorded",
+        rule_id: "round-trip-rule",
+        rule_group_id: "round-trip-group",
+        coverage_receipt_id: "round-trip-receipt",
+        revision: 2,
+        snapshot_digest: "4".repeat(64),
+        complete: false,
+        missing: [],
+        ambiguous: [],
+        next_action: { type: "ask", field: "service.catalog_closure" },
+        coverage: {},
+      },
+      error: null,
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 27,
+      timeoutMs: 100,
+    });
+
+    await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-full-snapshot",
+      AREA_FACT,
+    );
+
+    const snapshot = (fake.rpcCalls[0]?.args.p_coverage as any).snapshot;
+    expect(snapshot.services).toEqual(["z_service", "a_service"]);
+    expect(snapshot.summaryInvalidated).toBe(true);
+    expect(snapshot.currentSubject).toBe("z_service");
+    expect(snapshot.catalogOverflow).toEqual({
+      services: ["overflow_z", "overflow_a"],
+      safeRestriction: "Owner review only.",
+      ownerWords: "Revisar depois.",
+    });
+  });
+
   test("returns an exact durable replay without synthesizing receipt identity", async () => {
     const fake = new SupabaseBoundaryFake();
     fake.eventReceiptRows.set(
@@ -595,6 +740,164 @@ describe("loadOnboardingSnapshot", () => {
         },
       ],
     });
+  });
+
+  test("returns changed when a newer revision appears while selected rules are resolving", async () => {
+    const fake = new SupabaseBoundaryFake();
+    const revisionOne = receipt({
+      selected_rule_ids: ["selected-r1"],
+      snapshot_digest: "5".repeat(64),
+    });
+    const revisionTwo: ReceiptRow = {
+      id: "44444444-4444-4444-8444-444444444447",
+      readback: {
+        ...revisionOne.readback,
+        revision: 2,
+        snapshot: emptySnapshot(2),
+        selected_rule_ids: ["selected-r2"],
+        snapshot_digest: "6".repeat(64),
+      },
+    };
+    fake.receiptRows = [revisionOne];
+    fake.receiptReadSequences = [[revisionOne], [revisionOne, revisionTwo]];
+    fake.ruleRows = [
+      {
+        id: "selected-r1",
+        rule_group_id: "group-r1",
+        version: 1,
+        structured: {},
+        created_at: "2026-08-25T01:00:00.000Z",
+      },
+    ];
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 110,
+      timeoutMs: 100,
+    });
+
+    expect(await store.loadOnboardingSnapshot(ownerCapability())).toEqual({
+      ok: false,
+      code: "changed",
+      safeDetail: "coverage snapshot changed",
+      durationMs: 0,
+    });
+  });
+
+  test("fails closed on a saturated receipt bound or duplicate revision", async () => {
+    for (const rows of [
+      Array.from({ length: 512 }, (_, index) => ({
+        id: `receipt-${index + 1}`,
+        readback: {
+          ...receipt().readback,
+          revision: index + 1,
+          snapshot: emptySnapshot(index + 1),
+          selected_rule_ids: [],
+          snapshot_digest: (index % 16).toString(16).repeat(64),
+        },
+      })),
+      [
+        receipt({ selected_rule_ids: [] }),
+        {
+          ...receipt({ selected_rule_ids: [] }),
+          id: "duplicate-revision-receipt",
+        },
+      ],
+    ]) {
+      const fake = new SupabaseBoundaryFake();
+      fake.receiptRows = rows;
+      fake.ruleRows = [];
+      const store = createOnboardingStore({
+        client: fake.client() as any,
+        now: () => 120,
+        timeoutMs: 100,
+      });
+      expect(await store.loadOnboardingSnapshot(ownerCapability())).toEqual({
+        ok: false,
+        code: "changed",
+        safeDetail: "coverage snapshot changed",
+        durationMs: 0,
+      });
+    }
+  });
+
+  test("requires the selected rule response to match the exact unique requested ID set", async () => {
+    const cases: Array<{
+      selected: string[];
+      returned: RuleRow[];
+      ignoreFilter?: boolean;
+    }> = [
+      {
+        selected: ["selected-1", "selected-2"],
+        returned: [
+          {
+            id: "selected-1",
+            rule_group_id: "group-1",
+            version: 1,
+            structured: {},
+            created_at: "2026-08-25T01:00:00.000Z",
+          },
+        ],
+      },
+      {
+        selected: ["selected-1"],
+        returned: [
+          {
+            id: "selected-1",
+            rule_group_id: "group-1",
+            version: 1,
+            structured: {},
+            created_at: "2026-08-25T01:00:00.000Z",
+          },
+          {
+            id: "selected-1",
+            rule_group_id: "group-1",
+            version: 1,
+            structured: {},
+            created_at: "2026-08-25T01:00:00.000Z",
+          },
+        ],
+      },
+      {
+        selected: ["selected-1"],
+        returned: [
+          {
+            id: "selected-1",
+            rule_group_id: "group-1",
+            version: 1,
+            structured: {},
+            created_at: "2026-08-25T01:00:00.000Z",
+          },
+          {
+            id: "unexpected",
+            rule_group_id: "group-x",
+            version: 1,
+            structured: {},
+            created_at: "2026-08-25T01:00:00.000Z",
+          },
+        ],
+        ignoreFilter: true,
+      },
+    ];
+    for (const scenario of cases) {
+      const fake = new SupabaseBoundaryFake();
+      fake.receiptRows = [
+        receipt({ selected_rule_ids: scenario.selected }),
+      ];
+      fake.ruleRows = scenario.returned;
+      fake.ignoreRuleInFilter = scenario.ignoreFilter === true;
+      const store = createOnboardingStore({
+        client: fake.client() as any,
+        now: () => 130,
+        timeoutMs: 100,
+      });
+
+      expect(await store.loadOnboardingSnapshot(ownerCapability())).toEqual({
+        ok: false,
+        code: "changed",
+        safeDetail: "coverage snapshot changed",
+        durationMs: 0,
+      });
+    }
   });
 
   test("preserves timeout, query, empty, incomplete, and changed as distinct safe failures", async () => {

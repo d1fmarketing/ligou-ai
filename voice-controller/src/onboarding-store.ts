@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import {
   applyCoverageFact,
   buildSummaryAnchors,
-  canonicalCoverage,
   createCoverage,
   evaluateCoverage,
   type CoverageDisposition,
@@ -15,6 +14,7 @@ import {
 import type { Capability } from "./tools.ts";
 
 const DEFAULT_TIMEOUT_MS = 1_500;
+const MAX_COVERAGE_RECEIPTS = 512;
 const TOPICS = new Set([
   "servicos",
   "area",
@@ -382,10 +382,8 @@ function parseReceipt(
   const digest = String(readback.snapshot_digest ?? "");
   const snapshot = hydrateSnapshot(readback.snapshot, cap);
   const selectedRuleIds = Array.isArray(readback.selected_rule_ids)
-    ? readback.selected_rule_ids.filter(
-        (id): id is string => typeof id === "string" && id.length > 0,
-      )
-    : [];
+    ? readback.selected_rule_ids
+    : null;
   if (
     !Number.isSafeInteger(revision) ||
     revision < 1 ||
@@ -394,7 +392,12 @@ function parseReceipt(
     snapshot.revision !== revision ||
     readback.tenant_id !== cap.tenantId ||
     readback.call_id !== cap.callId ||
-    typeof readback.complete !== "boolean"
+    typeof readback.complete !== "boolean" ||
+    !selectedRuleIds ||
+    selectedRuleIds.some(
+      (id) => typeof id !== "string" || id.length === 0,
+    ) ||
+    new Set(selectedRuleIds).size !== selectedRuleIds.length
   )
     return null;
   return {
@@ -403,8 +406,43 @@ function parseReceipt(
     digest,
     complete: readback.complete,
     snapshot,
-    selectedRuleIds,
+    selectedRuleIds: selectedRuleIds as string[],
   };
+}
+
+function latestCoverageReceipt(
+  rows: CoverageReceiptRow[],
+  cap: Capability,
+):
+  | { kind: "ok"; receipt: NonNullable<ReturnType<typeof parseReceipt>> }
+  | { kind: "empty" | "changed" } {
+  if (rows.length === 0) return { kind: "empty" };
+  if (rows.length >= MAX_COVERAGE_RECEIPTS) return { kind: "changed" };
+  const revisions = new Set<number>();
+  let latestRow: CoverageReceiptRow | null = null;
+  let latestRevision = -1;
+  for (const row of rows) {
+    const revision = Number(row?.readback?.revision);
+    if (
+      !Number.isSafeInteger(revision) ||
+      revision < 1 ||
+      revisions.has(revision)
+    )
+      return { kind: "changed" };
+    revisions.add(revision);
+    if (revision > latestRevision) {
+      latestRevision = revision;
+      latestRow = row;
+    }
+  }
+  const parsed = parseReceipt(latestRow, cap);
+  return parsed
+    ? { kind: "ok", receipt: parsed }
+    : { kind: "changed" };
+}
+
+function jsonSafeSnapshot(snapshot: CoverageSnapshot): CoverageSnapshot {
+  return JSON.parse(JSON.stringify(snapshot)) as CoverageSnapshot;
 }
 
 function nextAction(progress: CoverageProgress): Record<string, unknown> {
@@ -462,6 +500,17 @@ function toRuleSnapshots(
   });
 }
 
+function exactSelectedRuleSet(
+  rows: RuleRow[],
+  selectedRuleIds: string[],
+): boolean {
+  if (rows.length !== selectedRuleIds.length) return false;
+  const returnedIds = rows.map((row) => row.id);
+  if (new Set(returnedIds).size !== returnedIds.length) return false;
+  const requested = new Set(selectedRuleIds);
+  return returnedIds.every((id) => requested.has(id));
+}
+
 function latestMatchingGroup(
   rows: RuleRow[],
   field: string,
@@ -509,18 +558,16 @@ export function createOnboardingStore(
     }
   };
 
-  const latestReceipt = async (
+  const coverageReceipts = async (
     cap: Capability,
-  ): Promise<BoundaryResult<CoverageReceiptRow>> =>
+  ): Promise<BoundaryResult<CoverageReceiptRow[]>> =>
     await client
       .from("receipts")
       .select("id,readback")
       .eq("tenant_id", cap.tenantId)
       .eq("call_id", cap.callId)
       .eq("kind", "onboarding_coverage")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .limit(MAX_COVERAGE_RECEIPTS);
 
   const receiptForEvent = async (
     cap: Capability,
@@ -547,6 +594,20 @@ export function createOnboardingStore(
       .eq("origem", "onboarding")
       .order("created_at", { ascending: false });
 
+  const selectedRulesForReceipt = async (
+    cap: Capability,
+    selectedRuleIds: string[],
+  ): Promise<BoundaryResult<RuleRow[]>> => {
+    if (selectedRuleIds.length === 0) return { data: [], error: null };
+    return await client
+      .from("rules")
+      .select("id,rule_group_id,version,structured,created_at")
+      .eq("tenant_id", cap.tenantId)
+      .eq("related_call_id", cap.callId)
+      .eq("origem", "onboarding")
+      .in("id", selectedRuleIds);
+  };
+
   const loadOnboardingSnapshot = async (
     cap: Capability,
   ): Promise<SnapshotResult> => {
@@ -559,7 +620,7 @@ export function createOnboardingStore(
         started,
       );
     try {
-      const receiptResult = await bounded(() => latestReceipt(cap));
+      const receiptResult = await bounded(() => coverageReceipts(cap));
       if (receiptResult.error)
         return snapshotFailure(
           "query_error",
@@ -567,21 +628,29 @@ export function createOnboardingStore(
           now,
           started,
         );
-      if (!receiptResult.data)
+      if (!Array.isArray(receiptResult.data))
+        return snapshotFailure(
+          "query_error",
+          "coverage snapshot query failed",
+          now,
+          started,
+        );
+      const latest = latestCoverageReceipt(receiptResult.data, cap);
+      if (latest.kind === "empty")
         return snapshotFailure(
           "empty",
           "coverage snapshot is empty",
           now,
           started,
         );
-      const parsed = parseReceipt(receiptResult.data, cap);
-      if (!parsed)
+      if (latest.kind === "changed")
         return snapshotFailure(
           "changed",
           "coverage snapshot changed",
           now,
           started,
         );
+      const parsed = latest.receipt;
       if (!parsed.complete)
         return snapshotFailure(
           "coverage_incomplete",
@@ -589,11 +658,41 @@ export function createOnboardingStore(
           now,
           started,
         );
-      const rulesResult = await bounded(() => rulesForCall(cap));
+      const rulesResult = await bounded(() =>
+        selectedRulesForReceipt(cap, parsed.selectedRuleIds)
+      );
       if (rulesResult.error || !Array.isArray(rulesResult.data))
         return snapshotFailure(
           "query_error",
           "coverage rules query failed",
+          now,
+          started,
+        );
+      if (!exactSelectedRuleSet(rulesResult.data, parsed.selectedRuleIds))
+        return snapshotFailure(
+          "changed",
+          "coverage snapshot changed",
+          now,
+          started,
+        );
+      const recheckResult = await bounded(() => coverageReceipts(cap));
+      if (recheckResult.error || !Array.isArray(recheckResult.data))
+        return snapshotFailure(
+          "query_error",
+          "coverage snapshot query failed",
+          now,
+          started,
+        );
+      const rechecked = latestCoverageReceipt(recheckResult.data, cap);
+      if (
+        rechecked.kind !== "ok" ||
+        rechecked.receipt.row.id !== parsed.row.id ||
+        rechecked.receipt.revision !== parsed.revision ||
+        rechecked.receipt.digest !== parsed.digest
+      )
+        return snapshotFailure(
+          "changed",
+          "coverage snapshot changed",
           now,
           started,
         );
@@ -706,7 +805,7 @@ export function createOnboardingStore(
           durationMs: elapsed(now, started),
         };
       }
-      const receiptResult = await bounded(() => latestReceipt(cap));
+      const receiptResult = await bounded(() => coverageReceipts(cap));
       if (receiptResult.error)
         return failure(
           "query_error",
@@ -714,16 +813,22 @@ export function createOnboardingStore(
           now,
           started,
         );
-      const parsed = receiptResult.data
-        ? parseReceipt(receiptResult.data, cap)
-        : null;
-      if (receiptResult.data && !parsed)
+      if (!Array.isArray(receiptResult.data))
+        return failure(
+          "query_error",
+          "coverage snapshot query failed",
+          now,
+          started,
+        );
+      const latest = latestCoverageReceipt(receiptResult.data, cap);
+      if (latest.kind === "changed")
         return failure(
           "changed",
           "coverage snapshot changed",
           now,
           started,
         );
+      const parsed = latest.kind === "ok" ? latest.receipt : null;
       const base = parsed?.snapshot ??
         createCoverage({ tenantId: cap.tenantId, callId: cap.callId });
       const coverageFact: CoverageFact = {
@@ -768,16 +873,14 @@ export function createOnboardingStore(
           persistedFact.subject ? String(persistedFact.subject) : undefined,
         );
       }
-      const canonicalSnapshot = JSON.parse(
-        canonicalCoverage(next),
-      ) as CoverageSnapshot;
+      const fullSnapshot = jsonSafeSnapshot(next);
       const coverageProjection = {
         schema_version: 1,
         tenant_id: cap.tenantId,
         call_id: cap.callId,
         revision: next.revision,
         complete: progress.readyForReview,
-        snapshot: canonicalSnapshot,
+        snapshot: fullSnapshot,
         progress: canonicalValue(progress),
         selected_rule_ids: correctionGroup
           ? (parsed?.selectedRuleIds ?? []).filter((id) => {
@@ -884,7 +987,7 @@ export function createOnboardingStore(
         started,
       );
     try {
-      const receiptResult = await bounded(() => latestReceipt(cap));
+      const receiptResult = await bounded(() => coverageReceipts(cap));
       if (receiptResult.error)
         return failure(
           "query_error",
@@ -892,21 +995,29 @@ export function createOnboardingStore(
           now,
           started,
         );
-      if (!receiptResult.data)
+      if (!Array.isArray(receiptResult.data))
+        return failure(
+          "query_error",
+          "coverage snapshot query failed",
+          now,
+          started,
+        );
+      const latest = latestCoverageReceipt(receiptResult.data, cap);
+      if (latest.kind === "empty")
         return failure(
           "empty",
           "coverage snapshot is empty",
           now,
           started,
         );
-      const parsed = parseReceipt(receiptResult.data, cap);
-      if (!parsed)
+      if (latest.kind === "changed")
         return failure(
           "changed",
           "coverage snapshot changed",
           now,
           started,
         );
+      const parsed = latest.receipt;
       if (!parsed.complete)
         return failure(
           "coverage_incomplete",

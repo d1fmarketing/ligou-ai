@@ -6,6 +6,7 @@ import { resolveSessionTenant } from "../src/session-tenant.ts";
 import { _handleBrowserRequest } from "../src/browser-requests.ts";
 import { resolveOwnedTenantForSession } from "../../supabase/functions/_shared/owned-tenant.ts";
 import { makeBrowserSessionCapability } from "../src/server.ts";
+import * as serverModule from "../src/server.ts";
 
 const V02_TENANT = {
   id: "22222222-2222-4222-8222-222222222222", slug: "ligou-22222222", name: "D1f Marketing", vertical: null,
@@ -121,6 +122,103 @@ describe("browser request handling", () => {
     );
     expect(seen).toEqual([{ userId: "owner-a", sessionType: "onboarding", sdp: "sdp", model: undefined, tenantId: V02_TENANT.id }]);
     expect(updates.some((u) => u.patch?.status === "ready")).toBe(true);
+  });
+
+  test("direct onboarding creates processing proof and marks that exact request ready before returning SDP", async () => {
+    const startDirectSessionRequest = (serverModule as any)
+      .startDirectSessionRequest;
+    expect(startDirectSessionRequest).toBeFunction();
+    const operations: Array<Record<string, unknown>> = [];
+    const client = {
+      from(table: string) {
+        const filters: Record<string, unknown> = {};
+        const api: any = {
+          insert(row: Record<string, unknown>) {
+            operations.push({ operation: "insert", table, row });
+            return api;
+          },
+          select() {
+            return api;
+          },
+          single: async () => ({
+            data: { id: "direct-request-1" },
+            error: null,
+          }),
+          update(patch: Record<string, unknown>) {
+            operations.push({ operation: "update", table, patch, filters });
+            return api;
+          },
+          eq(column: string, value: unknown) {
+            filters[column] = value;
+            return api;
+          },
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({ data: null, error: null }).then(resolve);
+          },
+        };
+        return api;
+      },
+    };
+    const starts: unknown[][] = [];
+
+    const result = await startDirectSessionRequest(
+      {
+        userId: "owner-a",
+        sessionType: "onboarding",
+        sdpOffer: "offer-sdp",
+        modelOverride: "gpt-realtime-2.1",
+      },
+      {
+        client,
+        nowIso: () => "2026-08-25T12:00:00.000Z",
+        resolveSessionTenantImpl: async () => ({
+          tenant: { ...V02_TENANT },
+          rules: [],
+        }),
+        startSessionImpl: async (...args: unknown[]) => {
+          starts.push(args);
+          operations.push({ operation: "start" });
+          return { sdp: "answer-sdp", call_id: "call-direct-1" };
+        },
+      },
+    );
+
+    expect(result).toEqual({ sdp: "answer-sdp", call_id: "call-direct-1" });
+    expect(starts).toEqual([
+      [
+        "owner-a",
+        "onboarding",
+        "offer-sdp",
+        "gpt-realtime-2.1",
+        V02_TENANT.id,
+      ],
+    ]);
+    expect(operations).toEqual([
+      {
+        operation: "insert",
+        table: "browser_session_requests",
+        row: {
+          tenant_id: V02_TENANT.id,
+          user_id: "owner-a",
+          session_type: "onboarding",
+          model_override: "gpt-realtime-2.1",
+          offer_sdp: "offer-sdp",
+          status: "processing",
+          handled_at: "2026-08-25T12:00:00.000Z",
+        },
+      },
+      { operation: "start" },
+      {
+        operation: "update",
+        table: "browser_session_requests",
+        patch: {
+          status: "ready",
+          answer_sdp: "answer-sdp",
+          call_id: "call-direct-1",
+        },
+        filters: { id: "direct-request-1" },
+      },
+    ]);
   });
 });
 
