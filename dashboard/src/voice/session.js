@@ -24,6 +24,28 @@ export async function startVoiceSession({ accessToken, sessionType = "owner_brow
     } catch { /* ignore */ }
   };
 
+  // The provider can end the call server-side (the agent finishes an interview with
+  // end_session): surface it as an ended session instead of a silent dead line with
+  // the microphone still open. "disconnected" can be a transient ICE blip, so it gets
+  // a short grace; "failed"/"closed" and a closed data channel are terminal.
+  // These live before the handlers because a handler can fire during the setup awaits.
+  let disconnectGrace = null;
+  let deadline = null;
+  let endedOnce = false;
+  channel.onclose = () => end("remote_hangup");
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      end("remote_hangup");
+    } else if (pc.connectionState === "disconnected") {
+      // 15s: transient ICE blips (wifi roaming, cell handoff) routinely exceed 5s and
+      // recover; the terminal signals above never wait on this timer.
+      if (!disconnectGrace) disconnectGrace = setTimeout(() => end("remote_hangup"), 15_000);
+    } else if (pc.connectionState === "connected" && disconnectGrace) {
+      clearTimeout(disconnectGrace);
+      disconnectGrace = null;
+    }
+  };
+
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
@@ -40,14 +62,17 @@ export async function startVoiceSession({ accessToken, sessionType = "owner_brow
   const { sdp, call_id, max_minutes } = await res.json();
   await pc.setRemoteDescription({ type: "answer", sdp });
 
-  const deadline = setTimeout(() => end("deadline"), max_minutes * 60_000);
+  deadline = setTimeout(() => end("deadline"), max_minutes * 60_000);
 
   function stop() {
     for (const track of media.getTracks()) track.stop();
     try { pc.close(); } catch { /* noop */ }
   }
   function end(reason = "user") {
-    clearTimeout(deadline);
+    if (endedOnce) return;
+    endedOnce = true;
+    if (deadline) clearTimeout(deadline);
+    if (disconnectGrace) clearTimeout(disconnectGrace);
     stop();
     onEnd?.(reason);
   }

@@ -36,11 +36,15 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
   // cancelledRef garante que a sessão que resolver depois seja fechada na hora
   // (mic solto) em vez de ressuscitar a chamada.
   const cancelledRef = useRef(false);
+  // Um hangup remoto pode disparar onEnd enquanto o setup ainda está em voo; a
+  // exceção de setup que sobra não pode sobrescrever o estado "ended" com erro cru.
+  const endedRef = useRef(false);
 
   useEffect(() => () => { cancelledRef.current = true; sessionRef.current?.end?.(); }, []);
 
   async function begin() {
     cancelledRef.current = false;
+    endedRef.current = false;
     setStatus("connecting");
     setError(null);
     setLines([]);
@@ -55,7 +59,7 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
         model,
         sessionType,
         onEvent: (ev) => setLines((prev) => [...prev.slice(-30), ev]),
-        onEnd: () => setStatus("ended"),
+        onEnd: () => { endedRef.current = true; setStatus("ended"); },
       });
       if (cancelledRef.current) {
         session?.end?.();
@@ -64,7 +68,7 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
       sessionRef.current = session;
       setStatus("live");
     } catch (e) {
-      if (cancelledRef.current) return;
+      if (cancelledRef.current || endedRef.current) return;
       setError(e.message);
       setStatus("error");
     }
