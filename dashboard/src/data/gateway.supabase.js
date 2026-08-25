@@ -187,8 +187,15 @@ export function createSupabaseGateway() {
     },
 
     async resetPrototype() {
+      // Real mode: reset the simulation-only tenant's working memory through the
+      // append-only path (every rule group gets a terminal rejected version, pending
+      // cases expire). The server refuses outside simulation_only.
+      const { error } = await supabase.rpc("reset_owner_test_memory");
       const { state } = await fetchAll();
-      return { state, warning: "Este painel usa dados reais — não há demonstração para restaurar." };
+      if (error) {
+        return { state, warning: `Não deu para zerar a memória de teste: ${error.message}` };
+      }
+      return { state };
     },
 
     async listMemory({ search, query, status, category } = {}) {

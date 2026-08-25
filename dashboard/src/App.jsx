@@ -326,6 +326,7 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
         pendingCount={pendingApprovals.length}
         business={state.business}
         inspector={inspector}
+        prototype={!supabaseConfigured}
         onReset={() => setDialog({ type: "reset" })}
       >
         {route === "ligou" ? (
@@ -407,7 +408,16 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
         onReject={(id) => perform(() => requireSuccess(gateway.rejectApproval(id)), "Proposta recusada sem alterar a Memória.")}
         onUpdateMemory={(id, patch) => perform(() => requireSuccess(gateway.updateMemory(id, patch)), "Regra atualizada com uma nova versão.")}
         onRevokeMemory={(id) => perform(() => requireSuccess(gateway.revokeMemory(id)), "Regra retirada da memória ativa. Recibo local preservado.")}
-        onReset={() => perform(() => gateway.resetPrototype(), "Dados de exemplo restaurados.")}
+        onReset={() => perform(
+          async () => {
+            const result = await gateway.resetPrototype();
+            // Real mode: a warning means the reset did NOT happen — never show success.
+            // (Prototype warnings are advisory: the in-memory reset still succeeded.)
+            if (supabaseConfigured && result?.warning) throw new Error(result.warning);
+            return result;
+          },
+          supabaseConfigured ? "Memória de teste zerada — pode começar do zero." : "Dados de exemplo restaurados.",
+        )}
       />
 
       <Toast toast={toast} onClose={() => setToast(null)} />
@@ -583,13 +593,23 @@ function DashboardDialog({
   }
 
   if (dialog.type === "reset") {
+    const real = supabaseConfigured;
     return (
-      <Dialog open title="Restaurar demonstração" description="Todas as mudanças feitas neste navegador serão substituídas pelos dados originais de exemplo." onClose={onClose}>
+      <Dialog
+        open
+        title={real ? "Zerar memória de teste" : "Restaurar demonstração"}
+        description={real
+          ? "Todas as regras da Memória serão descartadas e as aprovações pendentes expiram, para testar do zero. Disponível apenas em modo de simulação."
+          : "Todas as mudanças feitas neste navegador serão substituídas pelos dados originais de exemplo."}
+        onClose={onClose}
+      >
         <div className="confirmation-block">
-          <p>Esta ação reinicia conversas, regras e aprovações do protótipo.</p>
+          <p>{real
+            ? "O histórico de versões fica registrado — nada é apagado do banco, as regras saem da memória de trabalho."
+            : "Esta ação reinicia conversas, regras e aprovações do protótipo."}</p>
           <div className="dialog-actions">
             <button className="button button--ghost" type="button" onClick={onClose}>Cancelar</button>
-            <button className="button button--primary" type="button" disabled={busy} onClick={() => run(onReset)}><IconRefresh aria-hidden="true" /> Restaurar</button>
+            <button className="button button--primary" type="button" disabled={busy} onClick={() => run(onReset)}><IconRefresh aria-hidden="true" /> {real ? "Zerar memória" : "Restaurar"}</button>
           </div>
         </div>
       </Dialog>
