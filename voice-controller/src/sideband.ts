@@ -28,6 +28,10 @@ export interface SessionLedger {
   continuationWanted?: boolean;
   /** Function calls still executing from the current batch; the continuation waits for all outputs. */
   pendingToolCalls?: number;
+  /** The model called end_session: close gracefully after its farewell response finishes. */
+  agentEndRequested?: boolean;
+  /** The session was ended by the agent, so the provider call is still live and needs the audited hangup. */
+  agentEnded?: boolean;
 }
 
 /** Plan v4 §8: reserving quota only gates FUTURE sessions — a live session that runs up the bill must be cut.
@@ -385,7 +389,12 @@ export async function handleEvent(
           }));
           if (!isCurrent()) return;
           console.log(`sideband tool call=${ledger.callId.slice(0, 8)} name=${item.name} ok=${result.ok} response_active=${ledger.responseActive === true}`);
-          ledger.continuationWanted = true;
+          if (item.name === "end_session" && result.ok) {
+            // The farewell is the last turn: no continuation, close after the response finishes.
+            ledger.agentEndRequested = true;
+          } else {
+            ledger.continuationWanted = true;
+          }
         } finally {
           // The counter belongs to the current socket generation: activateOpenedSocket
           // resets it on reattach, so a stale call from a superseded socket must not
@@ -427,6 +436,19 @@ export async function handleEvent(
       }
       ledger.responseActive = false;
       maybeContinueResponse(ledger, ws);
+      if (ledger.agentEndRequested && ledger.status === "active" && (ledger.pendingToolCalls ?? 0) === 0) {
+        // The farewell response is done streaming; give client playback a short grace, then
+        // end the session. The audited provider hangup runs in finalize (agentEnded flag).
+        const grace = Number(process.env.LIGOU_AGENT_END_GRACE_MS ?? 5_000);
+        setTimeout(() => {
+          if (ledger.status !== "active" || !isCurrent()) return;
+          ledger.status = "ended";
+          ledger.agentEnded = true;
+          ledger.transcript.push({ role: "system", text: "session ended: interview completed by agent (end_session)", at: new Date().toISOString() });
+          console.log(`sideband agent end call=${ledger.callId.slice(0, 8)} (end_session honored)`);
+          try { ws.close(); } catch {}
+        }, Number.isFinite(grace) && grace >= 0 ? grace : 5_000);
+      }
       break;
     }
     case "session.ended": {
@@ -507,7 +529,11 @@ export async function persistLedger(
     && ledger.providerUsageEvidence.terminal === true;
   const cost = usageResolved ? Number(sessionCostUsd(ledger.model, ledger.usage).toFixed(4)) : null;
   const s = supa();
-  const providerNeedsTermination = ledger.status !== "ended";
+  // "ended" normally means the provider already finished the call (session.ended /
+  // caller hangup). An agent-initiated end is the exception: the status is "ended" but
+  // the provider call is still live and must get the audited hangup.
+  const providerNeedsTermination = ledger.status !== "ended" || ledger.agentEnded === true;
+  const terminationReason = ledger.agentEnded === true ? "agent_ended_session" : `sideband_${ledger.status}`;
   const outcome: BudgetOutcome = ledger.status === "ended"
     ? "ended"
     : ledger.status === "killed_deadline"
@@ -570,7 +596,7 @@ export async function persistLedger(
     summary_status: "pending_ingest",
     provider_termination_state: providerNeedsTermination ? "active" : "confirmed",
     provider_termination_mode: "hangup",
-    provider_termination_reason: providerNeedsTermination ? `sideband_${ledger.status}` : "caller_hung_up",
+    provider_termination_reason: providerNeedsTermination ? terminationReason : "caller_hung_up",
     provider_usage_state: usageResolved ? "resolved" : "unknown",
     provider_usage_evidence: providerUsageEvidence,
   }).eq("id", cap.callId);
@@ -583,7 +609,7 @@ export async function persistLedger(
     outcome,
     detail: { tools: ledger.toolLog, model: ledger.model },
     provider: providerNeedsTermination
-      ? { openaiCallId: ledger.openaiCallId, mode: "hangup", reason: `sideband_${ledger.status}` }
+      ? { openaiCallId: ledger.openaiCallId, mode: "hangup", reason: terminationReason }
       : undefined,
     fetchImpl,
     usageResolved,

@@ -31,7 +31,7 @@ export function makeCapability(
   epochs: { authEpoch: number; policyEpoch: number; simulation?: boolean } = { authEpoch: 1, policyEpoch: 1 },
 ): Capability {
   const allowedTools = sessionType === "onboarding"
-    ? ["get_business_info", "record_interview_answer"]
+    ? ["get_business_info", "record_interview_answer", "end_session"]
     : ["get_business_info", "quote_price", "evaluate_offer", "check_availability", "create_async_case", "consult_ligou_brain", "propose_booking", "close_deal"];
   return {
     actor: "CALLER",
@@ -170,6 +170,12 @@ export const toolSchemas = [
       required: ["topic", "rule_text"],
     },
   },
+  {
+    type: "function",
+    name: "end_session",
+    description: "ONBOARDING ONLY: ends the current voice call. Call exactly once, after the final recap and a single goodbye, when the interview is complete. The call hangs up shortly after; do not keep exchanging farewells.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
 ] as const;
 
 // map external tool name -> internal capability name
@@ -183,6 +189,7 @@ const CAP_NAME: Record<string, string> = {
   close_deal: "close_deal",
   consult_ligou_brain: "consult_ligou_brain",
   record_interview_answer: "record_interview_answer",
+  end_session: "end_session",
 };
 
 const TOPIC_CATEGORY: Record<string, string> = {
@@ -201,6 +208,10 @@ export async function runTool(cap: Capability, name: string, args: Record<string
   const capName = CAP_NAME[name];
   if (!capName || !cap.allowedTools.includes(capName)) return done({ error: "tool_not_allowed" }, false);
   if (Date.now() > cap.expiresAt) return done({ error: "capability_expired" }, false);
+
+  // Pure close signal: no tenant data is read or written, so it resolves before loadTenant.
+  // The sideband owns the actual hangup (grace period + audited provider termination).
+  if (name === "end_session") return done({ ok: true, ending: true });
 
   try {
     const { tenant, rules } = await loadTenant(cap.tenantSlug);

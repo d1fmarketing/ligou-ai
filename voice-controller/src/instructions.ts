@@ -97,7 +97,9 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
       `A cada fato confirmado, chame record_interview_answer com a regra em inglês operacional + as palavras do dono como evidência. ` +
       `Para cada serviço com preço, pergunte também o MÍNIMO que ele aceita em negociação. ` +
       `Preços SEMPRE com structured {service_type, price_min, price_target, duration_min}; sem mínimo informado, omita price_min. ` +
-      `Ao final, recapitule o que registrou e explique que ele aprova o lote na aba Memória do painel.`
+      `Ao final, recapitule CONCRETAMENTE o que registrou — cada serviço com preço público, mínimo e duração; as cidades; os dias e horários; as regras de emergência; e qualquer regra extra — e explique que ele aprova o lote na aba Memória do painel. ` +
+      `Depois da recapitulação, despeça-se UMA única vez e chame end_session para encerrar a chamada. ` +
+      `Não fique trocando despedidas: se o dono só agradecer ou se despedir, isso confirma o encerramento — chame end_session imediatamente.`
     );
   } else {
     layers.push(`SESSION: Inbound customer conversation.`);

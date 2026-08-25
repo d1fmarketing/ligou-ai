@@ -6,10 +6,11 @@
 // handler killed the session. The interview must be self-driving: exactly one
 // continuation, issued only once no response is active, and that provider error must
 // never be terminal.
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { emptyUsage } from "../src/config.ts";
-import { attachSideband, handleEvent, liveSessions, type SessionLedger } from "../src/sideband.ts";
-import { makeCapability } from "../src/tools.ts";
+import { _setClient } from "../src/rules.ts";
+import { attachSideband, handleEvent, liveSessions, persistLedger, type SessionLedger } from "../src/sideband.ts";
+import { makeCapability, runTool } from "../src/tools.ts";
 
 const cap = makeCapability("rocha-plumbing", "tenant-1", "call-1", 15, "onboarding", {
   authEpoch: 1, policyEpoch: 1,
@@ -51,10 +52,10 @@ function sentTypes(ws: { sent: string[] }): string[] {
 // The tool name is deliberately not in the capability's allowlist: runTool fails closed
 // without any database access, and the continuation contract must not depend on the
 // tool's own outcome.
-function functionCallDone(callId: string) {
+function functionCallDone(callId: string, name = "not_a_real_tool") {
   return {
     type: "response.output_item.done",
-    item: { type: "function_call", name: "not_a_real_tool", call_id: callId, arguments: "{}" },
+    item: { type: "function_call", name, call_id: callId, arguments: "{}" },
   };
 }
 
@@ -160,6 +161,95 @@ describe("sideband response continuation", () => {
     expect(sentTypes(ws)).toEqual(["conversation.item.create", "conversation.item.create", "response.create"]);
     expect(l.status).toBe("active");
   });
+});
+
+describe("agent-initiated session end (end_session)", () => {
+  test("end_session is a pure close signal: allowed in onboarding, denied elsewhere, no tenant access", async () => {
+    const allowed = await runTool(cap, "end_session", {});
+    expect(allowed.ok).toBe(true);
+    const customerCap = makeCapability("rocha-plumbing", "tenant-1", "call-2", 15, "customer", {
+      authEpoch: 1, policyEpoch: 1,
+    });
+    const denied = await runTool(customerCap, "end_session", {});
+    expect(denied.ok).toBe(false);
+    expect(denied.body.error).toBe("tool_not_allowed");
+  });
+
+  test("after the farewell response finishes, the session closes within the grace period", async () => {
+    process.env.LIGOU_AGENT_END_GRACE_MS = "40";
+    const l = ledger();
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, functionCallDone("fc_end", "end_session"));
+
+    // The output goes back, but no continuation is requested and nothing closes mid-response.
+    expect(sentTypes(ws).filter((t) => t === "conversation.item.create")).toHaveLength(1);
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(0);
+    expect(l.agentEndRequested).toBe(true);
+    expect(l.status).toBe("active");
+
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    expect(l.status).toBe("active");
+    expect(ws.closed).toBe(0);
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(l.status).toBe("ended");
+    expect(l.agentEnded).toBe(true);
+    expect(ws.closed).toBe(1);
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(0);
+    expect(l.transcript.some((entry) => entry.role === "system" && entry.text.includes("end_session"))).toBe(true);
+  });
+
+  test("a provider session end before the grace expires wins and is not double-closed", async () => {
+    process.env.LIGOU_AGENT_END_GRACE_MS = "40";
+    const l = ledger();
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, functionCallDone("fc_end", "end_session"));
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    await handleEvent(cap, l, ws as any, { type: "session.ended" });
+    expect(l.status).toBe("ended");
+    expect(ws.closed).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(ws.closed).toBe(1);
+    expect(l.agentEnded).toBeUndefined();
+  });
+
+  test("an agent-ended call still gets the audited provider hangup; a caller hangup does not", async () => {
+    const rows: any[] = [];
+    _setClient({
+      from(table: string) {
+        const api: any = {
+          update(row: any) { if (table === "calls") rows.push(row); return api; },
+          eq() { return api; },
+          insert() { return api; },
+          then(resolve: (value: unknown) => unknown) { return Promise.resolve({ data: null, error: null }).then(resolve); },
+        };
+        return api;
+      },
+      rpc() { return Promise.resolve({ data: "reservation-1", error: null }); },
+    } as any);
+    try {
+      const agentEnded = ledger();
+      agentEnded.status = "ended";
+      agentEnded.agentEnded = true;
+      await persistLedger(cap, agentEnded, async () => new Response(null, { status: 200 }));
+      const callerEnded = ledger();
+      callerEnded.status = "ended";
+      await persistLedger(cap, callerEnded, async () => new Response(null, { status: 200 }));
+    } finally {
+      _setClient(null);
+    }
+    expect(rows[0].provider_termination_state).toBe("active");
+    expect(rows[0].provider_termination_reason).toBe("agent_ended_session");
+    expect(rows[1].provider_termination_state).toBe("confirmed");
+    expect(rows[1].provider_termination_reason).toBe("caller_hung_up");
+  });
+});
+
+afterAll(() => {
+  delete process.env.LIGOU_AGENT_END_GRACE_MS;
+  _setClient(null);
 });
 
 describe("sideband reattach continuation state", () => {
