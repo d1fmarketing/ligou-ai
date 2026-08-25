@@ -315,6 +315,26 @@ describe("agent-initiated session end (end_session)", () => {
     }
   });
 
+  test("the recap gate is best-effort: after two refusals, or a text turn, end_session is honored", async () => {
+    process.env.LIGOU_AGENT_END_GRACE_MS = "40";
+    // Two refusals cap the guard even when no transcript event ever arrives.
+    const l = ledger();
+    const ws = socket();
+    l.pendingRecapAfterRecords = true;
+    await handleEvent(cap, l, ws as any, functionCallDone("fc_e1", "end_session"));
+    await handleEvent(cap, l, ws as any, functionCallDone("fc_e2", "end_session"));
+    expect(l.agentEndRequested).toBeUndefined();
+    expect(l.recapRefusals).toBe(2);
+    await handleEvent(cap, l, ws as any, functionCallDone("fc_e3", "end_session"));
+    expect(l.agentEndRequested).toBe(true);
+
+    // A text-modality turn also clears the pending recap.
+    const l2 = ledger();
+    l2.pendingRecapAfterRecords = true;
+    await handleEvent(cap, l2, socket() as any, { type: "response.output_text.done", text: "Resumo: tudo registrado." });
+    expect(l2.pendingRecapAfterRecords).toBe(false);
+  });
+
   test("an agent-ended call still gets the audited provider hangup; a caller hangup does not", async () => {
     const rows: any[] = [];
     _setClient({

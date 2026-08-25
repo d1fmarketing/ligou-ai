@@ -31,6 +31,9 @@ export interface SessionLedger {
   /** Rules were recorded and the owner has not heard the agent speak since: end_session
    *  is refused until at least one spoken agent turn follows the last registration. */
   pendingRecapAfterRecords?: boolean;
+  /** How many times end_session was refused for a missing recap. The guard is
+   *  best-effort: a broken transcription pipeline must not hold the call hostage. */
+  recapRefusals?: number;
   /** The model called end_session: close gracefully after its farewell response finishes. */
   agentEndRequested?: boolean;
   /** The graceful close is already scheduled for the current socket generation. */
@@ -404,6 +407,10 @@ export async function handleEvent(
         ledger.pendingRecapAfterRecords = false;
       }
       break;
+    case "response.output_text.done":
+      // A text-modality turn also counts as the agent addressing the owner.
+      if (msg.text) ledger.pendingRecapAfterRecords = false;
+      break;
     case "response.output_item.done": {
       const item = msg.item;
       if (item?.type === "function_call") {
@@ -418,7 +425,9 @@ export async function handleEvent(
           // end_session in its next response without ever speaking the promised recap, and the
           // call hung up in silence. State-machine invariant: registering and hanging up must
           // have a spoken agent turn between them.
-          if (item.name === "end_session" && result.ok && ledger.pendingRecapAfterRecords) {
+          if (item.name === "end_session" && result.ok && ledger.pendingRecapAfterRecords
+            && (ledger.recapRefusals ?? 0) < 2) {
+            ledger.recapRefusals = (ledger.recapRefusals ?? 0) + 1;
             result = {
               ok: false,
               body: {
