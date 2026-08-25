@@ -1,7 +1,12 @@
 // Tool contract tests — run against a mocked Supabase client; no audio, no network, $0.
 import { describe, expect, test, beforeEach, afterAll } from "bun:test";
 import { _setClient, invalidateTenant } from "../src/rules.ts";
-import { makeCapability, runTool, toolSchemas } from "../src/tools.ts";
+import {
+  makeCapability,
+  runTool,
+  toolSchemas,
+  toolSchemasForSessionType,
+} from "../src/tools.ts";
 import { overlapsBusy } from "../src/calendar.ts";
 import { buildInstructions } from "../src/instructions.ts";
 
@@ -27,6 +32,8 @@ let inserted: any[] = [];
 let busyEvents: Array<{ start_iso: string; end_iso: string }> = [];
 let calendarFails = false;
 let quoteRows: any[] = [];
+let rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+let coverageReceipt: Record<string, unknown> | null = null;
 
 function mockSupabase() {
   return {
@@ -37,12 +44,16 @@ function mockSupabase() {
         eq(column: string, value: unknown) { filters[column] = value; return api; },
         is() { return api; },
         lt() { return api; },
+        order() { return api; },
+        limit() { return api; },
         gt: async () => calendarFails
           ? { data: null, error: { message: "calendar unreadable" } }
           : { data: busyEvents, error: null },
         maybeSingle: async () => table === "booking_quotes"
           ? { data: quoteRows.find((row) => row.token_hash === filters.token_hash) ?? null, error: null }
-          : { data: null, error: null },
+          : table === "receipts"
+            ? { data: coverageReceipt, error: null }
+            : { data: null, error: null },
         single: async () => table === "tenants"
           ? { data: TENANT, error: null }
           : { data: { id: "case-1", status: "pendente" }, error: null },
@@ -59,7 +70,44 @@ function mockSupabase() {
       };
       return api;
     },
-    rpc: async () => ({ data: "res-1", error: null }),
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      rpcCalls.push({ name, args });
+      if (name === "record_onboarding_answer") {
+        return {
+          data: {
+            status: "recorded",
+            rule_id: "onboarding-rule-1",
+            rule_group_id: "onboarding-group-1",
+            coverage_receipt_id: "onboarding-receipt-1",
+            revision: 1,
+            snapshot_digest: "a".repeat(64),
+            complete: false,
+            missing: [{ field: "service.catalog_closure" }],
+            ambiguous: [],
+            next_action: {
+              type: "ask",
+              field: "service.catalog_closure",
+              question_pt: "Há mais algum serviço?",
+            },
+            coverage: {},
+          },
+          error: null,
+        };
+      }
+      if (name === "record_onboarding_voice_approval") {
+        return {
+          data: {
+            status: "recorded",
+            approval_receipt_id: "approval-receipt-1",
+            coverage_receipt_id: "coverage-receipt-1",
+            revision: 1,
+            snapshot_digest: "b".repeat(64),
+          },
+          error: null,
+        };
+      }
+      return { data: "res-1", error: null };
+    },
   } as any;
 }
 
@@ -68,6 +116,8 @@ beforeEach(() => {
   busyEvents = [];
   calendarFails = false;
   quoteRows = [];
+  rpcCalls = [];
+  coverageReceipt = null;
   TENANT.policy_epoch = 1;
   invalidateTenant("rocha-plumbing");
   _setClient(mockSupabase());
@@ -244,7 +294,7 @@ describe("create_async_case", () => {
 });
 
 describe("capability boundary", () => {
-  test("one onboarding capability records all five answers and an effective policy change invalidates it immediately", async () => {
+  test("an owner-bound onboarding capability records through the atomic RPC and a policy change invalidates it immediately", async () => {
     const onboarding = makeCapability(
       TENANT.slug,
       TENANT.id,
@@ -252,24 +302,140 @@ describe("capability boundary", () => {
       30,
       "onboarding",
       { authEpoch: 1, policyEpoch: 1 },
+      "u-1",
     );
-    for (const [index, topic] of ["servicos", "area", "precos", "agenda", "emergencia"].entries()) {
-      const result = await runTool(onboarding, "record_interview_answer", {
-        topic,
-        rule_text: `Synthetic onboarding answer ${index + 1}`,
-      });
-      expect(result.body.status).toBe("recorded");
-    }
-    expect(inserted.filter((entry) => entry.table === "rules")).toHaveLength(5);
+    const result = await runTool(onboarding, "record_interview_answer", {
+      topic: "area",
+      field: "area.coverage",
+      disposition: "answered",
+      rule_text: "Serve Anaheim and Irvine.",
+      structured: { value: ["Anaheim", "Irvine"] },
+      owner_words: "Atendemos Anaheim e Irvine.",
+    }, "provider-tool-1");
+    expect(result.body).toMatchObject({
+      status: "recorded",
+      rule_id: "onboarding-rule-1",
+      coverage_receipt_id: "onboarding-receipt-1",
+      revision: 1,
+      complete: false,
+    });
+    expect(rpcCalls.map((call) => call.name)).toEqual([
+      "record_onboarding_answer",
+    ]);
+    expect(inserted.filter((entry) => entry.table === "rules")).toHaveLength(0);
 
     TENANT.policy_epoch = 2;
     invalidateTenant(TENANT.slug);
     const stale = await runTool(onboarding, "record_interview_answer", {
       topic: "outro",
+      field: "business.languages_tone",
+      disposition: "answered",
       rule_text: "This must not be recorded under the stale capability",
-    });
+      owner_words: "Mantenha o tom profissional.",
+    }, "provider-tool-stale");
     expect(stale.body.error).toBe("policy_epoch_stale");
-    expect(inserted.filter((entry) => entry.table === "rules")).toHaveLength(5);
+    expect(rpcCalls).toHaveLength(1);
+  });
+
+  test("onboarding persistence requires the provider call id and authenticated owner", async () => {
+    const unbound = makeCapability(
+      TENANT.slug,
+      TENANT.id,
+      "call-onboarding",
+      30,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1 },
+    );
+    const args = {
+      topic: "area",
+      field: "area.coverage",
+      disposition: "answered",
+      rule_text: "Serve Anaheim.",
+      structured: { value: ["Anaheim"] },
+      owner_words: "Atendemos Anaheim.",
+    };
+    const missingProvider = await runTool(unbound, "record_interview_answer", args);
+    expect(missingProvider).toMatchObject({
+      ok: false,
+      body: { error: "provider_tool_call_id_required" },
+    });
+    const missingOwner = await runTool(
+      unbound,
+      "record_interview_answer",
+      args,
+      "provider-tool-unbound",
+    );
+    expect(missingOwner).toMatchObject({
+      ok: false,
+      body: { error: "not_owner_bound" },
+    });
+    expect(rpcCalls).toHaveLength(0);
+  });
+
+  test("approval persistence is callable and bound to the latest immutable snapshot", async () => {
+    const snapshot = {
+      tenantId: TENANT.id,
+      callId: "call-onboarding",
+      revision: 1,
+      services: [],
+      cells: {},
+      followUps: 0,
+      followUpGroups: {},
+    };
+    coverageReceipt = {
+      id: "coverage-receipt-1",
+      readback: {
+        tenant_id: TENANT.id,
+        call_id: "call-onboarding",
+        revision: 1,
+        complete: true,
+        snapshot_digest: "c".repeat(64),
+        snapshot,
+        selected_rule_ids: [],
+      },
+    };
+    const onboarding = makeCapability(
+      TENANT.slug,
+      TENANT.id,
+      "call-onboarding",
+      30,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1 },
+      "u-1",
+    );
+
+    const result = await runTool(
+      onboarding,
+      "approve_onboarding_summary",
+      { owner_words: "Aprovado, está correto." },
+      "provider-approval-1",
+    );
+
+    expect(result.body).toEqual({
+      status: "recorded",
+      approval_receipt_id: "approval-receipt-1",
+      coverage_receipt_id: "coverage-receipt-1",
+      revision: 1,
+      snapshot_hash: "b".repeat(64),
+    });
+    expect(rpcCalls.at(-1)?.name).toBe("record_onboarding_voice_approval");
+  });
+
+  test("onboarding end_session is advisory and application-owned", async () => {
+    const onboarding = makeCapability(
+      TENANT.slug,
+      TENANT.id,
+      "call-onboarding",
+      30,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1 },
+      "u-1",
+    );
+    const result = await runTool(onboarding, "end_session", {});
+    expect(result.body).toEqual({
+      status: "application_owned_close",
+      ending: false,
+    });
   });
 
   test("denies tools not in the allowlist", async () => {
@@ -362,6 +528,48 @@ describe("structured Hermes live boundary", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+describe("session-scoped Realtime tools", () => {
+  test("onboarding receives only its safe owner surface", () => {
+    const schemas = toolSchemasForSessionType("onboarding");
+    expect(schemas.map((schema) => schema.name)).toEqual([
+      "get_business_info",
+      "record_interview_answer",
+      "approve_onboarding_summary",
+      "end_session",
+    ]);
+    const record = schemas.find(
+      (schema) => schema.name === "record_interview_answer",
+    ) as any;
+    expect(record.parameters.required.sort()).toEqual([
+      "disposition",
+      "field",
+      "owner_words",
+      "rule_text",
+      "topic",
+    ]);
+    expect(record.parameters.properties.field.enum).toContain(
+      "authority.book",
+    );
+    expect(record.parameters.properties.disposition.enum).toEqual([
+      "answered",
+      "not_applicable",
+      "owner_review_required",
+    ]);
+    const approval = schemas.find(
+      (schema) => schema.name === "approve_onboarding_summary",
+    ) as any;
+    expect(approval.parameters.required).toEqual(["owner_words"]);
+  });
+
+  test("customer schemas expose no onboarding persistence or close tools", () => {
+    const names = toolSchemas.map((schema) => schema.name);
+    expect(names).not.toContain("record_interview_answer");
+    expect(names).not.toContain("approve_onboarding_summary");
+    expect(names).not.toContain("end_session");
+    expect(toolSchemasForSessionType("owner_browser")).toEqual(toolSchemas);
   });
 });
 

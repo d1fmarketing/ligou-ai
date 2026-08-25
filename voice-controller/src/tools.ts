@@ -8,6 +8,13 @@ import { issueQuote, issueSlotOffers, readQuote } from "./offers.ts";
 import { CUSTOMER_OUTCOME } from "./customer-language.ts";
 import { buildTrustedHermesContext, consultHermes, HERMES_TOPICS } from "./hermes.ts";
 import { mintSimulationSlots } from "./simulation.ts";
+import {
+  recordOnboardingAnswer,
+  recordOnboardingVoiceApproval,
+  type OnboardingAnswerArgs,
+} from "./onboarding-store.ts";
+
+export type CapabilitySessionType = "customer" | "owner_browser" | "onboarding";
 
 export interface Capability {
   actor: "CALLER";
@@ -20,6 +27,8 @@ export interface Capability {
   authEpoch: number;
   policyEpoch: number;
   simulation: boolean; // simulation_only tenant: role-play never reaches offers/powers/provider
+  sessionType: CapabilitySessionType;
+  ownerUserId?: string;
 }
 
 export function makeCapability(
@@ -27,11 +36,12 @@ export function makeCapability(
   tenantId: string,
   callId: string,
   maxMinutes: number,
-  sessionType: "customer" | "owner_browser" | "onboarding" = "customer",
+  sessionType: CapabilitySessionType = "customer",
   epochs: { authEpoch: number; policyEpoch: number; simulation?: boolean } = { authEpoch: 1, policyEpoch: 1 },
+  ownerUserId?: string,
 ): Capability {
   const allowedTools = sessionType === "onboarding"
-    ? ["get_business_info", "record_interview_answer", "end_session"]
+    ? ["get_business_info", "record_interview_answer", "approve_onboarding_summary", "end_session"]
     : ["get_business_info", "quote_price", "evaluate_offer", "check_availability", "create_async_case", "consult_ligou_brain", "propose_booking", "close_deal"];
   return {
     actor: "CALLER",
@@ -44,11 +54,56 @@ export function makeCapability(
     authEpoch: epochs.authEpoch,
     policyEpoch: epochs.policyEpoch,
     simulation: epochs.simulation === true,
+    sessionType,
+    ...(sessionType !== "customer" && ownerUserId
+      ? { ownerUserId }
+      : {}),
   };
 }
 
 // OpenAI Realtime function-tool schemas
-export const toolSchemas = [
+const ONBOARDING_COVERAGE_FIELDS = [
+  "business.customer_types",
+  "business.excluded_work",
+  "business.languages_tone",
+  "area.coverage",
+  "area.out_of_area_policy",
+  "area.travel_fee",
+  "schedule.business_hours",
+  "schedule.same_day_lead_time",
+  "schedule.capacity_buffer",
+  "schedule.reschedule_cancel",
+  "schedule.holidays",
+  "emergency.types",
+  "emergency.safety_escalation",
+  "emergency.after_hours",
+  "emergency.fee_authority",
+  "policy.payment_estimate",
+  "policy.warranty_materials",
+  "policy.access_cancellation",
+  "policy.complaints_returns",
+  "authority.quote_price",
+  "authority.negotiate_floor",
+  "authority.read_calendar",
+  "authority.book",
+  "authority.reschedule_cancel",
+  "authority.charge_fee",
+  "authority.emergency",
+  "authority.out_of_area",
+  "service.catalog_closure",
+  "service.name_synonyms",
+  "service.price_mode",
+  "service.price_target",
+  "service.negotiation",
+  "service.duration",
+  "service.inclusions_exclusions",
+  "service.materials_parts",
+  "service.warranty",
+  "service.emergency_eligibility",
+  "service.escalation",
+] as const;
+
+const allToolSchemas = [
   {
     type: "function",
     name: "get_business_info",
@@ -161,13 +216,30 @@ export const toolSchemas = [
     description: "ONBOARDING ONLY: records one answer from the owner interview as a suggested rule (topic + the rule in clear text + structured data when it is a price). Call once per fact learned; the owner approves the batch later in the dashboard.",
     parameters: {
       type: "object",
+      additionalProperties: false,
       properties: {
         topic: { type: "string", enum: ["servicos", "area", "precos", "agenda", "emergencia", "outro"] },
+        field: { type: "string", enum: ONBOARDING_COVERAGE_FIELDS },
+        subject: { type: "string", description: "normalized service subject for service.* fields" },
+        disposition: { type: "string", enum: ["answered", "not_applicable", "owner_review_required"] },
         rule_text: { type: "string", description: "the rule in clear operational language (English)" },
-        structured: { type: "object", description: "structured service and pricing details captured during onboarding" },
+        structured: { type: "object", description: "typed field value and structured service details captured during onboarding" },
         owner_words: { type: "string", description: "the owner's exact words (Portuguese), as evidence" },
       },
-      required: ["topic", "rule_text"],
+      required: ["topic", "field", "disposition", "rule_text", "owner_words"],
+    },
+  },
+  {
+    type: "function",
+    name: "approve_onboarding_summary",
+    description: "ONBOARDING ONLY: persists the owner's explicit voice acknowledgement of the current application-provided coverage summary. It does not approve rules or grant powers.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        owner_words: { type: "string", description: "the owner's explicit approval words (Portuguese)" },
+      },
+      required: ["owner_words"],
     },
   },
   {
@@ -177,6 +249,34 @@ export const toolSchemas = [
     parameters: { type: "object", properties: {}, required: [] },
   },
 ] as const;
+
+const ONBOARDING_TOOL_NAMES = new Set([
+  "get_business_info",
+  "record_interview_answer",
+  "approve_onboarding_summary",
+  "end_session",
+]);
+const CUSTOMER_TOOL_NAMES = new Set([
+  "get_business_info",
+  "quote_price",
+  "evaluate_offer",
+  "check_availability",
+  "create_async_case",
+  "propose_booking",
+  "close_deal",
+  "consult_ligou_brain",
+]);
+
+export function toolSchemasForSessionType(sessionType: CapabilitySessionType) {
+  const allowed = sessionType === "onboarding"
+    ? ONBOARDING_TOOL_NAMES
+    : CUSTOMER_TOOL_NAMES;
+  return allToolSchemas.filter((schema) => allowed.has(schema.name));
+}
+
+// Backward-compatible customer/phone export. Owner onboarding must call the
+// session-scoped selector so it never receives the customer mutation surface.
+export const toolSchemas = toolSchemasForSessionType("customer");
 
 // map external tool name -> internal capability name
 const CAP_NAME: Record<string, string> = {
@@ -189,19 +289,18 @@ const CAP_NAME: Record<string, string> = {
   close_deal: "close_deal",
   consult_ligou_brain: "consult_ligou_brain",
   record_interview_answer: "record_interview_answer",
+  approve_onboarding_summary: "approve_onboarding_summary",
   end_session: "end_session",
-};
-
-const TOPIC_CATEGORY: Record<string, string> = {
-  servicos: "preco", precos: "preco", area: "area", agenda: "agenda", emergencia: "emergencia", outro: "geral",
-};
-const TOPIC_ESCOPO: Record<string, string> = {
-  servicos: "servico", precos: "servico", area: "localizacao", agenda: "geral", emergencia: "geral", outro: "geral",
 };
 
 export interface ToolResult { ok: boolean; body: Record<string, unknown>; durationMs: number }
 
-export async function runTool(cap: Capability, name: string, args: Record<string, unknown>): Promise<ToolResult> {
+export async function runTool(
+  cap: Capability,
+  name: string,
+  args: Record<string, unknown>,
+  providerToolCallId?: string,
+): Promise<ToolResult> {
   const started = Date.now();
   const done = (body: Record<string, unknown>, ok = true): ToolResult => ({ ok, body, durationMs: Date.now() - started });
 
@@ -211,7 +310,14 @@ export async function runTool(cap: Capability, name: string, args: Record<string
 
   // Pure close signal: no tenant data is read or written, so it resolves before loadTenant.
   // The sideband owns the actual hangup (grace period + audited provider termination).
-  if (name === "end_session") return done({ ok: true, ending: true });
+  if (name === "end_session")
+    return done({ status: "application_owned_close", ending: false });
+  if (
+    (name === "record_interview_answer" ||
+      name === "approve_onboarding_summary") &&
+    !providerToolCallId
+  )
+    return done({ error: "provider_tool_call_id_required" }, false);
 
   try {
     const { tenant, rules } = await loadTenant(cap.tenantSlug);
@@ -421,37 +527,54 @@ export async function runTool(cap: Capability, name: string, args: Record<string
         return done(await closeDeal(cap, args) as Record<string, unknown>);
       }
       case "record_interview_answer": {
-        const topic = String(args.topic ?? "outro");
-        const ruleText = String(args.rule_text ?? "").slice(0, 600);
-        if (!ruleText) return done({ error: "rule_text_required" }, false);
-        let structured = (args.structured as Record<string, unknown>) ?? null;
-        // A price with a target but no floor becomes non-negotiable at the target:
-        // a conservative floor the owner can widen later. Without one, evaluate_offer
-        // and check_availability would refuse the approved rule with needs_owner.
-        // Only a real positive number qualifies — junk targets must stay fail-closed
-        // (needs_owner), never become an enforceable $0 floor.
-        if (
-          structured &&
-          typeof structured.price_target === "number" &&
-          Number.isFinite(structured.price_target) &&
-          structured.price_target > 0 &&
-          structured.price_min == null
-        ) {
-          structured = { ...structured, price_min: structured.price_target };
-        }
-        const { data, error } = await supa().from("rules").insert({
-          tenant_id: cap.tenantId,
-          origem: "onboarding",
-          escopo: TOPIC_ESCOPO[topic] ?? "geral",
-          status: "sugerido",
-          category: TOPIC_CATEGORY[topic] ?? "geral",
-          text: ruleText,
-          structured,
-          evidence_quote: args.owner_words ? String(args.owner_words).slice(0, 1000) : null,
-          related_call_id: cap.callId,
-        }).select("id").single();
-        if (error) return done({ status: "unknown", error: error.message }, false);
-        return done({ status: "recorded", rule_id: data.id, note: "Suggested rule saved; the owner approves the batch in the dashboard." });
+        const result = await recordOnboardingAnswer(
+          cap,
+          providerToolCallId!,
+          args as OnboardingAnswerArgs,
+        );
+        if (!result.ok)
+          return done(
+            {
+              status: "unknown",
+              error: result.code,
+              detail: result.safeDetail,
+            },
+            false,
+          );
+        return done({
+          status: result.status,
+          rule_id: result.ruleId,
+          coverage_receipt_id: result.coverageReceiptId,
+          revision: result.revision,
+          complete: result.complete,
+          missing: result.missing,
+          ambiguous: result.ambiguous,
+          next_action: result.nextAction,
+          snapshot_hash: result.digest,
+        });
+      }
+      case "approve_onboarding_summary": {
+        const result = await recordOnboardingVoiceApproval(
+          cap,
+          providerToolCallId!,
+          typeof args.owner_words === "string" ? args.owner_words : "",
+        );
+        if (!result.ok)
+          return done(
+            {
+              status: "unknown",
+              error: result.code,
+              detail: result.safeDetail,
+            },
+            false,
+          );
+        return done({
+          status: result.status,
+          approval_receipt_id: result.approvalReceiptId,
+          coverage_receipt_id: result.coverageReceiptId,
+          revision: result.revision,
+          snapshot_hash: result.digest,
+        });
       }
       default:
         return done({ error: "unknown_tool" }, false);

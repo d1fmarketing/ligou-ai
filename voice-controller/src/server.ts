@@ -5,7 +5,11 @@ import { config } from "./config.ts";
 import { buildInstructions, type SessionType } from "./instructions.ts";
 import { supa } from "./rules.ts";
 import { resolveSessionTenant } from "./session-tenant.ts";
-import { makeCapability, toolSchemas } from "./tools.ts";
+import {
+  makeCapability,
+  toolSchemasForSessionType,
+  type Capability,
+} from "./tools.ts";
 import { attachSideband, liveSessions } from "./sideband.ts";
 import { requireTenantOwner } from "../../supabase/functions/_shared/tenant-ownership.ts";
 import { finalizeTerminalBudget, reserveCallBudget } from "./budget.ts";
@@ -24,6 +28,34 @@ async function verifyOwner(authHeader: string | null): Promise<{ userId: string 
   if (!res.ok) return null;
   const user = (await res.json()) as any;
   return user?.id ? { userId: user.id } : null;
+}
+
+export function makeBrowserSessionCapability(args: {
+  tenant: {
+    slug: string;
+    id: string;
+    auth_epoch: number;
+    policy_epoch: number;
+    operational_mode?: string;
+  };
+  callId: string;
+  userId: string;
+  sessionType: SessionType;
+  maxMinutes: number;
+}): Capability {
+  return makeCapability(
+    args.tenant.slug,
+    args.tenant.id,
+    args.callId,
+    args.maxMinutes,
+    args.sessionType,
+    {
+      authEpoch: args.tenant.auth_epoch,
+      policyEpoch: args.tenant.policy_epoch,
+      simulation: args.tenant.operational_mode === "simulation_only",
+    },
+    args.sessionType === "customer" ? undefined : args.userId,
+  );
 }
 
 export async function startSession(userId: string, sessionType: SessionType, sdpOffer: string, modelOverride?: string, tenantId?: string) {
@@ -87,10 +119,12 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
 
   const instructions = buildInstructions(tenant, rules, sessionType);
   const maxMinutes = sessionType === "onboarding" ? 30 : (tenant.session_max_minutes ?? config.sessionMaxMinutes);
-  const cap = makeCapability(tenant.slug, tenant.id, call.id, maxMinutes, sessionType, {
-    authEpoch: tenant.auth_epoch,
-    policyEpoch: tenant.policy_epoch,
-    simulation: tenant.operational_mode === "simulation_only",
+  const cap = makeBrowserSessionCapability({
+    tenant,
+    callId: call.id,
+    userId,
+    sessionType,
+    maxMinutes,
   });
 
   // Unified interface (official server flow): ONE multipart POST with the STANDARD key. No ephemeral ek_ —
@@ -107,7 +141,11 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
       // low eagerness owns ordinary user turns — server-created responses, native
       // barge-in. The application never creates a response for a normal user turn.
       form.set("session", JSON.stringify({
-        type: "realtime", model, instructions, tools: toolSchemas, tool_choice: "auto",
+        type: "realtime",
+        model,
+        instructions,
+        tools: toolSchemasForSessionType(sessionType),
+        tool_choice: "auto",
         audio: {
           input: { turn_detection: { type: "semantic_vad", eagerness: "low", create_response: true, interrupt_response: true } },
           output: { voice: config.voice },

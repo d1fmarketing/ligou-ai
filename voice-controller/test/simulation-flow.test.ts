@@ -31,6 +31,8 @@ function mockSupabase() {
         eq(column: string, value: unknown) { filters[column] = value; return api; },
         is() { return api; },
         lt() { return api; },
+        order() { return api; },
+        limit() { return api; },
         gt: async () => ({ data: [], error: null }),
         maybeSingle: async () => table === "booking_quotes"
           ? { data: quoteRows.find((row) => row.token_hash === filters.token_hash) ?? null, error: null }
@@ -53,6 +55,24 @@ function mockSupabase() {
     },
     rpc: async (name: string, args: unknown) => {
       rpcCalls.push({ name, args });
+      if (name === "record_onboarding_answer") {
+        return {
+          data: {
+            status: "recorded",
+            rule_id: `onboarding-rule-${rpcCalls.length}`,
+            rule_group_id: `onboarding-group-${rpcCalls.length}`,
+            coverage_receipt_id: `onboarding-receipt-${rpcCalls.length}`,
+            revision: 1,
+            snapshot_digest: "a".repeat(64),
+            complete: false,
+            missing: [],
+            ambiguous: [],
+            next_action: { type: "ask", field: "service.catalog_closure" },
+            coverage: {},
+          },
+          error: null,
+        };
+      }
       return { data: null, error: { message: `rpc_forbidden_in_simulation:${name}` } };
     },
   };
@@ -143,38 +163,91 @@ test("a live capability never enters the simulation path", async () => {
   expect(rpcCalls.some((c) => c.name === "consume_slot_offer")).toBe(true);
 });
 
-test("interview price answers gain a conservative floor when the owner only gave a target", async () => {
-  const cap = makeCapability(TENANT.slug, TENANT.id, "call-ob", 30, "onboarding", { authEpoch: 1, policyEpoch: 1 });
-  await runTool(cap, "record_interview_answer", {
-    topic: "precos", rule_text: "Basic visit: public quote $200.",
-    structured: { service_type: "basic_visit", price_target: 200, duration_min: 60 },
-  });
-  const row = inserted.find((i) => i.table === "rules");
-  expect(row.row.structured.price_min).toBe(200);
-  expect(row.row.structured.price_target).toBe(200);
+test("interview facts use atomic onboarding coverage without touching booking, power, or direct rule writes", async () => {
+  const cap = makeCapability(
+    TENANT.slug,
+    TENANT.id,
+    "call-ob",
+    30,
+    "onboarding",
+    { authEpoch: 1, policyEpoch: 1, simulation: true },
+    "owner-a",
+  );
+  const result = await runTool(cap, "record_interview_answer", {
+    topic: "precos",
+    field: "service.price_target",
+    subject: "basic_visit",
+    disposition: "answered",
+    rule_text: "Basic visit has a public price of $200.",
+    structured: { price_target: 200 },
+    owner_words: "A visita básica custa duzentos dólares.",
+  }, "provider-price-target");
 
-  await runTool(cap, "record_interview_answer", {
-    topic: "precos", rule_text: "Negotiable visit: $150–$220.",
-    structured: { service_type: "nego_visit", price_min: 150, price_target: 220, duration_min: 60 },
+  expect(result.body.status).toBe("recorded");
+  const persistence = rpcCalls.find((call) => call.name === "record_onboarding_answer");
+  expect(persistence.args).toMatchObject({
+    p_owner: "owner-a",
+    p_fact: {
+      field: "service.price_target",
+      subject: "basic_visit",
+      structured: { price_target: 200 },
+    },
+    p_coverage: {
+      snapshot: {
+        cells: {
+          "service:basic_visit:service.price_target": {
+            state: "answered",
+            value: 200,
+          },
+        },
+      },
+    },
   });
-  const nego = inserted.filter((i) => i.table === "rules")[1];
-  expect(nego.row.structured.price_min).toBe(150);
+  expect(inserted.some((entry) => entry.table === "rules")).toBe(false);
+  expect(inserted.some((entry) => entry.table === "bookings")).toBe(false);
+  expect(inserted.some((entry) => entry.table === "action_intents")).toBe(false);
+  expect(rpcCalls.some((call) => String(call.name).includes("power"))).toBe(false);
 });
 
-test("junk price targets never become an enforceable zero floor", async () => {
-  const cap = makeCapability(TENANT.slug, TENANT.id, "call-ob2", 30, "onboarding", { authEpoch: 1, policyEpoch: 1 });
-  const junkTargets = ["", false, "200", 0, -50];
+test("junk price targets remain ambiguous coverage and never become authority", async () => {
+  const cap = makeCapability(
+    TENANT.slug,
+    TENANT.id,
+    "call-ob2",
+    30,
+    "onboarding",
+    { authEpoch: 1, policyEpoch: 1, simulation: true },
+    "owner-a",
+  );
+  const junkTargets = ["", false, "200", -50];
   for (const [index, target] of junkTargets.entries()) {
     await runTool(cap, "record_interview_answer", {
-      topic: "precos", rule_text: `Junk price ${index}.`,
-      structured: { service_type: `junk_${index}`, price_target: target, duration_min: 60 },
+      topic: "precos",
+      field: "service.price_target",
+      subject: `junk_${index}`,
+      disposition: "answered",
+      rule_text: `Junk price ${index}.`,
+      structured: { price_target: target },
+      owner_words: `Valor inválido ${index}.`,
+    }, `provider-junk-${index}`);
+  }
+  const persistenceCalls = rpcCalls.filter(
+    (call) => call.name === "record_onboarding_answer",
+  );
+  expect(persistenceCalls).toHaveLength(junkTargets.length);
+  for (const call of persistenceCalls) {
+    const coverage = call.args.p_coverage as any;
+    const cell = Object.values(coverage.snapshot.cells).find(
+      (value: any) => value?.state === "ambiguous",
+    ) as any;
+    expect(cell?.reason).toBe("price_target_must_be_nonnegative_number");
+    expect(coverage.authority).toEqual({
+      rules_approved: false,
+      powers_granted: false,
+      operational_mode_changed: false,
     });
   }
-  const rows = inserted.filter((i) => i.table === "rules");
-  expect(rows.length).toBe(junkTargets.length);
-  for (const row of rows) {
-    expect(row.row.structured.price_min).toBeUndefined();
-  }
+  expect(inserted.some((entry) => entry.table === "rules")).toBe(false);
 });
 
 describe("instructions", () => {

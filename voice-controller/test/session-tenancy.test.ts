@@ -5,6 +5,7 @@ import { _setClient, invalidateTenant } from "../src/rules.ts";
 import { resolveSessionTenant } from "../src/session-tenant.ts";
 import { _handleBrowserRequest } from "../src/browser-requests.ts";
 import { resolveOwnedTenantForSession } from "../../supabase/functions/_shared/owned-tenant.ts";
+import { makeBrowserSessionCapability } from "../src/server.ts";
 
 const V02_TENANT = {
   id: "22222222-2222-4222-8222-222222222222", slug: "ligou-22222222", name: "D1f Marketing", vertical: null,
@@ -68,6 +69,31 @@ describe("resolveSessionTenant", () => {
 
   test("without a tenant id a non-owner of the legacy tenant is still refused", async () => {
     await expect(resolveSessionTenant("owner-a", undefined)).rejects.toThrow(/not_tenant_owner/);
+  });
+});
+
+describe("browser capability ownership", () => {
+  test("authenticated owner identity is retained only for owner and onboarding browser sessions", () => {
+    for (const sessionType of ["owner_browser", "onboarding"] as const) {
+      const cap = makeBrowserSessionCapability({
+        tenant: V02_TENANT,
+        callId: `call-${sessionType}`,
+        userId: "owner-a",
+        sessionType,
+        maxMinutes: 30,
+      });
+      expect(cap.sessionType).toBe(sessionType);
+      expect(cap.ownerUserId).toBe("owner-a");
+    }
+    const customer = makeBrowserSessionCapability({
+      tenant: V02_TENANT,
+      callId: "call-customer",
+      userId: "owner-a",
+      sessionType: "customer",
+      maxMinutes: 15,
+    });
+    expect(customer.sessionType).toBe("customer");
+    expect(customer.ownerUserId).toBeUndefined();
   });
 });
 
