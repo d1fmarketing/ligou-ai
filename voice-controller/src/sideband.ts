@@ -54,6 +54,9 @@ export interface SessionLedger {
    *  meta-announcements ("vou recapitular") instead of speaking it (E2E test 6). */
   recapPushes?: number;
   recapPushTimer?: ReturnType<typeof setTimeout> | null;
+  /** Monotonic count of speech_started events: an async push attempt aborts if the
+   *  owner spoke after it began (the timer-clear alone cannot cancel mid-await). */
+  speechStartedCount?: number;
   /** The model called end_session: close gracefully after its farewell response finishes. */
   agentEndRequested?: boolean;
   /** The graceful close is already scheduled for the current socket generation. */
@@ -487,6 +490,7 @@ export async function handleEvent(
       break;
     case "input_audio_buffer.speech_started":
       // The owner is talking: an owed-recap push must not talk over them.
+      ledger.speechStartedCount = (ledger.speechStartedCount ?? 0) + 1;
       if (ledger.recapPushTimer) { clearTimeout(ledger.recapPushTimer); ledger.recapPushTimer = null; }
       break;
     case "response.output_audio_transcript.done":
@@ -622,8 +626,13 @@ export async function handleEvent(
         ledger.recapPushTimer = setTimeout(() => {
           ledger.recapPushTimer = null;
           void (async () => {
+            // Low-eagerness VAD means responseActive lags real speech onset: the owner
+            // may already be talking with no auto-response yet. Any speech_started after
+            // this attempt began aborts it (review finding on 65de53a).
+            const speechGen = ledger.speechStartedCount ?? 0;
             const eligible = () => isCurrent() && ledger.status === "active" && ledger.pendingRecapAfterRecords === true
-              && !ledger.responseActive && (ledger.pendingToolCalls ?? 0) === 0 && !ledger.agentEndRequested;
+              && !ledger.responseActive && (ledger.pendingToolCalls ?? 0) === 0 && !ledger.agentEndRequested
+              && (ledger.speechStartedCount ?? 0) === speechGen;
             if (!eligible()) return;
             // Deterministic summary: inject the persisted snapshot so the forced turn
             // reads from the database, then request the response via the coordinator.

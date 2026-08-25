@@ -628,6 +628,35 @@ describe("response coordinator invariants (voice-orchestration contract)", () =>
     expect(createIdx).toBeGreaterThan(snapIdx);
   });
 
+  test("speech starting during the snapshot fetch aborts the push (no talking over the owner)", async () => {
+    process.env.LIGOU_RECAP_PUSH_DELAY_MS = "40";
+    // The rules read resolves only after 80ms — speech arrives inside that window.
+    const slowClient = {
+      from() {
+        const api: any = {
+          select() { return api; }, eq() { return api; },
+          then(resolve: (value: unknown) => unknown) {
+            return new Promise((r) => setTimeout(() => r({ data: [{ category: "preco", text: "x", structured: null }], error: null }), 80)).then(resolve);
+          },
+        };
+        return api;
+      },
+      rpc() { return Promise.resolve({ data: null, error: null }); },
+    } as any;
+    _setClient(slowClient);
+    const l = ledger();
+    const ws = socket();
+    l.pendingRecapAfterRecords = true;
+    l.recapBlockedResponseId = "resp_a";
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    // Timer fires at 40ms and starts the fetch; the owner speaks at ~60ms, mid-await.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await handleEvent(cap, l, ws as any, { type: "input_audio_buffer.speech_started" });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(sentTypes(ws).filter((t) => t === "response.create")).toHaveLength(0);
+  });
+
   test("text-only onboarding: records → owed recap → grounded summary turn → honored close (Layer B)", async () => {
     process.env.LIGOU_RECAP_PUSH_DELAY_MS = "40";
     process.env.LIGOU_AGENT_END_GRACE_MS = "40";
