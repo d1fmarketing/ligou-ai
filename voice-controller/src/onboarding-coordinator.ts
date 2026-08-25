@@ -609,11 +609,6 @@ function ownerReplyKind(
       ["tudo", "correto"],
       ["pode", "confirmar"],
     ].some((sequence) => containsSequence(tokens, sequence));
-  const assentMarker = (tokens: string[]) =>
-    explicitAssent(tokens) ||
-    tokens.some(
-      (token) => token.startsWith("confirm") || token.startsWith("aprov"),
-    );
   const negation = (tokens: string[]) =>
     tokens.some((token) =>
       [
@@ -624,13 +619,38 @@ function ownerReplyKind(
         "tampouco",
         "nenhum",
         "nenhuma",
+        "negativo",
+        "negativa",
+        "discordo",
+        "recuso",
+        "rejeito",
       ].includes(token)
     );
-  if (
-    clauses.some((clause) => negation(clause) && assentMarker(clause)) ||
-    /\b(nao aprovado|nao aprovo|nao esta correto|nao esta certa|incorret|errad|corrig|correcao|mude|altere|mas)\b/.test(
+  const negativeIdiom = (tokens: string[]) =>
+    [
+      ["de", "forma", "alguma"],
+      ["de", "modo", "algum"],
+      ["de", "jeito", "nenhum"],
+      ["de", "jeito", "algum"],
+      ["de", "nenhuma", "forma"],
+      ["de", "nenhum", "modo"],
+      ["de", "maneira", "alguma"],
+      ["em", "hipotese", "alguma"],
+      ["nem", "pensar"],
+    ].some((sequence) => containsSequence(tokens, sequence));
+  const utteranceHasRefusal = clauses.some(
+    (clause) => negation(clause) || negativeIdiom(clause),
+  );
+  const whitelistedNegativeConfirmation =
+    /^(?:nao tenho (?:correcao|correcoes)|nao ha (?:correcao|correcoes))\s*[.!;]+\s*(?:esta tudo correto|esta tudo correta|tudo certo|tudo correto|confirmo|aprovado|aprovada)\s*[.!]*$/.test(
       normalized,
-    )
+    );
+  if (
+    (utteranceHasRefusal && !whitelistedNegativeConfirmation) ||
+    (!whitelistedNegativeConfirmation &&
+      /\b(nao aprovado|nao aprovo|nao esta correto|nao esta certa|incorret|errad|corrig|correcao|mude|altere|mas)\b/.test(
+        normalized,
+      ))
   )
     return "correction";
   if (clauses.some(explicitAssent))

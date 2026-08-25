@@ -1443,6 +1443,87 @@ describe("Task 4 review fixes", () => {
     }
   });
 
+  test("utterance-level refusal always overrides an assent phrase or earlier affirmative question", () => {
+    const refusalMatrix = [
+      "Está tudo correto? Não.",
+      "Tudo certo? Jamais.",
+      "De forma alguma aprovo esse resumo.",
+      "De modo algum confirmo",
+      "ESTÁ TUDO CORRETO?!   nÃo...",
+      "tUdO CeRtO ?! JAMAIS!",
+      "De   FORMA, alguma: APROVO esse resumo.",
+      "de MODO ALGUM — CONFIRMO",
+      "Em hipótese alguma aprovo esse resumo.",
+      "De maneira alguma confirmo.",
+      "De jeito algum aprovo.",
+      "Negativo. Está tudo correto?",
+      "Discordo; confirmo não.",
+    ];
+    for (const [index, transcript] of refusalMatrix.entries()) {
+      let lifecycle = finishSummary();
+      const turnId = `utterance-refusal-${index}`;
+      ({ lifecycle } = step(lifecycle, {
+        type: "caller.speech_started",
+        turnId,
+        socketGeneration: 1,
+        elapsedMs: 70,
+      }));
+      const refused = step(lifecycle, {
+        type: "caller.transcript.completed",
+        turnId,
+        transcript,
+        socketGeneration: 1,
+        elapsedMs: 71,
+      });
+      lifecycle = refused.lifecycle;
+      expect(lifecycle.approvalCandidate).toBeUndefined();
+      expect(lifecycle.consumedCallerTurnIds).toContain(turnId);
+      expect(lifecycle.freshCallerTurnIds).not.toContain(turnId);
+
+      const tool = step(lifecycle, {
+        type: "tool.called",
+        toolCallId: `refused-approval-tool-${index}`,
+        name: "approve_onboarding_summary",
+        args: { owner_words: transcript },
+        providerResponseId: `response-refused-approval-${index}`,
+        batchHash: `refused-approval-batch-${index}`,
+        socketGeneration: 1,
+        elapsedMs: 72,
+      });
+      expect(commandTypes(tool.commands)).not.toContain("persist_approval");
+    }
+
+    const validMatrix = [
+      "Está tudo correto.",
+      "Tudo certo.",
+      "Confirmo.",
+      "Aprovado.",
+      "NÃO TENHO CORREÇÕES!!! Está tudo CORRETO.",
+    ];
+    for (const [index, transcript] of validMatrix.entries()) {
+      let lifecycle = finishSummary();
+      const turnId = `utterance-valid-${index}`;
+      ({ lifecycle } = step(lifecycle, {
+        type: "caller.speech_started",
+        turnId,
+        socketGeneration: 1,
+        elapsedMs: 73,
+      }));
+      const approved = step(lifecycle, {
+        type: "caller.transcript.completed",
+        turnId,
+        transcript,
+        socketGeneration: 1,
+        elapsedMs: 74,
+      });
+      expect(approved.lifecycle.approvalCandidate).toMatchObject({
+        turnId,
+        ownerWords: transcript,
+      });
+      expect(approved.lifecycle.consumedCallerTurnIds).toContain(turnId);
+    }
+  });
+
   test("a caller turn ID is consumed by its first completed transcript", () => {
     let lifecycle = finishSummary();
     ({ lifecycle } = step(lifecycle, {
