@@ -7,32 +7,44 @@ const SESSION_URL = import.meta.env.VITE_SESSION_URL || `${CONTROLLER_URL}/sessi
 
 const MANUAL_END_REASONS = new Set(["user", "manual_hangup", "dialog_close"]);
 const TERMINAL_FAILURE_STATUSES = new Set(["error", "killed_budget", "killed_deadline"]);
+const RECONCILABLE_PROVIDER_STATES = new Set(["active", "pending", "unknown"]);
 
 function isObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 async function boundedRead(read, timeoutMs, signal) {
+  const readAbort = new AbortController();
   let timer;
-  let onAbort;
+  let onExternalAbort;
   try {
+    const readPromise = Promise.resolve()
+      .then(() => read(readAbort.signal))
+      .then((value) => ({ ok: true, value }))
+      .catch(() => ({ ok: false }));
     const candidates = [
-      Promise.resolve().then(read).then((value) => ({ ok: true, value })),
+      readPromise,
       new Promise((resolve) => {
-        timer = setTimeout(() => resolve({ ok: false }), timeoutMs);
+        timer = setTimeout(() => {
+          readAbort.abort("read_deadline");
+          resolve({ ok: false });
+        }, timeoutMs);
       }),
     ];
     if (signal) candidates.push(new Promise((resolve) => {
-      onAbort = () => resolve({ ok: false, cancelled: true });
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
+      onExternalAbort = () => {
+        readAbort.abort(signal.reason);
+        resolve({ ok: false, cancelled: true });
+      };
+      if (signal.aborted) onExternalAbort();
+      else signal.addEventListener("abort", onExternalAbort, { once: true });
     }));
     return await Promise.race(candidates);
   } catch {
     return { ok: false };
   } finally {
     if (timer) clearTimeout(timer);
-    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    if (signal && onExternalAbort) signal.removeEventListener("abort", onExternalAbort);
   }
 }
 
@@ -103,6 +115,7 @@ export async function resolveOnboardingOutcome({
   signal,
   now = Date.now,
   sleep,
+  knownRevision,
 }) {
   if (MANUAL_END_REASONS.has(reason)
     || !client
@@ -115,13 +128,13 @@ export async function resolveOnboardingOutcome({
     : ONBOARDING_OUTCOME_WINDOW_MS;
   const boundedPoll = Number.isFinite(pollIntervalMs) && pollIntervalMs >= 0 ? pollIntervalMs : 250;
   const deadline = now() + boundedTimeout;
-  let revision = null;
+  let revision = Number.isSafeInteger(knownRevision) && knownRevision > 0 ? knownRevision : null;
 
   while (!cancellationRequested(isCancelled, signal)) {
     const remaining = deadline - now();
     if (remaining <= 0) break;
     const [approvalRead, callRead] = await Promise.all([
-      boundedRead(() => client
+      boundedRead((readSignal) => client
         .from("receipts")
         .select("id,call_id,kind,outcome,readback,created_at")
         .eq("call_id", callId)
@@ -129,12 +142,14 @@ export async function resolveOnboardingOutcome({
         .eq("outcome", "accepted")
         .order("created_at", { ascending: false })
         .limit(1)
+        .abortSignal(readSignal)
         .maybeSingle(), remaining, signal),
-      boundedRead(() => client
+      boundedRead((readSignal) => client
         .from("calls")
         .select("id,session_type,status,provider_termination_state,provider_termination_reason")
         .eq("id", callId)
         .eq("session_type", "onboarding")
+        .abortSignal(readSignal)
         .maybeSingle(), remaining, signal),
     ]);
     if (cancellationRequested(isCancelled, signal)) return { status: "interrupted" };
@@ -143,7 +158,11 @@ export async function resolveOnboardingOutcome({
     const observedRevision = approvalResult && !approvalResult.error
       ? approvalRevision(approvalResult.data, callId)
       : null;
-    if (observedRevision !== null) revision = observedRevision;
+    const freshRevision = observedRevision !== null
+      && (revision === null || observedRevision >= revision)
+      ? observedRevision
+      : null;
+    if (freshRevision !== null) revision = freshRevision;
 
     const callResult = callRead.ok ? callRead.value : null;
     const call = callResult && !callResult.error && isObject(callResult.data)
@@ -153,11 +172,16 @@ export async function resolveOnboardingOutcome({
     if (call && TERMINAL_FAILURE_STATUSES.has(call.status)) {
       return revision === null ? { status: "interrupted" } : { status: "interrupted", revision };
     }
-    if (call?.status === "ended" && call.provider_termination_state === "confirmed") {
-      if (call.provider_termination_reason !== "agent_ended_session") {
+    if (call) {
+      const providerState = call.provider_termination_state;
+      if (providerState === "confirmed") {
+        if (call.status !== "ended" || call.provider_termination_reason !== "agent_ended_session") {
+          return revision === null ? { status: "interrupted" } : { status: "interrupted", revision };
+        }
+        if (freshRevision !== null) return { status: "complete", revision: freshRevision };
+      } else if (!RECONCILABLE_PROVIDER_STATES.has(providerState)) {
         return revision === null ? { status: "interrupted" } : { status: "interrupted", revision };
       }
-      if (revision !== null) return { status: "complete", revision };
     }
 
     const waitFor = Math.min(boundedPoll, Math.max(0, deadline - now()));
@@ -176,11 +200,15 @@ export async function watchOnboardingOutcome({
   sleep,
   ...resolution
 }) {
+  let knownRevision = Number.isSafeInteger(resolution.knownRevision) && resolution.knownRevision > 0
+    ? resolution.knownRevision
+    : null;
   while (!cancellationRequested(isCancelled, signal)) {
-    const outcome = await resolve({ ...resolution, signal, isCancelled, sleep });
+    const outcome = await resolve({ ...resolution, knownRevision, signal, isCancelled, sleep });
     if (cancellationRequested(isCancelled, signal)) return { status: "interrupted" };
     onOutcome?.(outcome);
     if (outcome.status !== "finalizing") return outcome;
+    if (Number.isSafeInteger(outcome.revision) && outcome.revision > 0) knownRevision = outcome.revision;
     const boundedRetry = Number.isFinite(retryDelayMs) && retryDelayMs >= 250
       ? retryDelayMs
       : ONBOARDING_OUTCOME_RECHECK_MS;

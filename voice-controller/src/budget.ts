@@ -132,7 +132,7 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
   const providerUsageState = row.provider_usage_state;
   const needsTermination = ["active", "pending", "unknown"].includes(providerState);
   const storedTerminationReason = typeof row.provider_termination_reason === "string"
-    && row.provider_termination_reason.length > 0
+    && row.provider_termination_reason.trim().length > 0
     ? row.provider_termination_reason
     : "durable_budget_reconciliation";
   const provider = needsTermination

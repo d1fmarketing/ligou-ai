@@ -60,16 +60,17 @@ function queryClient({ receipt = { data: null, error: null }, call = { data: nul
   return {
     queries,
     from(table) {
-      const query = { table, columns: null, equals: [], orders: [], limit: null };
+      const query = { table, columns: null, equals: [], orders: [], limit: null, abortSignal: null };
       queries.push(query);
       const builder = {
         select(columns) { query.columns = columns; return builder; },
         eq(column, value) { query.equals.push([column, value]); return builder; },
         order(column, options) { query.orders.push([column, options]); return builder; },
         limit(value) { query.limit = value; return builder; },
+        abortSignal(signal) { query.abortSignal = signal; return builder; },
         maybeSingle() {
           const configured = table === "receipts" ? receipt : call;
-          return typeof configured === "function" ? configured() : Promise.resolve(configured);
+          return typeof configured === "function" ? configured(query) : Promise.resolve(configured);
         },
       };
       return builder;
@@ -383,6 +384,70 @@ test("the production outcome window spans the provider timeout plus database mar
   assert.ok(callReads <= 12);
 });
 
+test("deadline aborts both real query builders through their captured child signals", async () => {
+  const captured = [];
+  let active = 0;
+  let maxActive = 0;
+  const hangingRead = (query) => new Promise((resolve) => {
+    const signal = query.abortSignal;
+    captured.push(signal);
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    signal.addEventListener("abort", () => {
+      active -= 1;
+      resolve({ data: null, error: { message: "aborted" } });
+    }, { once: true });
+  });
+
+  const outcome = await resolveOnboardingOutcome({
+    client: queryClient({ receipt: hangingRead, call: hangingRead }),
+    reason: "remote_hangup",
+    callId: CALL_ID,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+  });
+
+  assert.deepEqual(outcome, { status: "interrupted" });
+  assert.equal(captured.length, 2);
+  assert.equal(captured.every((signal) => signal instanceof AbortSignal && signal.aborted), true);
+  assert.equal(active, 0);
+  assert.equal(maxActive, 2);
+});
+
+test("watcher never overlaps a new probe with the prior aborted receipt and call reads", async () => {
+  let active = 0;
+  let maxActive = 0;
+  let queryStarts = 0;
+  const hangingRead = (query) => new Promise((resolve) => {
+    queryStarts += 1;
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    query.abortSignal.addEventListener("abort", () => {
+      active -= 1;
+      resolve({ data: null, error: { message: "aborted" } });
+    }, { once: true });
+  });
+  const published = [];
+
+  await watchOnboardingOutcome({
+    client: queryClient({ receipt: hangingRead, call: hangingRead }),
+    reason: "remote_hangup",
+    callId: CALL_ID,
+    knownRevision: 8,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+    retryDelayMs: 250,
+    sleep: async () => {},
+    isCancelled: () => queryStarts >= 4,
+    onOutcome: (value) => { published.push(value); },
+  });
+
+  assert.equal(queryStarts, 4);
+  assert.equal(maxActive, 2);
+  assert.equal(active, 0);
+  assert.deepEqual(published, [{ status: "finalizing", revision: 8 }]);
+});
+
 test("a finalizing watcher re-enters exact resolution and publishes terminal truth", async () => {
   const outcomes = [
     { status: "finalizing", revision: 8 },
@@ -414,6 +479,71 @@ test("a finalizing watcher re-enters exact resolution and publishes terminal tru
   ]);
   assert.equal(sleeps.length, 1);
   assert.ok(sleeps[0] >= 250, "finalizing recheck must not hot-poll");
+});
+
+test("known finalizing revision survives a transient receipt outage but cannot authorize completion", async () => {
+  const clients = [
+    queryClient({
+      receipt: { data: approvalRow(), error: null },
+      call: { data: callRow({ status: "active", provider_termination_state: "pending" }), error: null },
+    }),
+    queryClient({
+      receipt: { data: null, error: { message: "temporary outage" } },
+      call: { data: callRow(), error: null },
+    }),
+    queryClient({
+      receipt: { data: approvalRow(), error: null },
+      call: { data: callRow(), error: null },
+    }),
+  ];
+  const published = [];
+  const known = [];
+  let probe = 0;
+
+  const outcome = await watchOnboardingOutcome({
+    client: {},
+    reason: "remote_hangup",
+    callId: CALL_ID,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+    retryDelayMs: 250,
+    sleep: async () => {},
+    resolve: async (scope) => {
+      known.push(scope.knownRevision ?? null);
+      return resolveOnboardingOutcome({ ...scope, client: clients[probe++] });
+    },
+    onOutcome: (value) => { published.push(value); },
+  });
+
+  assert.deepEqual(outcome, { status: "complete", revision: 8 });
+  assert.deepEqual(known, [null, 8, 8]);
+  assert.deepEqual(published, [
+    { status: "finalizing", revision: 8 },
+    { status: "finalizing", revision: 8 },
+    { status: "complete", revision: 8 },
+  ]);
+});
+
+test("non-reconcilable or structurally invalid provider state interrupts once", async () => {
+  for (const provider_termination_state of ["external_evidence_required", "not_required", "bogus", null]) {
+    const published = [];
+    const outcome = await watchOnboardingOutcome({
+      client: queryClient({
+        receipt: { data: approvalRow(), error: null },
+        call: { data: callRow({ provider_termination_state }), error: null },
+      }),
+      reason: "remote_hangup",
+      callId: CALL_ID,
+      timeoutMs: 5,
+      retryDelayMs: 250,
+      sleep: async () => {},
+      isCancelled: () => published.length >= 2,
+      onOutcome: (value) => { published.push(value); },
+    });
+
+    assert.deepEqual(outcome, { status: "interrupted", revision: 8 });
+    assert.deepEqual(published, [{ status: "interrupted", revision: 8 }]);
+  }
 });
 
 test("aborting a finalizing watcher clears its retry timer and prevents future reads or writes", async () => {

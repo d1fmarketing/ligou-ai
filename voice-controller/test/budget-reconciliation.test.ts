@@ -240,6 +240,7 @@ describe("durable budget reconciliation", () => {
       ["abandoned_call_reaped", "abandoned_call_reaped"],
       [null, "durable_budget_reconciliation"],
       ["", "durable_budget_reconciliation"],
+      ["   ", "durable_budget_reconciliation"],
     ] as const) {
       providerRpcCalls = [];
       providerAttemptStarted = false;
