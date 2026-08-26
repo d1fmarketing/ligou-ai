@@ -262,6 +262,42 @@ interface OnboardingCommandContext {
   isCurrent: () => boolean;
 }
 
+function pendingResponseCommandIsCurrent(
+  adapter: OnboardingAdapterState,
+  command: RequestResponseCommand,
+): boolean {
+  if (command.purpose === "summary")
+    return Boolean(
+      command.snapshotDigest &&
+      command.snapshotDigest === adapter.lifecycle.coverage.digest &&
+      command.snapshotDigest === adapter.lifecycle.summary?.digest &&
+      adapter.lifecycle.phase === "summary_speaking",
+    );
+  if (command.purpose === "final_signoff")
+    return Boolean(
+      command.approvalReceiptId &&
+      command.approvalReceiptId ===
+        adapter.lifecycle.approval?.approvalReceiptId &&
+      command.approvalReceiptId ===
+        adapter.lifecycle.signoff?.approvalReceiptId &&
+      adapter.lifecycle.phase === "final_signoff_speaking",
+    );
+  return adapter.lifecycle.phase !== "blocked" &&
+    adapter.lifecycle.phase !== "closed" &&
+    adapter.lifecycle.phase !== "provider_terminating";
+}
+
+function pruneInvalidPendingResponseCommands(
+  adapter: OnboardingAdapterState,
+): void {
+  if (adapter.lifecycle.phase === "blocked") return;
+  for (const [intentKey, command] of Object.entries(
+    adapter.pendingResponseCommands,
+  ))
+    if (!pendingResponseCommandIsCurrent(adapter, command))
+      delete adapter.pendingResponseCommands[intentKey];
+}
+
 async function dispatchOnboardingEvent(
   context: OnboardingCommandContext,
   event: OnboardingEvent,
@@ -269,6 +305,7 @@ async function dispatchOnboardingEvent(
   const adapter = ensureOnboardingAdapter(context.ledger);
   const reduced = reduceOnboarding(adapter.lifecycle, event);
   adapter.lifecycle = reduced.lifecycle;
+  pruneInvalidPendingResponseCommands(adapter);
   context.ledger.phase = adapter.lifecycle.phase;
   await executeOnboardingCommands(context, reduced.commands);
 }
@@ -603,12 +640,20 @@ async function drainPendingResponseCommands(
   context: OnboardingCommandContext,
 ): Promise<void> {
   const adapter = ensureOnboardingAdapter(context.ledger);
-  if (!context.isCurrent() || adapter.speechPending) return;
+  if (
+    !context.isCurrent() || adapter.speechPending ||
+    adapter.lifecycle.phase === "blocked" ||
+    adapter.lifecycle.phase === "closed" ||
+    adapter.lifecycle.phase === "provider_terminating"
+  ) return;
   for (const [intentKey, command] of Object.entries(
     adapter.pendingResponseCommands,
   )) {
     const intent = adapter.lifecycle.responseIntents[intentKey];
-    if (!intent || intent.state !== "queued") {
+    if (
+      !intent || intent.state !== "queued" ||
+      !pendingResponseCommandIsCurrent(adapter, command)
+    ) {
       delete adapter.pendingResponseCommands[intentKey];
       continue;
     }
@@ -1044,7 +1089,9 @@ async function handleOnboardingRawEvent(
       }
       if (buffered.terminal) break;
       buffered.terminal = true;
-      if (responseStatus !== "completed") {
+      const ordinaryCancelled = responseStatus === "cancelled" &&
+        buffered.tools.length === 0 && !buffered.invariant;
+      if (responseStatus !== "completed" && !ordinaryCancelled) {
         buffered.invariant = {
           code: "response_not_completed",
           safeDetail: "provider response was not completed",
@@ -1116,6 +1163,10 @@ async function handleOnboardingRawEvent(
         adapter.speechPending = false;
         delete adapter.speechResponseId;
         await drainPendingResponseCommands(context);
+      } else if (adapter.speechResponseId === responseId && ordinaryCancelled) {
+        // Barge-in cancelled this ordinary VAD attempt. Keep the speech turn
+        // pending so the next metadata-less provider response can bind it.
+        delete adapter.speechResponseId;
       }
       break;
     }

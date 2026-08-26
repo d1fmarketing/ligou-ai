@@ -177,6 +177,7 @@ export type TelemetryName =
 const MAX_TOOL_OUTBOX_RECEIPTS = 512;
 const MAX_TOOL_BATCHES = 512;
 const MAX_RESPONSE_INTENTS = 512;
+const MAX_TERMINAL_RESPONSE_IDS = 512;
 
 interface TelemetryCommand {
   type: "telemetry";
@@ -935,6 +936,128 @@ function isRepeatedLateSignoffProof(
   ) && event.responseId === signoff.responseId;
 }
 
+function recordTerminalResponseId(
+  lifecycle: OnboardingLifecycle,
+  responseId: string,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+): boolean {
+  if (lifecycle.terminalResponseIds.includes(responseId)) return true;
+  if (lifecycle.terminalResponseIds.length >= MAX_TERMINAL_RESPONSE_IDS) {
+    const protectedIds = new Set<string>([
+      ...Object.values(lifecycle.toolBatches)
+        .map((batch) => batch.providerResponseId),
+      ...(lifecycle.activeResponseId ? [lifecycle.activeResponseId] : []),
+      ...(lifecycle.summary?.responseId ? [lifecycle.summary.responseId] : []),
+      ...(lifecycle.signoff?.responseId ? [lifecycle.signoff.responseId] : []),
+      ...Object.values(lifecycle.responseIntents)
+        .filter((intent) => intent.state !== "terminal" && intent.responseId)
+        .map((intent) => intent.responseId!),
+    ]);
+    const pruneIndex = lifecycle.terminalResponseIds.findIndex(
+      (candidate) => !protectedIds.has(candidate),
+    );
+    if (pruneIndex < 0) {
+      block(
+        lifecycle,
+        commands,
+        event,
+        "terminal_response_capacity_exceeded",
+        "terminal response replay registry reached its deterministic bound",
+      );
+      return false;
+    }
+    lifecycle.terminalResponseIds.splice(pruneIndex, 1);
+  }
+  lifecycle.terminalResponseIds.push(responseId);
+  return true;
+}
+
+function reduceBlockedBookkeeping(
+  current: OnboardingLifecycle,
+  event: OnboardingEvent,
+): { lifecycle: OnboardingLifecycle; commands: OnboardingCommand[] } {
+  if (!validSocketGeneration(current, event))
+    return {
+      lifecycle: current,
+      commands: [
+        telemetry(current, "invariant.violation", event, {
+          outcome: "stale_socket_generation",
+        }),
+      ],
+    };
+  if (event.type === "response.done") {
+    const lifecycle = cloneLifecycle(current);
+    lifecycle.lifecycleRevision += 1;
+    const commands: OnboardingCommand[] = [];
+    recordTerminalResponseId(lifecycle, event.responseId, commands, event);
+    if (lifecycle.activeResponseId === event.responseId)
+      delete lifecycle.activeResponseId;
+    for (const intent of Object.values(lifecycle.responseIntents))
+      if (intent.responseId === event.responseId) intent.state = "terminal";
+    commands.push(
+      telemetry(lifecycle, "voice.response.terminal", event, {
+        responseId: event.responseId,
+        outcome: "blocked_bookkeeping_only",
+      }),
+    );
+    return { lifecycle, commands };
+  }
+  if (event.type === "tool.output_sent") {
+    const receipt = current.toolOutbox[event.toolCallId];
+    if (!receipt ||
+      (receipt.state !== "executed" && receipt.state !== "output_pending"))
+      return {
+        lifecycle: current,
+        commands: [telemetry(current, "invariant.violation", event, {
+          toolCallId: event.toolCallId,
+          outcome: "blocked_invalid_output_send",
+        })],
+      };
+    const lifecycle = cloneLifecycle(current);
+    lifecycle.lifecycleRevision += 1;
+    lifecycle.toolOutbox[event.toolCallId]!.state = "output_pending";
+    lifecycle.toolOutbox[event.toolCallId]!.socketGeneration =
+      event.socketGeneration;
+    return {
+      lifecycle,
+      commands: [telemetry(lifecycle, "voice.tool.output_sent", event, {
+        toolCallId: event.toolCallId,
+        outcome: "blocked_bookkeeping_only",
+      })],
+    };
+  }
+  if (event.type === "tool.output_acked") {
+    const receipt = current.toolOutbox[event.toolCallId];
+    if (!receipt || receipt.state !== "output_pending" ||
+      receipt.outputItemId !== event.outputItemId)
+      return {
+        lifecycle: current,
+        commands: [telemetry(current, "invariant.violation", event, {
+          toolCallId: event.toolCallId,
+          outcome: "blocked_invalid_output_ack",
+        })],
+      };
+    const lifecycle = cloneLifecycle(current);
+    lifecycle.lifecycleRevision += 1;
+    lifecycle.toolOutbox[event.toolCallId]!.state = "output_acked";
+    return {
+      lifecycle,
+      commands: [telemetry(lifecycle, "voice.tool.output_acked", event, {
+        toolCallId: event.toolCallId,
+        outcome: "blocked_bookkeeping_only",
+      })],
+    };
+  }
+  return {
+    lifecycle: current,
+    commands: [telemetry(current, "invariant.violation", event, {
+      outcome: "event_ignored_while_blocked",
+      ...(event.type === "tool.called" ? { toolCallId: event.toolCallId } : {}),
+    })],
+  };
+}
+
 export function createOnboardingLifecycle(callId: string): OnboardingLifecycle {
   if (!callId.trim()) throw new Error("onboarding_call_id_required");
   return {
@@ -967,16 +1090,20 @@ export function reduceOnboarding(
   if (isRepeatedLateSignoffProof(current, event))
     return { lifecycle: current, commands: [] };
 
-  if (current.phase === "blocked" && event.type === "tool.called")
+  if (
+    event.type === "response.created" &&
+    event.intentKey &&
+    current.responseIntents[event.intentKey]?.state === "terminal"
+  )
     return {
       lifecycle: current,
-      commands: [
-        telemetry(current, "invariant.violation", event, {
-          toolCallId: event.toolCallId,
-          outcome: "tool_after_blocked",
-        }),
-      ],
+      commands: [telemetry(current, "invariant.violation", event, {
+        responseId: event.responseId,
+        intentKey: event.intentKey,
+        outcome: "invalidated_response_intent",
+      })],
     };
+
   if (
     event.type === "approval.persistence_failed" &&
     event.code === "changed" &&
@@ -995,6 +1122,9 @@ export function reduceOnboarding(
           ],
         }
       : { lifecycle: current, commands: [] };
+
+  if (current.phase === "blocked")
+    return reduceBlockedBookkeeping(current, event);
 
   if (
     event.type === "snapshot.refresh_loaded" &&
@@ -1168,8 +1298,12 @@ export function reduceOnboarding(
       break;
     }
     case "response.done": {
-      if (!lifecycle.terminalResponseIds.includes(event.responseId))
-        lifecycle.terminalResponseIds.push(event.responseId);
+      if (!recordTerminalResponseId(
+        lifecycle,
+        event.responseId,
+        commands,
+        event,
+      )) break;
       if (lifecycle.activeResponseId === event.responseId)
         delete lifecycle.activeResponseId;
       for (const intent of Object.values(lifecycle.responseIntents))
@@ -1251,6 +1385,12 @@ export function reduceOnboarding(
       }
       if (lifecycle.summary)
         lifecycle.invalidatedSummaryRevision = lifecycle.summary.revision;
+      for (const intent of Object.values(lifecycle.responseIntents))
+        if (
+          intent.purpose === "summary" &&
+          intent.intentKey !== `summary:${event.digest}`
+        )
+          intent.state = "terminal";
       if (
         lifecycle.snapshotRefresh &&
         event.revision > lifecycle.snapshotRefresh.rejectedRevision

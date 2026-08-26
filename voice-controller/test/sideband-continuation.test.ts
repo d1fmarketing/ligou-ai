@@ -273,6 +273,85 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     }
   });
 
+  test("ordinary cancelled VAD response is recoverable and rebinds pending speech to the next completed response", async () => {
+    const cap = onboardingCap("call-cancelled-vad-rebind");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, responseCreated("resp-bootstrap"));
+    await handleEvent(cap, l, ws as any, responseDone("resp-bootstrap"));
+    const digest = "c".repeat(64);
+    l.onboarding!.lifecycle.phase = "summary_speaking";
+    l.onboarding!.lifecycle.coverage = {
+      revision: 4, digest, complete: true, missing: [], ambiguous: [],
+    };
+    l.onboarding!.lifecycle.preparedSnapshotDigests = [digest];
+    l.onboarding!.lifecycle.summary = {
+      receiptId: "coverage-cancel",
+      revision: 4,
+      digest,
+      requiredAnchors: ["Área: Irvine"],
+      transcript: "",
+      transcriptFinal: false,
+      audioDone: false,
+      responseDone: false,
+      playbackStopped: false,
+      interrupted: false,
+    };
+    const intentKey = `summary:${digest}`;
+    l.onboarding!.lifecycle.responseIntents[intentKey] = {
+      intentKey, purpose: "summary", state: "queued",
+    };
+    l.onboarding!.pendingResponseCommands[intentKey] = {
+      type: "request_response",
+      intentKey,
+      purpose: "summary",
+      snapshotDigest: digest,
+      instructions: "Resumo atual.",
+    };
+    l.onboarding!.speechGeneration = 1;
+    l.onboarding!.speechPending = true;
+
+    await handleEvent(cap, l, ws as any, responseCreated("resp-vad-cancelled"));
+    expect(l.onboarding!.speechResponseId).toBe("resp-vad-cancelled");
+    await handleEvent(cap, l, ws as any, {
+      type: "response.done",
+      response: { id: "resp-vad-cancelled", status: "cancelled" },
+    });
+    expect(l.onboarding!.lifecycle.phase).toBe("summary_speaking");
+    expect(l.onboarding!.speechPending).toBe(true);
+    expect(l.onboarding!.speechResponseId).toBeUndefined();
+    expect(l.onboarding!.lifecycle.terminalResponseIds)
+      .toContain("resp-vad-cancelled");
+    expect(framesOfType(ws, "response.create")).toHaveLength(0);
+
+    await handleEvent(cap, l, ws as any, responseCreated("resp-vad-rebound"));
+    expect(l.onboarding!.speechResponseId).toBe("resp-vad-rebound");
+    await handleEvent(cap, l, ws as any, responseDone("resp-vad-rebound"));
+    expect(l.onboarding!.speechPending).toBe(false);
+    expect(l.onboarding!.speechResponseId).toBeUndefined();
+    const summaries = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "summary",
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].response.metadata.intent_key).toBe(intentKey);
+  });
+
+  test("failed or incomplete response without tools remains fail-closed", async () => {
+    for (const status of ["failed", "incomplete"]) {
+      const cap = onboardingCap(`call-empty-${status}`);
+      const l = ledger(cap.callId);
+      const ws = socket();
+      await handleEvent(cap, l, ws as any, responseCreated("resp-empty-invalid"));
+      await handleEvent(cap, l, ws as any, {
+        type: "response.done",
+        response: { id: "resp-empty-invalid", status },
+      });
+      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(l.toolLog).toEqual([]);
+      expect(functionOutputs(ws)).toEqual([]);
+    }
+  });
+
   test("non-completed function item statuses have zero tool, store, or output effects", async () => {
     for (const status of ["cancelled", "failed", "incomplete", undefined]) {
       const cap = onboardingCap(`call-item-${status ?? "missing"}`);
@@ -1078,6 +1157,96 @@ function sequentialAnswerBoundary(results: Array<{
   };
 }
 
+function staleSummaryCorrectionBoundary(
+  oldReceipt: ReturnType<typeof coverageReceipt>,
+  newReceipt: ReturnType<typeof coverageReceipt>,
+  newComplete: boolean,
+) {
+  let correctionPersisted = false;
+  let firstReceiptRead = true;
+  let resolveOldSnapshot!: () => void;
+  const oldSnapshotGate = new Promise<void>((resolve) => {
+    resolveOldSnapshot = resolve;
+  });
+  const ruleRows = [
+    {
+      id: oldReceipt.readback.selected_rule_ids[0]!,
+      rule_group_id: "old-group",
+      version: 1,
+      structured: { coverage_field: "area.coverage" },
+      created_at: "2026-08-25T00:00:00.000Z",
+    },
+    {
+      id: newReceipt.readback.selected_rule_ids[0]!,
+      rule_group_id: "new-group",
+      version: 2,
+      structured: { coverage_field: "area.coverage" },
+      created_at: "2026-08-25T00:01:00.000Z",
+    },
+  ];
+  return {
+    resolveOldSnapshot,
+    client: {
+      from(table: string) {
+        let requestedIds: unknown[] | undefined;
+        const query: any = {
+          select() { return query; }, eq() { return query; }, order() { return query; },
+          limit() { return query; },
+          in(_column: string, values: unknown[]) { requestedIds = values; return query; },
+          maybeSingle: async () => ({ data: null, error: null }),
+          async then(resolve: (value: unknown) => unknown) {
+            if (table === "receipts") {
+              if (firstReceiptRead) {
+                firstReceiptRead = false;
+                await oldSnapshotGate;
+              }
+              return resolve({
+                data: [correctionPersisted ? newReceipt : oldReceipt],
+                error: null,
+              });
+            }
+            if (table === "rules") {
+              const data = requestedIds
+                ? ruleRows.filter((row) => requestedIds!.includes(row.id))
+                : ruleRows;
+              return resolve({ data, error: null });
+            }
+            return resolve({ data: null, error: null });
+          },
+        };
+        return query;
+      },
+      rpc(name: string) {
+        if (name !== "record_onboarding_answer")
+          return Promise.resolve({ data: null, error: { message: "unexpected rpc" } });
+        correctionPersisted = true;
+        return Promise.resolve({
+          data: {
+            status: "recorded",
+            rule_id: newReceipt.readback.selected_rule_ids[0],
+            rule_group_id: "new-group",
+            coverage_receipt_id: newReceipt.id,
+            revision: newReceipt.readback.revision,
+            snapshot_digest: newReceipt.readback.snapshot_digest,
+            complete: newComplete,
+            missing: newComplete ? [] : [{ field: "area.coverage" }],
+            ambiguous: [],
+            next_action: newComplete
+              ? { type: "prepare_summary" }
+              : {
+                  type: "ask",
+                  field: "area.coverage",
+                  question_pt: "Qual é a nova área?",
+                },
+            coverage: {},
+          },
+          error: null,
+        });
+      },
+    } as any,
+  };
+}
+
 function seedAwaitingApproval(
   l: SessionLedger,
   receiptId: string,
@@ -1171,6 +1340,85 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
     );
     expect(summaries).toHaveLength(1);
     expect(summaries[0].response.metadata.intent_key).toBe(`summary:${digest}`);
+  });
+
+  test("VAD correction invalidates delayed old summary; only a complete new digest may speak", async () => {
+    for (const newComplete of [false, true]) {
+      const cap = onboardingCap(`call-stale-summary-${newComplete}`);
+      const oldSnapshot = completeCoverage(cap, 1);
+      const newSnapshot = completeCoverage(cap, 2);
+      const oldDigest = "a".repeat(64);
+      const newDigest = "b".repeat(64);
+      const oldReceipt = coverageReceipt(cap, oldSnapshot, oldDigest, "old-rule");
+      const newReceipt = coverageReceipt(cap, newSnapshot, newDigest, "new-rule");
+      const boundary = staleSummaryCorrectionBoundary(
+        oldReceipt, newReceipt, newComplete,
+      );
+      _setClient(boundary.client);
+      const l = ledger(cap.callId);
+      const ws = socket();
+      await handleEvent(cap, l, ws as any, responseCreated("resp-old-coverage"));
+      l.onboarding!.lifecycle.phase = "coverage_check";
+      l.onboarding!.lifecycle.coverage = {
+        revision: 1,
+        digest: oldDigest,
+        complete: true,
+        missing: [],
+        ambiguous: [],
+      };
+      const snapshotWork = handleEvent(
+        cap, l, ws as any, responseDone("resp-old-coverage"),
+      );
+      await flushAsync();
+      const speechWork = handleEvent(cap, l, ws as any, {
+        type: "input_audio_buffer.speech_started",
+        item_id: "turn-correction",
+      });
+      const transcriptWork = handleEvent(cap, l, ws as any, {
+        type: "conversation.item.input_audio_transcription.completed",
+        item_id: "turn-correction",
+        transcript: "Corrigindo a área de atendimento.",
+      });
+      boundary.resolveOldSnapshot();
+      await Promise.all([snapshotWork, speechWork, transcriptWork]);
+      expect(l.onboarding!.pendingResponseCommands[`summary:${oldDigest}`])
+        .toBeDefined();
+
+      await handleEvent(cap, l, ws as any, responseCreated("resp-vad-correction"));
+      await handleEvent(cap, l, ws as any, functionCallDone(
+        "resp-vad-correction",
+        "fc-vad-correction",
+        "record_interview_answer",
+        JSON.stringify({
+          topic: "area",
+          field: "area.coverage",
+          disposition: "answered",
+          rule_text: "Nova área corrigida.",
+          structured: { value: ["Anaheim"] },
+          owner_words: "Agora atendemos Anaheim.",
+        }),
+        0,
+      ));
+      await handleEvent(cap, l, ws as any, responseDone("resp-vad-correction"));
+      expect(framesOfType(ws, "response.create").filter(
+        (frame) => frame.response?.metadata?.intent_key === `summary:${oldDigest}`,
+      )).toHaveLength(0);
+      expect(l.onboarding!.pendingResponseCommands[`summary:${oldDigest}`])
+        .toBeUndefined();
+      expect(l.onboarding!.lifecycle.responseIntents[`summary:${oldDigest}`]?.state)
+        .toBe("terminal");
+
+      await handleEvent(cap, l, ws as any,
+        outputAck("tool-output:fc-vad-correction"));
+      const newSummaries = framesOfType(ws, "response.create").filter(
+        (frame) => frame.response?.metadata?.intent_key === `summary:${newDigest}`,
+      );
+      expect(newSummaries).toHaveLength(newComplete ? 1 : 0);
+      expect(framesOfType(ws, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "summary",
+      )).toHaveLength(newComplete ? 1 : 0);
+      _setClient(null);
+    }
   });
 
   test("changed approval refreshes, acks its output, then runs ordinary summary preparation", async () => {

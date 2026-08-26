@@ -2213,3 +2213,194 @@ test("reducer maps fail closed at deterministic capacity without discarding repl
   expect(intentOverflow.commands.some((command) => command.type === "request_response"))
     .toBe(false);
 });
+
+test("blocked is absorbing while terminal and output acknowledgements remain bookkeeping-only", () => {
+  const blocked = createOnboardingLifecycle(callId);
+  blocked.phase = "blocked";
+  blocked.socketGeneration = 1;
+  blocked.coverage = {
+    revision: 1,
+    digest: "blocked-digest",
+    complete: true,
+    missing: [],
+    ambiguous: [],
+  };
+  blocked.toolOutbox["blocked-tool"] = {
+    toolCallId: "blocked-tool",
+    toolName: "end_session",
+    argsHash: hashOnboardingToolArgs({}),
+    state: "output_pending",
+    providerResponseId: "blocked-response",
+    batchHash: "blocked-batch",
+    output: "{}",
+    resultHash: "blocked-result",
+    outputItemId: "tool-output:blocked-tool",
+    socketGeneration: 1,
+  };
+  const advancingEvents: OnboardingEvent[] = [
+    {
+      type: "response.transcript.done",
+      responseId: "blocked-response",
+      transcript: "Área: Irvine. Você confirma?",
+      socketGeneration: 1,
+      elapsedMs: 1,
+    },
+    {
+      type: "response.output_audio.done",
+      responseId: "blocked-response",
+      socketGeneration: 1,
+      elapsedMs: 2,
+    },
+    {
+      type: "output_audio_buffer.stopped",
+      responseId: "blocked-response",
+      socketGeneration: 1,
+      elapsedMs: 3,
+    },
+    {
+      type: "coverage.changed",
+      revision: 2,
+      digest: "new-blocked-digest",
+      complete: true,
+      missing: [],
+      ambiguous: [],
+      elapsedMs: 4,
+    },
+    {
+      type: "snapshot.loaded",
+      result: authoritativeSnapshot(2, "new-blocked-digest"),
+      elapsedMs: 5,
+    },
+    {
+      type: "tool.batch_closed",
+      providerResponseId: "blocked-response",
+      batchHash: "blocked-batch",
+      toolCallIds: ["blocked-tool"],
+      elapsedMs: 6,
+    },
+  ];
+  const forbidden = new Set([
+    "prepare_summary", "request_response", "request_signoff",
+    "request_hangup", "persist_fact", "persist_approval", "execute_tool",
+  ]);
+  for (const event of advancingEvents) {
+    const result = step(blocked, event);
+    expect(result.lifecycle).toBe(blocked);
+    expect(result.lifecycle.phase).toBe("blocked");
+    expect(result.commands.some((command) => forbidden.has(command.type)))
+      .toBe(false);
+  }
+
+  const terminal = step(blocked, {
+    type: "response.done",
+    responseId: "blocked-response",
+    socketGeneration: 1,
+    elapsedMs: 7,
+  });
+  expect(terminal.lifecycle.phase).toBe("blocked");
+  expect(terminal.lifecycle.terminalResponseIds).toContain("blocked-response");
+  expect(terminal.commands.some((command) => forbidden.has(command.type)))
+    .toBe(false);
+
+  const acknowledged = step(blocked, {
+    type: "tool.output_acked",
+    toolCallId: "blocked-tool",
+    outputItemId: "tool-output:blocked-tool",
+    socketGeneration: 1,
+    elapsedMs: 8,
+  });
+  expect(acknowledged.lifecycle.phase).toBe("blocked");
+  expect(acknowledged.lifecycle.toolOutbox["blocked-tool"]?.state)
+    .toBe("output_acked");
+  expect(acknowledged.commands.some((command) => forbidden.has(command.type)))
+    .toBe(false);
+});
+
+test("coverage change invalidates queued or sent old summary intent and ignores its late provider evidence", () => {
+  for (const state of ["queued", "sent"] as const) {
+    let lifecycle = snapshotReady().lifecycle;
+    lifecycle.responseIntents["summary:digest-41"]!.state = state;
+    const changed = step(lifecycle, {
+      type: "coverage.changed",
+      revision: 42,
+      digest: "digest-42",
+      complete: false,
+      missing: [{ field: "area.coverage" }],
+      ambiguous: [],
+      elapsedMs: 60,
+    });
+    lifecycle = changed.lifecycle;
+    expect(lifecycle.phase).toBe("collecting");
+    expect(lifecycle.summary).toBeUndefined();
+    expect(lifecycle.responseIntents["summary:digest-41"]?.state)
+      .toBe("terminal");
+
+    const lateCreated = step(lifecycle, {
+      type: "response.created",
+      responseId: `late-old-summary-${state}`,
+      intentKey: "summary:digest-41",
+      socketGeneration: 1,
+      elapsedMs: 61,
+    });
+    expect(lateCreated.lifecycle).toBe(lifecycle);
+    expect(lateCreated.lifecycle.activeResponseId).toBeUndefined();
+    expect(lateCreated.lifecycle.responseIntents["summary:digest-41"]?.state)
+      .toBe("terminal");
+    expect(lateCreated.commands.some((command) =>
+      command.type === "request_response" || command.type === "request_hangup"
+    )).toBe(false);
+  }
+});
+
+test("terminal response registry prunes only unreferenced identities and blocks when every identity is live", () => {
+  const pruneable = startCollecting();
+  pruneable.terminalResponseIds = Array.from(
+    { length: 512 }, (_, index) => `terminal-${index}`,
+  );
+  const pruned = step(pruneable, {
+    type: "response.done",
+    responseId: "terminal-new",
+    socketGeneration: 1,
+    elapsedMs: 1,
+  });
+  expect(pruned.lifecycle.phase).toBe("collecting");
+  expect(pruned.lifecycle.terminalResponseIds).toHaveLength(512);
+  expect(pruned.lifecycle.terminalResponseIds).not.toContain("terminal-0");
+  expect(pruned.lifecycle.terminalResponseIds).toContain("terminal-new");
+
+  const protectedLifecycle = startCollecting();
+  protectedLifecycle.coverage = {
+    revision: 4,
+    digest: "protected-digest",
+    complete: true,
+    missing: [],
+    ambiguous: [],
+  };
+  protectedLifecycle.terminalResponseIds = Array.from(
+    { length: 512 }, (_, index) => `protected-${index}`,
+  );
+  protectedLifecycle.toolBatches = Object.fromEntries(
+    protectedLifecycle.terminalResponseIds.map((responseId, index) => [
+      `${responseId}:batch-${index}`,
+      {
+        providerResponseId: responseId,
+        batchHash: `batch-${index}`,
+        toolCallIds: [],
+        closed: true,
+        continuationRequested: false,
+      },
+    ]),
+  );
+  const overflow = step(protectedLifecycle, {
+    type: "response.done",
+    responseId: "protected-overflow",
+    socketGeneration: 1,
+    elapsedMs: 2,
+  });
+  expect(overflow.lifecycle.phase).toBe("blocked");
+  expect(overflow.lifecycle.terminalResponseIds).toHaveLength(512);
+  expect(overflow.lifecycle.terminalResponseIds)
+    .not.toContain("protected-overflow");
+  expect(overflow.commands.some((command) => command.type === "prepare_summary"))
+    .toBe(false);
+});
