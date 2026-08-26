@@ -174,6 +174,10 @@ export type TelemetryName =
   | "onboarding.closed"
   | "invariant.violation";
 
+const MAX_TOOL_OUTBOX_RECEIPTS = 512;
+const MAX_TOOL_BATCHES = 512;
+const MAX_RESPONSE_INTENTS = 512;
+
 interface TelemetryCommand {
   type: "telemetry";
   name: TelemetryName;
@@ -288,7 +292,13 @@ export type OnboardingEvent =
         | "tool_args_mismatch"
         | "function_item_identity_missing"
         | "function_item_after_terminal_response"
-        | "tool_batch_too_large";
+        | "tool_batch_too_large"
+        | "response_not_completed"
+        | "function_item_not_completed"
+        | "output_index_invalid"
+        | "output_index_duplicate"
+        | "adapter_capacity_exceeded"
+        | "reused_coverage_mismatch";
       safeDetail: string;
     })
   | (SocketEvent & { type: "response.intent_sent"; intentKey: string })
@@ -497,6 +507,16 @@ function queueResponse(
   request: Omit<Extract<OnboardingCommand, { type: "request_response" }>, "type">,
 ): boolean {
   if (lifecycle.responseIntents[request.intentKey]) return false;
+  if (Object.keys(lifecycle.responseIntents).length >= MAX_RESPONSE_INTENTS) {
+    block(
+      lifecycle,
+      commands,
+      event,
+      "response_intent_capacity_exceeded",
+      "response intent replay registry reached its deterministic bound",
+    );
+    return false;
+  }
   lifecycle.responseIntents[request.intentKey] = {
     intentKey: request.intentKey,
     purpose: request.purpose,
@@ -895,6 +915,26 @@ function validSocketGeneration(
   );
 }
 
+function isRepeatedLateSignoffProof(
+  lifecycle: OnboardingLifecycle,
+  event: OnboardingEvent,
+): boolean {
+  if (lifecycle.phase !== "provider_terminating") return false;
+  const signoff = lifecycle.signoff;
+  const approval = lifecycle.approval;
+  if (!signoff?.responseId || !approval) return false;
+  if (!lifecycle.requestedHangupKeys.includes(
+    `hangup:${approval.approvalReceiptId}`,
+  )) return false;
+  return (
+    event.type === "response.transcript.delta" ||
+    event.type === "response.transcript.done" ||
+    event.type === "response.output_audio.done" ||
+    event.type === "response.done" ||
+    event.type === "output_audio_buffer.stopped"
+  ) && event.responseId === signoff.responseId;
+}
+
 export function createOnboardingLifecycle(callId: string): OnboardingLifecycle {
   if (!callId.trim()) throw new Error("onboarding_call_id_required");
   return {
@@ -924,6 +964,19 @@ export function reduceOnboarding(
   current: OnboardingLifecycle,
   event: OnboardingEvent,
 ): { lifecycle: OnboardingLifecycle; commands: OnboardingCommand[] } {
+  if (isRepeatedLateSignoffProof(current, event))
+    return { lifecycle: current, commands: [] };
+
+  if (current.phase === "blocked" && event.type === "tool.called")
+    return {
+      lifecycle: current,
+      commands: [
+        telemetry(current, "invariant.violation", event, {
+          toolCallId: event.toolCallId,
+          outcome: "tool_after_blocked",
+        }),
+      ],
+    };
   if (
     event.type === "approval.persistence_failed" &&
     event.code === "changed" &&
@@ -1482,6 +1535,17 @@ export function reduceOnboarding(
           resendOutput(lifecycle, commands, event, existing, true);
         break;
       }
+      if (Object.keys(lifecycle.toolOutbox).length >= MAX_TOOL_OUTBOX_RECEIPTS) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "tool_outbox_capacity_exceeded",
+          "tool replay registry reached its deterministic bound",
+          event.toolCallId,
+        );
+        break;
+      }
       const receipt: ToolReceipt = {
         toolCallId: event.toolCallId,
         toolName: event.name,
@@ -1714,6 +1778,16 @@ export function reduceOnboarding(
             "tool_batch_mismatch",
             "replayed tool batch changed membership",
           );
+        break;
+      }
+      if (Object.keys(lifecycle.toolBatches).length >= MAX_TOOL_BATCHES) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "tool_batch_capacity_exceeded",
+          "tool batch replay registry reached its deterministic bound",
+        );
         break;
       }
       lifecycle.toolBatches[key] = {

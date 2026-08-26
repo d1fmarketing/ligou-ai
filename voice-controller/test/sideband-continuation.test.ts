@@ -90,7 +90,10 @@ function responseCreated(responseId: string, intentKey?: string) {
 }
 
 function responseDone(responseId: string, extra: Record<string, unknown> = {}) {
-  return { type: "response.done", response: { id: responseId, ...extra } };
+  return {
+    type: "response.done",
+    response: { id: responseId, status: "completed", ...extra },
+  };
 }
 
 function functionCallDone(
@@ -98,11 +101,20 @@ function functionCallDone(
   callId: string,
   name = "not_a_real_tool",
   args = "{}",
+  outputIndex = 0,
+  itemStatus = "completed",
 ) {
   return {
     type: "response.output_item.done",
     response_id: responseId,
-    item: { type: "function_call", name, call_id: callId, arguments: args },
+    output_index: outputIndex,
+    item: {
+      type: "function_call",
+      status: itemStatus,
+      name,
+      call_id: callId,
+      arguments: args,
+    },
   };
 }
 
@@ -170,9 +182,146 @@ describe("non-onboarding transport behavior remains source-compatible", () => {
     expect(ws.sent).toEqual([]);
     expect(l.toolLog).toEqual([]);
   });
+
+  test("single tool completing after its terminal response continues immediately", async () => {
+    const cap = customerCap("call-single-after-terminal");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    await handleEvent(cap, l, ws as any,
+      functionCallDone("resp-single", "fc-single"));
+    expect(functionOutputs(ws)).toHaveLength(1);
+    expect(framesOfType(ws, "response.create")).toHaveLength(1);
+  });
+
+  test("idle terminal response emits no application continuation", async () => {
+    const cap = customerCap("call-idle-terminal");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    await handleEvent(cap, l, ws as any, { type: "response.done", response: {} });
+    expect(ws.sent).toEqual([]);
+  });
+
+  test("tool batch straddling response.done waits for the final result and continues once", async () => {
+    const cap = customerCap("call-straddled-batch");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "response.created" });
+    const first = handleEvent(cap, l, ws as any,
+      functionCallDone("resp-straddled", "fc-straddled-1"));
+    const second = handleEvent(cap, l, ws as any,
+      functionCallDone("resp-straddled", "fc-straddled-2"));
+    const terminal = handleEvent(
+      cap, l, ws as any, { type: "response.done", response: {} },
+    );
+    expect(framesOfType(ws, "response.create")).toHaveLength(0);
+    await Promise.all([first, second, terminal]);
+    expect(functionOutputs(ws)).toHaveLength(2);
+    expect(framesOfType(ws, "response.create")).toHaveLength(1);
+  });
+
+  test("stale in-flight old socket cannot corrupt a fresh batch or its one continuation", async () => {
+    const cap = customerCap("call-stale-vs-fresh");
+    const l = ledger(cap.callId);
+    const oldSocket = socket();
+    const freshSocket = socket();
+    let oldCurrent = true;
+    const oldWork = handleEvent(
+      cap, l, oldSocket as any,
+      functionCallDone("resp-old", "fc-old"),
+      () => oldCurrent,
+    );
+    oldCurrent = false;
+    l.responseActive = false;
+    l.pendingToolCalls = 0;
+    await handleEvent(cap, l, freshSocket as any, { type: "response.created" });
+    const freshOne = handleEvent(cap, l, freshSocket as any,
+      functionCallDone("resp-fresh", "fc-fresh-1"));
+    const freshTwo = handleEvent(cap, l, freshSocket as any,
+      functionCallDone("resp-fresh", "fc-fresh-2"));
+    await handleEvent(cap, l, freshSocket as any, { type: "response.done", response: {} });
+    await Promise.all([oldWork, freshOne, freshTwo]);
+    expect(oldSocket.sent).toEqual([]);
+    expect(functionOutputs(freshSocket)).toHaveLength(2);
+    expect(framesOfType(freshSocket, "response.create")).toHaveLength(1);
+    expect(l.pendingToolCalls).toBe(0);
+  });
 });
 
 describe("onboarding raw correlation and durable tool outbox", () => {
+  test("non-completed response terminal statuses have zero tool, store, or output effects", async () => {
+    for (const status of ["cancelled", "failed", "incomplete", undefined]) {
+      const cap = onboardingCap(`call-response-${status ?? "missing"}`);
+      const l = ledger(cap.callId);
+      const ws = socket();
+      await handleEvent(cap, l, ws as any, responseCreated("resp-status"));
+      await handleEvent(cap, l, ws as any,
+        functionCallDone("resp-status", "fc-status"));
+      await handleEvent(cap, l, ws as any, {
+        type: "response.done",
+        response: {
+          id: "resp-status",
+          ...(status ? { status } : {}),
+        },
+      });
+      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(l.toolLog).toEqual([]);
+      expect(functionOutputs(ws)).toEqual([]);
+      expect(Object.keys(l.onboarding!.lifecycle.toolOutbox)).toEqual([]);
+    }
+  });
+
+  test("non-completed function item statuses have zero tool, store, or output effects", async () => {
+    for (const status of ["cancelled", "failed", "incomplete", undefined]) {
+      const cap = onboardingCap(`call-item-${status ?? "missing"}`);
+      const l = ledger(cap.callId);
+      const ws = socket();
+      await handleEvent(cap, l, ws as any, responseCreated("resp-item-status"));
+      const item = functionCallDone(
+        "resp-item-status", "fc-item-status", "not_a_real_tool", "{}", 0,
+        status ?? "completed",
+      );
+      if (status === undefined) delete (item.item as any).status;
+      await handleEvent(cap, l, ws as any, item);
+      await handleEvent(cap, l, ws as any, responseDone("resp-item-status"));
+      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(l.toolLog).toEqual([]);
+      expect(functionOutputs(ws)).toEqual([]);
+    }
+  });
+
+  test("missing, invalid, or duplicate output_index blocks the complete batch before execution", async () => {
+    const invalidIndexes: unknown[] = [undefined, -1, 1.5, "0"];
+    for (const [position, outputIndex] of invalidIndexes.entries()) {
+      const cap = onboardingCap(`call-index-${position}`);
+      const l = ledger(cap.callId);
+      const ws = socket();
+      await handleEvent(cap, l, ws as any, responseCreated("resp-index"));
+      const item = functionCallDone("resp-index", "fc-index");
+      (item as any).output_index = outputIndex;
+      await handleEvent(cap, l, ws as any, item);
+      await handleEvent(cap, l, ws as any, responseDone("resp-index"));
+      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(l.toolLog).toEqual([]);
+      expect(functionOutputs(ws)).toEqual([]);
+    }
+
+    const cap = onboardingCap("call-index-duplicate");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, responseCreated("resp-index-duplicate"));
+    await handleEvent(cap, l, ws as any,
+      functionCallDone("resp-index-duplicate", "fc-index-a", "not_a_real_tool", "{}", 3));
+    await handleEvent(cap, l, ws as any,
+      functionCallDone("resp-index-duplicate", "fc-index-b", "not_a_real_tool", "{}", 3));
+    await handleEvent(cap, l, ws as any, responseDone("resp-index-duplicate"));
+    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expect(l.toolLog).toEqual([]);
+    expect(functionOutputs(ws)).toEqual([]);
+  });
+
   test("metadata-less VAD never claims a queued application intent", async () => {
     const cap = onboardingCap();
     const l = ledger(cap.callId);
@@ -197,24 +346,24 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     await handleEvent(cap, l, ws as any, responseCreated("resp-tools"));
     const first = handleEvent(
       cap, l, ws as any,
-      functionCallDone("resp-tools", "fc-z", "not_a_real_tool", JSON.stringify({ z: 2, a: 1 })),
+      functionCallDone("resp-tools", "fc-z", "not_a_real_tool", JSON.stringify({ z: 2, a: 1 }), 9),
     );
     const second = handleEvent(
       cap, l, ws as any,
-      functionCallDone("resp-tools", "fc-a", "not_a_real_tool", JSON.stringify({ b: true })),
+      functionCallDone("resp-tools", "fc-a", "not_a_real_tool", JSON.stringify({ b: true }), 2),
     );
     const terminal = handleEvent(cap, l, ws as any, responseDone("resp-tools"));
     await Promise.all([first, second, terminal]);
     expect(functionOutputs(ws).map((frame) => frame.item)).toEqual([
-      expect.objectContaining({ id: "tool-output:fc-z", call_id: "fc-z" }),
       expect.objectContaining({ id: "tool-output:fc-a", call_id: "fc-a" }),
+      expect.objectContaining({ id: "tool-output:fc-z", call_id: "fc-z" }),
     ]);
     expect(l.onboarding!.lifecycle.toolOutbox["fc-z"]?.state).toBe("output_pending");
     expect(l.onboarding!.lifecycle.toolOutbox["fc-a"]?.state).toBe("output_pending");
     const batches = Object.values(l.onboarding!.lifecycle.toolBatches);
     expect(batches).toHaveLength(1);
     expect(batches[0]).toMatchObject({
-      providerResponseId: "resp-tools", toolCallIds: ["fc-z", "fc-a"],
+      providerResponseId: "resp-tools", toolCallIds: ["fc-a", "fc-z"],
     });
     expect(batches[0]!.batchHash).toMatch(/^[a-f0-9]{64}$/);
     await handleEvent(cap, l, ws as any, outputAck("tool-output:fc-z"));
@@ -230,12 +379,102 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     const replaySocket = socket();
     await handleEvent(replayCap, replayLedger, replaySocket as any, responseCreated("resp-tools"));
     await handleEvent(replayCap, replayLedger, replaySocket as any,
-      functionCallDone("resp-tools", "fc-z", "not_a_real_tool", JSON.stringify({ a: 1, z: 2 })));
+      functionCallDone("resp-tools", "fc-z", "not_a_real_tool", JSON.stringify({ a: 1, z: 2 }), 9));
     await handleEvent(replayCap, replayLedger, replaySocket as any,
-      functionCallDone("resp-tools", "fc-a", "not_a_real_tool", JSON.stringify({ b: true })));
+      functionCallDone("resp-tools", "fc-a", "not_a_real_tool", JSON.stringify({ b: true }), 2));
     await handleEvent(replayCap, replayLedger, replaySocket as any, responseDone("resp-tools"));
     expect(Object.values(replayLedger.onboarding!.lifecycle.toolBatches)[0]!.batchHash)
       .toBe(batches[0]!.batchHash);
+  });
+
+  test("reversed arrival persists two interview answers in numeric output_index order", async () => {
+    const cap = onboardingCap("call-index-order-rpc");
+    const boundary = sequentialAnswerBoundary([
+      { status: "recorded", revision: 1, digest: "1".repeat(64) },
+      { status: "recorded", revision: 2, digest: "2".repeat(64) },
+    ]);
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    const firstArgs = {
+      topic: "area", field: "area.coverage", disposition: "answered",
+      rule_text: "FIRST authoritative correction.",
+      structured: { value: ["Irvine"] }, owner_words: "Primeiro Irvine.",
+    };
+    const secondArgs = {
+      topic: "area", field: "area.out_of_area_policy", disposition: "answered",
+      rule_text: "SECOND authoritative correction.",
+      structured: { value: "owner_review" }, owner_words: "Depois revisão.",
+    };
+    await handleEvent(cap, l, ws as any, responseCreated("resp-index-order"));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-index-order", "fc-second", "record_interview_answer",
+      JSON.stringify(secondArgs), 8,
+    ));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-index-order", "fc-first", "record_interview_answer",
+      JSON.stringify(firstArgs), 2,
+    ));
+    await handleEvent(cap, l, ws as any, responseDone("resp-index-order"));
+
+    expect(boundary.rpcFacts.map((fact) => fact.rule_text)).toEqual([
+      "FIRST authoritative correction.",
+      "SECOND authoritative correction.",
+    ]);
+    expect(functionOutputs(ws).map((frame) => frame.item.call_id)).toEqual([
+      "fc-first", "fc-second",
+    ]);
+    expect(l.onboarding!.lifecycle.coverage.revision).toBe(2);
+  });
+
+  test("semantic reused answer is output-acked without regressing coverage; a real advance still changes it", async () => {
+    const cap = onboardingCap("call-semantic-reused");
+    const boundary = sequentialAnswerBoundary([
+      { status: "reused", revision: 1, digest: "1".repeat(64) },
+      { status: "recorded", revision: 3, digest: "3".repeat(64) },
+    ]);
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, responseCreated("resp-bootstrap"));
+    await handleEvent(cap, l, ws as any, responseDone("resp-bootstrap"));
+    l.onboarding!.lifecycle.coverage = {
+      revision: 2,
+      digest: "2".repeat(64),
+      complete: false,
+      missing: [],
+      ambiguous: [],
+    };
+    const reusedArgs = {
+      topic: "area", field: "area.coverage", disposition: "answered",
+      rule_text: "Serve Irvine.", structured: { value: ["Irvine"] },
+      owner_words: "Atendemos Irvine.",
+    };
+    await handleEvent(cap, l, ws as any, responseCreated("resp-reused"));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-reused", "fc-reused-new-provider-id", "record_interview_answer",
+      JSON.stringify(reusedArgs), 0,
+    ));
+    await handleEvent(cap, l, ws as any, responseDone("resp-reused"));
+    expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
+    expect(l.onboarding!.lifecycle.coverage).toMatchObject({
+      revision: 2, digest: "2".repeat(64),
+    });
+    expect(JSON.parse(functionOutputs(ws).at(-1)!.item.output).status).toBe("reused");
+    await handleEvent(cap, l, ws as any,
+      outputAck("tool-output:fc-reused-new-provider-id"));
+    expect(l.onboarding!.lifecycle.toolOutbox["fc-reused-new-provider-id"]?.state)
+      .toBe("output_acked");
+
+    await handleEvent(cap, l, ws as any, responseCreated("resp-advance"));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-advance", "fc-real-advance", "record_interview_answer",
+      JSON.stringify({ ...reusedArgs, rule_text: "Serve Irvine e Anaheim." }), 0,
+    ));
+    await handleEvent(cap, l, ws as any, responseDone("resp-advance"));
+    expect(l.onboarding!.lifecycle.coverage).toMatchObject({
+      revision: 3, digest: "3".repeat(64),
+    });
   });
 
   test("exact duplicated provider items execute and send once", async () => {
@@ -269,6 +508,153 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     expect(l.toolLog).toEqual([]);
     expect(functionOutputs(ws)).toEqual([]);
     expect(Object.values(l.onboarding!.lifecycle.toolOutbox)).toEqual([]);
+  });
+
+  test("cross-response changed call_id preflights the whole batch and never admits siblings", async () => {
+    const cap = onboardingCap("call-cross-response-preflight");
+    const boundary = sequentialAnswerBoundary([
+      { status: "recorded", revision: 1, digest: "1".repeat(64) },
+    ]);
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, responseCreated("resp-original"));
+    await handleEvent(cap, l, ws as any,
+      functionCallDone("resp-original", "fc-reused", "not_a_real_tool", JSON.stringify({ value: 1 }), 1));
+    await handleEvent(cap, l, ws as any, responseDone("resp-original"));
+    const outputsBefore = functionOutputs(ws).length;
+    const toolsBefore = l.toolLog.length;
+
+    await handleEvent(cap, l, ws as any, responseCreated("resp-changed"));
+    await handleEvent(cap, l, ws as any,
+      functionCallDone("resp-changed", "fc-reused", "not_a_real_tool", JSON.stringify({ value: 2 }), 1));
+    await handleEvent(cap, l, ws as any,
+      functionCallDone(
+        "resp-changed",
+        "fc-sibling",
+        "record_interview_answer",
+        JSON.stringify({
+          topic: "area",
+          field: "area.coverage",
+          disposition: "answered",
+          rule_text: "Sibling must never persist.",
+          structured: { value: ["Irvine"] },
+          owner_words: "Nunca deve persistir.",
+        }),
+        4,
+      ));
+    await handleEvent(cap, l, ws as any, responseDone("resp-changed"));
+    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expect(l.toolLog).toHaveLength(toolsBefore);
+    expect(functionOutputs(ws)).toHaveLength(outputsBefore);
+    expect(l.onboarding!.lifecycle.toolOutbox["fc-sibling"]).toBeUndefined();
+    expect(boundary.rpcFacts).toEqual([]);
+
+    await handleEvent(cap, l, ws as any, responseCreated("resp-after-block"));
+    await handleEvent(cap, l, ws as any,
+      functionCallDone(
+        "resp-after-block",
+        "fc-after-block",
+        "record_interview_answer",
+        JSON.stringify({
+          topic: "area",
+          field: "area.coverage",
+          disposition: "answered",
+          rule_text: "Blocked member must never persist.",
+          structured: { value: ["Anaheim"] },
+          owner_words: "Também não deve persistir.",
+        }),
+        0,
+      ));
+    await handleEvent(cap, l, ws as any, responseDone("resp-after-block"));
+    expect(l.toolLog).toHaveLength(toolsBefore);
+    expect(l.onboarding!.lifecycle.toolOutbox["fc-after-block"]).toBeUndefined();
+    expect(boundary.rpcFacts).toEqual([]);
+  });
+
+  test("adapter response and pending-command maps stay bounded with deterministic overflow", async () => {
+    const responseCap = onboardingCap("call-response-capacity");
+    const responseLedger = ledger(responseCap.callId);
+    const responseSocket = socket();
+    await handleEvent(
+      responseCap, responseLedger, responseSocket as any,
+      responseCreated("resp-bootstrap"),
+    );
+    await handleEvent(
+      responseCap, responseLedger, responseSocket as any,
+      responseDone("resp-bootstrap"),
+    );
+    responseLedger.onboarding!.responses = Object.fromEntries(
+      Array.from({ length: 512 }, (_, index) => [
+        `pending-response-${index}`,
+        {
+          responseId: `pending-response-${index}`,
+          tools: [],
+          terminal: false,
+        },
+      ]),
+    );
+    await handleEvent(
+      responseCap, responseLedger, responseSocket as any,
+      responseDone("overflow-response"),
+    );
+    expect(responseLedger.onboarding!.lifecycle.phase).toBe("blocked");
+    expect(Object.keys(responseLedger.onboarding!.responses).length)
+      .toBeLessThanOrEqual(512);
+
+    const pruneCap = onboardingCap("call-response-prune");
+    const pruneLedger = ledger(pruneCap.callId);
+    const pruneSocket = socket();
+    await handleEvent(pruneCap, pruneLedger, pruneSocket as any,
+      responseCreated("resp-bootstrap"));
+    await handleEvent(pruneCap, pruneLedger, pruneSocket as any,
+      responseDone("resp-bootstrap"));
+    pruneLedger.onboarding!.responses = Object.fromEntries(
+      Array.from({ length: 512 }, (_, index) => [
+        `terminal-response-${index}`,
+        {
+          responseId: `terminal-response-${index}`,
+          tools: [],
+          terminal: true,
+        },
+      ]),
+    );
+    await handleEvent(pruneCap, pruneLedger, pruneSocket as any,
+      responseDone("new-pruned-response"));
+    expect(pruneLedger.onboarding!.lifecycle.phase).not.toBe("blocked");
+    expect(Object.keys(pruneLedger.onboarding!.responses)).toHaveLength(512);
+    expect(pruneLedger.onboarding!.responses["terminal-response-0"]).toBeUndefined();
+    expect(pruneLedger.onboarding!.responses["new-pruned-response"]).toBeDefined();
+
+    const pendingCap = onboardingCap("call-pending-capacity");
+    const pendingLedger = ledger(pendingCap.callId);
+    const pendingSocket = socket();
+    await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
+      responseCreated("resp-bootstrap"));
+    await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
+      responseDone("resp-bootstrap"));
+    pendingLedger.onboarding!.pendingResponseCommands = Object.fromEntries(
+      Array.from({ length: 512 }, (_, index) => [
+        `pending-intent-${index}`,
+        {
+          type: "request_response",
+          intentKey: `pending-intent-${index}`,
+          purpose: "tool_continuation",
+        },
+      ]),
+    );
+    await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
+      responseCreated("resp-pending-overflow"));
+    await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
+      functionCallDone("resp-pending-overflow", "fc-pending-overflow", "end_session"));
+    await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
+      responseDone("resp-pending-overflow"));
+    await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
+      outputAck("tool-output:fc-pending-overflow"));
+    expect(pendingLedger.onboarding!.lifecycle.phase).toBe("blocked");
+    expect(Object.keys(pendingLedger.onboarding!.pendingResponseCommands))
+      .toHaveLength(512);
+    expect(framesOfType(pendingSocket, "response.create")).toHaveLength(0);
   });
 
   test("first through hundredth premature end_session stays refused", async () => {
@@ -594,6 +980,104 @@ function snapshotBoundary(
   };
 }
 
+function delayedSnapshotBoundary(receipt: ReturnType<typeof coverageReceipt>) {
+  const ruleId = receipt.readback.selected_rule_ids[0]!;
+  let firstReceiptRead = true;
+  let resolveReceipt!: () => void;
+  const gate = new Promise<void>((resolve) => { resolveReceipt = resolve; });
+  return {
+    resolveReceipt,
+    client: {
+      from(table: string) {
+        const query: any = {
+          select() { return query; }, eq() { return query; }, in() { return query; },
+          order() { return query; }, limit() { return query; },
+          maybeSingle: async () => ({ data: null, error: null }),
+          async then(resolve: (value: unknown) => unknown) {
+            if (table === "receipts") {
+              if (firstReceiptRead) {
+                firstReceiptRead = false;
+                await gate;
+              }
+              return resolve({ data: [receipt], error: null });
+            }
+            if (table === "rules")
+              return resolve({
+                data: [{
+                  id: ruleId,
+                  rule_group_id: "rule-group-delayed",
+                  version: 1,
+                  structured: { coverage_field: "area.coverage" },
+                  created_at: "2026-08-25T00:00:00.000Z",
+                }],
+                error: null,
+              });
+            return resolve({ data: null, error: null });
+          },
+        };
+        return query;
+      },
+      rpc() {
+        return Promise.resolve({ data: null, error: { message: "unexpected rpc" } });
+      },
+    } as any,
+  };
+}
+
+function sequentialAnswerBoundary(results: Array<{
+  status: "recorded" | "reused";
+  revision: number;
+  digest: string;
+}>) {
+  const rpcFacts: Array<Record<string, unknown>> = [];
+  let resultIndex = 0;
+  return {
+    rpcFacts,
+    client: {
+      from(table: string) {
+        const query: any = {
+          select() { return query; }, eq() { return query; }, order() { return query; },
+          limit() { return query; },
+          maybeSingle: async () => ({ data: null, error: null }),
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({
+              data: table === "receipts" ? [] : [], error: null,
+            }).then(resolve);
+          },
+        };
+        return query;
+      },
+      rpc(name: string, args: Record<string, unknown>) {
+        if (name !== "record_onboarding_answer")
+          return Promise.resolve({ data: null, error: { message: "unexpected rpc" } });
+        rpcFacts.push(args.p_fact as Record<string, unknown>);
+        const next = results[Math.min(resultIndex, results.length - 1)]!;
+        resultIndex += 1;
+        return Promise.resolve({
+          data: {
+            status: next.status,
+            rule_id: `rule-${resultIndex}`,
+            rule_group_id: `group-${resultIndex}`,
+            coverage_receipt_id: `receipt-${next.revision}`,
+            revision: next.revision,
+            snapshot_digest: next.digest,
+            complete: false,
+            missing: [],
+            ambiguous: [],
+            next_action: {
+              type: "ask",
+              field: "service.catalog_closure",
+              question_pt: "Esses são todos os serviços?",
+            },
+            coverage: {},
+          },
+          error: null,
+        });
+      },
+    } as any,
+  };
+}
+
 function seedAwaitingApproval(
   l: SessionLedger,
   receiptId: string,
@@ -642,6 +1126,51 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
     expect(summaryCreates[0].response.metadata).toMatchObject({
       intent_key: `summary:${digest}`, purpose: "summary", snapshot_digest: digest,
     });
+  });
+
+  test("speech ingress during a slow snapshot suppresses summary until the same-socket VAD response is terminal", async () => {
+    const cap = onboardingCap("call-slow-snapshot-speech");
+    const snapshot = completeCoverage(cap, 1);
+    const digest = "9".repeat(64);
+    const receipt = coverageReceipt(cap, snapshot, digest, "rule-slow-speech");
+    const boundary = delayedSnapshotBoundary(receipt);
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, responseCreated("resp-coverage"));
+    l.onboarding!.lifecycle.phase = "coverage_check";
+    l.onboarding!.lifecycle.coverage = {
+      revision: 1, digest, complete: true, missing: [], ambiguous: [],
+    };
+    const snapshotWork = handleEvent(cap, l, ws as any, responseDone("resp-coverage"));
+    await flushAsync();
+    const speechWork = handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-during-snapshot",
+    });
+    const transcriptWork = handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-during-snapshot",
+      transcript: "Só um momento, quero acrescentar uma correção.",
+    });
+    expect(l.onboarding!.speechGeneration).toBe(1);
+    boundary.resolveReceipt();
+    await Promise.all([snapshotWork, speechWork, transcriptWork]);
+
+    expect(framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "summary",
+    )).toHaveLength(0);
+    expect(l.transcript.some((entry) =>
+      entry.role === "caller" && entry.text.includes("correção")
+    )).toBe(true);
+
+    await handleEvent(cap, l, ws as any, responseCreated("resp-vad-fresh"));
+    await handleEvent(cap, l, ws as any, responseDone("resp-vad-fresh"));
+    const summaries = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "summary",
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].response.metadata.intent_key).toBe(`summary:${digest}`);
   });
 
   test("changed approval refreshes, acks its output, then runs ordinary summary preparation", async () => {
@@ -750,7 +1279,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       JSON.stringify({ owner_words: "Aprovado." }),
     ));
     await handleEvent(cap, l, ws as any,
-      functionCallDone("resp-approval-batch", "fc-close-sibling", "end_session"));
+      functionCallDone("resp-approval-batch", "fc-close-sibling", "end_session", "{}", 1));
     await handleEvent(cap, l, ws as any, responseDone("resp-approval-batch"));
 
     await handleEvent(cap, l, ws as any, outputAck("tool-output:fc-approval"));
@@ -771,6 +1300,7 @@ describe("physical socket attach and reconnect", () => {
     sent: string[] = [];
     failFunctionOutputs = false;
     failResponseCreates = false;
+    suppressCloseEvent = false;
     closed = 0;
     constructor() { SyntheticWebSocket.instances.push(this); }
     addEventListener(type: string, listener: (event: any) => void) {
@@ -784,7 +1314,10 @@ describe("physical socket attach and reconnect", () => {
         throw new Error("synthetic response send failure");
       this.sent.push(payload);
     }
-    close() { this.closed += 1; this.emit("close", { code: 1000 }); }
+    close() {
+      this.closed += 1;
+      if (!this.suppressCloseEvent) this.emit("close", { code: 1000 });
+    }
     emit(type: string, event: any = {}) {
       for (const listener of this.listeners.get(type) ?? []) listener(event);
     }
@@ -855,6 +1388,57 @@ describe("physical socket attach and reconnect", () => {
     } finally {
       liveSessions.delete(cap.callId);
       globalThis.WebSocket = original;
+    }
+  });
+
+  test("summary intent created after delayed snapshot and socket replacement drains on the new generation", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-delayed-snapshot-reattach");
+    const snapshot = completeCoverage(cap, 1);
+    const digest = "8".repeat(64);
+    const receipt = coverageReceipt(cap, snapshot, digest, "rule-delayed");
+    const boundary = delayedSnapshotBoundary(receipt);
+    _setClient(boundary.client);
+    try {
+      const control = attachSideband(
+        cap, "rtc-delayed-snapshot-reattach", "gpt-realtime-2.1",
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      first.message(responseCreated("resp-greeting", `greeting:${cap.callId}`));
+      first.message(responseDone("resp-greeting"));
+      await flushAsync();
+      control.ledger.onboarding!.lifecycle.phase = "coverage_check";
+      control.ledger.onboarding!.lifecycle.coverage = {
+        revision: 1, digest, complete: true, missing: [], ambiguous: [],
+      };
+      first.message(responseCreated("resp-coverage"));
+      first.message(responseDone("resp-coverage"));
+      await flushAsync();
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      boundary.resolveReceipt();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      expect(framesOfType(first, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "summary",
+      )).toHaveLength(0);
+      const summaries = framesOfType(second, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "summary",
+      );
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0].response.metadata.intent_key).toBe(`summary:${digest}`);
+      expect(control.ledger.onboarding!.lifecycle.socketGeneration).toBe(2);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+      _setClient(null);
     }
   });
 
@@ -994,6 +1578,68 @@ describe("physical socket attach and reconnect", () => {
       liveSessions.delete(cap.callId);
       globalThis.WebSocket = original;
       _setClient(null);
+    }
+  });
+
+  test("final playback arriving after sideband reattach still enters the single hangup path", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-final-close-reattach");
+    try {
+      const control = attachSideband(
+        cap, "rtc-final-close-reattach", "gpt-realtime-2.1",
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      const lifecycle = control.ledger.onboarding!.lifecycle;
+      const digest = "f".repeat(64);
+      lifecycle.phase = "final_signoff_speaking";
+      lifecycle.coverage = {
+        revision: 9, digest, complete: true, missing: [], ambiguous: [],
+      };
+      lifecycle.preparedSnapshotDigests = [digest];
+      lifecycle.approval = {
+        toolCallId: "approval-tool-final",
+        approvalReceiptId: "approval-receipt-final",
+        coverageReceiptId: "coverage-receipt-final",
+        revision: 9,
+        digest,
+      };
+      lifecycle.signoff = {
+        approvalReceiptId: "approval-receipt-final",
+        responseId: "resp-final-reattach",
+        audioDone: true,
+        responseDone: true,
+        playbackStopped: false,
+        interrupted: false,
+      };
+      delete lifecycle.activeResponseId;
+      control.ledger.responseActive = false;
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      second.suppressCloseEvent = true;
+      second.message({
+        type: "output_audio_buffer.stopped",
+        response_id: "resp-final-reattach",
+      });
+      await flushAsync();
+
+      expect(control.ledger.status).toBe("ended");
+      expect(control.ledger.agentEnded).toBe(true);
+      expect(control.ledger.onboarding!.pendingHangupIntentKey)
+        .toBe("hangup:approval-receipt-final");
+      expect(control.ledger.onboarding!.lifecycle.requestedHangupKeys)
+        .toEqual(["hangup:approval-receipt-final"]);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
     }
   });
 });

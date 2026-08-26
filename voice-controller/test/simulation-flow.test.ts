@@ -291,8 +291,10 @@ test("serialized sideband passes exact provider call_id and acknowledges simulat
   await handleEvent(cap, ledger, ws as any, {
     type: "response.output_item.done",
     response_id: "resp-sideband-answer",
+    output_index: 0,
     item: {
       type: "function_call",
+      status: "completed",
       name: "record_interview_answer",
       call_id: "provider-sideband-answer-1",
       arguments: JSON.stringify({
@@ -309,7 +311,7 @@ test("serialized sideband passes exact provider call_id and acknowledges simulat
   expect(ws.sent).toEqual([]);
   await handleEvent(cap, ledger, ws as any, {
     type: "response.done",
-    response: { id: "resp-sideband-answer" },
+    response: { id: "resp-sideband-answer", status: "completed" },
   });
 
   const persistence = rpcCalls.find(

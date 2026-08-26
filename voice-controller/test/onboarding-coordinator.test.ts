@@ -8,6 +8,7 @@ import {
 } from "../src/onboarding-coverage.ts";
 import {
   createOnboardingLifecycle,
+  hashOnboardingToolArgs,
   reduceOnboarding,
   type OnboardingCommand,
   type OnboardingEvent,
@@ -387,6 +388,51 @@ function signoffSpeaking(lifecycle = approvalPersisting().lifecycle) {
 
 function commandTypes(commands: OnboardingCommand[]) {
   return commands.map((command) => command.type);
+}
+
+function providerTerminatingLifecycle() {
+  let lifecycle = signoffSpeaking();
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.intent_sent",
+    intentKey: "final-signoff:approval-receipt-1",
+    socketGeneration: 1,
+    elapsedMs: 77,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.created",
+    responseId: "response-signoff-late",
+    intentKey: "final-signoff:approval-receipt-1",
+    socketGeneration: 1,
+    elapsedMs: 78,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.output_audio.done",
+    responseId: "response-signoff-late",
+    socketGeneration: 1,
+    elapsedMs: 79,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.done",
+    responseId: "response-signoff-late",
+    socketGeneration: 1,
+    elapsedMs: 80,
+  }));
+  const playback = step(lifecycle, {
+    type: "output_audio_buffer.stopped",
+    responseId: "response-signoff-late",
+    socketGeneration: 1,
+    elapsedMs: 81,
+  });
+  lifecycle = playback.lifecycle;
+  expect(playback.commands.filter((command) => command.type === "request_hangup"))
+    .toHaveLength(1);
+  ({ lifecycle } = step(lifecycle, {
+    type: "provider.termination_requested",
+    intentKey: "hangup:approval-receipt-1",
+    elapsedMs: 82,
+  }));
+  expect(lifecycle.phase).toBe("provider_terminating");
+  return lifecycle;
 }
 
 function summaryCommands(commands: OnboardingCommand[]) {
@@ -849,7 +895,13 @@ describe("onboarding lifecycle forbidden transitions", () => {
         elapsedMs: 1,
       });
       expect(refused.lifecycle.phase).toBe(phase);
-      expect(commandTypes(refused.commands)).toContain("refuse_end_session");
+      if (phase === "blocked") {
+        expect(refused.lifecycle).toBe(lifecycle);
+        expect(commandTypes(refused.commands)).not.toContain("refuse_end_session");
+        expect(refused.lifecycle.toolOutbox[`end-${phase}`]).toBeUndefined();
+      } else {
+        expect(commandTypes(refused.commands)).toContain("refuse_end_session");
+      }
       expect(commandTypes(refused.commands)).not.toContain("request_hangup");
     }
 
@@ -2032,4 +2084,132 @@ test("lifecycle telemetry precedes the side effect command it describes", () => 
     (command) => command.type === "request_hangup",
   );
   expect(closingTelemetry).toBeLessThan(hangup);
+});
+
+test("late repeated signoff proof is state-identical after provider termination starts", () => {
+  const lifecycle = providerTerminatingLifecycle();
+  const repeated: OnboardingEvent[] = [
+    {
+      type: "response.output_audio.done",
+      responseId: "response-signoff-late",
+      socketGeneration: 1,
+      elapsedMs: 90,
+    },
+    {
+      type: "response.done",
+      responseId: "response-signoff-late",
+      socketGeneration: 1,
+      elapsedMs: 91,
+    },
+    {
+      type: "output_audio_buffer.stopped",
+      responseId: "response-signoff-late",
+      socketGeneration: 1,
+      elapsedMs: 92,
+    },
+  ];
+  for (const event of repeated) {
+    const result = step(lifecycle, event);
+    expect(result.lifecycle).toBe(lifecycle);
+    expect(result.commands).toEqual([]);
+    expect(result.lifecycle.requestedHangupKeys)
+      .toEqual(["hangup:approval-receipt-1"]);
+  }
+  const closed = step(lifecycle, {
+    type: "provider.termination_confirmed",
+    intentKey: "hangup:approval-receipt-1",
+    terminalPersisted: true,
+    elapsedMs: 93,
+  });
+  expect(closed.lifecycle.phase).toBe("closed");
+  expect(closed.lifecycle.providerTerminationConfirmed).toBe(true);
+});
+
+test("reducer maps fail closed at deterministic capacity without discarding replay identities", () => {
+  const toolLifecycle = startCollecting();
+  toolLifecycle.toolOutbox = Object.fromEntries(
+    Array.from({ length: 512 }, (_, index) => [
+      `existing-tool-${index}`,
+      {
+        toolCallId: `existing-tool-${index}`,
+        toolName: "end_session",
+        argsHash: `args-${index}`,
+        state: "output_acked" as const,
+        providerResponseId: `response-${index}`,
+        batchHash: `batch-${index}`,
+        outputItemId: `tool-output:existing-tool-${index}`,
+        socketGeneration: 1,
+      },
+    ]),
+  );
+  const toolOverflow = step(toolLifecycle, {
+    type: "tool.called",
+    toolCallId: "overflow-tool",
+    name: "end_session",
+    args: {},
+    providerResponseId: "overflow-response",
+    batchHash: "overflow-batch",
+    socketGeneration: 1,
+    elapsedMs: 1,
+  });
+  expect(toolOverflow.lifecycle.phase).toBe("blocked");
+  expect(Object.keys(toolOverflow.lifecycle.toolOutbox)).toHaveLength(512);
+  expect(toolOverflow.lifecycle.toolOutbox["overflow-tool"]).toBeUndefined();
+
+  const batchLifecycle = startCollecting();
+  batchLifecycle.toolOutbox["new-batch-tool"] = {
+    toolCallId: "new-batch-tool",
+    toolName: "end_session",
+    argsHash: hashOnboardingToolArgs({}),
+    state: "output_pending",
+    providerResponseId: "new-batch-response",
+    batchHash: "new-batch-hash",
+    output: "{}",
+    resultHash: "result",
+    outputItemId: "tool-output:new-batch-tool",
+    socketGeneration: 1,
+  };
+  batchLifecycle.toolBatches = Object.fromEntries(
+    Array.from({ length: 512 }, (_, index) => [
+      `response-${index}:batch-${index}`,
+      {
+        providerResponseId: `response-${index}`,
+        batchHash: `batch-${index}`,
+        toolCallIds: [`tool-${index}`],
+        closed: true,
+        continuationRequested: true,
+      },
+    ]),
+  );
+  const batchOverflow = step(batchLifecycle, {
+    type: "tool.batch_closed",
+    providerResponseId: "new-batch-response",
+    batchHash: "new-batch-hash",
+    toolCallIds: ["new-batch-tool"],
+    elapsedMs: 2,
+  });
+  expect(batchOverflow.lifecycle.phase).toBe("blocked");
+  expect(Object.keys(batchOverflow.lifecycle.toolBatches)).toHaveLength(512);
+
+  const intentLifecycle = createOnboardingLifecycle(callId);
+  intentLifecycle.responseIntents = Object.fromEntries(
+    Array.from({ length: 512 }, (_, index) => [
+      `existing-intent-${index}`,
+      {
+        intentKey: `existing-intent-${index}`,
+        purpose: "tool_continuation" as const,
+        state: "terminal" as const,
+        responseId: `response-intent-${index}`,
+      },
+    ]),
+  );
+  const intentOverflow = step(intentLifecycle, {
+    type: "socket.attached",
+    socketGeneration: 1,
+    elapsedMs: 3,
+  });
+  expect(intentOverflow.lifecycle.phase).toBe("blocked");
+  expect(Object.keys(intentOverflow.lifecycle.responseIntents)).toHaveLength(512);
+  expect(intentOverflow.commands.some((command) => command.type === "request_response"))
+    .toBe(false);
 });

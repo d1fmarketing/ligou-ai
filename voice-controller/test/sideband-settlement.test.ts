@@ -747,7 +747,7 @@ describe("sideband budget finalization", () => {
       }) });
       socket.emit("message", { data: JSON.stringify({
         type: "response.done",
-        response: { id: "resp-final-7" },
+        response: { id: "resp-final-7", status: "completed" },
       }) });
       socket.emit("message", { data: JSON.stringify({
         type: "output_audio_buffer.stopped",
