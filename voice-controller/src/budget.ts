@@ -131,11 +131,15 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
   const providerState = String(row.provider_termination_state ?? "not_required");
   const providerUsageState = row.provider_usage_state;
   const needsTermination = ["active", "pending", "unknown"].includes(providerState);
+  const storedTerminationReason = typeof row.provider_termination_reason === "string"
+    && row.provider_termination_reason.length > 0
+    ? row.provider_termination_reason
+    : "durable_budget_reconciliation";
   const provider = needsTermination
     ? {
         openaiCallId: row.openai_call_id ? String(row.openai_call_id) : null,
         mode: (row.provider_termination_mode === "reject" ? "reject" : "hangup") as ProviderTerminationMode,
-        reason: "durable_budget_reconciliation",
+        reason: storedTerminationReason,
       }
     : undefined;
 

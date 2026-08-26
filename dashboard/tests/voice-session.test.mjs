@@ -17,10 +17,12 @@ after(async () => { await vite.close(); });
 
 const {
   applyCurrentSessionRun,
+  endedVoiceSessionCopy,
   onboardingOutcomeCopy,
   resolveOnboardingOutcome,
   settleStartedSession,
   startVoiceSession,
+  watchOnboardingOutcome,
 } = sessionModule;
 
 const CALL_ID = "7f58ee06-6a13-4d45-a2d5-c60244dc92a3";
@@ -350,6 +352,96 @@ test("bounded polling reaches durable completion from active provider state", as
   assert.equal(callReads, 2);
 });
 
+test("the production outcome window spans the provider timeout plus database margin", async () => {
+  let clock = 0;
+  let callReads = 0;
+  const client = queryClient({
+    receipt: { data: approvalRow(), error: null },
+    call: () => {
+      callReads += 1;
+      return Promise.resolve({
+        data: clock < 6_000
+          ? callRow({ status: "active", provider_termination_state: "pending" })
+          : callRow(),
+        error: null,
+      });
+    },
+  });
+
+  const outcome = await resolveOnboardingOutcome({
+    client,
+    reason: "remote_hangup",
+    callId: CALL_ID,
+    pollIntervalMs: 1_000,
+    now: () => clock,
+    sleep: async (milliseconds) => { clock += milliseconds; },
+    isCancelled: () => callReads > 12,
+  });
+
+  assert.deepEqual(outcome, { status: "complete", revision: 8 });
+  assert.ok(clock >= 6_000);
+  assert.ok(callReads <= 12);
+});
+
+test("a finalizing watcher re-enters exact resolution and publishes terminal truth", async () => {
+  const outcomes = [
+    { status: "finalizing", revision: 8 },
+    { status: "complete", revision: 8 },
+  ];
+  const published = [];
+  const sleeps = [];
+  const scopes = [];
+  let resolveCalls = 0;
+
+  const outcome = await watchOnboardingOutcome({
+    client: {},
+    reason: "remote_hangup",
+    callId: CALL_ID,
+    resolve: async (scope) => {
+      scopes.push({ callId: scope.callId, reason: scope.reason });
+      return outcomes[resolveCalls++];
+    },
+    sleep: async (milliseconds) => { sleeps.push(milliseconds); },
+    onOutcome: (value) => { published.push(value); },
+  });
+
+  assert.deepEqual(outcome, { status: "complete", revision: 8 });
+  assert.deepEqual(published, outcomes);
+  assert.equal(resolveCalls, 2);
+  assert.deepEqual(scopes, [
+    { callId: CALL_ID, reason: "remote_hangup" },
+    { callId: CALL_ID, reason: "remote_hangup" },
+  ]);
+  assert.equal(sleeps.length, 1);
+  assert.ok(sleeps[0] >= 250, "finalizing recheck must not hot-poll");
+});
+
+test("aborting a finalizing watcher clears its retry timer and prevents future reads or writes", async () => {
+  const controller = new AbortController();
+  const published = [];
+  let resolveCalls = 0;
+  const watching = watchOnboardingOutcome({
+    resolve: async () => {
+      resolveCalls += 1;
+      return { status: "finalizing", revision: 8 };
+    },
+    retryDelayMs: 10_000,
+    signal: controller.signal,
+    onOutcome: (value) => { published.push(value); },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+
+  const outcome = await Promise.race([
+    watching,
+    new Promise((resolve) => setTimeout(() => resolve("watcher_did_not_cancel"), 80)),
+  ]);
+
+  assert.notEqual(outcome, "watcher_did_not_cancel");
+  assert.equal(resolveCalls, 1);
+  assert.deepEqual(published, [{ status: "finalizing", revision: 8 }]);
+});
+
 test("bounded polling stops on terminal failure instead of waiting for its deadline", async () => {
   let callReads = 0;
   const client = queryClient({
@@ -520,4 +612,17 @@ test("onboarding result copy distinguishes interrupted, finalizing, and durable 
     onboardingOutcomeCopy({ status: "complete", revision: 8 }),
     "Entrevista concluída. Cobertura confirmada por voz · revisão 8. Regras ainda aguardando aprovação na Memória.",
   );
+});
+
+test("ended copy follows the ended run type rather than the next-run selector", () => {
+  assert.equal(endedVoiceSessionCopy({
+    endedSessionType: "owner_browser",
+    selectedSessionType: "onboarding",
+    onboardingOutcome: null,
+  }), "Chamada encerrada. Resumo e custo aparecem no histórico.");
+  assert.equal(endedVoiceSessionCopy({
+    endedSessionType: "onboarding",
+    selectedSessionType: "owner_browser",
+    onboardingOutcome: null,
+  }), "Verificando conclusão…");
 });

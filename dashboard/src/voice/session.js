@@ -12,19 +12,27 @@ function isObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-async function boundedRead(read, timeoutMs) {
+async function boundedRead(read, timeoutMs, signal) {
   let timer;
+  let onAbort;
   try {
-    return await Promise.race([
+    const candidates = [
       Promise.resolve().then(read).then((value) => ({ ok: true, value })),
       new Promise((resolve) => {
         timer = setTimeout(() => resolve({ ok: false }), timeoutMs);
       }),
-    ]);
+    ];
+    if (signal) candidates.push(new Promise((resolve) => {
+      onAbort = () => resolve({ ok: false, cancelled: true });
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }));
+    return await Promise.race(candidates);
   } catch {
     return { ok: false };
   } finally {
     if (timer) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
   }
 }
 
@@ -58,21 +66,43 @@ export function applyCurrentSessionRun({ runId, currentRunId, onCurrent }) {
   return true;
 }
 
-function cancellationRequested(isCancelled) {
+function cancellationRequested(isCancelled, signal) {
+  if (signal?.aborted) return true;
   try { return Boolean(isCancelled?.()); } catch { return true; }
 }
 
-function wait(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+async function pause(milliseconds, { signal, sleep } = {}) {
+  if (signal?.aborted) return false;
+  if (sleep) {
+    await sleep(milliseconds);
+    return !signal?.aborted;
+  }
+  return await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
+
+const ONBOARDING_OUTCOME_WINDOW_MS = 8_000;
+const ONBOARDING_OUTCOME_RECHECK_MS = 1_000;
 
 export async function resolveOnboardingOutcome({
   client,
   reason,
   callId,
-  timeoutMs = 3_000,
+  timeoutMs = ONBOARDING_OUTCOME_WINDOW_MS,
   pollIntervalMs = 250,
   isCancelled,
+  signal,
+  now = Date.now,
+  sleep,
 }) {
   if (MANUAL_END_REASONS.has(reason)
     || !client
@@ -80,13 +110,15 @@ export async function resolveOnboardingOutcome({
     || typeof callId !== "string"
     || !callId.trim()) return { status: "interrupted" };
 
-  const boundedTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 3_000;
+  const boundedTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : ONBOARDING_OUTCOME_WINDOW_MS;
   const boundedPoll = Number.isFinite(pollIntervalMs) && pollIntervalMs >= 0 ? pollIntervalMs : 250;
-  const deadline = Date.now() + boundedTimeout;
+  const deadline = now() + boundedTimeout;
   let revision = null;
 
-  while (!cancellationRequested(isCancelled)) {
-    const remaining = deadline - Date.now();
+  while (!cancellationRequested(isCancelled, signal)) {
+    const remaining = deadline - now();
     if (remaining <= 0) break;
     const [approvalRead, callRead] = await Promise.all([
       boundedRead(() => client
@@ -97,15 +129,15 @@ export async function resolveOnboardingOutcome({
         .eq("outcome", "accepted")
         .order("created_at", { ascending: false })
         .limit(1)
-        .maybeSingle(), remaining),
+        .maybeSingle(), remaining, signal),
       boundedRead(() => client
         .from("calls")
         .select("id,session_type,status,provider_termination_state,provider_termination_reason")
         .eq("id", callId)
         .eq("session_type", "onboarding")
-        .maybeSingle(), remaining),
+        .maybeSingle(), remaining, signal),
     ]);
-    if (cancellationRequested(isCancelled)) return { status: "interrupted" };
+    if (cancellationRequested(isCancelled, signal)) return { status: "interrupted" };
 
     const approvalResult = approvalRead.ok ? approvalRead.value : null;
     const observedRevision = approvalResult && !approvalResult.error
@@ -128,11 +160,33 @@ export async function resolveOnboardingOutcome({
       if (revision !== null) return { status: "complete", revision };
     }
 
-    const waitFor = Math.min(boundedPoll, Math.max(0, deadline - Date.now()));
-    if (waitFor > 0) await wait(waitFor);
+    const waitFor = Math.min(boundedPoll, Math.max(0, deadline - now()));
+    if (waitFor > 0 && !await pause(waitFor, { signal, sleep })) return { status: "interrupted" };
   }
 
   return revision === null ? { status: "interrupted" } : { status: "finalizing", revision };
+}
+
+export async function watchOnboardingOutcome({
+  resolve = resolveOnboardingOutcome,
+  onOutcome,
+  retryDelayMs = ONBOARDING_OUTCOME_RECHECK_MS,
+  signal,
+  isCancelled,
+  sleep,
+  ...resolution
+}) {
+  while (!cancellationRequested(isCancelled, signal)) {
+    const outcome = await resolve({ ...resolution, signal, isCancelled, sleep });
+    if (cancellationRequested(isCancelled, signal)) return { status: "interrupted" };
+    onOutcome?.(outcome);
+    if (outcome.status !== "finalizing") return outcome;
+    const boundedRetry = Number.isFinite(retryDelayMs) && retryDelayMs >= 250
+      ? retryDelayMs
+      : ONBOARDING_OUTCOME_RECHECK_MS;
+    if (!await pause(boundedRetry, { signal, sleep })) return { status: "interrupted" };
+  }
+  return { status: "interrupted" };
 }
 
 export function onboardingOutcomeCopy(outcome) {
@@ -144,6 +198,12 @@ export function onboardingOutcomeCopy(outcome) {
     return `Finalizando… Cobertura confirmada por voz · revisão ${outcome.revision}. O encerramento do provedor ainda não foi confirmado. Regras ainda aguardando aprovação na Memória.`;
   }
   return "Entrevista interrompida. A conclusão não foi confirmada. Revise na Memória as sugestões que já foram registradas.";
+}
+
+export function endedVoiceSessionCopy({ endedSessionType, onboardingOutcome }) {
+  return endedSessionType === "onboarding"
+    ? onboardingOutcomeCopy(onboardingOutcome)
+    : "Chamada encerrada. Resumo e custo aparecem no histórico.";
 }
 
 export async function startVoiceSession({ accessToken, sessionType = "owner_browser", model, onEvent, onEnd }) {

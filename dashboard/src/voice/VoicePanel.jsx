@@ -4,10 +4,10 @@ import { Dialog } from "../components/Dialog.jsx";
 import { supabase } from "../lib/supabase.js";
 import {
   applyCurrentSessionRun,
-  onboardingOutcomeCopy,
-  resolveOnboardingOutcome,
+  endedVoiceSessionCopy,
   settleStartedSession,
   startVoiceSession,
+  watchOnboardingOutcome,
 } from "./session.js";
 import { statusLineFor } from "./panel-copy.js";
 
@@ -22,6 +22,7 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
   const [model, setModel] = useState("gpt-realtime-2.1");
   const [sessionType, setSessionType] = useState(initialSessionType);
   const [onboardingOutcome, setOnboardingOutcome] = useState(null);
+  const [endedSessionType, setEndedSessionType] = useState(null);
   const sessionRef = useRef(null);
 
   useEffect(() => {
@@ -50,8 +51,10 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
   // descrevendo somente a execução atual; callbacks de uma execução anterior
   // nunca podem observar os valores que a próxima execução resetou.
   const sessionRunRef = useRef(0);
+  const outcomeAbortRef = useRef(null);
 
   useEffect(() => () => {
+    outcomeAbortRef.current?.abort();
     sessionRunRef.current += 1;
     cancelledRef.current = true;
     sessionRef.current?.end?.("dialog_close");
@@ -65,23 +68,30 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
     endedRef.current = true;
     sessionRef.current = null;
     setStatus("ended");
+    setEndedSessionType(endedSessionType);
     setOnboardingOutcome(null);
+    outcomeAbortRef.current?.abort();
+    outcomeAbortRef.current = null;
     if (endedSessionType !== "onboarding") return;
-    void resolveOnboardingOutcome({
+    const outcomeAbort = new AbortController();
+    outcomeAbortRef.current = outcomeAbort;
+    void watchOnboardingOutcome({
       client: supabase,
       reason: end.reason,
       callId: end.callId,
+      signal: outcomeAbort.signal,
       isCancelled: () => sessionRunRef.current !== runId,
-    }).then((outcome) => {
-      applyCurrentSessionRun({
+      onOutcome: (outcome) => applyCurrentSessionRun({
         runId,
         currentRunId: sessionRunRef.current,
         onCurrent: () => { if (endedRef.current) setOnboardingOutcome(outcome); },
-      });
+      }),
     });
   }
 
   async function begin() {
+    outcomeAbortRef.current?.abort();
+    outcomeAbortRef.current = null;
     const runId = sessionRunRef.current + 1;
     sessionRunRef.current = runId;
     const startedSessionType = sessionType;
@@ -90,6 +100,7 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
     setStatus("connecting");
     setError(null);
     setOnboardingOutcome(null);
+    setEndedSessionType(null);
     setLines([]);
     setLiveCases([]);
     setLiveSuggestions([]);
@@ -174,9 +185,7 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
             </button>
             {status === "ended" ? (
               <p className="voice-live-note">
-                {interviewing
-                  ? onboardingOutcomeCopy(onboardingOutcome)
-                  : "Chamada encerrada. Resumo e custo aparecem no histórico."}
+                {endedVoiceSessionCopy({ endedSessionType, onboardingOutcome })}
               </p>
             ) : null}
             {error ? <p className="voice-live-error">{error}</p> : null}

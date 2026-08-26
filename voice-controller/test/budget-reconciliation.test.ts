@@ -233,6 +233,33 @@ describe("durable budget reconciliation", () => {
     expect(settleAttempts).toBe(0);
   });
 
+  test("budget reconciliation preserves the durable provider termination reason", async () => {
+    for (const [storedReason, expectedReason] of [
+      ["agent_ended_session", "agent_ended_session"],
+      ["caller_hung_up", "caller_hung_up"],
+      ["abandoned_call_reaped", "abandoned_call_reaped"],
+      [null, "durable_budget_reconciliation"],
+      ["", "durable_budget_reconciliation"],
+    ] as const) {
+      providerRpcCalls = [];
+      providerAttemptStarted = false;
+      settleAttempts = 0;
+      deferred = [];
+      claimRow = {
+        reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
+        actual_cost_usd: 0, minutes: 1, outcome: "ended",
+        provider_termination_state: "active", provider_termination_mode: "hangup",
+        provider_termination_reason: storedReason,
+        provider_usage_state: "resolved", openai_call_id: "rtc-reason",
+      };
+
+      await reconcileBudgetReservations(async () => new Response(null, { status: 200 }));
+
+      const begin = providerRpcCalls.find((call) => call.name === "begin_provider_termination_attempt");
+      expect(begin?.args?.p_reason).toBe(expectedReason);
+    }
+  });
+
   test("a terminal call whose provider usage never resolves settles at a bounded rate instead of holding forever", async () => {
     // Media that never connects produces no usage events, so usage stays unknown.
     // Holding the full reservation forever silently consumes the daily budget, so
