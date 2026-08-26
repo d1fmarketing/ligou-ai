@@ -290,7 +290,11 @@ function pendingResponseCommandIsCurrent(
 function pruneInvalidPendingResponseCommands(
   adapter: OnboardingAdapterState,
 ): void {
-  if (adapter.lifecycle.phase === "blocked") return;
+  if (adapter.lifecycle.phase === "blocked") {
+    for (const intentKey of Object.keys(adapter.pendingResponseCommands))
+      delete adapter.pendingResponseCommands[intentKey];
+    return;
+  }
   for (const [intentKey, command] of Object.entries(
     adapter.pendingResponseCommands,
   ))
@@ -341,6 +345,10 @@ async function executeOnboardingCommands(
     if (!retainsCallAuthority() && command.type !== "telemetry") return;
     const adapter = ensureOnboardingAdapter(ledger);
     if (command.type === "request_response") {
+      if (!pendingResponseCommandIsCurrent(adapter, command)) {
+        delete adapter.pendingResponseCommands[command.intentKey];
+        continue;
+      }
       if (
         !adapter.pendingResponseCommands[command.intentKey] &&
         Object.keys(adapter.pendingResponseCommands).length >=

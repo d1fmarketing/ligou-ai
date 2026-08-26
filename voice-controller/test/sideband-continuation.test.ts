@@ -556,6 +556,87 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     });
   });
 
+  test("coverage correction drops queued old signoff command and ignores its late response", async () => {
+    const cap = onboardingCap("call-stale-signoff-command");
+    const boundary = sequentialAnswerBoundary([
+      { status: "recorded", revision: 2, digest: "b".repeat(64) },
+    ]);
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, responseCreated("resp-bootstrap"));
+    await handleEvent(cap, l, ws as any, responseDone("resp-bootstrap"));
+    const adapter = l.onboarding!;
+    adapter.lifecycle.phase = "final_signoff_speaking";
+    adapter.lifecycle.coverage = {
+      revision: 1,
+      digest: "a".repeat(64),
+      complete: true,
+      missing: [],
+      ambiguous: [],
+    };
+    adapter.lifecycle.approval = {
+      toolCallId: "approval-tool-A",
+      approvalReceiptId: "approval-A",
+      coverageReceiptId: "coverage-A",
+      revision: 1,
+      digest: "a".repeat(64),
+    };
+    adapter.lifecycle.signoff = {
+      approvalReceiptId: "approval-A",
+      audioDone: false,
+      responseDone: false,
+      playbackStopped: false,
+      interrupted: false,
+    };
+    const oldIntent = "final-signoff:approval-A";
+    adapter.lifecycle.responseIntents[oldIntent] = {
+      intentKey: oldIntent,
+      purpose: "final_signoff",
+      state: "queued",
+    };
+    adapter.pendingResponseCommands[oldIntent] = {
+      type: "request_response",
+      intentKey: oldIntent,
+      purpose: "final_signoff",
+      approvalReceiptId: "approval-A",
+      instructions: "Fechamento A.",
+    };
+
+    await handleEvent(cap, l, ws as any, responseCreated("resp-correction-B"));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-correction-B",
+      "fc-correction-B",
+      "record_interview_answer",
+      JSON.stringify({
+        topic: "area",
+        field: "area.coverage",
+        disposition: "answered",
+        rule_text: "Correção B.",
+        structured: { value: ["Anaheim"] },
+        owner_words: "Agora Anaheim.",
+      }),
+      0,
+    ));
+    await handleEvent(cap, l, ws as any, responseDone("resp-correction-B"));
+    expect(adapter.lifecycle.approval).toBeUndefined();
+    expect(adapter.lifecycle.signoff).toBeUndefined();
+    expect(adapter.lifecycle.responseIntents[oldIntent]?.state).toBe("terminal");
+    expect(adapter.pendingResponseCommands[oldIntent]).toBeUndefined();
+
+    const beforeLate = adapter.lifecycle;
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("late-old-signoff", oldIntent),
+    );
+    expect(adapter.lifecycle).toBe(beforeLate);
+    expect(adapter.lifecycle.activeResponseId).toBeUndefined();
+    expect(adapter.lifecycle.signoff).toBeUndefined();
+    expect(adapter.lifecycle.requestedHangupKeys).toEqual([]);
+  });
+
   test("exact duplicated provider items execute and send once", async () => {
     const cap = onboardingCap();
     const l = ledger(cap.callId);
@@ -732,7 +813,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       outputAck("tool-output:fc-pending-overflow"));
     expect(pendingLedger.onboarding!.lifecycle.phase).toBe("blocked");
     expect(Object.keys(pendingLedger.onboarding!.pendingResponseCommands))
-      .toHaveLength(512);
+      .toHaveLength(0);
     expect(framesOfType(pendingSocket, "response.create")).toHaveLength(0);
   });
 
@@ -1595,6 +1676,78 @@ describe("physical socket attach and reconnect", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(framesOfType(second, "response.create")).toHaveLength(0);
       expect(control.ledger.onboarding!.lifecycle.socketGeneration).toBe(2);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("blocked reattach prunes queued authority speech and resends only exact pending output", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-blocked-reattach");
+    try {
+      const control = attachSideband(
+        cap, "rtc-blocked-reattach", "gpt-realtime-2.1",
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      const adapter = control.ledger.onboarding!;
+      adapter.lifecycle.phase = "blocked";
+      adapter.lifecycle.responseIntents["summary:old"] = {
+        intentKey: "summary:old", purpose: "summary", state: "queued",
+      };
+      adapter.lifecycle.responseIntents["final-signoff:old"] = {
+        intentKey: "final-signoff:old", purpose: "final_signoff", state: "queued",
+      };
+      adapter.pendingResponseCommands["summary:old"] = {
+        type: "request_response",
+        intentKey: "summary:old",
+        purpose: "summary",
+        snapshotDigest: "old",
+        instructions: "Resumo antigo.",
+      };
+      adapter.pendingResponseCommands["final-signoff:old"] = {
+        type: "request_response",
+        intentKey: "final-signoff:old",
+        purpose: "final_signoff",
+        approvalReceiptId: "old",
+        instructions: "Fechamento antigo.",
+      };
+      adapter.lifecycle.toolOutbox["blocked-output"] = {
+        toolCallId: "blocked-output",
+        toolName: "end_session",
+        argsHash: "blocked-args",
+        state: "output_pending",
+        providerResponseId: "blocked-response",
+        batchHash: "blocked-batch",
+        output: "{\"status\":\"application_owned_close\"}",
+        resultHash: "blocked-result",
+        outputItemId: "tool-output:blocked-output",
+        socketGeneration: 1,
+      };
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      expect(adapter.lifecycle.phase).toBe("blocked");
+      expect(adapter.lifecycle.socketGeneration).toBe(2);
+      expect(framesOfType(second, "response.create")).toHaveLength(0);
+      expect(functionOutputs(second)).toEqual([
+        expect.objectContaining({
+          item: expect.objectContaining({
+            id: "tool-output:blocked-output",
+            call_id: "blocked-output",
+          }),
+        }),
+      ]);
+      expect(adapter.pendingResponseCommands).toEqual({});
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);

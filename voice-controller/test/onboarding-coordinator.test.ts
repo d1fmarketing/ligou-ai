@@ -2404,3 +2404,291 @@ test("terminal response registry prunes only unreferenced identities and blocks 
   expect(overflow.commands.some((command) => command.type === "prepare_summary"))
     .toBe(false);
 });
+
+test("blocked attach and durable tool completion preserve bookkeeping without response authority", () => {
+  const attachedLifecycle = createOnboardingLifecycle(callId);
+  attachedLifecycle.phase = "blocked";
+  attachedLifecycle.socketGeneration = 1;
+  attachedLifecycle.toolOutbox["blocked-pending"] = {
+    toolCallId: "blocked-pending",
+    toolName: "end_session",
+    argsHash: hashOnboardingToolArgs({}),
+    state: "output_pending",
+    providerResponseId: "blocked-response",
+    batchHash: "blocked-batch",
+    output: "{\"status\":\"application_owned_close\"}",
+    resultHash: "blocked-result",
+    outputItemId: "tool-output:blocked-pending",
+    socketGeneration: 1,
+  };
+  const attached = step(attachedLifecycle, {
+    type: "socket.attached",
+    socketGeneration: 2,
+    elapsedMs: 1,
+  });
+  expect(attached.lifecycle.phase).toBe("blocked");
+  expect(attached.lifecycle.socketGeneration).toBe(2);
+  expect(attached.commands.filter((command) => command.type === "resend_output"))
+    .toEqual([
+      expect.objectContaining({
+        type: "resend_output",
+        toolCallId: "blocked-pending",
+        outputItemId: "tool-output:blocked-pending",
+        replay: true,
+        socketGeneration: 2,
+      }),
+    ]);
+  expect(attached.commands.some((command) => command.type === "request_response"))
+    .toBe(false);
+
+  const executionLifecycle = createOnboardingLifecycle(callId);
+  executionLifecycle.phase = "blocked";
+  executionLifecycle.socketGeneration = 2;
+  executionLifecycle.toolOutbox["blocked-running"] = {
+    toolCallId: "blocked-running",
+    toolName: "record_interview_answer",
+    argsHash: hashOnboardingToolArgs({ field: "area.coverage" }),
+    state: "running",
+    providerResponseId: "blocked-running-response",
+    batchHash: "blocked-running-batch",
+    outputItemId: "tool-output:blocked-running",
+    socketGeneration: 1,
+  };
+  const executed = step(executionLifecycle, {
+    type: "tool.executed",
+    toolCallId: "blocked-running",
+    output: "{\"status\":\"recorded\"}",
+    resultHash: "blocked-running-result",
+    elapsedMs: 2,
+  });
+  expect(executed.lifecycle.phase).toBe("blocked");
+  expect(executed.lifecycle.toolOutbox["blocked-running"]?.state)
+    .toBe("executed");
+  expect(executed.commands.filter((command) => command.type === "resend_output"))
+    .toHaveLength(1);
+  expect(executed.commands.some((command) =>
+    command.type === "prepare_summary" || command.type === "request_response"
+  )).toBe(false);
+});
+
+test("blocked exact post-hangup durable confirmation may close; mismatch remains blocked", () => {
+  const lifecycle = createOnboardingLifecycle(callId);
+  lifecycle.phase = "blocked";
+  lifecycle.approval = {
+    toolCallId: "approval-tool-blocked",
+    approvalReceiptId: "approval-receipt-blocked",
+    coverageReceiptId: "coverage-receipt-blocked",
+    revision: 7,
+    digest: "blocked-digest",
+  };
+  lifecycle.requestedHangupKeys = ["hangup:approval-receipt-blocked"];
+
+  const mismatch = step(lifecycle, {
+    type: "provider.termination_confirmed",
+    intentKey: "hangup:wrong",
+    terminalPersisted: true,
+    elapsedMs: 1,
+  });
+  expect(mismatch.lifecycle).toBe(lifecycle);
+  expect(mismatch.lifecycle.phase).toBe("blocked");
+
+  const closed = step(lifecycle, {
+    type: "provider.termination_confirmed",
+    intentKey: "hangup:approval-receipt-blocked",
+    terminalPersisted: true,
+    elapsedMs: 2,
+  });
+  expect(closed.lifecycle.phase).toBe("closed");
+  expect(closed.lifecycle.providerTerminationConfirmed).toBe(true);
+  expect(closed.commands).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "telemetry", name: "closing.provider_confirmed" }),
+    expect.objectContaining({ type: "telemetry", name: "onboarding.closed" }),
+  ]));
+});
+
+test("coverage correction invalidates queued or sent old signoff and corrected approval can produce signoff B", () => {
+  let corrected!: OnboardingLifecycle;
+  for (const state of ["queued", "sent"] as const) {
+    const lifecycle = createOnboardingLifecycle(callId);
+    lifecycle.phase = "final_signoff_speaking";
+    lifecycle.socketGeneration = 1;
+    lifecycle.coverage = {
+      revision: 1,
+      digest: "digest-A",
+      complete: true,
+      missing: [],
+      ambiguous: [],
+    };
+    lifecycle.approval = {
+      toolCallId: "approval-tool-A",
+      approvalReceiptId: "approval-A",
+      coverageReceiptId: "coverage-A",
+      revision: 1,
+      digest: "digest-A",
+    };
+    lifecycle.signoff = {
+      approvalReceiptId: "approval-A",
+      responseId: "response-signoff-A",
+      audioDone: false,
+      responseDone: false,
+      playbackStopped: false,
+      interrupted: false,
+    };
+    lifecycle.responseIntents["final-signoff:approval-A"] = {
+      intentKey: "final-signoff:approval-A",
+      purpose: "final_signoff",
+      state,
+      ...(state === "sent" ? { responseId: "response-signoff-A" } : {}),
+    };
+    if (state === "sent")
+      lifecycle.activeResponseId = "response-signoff-A";
+
+    const changed = step(lifecycle, {
+      type: "coverage.changed",
+      revision: 2,
+      digest: "digest-B",
+      complete: true,
+      missing: [],
+      ambiguous: [],
+      elapsedMs: 1,
+    });
+    expect(changed.lifecycle.approval).toBeUndefined();
+    expect(changed.lifecycle.signoff).toBeUndefined();
+    expect(changed.lifecycle.activeResponseId).toBeUndefined();
+    expect(changed.lifecycle.responseIntents["final-signoff:approval-A"]?.state)
+      .toBe("terminal");
+    const late = step(changed.lifecycle, {
+      type: "response.created",
+      responseId: "late-response-signoff-A",
+      intentKey: "final-signoff:approval-A",
+      socketGeneration: 1,
+      elapsedMs: 2,
+    });
+    expect(late.lifecycle).toBe(changed.lifecycle);
+    expect(late.lifecycle.activeResponseId).toBeUndefined();
+    expect(late.commands.some((command) => command.type === "request_hangup"))
+      .toBe(false);
+    if (state === "queued") corrected = changed.lifecycle;
+  }
+
+  let result = step(corrected, {
+    type: "snapshot.loaded",
+    result: authoritativeSnapshot(2, "digest-B"),
+    elapsedMs: 3,
+  });
+  let lifecycle = result.lifecycle;
+  expect(lifecycle.phase).toBe("summary_speaking");
+  expect(result.commands.some((command) =>
+    command.type === "request_response" && command.intentKey === "summary:digest-B"
+  )).toBe(true);
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.intent_sent",
+    intentKey: "summary:digest-B",
+    socketGeneration: 1,
+    elapsedMs: 4,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.created",
+    responseId: "response-summary-B",
+    intentKey: "summary:digest-B",
+    socketGeneration: 1,
+    elapsedMs: 5,
+  }));
+  for (const event of [
+    {
+      type: "response.transcript.done",
+      responseId: "response-summary-B",
+      transcript: validSummaryTranscript(),
+      socketGeneration: 1,
+      elapsedMs: 6,
+    },
+    {
+      type: "response.output_audio.done",
+      responseId: "response-summary-B",
+      socketGeneration: 1,
+      elapsedMs: 7,
+    },
+    {
+      type: "response.done",
+      responseId: "response-summary-B",
+      socketGeneration: 1,
+      elapsedMs: 8,
+    },
+    {
+      type: "output_audio_buffer.stopped",
+      responseId: "response-summary-B",
+      socketGeneration: 1,
+      elapsedMs: 9,
+    },
+  ] as OnboardingEvent[])
+    ({ lifecycle } = step(lifecycle, event));
+  expect(lifecycle.phase).toBe("awaiting_owner_approval");
+  ({ lifecycle } = step(lifecycle, {
+    type: "caller.speech_started",
+    turnId: "owner-B",
+    socketGeneration: 1,
+    elapsedMs: 10,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "caller.transcript.completed",
+    turnId: "owner-B",
+    transcript: "Aprovado, está tudo correto.",
+    socketGeneration: 1,
+    elapsedMs: 11,
+  }));
+  result = step(lifecycle, {
+    type: "tool.called",
+    toolCallId: "approval-tool-B",
+    name: "approve_onboarding_summary",
+    args: { owner_words: "Aprovado, está tudo correto." },
+    providerResponseId: "response-approval-B",
+    batchHash: "batch-approval-B",
+    socketGeneration: 1,
+    elapsedMs: 12,
+  });
+  lifecycle = result.lifecycle;
+  expect(result.commands.some((command) => command.type === "persist_approval"))
+    .toBe(true);
+  ({ lifecycle } = step(lifecycle, {
+    type: "approval.persisted",
+    toolCallId: "approval-tool-B",
+    approvalReceiptId: "approval-B",
+    coverageReceiptId: "coverage-receipt-2",
+    revision: 2,
+    digest: "digest-B",
+    output: "{\"status\":\"recorded\"}",
+    resultHash: "approval-result-B",
+    elapsedMs: 13,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "tool.output_sent",
+    toolCallId: "approval-tool-B",
+    socketGeneration: 1,
+    elapsedMs: 14,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "tool.batch_closed",
+    providerResponseId: "response-approval-B",
+    batchHash: "batch-approval-B",
+    toolCallIds: ["approval-tool-B"],
+    elapsedMs: 15,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.done",
+    responseId: "response-approval-B",
+    socketGeneration: 1,
+    elapsedMs: 16,
+  }));
+  result = step(lifecycle, {
+    type: "tool.output_acked",
+    toolCallId: "approval-tool-B",
+    outputItemId: "tool-output:approval-tool-B",
+    socketGeneration: 1,
+    elapsedMs: 17,
+  });
+  expect(result.lifecycle.phase).toBe("final_signoff_speaking");
+  expect(result.commands.some((command) =>
+    command.type === "request_response" &&
+    command.intentKey === "final-signoff:approval-B"
+  )).toBe(true);
+});
