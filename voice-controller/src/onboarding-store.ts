@@ -25,6 +25,8 @@ import type { Capability } from "./tools.ts";
 
 const DEFAULT_TIMEOUT_MS = 1_500;
 const MAX_COVERAGE_RECEIPTS = 512;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TOPICS = new Set([
   "servicos",
   "area",
@@ -384,19 +386,13 @@ function cleanFact(
 }
 
 function coverageValue(
-  field: string,
   disposition: CoverageDisposition,
   structured: Record<string, unknown> | undefined,
-  ruleText: string,
 ): unknown {
   if (disposition !== "answered") return null;
-  if (!structured) return ruleText;
-  if (Object.prototype.hasOwnProperty.call(structured, "value"))
-    return structured.value;
-  const leaf = field.slice(field.indexOf(".") + 1);
-  if (Object.prototype.hasOwnProperty.call(structured, leaf))
-    return structured[leaf];
-  return structured;
+  return structured && Object.prototype.hasOwnProperty.call(structured, "value")
+    ? structured.value
+    : undefined;
 }
 
 function hydrateSnapshot(
@@ -825,7 +821,7 @@ export function createOnboardingStore(
       .select("id,readback,detail")
       .eq("tenant_id", cap.tenantId)
       .eq("call_id", cap.callId)
-      .eq("kind", "onboarding_voice_approval")
+      .in("kind", ["onboarding_voice_approval", "onboarding_event_alias"])
       .eq("external_id", eventKey)
       .limit(1)
       .maybeSingle(), signal);
@@ -973,17 +969,30 @@ export function createOnboardingStore(
   ): VoiceApprovalSuccess | null => {
     const detail = row.detail ?? {};
     const readback = row.readback;
+    const approvalReceiptId = readback.target_kind ===
+        "onboarding_voice_approval"
+      ? String(readback.target_receipt_id ?? "")
+      : row.id;
     if (
       detail.provider_tool_call_id !== providerToolCallId ||
       detail.owner_words !== ownerWords ||
-      !/^[0-9a-f-]{36}$/.test(String(readback.snapshot_receipt_id ?? "")) ||
+      !UUID_RE.test(approvalReceiptId) ||
+      (
+        readback.target_kind === "onboarding_voice_approval" &&
+        (
+          readback.schema_version !== 2 ||
+          detail.target_receipt_id !== approvalReceiptId
+        )
+      ) ||
+      !UUID_RE.test(String(readback.snapshot_receipt_id ?? "")) ||
       !Number.isSafeInteger(Number(readback.snapshot_revision)) ||
+      Number(readback.snapshot_revision) < 1 ||
       !/^[0-9a-f]{64}$/.test(String(readback.snapshot_digest ?? ""))
     ) return null;
     return {
       ok: true,
       status: "reused",
-      approvalReceiptId: row.id,
+      approvalReceiptId,
       coverageReceiptId: String(readback.snapshot_receipt_id),
       revision: Number(readback.snapshot_revision),
       digest: String(readback.snapshot_digest),
@@ -1220,10 +1229,8 @@ export function createOnboardingStore(
           : {}),
         disposition: persistedFact.disposition as CoverageDisposition,
         value: coverageValue(
-          String(persistedFact.field),
           persistedFact.disposition as CoverageDisposition,
           persistedFact.structured as Record<string, unknown> | undefined,
-          String(persistedFact.rule_text),
         ),
         ruleText: String(persistedFact.rule_text),
         ownerWords: String(persistedFact.owner_words),
@@ -1384,9 +1391,8 @@ export function createOnboardingStore(
         now,
         started,
       );
-    let key: string;
     try {
-      key = coverageKey(input.field, input.subject);
+      coverageKey(input.field, input.subject);
     } catch {
       return failure(
         "invalid_fact",
@@ -1406,7 +1412,80 @@ export function createOnboardingStore(
         now,
         started,
       );
+    const eventKey = sha256(
+      `ligou.v0_2.onboarding_followup:v1:${cap.tenantId}:${cap.callId}:${input.revision}:${input.field}:${input.subject ?? ""}`,
+    );
+    const fromReceipt = (row: CoverageReceiptRow): FollowupSuccess | null => {
+      const readback = row.readback;
+      const detail = row.detail ?? {};
+      const action = readback.next_action &&
+          typeof readback.next_action === "object"
+        ? readback.next_action as Record<string, unknown>
+        : {};
+      if (
+        detail.transition_kind !== "directed_followup" ||
+        detail.source_revision !== input.revision ||
+        detail.source_digest !== input.digest ||
+        detail.field !== input.field ||
+        String(detail.subject ?? "") !== String(input.subject ?? "") ||
+        detail.question_pt !== input.questionPt ||
+        action.type !== "ask" ||
+        action.field !== input.field ||
+        String(action.subject ?? "") !== String(input.subject ?? "") ||
+        action.question_pt !== input.questionPt
+      ) return null;
+      const revision = Number(readback.revision);
+      const digest = String(readback.snapshot_digest ?? "");
+      const storedProgress = readback.progress &&
+          typeof readback.progress === "object"
+        ? readback.progress as Record<string, unknown>
+        : {};
+      if (
+        !Number.isSafeInteger(revision) || revision !== input.revision + 1 ||
+        !/^[0-9a-f]{64}$/.test(digest)
+      ) return null;
+      return {
+        ok: true,
+        status: "reused",
+        coverageReceiptId: row.id,
+        revision,
+        digest,
+        complete: readback.complete === true,
+        missing: Array.isArray(storedProgress.missingRequired)
+          ? storedProgress.missingRequired as CoverageRef[]
+          : [],
+        ambiguous: Array.isArray(storedProgress.ambiguous)
+          ? storedProgress.ambiguous as CoverageRef[]
+          : [],
+        nextAction: authoritativeNextAction(readback.next_action, row.id, digest),
+        coverage: readback,
+        durationMs: elapsed(now, started),
+      };
+    };
     try {
+      const exactResult = await bounded((signal) =>
+        receiptForEvent(cap, eventKey, signal)
+      );
+      if (exactResult.error)
+        return failure(
+          ambiguousBoundaryFailure(exactResult.error)
+            ? "indeterminate"
+            : "query_error",
+          ambiguousBoundaryFailure(exactResult.error)
+            ? "onboarding follow-up persistence is indeterminate"
+            : "onboarding follow-up replay query failed",
+          now,
+          started,
+        );
+      if (exactResult.data) {
+        const replay = fromReceipt(exactResult.data);
+        return replay ?? failure(
+          "changed",
+          "onboarding follow-up event payload changed",
+          now,
+          started,
+        );
+      }
       const receiptResult = await bounded((signal) => coverageReceipts(cap, signal));
       if (receiptResult.error || !Array.isArray(receiptResult.data))
         return failure(
@@ -1482,9 +1561,6 @@ export function createOnboardingStore(
         parsed.row.readback.summary_projection ?? null,
       );
       coverageProjection.summary_hash = parsed.row.readback.summary_hash ?? null;
-      const eventKey = sha256(
-        `ligou.v0_2.onboarding_followup:v1:${cap.tenantId}:${cap.callId}:${input.revision}:${input.field}:${input.subject ?? ""}`,
-      );
       const rpcArgs = {
         p_tenant: cap.tenantId,
         p_call: cap.callId,
@@ -1494,45 +1570,6 @@ export function createOnboardingStore(
         p_field: input.field,
         p_subject: input.subject ?? null,
         p_coverage: coverageProjection,
-      };
-      const fromReceipt = (row: CoverageReceiptRow): FollowupSuccess | null => {
-        const readback = row.readback;
-        const detail = row.detail ?? {};
-        if (
-          detail.transition_kind !== "directed_followup" ||
-          detail.source_revision !== input.revision ||
-          detail.field !== input.field ||
-          String(detail.subject ?? "") !== String(input.subject ?? "")
-        ) return null;
-        const revision = Number(readback.revision);
-        const digest = String(readback.snapshot_digest ?? "");
-        const storedProgress = readback.progress &&
-            typeof readback.progress === "object"
-          ? readback.progress as Record<string, unknown>
-          : {};
-        if (!Number.isSafeInteger(revision) || !/^[0-9a-f]{64}$/.test(digest))
-          return null;
-        return {
-          ok: true,
-          status: "reused",
-          coverageReceiptId: row.id,
-          revision,
-          digest,
-          complete: readback.complete === true,
-          missing: Array.isArray(storedProgress.missingRequired)
-            ? storedProgress.missingRequired as CoverageRef[]
-            : [],
-          ambiguous: Array.isArray(storedProgress.ambiguous)
-            ? storedProgress.ambiguous as CoverageRef[]
-            : [],
-          nextAction: authoritativeNextAction(
-            readback.next_action,
-            row.id,
-            digest,
-          ),
-          coverage: readback,
-          durationMs: elapsed(now, started),
-        };
       };
       const mutationResult = await mutation({
         name: "record_onboarding_followup",
@@ -1631,7 +1668,38 @@ export function createOnboardingStore(
         now,
         started,
       );
+    const eventKey = sha256(
+      `ligou.v0_2.onboarding_voice_approval:v1:${cap.tenantId}:${cap.callId}:${providerToolCallId}`,
+    );
     try {
+      const exactResult = await bounded((signal) =>
+        approvalReceiptForEvent(cap, eventKey, signal)
+      );
+      if (exactResult.error)
+        return failure(
+          ambiguousBoundaryFailure(exactResult.error)
+            ? "indeterminate"
+            : "query_error",
+          ambiguousBoundaryFailure(exactResult.error)
+            ? "onboarding approval persistence is indeterminate"
+            : "onboarding approval replay query failed",
+          now,
+          started,
+        );
+      if (exactResult.data) {
+        const replay = approvalFromReceipt(
+          exactResult.data,
+          providerToolCallId,
+          ownerWords,
+          started,
+        );
+        return replay ?? failure(
+          "changed",
+          "onboarding approval event payload changed",
+          now,
+          started,
+        );
+      }
       const receiptResult = await bounded((signal) => coverageReceipts(cap, signal));
       if (receiptResult.error)
         return failure(
@@ -1674,9 +1742,6 @@ export function createOnboardingStore(
           now,
           started,
         );
-      const eventKey = sha256(
-        `ligou.v0_2.onboarding_voice_approval:v1:${cap.tenantId}:${cap.callId}:${providerToolCallId}`,
-      );
       const rpcArgs = {
         p_tenant: cap.tenantId,
         p_call: cap.callId,

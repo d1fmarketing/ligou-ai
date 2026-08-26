@@ -4,6 +4,12 @@ import { readFileSync } from "node:fs";
 import { config } from "./config.ts";
 import { HERMES_ACTIONS, parseHermesActionContent } from "../../hermes-cell/action-contract.mjs";
 import { resolveTenantIdentity } from "../../hermes-cell/tenant-identity.mjs";
+import {
+  hasV2DomainRule,
+  operationalRuleByMaterializationKey,
+  servicePolicies,
+  type Rule,
+} from "./rules.ts";
 
 const HERMES_ACTION_SYSTEM_PROMPT = readFileSync(
   new URL("../../hermes-cell/config/action-system-prompt.txt", import.meta.url),
@@ -51,31 +57,38 @@ export function buildTrustedHermesContext(
   topic: string,
   serviceId: string,
   tenant: { vertical?: unknown; auth_epoch?: unknown; policy_epoch?: unknown },
-  rules: Array<{ category?: unknown; structured?: Record<string, unknown> | null }>,
+  rules: Rule[],
 ): TrustedHermesContext {
   if (!(HERMES_TOPICS as readonly string[]).includes(topic)) throw new Error("hermes_topic_invalid");
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(serviceId)) throw new Error("hermes_service_invalid");
-  const approved = rules.some((rule) => {
-    const structured = rule?.structured;
-    if (structured?.service_type !== serviceId) return false;
-    if (structured.schema !== "ligou.rule.service.v2") return true;
-    return structured.materialization_eligible === true &&
-      structured.review_ready === true &&
-      structured.operational_state !== "disabled" &&
-      structured.materialization_key === `service:${serviceId}` &&
-      /^[0-9a-f]{64}$/.test(String(structured.materialization_hash ?? ""));
-  });
+  const approved = servicePolicies(rules).some(
+    (policy) => policy.service_type === serviceId,
+  );
   if (!approved) throw new Error("hermes_service_unknown");
   if (!Number.isSafeInteger(tenant.auth_epoch) || !Number.isSafeInteger(tenant.policy_epoch)) {
     throw new Error("hermes_authority_invalid");
   }
+  const hasV2Schedule = hasV2DomainRule(rules, "domain:schedule");
+  const resolvedSchedule = operationalRuleByMaterializationKey(
+    rules,
+    "domain:schedule",
+    "agenda",
+  );
+  const hoursConfigured = hasV2Schedule
+    ? resolvedSchedule?.structured?.schema === "ligou.rule.schedule.v2"
+    : rules.some((rule) =>
+        rule.category === "agenda" &&
+        typeof rule.text === "string" &&
+        rule.text.trim().length > 0 &&
+        rule.structured?.schema !== "ligou.rule.schedule.v2"
+      );
   return {
     schema: "ligou.hermes.context.v1",
     topic: topic as HermesTopic,
     service: { id: serviceId, approved: true },
     business: { vertical: safeVertical(tenant.vertical) },
     authority: { auth_epoch: Number(tenant.auth_epoch), policy_epoch: Number(tenant.policy_epoch) },
-    operations: { hours_configured: rules.some((rule) => rule.category === "agenda") },
+    operations: { hours_configured: hoursConfigured },
   };
 }
 

@@ -16,6 +16,14 @@ function materializationIntent(rule) {
   }[rule.structured.operational_state] ?? "revisão do dono";
 }
 
+function canonicalFields(rule) {
+  return rule?.structured?.fields &&
+      typeof rule.structured.fields === "object" &&
+      !Array.isArray(rule.structured.fields)
+    ? rule.structured.fields
+    : null;
+}
+
 function ruleTitle(rule) {
   if (rule?.structured?.schema === "ligou.rule.service.v2") {
     const service = String(rule.structured.service_type ?? "serviço")
@@ -65,8 +73,10 @@ export function mapRuleGroups(rules) {
           id: latest.id,
           status: STATUS_FROM_DB[latest.status] ?? latest.status,
           version: latest.version,
+          text: latest.text,
           intent: materializationIntent(latest),
           coverageRevision: latest.structured?.coverage_revision ?? null,
+          canonicalFields: canonicalFields(latest),
         }
       : null;
     entries.push({
@@ -90,19 +100,18 @@ export function mapRuleGroups(rules) {
       updatedAt: latest.created_at,
       materializationIntent: materializationIntent(displayed),
       coverageRevision: displayed.structured?.coverage_revision ?? null,
-      canonicalFields:
-        displayed.structured?.fields &&
-          typeof displayed.structured.fields === "object" &&
-          !Array.isArray(displayed.structured.fields)
-          ? displayed.structured.fields
-          : null,
+      canonicalFields: canonicalFields(displayed),
       ...(draft ? { draft } : {}),
-      ...(effective && displayed.id !== effective.id
+      ...(effective && hasLaterDraft
         ? {
             effectivePolicy: {
               id: effective.id,
               version: effective.version,
               text: effective.text,
+              intent: materializationIntent(effective),
+              coverageRevision:
+                effective.structured?.coverage_revision ?? null,
+              canonicalFields: canonicalFields(effective),
             },
           }
         : {}),

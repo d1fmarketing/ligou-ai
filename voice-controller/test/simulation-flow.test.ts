@@ -233,7 +233,7 @@ test("interview facts use atomic onboarding coverage without touching booking, p
     subject: "basic_visit",
     disposition: "answered",
     rule_text: "Basic visit has a public price of $200.",
-    structured: { price_target: 200 },
+    structured: { value: 200 },
     owner_words: "A visita básica custa duzentos dólares.",
   }, "provider-price-target");
 
@@ -244,7 +244,7 @@ test("interview facts use atomic onboarding coverage without touching booking, p
     p_fact: {
       field: "service.price_target",
       subject: "basic_visit",
-      structured: { price_target: 200 },
+      structured: { value: 200 },
     },
     p_coverage: {
       snapshot: {
@@ -281,7 +281,7 @@ test("junk price targets remain ambiguous coverage and never become authority", 
       subject: `junk_${index}`,
       disposition: "answered",
       rule_text: `Junk price ${index}.`,
-      structured: { price_target: target },
+      structured: { value: target },
       owner_words: `Valor inválido ${index}.`,
     }, `provider-junk-${index}`);
   }
@@ -355,7 +355,7 @@ test("serialized sideband passes exact provider call_id and acknowledges simulat
         subject: "basic_visit",
         disposition: "answered",
         rule_text: "Basic visit has a public price of $200.",
-        structured: { price_target: 200 },
+        structured: { value: 200 },
         owner_words: "A visita básica custa duzentos dólares.",
       }),
     },

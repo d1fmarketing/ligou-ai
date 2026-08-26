@@ -1,0 +1,767 @@
+-- Review round 1: V2 facts require an explicit typed value, directed
+-- follow-ups retain their complete source identity, and a second provider
+-- approval event for the same snapshot receives its own durable alias.
+-- Public RPC signatures remain unchanged. The previously audited bodies are
+-- renamed, fully revoked, and called only by these narrow definer wrappers.
+
+do $$
+begin
+  if to_regclass('public.receipts_onboarding_approval_snapshot_unique') is null
+     or to_regclass('public.receipts_onboarding_event_key_unique') is null then
+    raise exception using errcode = '55000',
+      message = 'onboarding_reconciliation_indexes_missing';
+  end if;
+end
+$$;
+
+alter table public.receipts
+  drop constraint if exists receipts_onboarding_shape_check;
+alter table public.receipts add constraint receipts_onboarding_shape_check check (
+  kind not in (
+    'onboarding_coverage',
+    'onboarding_voice_approval',
+    'onboarding_event_alias'
+  )
+  or (
+    outcome = 'accepted'
+    and call_id is not null
+    and coalesce(external_id ~ '^[0-9a-f]{64}$', false)
+    and coalesce(payload_hash ~ '^[0-9a-f]{64}$', false)
+    and jsonb_typeof(readback) = 'object'
+    and coalesce(readback->>'call_id' = call_id::text, false)
+    and readback->'authority' is not distinct from jsonb_build_object(
+      'rules_approved', false,
+      'powers_granted', false,
+      'operational_mode_changed', false
+    )
+    and (
+      kind <> 'onboarding_coverage'
+      or (
+        coalesce(readback->>'revision' ~ '^[1-9][0-9]*$', false)
+        and jsonb_typeof(readback->'complete') = 'boolean'
+        and coalesce(readback->>'snapshot_digest' ~ '^[0-9a-f]{64}$', false)
+        and (
+          (
+            readback->'schema_version' is not distinct from '1'::jsonb
+            and coalesce(detail->>'answer_hash' ~ '^[0-9a-f]{64}$', false)
+          )
+          or (
+            readback->'schema_version' is not distinct from '2'::jsonb
+            and coalesce(readback->>'transition_kind', '') in (
+              'answer', 'directed_followup'
+            )
+            and jsonb_typeof(readback->'snapshot') = 'object'
+            and jsonb_typeof(readback->'progress') = 'object'
+            and jsonb_typeof(readback->'selected_rule_ids') = 'array'
+            and jsonb_typeof(readback->'current_answer_hashes') = 'object'
+            and jsonb_typeof(readback->'materializations') = 'array'
+            and (
+              (
+                (readback->>'complete')::boolean = false
+                and readback->'summary_projection' = 'null'::jsonb
+                and readback->'summary_hash' = 'null'::jsonb
+              )
+              or (
+                (readback->>'complete')::boolean = true
+                and jsonb_typeof(readback->'summary_projection') = 'object'
+                and coalesce(readback->>'summary_hash' ~ '^[0-9a-f]{64}$', false)
+                and readback->>'summary_hash' =
+                  readback->'summary_projection'->>'summaryHash'
+              )
+            )
+            and (
+              (
+                readback->>'transition_kind' = 'answer'
+                and coalesce(detail->>'answer_hash' ~ '^[0-9a-f]{64}$', false)
+                and coalesce(detail->>'coverage_key', '') <> ''
+              )
+              or (
+                readback->>'transition_kind' = 'directed_followup'
+                and detail->>'transition_kind' = 'directed_followup'
+                and coalesce(detail->>'source_revision' ~ '^[1-9][0-9]*$', false)
+                and coalesce(detail->>'source_digest' ~ '^[0-9a-f]{64}$', false)
+                and coalesce(detail->>'field', '') <> ''
+                and coalesce(detail->>'question_pt', '') <> ''
+              )
+            )
+          )
+        )
+      )
+    )
+    and (
+      kind <> 'onboarding_voice_approval'
+      or (
+        readback->'schema_version' is not distinct from '1'::jsonb
+        and coalesce(
+          readback->>'snapshot_receipt_id' ~
+            '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+          false
+        )
+        and coalesce(readback->>'snapshot_revision' ~ '^[1-9][0-9]*$', false)
+        and coalesce(readback->>'snapshot_digest' ~ '^[0-9a-f]{64}$', false)
+        and coalesce(
+          detail->>'owner_id' ~
+            '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+          false
+        )
+      )
+    )
+    and (
+      kind <> 'onboarding_event_alias'
+      or (
+        readback->'schema_version' is not distinct from '2'::jsonb
+        and readback->>'target_kind' in (
+          'onboarding_coverage', 'onboarding_voice_approval'
+        )
+        and coalesce(
+          readback->>'target_receipt_id' ~
+            '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+          false
+        )
+        and coalesce(readback->>'target_revision' ~ '^[1-9][0-9]*$', false)
+        and coalesce(readback->>'target_digest' ~ '^[0-9a-f]{64}$', false)
+        and coalesce(
+          detail->>'target_receipt_id' = readback->>'target_receipt_id', false
+        )
+        and (
+          readback->>'target_kind' = 'onboarding_coverage'
+          or (
+            readback->>'target_kind' = 'onboarding_voice_approval'
+            and readback->>'approval_receipt_id' =
+              readback->>'target_receipt_id'
+            and coalesce(
+              readback->>'snapshot_receipt_id' ~
+                '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+              false
+            )
+            and readback->>'snapshot_revision' =
+              readback->>'target_revision'
+            and readback->>'snapshot_digest' = readback->>'target_digest'
+            and coalesce(
+              detail->>'owner_id' ~
+                '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+              false
+            )
+            and coalesce(detail->>'provider_tool_call_id', '') <> ''
+            and coalesce(detail->>'owner_words', '') <> ''
+          )
+        )
+      )
+    )
+  )
+) not valid;
+alter table public.receipts
+  validate constraint receipts_onboarding_shape_check;
+
+alter function public.record_onboarding_answer(
+  uuid,uuid,uuid,text,text,text,integer,jsonb,uuid,jsonb
+) rename to record_onboarding_answer_v2_base;
+
+create or replace function public.record_onboarding_answer(
+  p_tenant uuid,
+  p_call uuid,
+  p_owner uuid,
+  p_provider_tool_call_id text,
+  p_event_key text,
+  p_answer_hash text,
+  p_expected_revision integer,
+  p_fact jsonb,
+  p_rule_group_id uuid,
+  p_coverage jsonb
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_request_role text;
+  v_coverage_key text;
+  v_materialization_key text;
+begin
+  v_request_role := coalesce(
+    nullif(current_setting('request.jwt.claim.role', true), ''),
+    nullif(auth.jwt()->>'role', '')
+  );
+  if v_request_role is distinct from 'service_role' then
+    raise exception using errcode = '42501', message = 'service_role_required';
+  end if;
+  perform set_config('request.jwt.claim.role', v_request_role, true);
+  if p_coverage->'schema_version' is not distinct from '2'::jsonb
+     and p_fact->>'disposition' = 'answered'
+     and (
+       jsonb_typeof(p_fact->'structured') is distinct from 'object'
+       or not (p_fact->'structured' ? 'value')
+     ) then
+    v_coverage_key := case
+      when p_fact->>'field' like 'service.%'
+        and p_fact->>'field' <> 'service.catalog_closure'
+        then 'service:' || coalesce(p_fact->>'subject', '') || ':' ||
+          (p_fact->>'field')
+      else p_fact->>'field'
+    end;
+    v_materialization_key := case
+      when p_fact->>'field' like 'service.%'
+        and p_fact->>'field' <> 'service.catalog_closure'
+        then 'service:' || coalesce(p_fact->>'subject', '')
+      when p_fact->>'field' like 'business.%' then 'domain:business'
+      when p_fact->>'field' like 'area.%' then 'domain:area'
+      when p_fact->>'field' like 'schedule.%' then 'domain:schedule'
+      when p_fact->>'field' like 'emergency.%' then 'domain:emergency'
+      when p_fact->>'field' like 'policy.%' then 'domain:policy'
+      when p_fact->>'field' like 'authority.%' then 'domain:authority'
+      else null
+    end;
+    if coalesce(
+         p_coverage->'snapshot'->'cells'->v_coverage_key->>'state', ''
+       ) not in ('ambiguous', 'missing')
+       or exists (
+         select 1
+         from jsonb_array_elements(
+           coalesce(p_coverage->'materializations', '[]'::jsonb)
+         ) item
+         where item->>'key' = v_materialization_key
+           and (
+             coalesce((item->>'review_ready')::boolean, false)
+             or coalesce(
+               (item->'structured'->>'materialization_eligible')::boolean,
+               false
+             )
+           )
+       ) then
+      raise exception using errcode = '22023',
+        message = 'onboarding_structured_value_required';
+    end if;
+  end if;
+  return public.record_onboarding_answer_v2_base(
+    p_tenant, p_call, p_owner, p_provider_tool_call_id, p_event_key,
+    p_answer_hash, p_expected_revision, p_fact, p_rule_group_id, p_coverage
+  );
+end
+$$;
+
+revoke all on function public.record_onboarding_answer_v2_base(
+  uuid,uuid,uuid,text,text,text,integer,jsonb,uuid,jsonb
+) from public, anon, authenticated, service_role;
+revoke all on function public.record_onboarding_answer(
+  uuid,uuid,uuid,text,text,text,integer,jsonb,uuid,jsonb
+) from public, anon, authenticated;
+grant execute on function public.record_onboarding_answer(
+  uuid,uuid,uuid,text,text,text,integer,jsonb,uuid,jsonb
+) to service_role;
+
+create or replace function public.record_onboarding_followup(
+  p_tenant uuid,
+  p_call uuid,
+  p_owner uuid,
+  p_event_key text,
+  p_expected_revision integer,
+  p_field text,
+  p_subject text,
+  p_coverage jsonb
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_request_id uuid;
+  v_expected_event_key text;
+  v_payload jsonb;
+  v_payload_hash text;
+  v_existing public.receipts;
+  v_latest public.receipts;
+  v_receipt_id uuid;
+  v_key text;
+  v_global_count integer;
+  v_group_count integer;
+  v_expected_snapshot jsonb;
+  v_expected_coverage jsonb;
+  v_readback jsonb;
+  v_snapshot_digest text;
+  v_request_role text;
+begin
+  v_request_role := coalesce(
+    nullif(current_setting('request.jwt.claim.role', true), ''),
+    nullif(auth.jwt()->>'role', '')
+  );
+  if v_request_role is distinct from 'service_role' then
+    raise exception using errcode = '42501', message = 'service_role_required';
+  end if;
+  perform set_config('request.jwt.claim.role', v_request_role, true);
+  if p_tenant is null or p_call is null or p_owner is null
+     or p_expected_revision is null or p_expected_revision < 1
+     or coalesce(p_field, '') = ''
+     or p_event_key is null or p_event_key !~ '^[0-9a-f]{64}$'
+     or jsonb_typeof(p_coverage) is distinct from 'object' then
+    raise exception using errcode = '22023',
+      message = 'onboarding_followup_shape_invalid';
+  end if;
+  if p_field like 'service.%' and p_field <> 'service.catalog_closure' then
+    if coalesce(p_subject, '') !~ '^[a-z0-9][a-z0-9_]{0,199}$' then
+      raise exception using errcode = '22023',
+        message = 'onboarding_subject_required';
+    end if;
+    v_key := 'service:' || p_subject || ':' || p_field;
+  else
+    if nullif(p_subject, '') is not null then
+      raise exception using errcode = '22023',
+        message = 'onboarding_subject_forbidden';
+    end if;
+    v_key := p_field;
+  end if;
+  v_expected_event_key := encode(extensions.digest(convert_to(
+    'ligou.v0_2.onboarding_followup:v1:' || p_tenant::text || ':' ||
+      p_call::text || ':' || p_expected_revision::text || ':' || p_field ||
+      ':' || coalesce(p_subject, ''),
+    'UTF8'
+  ), 'sha256'), 'hex');
+  if p_event_key <> v_expected_event_key then
+    raise exception using errcode = '22023',
+      message = 'onboarding_event_key_mismatch';
+  end if;
+  v_payload := jsonb_build_object(
+    'schema_version', 2,
+    'tenant_id', p_tenant,
+    'call_id', p_call,
+    'owner_id', p_owner,
+    'event_key', p_event_key,
+    'expected_revision', p_expected_revision,
+    'field', p_field,
+    'subject', p_subject,
+    'coverage', p_coverage
+  );
+  v_payload_hash := encode(extensions.digest(
+    convert_to(v_payload::text, 'UTF8'), 'sha256'
+  ), 'hex');
+
+  perform pg_advisory_xact_lock(hashtextextended(
+    'ligou.v0_2.onboarding:' || p_tenant::text || ':' || p_call::text,
+    0
+  ));
+  select br.id into v_request_id
+  from public.calls c
+  join public.tenants t
+    on t.id = c.tenant_id
+   and t.id = p_tenant
+   and t.owner_user_id = p_owner
+   and t.status = 'onboarding'
+   and t.operational_mode = 'simulation_only'
+  join public.browser_session_requests br
+    on br.tenant_id = t.id
+   and br.call_id = c.id
+   and br.user_id = p_owner
+   and br.session_type = 'onboarding'
+   and br.status = 'ready'
+  where c.id = p_call
+    and c.tenant_id = p_tenant
+    and c.channel = 'browser'
+    and c.session_type = 'onboarding'
+    and c.status = 'active'
+  order by br.handled_at desc nulls last, br.created_at desc, br.id desc
+  limit 1
+  for update of c, t, br;
+  if v_request_id is null then
+    raise exception using errcode = '42501',
+      message = 'onboarding_call_not_owner_bound';
+  end if;
+
+  select r.* into v_existing
+  from public.receipts r
+  where r.tenant_id = p_tenant
+    and r.call_id = p_call
+    and r.kind = 'onboarding_coverage'
+    and r.external_id = p_event_key
+  limit 1;
+  if v_existing.id is not null then
+    if v_existing.payload_hash is distinct from v_payload_hash then
+      raise exception using errcode = '23505',
+        message = 'onboarding_event_payload_mismatch';
+    end if;
+    return jsonb_build_object(
+      'status', 'reused',
+      'coverage_receipt_id', v_existing.id,
+      'revision', (v_existing.readback->>'revision')::integer,
+      'snapshot_digest', v_existing.readback->>'snapshot_digest',
+      'complete', (v_existing.readback->>'complete')::boolean,
+      'missing', v_existing.readback->'progress'->'missingRequired',
+      'ambiguous', v_existing.readback->'progress'->'ambiguous',
+      'next_action', v_existing.readback->'next_action',
+      'coverage', v_existing.readback
+    );
+  end if;
+
+  select r.* into v_latest
+  from public.receipts r
+  where r.tenant_id = p_tenant
+    and r.call_id = p_call
+    and r.kind = 'onboarding_coverage'
+  order by (r.readback->>'revision')::integer desc,
+    r.created_at desc, r.id desc
+  limit 1;
+  if v_latest.id is null then
+    raise exception using errcode = 'P0002',
+      message = 'onboarding_coverage_missing';
+  end if;
+  if v_latest.readback->'schema_version' is distinct from '2'::jsonb
+     or (v_latest.readback->>'revision')::integer <> p_expected_revision then
+    raise exception using errcode = '40001',
+      message = 'onboarding_revision_changed';
+  end if;
+  if coalesce((v_latest.readback->>'complete')::boolean, false) then
+    raise exception using errcode = '22023',
+      message = 'onboarding_coverage_complete';
+  end if;
+  if v_latest.readback->'next_action'->>'type' <> 'ask'
+     or v_latest.readback->'next_action'->>'field' <> p_field
+     or coalesce(v_latest.readback->'next_action'->>'subject', '') <>
+       coalesce(p_subject, '') then
+    raise exception using errcode = '40001',
+      message = 'onboarding_followup_changed';
+  end if;
+  v_global_count := (v_latest.readback->'snapshot'->>'followUps')::integer;
+  v_group_count := coalesce(
+    (v_latest.readback->'snapshot'->'followUpGroups'->>v_key)::integer,
+    0
+  );
+  if v_group_count >= 2 then
+    raise exception using errcode = '22023',
+      message = 'onboarding_followup_group_exhausted';
+  end if;
+  if v_global_count >= 12 then
+    raise exception using errcode = '22023',
+      message = 'onboarding_followup_global_exhausted';
+  end if;
+
+  v_expected_snapshot := v_latest.readback->'snapshot' || jsonb_build_object(
+    'revision', p_expected_revision + 1,
+    'followUps', v_global_count + 1,
+    'followUpGroups',
+      (v_latest.readback->'snapshot'->'followUpGroups') ||
+        jsonb_build_object(v_key, v_group_count + 1)
+  );
+  v_expected_coverage := (
+    v_latest.readback
+      - 'snapshot_digest'
+      - 'rule_id'
+      - 'rule_group_id'
+      - 'materialization_action'
+  ) || jsonb_build_object(
+    'schema_version', 2,
+    'transition_kind', 'directed_followup',
+    'revision', p_expected_revision + 1,
+    'snapshot', v_expected_snapshot
+  );
+  if p_coverage is distinct from v_expected_coverage then
+    raise exception using errcode = '22023',
+      message = 'onboarding_followup_projection_invalid';
+  end if;
+
+  v_readback := p_coverage || jsonb_build_object(
+    'rule_id', v_latest.readback->'rule_id',
+    'rule_group_id', v_latest.readback->'rule_group_id',
+    'materialization_action', v_latest.readback->'materialization_action'
+  );
+  v_snapshot_digest := encode(extensions.digest(
+    convert_to(v_readback::text, 'UTF8'), 'sha256'
+  ), 'hex');
+  v_readback := v_readback || jsonb_build_object(
+    'snapshot_digest', v_snapshot_digest
+  );
+  insert into public.receipts (
+    tenant_id, call_id, kind, outcome, external_id, readback, payload_hash,
+    detail
+  ) values (
+    p_tenant, p_call, 'onboarding_coverage', 'accepted', p_event_key,
+    v_readback, v_payload_hash,
+    jsonb_build_object(
+      'transition_kind', 'directed_followup',
+      'source_revision', p_expected_revision,
+      'source_digest', v_latest.readback->>'snapshot_digest',
+      'field', p_field,
+      'subject', p_subject,
+      'question_pt', v_latest.readback->'next_action'->>'question_pt',
+      'coverage_key', v_key,
+      'browser_request_id', v_request_id
+    )
+  ) returning id into v_receipt_id;
+  return jsonb_build_object(
+    'status', 'recorded',
+    'coverage_receipt_id', v_receipt_id,
+    'revision', p_expected_revision + 1,
+    'snapshot_digest', v_snapshot_digest,
+    'complete', (v_readback->>'complete')::boolean,
+    'missing', v_readback->'progress'->'missingRequired',
+    'ambiguous', v_readback->'progress'->'ambiguous',
+    'next_action', v_readback->'next_action',
+    'coverage', v_readback
+  );
+end
+$$;
+
+revoke all on function public.record_onboarding_followup(
+  uuid,uuid,uuid,text,integer,text,text,jsonb
+) from public, anon, authenticated;
+grant execute on function public.record_onboarding_followup(
+  uuid,uuid,uuid,text,integer,text,text,jsonb
+) to service_role;
+
+alter function public.record_onboarding_voice_approval(
+  uuid,uuid,uuid,text,text,integer,text,text
+) rename to record_onboarding_voice_approval_v2_base;
+
+create or replace function public.record_onboarding_voice_approval(
+  p_tenant uuid,
+  p_call uuid,
+  p_owner uuid,
+  p_provider_tool_call_id text,
+  p_event_key text,
+  p_expected_revision integer,
+  p_expected_digest text,
+  p_owner_words text
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_payload jsonb;
+  v_payload_hash text;
+  v_result jsonb;
+  v_exact public.receipts;
+  v_target public.receipts;
+  v_alias_readback jsonb;
+  v_request_role text;
+  v_request_id uuid;
+  v_expected_event_key text;
+begin
+  v_request_role := coalesce(
+    nullif(current_setting('request.jwt.claim.role', true), ''),
+    nullif(auth.jwt()->>'role', '')
+  );
+  if v_request_role is distinct from 'service_role' then
+    raise exception using errcode = '42501', message = 'service_role_required';
+  end if;
+  perform set_config('request.jwt.claim.role', v_request_role, true);
+  if p_tenant is null or p_call is null or p_owner is null then
+    raise exception using errcode = '22023',
+      message = 'onboarding_scope_required';
+  end if;
+  if p_provider_tool_call_id is null
+     or length(btrim(p_provider_tool_call_id)) < 1
+     or length(p_provider_tool_call_id) > 255 then
+    raise exception using errcode = '22023',
+      message = 'onboarding_provider_tool_call_id_invalid';
+  end if;
+  if p_event_key is null or p_event_key !~ '^[0-9a-f]{64}$'
+     or p_expected_digest is null or p_expected_digest !~ '^[0-9a-f]{64}$'
+     or p_expected_revision is null or p_expected_revision < 1 then
+    raise exception using errcode = '22023',
+      message = 'onboarding_approval_snapshot_invalid';
+  end if;
+  if length(btrim(coalesce(p_owner_words, ''))) < 1
+     or length(p_owner_words) > 1000 then
+    raise exception using errcode = '22023',
+      message = 'onboarding_approval_words_invalid';
+  end if;
+  v_expected_event_key := encode(extensions.digest(convert_to(
+    'ligou.v0_2.onboarding_voice_approval:v1:' || p_tenant::text || ':' ||
+      p_call::text || ':' || p_provider_tool_call_id,
+    'UTF8'
+  ), 'sha256'), 'hex');
+  if p_event_key <> v_expected_event_key then
+    raise exception using errcode = '22023',
+      message = 'onboarding_event_key_mismatch';
+  end if;
+  v_payload := jsonb_build_object(
+    'schema_version', 1,
+    'tenant_id', p_tenant,
+    'call_id', p_call,
+    'owner_id', p_owner,
+    'provider_tool_call_id', p_provider_tool_call_id,
+    'event_key', p_event_key,
+    'expected_revision', p_expected_revision,
+    'expected_digest', p_expected_digest,
+    'owner_words', p_owner_words
+  );
+  v_payload_hash := encode(extensions.digest(
+    convert_to(v_payload::text, 'UTF8'), 'sha256'
+  ), 'hex');
+
+  perform pg_advisory_xact_lock(hashtextextended(
+    'ligou.v0_2.onboarding:' || p_tenant::text || ':' || p_call::text,
+    0
+  ));
+  select br.id into v_request_id
+  from public.calls c
+  join public.tenants t
+    on t.id = c.tenant_id
+   and t.id = p_tenant
+   and t.owner_user_id = p_owner
+   and t.status = 'onboarding'
+   and t.operational_mode = 'simulation_only'
+  join public.browser_session_requests br
+    on br.tenant_id = t.id
+   and br.call_id = c.id
+   and br.user_id = p_owner
+   and br.session_type = 'onboarding'
+   and br.status = 'ready'
+  where c.id = p_call
+    and c.tenant_id = p_tenant
+    and c.channel = 'browser'
+    and c.session_type = 'onboarding'
+    and c.status = 'active'
+  order by br.handled_at desc nulls last, br.created_at desc, br.id desc
+  limit 1
+  for update of c, t, br;
+  if v_request_id is null then
+    raise exception using errcode = '42501',
+      message = 'onboarding_call_not_owner_bound';
+  end if;
+
+  -- Historical exact event replay wins after owner/call proof and before the
+  -- latest snapshot preflight in the legacy-compatible base body.
+  select r.* into v_exact
+  from public.receipts r
+  where r.tenant_id = p_tenant
+    and r.call_id = p_call
+    and r.kind in ('onboarding_voice_approval', 'onboarding_event_alias')
+    and r.external_id = p_event_key
+  limit 1;
+  if v_exact.id is not null then
+    if v_exact.payload_hash is distinct from v_payload_hash then
+      raise exception using errcode = '23505',
+        message = 'onboarding_event_payload_mismatch';
+    end if;
+    if v_exact.kind = 'onboarding_event_alias' then
+      if v_exact.readback->>'target_kind' <> 'onboarding_voice_approval' then
+        raise exception using errcode = '23505',
+          message = 'onboarding_event_payload_mismatch';
+      end if;
+      select r.* into v_target
+      from public.receipts r
+      where r.id = (v_exact.readback->>'target_receipt_id')::uuid
+        and r.tenant_id = p_tenant
+        and r.call_id = p_call
+        and r.kind = 'onboarding_voice_approval'
+        and r.readback->>'snapshot_receipt_id' =
+          v_exact.readback->>'snapshot_receipt_id'
+      limit 1;
+      if v_target.id is null then
+        raise exception using errcode = 'P0002',
+          message = 'onboarding_approval_target_missing';
+      end if;
+      return jsonb_build_object(
+        'status', 'reused',
+        'approval_receipt_id', v_target.id,
+        'coverage_receipt_id', v_exact.readback->>'snapshot_receipt_id',
+        'revision', (v_exact.readback->>'snapshot_revision')::integer,
+        'snapshot_digest', v_exact.readback->>'snapshot_digest'
+      );
+    end if;
+    return jsonb_build_object(
+      'status', 'reused',
+      'approval_receipt_id', v_exact.id,
+      'coverage_receipt_id', v_exact.readback->>'snapshot_receipt_id',
+      'revision', (v_exact.readback->>'snapshot_revision')::integer,
+      'snapshot_digest', v_exact.readback->>'snapshot_digest'
+    );
+  end if;
+
+  v_result := public.record_onboarding_voice_approval_v2_base(
+    p_tenant, p_call, p_owner, p_provider_tool_call_id, p_event_key,
+    p_expected_revision, p_expected_digest, p_owner_words
+  );
+
+  select r.* into v_exact
+  from public.receipts r
+  where r.tenant_id = p_tenant
+    and r.call_id = p_call
+    and r.kind in ('onboarding_voice_approval', 'onboarding_event_alias')
+    and r.external_id = p_event_key
+  limit 1;
+  if v_exact.id is not null then
+    if v_exact.payload_hash is distinct from v_payload_hash then
+      raise exception using errcode = '23505',
+        message = 'onboarding_event_payload_mismatch';
+    end if;
+    if v_exact.kind = 'onboarding_event_alias' then
+      if v_exact.readback->>'target_kind' <> 'onboarding_voice_approval'
+         or v_exact.readback->>'target_receipt_id' <>
+           v_result->>'approval_receipt_id' then
+        raise exception using errcode = '23505',
+          message = 'onboarding_event_payload_mismatch';
+      end if;
+      return jsonb_build_object(
+        'status', 'reused',
+        'approval_receipt_id', v_exact.readback->>'target_receipt_id',
+        'coverage_receipt_id', v_exact.readback->>'snapshot_receipt_id',
+        'revision', (v_exact.readback->>'snapshot_revision')::integer,
+        'snapshot_digest', v_exact.readback->>'snapshot_digest'
+      );
+    end if;
+    return v_result;
+  end if;
+
+  select r.* into v_target
+  from public.receipts r
+  where r.id = (v_result->>'approval_receipt_id')::uuid
+    and r.tenant_id = p_tenant
+    and r.call_id = p_call
+    and r.kind = 'onboarding_voice_approval'
+    and r.readback->>'snapshot_receipt_id' =
+      v_result->>'coverage_receipt_id'
+  limit 1;
+  if v_target.id is null then
+    raise exception using errcode = 'P0002',
+      message = 'onboarding_approval_target_missing';
+  end if;
+  v_alias_readback := jsonb_build_object(
+    'schema_version', 2,
+    'call_id', p_call,
+    'target_kind', 'onboarding_voice_approval',
+    'target_receipt_id', v_target.id,
+    'approval_receipt_id', v_target.id,
+    'snapshot_receipt_id', v_result->>'coverage_receipt_id',
+    'snapshot_revision', (v_result->>'revision')::integer,
+    'snapshot_digest', v_result->>'snapshot_digest',
+    'target_revision', (v_result->>'revision')::integer,
+    'target_digest', v_result->>'snapshot_digest',
+    'authority', jsonb_build_object(
+      'rules_approved', false,
+      'powers_granted', false,
+      'operational_mode_changed', false
+    )
+  );
+  insert into public.receipts (
+    tenant_id, call_id, kind, outcome, external_id, readback, payload_hash,
+    detail
+  ) values (
+    p_tenant, p_call, 'onboarding_event_alias', 'accepted', p_event_key,
+    v_alias_readback, v_payload_hash,
+    jsonb_build_object(
+      'owner_words', p_owner_words,
+      'owner_id', p_owner,
+      'provider_tool_call_id', p_provider_tool_call_id,
+      'target_receipt_id', v_target.id,
+      'snapshot_digest', v_result->>'snapshot_digest'
+    )
+  );
+  return jsonb_build_object(
+    'status', 'reused',
+    'approval_receipt_id', v_target.id,
+    'coverage_receipt_id', v_result->>'coverage_receipt_id',
+    'revision', (v_result->>'revision')::integer,
+    'snapshot_digest', v_result->>'snapshot_digest'
+  );
+end
+$$;
+
+revoke all on function public.record_onboarding_voice_approval_v2_base(
+  uuid,uuid,uuid,text,text,integer,text,text
+) from public, anon, authenticated, service_role;
+revoke all on function public.record_onboarding_voice_approval(
+  uuid,uuid,uuid,text,text,integer,text,text
+) from public, anon, authenticated;
+grant execute on function public.record_onboarding_voice_approval(
+  uuid,uuid,uuid,text,text,integer,text,text
+) to service_role;

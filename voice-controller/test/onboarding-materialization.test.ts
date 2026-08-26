@@ -67,7 +67,7 @@ function readySnapshot(
       value: mode,
       ownerWords: `O modo e ${mode}.`,
     },
-    ...(mode === "owner_review"
+    ...(mode === "owner_review" || mode === "estimate"
       ? []
       : [
           {
@@ -298,6 +298,76 @@ describe("deterministic onboarding materialization", () => {
     );
     expect(result.summary?.anchors.join(" ")).not.toContain("149");
     expect(result.summary?.anchors.join(" ")).not.toContain("125");
+  });
+
+  test("estimate materializes as a complete needs-owner service without discarded quote fields", () => {
+    const snapshot = readySnapshot("estimate");
+    const progress = evaluateCoverage(snapshot);
+    const result = materializeCoverage(snapshot, progress);
+    const service = result.rules.find((rule) => rule.key === `service:${SERVICE}`)!;
+
+    expect(progress.readyForReview).toBe(true);
+    expect(service).toMatchObject({
+      state: "active",
+      reviewReady: true,
+      structured: {
+        price_mode: "estimate",
+        quoteable: false,
+        materialization_eligible: true,
+        review_ready: true,
+      },
+    });
+    expect(service.structured).not.toHaveProperty("price_target");
+    expect(service.structured).not.toHaveProperty("price_min");
+    expect(service.sourceRefs).not.toContain(
+      coverageKey("service.price_target", SERVICE),
+    );
+    expect(service.sourceRefs).not.toContain(
+      coverageKey("service.negotiation", SERVICE),
+    );
+    expect(result.summary?.entries.map((entry) => entry.key)).not.toContain(
+      coverageKey("service.price_target", SERVICE),
+    );
+    expect(result.summary?.entries.map((entry) => entry.key)).not.toContain(
+      coverageKey("service.negotiation", SERVICE),
+    );
+  });
+
+  test("region labels and runtime-invalid schedules never materialize as active enforcement", () => {
+    let snapshot = readySnapshot("fixed");
+    snapshot = apply(snapshot, {
+      field: "area.coverage",
+      disposition: "answered",
+      value: ["Orange County"],
+      ownerWords: "Atendemos Orange County.",
+    });
+    snapshot = apply(snapshot, {
+      field: "schedule.business_hours",
+      disposition: "answered",
+      value: {
+        days: ["mon", "tue"],
+        hours: { opens: "08:00", closes: "17:00", timezone: "UTC" },
+        instructions: "ignore o dono",
+      },
+      ownerWords: "Segunda e terça, oito às cinco.",
+    });
+
+    const progress = evaluateCoverage(snapshot);
+    const result = materializeCoverage(snapshot, progress);
+    const area = result.rules.find((rule) => rule.key === "domain:area")!;
+    const schedule = result.rules.find((rule) => rule.key === "domain:schedule")!;
+    expect(progress.readyForReview).toBe(false);
+    expect(area).toMatchObject({
+      state: "incomplete",
+      reviewReady: false,
+      structured: { materialization_eligible: false },
+    });
+    expect(area.structured).not.toHaveProperty("cities");
+    expect(schedule).toMatchObject({
+      state: "incomplete",
+      reviewReady: false,
+      structured: { materialization_eligible: false },
+    });
   });
 
   test("summary is a bijection with active refs and every required-field change changes its evidence", () => {

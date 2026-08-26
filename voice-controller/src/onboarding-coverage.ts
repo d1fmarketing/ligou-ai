@@ -235,7 +235,8 @@ const templates: Record<CoverageField, string> = {
   "business.excluded_work": "Que tipos de trabalho vocês não realizam?",
   "business.languages_tone":
     "Como a equipe deve se apresentar e em quais idiomas?",
-  "area.coverage": "Quais cidades, regiões ou CEPs vocês atendem?",
+  "area.coverage":
+    "Quais nomes exatos de cidades vocês atendem? Informe somente cidades, sem regiões, condados ou CEPs.",
   "area.out_of_area_policy":
     "Como devemos tratar pedidos fora da área atendida?",
   "area.travel_fee": "Existe taxa de deslocamento fora da área normal?",
@@ -354,15 +355,16 @@ function activeFields(snapshot: CoverageSnapshot): {
   const conditional: CoverageRef[] = [];
   for (const subject of snapshot.services) {
     const mode = snapshot.cells[keyFor("service.price_mode", subject)];
-    const ownerReview =
-      mode?.state === "answered" && mode.value === "owner_review";
+    const noQuoteInputs =
+      mode?.state === "answered" &&
+      (mode.value === "owner_review" || mode.value === "estimate");
     for (const field of serviceFields)
       if (
-        !ownerReview ||
+        !noQuoteInputs ||
         !["service.price_target", "service.negotiation"].includes(field)
       )
         required.push({ field, subject });
-    if (!ownerReview)
+    if (!noQuoteInputs)
       conditional.push(
         { field: "service.price_target", subject },
         { field: "service.negotiation", subject },
@@ -389,25 +391,54 @@ function nonEmptyStrings(value: unknown): value is string[] {
     value.every((item) => typeof item === "string" && item.trim().length > 0)
   );
 }
-function validBusinessHours(value: unknown): boolean {
-  if (typeof value === "string") return value.trim().length > 0;
+const EXECUTABLE_WEEKDAYS = new Set([
+  "sun",
+  "mon",
+  "tue",
+  "wed",
+  "thu",
+  "fri",
+  "sat",
+]);
+
+function wholeHour(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const match = /^([01][0-9]|2[0-3]):00$/.exec(value);
+  return match ? Number(match[1]) : null;
+}
+
+export function isExecutableBusinessHours(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const hours = value as { days?: unknown; hours?: unknown };
-  if (!nonEmptyStrings(hours.days)) return false;
-  if (typeof hours.hours === "string") return hours.hours.trim().length > 0;
   if (
-    !hours.hours ||
-    typeof hours.hours !== "object" ||
-    Array.isArray(hours.hours)
-  )
-    return false;
+    Object.keys(hours).sort().join(",") !== "days,hours" ||
+    !hours.hours || typeof hours.hours !== "object" ||
+    Array.isArray(hours.hours) ||
+    Object.keys(hours.hours).sort().join(",") !== "closes,opens"
+  ) return false;
+  if (
+    !nonEmptyStrings(hours.days) ||
+    hours.days.some((day) => !EXECUTABLE_WEEKDAYS.has(day)) ||
+    new Set(hours.days).size !== hours.days.length
+  ) return false;
   const window = hours.hours as { opens?: unknown; closes?: unknown };
-  return (
-    typeof window.opens === "string" &&
-    window.opens.trim().length > 0 &&
-    typeof window.closes === "string" &&
-    window.closes.trim().length > 0
-  );
+  const opens = wholeHour(window.opens);
+  const closes = wholeHour(window.closes);
+  return opens !== null && closes !== null && opens < closes;
+}
+
+const NON_CITY_SCOPE = /\b(?:county|condado|region|regiao|região|state|estado|province|provincia|província|metropolitan|metro|area|área|zip|cep)\b/iu;
+export function isExactCityName(value: unknown): value is string {
+  if (typeof value !== "string" || value !== value.trim()) return false;
+  if (value.length < 1 || value.length > 100 || NON_CITY_SCOPE.test(value))
+    return false;
+  return /^[\p{L}\p{M}][\p{L}\p{M}.' -]*$/u.test(value);
+}
+export function isExactCityList(value: unknown): value is string[] {
+  if (!Array.isArray(value) || value.length < 1) return false;
+  if (!value.every(isExactCityName)) return false;
+  const canonical = value.map((city) => city.toLocaleLowerCase("en-US"));
+  return new Set(canonical).size === canonical.length;
 }
 function validAnswer(
   field: CoverageField,
@@ -460,17 +491,15 @@ function validAnswer(
       ? null
       : "emergency_eligibility_must_be_boolean";
   if (field === "schedule.business_hours")
-    return validBusinessHours(value) ? null : "must_be_business_hours";
+    return isExecutableBusinessHours(value) ? null : "must_be_business_hours";
   if (field === "business.customer_types")
     return nonEmptyStrings(value) &&
       value.every((item) => customerTypes.has(item.trim().toLowerCase()))
       ? null
       : "must_be_known_customer_types";
-  if (
-    ["area.coverage", "emergency.types", "service.name_synonyms"].includes(
-      field,
-    )
-  )
+  if (field === "area.coverage")
+    return isExactCityList(value) ? null : "must_be_exact_city_names";
+  if (["emergency.types", "service.name_synonyms"].includes(field))
     return nonEmptyStrings(value) ? null : "must_be_nonempty_string_list";
   if (textFields.has(field))
     return typeof value === "string" && value.trim().length > 0
@@ -834,8 +863,17 @@ export function buildSummaryAnchors(snapshot: CoverageSnapshot): string[] {
     const name =
       valueFor(snapshot, "service.name_synonyms", subject) ??
       subject.replace(/_/g, " ");
-    const price = valueFor(snapshot, "service.price_target", subject);
-    const negotiation = snapshot.cells[keyFor("service.negotiation", subject)];
+    const mode = snapshot.cells[keyFor("service.price_mode", subject)];
+    const quoteFieldsActive = !(
+      mode?.state === "answered" &&
+      (mode.value === "estimate" || mode.value === "owner_review")
+    );
+    const price = quoteFieldsActive
+      ? valueFor(snapshot, "service.price_target", subject)
+      : undefined;
+    const negotiation = quoteFieldsActive
+      ? snapshot.cells[keyFor("service.negotiation", subject)]
+      : undefined;
     const duration = valueFor(snapshot, "service.duration", subject);
     anchors.push(`Serviço: ${name}`);
     if (price) anchors.push(`Preço público: ${price}`);

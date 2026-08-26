@@ -73,8 +73,18 @@ test("a rejected V2 correction preserves the prior effective policy and exposes 
     id: "rejected-v2",
     status: "rejeitada",
     version: 2,
+    text: "Correção rejeitada.",
     intent: "revisão do dono",
     coverageRevision: 42,
+    canonicalFields: null,
+  });
+  assert.deepEqual(entries[0].effectivePolicy, {
+    id: "approved-v1",
+    version: 1,
+    text: "Drain cleaning fixo por 149.",
+    intent: "ativa",
+    coverageRevision: 41,
+    canonicalFields: null,
   });
 });
 

@@ -1040,7 +1040,10 @@ function completeCoverage(cap: Capability, revision: number): CoverageSnapshot {
     const values: Partial<Record<CoverageField, unknown>> = {
       "business.customer_types": ["residencial"],
       "area.coverage": ["Irvine"],
-      "schedule.business_hours": "segunda a sexta, 08:00 às 18:00",
+      "schedule.business_hours": {
+        days: ["mon", "tue", "wed", "thu", "fri"],
+        hours: { opens: "08:00", closes: "18:00" },
+      },
       "emergency.types": ["vazamento"],
       "emergency.safety_escalation": "ligar 911 em risco imediato",
     };
@@ -2189,6 +2192,155 @@ describe("physical socket attach and reconnect", () => {
         .toBe("output_pending");
       expect(control.ledger.onboarding!.pendingMutationCommands).toEqual({});
       expect(control.ledger.onboarding!.lifecycle.phase).not.toBe("blocked");
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+      _setClient(null);
+    }
+  });
+
+  test("a late-committed follow-up recovers on physical reattach and asks exactly one question without blocking", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-late-followup-reattach");
+    const sourceDigest = "a".repeat(64);
+    const committedDigest = "b".repeat(64);
+    const questionPt = "Quais cidades vocês atendem?";
+    const committed = {
+      id: "99999999-9999-4999-8999-999999999999",
+      readback: {
+        schema_version: 1,
+        tenant_id: cap.tenantId,
+        call_id: cap.callId,
+        revision: 2,
+        complete: false,
+        snapshot: {
+          ...createCoverage({ tenantId: cap.tenantId, callId: cap.callId }),
+          revision: 2,
+          followUps: 1,
+          followUpGroups: { "area.coverage": 1 },
+        },
+        progress: {
+          missingRequired: [{ field: "area.coverage" }],
+          ambiguous: [],
+        },
+        selected_rule_ids: [],
+        next_action: {
+          type: "ask",
+          field: "area.coverage",
+          question_pt: questionPt,
+        },
+        snapshot_digest: committedDigest,
+        authority: {
+          rules_approved: false,
+          powers_granted: false,
+          operational_mode_changed: false,
+        },
+      },
+      detail: {
+        transition_kind: "directed_followup",
+        source_revision: 1,
+        source_digest: sourceDigest,
+        field: "area.coverage",
+        subject: null,
+        question_pt: questionPt,
+      },
+    };
+    let rpcCalls = 0;
+    _setClient({
+      from(table: string) {
+        const filters: Array<[string, unknown]> = [];
+        const query: any = {
+          select() { return query; },
+          eq(column: string, value: unknown) { filters.push([column, value]); return query; },
+          in() { return query; }, order() { return query; }, limit() { return query; },
+          maybeSingle: async () => ({
+            data: table === "receipts" && filters.some(
+                ([column]) => column === "external_id",
+              )
+              ? committed
+              : null,
+            error: null,
+          }),
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({
+              data: table === "receipts" ? [committed] : [],
+              error: null,
+            }).then(resolve);
+          },
+        };
+        return query;
+      },
+      rpc() {
+        rpcCalls += 1;
+        return Promise.resolve({
+          data: null,
+          error: { message: "RPC must not rerun after exact late commit" },
+        });
+      },
+    } as any);
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-late-followup-reattach",
+        "gpt-realtime-2.1",
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      first.message(responseCreated("resp-greeting", `greeting:${cap.callId}`));
+      first.message(responseDone("resp-greeting"));
+      await flushAsync();
+
+      const adapter = control.ledger.onboarding!;
+      const intentKey = "tool-batch:resp-late-followup:batch-late-followup";
+      adapter.lifecycle.phase = "follow_up";
+      adapter.lifecycle.coverage = {
+        revision: 1,
+        digest: sourceDigest,
+        complete: false,
+        missing: [{ field: "area.coverage" }],
+        ambiguous: [],
+        nextQuestion: { field: "area.coverage", questionPt },
+      };
+      adapter.lifecycle.pendingFollowup = {
+        sourceRevision: 1,
+        sourceDigest,
+        field: "area.coverage",
+        questionPt,
+        intentKey,
+      };
+      adapter.pendingMutationCommands["followup:1:area.coverage:"] = {
+        type: "persist_followup",
+        revision: 1,
+        digest: sourceDigest,
+        field: "area.coverage",
+        questionPt,
+        intentKey,
+      };
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      const questions = framesOfType(second, "response.create").filter(
+        (frame) => frame.response?.metadata?.intent_key === intentKey,
+      );
+      expect(questions).toHaveLength(1);
+      expect(questions[0].response.metadata.purpose).toBe("tool_continuation");
+      expect(JSON.stringify(questions[0])).toContain(questionPt);
+      expect(functionOutputs(second)).toHaveLength(0);
+      expect(rpcCalls).toBe(0);
+      expect(adapter.lifecycle.coverage).toMatchObject({
+        revision: 2,
+        digest: committedDigest,
+      });
+      expect(adapter.pendingMutationCommands).toEqual({});
+      expect(adapter.lifecycle.phase).not.toBe("blocked");
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);

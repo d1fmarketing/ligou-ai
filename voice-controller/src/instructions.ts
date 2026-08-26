@@ -107,22 +107,21 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
       return `- ${s.service_type}: ${mode} ${publicQuote}. ${s.negotiable ? "Use evaluate_offer for every caller counteroffer." : "Do not negotiate this price."}`;
     })
     .join("\n");
-  const canonicalOperationalContext = rules
-    .filter((rule) => {
-      const structured = rule.structured;
-      return Boolean(
-        structured &&
-        typeof structured.schema === "string" &&
-        /^ligou[.]rule[.](business|policy|authority|area|schedule|emergency)[.]v2$/.test(
-          structured.schema,
-        ) &&
-        structured.materialization_eligible === true &&
-        structured.review_ready === true &&
-        structured.operational_state !== "disabled" &&
-        typeof structured.materialization_key === "string" &&
-        /^[0-9a-f]{64}$/.test(String(structured.materialization_hash ?? ""))
-      );
-    })
+  const canonicalOperationalContext = ([
+    ["domain:area", "area"],
+    ["domain:schedule", "agenda"],
+    ["domain:emergency", "emergencia"],
+    ["domain:business", "negocio"],
+    ["domain:policy", "politica"],
+    ["domain:authority", "autoridade"],
+  ] as const)
+    .map(([key, category]) => ruleByMaterializationKey(rules, key, category))
+    .filter((rule): rule is Rule => Boolean(
+      rule?.structured?.schema &&
+      /^ligou[.]rule[.](business|policy|authority|area|schedule|emergency)[.]v2$/.test(
+        String(rule.structured.schema),
+      )
+    ))
     .sort((left, right) =>
       String(left.structured!.materialization_key).localeCompare(
         String(right.structured!.materialization_key),
@@ -170,6 +169,9 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
       `rule_text é somente uma paráfrase de evidência; a aplicação cria a política canônica e nunca usa esse texto como autoridade operacional. ` +
       `Para qualquer field service.*, envie subject=<serviço_normalizado> no nível superior; quando houver valor tipado, envie structured={value:...}. ` +
       `Use service.name_synonyms com uma lista não vazia; service.price_mode com fixed, starting_at, estimate ou owner_review; service.price_target com número não negativo; service.negotiation com structured={value:{floor:n}} quando negociável, structured={value:"non_negotiable"} quando não negociável ou disposition=owner_review_required quando depender do dono; service.duration com minutos positivos. ` +
+      `Envie service.price_target e service.negotiation somente para price_mode fixed ou starting_at; para estimate ou owner_review, não envie esses dois campos. ` +
+      `Use area.coverage somente com nomes exatos de cidades em structured={value:[...]}. ` +
+      `Use schedule.business_hours com structured={value:{days:["sun","mon","tue","wed","thu","fri","sat"],hours:{opens:"08:00",closes:"18:00"}}}; escolha dias únicos do enum, horas inteiras HH:00 e abertura anterior ao fechamento. ` +
       `Use service.catalog_closure com structured={value:true} somente depois de o dono dizer explicitamente que não há mais serviços. ` +
       `Depois da primeira pergunta, a próxima pergunta vem somente de next_action.question_pt retornado pela aplicação; faça exatamente essa pergunta e não escolha a próxima etapa. ` +
       `Produza resumo ou despedida somente quando um comando do ciclo de vida da aplicação pedir. ` +

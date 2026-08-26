@@ -2,9 +2,10 @@
 // F1 surface: deterministic read/decision tools + create_async_case. Booking mutations arrive in F2 via the action worker.
 import { createHash, randomUUID } from "node:crypto";
 import {
+  hasV2DomainRule,
   loadTenant,
+  operationalRuleByMaterializationKey,
   priceRules,
-  ruleByMaterializationKey,
   servicePolicies,
   supa,
   type Rule,
@@ -15,6 +16,10 @@ import { issueQuote, issueSlotOffers, readQuote } from "./offers.ts";
 import { CUSTOMER_OUTCOME } from "./customer-language.ts";
 import { buildTrustedHermesContext, consultHermes, HERMES_TOPICS } from "./hermes.ts";
 import { mintSimulationSlots } from "./simulation.ts";
+import {
+  isExactCityList,
+  isExecutableBusinessHours,
+} from "./onboarding-coverage.ts";
 import {
   recordOnboardingAnswer,
   recordOnboardingVoiceApproval,
@@ -230,7 +235,7 @@ const allToolSchemas = [
         subject: { type: "string", description: "Top-level normalized service identifier required for every service.* field; omit for service.catalog_closure and non-service fields." },
         disposition: { type: "string", enum: ["answered", "not_applicable", "owner_review_required"] },
         rule_text: { type: "string", description: "short evidence paraphrase only; the server never uses this model-authored text as operational policy" },
-        structured: { type: "object", description: 'Use exactly {"value":...}: service.name_synonyms -> non-empty string array; service.price_mode -> fixed|starting_at|estimate|owner_review; service.price_target -> nonnegative number; service.negotiation -> {"floor":number} or "non_negotiable" when answered (or use owner_review_required disposition); service.duration -> positive minutes; service.catalog_closure -> true only after explicit no-more-services.' },
+        structured: { type: "object", description: 'Use exactly {"value":...}: service.name_synonyms -> non-empty string array; service.price_mode -> fixed|starting_at|estimate|owner_review; service.price_target -> nonnegative number; service.negotiation -> {"floor":number} or "non_negotiable" when answered (or use owner_review_required disposition); service.duration -> positive minutes; service.catalog_closure -> true only after explicit no-more-services; area.coverage -> exact city-name array only; schedule.business_hours -> {"days":["sun"|"mon"|"tue"|"wed"|"thu"|"fri"|"sat"],"hours":{"opens":"HH:00","closes":"HH:00"}} with unique days and opens before closes.' },
         owner_words: { type: "string", description: "the owner's exact words (Portuguese), as evidence" },
       },
       required: ["topic", "field", "disposition", "rule_text", "owner_words"],
@@ -302,16 +307,14 @@ const CAP_NAME: Record<string, string> = {
 
 export interface ToolResult { ok: boolean; body: Record<string, unknown>; durationMs: number }
 
-function hasDomainV2(rules: Rule[], key: string): boolean {
-  return rules.some((rule) => rule.structured?.materialization_key === key);
-}
-
-function areaCities(rule: Rule | undefined): string[] {
-  return Array.isArray(rule?.structured?.cities)
-    ? rule.structured.cities
+function areaCities(rule: Rule | undefined): string[] | null {
+  if (!rule) return [];
+  const value = rule.structured?.cities;
+  if (!isExactCityList(value))
+    return rule.structured?.schema === "ligou.rule.area.v2" ? null : [];
+  return value
         .map((city) => normalizeGeography(String(city)))
-        .filter(Boolean)
-    : [];
+        .filter(Boolean);
 }
 
 function scheduleWindow(rules: Rule[]):
@@ -319,8 +322,8 @@ function scheduleWindow(rules: Rule[]):
   | { kind: "v2"; days: Set<string>; opens: number; closes: number }
   | { kind: "blocked" } {
   const key = "domain:schedule";
-  const rule = ruleByMaterializationKey(rules, key, "agenda");
-  if (!hasDomainV2(rules, key))
+  const rule = operationalRuleByMaterializationKey(rules, key, "agenda");
+  if (!hasV2DomainRule(rules, key))
     return {
       kind: "legacy",
       days: new Set(["mon", "tue", "wed", "thu", "fri", "sat"]),
@@ -329,29 +332,22 @@ function scheduleWindow(rules: Rule[]):
     };
   if (
     !rule || rule.structured?.operational_state !== "active" ||
-    !rule.structured.business_hours ||
-    typeof rule.structured.business_hours !== "object" ||
-    Array.isArray(rule.structured.business_hours)
+    !isExecutableBusinessHours(rule.structured.business_hours)
   ) return { kind: "blocked" };
   const hours = rule.structured.business_hours as {
     days?: unknown;
     hours?: { opens?: unknown; closes?: unknown };
   };
-  const allowedDays = new Set(["sun", "mon", "tue", "wed", "thu", "fri", "sat"]);
-  const days = Array.isArray(hours.days) && hours.days.every(
-      (day) => typeof day === "string" && allowedDays.has(day.toLowerCase()),
-    )
-    ? new Set(hours.days.map((day) => String(day).toLowerCase()))
-    : null;
+  const days = new Set((hours.days as string[]));
   const hour = (value: unknown) => {
-    const match = /^([01]?[0-9]|2[0-3]):00$/.exec(
+    const match = /^([01][0-9]|2[0-3]):00$/.exec(
       String(value ?? ""),
     );
     return match ? Number(match[1]) : null;
   };
   const opens = hour(hours.hours?.opens);
   const closes = hour(hours.hours?.closes);
-  return days && days.size > 0 && opens !== null && closes !== null && opens < closes
+  return days.size > 0 && opens !== null && closes !== null && opens < closes
     ? { kind: "v2", days, opens, closes }
     : { kind: "blocked" };
 }
@@ -389,8 +385,12 @@ export async function runTool(
     switch (name) {
       case "get_business_info": {
         const services = servicePolicies(rules).map((s) => s.service_type);
-        const area = ruleByMaterializationKey(rules, "domain:area", "area");
-        const agenda = ruleByMaterializationKey(
+        const area = operationalRuleByMaterializationKey(
+          rules,
+          "domain:area",
+          "area",
+        );
+        const agenda = operationalRuleByMaterializationKey(
           rules,
           "domain:schedule",
           "agenda",
@@ -398,7 +398,9 @@ export async function runTool(
         return done({
           name: tenant.name,
           services,
-          service_area: area ? ((area.structured as any)?.cities ?? area.text) : null,
+          service_area: area
+            ? ((area.structured as any)?.cities ?? area.text)
+            : null,
           hours: agenda?.text ?? null,
           now_local: new Date().toLocaleString("en-US", { timeZone: tenant.timezone }),
         });
@@ -484,9 +486,13 @@ export async function runTool(
         const geography = normalizeGeography(String(args.service_city ?? ""));
         if (!geography) return done({ status: "needs_owner", reason: "geography_required" });
         const areaKey = "domain:area";
-        const areaRule = ruleByMaterializationKey(rules, areaKey, "area");
+        const areaRule = operationalRuleByMaterializationKey(
+          rules,
+          areaKey,
+          "area",
+        );
         if (
-          hasDomainV2(rules, areaKey) &&
+          hasV2DomainRule(rules, areaKey) &&
           (!areaRule || areaRule.structured?.operational_state !== "active")
         )
           return done({
@@ -495,6 +501,12 @@ export async function runTool(
             say: CUSTOMER_OUTCOME.needsTeam,
           });
         const cities = areaCities(areaRule);
+        if (cities === null)
+          return done({
+            status: "needs_owner",
+            reason: "area_policy_requires_owner",
+            say: CUSTOMER_OUTCOME.needsTeam,
+          });
         if (cities.length > 0 && !cities.includes(geography))
           return done({
             status: "needs_owner",

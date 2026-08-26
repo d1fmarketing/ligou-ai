@@ -1,6 +1,10 @@
 // Approved-rules projection: the Supabase ledger is the truth; this cache is derived and refreshable.
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { config } from "./config.ts";
+import {
+  isExactCityList,
+  isExecutableBusinessHours,
+} from "./onboarding-coverage.ts";
 
 export interface Rule {
   id: string;
@@ -116,6 +120,28 @@ function v2ServiceSubject(rule: Rule): string | null {
     : null;
 }
 
+function normalizedServiceSubject(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const subject = value.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_]{0,199}$/.test(subject) ? subject : null;
+}
+
+function v2ServicePresenceSubjects(rule: Rule): string[] {
+  const structured = rule.structured;
+  if (!structured) return [];
+  const keyMatch = /^service:([a-z0-9][a-z0-9_]{0,199})$/.exec(
+    String(structured.materialization_key ?? ""),
+  );
+  if (
+    structured.schema !== "ligou.rule.service.v2" &&
+    !keyMatch
+  ) return [];
+  return [...new Set([
+    normalizedServiceSubject(structured.service_type),
+    keyMatch?.[1] ?? null,
+  ].filter((value): value is string => value !== null))];
+}
+
 function parseV2Service(rule: Rule): ServicePolicy | null {
   const structured = rule.structured;
   const serviceType = v2ServiceSubject(rule);
@@ -204,16 +230,21 @@ function parseLegacyService(rule: Rule): ServicePolicy | null {
 }
 
 export function servicePolicies(rules: Rule[]): ServicePolicy[] {
-  const v2Subjects = new Set(
-    rules.map(v2ServiceSubject).filter((value): value is string => value !== null),
-  );
-  const v2 = rules.flatMap((rule) => {
-    const parsed = parseV2Service(rule);
-    return parsed ? [parsed] : [];
+  const v2BySubject = new Map<string, Set<Rule>>();
+  for (const rule of rules)
+    for (const subject of v2ServicePresenceSubjects(rule)) {
+      const candidates = v2BySubject.get(subject) ?? new Set<Rule>();
+      candidates.add(rule);
+      v2BySubject.set(subject, candidates);
+    }
+  const v2 = [...v2BySubject.entries()].flatMap(([subject, candidates]) => {
+    if (candidates.size !== 1) return [];
+    const parsed = parseV2Service([...candidates][0]!);
+    return parsed?.service_type === subject ? [parsed] : [];
   });
   const legacy = rules.flatMap((rule) => {
     const parsed = parseLegacyService(rule);
-    return parsed && !v2Subjects.has(parsed.service_type) ? [parsed] : [];
+    return parsed && !v2BySubject.has(parsed.service_type) ? [parsed] : [];
   });
   return [...v2, ...legacy].sort((left, right) =>
     left.service_type.localeCompare(right.service_type)
@@ -242,34 +273,86 @@ export function ruleByCategory(rules: Rule[], category: string): Rule | undefine
   return rules.find((r) => r.category === category);
 }
 
-const DOMAIN_SCHEMAS: Record<string, string> = {
+const DOMAIN_SCHEMAS = {
   "domain:area": "ligou.rule.area.v2",
   "domain:schedule": "ligou.rule.schedule.v2",
   "domain:emergency": "ligou.rule.emergency.v2",
   "domain:business": "ligou.rule.business.v2",
   "domain:policy": "ligou.rule.policy.v2",
   "domain:authority": "ligou.rule.authority.v2",
+} as const;
+
+const DOMAIN_CATEGORIES: Record<keyof typeof DOMAIN_SCHEMAS, string> = {
+  "domain:area": "area",
+  "domain:schedule": "agenda",
+  "domain:emergency": "emergencia",
+  "domain:business": "negocio",
+  "domain:policy": "politica",
+  "domain:authority": "autoridade",
 };
+
+export function hasV2DomainRule(
+  rules: Rule[],
+  key: keyof typeof DOMAIN_SCHEMAS,
+): boolean {
+  const schema = DOMAIN_SCHEMAS[key];
+  return rules.some((rule) =>
+    rule.structured?.schema === schema ||
+    rule.structured?.materialization_key === key
+  );
+}
+
+function canonicalV2DomainRule(
+  rule: Rule,
+  key: keyof typeof DOMAIN_SCHEMAS,
+): boolean {
+  const structured = rule.structured;
+  if (
+    !structured || structured.schema !== DOMAIN_SCHEMAS[key] ||
+    structured.materialization_key !== key ||
+    rule.category !== DOMAIN_CATEGORIES[key] ||
+    rule.escopo !== (key === "domain:area" ? "localizacao" : "geral") ||
+    structured.materialization_eligible !== true ||
+    structured.review_ready !== true ||
+    !["active", "owner_review_required"].includes(
+      String(structured.operational_state),
+    ) ||
+    !/^[0-9a-f]{64}$/.test(String(structured.materialization_hash ?? ""))
+  ) return false;
+  if (
+    structured.operational_state === "active" && key === "domain:area"
+  ) return isExactCityList(structured.cities);
+  if (
+    structured.operational_state === "active" && key === "domain:schedule"
+  )
+    return isExecutableBusinessHours(structured.business_hours);
+  return true;
+}
 
 export function ruleByMaterializationKey(
   rules: Rule[],
   key: keyof typeof DOMAIN_SCHEMAS,
   legacyCategory?: string,
 ): Rule | undefined {
-  const candidates = rules.filter(
-    (rule) => rule.structured?.materialization_key === key,
+  const candidates = rules.filter((rule) =>
+    rule.structured?.schema === DOMAIN_SCHEMAS[key] ||
+    rule.structured?.materialization_key === key
   );
   if (candidates.length > 0) {
     if (candidates.length !== 1) return undefined;
     const [rule] = candidates;
-    const structured = rule!.structured!;
-    return structured.schema === DOMAIN_SCHEMAS[key] &&
-        structured.materialization_eligible === true &&
-        structured.review_ready === true &&
-        structured.operational_state !== "disabled" &&
-        /^[0-9a-f]{64}$/.test(String(structured.materialization_hash ?? ""))
-      ? rule
-      : undefined;
+    return canonicalV2DomainRule(rule!, key) ? rule : undefined;
   }
   return legacyCategory ? ruleByCategory(rules, legacyCategory) : undefined;
+}
+
+export function operationalRuleByMaterializationKey(
+  rules: Rule[],
+  key: keyof typeof DOMAIN_SCHEMAS,
+  legacyCategory?: string,
+): Rule | undefined {
+  const rule = ruleByMaterializationKey(rules, key, legacyCategory);
+  if (!rule) return undefined;
+  if (rule.structured?.schema !== DOMAIN_SCHEMAS[key]) return rule;
+  return rule.structured.operational_state === "active" ? rule : undefined;
 }

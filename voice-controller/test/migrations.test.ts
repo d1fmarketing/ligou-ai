@@ -981,3 +981,54 @@ describe("onboarding transition safety migration contract", () => {
     expect(sql).toContain("Strict legacy pricing compatibility");
   });
 });
+
+describe("onboarding V2 reconciliation migration contract", () => {
+  test("defends structured values and makes follow-up and approval aliases exactly recoverable", () => {
+    const sql = migrationSql("onboarding_v2_reconciliation");
+    const answerAt = sql.indexOf(
+      "create or replace function public.record_onboarding_answer",
+    );
+    const followupAt = sql.indexOf(
+      "create or replace function public.record_onboarding_followup",
+    );
+    const approvalAt = sql.indexOf(
+      "create or replace function public.record_onboarding_voice_approval",
+    );
+    const shapeAt = sql.indexOf(
+      "add constraint receipts_onboarding_shape_check check",
+    );
+    expect(answerAt).toBeGreaterThan(-1);
+    expect(followupAt).toBeGreaterThan(answerAt);
+    expect(approvalAt).toBeGreaterThan(followupAt);
+    const shape = sql.slice(shapeAt, answerAt);
+    expect(shape).toContain(
+      "coalesce(detail->>'source_digest' ~ '^[0-9a-f]{64}$', false)",
+    );
+    expect(shape).toContain("coalesce(detail->>'question_pt', '') <> ''");
+    expect(sql).toContain("onboarding_structured_value_required");
+    expect(sql).toContain("p_fact->'structured' ? 'value'");
+    expect(sql).toContain("'source_digest'");
+    expect(sql).toContain("'question_pt'");
+    expect(sql).toContain("'target_kind', 'onboarding_voice_approval'");
+    expect(sql).toContain("kind in ('onboarding_voice_approval', 'onboarding_event_alias')");
+    expect(sql).toContain("readback->>'target_kind' = 'onboarding_voice_approval'");
+    expect(sql).toContain("receipts_onboarding_approval_snapshot_unique");
+    expect(sql).toContain("receipts_onboarding_event_key_unique");
+    expect(sql).not.toContain("drop index if exists public.receipts_onboarding_approval_snapshot_unique");
+    expect(sql).not.toContain("delete from public.receipts");
+    const approval = sql.slice(approvalAt);
+    expect(approval.indexOf(
+      "kind in ('onboarding_voice_approval', 'onboarding_event_alias')",
+    )).toBeLessThan(approval.indexOf(
+      "v_result := public.record_onboarding_voice_approval_v2_base",
+    ));
+    for (const signature of [
+      "record_onboarding_answer( uuid,uuid,uuid,text,text,text,integer,jsonb,uuid,jsonb )",
+      "record_onboarding_followup( uuid,uuid,uuid,text,integer,text,text,jsonb )",
+      "record_onboarding_voice_approval( uuid,uuid,uuid,text,text,integer,text,text )",
+    ]) {
+      expect(sql).toContain(`revoke all on function public.${signature}`);
+      expect(sql).toContain(`grant execute on function public.${signature}`);
+    }
+  });
+});

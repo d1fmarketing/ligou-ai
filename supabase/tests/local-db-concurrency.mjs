@@ -1108,6 +1108,42 @@ async function onboardingReceiptSecurityAndIdempotency(connection, home) {
   assert.equal(approvals[0].approval_receipt_id, approvals[1].approval_receipt_id);
   assert.deepEqual(approvals.map((item) => item.status).sort(), ["recorded", "reused"]);
 
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (select count(*) from public.receipts
+        where tenant_id = '${ids.tenant}' and kind = 'onboarding_voice_approval')::text || ':' ||
+      (select count(*) from public.receipts
+        where tenant_id = '${ids.tenant}' and kind = 'onboarding_event_alias'
+          and readback->>'target_kind' = 'onboarding_voice_approval')::text || ':' ||
+      coalesce((select bool_and(
+        detail->>'target_receipt_id' = readback->>'target_receipt_id'
+        and readback->>'target_receipt_id' = '${approvals[0].approval_receipt_id}'
+      ) from public.receipts
+        where tenant_id = '${ids.tenant}' and kind = 'onboarding_event_alias'
+          and readback->>'target_kind' = 'onboarding_voice_approval'), false)::text;
+  `), "duplicate snapshot approval alias"), "1:1:true");
+
+  const replayApprovalA = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingApprovalSql({
+      tenantId: ids.tenant, callId: ids.call, ownerId: ids.owner,
+      providerToolCallId: "approval-concurrent-a", expectedRevision: 2,
+      expectedDigest: complete.snapshot_digest, ownerWords: "Sim, está aprovado.",
+    })),
+  ), "exact replay concurrent approval A"));
+  const replayApprovalB = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingApprovalSql({
+      tenantId: ids.tenant, callId: ids.call, ownerId: ids.owner,
+      providerToolCallId: "approval-concurrent-b", expectedRevision: 2,
+      expectedDigest: complete.snapshot_digest, ownerWords: "Aprovo esse resumo.",
+    })),
+  ), "exact replay concurrent approval B"));
+  assert.equal(replayApprovalA.approval_receipt_id, approvals[0].approval_receipt_id);
+  assert.equal(replayApprovalB.approval_receipt_id, approvals[0].approval_receipt_id);
+
   const arbitraryDigest = "9".repeat(64);
   const factThree = onboardingFact("schedule.holidays", "Encaminhar feriados ao dono.", "Vamos revisar feriados.");
   const arbitraryCoverage = {
@@ -1130,6 +1166,33 @@ async function onboardingReceiptSecurityAndIdempotency(connection, home) {
     coverage: arbitraryCoverage,
   }))), "arbitrary prior digest onboarding answer"));
   assert.notEqual(third.snapshot_digest, arbitraryDigest);
+
+  const historicalApprovalA = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingApprovalSql({
+      tenantId: ids.tenant, callId: ids.call, ownerId: ids.owner,
+      providerToolCallId: "approval-concurrent-a", expectedRevision: 2,
+      expectedDigest: complete.snapshot_digest, ownerWords: "Sim, está aprovado.",
+    })),
+  ), "historical exact approval A after coverage advanced"));
+  const historicalApprovalB = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingApprovalSql({
+      tenantId: ids.tenant, callId: ids.call, ownerId: ids.owner,
+      providerToolCallId: "approval-concurrent-b", expectedRevision: 2,
+      expectedDigest: complete.snapshot_digest, ownerWords: "Aprovo esse resumo.",
+    })),
+  ), "historical exact approval B after coverage advanced"));
+  assert.equal(
+    historicalApprovalA.approval_receipt_id,
+    approvals[0].approval_receipt_id,
+  );
+  assert.equal(
+    historicalApprovalB.approval_receipt_id,
+    approvals[0].approval_receipt_id,
+  );
   assert.equal(scalar(await runSql(connection, home, `
     select bool_and(
       r.readback->>'snapshot_digest' = encode(extensions.digest(
@@ -1291,6 +1354,35 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     state: "answered",
     value: 199,
   }));
+
+  const hostileWithoutStructured = fact(149, "Não faço obra estrutural.");
+  delete hostileWithoutStructured.structured;
+  const hostileV2 = await runSql(connection, home, serviceTransaction(
+    onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-hostile-without-structured",
+      answerHash: sha256(JSON.stringify(hostileWithoutStructured)),
+      expectedRevision: 0,
+      fact: hostileWithoutStructured,
+      coverage: v2CoverageSnapshot({
+        tenantId: tenant,
+        callId: call,
+        revision: 1,
+        target: 149,
+        answerHash: sha256(JSON.stringify(hostileWithoutStructured)),
+        hashCharacter: "f",
+      }),
+    }),
+  ));
+  assert.notEqual(hostileV2.code, 0);
+  assert.match(hostileV2.stderr, /onboarding_structured_value_required/);
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (select count(*) from public.receipts where tenant_id = '${tenant}')::text || ':' ||
+      (select count(*) from public.rules where tenant_id = '${tenant}')::text;
+  `), "V2 hostile unstructured rollback"), "0:0");
 
   const answerA1 = {
     tenantId: tenant,
@@ -1475,6 +1567,12 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
   ), "first durable V2 followup"));
   assert.equal(followOne.revision, 4);
   assert.equal(followOne.coverage.snapshot.followUps, 1);
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (detail->>'source_digest' = '${a3.snapshot_digest}')::text || ':' ||
+      (detail->>'question_pt' = 'O que este serviço inclui e exclui?')::text
+    from public.receipts where id = '${followOne.coverage_receipt_id}';
+  `), "durable followup exact identity"), "true:true");
 
   const followTwoCoverage = structuredClone(followOne.coverage);
   for (const key of [

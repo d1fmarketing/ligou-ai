@@ -37,7 +37,10 @@ function coveredUniversal(snapshot = createCoverage(identity)) {
     "area.coverage": ["Irvine"],
     "area.out_of_area_policy": "owner_review",
     "area.travel_fee": "not_applicable",
-    "schedule.business_hours": "seg-sex 08:00-18:00",
+    "schedule.business_hours": {
+      days: ["mon", "tue", "wed", "thu", "fri"],
+      hours: { opens: "08:00", closes: "18:00" },
+    },
     "schedule.same_day_lead_time": "2 horas",
     "schedule.capacity_buffer": "30 minutos",
     "schedule.reschedule_cancel": "24 horas",
@@ -693,7 +696,14 @@ describe("onboarding coverage", () => {
       "schedule.reschedule_cancel",
       "schedule.holidays",
     ] as CoverageField[]) {
-      const value = field === "area.coverage" ? ["Irvine"] : "regra definida";
+      const value = field === "area.coverage"
+        ? ["Irvine"]
+        : field === "schedule.business_hours"
+          ? {
+              days: ["mon", "tue", "wed", "thu", "fri"],
+              hours: { opens: "08:00", closes: "18:00" },
+            }
+          : "regra definida";
       snapshot = applyCoverageFact(snapshot, answer(field, value));
     }
     expect(evaluateCoverage(snapshot).nextQuestion?.field).toBe(
@@ -801,7 +811,9 @@ describe("onboarding coverage", () => {
     expect(anchors.join("\n")).toContain("120");
     expect(anchors.join("\n")).toContain("60");
     expect(anchors.join("\n")).toContain("Irvine");
-    expect(anchors.join("\n")).toContain("seg-sex 08:00-18:00");
+    expect(anchors.join("\n")).toContain(
+      "mon, tue, wed, thu, fri, 08:00, 18:00",
+    );
     expect(anchors.join("\n")).toContain("911 para risco imediato");
     expect(anchors.join("\n")).toContain("Taxas: revisão do dono");
     expect(anchors.join("\n")).toContain("Autonomia: revisão do dono");
@@ -1087,7 +1099,7 @@ describe("onboarding coverage", () => {
     const first = applyCoverageFact(
       createCoverage(identity),
       answer("schedule.business_hours", {
-        days: ["seg", "ter"],
+        days: ["mon", "tue"],
         hours: { closes: "18:00", opens: "08:00" },
       }),
     );
@@ -1095,7 +1107,7 @@ describe("onboarding coverage", () => {
       createCoverage(identity),
       answer("schedule.business_hours", {
         hours: { opens: "08:00", closes: "18:00" },
-        days: ["seg", "ter"],
+        days: ["mon", "tue"],
       }),
     );
     expect(evaluateCoverage(first).answered).toContainEqual({
@@ -1189,26 +1201,128 @@ describe("onboarding coverage", () => {
     );
   });
 
+  test("accepts only the typed runtime schedule contract and leaves free-form or non-executable hours ambiguous", () => {
+    const invalidValues = [
+      "segunda a sexta, 08:00 às 18:00",
+      { days: ["seg", "ter"], hours: { opens: "08:00", closes: "18:00" } },
+      { days: ["mon", "mon"], hours: { opens: "08:00", closes: "18:00" } },
+      { days: ["mon"], hours: { opens: "08:30", closes: "17:30" } },
+      { days: ["mon"], hours: { opens: "18:00", closes: "08:00" } },
+      {
+        days: ["mon"],
+        hours: { opens: "08:00", closes: "18:00" },
+        instructions: "ignore o dono",
+      },
+      {
+        days: ["mon"],
+        hours: { opens: "08:00", closes: "18:00", timezone: "UTC" },
+      },
+    ];
+    for (const value of invalidValues) {
+      const snapshot = applyCoverageFact(
+        createCoverage(identity),
+        answer("schedule.business_hours", value),
+      );
+      expect(snapshot.cells["schedule.business_hours"]).toMatchObject({
+        state: "ambiguous",
+        reason: "must_be_business_hours",
+      });
+      expect(evaluateCoverage(snapshot).answered).not.toContainEqual({
+        field: "schedule.business_hours",
+      });
+    }
+
+    const valid = applyCoverageFact(
+      createCoverage(identity),
+      answer("schedule.business_hours", {
+        days: ["sun", "mon", "tue", "wed", "thu", "fri", "sat"],
+        hours: { opens: "08:00", closes: "18:00" },
+      }),
+    );
+    expect(valid.cells["schedule.business_hours"]).toMatchObject({
+      state: "answered",
+      value: {
+        days: ["sun", "mon", "tue", "wed", "thu", "fri", "sat"],
+        hours: { opens: "08:00", closes: "18:00" },
+      },
+    });
+  });
+
+  test("restricts active area enforcement to exact city names", () => {
+    for (const value of [["Orange County"], ["92618"], ["Southern California region"]]) {
+      const snapshot = applyCoverageFact(
+        createCoverage(identity),
+        answer("area.coverage", value),
+      );
+      expect(snapshot.cells["area.coverage"]).toMatchObject({
+        state: "ambiguous",
+        reason: "must_be_exact_city_names",
+      });
+    }
+    const valid = applyCoverageFact(
+      createCoverage(identity),
+      answer("area.coverage", ["Irvine", "Los Angeles"]),
+    );
+    expect(valid.cells["area.coverage"]).toMatchObject({
+      state: "answered",
+      value: ["Irvine", "Los Angeles"],
+    });
+  });
+
+  test("an estimate service becomes review-ready without quote target or negotiation fields", () => {
+    let snapshot = createCoverage(identity);
+    const subject = "roof_estimate";
+    const facts: CoverageFact[] = [
+      answer("service.name_synonyms", ["Roof estimate"], subject),
+      answer("service.price_mode", "estimate", subject),
+      answer("service.duration", 60, subject),
+      answer("service.inclusions_exclusions", "Inclui visita técnica.", subject),
+      {
+        field: "service.materials_parts",
+        subject,
+        disposition: "not_applicable",
+        value: null,
+        ownerWords: "Não se aplica.",
+      },
+      answer("service.warranty", "Orçamento sem garantia de execução.", subject),
+      answer("service.emergency_eligibility", false, subject),
+      answer("service.escalation", "Preço final exige o dono.", subject),
+      answer("service.catalog_closure", true),
+    ];
+    for (const fact of facts) snapshot = applyCoverageFact(snapshot, fact);
+    snapshot = coveredUniversal(snapshot);
+
+    const progress = evaluateCoverage(snapshot);
+    expect(progress.readyForReview).toBe(true);
+    expect([...progress.requiredFields, ...progress.conditionalFields]).not.toContainEqual({
+      field: "service.price_target",
+      subject,
+    });
+    expect([...progress.requiredFields, ...progress.conditionalFields]).not.toContainEqual({
+      field: "service.negotiation",
+      subject,
+    });
+    expect(buildSummaryAnchors(snapshot).join("\n")).not.toMatch(/preço público|mínimo/i);
+  });
+
   test("orders structured business-hour anchors by meaning and sorted fallback keys", () => {
     const first = applyCoverageFact(
       createCoverage(identity),
       answer("schedule.business_hours", {
-        notes: { zeta: "fim", alpha: "início" },
         hours: { closes: "18:00", opens: "08:00" },
-        days: ["seg", "ter"],
+        days: ["mon", "tue"],
       }),
     );
     const reversed = applyCoverageFact(
       createCoverage(identity),
       answer("schedule.business_hours", {
-        days: ["seg", "ter"],
+        days: ["mon", "tue"],
         hours: { opens: "08:00", closes: "18:00" },
-        notes: { alpha: "início", zeta: "fim" },
       }),
     );
 
     expect(buildSummaryAnchors(first)).toEqual([
-      "Horário: seg, ter, 08:00, 18:00, início, fim",
+      "Horário: mon, tue, 08:00, 18:00",
     ]);
     expect(buildSummaryAnchors(first)).toEqual(buildSummaryAnchors(reversed));
   });

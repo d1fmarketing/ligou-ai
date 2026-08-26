@@ -4,6 +4,7 @@ import {
   invalidateTenant,
   loadTenant,
   priceRules,
+  ruleByMaterializationKey,
   servicePolicies,
   type Rule,
 } from "../src/rules.ts";
@@ -227,5 +228,91 @@ describe("V2 service policy projection", () => {
       .toEqual(["legacy_service"]);
     expect(priceRules([unsafe, legacy]).map((item) => item.service_type))
       .toEqual(["legacy_service"]);
+  });
+
+  test("a schema-marked V2 service with a missing or mismatched key shadows legacy for its subject", () => {
+    const legacy = rule("legacy-drain", {
+      service_type: "drain_cleaning",
+      price_target: 999,
+      price_min: 999,
+      duration_min: 10,
+    });
+    const base = {
+      schema: "ligou.rule.service.v2",
+      materialization_hash: "e".repeat(64),
+      materialization_eligible: true,
+      review_ready: true,
+      operational_state: "active",
+      service_type: "drain_cleaning",
+      service_names: ["Drain cleaning"],
+      price_mode: "fixed",
+      quoteable: true,
+      negotiable: false,
+      price_target: 149,
+      price_min: 149,
+      duration_min: 60,
+      coverage_revision: 44,
+      source_call_id: "22222222-2222-4222-8222-222222222222",
+    };
+    for (const materializationKey of [undefined, "service:other_service"]) {
+      const malformed = rule("malformed-v2", {
+        ...base,
+        ...(materializationKey === undefined
+          ? {}
+          : { materialization_key: materializationKey }),
+      });
+      expect(servicePolicies([legacy, malformed])).toEqual([]);
+      expect(priceRules([legacy, malformed])).toEqual([]);
+    }
+  });
+});
+
+describe("V2 domain policy projection", () => {
+  const legacyArea: Rule = {
+    id: "legacy-area",
+    rule_group_id: "legacy-area-group",
+    version: 1,
+    category: "area",
+    escopo: "localizacao",
+    text: "Legacy Irvine.",
+    structured: { cities: ["Irvine"] },
+  };
+
+  test("schema-only or key-only malformed V2 domains shadow legacy", () => {
+    const base: Rule = {
+      id: "v2-area",
+      rule_group_id: "v2-area-group",
+      version: 1,
+      category: "area",
+      escopo: "localizacao",
+      text: "V2 area.",
+      structured: {
+        schema: "ligou.rule.area.v2",
+        materialization_key: "domain:area",
+        materialization_hash: "a".repeat(64),
+        materialization_eligible: true,
+        review_ready: true,
+        operational_state: "active",
+        cities: ["Irvine"],
+      },
+    };
+    const schemaOnly = {
+      ...base,
+      structured: { ...base.structured, materialization_key: undefined },
+    } as Rule;
+    const keyOnly = {
+      ...base,
+      structured: { ...base.structured, schema: undefined },
+    } as Rule;
+    expect(ruleByMaterializationKey(
+      [legacyArea, schemaOnly],
+      "domain:area",
+      "area",
+    )).toBeUndefined();
+    expect(ruleByMaterializationKey(
+      [legacyArea, keyOnly],
+      "domain:area",
+      "area",
+    )).toBeUndefined();
   });
 });

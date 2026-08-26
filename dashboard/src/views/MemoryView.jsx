@@ -47,6 +47,22 @@ function displayDate(value, fallback) {
   return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw.split('-').reverse().join('/') : raw;
 }
 
+function canonicalFieldRows(fields) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return [];
+  return Object.entries(fields)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => {
+      const rendered = Array.isArray(value)
+        ? value.map((item) => String(item)).join(', ')
+        : typeof value === 'boolean'
+          ? (value ? 'sim' : 'não')
+          : value == null
+            ? 'Não se aplica'
+            : String(value);
+      return [key, rendered];
+    });
+}
+
 function normalizedFilter(filter) {
   if (filter && typeof filter === 'object') {
     return {
@@ -250,6 +266,40 @@ export function MemoryView({
 
                   <p className="memory-rule-text">{entryText(entry)}</p>
 
+                  {entry.effectivePolicy && entry.draft ? (
+                    <section
+                      className="memory-policy-comparison"
+                      aria-label="Política efetiva e correção"
+                    >
+                      <div className="memory-policy-comparison-panel" data-kind="effective">
+                        <h3>Política efetiva</h3>
+                        <p>{entry.effectivePolicy.text}</p>
+                        <p>{`Intenção efetiva: ${readable(entry.effectivePolicy.intent)}`}</p>
+                        <p>{`Revisão de cobertura efetiva: ${readable(entry.effectivePolicy.coverageRevision)}`}</p>
+                        {canonicalFieldRows(entry.effectivePolicy.canonicalFields).length > 0 ? (
+                          <ul aria-label="Campos canônicos da política efetiva">
+                            {canonicalFieldRows(entry.effectivePolicy.canonicalFields).map(([key, value]) => (
+                              <li key={key}>{`${key}: ${value}`}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
+                      <div className="memory-policy-comparison-panel" data-kind="correction">
+                        <h3>{`Correção ${entry.draft.status}`}</h3>
+                        <p>{entry.draft.text}</p>
+                        <p>{`Intenção da correção: ${readable(entry.draft.intent)}`}</p>
+                        <p>{`Revisão de cobertura da correção: ${readable(entry.draft.coverageRevision)}`}</p>
+                        {canonicalFieldRows(entry.draft.canonicalFields).length > 0 ? (
+                          <ul aria-label="Campos canônicos da correção">
+                            {canonicalFieldRows(entry.draft.canonicalFields).map(([key, value]) => (
+                              <li key={key}>{`${key}: ${value}`}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
+                    </section>
+                  ) : null}
+
                   <dl className="memory-metadata">
                     <div>
                       <dt>Origem</dt>
@@ -271,6 +321,18 @@ export function MemoryView({
                       <dt>Aprovação</dt>
                       <dd>{readable(entry.approval || entry.approvedBy, status === 'sugerida' ? 'Aguardando aprovação' : 'Rafael')}</dd>
                     </div>
+                    {entry.materializationIntent ? (
+                      <div>
+                        <dt>Intenção canônica</dt>
+                        <dd>{entry.materializationIntent}</dd>
+                      </div>
+                    ) : null}
+                    {Number.isSafeInteger(entry.coverageRevision) ? (
+                      <div>
+                        <dt>Revisão de cobertura</dt>
+                        <dd>{entry.coverageRevision}</dd>
+                      </div>
+                    ) : null}
                     {typeof entry.structured?.price_target === 'number' ? (
                       <div>
                         <dt>Preço aplicado</dt>
@@ -282,6 +344,14 @@ export function MemoryView({
                       </div>
                     ) : null}
                   </dl>
+
+                  {!entry.effectivePolicy && canonicalFieldRows(entry.canonicalFields).length > 0 ? (
+                    <ul className="memory-canonical-fields" aria-label="Campos canônicos">
+                      {canonicalFieldRows(entry.canonicalFields).map(([key, value]) => (
+                        <li key={key}>{`${key}: ${value}`}</li>
+                      ))}
+                    </ul>
+                  ) : null}
 
                   <footer className="memory-card-actions">
                     {status === 'sugerida' && onApproveSuggestion ? (

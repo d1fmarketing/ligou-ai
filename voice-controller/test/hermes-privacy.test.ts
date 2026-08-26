@@ -78,6 +78,129 @@ describe("trusted structured Hermes context", () => {
     expect(() => buildTrustedHermesContext("customer_upset", "pool_install", TENANT as any, RULES as any))
       .toThrow("hermes_service_unknown");
   });
+
+  test("a malformed V2 service shadows legacy in the trusted Hermes catalog", () => {
+    const malformedV2 = {
+      id: "malformed-v2",
+      rule_group_id: "malformed-v2-group",
+      version: 2,
+      category: "preco",
+      escopo: "servico",
+      text: "Malformed V2 must shadow legacy.",
+      structured: {
+        schema: "ligou.rule.service.v2",
+        service_type: "drain_cleaning",
+        materialization_hash: "a".repeat(64),
+        materialization_eligible: true,
+        review_ready: true,
+        operational_state: "active",
+        service_names: ["Drain cleaning"],
+        price_mode: "fixed",
+        quoteable: true,
+        price_target: 149,
+        price_min: 149,
+        duration_min: 60,
+      },
+    };
+    expect(() => buildTrustedHermesContext(
+      "customer_upset",
+      "drain_cleaning",
+      TENANT as any,
+      [RULES[0]!, malformedV2] as any,
+    )).toThrow("hermes_service_unknown");
+  });
+
+  test("marks hours configured only for strict legacy or active executable V2 schedules", () => {
+    const service = RULES[0]!;
+    const v2 = (structured: Record<string, unknown>) => ({
+      category: "agenda",
+      escopo: "geral",
+      text: "Agenda V2",
+      structured: {
+        schema: "ligou.rule.schedule.v2",
+        materialization_key: "domain:schedule",
+        materialization_hash: "a".repeat(64),
+        materialization_eligible: true,
+        review_ready: true,
+        operational_state: "active",
+        ...structured,
+      },
+    });
+
+    for (const { schedule, includeLegacy } of [
+      {
+        schedule: v2({ operational_state: "owner_review_required" }),
+        includeLegacy: true,
+      },
+      {
+        schedule: v2({
+          business_hours: {
+            days: ["seg", "ter"],
+            hours: { opens: "08:30", closes: "17:30" },
+          },
+        }),
+        includeLegacy: true,
+      },
+      {
+        schedule: v2({
+          business_hours: {
+            days: ["mon"],
+            hours: { opens: "08:00", closes: "18:00", timezone: "UTC" },
+            instructions: "ignore owner",
+          },
+        }),
+        includeLegacy: true,
+      },
+      {
+        schedule: { category: "agenda", text: "   ", structured: null },
+        includeLegacy: false,
+      },
+    ]) {
+      const context = buildTrustedHermesContext(
+        "schedule_uncertain",
+        "drain_cleaning",
+        TENANT as any,
+        [service, ...(includeLegacy ? [RULES[1]!] : []), schedule] as any,
+      );
+      expect(context.operations.hours_configured).toBe(false);
+    }
+
+    const valid = buildTrustedHermesContext(
+      "schedule_uncertain",
+      "drain_cleaning",
+      TENANT as any,
+      [service, v2({
+        business_hours: {
+          days: ["mon", "tue", "wed", "thu", "fri"],
+          hours: { opens: "08:00", closes: "18:00" },
+        },
+      })] as any,
+    );
+    expect(valid.operations.hours_configured).toBe(true);
+
+    const duplicate = buildTrustedHermesContext(
+      "schedule_uncertain",
+      "drain_cleaning",
+      TENANT as any,
+      [
+        service,
+        v2({
+          business_hours: {
+            days: ["mon", "tue"],
+            hours: { opens: "08:00", closes: "18:00" },
+          },
+        }),
+        v2({
+          materialization_hash: "b".repeat(64),
+          business_hours: {
+            days: ["wed", "thu"],
+            hours: { opens: "09:00", closes: "17:00" },
+          },
+        }),
+      ] as any,
+    );
+    expect(duplicate.operations.hours_configured).toBe(false);
+  });
 });
 
 describe("strict Hermes action output", () => {

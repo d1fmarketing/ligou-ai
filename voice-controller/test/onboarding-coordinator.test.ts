@@ -97,7 +97,10 @@ function completeCoverage(revision = 41): CoverageSnapshot {
     const values: Partial<Record<CoverageField, unknown>> = {
       "business.customer_types": ["residencial"],
       "area.coverage": ["Irvine"],
-      "schedule.business_hours": "segunda a sexta, 08:00 às 18:00",
+      "schedule.business_hours": {
+        days: ["mon", "tue", "wed", "thu", "fri"],
+        hours: { opens: "08:00", closes: "18:00" },
+      },
       "emergency.types": ["vazamento"],
       "emergency.safety_escalation": "ligar 911 em risco imediato",
     };

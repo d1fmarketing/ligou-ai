@@ -840,6 +840,9 @@ export async function runLocalDatabaseGate() {
     const applicationIntegrationTests = await runBunTestFile(
       path.join(repoRoot, "voice-controller/test/booking.integration.test.ts"), 6, applicationEnv, runnerRoot,
     );
+    const onboardingPolicyIntegrationTests = await runBunTestFile(
+      path.join(repoRoot, "voice-controller/test/onboarding-policy.local.integration.test.ts"), 1, applicationEnv, runnerRoot,
+    );
     const budgetRuntimeTests = await runBunTestFile(
       path.join(repoRoot, "voice-controller/test/budget.local.integration.test.ts"), 2, applicationEnv, runnerRoot,
     );
@@ -884,6 +887,7 @@ export async function runLocalDatabaseGate() {
       concurrencyTests: concurrency.tests,
       upgradeTests: upgrade.tests,
       applicationIntegrationTests,
+      onboardingPolicyIntegrationTests,
       budgetRuntimeTests,
       startupTests,
       authenticatedRlsTests: authenticatedRls.tests,
