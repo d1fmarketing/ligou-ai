@@ -877,3 +877,16 @@ describe("onboarding coverage receipt migration contract", () => {
     expect(sql).toContain("r.version > v_rule.version");
   });
 });
+
+describe("service-role onboarding receipt read grant contract", () => {
+  test("adds only the SELECT privilege required by the server-side receipt store", () => {
+    const sql = migrationSql("service_role_receipts_select");
+
+    expect(sql).toBe("grant select on table public.receipts to service_role;");
+    expect(sql).not.toContain("insert");
+    expect(sql).not.toContain("update");
+    expect(sql).not.toContain("delete");
+    expect(sql).not.toContain("anon");
+    expect(sql).not.toContain("authenticated");
+  });
+});

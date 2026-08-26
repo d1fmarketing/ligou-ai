@@ -43,8 +43,8 @@ function approvalRevision(row, callId) {
   return row.readback.snapshot_revision;
 }
 
-export function settleStartedSession({ session, cancelled, ended, onAccepted }) {
-  if (cancelled || ended) {
+export function settleStartedSession({ session, runId, currentRunId, cancelled, ended, onAccepted }) {
+  if (runId !== currentRunId || cancelled || ended) {
     session?.end?.(cancelled ? "manual_hangup" : "remote_hangup");
     return false;
   }
@@ -52,7 +52,28 @@ export function settleStartedSession({ session, cancelled, ended, onAccepted }) 
   return true;
 }
 
-export async function resolveOnboardingOutcome({ client, reason, callId, timeoutMs = 3_000 }) {
+export function applyCurrentSessionRun({ runId, currentRunId, onCurrent }) {
+  if (runId !== currentRunId) return false;
+  onCurrent?.();
+  return true;
+}
+
+function cancellationRequested(isCancelled) {
+  try { return Boolean(isCancelled?.()); } catch { return true; }
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export async function resolveOnboardingOutcome({
+  client,
+  reason,
+  callId,
+  timeoutMs = 3_000,
+  pollIntervalMs = 250,
+  isCancelled,
+}) {
   if (MANUAL_END_REASONS.has(reason)
     || !client
     || typeof client.from !== "function"
@@ -60,47 +81,62 @@ export async function resolveOnboardingOutcome({ client, reason, callId, timeout
     || !callId.trim()) return { status: "interrupted" };
 
   const boundedTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 3_000;
-  const [approvalRead, callRead] = await Promise.all([
-    boundedRead(() => client
-      .from("receipts")
-      .select("id,call_id,kind,outcome,readback,created_at")
-      .eq("call_id", callId)
-      .eq("kind", "onboarding_voice_approval")
-      .eq("outcome", "accepted")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle(), boundedTimeout),
-    boundedRead(() => client
-      .from("calls")
-      .select("id,session_type,status,provider_termination_state")
-      .eq("id", callId)
-      .eq("session_type", "onboarding")
-      .maybeSingle(), boundedTimeout),
-  ]);
+  const boundedPoll = Number.isFinite(pollIntervalMs) && pollIntervalMs >= 0 ? pollIntervalMs : 250;
+  const deadline = Date.now() + boundedTimeout;
+  let revision = null;
 
-  const approvalResult = approvalRead.ok ? approvalRead.value : null;
-  const revision = approvalResult && !approvalResult.error
-    ? approvalRevision(approvalResult.data, callId)
-    : null;
-  if (revision === null) return { status: "interrupted" };
+  while (!cancellationRequested(isCancelled)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const [approvalRead, callRead] = await Promise.all([
+      boundedRead(() => client
+        .from("receipts")
+        .select("id,call_id,kind,outcome,readback,created_at")
+        .eq("call_id", callId)
+        .eq("kind", "onboarding_voice_approval")
+        .eq("outcome", "accepted")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(), remaining),
+      boundedRead(() => client
+        .from("calls")
+        .select("id,session_type,status,provider_termination_state,provider_termination_reason")
+        .eq("id", callId)
+        .eq("session_type", "onboarding")
+        .maybeSingle(), remaining),
+    ]);
+    if (cancellationRequested(isCancelled)) return { status: "interrupted" };
 
-  const callResult = callRead.ok ? callRead.value : null;
-  const call = callResult && !callResult.error && isObject(callResult.data)
-    ? callResult.data
-    : null;
-  if (!call || call.id !== callId || call.session_type !== "onboarding") {
-    return { status: "finalizing", revision };
+    const approvalResult = approvalRead.ok ? approvalRead.value : null;
+    const observedRevision = approvalResult && !approvalResult.error
+      ? approvalRevision(approvalResult.data, callId)
+      : null;
+    if (observedRevision !== null) revision = observedRevision;
+
+    const callResult = callRead.ok ? callRead.value : null;
+    const call = callResult && !callResult.error && isObject(callResult.data)
+      && callResult.data.id === callId && callResult.data.session_type === "onboarding"
+      ? callResult.data
+      : null;
+    if (call && TERMINAL_FAILURE_STATUSES.has(call.status)) {
+      return revision === null ? { status: "interrupted" } : { status: "interrupted", revision };
+    }
+    if (call?.status === "ended" && call.provider_termination_state === "confirmed") {
+      if (call.provider_termination_reason !== "agent_ended_session") {
+        return revision === null ? { status: "interrupted" } : { status: "interrupted", revision };
+      }
+      if (revision !== null) return { status: "complete", revision };
+    }
+
+    const waitFor = Math.min(boundedPoll, Math.max(0, deadline - Date.now()));
+    if (waitFor > 0) await wait(waitFor);
   }
-  if (TERMINAL_FAILURE_STATUSES.has(call.status)) {
-    return { status: "interrupted", revision };
-  }
-  if (call.status === "ended" && call.provider_termination_state === "confirmed") {
-    return { status: "complete", revision };
-  }
-  return { status: "finalizing", revision };
+
+  return revision === null ? { status: "interrupted" } : { status: "finalizing", revision };
 }
 
 export function onboardingOutcomeCopy(outcome) {
+  if (!outcome) return "Verificando conclusão…";
   if (outcome?.status === "complete") {
     return `Entrevista concluída. Cobertura confirmada por voz · revisão ${outcome.revision}. Regras ainda aguardando aprovação na Memória.`;
   }
@@ -112,77 +148,84 @@ export function onboardingOutcomeCopy(outcome) {
 
 export async function startVoiceSession({ accessToken, sessionType = "owner_browser", model, onEvent, onEnd }) {
   const media = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const pc = new RTCPeerConnection();
-  const audioEl = document.createElement("audio");
-  audioEl.autoplay = true;
-
-  pc.ontrack = (event) => { audioEl.srcObject = event.streams[0]; };
-  for (const track of media.getTracks()) pc.addTrack(track, media);
-
-  // data channel: local visibility only (captions); nothing authoritative happens here
-  const channel = pc.createDataChannel("oai-events");
-  channel.onmessage = (msg) => {
-    try {
-      const ev = JSON.parse(msg.data);
-      if (ev.type === "response.output_audio_transcript.done" && ev.transcript) onEvent?.({ kind: "agent", text: ev.transcript });
-      if (ev.type === "conversation.item.input_audio_transcription.completed" && ev.transcript) onEvent?.({ kind: "caller", text: ev.transcript });
-    } catch { /* ignore */ }
-  };
-
-  // The application can end the provider call after the onboarding close gates:
-  // surface it as an ended session instead of a silent dead line with the microphone
-  // still open. "disconnected" can be a transient ICE blip, so it gets
-  // a short grace; "failed"/"closed" and a closed data channel are terminal.
-  // These live before the handlers because a handler can fire during the setup awaits.
+  let pc = null;
+  let channel = null;
   let disconnectGrace = null;
   let deadline = null;
   let endedOnce = false;
+  let stopped = false;
   let callId = null;
-  channel.onclose = () => end("remote_hangup");
-  pc.onconnectionstatechange = () => {
-    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-      end("remote_hangup");
-    } else if (pc.connectionState === "disconnected") {
-      // 15s: transient ICE blips (wifi roaming, cell handoff) routinely exceed 5s and
-      // recover; the terminal signals above never wait on this timer.
-      if (!disconnectGrace) disconnectGrace = setTimeout(() => end("remote_hangup"), 15_000);
-    } else if (pc.connectionState === "connected" && disconnectGrace) {
-      clearTimeout(disconnectGrace);
-      disconnectGrace = null;
-    }
-  };
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-
-  const res = await fetch(SESSION_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
-    body: JSON.stringify({ sdp: offer.sdp, session_type: sessionType, model }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    stop();
-    throw new Error(body.error === "budget_exceeded" ? "Orçamento diário de voz atingido — sessão bloqueada." : body.error || `Falha ao iniciar sessão (${res.status})`);
-  }
-  const { sdp, call_id, max_minutes } = await res.json();
-  callId = call_id;
-  await pc.setRemoteDescription({ type: "answer", sdp });
-
-  if (!endedOnce) deadline = setTimeout(() => end("deadline"), max_minutes * 60_000);
 
   function stop() {
+    if (stopped) return;
+    stopped = true;
+    if (deadline) clearTimeout(deadline);
+    if (disconnectGrace) clearTimeout(disconnectGrace);
+    deadline = null;
+    disconnectGrace = null;
+    if (channel) channel.onclose = null;
+    if (pc) pc.onconnectionstatechange = null;
     for (const track of media.getTracks()) track.stop();
-    try { pc.close(); } catch { /* noop */ }
+    try { pc?.close(); } catch { /* noop */ }
   }
   function end(reason = "user") {
     if (endedOnce) return;
     endedOnce = true;
-    if (deadline) clearTimeout(deadline);
-    if (disconnectGrace) clearTimeout(disconnectGrace);
     stop();
     onEnd?.({ reason, callId });
   }
 
-  return { end, callId, maxMinutes: max_minutes };
+  try {
+    pc = new RTCPeerConnection();
+    const audioEl = document.createElement("audio");
+    audioEl.autoplay = true;
+    pc.ontrack = (event) => { audioEl.srcObject = event.streams[0]; };
+    for (const track of media.getTracks()) pc.addTrack(track, media);
+
+    // data channel: local visibility only (captions); nothing authoritative happens here
+    channel = pc.createDataChannel("oai-events");
+    channel.onmessage = (msg) => {
+      try {
+        const ev = JSON.parse(msg.data);
+        if (ev.type === "response.output_audio_transcript.done" && ev.transcript) onEvent?.({ kind: "agent", text: ev.transcript });
+        if (ev.type === "conversation.item.input_audio_transcription.completed" && ev.transcript) onEvent?.({ kind: "caller", text: ev.transcript });
+      } catch { /* ignore */ }
+    };
+
+    // The application can end the provider call after the onboarding close gates:
+    // surface it as an ended session instead of a silent dead line with the microphone
+    // still open. "disconnected" can be a transient ICE blip, so it gets
+    // a short grace; "failed"/"closed" and a closed data channel are terminal.
+    channel.onclose = () => end("remote_hangup");
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        end("remote_hangup");
+      } else if (pc.connectionState === "disconnected") {
+        if (!disconnectGrace) disconnectGrace = setTimeout(() => end("remote_hangup"), 15_000);
+      } else if (pc.connectionState === "connected" && disconnectGrace) {
+        clearTimeout(disconnectGrace);
+        disconnectGrace = null;
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const res = await fetch(SESSION_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ sdp: offer.sdp, session_type: sessionType, model }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error === "budget_exceeded" ? "Orçamento diário de voz atingido — sessão bloqueada." : body.error || `Falha ao iniciar sessão (${res.status})`);
+    }
+    const { sdp, call_id, max_minutes } = await res.json();
+    callId = call_id;
+    await pc.setRemoteDescription({ type: "answer", sdp });
+    if (!endedOnce) deadline = setTimeout(() => end("deadline"), max_minutes * 60_000);
+    return { end, callId, maxMinutes: max_minutes };
+  } catch (error) {
+    stop();
+    throw error;
+  }
 }

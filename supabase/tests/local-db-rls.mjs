@@ -115,6 +115,10 @@ export async function runAuthenticatedRlsSuite(options) {
     ...init,
     headers: { apikey: env.publishableKey, Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(init.headers ?? {}) },
   }, [env.serviceRoleKey, env.publishableKey, tokenA, tokenB]);
+  const serviceRest = async (pathname, init = {}) => jsonRequest(`${env.apiUrl}${pathname}`, {
+    ...init,
+    headers: { ...serviceHeaders, ...(init.headers ?? {}) },
+  }, [env.serviceRoleKey, env.publishableKey, tokenA, tokenB]);
 
   let checks = 0;
   const tenantsA = await rest(tokenA, "/rest/v1/tenants?select=id,slug&order=slug");
@@ -130,6 +134,15 @@ export async function runAuthenticatedRlsSuite(options) {
   assert.deepEqual(ownReceipts.body, [{ tenant_id: "71000000-0000-4000-8000-000000000001", kind: "onboarding_coverage" }]); checks++;
   const crossReceipts = await rest(tokenA, "/rest/v1/receipts?select=id&tenant_id=eq.72000000-0000-4000-8000-000000000001");
   assert.equal(crossReceipts.response.ok, true); assert.deepEqual(crossReceipts.body, []); checks++;
+  const serviceReceipt = await serviceRest(
+    "/rest/v1/receipts?select=tenant_id,call_id,kind&call_id=eq.71000000-0000-4000-8000-000000000002",
+  );
+  assert.equal(serviceReceipt.response.status, 200, `service-role receipt read failed: ${serviceReceipt.safeError()}`);
+  assert.deepEqual(serviceReceipt.body, [{
+    tenant_id: "71000000-0000-4000-8000-000000000001",
+    call_id: "71000000-0000-4000-8000-000000000002",
+    kind: "onboarding_coverage",
+  }]); checks++;
   const crossRules = await rest(tokenB, "/rest/v1/effective_rules?select=id&tenant_id=eq.71000000-0000-4000-8000-000000000001");
   assert.equal(crossRules.response.ok, true); assert.deepEqual(crossRules.body, []); checks++;
   const ownRules = await rest(tokenB, "/rest/v1/effective_rules?select=id&tenant_id=eq.72000000-0000-4000-8000-000000000001");

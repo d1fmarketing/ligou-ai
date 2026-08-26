@@ -757,7 +757,7 @@ export async function runLocalDatabaseGate() {
       "test", "db", "--local", path.join(repoRoot, "supabase/tests/database/00_schema_security.sql"),
     ], "database pgTAP assertions", [databaseSecret]);
     const pgTapCount = Number(/Tests=(\d+)/.exec(pgTapOutput)?.[1]);
-    assert.equal(pgTapCount, 27);
+    assert.equal(pgTapCount, 28);
 
     const testEnvironment = {
       PATH: process.env.PATH ?? "/usr/bin:/bin",
@@ -816,7 +816,7 @@ export async function runLocalDatabaseGate() {
       pgUser: decodeURIComponent(connection.username),
       pgPassword: databaseSecret,
     });
-    assert.equal(authenticatedRls.tests, 30);
+    assert.equal(authenticatedRls.tests, 31);
     const applicationEnv = {
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       HOME: path.join(runnerRoot, "application-home"),

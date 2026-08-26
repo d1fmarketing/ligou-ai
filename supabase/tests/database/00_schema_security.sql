@@ -1,7 +1,7 @@
 begin;
 
 create extension if not exists pgtap with schema extensions;
-select extensions.plan(27);
+select extensions.plan(28);
 
 select extensions.ok(
   not exists (
@@ -429,11 +429,23 @@ select extensions.ok(
       ('calendar_test_receipts', 'select'), ('calendar_test_receipts', 'insert'), ('calendar_test_receipts', 'update'),
       ('owner_profiles', 'select'),
       ('oauth_states', 'select'), ('oauth_states', 'insert'), ('oauth_states', 'update'),
-      ('phone_lifecycle_legacy_conflicts', 'select'), ('phone_lifecycle_legacy_conflicts', 'insert'), ('phone_lifecycle_legacy_conflicts', 'update')
+      ('phone_lifecycle_legacy_conflicts', 'select'), ('phone_lifecycle_legacy_conflicts', 'insert'), ('phone_lifecycle_legacy_conflicts', 'update'),
+      ('receipts', 'select')
     ) required(relation, privilege)
     where not has_table_privilege('service_role', format('public.%I', relation), privilege)
   ),
   'service_role has every explicit direct runtime relation grant'
+);
+
+select extensions.ok(
+  has_table_privilege('service_role', 'public.receipts', 'select')
+  and not has_table_privilege('service_role', 'public.receipts', 'insert')
+  and not has_table_privilege('service_role', 'public.receipts', 'update')
+  and not has_table_privilege('service_role', 'public.receipts', 'delete')
+  and not has_table_privilege('service_role', 'public.receipts', 'truncate')
+  and not has_table_privilege('anon', 'public.receipts', 'select,insert,update,delete')
+  and not has_table_privilege('authenticated', 'public.receipts', 'insert,update,delete'),
+  'receipt ledger grants are least-privilege and keep owner reads RLS-bound'
 );
 
 select extensions.ok(

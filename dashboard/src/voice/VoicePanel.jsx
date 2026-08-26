@@ -3,6 +3,7 @@ import { IconMicrophone2, IconPhoneOff } from "@tabler/icons-react";
 import { Dialog } from "../components/Dialog.jsx";
 import { supabase } from "../lib/supabase.js";
 import {
+  applyCurrentSessionRun,
   onboardingOutcomeCopy,
   resolveOnboardingOutcome,
   settleStartedSession,
@@ -45,17 +46,19 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
   // Um hangup remoto pode disparar onEnd enquanto o setup ainda está em voo; a
   // exceção de setup que sobra não pode sobrescrever o estado "ended" com erro cru.
   const endedRef = useRef(false);
-  // Uma leitura durável iniciada por uma sessão antiga não pode sobrescrever a
-  // próxima chamada se o usuário ligar de novo antes de a consulta terminar.
-  const outcomeRunRef = useRef(0);
+  // Cada begin ganha uma identidade monotônica. Refs booleanos continuam
+  // descrevendo somente a execução atual; callbacks de uma execução anterior
+  // nunca podem observar os valores que a próxima execução resetou.
+  const sessionRunRef = useRef(0);
 
   useEffect(() => () => {
-    outcomeRunRef.current += 1;
+    sessionRunRef.current += 1;
     cancelledRef.current = true;
     sessionRef.current?.end?.("dialog_close");
   }, []);
 
-  function handleEnd(event, endedSessionType) {
+  function handleEnd(event, endedSessionType, runId) {
+    if (sessionRunRef.current !== runId) return;
     const end = event && typeof event === "object"
       ? event
       : { reason: "remote_hangup", callId: null };
@@ -63,21 +66,25 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
     sessionRef.current = null;
     setStatus("ended");
     setOnboardingOutcome(null);
-    const run = ++outcomeRunRef.current;
     if (endedSessionType !== "onboarding") return;
     void resolveOnboardingOutcome({
       client: supabase,
       reason: end.reason,
       callId: end.callId,
+      isCancelled: () => sessionRunRef.current !== runId,
     }).then((outcome) => {
-      if (outcomeRunRef.current !== run || !endedRef.current) return;
-      setOnboardingOutcome(outcome);
+      applyCurrentSessionRun({
+        runId,
+        currentRunId: sessionRunRef.current,
+        onCurrent: () => { if (endedRef.current) setOnboardingOutcome(outcome); },
+      });
     });
   }
 
   async function begin() {
+    const runId = sessionRunRef.current + 1;
+    sessionRunRef.current = runId;
     const startedSessionType = sessionType;
-    outcomeRunRef.current += 1;
     cancelledRef.current = false;
     endedRef.current = false;
     setStatus("connecting");
@@ -88,17 +95,28 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
     setLiveSuggestions([]);
     try {
       const { data } = await supabase.auth.getSession();
+      if (sessionRunRef.current !== runId) return;
       const token = data?.session?.access_token;
       if (!token) throw new Error("Sessão expirada — entre novamente.");
       const session = await startVoiceSession({
         accessToken: token,
         model,
         sessionType: startedSessionType,
-        onEvent: (ev) => setLines((prev) => [...prev.slice(-30), ev]),
-        onEnd: (event) => handleEnd(event, startedSessionType),
+        onEvent: (ev) => applyCurrentSessionRun({
+          runId,
+          currentRunId: sessionRunRef.current,
+          onCurrent: () => setLines((prev) => [...prev.slice(-30), ev]),
+        }),
+        onEnd: (event) => applyCurrentSessionRun({
+          runId,
+          currentRunId: sessionRunRef.current,
+          onCurrent: () => handleEnd(event, startedSessionType, runId),
+        }),
       });
       settleStartedSession({
         session,
+        runId,
+        currentRunId: sessionRunRef.current,
         cancelled: cancelledRef.current,
         ended: endedRef.current,
         onAccepted: (acceptedSession) => {
@@ -107,18 +125,19 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
         },
       });
     } catch (e) {
-      if (cancelledRef.current || endedRef.current) return;
+      if (sessionRunRef.current !== runId || cancelledRef.current || endedRef.current) return;
       setError(e.message);
       setStatus("error");
     }
   }
 
   function hangup() {
+    const runId = sessionRunRef.current;
     cancelledRef.current = true;
     const session = sessionRef.current;
     sessionRef.current = null;
     if (session?.end) session.end("manual_hangup");
-    else handleEnd({ reason: "manual_hangup", callId: null }, sessionType);
+    else handleEnd({ reason: "manual_hangup", callId: null }, sessionType, runId);
   }
 
   const interviewing = sessionType === "onboarding";
@@ -156,7 +175,7 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
             {status === "ended" ? (
               <p className="voice-live-note">
                 {interviewing
-                  ? (onboardingOutcome ? onboardingOutcomeCopy(onboardingOutcome) : null)
+                  ? onboardingOutcomeCopy(onboardingOutcome)
                   : "Chamada encerrada. Resumo e custo aparecem no histórico."}
               </p>
             ) : null}

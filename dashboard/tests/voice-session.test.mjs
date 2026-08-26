@@ -16,6 +16,7 @@ const sessionModule = await vite.ssrLoadModule("/src/voice/session.js");
 after(async () => { await vite.close(); });
 
 const {
+  applyCurrentSessionRun,
   onboardingOutcomeCopy,
   resolveOnboardingOutcome,
   settleStartedSession,
@@ -47,6 +48,7 @@ function callRow(overrides = {}) {
     session_type: "onboarding",
     status: "ended",
     provider_termination_state: "confirmed",
+    provider_termination_reason: "agent_ended_session",
     ...overrides,
   };
 }
@@ -73,26 +75,29 @@ function queryClient({ receipt = { data: null, error: null }, call = { data: nul
   };
 }
 
-function installVoiceBrowser() {
+function installVoiceBrowser({ fetchImpl, remoteDescriptionError } = {}) {
   const originals = {
     navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
     RTCPeerConnection: Object.getOwnPropertyDescriptor(globalThis, "RTCPeerConnection"),
     document: Object.getOwnPropertyDescriptor(globalThis, "document"),
     fetch: Object.getOwnPropertyDescriptor(globalThis, "fetch"),
   };
-  const tracks = [{ stopped: false, stop() { this.stopped = true; } }];
+  const tracks = [{ stopped: false, stopCalls: 0, stop() { this.stopped = true; this.stopCalls += 1; } }];
   const channel = { onmessage: null, onclose: null };
+  const peers = [];
 
   class Peer {
+    constructor() { peers.push(this); }
     connectionState = "new";
+    closeCalls = 0;
     ontrack = null;
     onconnectionstatechange = null;
     createDataChannel() { return channel; }
     addTrack() {}
     async createOffer() { return { type: "offer", sdp: "offer-sdp" }; }
     async setLocalDescription() {}
-    async setRemoteDescription() {}
-    close() { this.connectionState = "closed"; }
+    async setRemoteDescription() { if (remoteDescriptionError) throw remoteDescriptionError; }
+    close() { this.closeCalls += 1; this.connectionState = "closed"; }
   }
 
   Object.defineProperty(globalThis, "navigator", {
@@ -106,14 +111,15 @@ function installVoiceBrowser() {
   });
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
-    value: async () => ({
+    value: fetchImpl ?? (async () => ({
       ok: true,
       json: async () => ({ sdp: "answer-sdp", call_id: CALL_ID, max_minutes: 1 }),
-    }),
+    })),
   });
 
   return {
     tracks,
+    peers,
     restore() {
       for (const [name, descriptor] of Object.entries(originals)) {
         if (descriptor) Object.defineProperty(globalThis, name, descriptor);
@@ -150,6 +156,8 @@ test("onEnd during setup prevents a late start resolution from restoring live", 
   const session = { endCalls: 0, end() { this.endCalls += 1; } };
   const settled = start.then((resolved) => settleStartedSession({
     session: resolved,
+    runId: 1,
+    currentRunId: 1,
     cancelled: false,
     ended,
     onAccepted() { status = "live"; },
@@ -170,6 +178,8 @@ test("manual close during setup also rejects the late session", async () => {
 
   const accepted = settleStartedSession({
     session,
+    runId: 1,
+    currentRunId: 1,
     cancelled: true,
     ended: false,
     onAccepted() { status = "live"; },
@@ -180,6 +190,81 @@ test("manual close during setup also rejects the late session", async () => {
   assert.equal(session.endCalls, 1);
 });
 
+test("overlapping A and B setup keeps stale A callbacks and resolution out of B", async () => {
+  let currentRunId = 1;
+  let status = "connecting-a";
+  const sessionA = { endCalls: 0, end() { this.endCalls += 1; } };
+  const sessionB = { endCalls: 0, end() { this.endCalls += 1; } };
+
+  assert.equal(applyCurrentSessionRun({
+    runId: 1,
+    currentRunId,
+    onCurrent() { status = "ended-a"; },
+  }), true);
+  currentRunId = 2;
+  status = "connecting-b";
+
+  assert.equal(settleStartedSession({
+    session: sessionA,
+    runId: 1,
+    currentRunId,
+    cancelled: false,
+    ended: false,
+    onAccepted() { status = "live-a"; },
+  }), false);
+  assert.equal(applyCurrentSessionRun({
+    runId: 1,
+    currentRunId,
+    onCurrent() { status = "overwritten-by-a"; },
+  }), false);
+  assert.equal(status, "connecting-b");
+  assert.equal(sessionA.endCalls, 1);
+
+  assert.equal(settleStartedSession({
+    session: sessionB,
+    runId: 2,
+    currentRunId,
+    cancelled: false,
+    ended: false,
+    onAccepted() { status = "live-b"; },
+  }), true);
+  assert.equal(status, "live-b");
+  assert.equal(sessionB.endCalls, 0);
+});
+
+test("fetch rejection after microphone acquisition releases every browser resource", async () => {
+  const browser = installVoiceBrowser({ fetchImpl: async () => { throw new Error("fetch_failed"); } });
+  try {
+    await assert.rejects(() => startVoiceSession({ accessToken: "owner-token" }), /fetch_failed/);
+    assert.equal(browser.tracks[0].stopCalls, 1);
+    assert.equal(browser.peers[0].closeCalls, 1);
+  } finally {
+    browser.restore();
+  }
+});
+
+test("remote-description failure releases resources and normal cleanup stays idempotent", async () => {
+  const failed = installVoiceBrowser({ remoteDescriptionError: new Error("remote_description_failed") });
+  try {
+    await assert.rejects(() => startVoiceSession({ accessToken: "owner-token" }), /remote_description_failed/);
+    assert.equal(failed.tracks[0].stopCalls, 1);
+    assert.equal(failed.peers[0].closeCalls, 1);
+  } finally {
+    failed.restore();
+  }
+
+  const normal = installVoiceBrowser();
+  try {
+    const session = await startVoiceSession({ accessToken: "owner-token" });
+    session.end("manual_hangup");
+    session.end("manual_hangup");
+    assert.equal(normal.tracks[0].stopCalls, 1);
+    assert.equal(normal.peers[0].closeCalls, 1);
+  } finally {
+    normal.restore();
+  }
+});
+
 test("peer close without an acknowledgement is interrupted and queries only the exact call", async () => {
   const client = queryClient({ call: { data: callRow(), error: null } });
 
@@ -187,6 +272,8 @@ test("peer close without an acknowledgement is interrupted and queries only the 
     client,
     reason: "remote_hangup",
     callId: CALL_ID,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
   });
 
   assert.deepEqual(outcome, { status: "interrupted" });
@@ -209,7 +296,9 @@ test("durable acknowledgement with provider termination pending is finalizing", 
     call: { data: callRow({ status: "active", provider_termination_state: "pending" }), error: null },
   });
 
-  const outcome = await resolveOnboardingOutcome({ client, reason: "remote_hangup", callId: CALL_ID });
+  const outcome = await resolveOnboardingOutcome({
+    client, reason: "remote_hangup", callId: CALL_ID, timeoutMs: 5, pollIntervalMs: 1,
+  });
 
   assert.deepEqual(outcome, { status: "finalizing", revision: 8 });
 });
@@ -223,6 +312,111 @@ test("only exact acknowledgement plus confirmed provider and ended call is compl
   const outcome = await resolveOnboardingOutcome({ client, reason: "remote_hangup", callId: CALL_ID });
 
   assert.deepEqual(outcome, { status: "complete", revision: 8 });
+});
+
+test("confirmed provider termination is complete only for application-owned agent close", async () => {
+  for (const provider_termination_reason of ["caller_hung_up", null, "abandoned", "sideband_error"]) {
+    const client = queryClient({
+      receipt: { data: approvalRow(), error: null },
+      call: { data: callRow({ provider_termination_reason }), error: null },
+    });
+
+    const outcome = await resolveOnboardingOutcome({
+      client, reason: "remote_hangup", callId: CALL_ID, timeoutMs: 5, pollIntervalMs: 1,
+    });
+
+    assert.deepEqual(outcome, { status: "interrupted", revision: 8 });
+    assert.match(client.queries.find((entry) => entry.table === "calls").columns, /provider_termination_reason/);
+  }
+});
+
+test("bounded polling reaches durable completion from active provider state", async () => {
+  let callReads = 0;
+  const client = queryClient({
+    receipt: { data: approvalRow(), error: null },
+    call: () => Promise.resolve({
+      data: callReads++ === 0
+        ? callRow({ status: "active", provider_termination_state: "pending" })
+        : callRow(),
+      error: null,
+    }),
+  });
+
+  const outcome = await resolveOnboardingOutcome({
+    client, reason: "remote_hangup", callId: CALL_ID, timeoutMs: 500, pollIntervalMs: 1,
+  });
+
+  assert.deepEqual(outcome, { status: "complete", revision: 8 });
+  assert.equal(callReads, 2);
+});
+
+test("bounded polling stops on terminal failure instead of waiting for its deadline", async () => {
+  let callReads = 0;
+  const client = queryClient({
+    receipt: { data: approvalRow(), error: null },
+    call: () => Promise.resolve({
+      data: callReads++ === 0
+        ? callRow({ status: "active", provider_termination_state: "pending" })
+        : callRow({ status: "killed_deadline", provider_termination_state: "confirmed", provider_termination_reason: "sideband_killed_deadline" }),
+      error: null,
+    }),
+  });
+
+  const outcome = await resolveOnboardingOutcome({
+    client, reason: "remote_hangup", callId: CALL_ID, timeoutMs: 50, pollIntervalMs: 1,
+  });
+
+  assert.deepEqual(outcome, { status: "interrupted", revision: 8 });
+  assert.equal(callReads, 2);
+});
+
+test("polling deadline is finalizing with acknowledgement and interrupted without it", async () => {
+  const pendingCall = { data: callRow({ status: "active", provider_termination_state: "pending" }), error: null };
+  const withReceipt = await resolveOnboardingOutcome({
+    client: queryClient({ receipt: { data: approvalRow(), error: null }, call: pendingCall }),
+    reason: "remote_hangup",
+    callId: CALL_ID,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+  });
+  const withoutReceipt = await resolveOnboardingOutcome({
+    client: queryClient({ call: pendingCall }),
+    reason: "remote_hangup",
+    callId: CALL_ID,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+  });
+
+  assert.deepEqual(withReceipt, { status: "finalizing", revision: 8 });
+  assert.deepEqual(withoutReceipt, { status: "interrupted" });
+});
+
+test("polling cancellation stops retries and cannot claim a stale completion", async () => {
+  let callReads = 0;
+  let cancelled = false;
+  const client = queryClient({
+    receipt: { data: approvalRow(), error: null },
+    call: () => {
+      callReads += 1;
+      cancelled = true;
+      return Promise.resolve({
+        data: callRow({ status: "active", provider_termination_state: "pending" }),
+        error: null,
+      });
+    },
+  });
+
+  const outcome = await resolveOnboardingOutcome({
+    client,
+    reason: "remote_hangup",
+    callId: CALL_ID,
+    timeoutMs: 50,
+    pollIntervalMs: 1,
+    isCancelled: () => cancelled,
+  });
+
+  assert.deepEqual(outcome, { status: "interrupted" });
+  assert.equal(callReads, 1);
 });
 
 test("manual hangup never becomes successful even when durable rows already exist", async () => {
@@ -240,7 +434,9 @@ test("manual hangup never becomes successful even when durable rows already exis
 test("a generic completed signal or WebRTC close is not durable success", async () => {
   const client = queryClient();
 
-  const outcome = await resolveOnboardingOutcome({ client, reason: "completed", callId: CALL_ID });
+  const outcome = await resolveOnboardingOutcome({
+    client, reason: "completed", callId: CALL_ID, timeoutMs: 5, pollIntervalMs: 1,
+  });
 
   assert.deepEqual(outcome, { status: "interrupted" });
 });
@@ -257,7 +453,9 @@ test("mismatched acknowledgement identity fails closed", async () => {
     call: { data: callRow(), error: null },
   });
 
-  const outcome = await resolveOnboardingOutcome({ client, reason: "remote_hangup", callId: CALL_ID });
+  const outcome = await resolveOnboardingOutcome({
+    client, reason: "remote_hangup", callId: CALL_ID, timeoutMs: 5, pollIntervalMs: 1,
+  });
 
   assert.deepEqual(outcome, { status: "interrupted" });
 });
@@ -273,6 +471,7 @@ test("unavailable or timed-out acknowledgement read is interrupted", async () =>
     reason: "remote_hangup",
     callId: CALL_ID,
     timeoutMs: 5,
+    pollIntervalMs: 1,
   });
 
   assert.deepEqual(unavailable, { status: "interrupted" });
@@ -290,6 +489,7 @@ test("acknowledgement plus unavailable terminal read remains finalizing", async 
     reason: "remote_hangup",
     callId: CALL_ID,
     timeoutMs: 5,
+    pollIntervalMs: 1,
   });
 
   assert.deepEqual(outcome, { status: "finalizing", revision: 8 });
@@ -307,6 +507,7 @@ test("terminal error cannot be relabeled as a completed interview", async () => 
 });
 
 test("onboarding result copy distinguishes interrupted, finalizing, and durable completion", () => {
+  assert.equal(onboardingOutcomeCopy(null), "Verificando conclusão…");
   assert.equal(
     onboardingOutcomeCopy({ status: "interrupted" }),
     "Entrevista interrompida. A conclusão não foi confirmada. Revise na Memória as sugestões que já foram registradas.",
