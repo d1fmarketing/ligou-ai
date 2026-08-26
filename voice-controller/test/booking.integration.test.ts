@@ -90,7 +90,7 @@ d("booking end-to-end (fake calendar)", () => {
   test("floor is enforced server-side: below-minimum close -> pending_approval case, never a calendar event", async () => {
     const c = await cap();
     const prop = await offeredBooking(c, 200);
-    expect(prop.status).toBe("proposed");
+    expect(prop).toMatchObject({ status: "proposed" });
     // Simulate a compromised internal caller changing persisted price; close
     // still reads current private policy and refuses before intent creation.
     await supa().from("bookings").update({ price_agreed: 120 }).eq("id", prop.booking_id);
@@ -104,7 +104,7 @@ d("booking end-to-end (fake calendar)", () => {
   test("within-band close -> intent -> worker -> accepted receipt with read-back -> booking confirmed", async () => {
     const c = await cap();
     const prop = await offeredBooking(c, 200);
-    expect(prop.status).toBe("proposed");
+    expect(prop).toMatchObject({ status: "proposed" });
 
     const closing = closeDeal(c, { booking_id: prop.booking_id });
     // drive the worker while close_deal waits

@@ -1,7 +1,7 @@
 // Instructions builder — layered, deterministic. Stable layers (1-4) first so prompt-prefix caching can engage;
 // anything dynamic lives in layer 5 or arrives via tools. Cache is best-effort: we MEASURE cached_tokens, never assume.
 import type { Rule, Tenant } from "./rules.ts";
-import { priceRules, ruleByCategory } from "./rules.ts";
+import { ruleByMaterializationKey, servicePolicies } from "./rules.ts";
 
 export type SessionType = "customer" | "owner_browser" | "onboarding";
 
@@ -85,16 +85,52 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
   }
 
   // 4 — business profile rendered from approved rules (stable between rule changes; deterministic order)
-  const area = ruleByCategory(rules, "area");
-  const agenda = ruleByCategory(rules, "agenda");
-  const emerg = ruleByCategory(rules, "emergencia");
-  const services = priceRules(rules)
+  const area = ruleByMaterializationKey(rules, "domain:area", "area");
+  const agenda = ruleByMaterializationKey(
+    rules,
+    "domain:schedule",
+    "agenda",
+  );
+  const emerg = ruleByMaterializationKey(
+    rules,
+    "domain:emergency",
+    "emergencia",
+  );
+  const services = servicePolicies(rules)
     .sort((a, b) => a.service_type.localeCompare(b.service_type))
     .map((s) => {
       if (s.surcharge != null) return `- ${s.service_type}: ${s.description}`;
+      if (!s.quoteable)
+        return `- ${s.service_type}: serviço aprovado para catálogo; preço e disponibilidade exigem confirmação do dono.`;
       const publicQuote = s.price_target === 0 ? "free" : `$${s.price_target}`;
-      return `- ${s.service_type}: public quote ${publicQuote}. Use evaluate_offer for every caller counteroffer.`;
+      const mode = s.price_mode === "starting_at" ? "starting at" : "public quote";
+      return `- ${s.service_type}: ${mode} ${publicQuote}. ${s.negotiable ? "Use evaluate_offer for every caller counteroffer." : "Do not negotiate this price."}`;
     })
+    .join("\n");
+  const canonicalOperationalContext = rules
+    .filter((rule) => {
+      const structured = rule.structured;
+      return Boolean(
+        structured &&
+        typeof structured.schema === "string" &&
+        /^ligou[.]rule[.](business|policy|authority|area|schedule|emergency)[.]v2$/.test(
+          structured.schema,
+        ) &&
+        structured.materialization_eligible === true &&
+        structured.review_ready === true &&
+        structured.operational_state !== "disabled" &&
+        typeof structured.materialization_key === "string" &&
+        /^[0-9a-f]{64}$/.test(String(structured.materialization_hash ?? ""))
+      );
+    })
+    .sort((left, right) =>
+      String(left.structured!.materialization_key).localeCompare(
+        String(right.structured!.materialization_key),
+      )
+    )
+    .map((rule) =>
+      `- ${String(rule.structured!.materialization_key)}: ${rule.text}`
+    )
     .join("\n");
   if (sessionType === "onboarding") {
     layers.push(
@@ -107,7 +143,10 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
       (area ? `Area: ${area.text}\n` : "") +
       (agenda ? `Hours: ${agenda.text}\n` : "") +
       (emerg ? `Emergencies: ${emerg.text}\n` : "") +
-      `Services and approved bands:\n${services}`
+      `Services and approved bands:\n${services}` +
+      (canonicalOperationalContext
+        ? `\nCanonical approved business, policy, and authority context:\n${canonicalOperationalContext}`
+        : "")
     );
   }
 
@@ -128,6 +167,7 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
       `Se for interrompido no meio de uma fala, NÃO recomece a frase nem repita a apresentação; continue do ponto onde parou. ` +
       `A primeira pergunta de descoberta vem nas instruções da resposta de greeting; diga-a exatamente depois da saudação. ` +
       `Persista cada fato em silêncio com record_interview_answer, usando um fato por chamada: topic, field, disposition, rule_text e owner_words. ` +
+      `rule_text é somente uma paráfrase de evidência; a aplicação cria a política canônica e nunca usa esse texto como autoridade operacional. ` +
       `Para qualquer field service.*, envie subject=<serviço_normalizado> no nível superior; quando houver valor tipado, envie structured={value:...}. ` +
       `Use service.name_synonyms com uma lista não vazia; service.price_mode com fixed, starting_at, estimate ou owner_review; service.price_target com número não negativo; service.negotiation com structured={value:{floor:n}} quando negociável, structured={value:"non_negotiable"} quando não negociável ou disposition=owner_review_required quando depender do dono; service.duration com minutos positivos. ` +
       `Use service.catalog_closure com structured={value:true} somente depois de o dono dizer explicitamente que não há mais serviços. ` +

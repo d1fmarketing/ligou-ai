@@ -156,6 +156,13 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
   const allMigrations = orderMigrations((await readdir(sourceMigrations)).filter((name) => name.endsWith(".sql")));
   const legacyMigrations = allMigrations.filter((name) => BigInt(migrationVersion(name)) <= 14n);
   const throughRetirement = allMigrations.filter((name) => BigInt(migrationVersion(name)) <= BigInt(retirementVersion));
+  const fixAFile = allMigrations.find((name) =>
+    name.endsWith("_onboarding_transition_safety.sql")
+  );
+  assert.ok(fixAFile, "Fix A migration must exist exactly once");
+  const beforeFixA = allMigrations.filter((name) =>
+    BigInt(migrationVersion(name)) < BigInt(migrationVersion(fixAFile))
+  );
   const tenantId = "60000000-0000-4000-8000-000000000001";
   let assertions = 0;
 
@@ -320,9 +327,116 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
     `), "legacy phone asymmetry seed", connection.password);
     assertions += 1;
 
-    for (const fileName of allMigrations.slice(throughRetirement.length)) await stage(fileName);
-    await beforeDestructive("remaining timestamp migrations");
-    await runSupabase(["migration", "up", "--local", "--include-all"], "remaining timestamp migrations");
+    for (const fileName of beforeFixA.slice(throughRetirement.length)) await stage(fileName);
+    await beforeDestructive("timestamp migrations before Fix A");
+    await runSupabase(["migration", "up", "--local", "--include-all"], "timestamp migrations before Fix A");
+    assertHistory(beforeFixA, await history(connection, home));
+    assertions += 1;
+
+    successful(await runPsql(connection, home, `
+      insert into auth.users (id, email)
+      values ('60000000-0000-4000-8000-000000000201', 'upgrade-onboarding@example.invalid');
+      insert into public.tenants
+        (id, slug, name, owner_user_id, status, operational_mode)
+      values (
+        '60000000-0000-4000-8000-000000000202',
+        'synthetic-upgrade-onboarding',
+        'Synthetic Upgrade Onboarding',
+        '60000000-0000-4000-8000-000000000201',
+        'onboarding',
+        'simulation_only'
+      );
+      insert into public.calls (id, tenant_id, channel, session_type, status)
+      values (
+        '60000000-0000-4000-8000-000000000203',
+        '60000000-0000-4000-8000-000000000202',
+        'browser',
+        'onboarding',
+        'active'
+      );
+      insert into public.browser_session_requests
+        (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp, call_id, handled_at)
+      values (
+        '60000000-0000-4000-8000-000000000202',
+        '60000000-0000-4000-8000-000000000201',
+        'onboarding',
+        'upgrade-offer',
+        'ready',
+        'upgrade-answer',
+        '60000000-0000-4000-8000-000000000203',
+        now()
+      );
+      insert into public.rules (
+        id, tenant_id, rule_group_id, version, origem, escopo, status,
+        category, text, structured, evidence_quote, related_call_id
+      ) values (
+        '60000000-0000-4000-8000-000000000204',
+        '60000000-0000-4000-8000-000000000202',
+        '60000000-0000-4000-8000-000000000205',
+        1,
+        'onboarding',
+        'geral',
+        'sugerido',
+        'outro',
+        'Legacy V1 onboarding evidence',
+        '{"coverage_field":"business.languages_tone","coverage_subject":null}'::jsonb,
+        'Tom profissional.',
+        '60000000-0000-4000-8000-000000000203'
+      );
+      insert into public.receipts (
+        id, tenant_id, call_id, kind, outcome, external_id, readback,
+        payload_hash, detail
+      ) values (
+        '60000000-0000-4000-8000-000000000206',
+        '60000000-0000-4000-8000-000000000202',
+        '60000000-0000-4000-8000-000000000203',
+        'onboarding_coverage',
+        'accepted',
+        '${"a".repeat(64)}',
+        '${JSON.stringify({
+          schema_version: 1,
+          tenant_id: "60000000-0000-4000-8000-000000000202",
+          call_id: "60000000-0000-4000-8000-000000000203",
+          revision: 1,
+          complete: false,
+          snapshot: {
+            tenantId: "60000000-0000-4000-8000-000000000202",
+            callId: "60000000-0000-4000-8000-000000000203",
+            revision: 1,
+            services: [],
+            cells: {},
+            followUps: 0,
+            followUpGroups: {},
+            summaryInvalidated: false,
+          },
+          progress: {
+            missingRequired: [{ field: "area.coverage" }],
+            ambiguous: [],
+          },
+          selected_rule_ids: ["60000000-0000-4000-8000-000000000204"],
+          next_action: {
+            type: "ask",
+            field: "area.coverage",
+            question_pt: "Qual é a área?",
+          },
+          rule_id: "60000000-0000-4000-8000-000000000204",
+          rule_group_id: "60000000-0000-4000-8000-000000000205",
+          snapshot_digest: "c".repeat(64),
+          authority: {
+            rules_approved: false,
+            powers_granted: false,
+            operational_mode_changed: false,
+          },
+        }).replaceAll("'", "''")}'::jsonb,
+        '${"b".repeat(64)}',
+        '{"answer_hash":"${"d".repeat(64)}"}'::jsonb
+      );
+    `), "pre-Fix-A V1 onboarding seed", connection.password);
+    assertions += 1;
+
+    for (const fileName of allMigrations.slice(beforeFixA.length)) await stage(fileName);
+    await beforeDestructive("Fix A and remaining timestamp migrations");
+    await runSupabase(["migration", "up", "--local", "--include-all"], "Fix A and remaining timestamp migrations");
     assertHistory(allMigrations, await history(connection, home));
     assertions += 1;
 
@@ -336,6 +450,100 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
         (select convalidated from pg_constraint
           where conrelid = 'public.receipts'::regclass and conname = 'receipts_onboarding_shape_check')::text;
     `), "onboarding receipt forward-upgrade proof", connection.password).trim(), "true:true:true:true:true");
+    assertions += 1;
+
+    assert.equal(successful(await runPsql(connection, home, `
+      begin;
+      set local role service_role;
+      select set_config('request.jwt.claim.role', 'service_role', true);
+      do $upgrade$
+      declare v_result jsonb;
+      begin
+        v_result := public.record_onboarding_answer(
+          '60000000-0000-4000-8000-000000000202',
+          '60000000-0000-4000-8000-000000000203',
+          '60000000-0000-4000-8000-000000000201',
+          'upgrade-v1-answer-two',
+          encode(extensions.digest(convert_to(
+            'ligou.v0_2.onboarding_answer:v1:60000000-0000-4000-8000-000000000202:60000000-0000-4000-8000-000000000203:upgrade-v1-answer-two',
+            'UTF8'
+          ), 'sha256'), 'hex'),
+          '${"e".repeat(64)}',
+          1,
+          '{
+            "topic":"area",
+            "field":"area.coverage",
+            "disposition":"answered",
+            "rule_text":"Atender Irvine.",
+            "structured":{"value":["Irvine"]},
+            "owner_words":"Irvine."
+          }'::jsonb,
+          '60000000-0000-4000-8000-000000000205',
+          '${JSON.stringify({
+            schema_version: 1,
+            tenant_id: "60000000-0000-4000-8000-000000000202",
+            call_id: "60000000-0000-4000-8000-000000000203",
+            revision: 2,
+            complete: false,
+            snapshot: {
+              tenantId: "60000000-0000-4000-8000-000000000202",
+              callId: "60000000-0000-4000-8000-000000000203",
+              revision: 2,
+              services: [],
+              cells: {},
+              followUps: 0,
+              followUpGroups: {},
+              summaryInvalidated: false,
+            },
+            progress: {
+              missingRequired: [{ field: "schedule.business_hours" }],
+              ambiguous: [],
+            },
+            selected_rule_ids: [],
+            next_action: {
+              type: "ask",
+              field: "schedule.business_hours",
+              question_pt: "Qual é o horário?",
+            },
+            authority: {
+              rules_approved: false,
+              powers_granted: false,
+              operational_mode_changed: false,
+            },
+          }).replaceAll("'", "''")}'::jsonb
+        );
+        if v_result->>'status' <> 'recorded' then
+          raise exception 'rollback_v1_answer_not_recorded';
+        end if;
+      end
+      $upgrade$;
+      select
+      (select max(version)::text from public.rules
+        where rule_group_id = '60000000-0000-4000-8000-000000000205') || ':' ||
+      (select max((readback->>'revision')::integer)::text from public.receipts
+        where call_id = '60000000-0000-4000-8000-000000000203'
+          and kind = 'onboarding_coverage');
+      commit;
+    `), "rollback-callable V1 answer after Fix A", connection.password)
+      .trim().split("\n").at(-1), "2:2");
+    assertions += 1;
+
+    assert.equal(successful(await runPsql(connection, home, `
+      select
+        (to_regprocedure('public.record_onboarding_followup(uuid,uuid,uuid,text,integer,text,text,jsonb)') is not null)::text || ':' ||
+        has_function_privilege('service_role', 'public.record_onboarding_followup(uuid,uuid,uuid,text,integer,text,text,jsonb)', 'execute')::text || ':' ||
+        (not has_function_privilege('authenticated', 'public.record_onboarding_followup(uuid,uuid,uuid,text,integer,text,text,jsonb)', 'execute'))::text || ':' ||
+        (select pg_get_constraintdef(oid) like '%onboarding_event_alias%'
+          from pg_constraint where conrelid = 'public.receipts'::regclass
+            and conname = 'receipts_kind_check')::text || ':' ||
+        (to_regclass('public.receipts_onboarding_answer_hash_unique') is null)::text || ':' ||
+        (to_regclass('public.receipts_onboarding_answer_hash_lookup') is not null)::text || ':' ||
+        (to_regprocedure('public.authorize_booking_intent(uuid,uuid,uuid,uuid,uuid,numeric,integer,integer,jsonb,text)') is not null)::text || ':' ||
+        (to_regprocedure('public.validate_booking_intent_authority(uuid)') is not null)::text || ':' ||
+        (to_regprocedure('public.consume_slot_offer(uuid,uuid,text,integer,integer,text,text)') is not null)::text || ':' ||
+        (to_regprocedure('public.enforce_slot_offer_private_policy()') is not null)::text;
+    `), "Fix A upgrade identities and ACL", connection.password).trim(),
+      "true:true:true:true:true:true:true:true:true:true");
     assertions += 1;
 
     assert.equal(successful(await runPsql(connection, home, `

@@ -119,6 +119,7 @@ select extensions.ok(
       ('record_booking_delivery(uuid,uuid,text,text,text,jsonb,text,jsonb,jsonb)'),
       ('record_calendar_test_result(uuid,text,text,jsonb,text)'),
       ('record_onboarding_answer(uuid,uuid,uuid,text,text,text,integer,jsonb,uuid,jsonb)'),
+      ('record_onboarding_followup(uuid,uuid,uuid,text,integer,text,text,jsonb)'),
       ('record_onboarding_voice_approval(uuid,uuid,uuid,text,text,integer,text,text)'),
       ('release_health_state(uuid,text)'),
       ('reserve_call_budget(uuid,uuid,numeric)'),
@@ -316,7 +317,6 @@ select extensions.ok(
     from (values
       ('receipts_onboarding_event_key_unique'),
       ('receipts_onboarding_coverage_revision_unique'),
-      ('receipts_onboarding_answer_hash_unique'),
       ('receipts_onboarding_approval_snapshot_unique')
     ) required(name)
     where not exists (
@@ -325,6 +325,18 @@ select extensions.ok(
       join pg_class c on c.oid = i.indexrelid
       where c.relname = required.name and i.indisunique and i.indpred is not null
     )
+  )
+  and exists (
+    select 1
+    from pg_index i
+    join pg_class c on c.oid = i.indexrelid
+    where c.relname = 'receipts_onboarding_answer_hash_lookup'
+      and not i.indisunique
+      and i.indpred is not null
+  )
+  and not exists (
+    select 1 from pg_class c
+    where c.relname = 'receipts_onboarding_answer_hash_unique'
   ),
   'booking, connector, and onboarding receipt constraints are valid'
 );
@@ -368,7 +380,12 @@ select extensions.ok(
   not has_function_privilege('service_role', 'public.prepare_booking_provider_write(uuid)', 'execute')
   and not has_function_privilege('service_role', 'public.release_booking_slot_lease(uuid)', 'execute')
   and not has_function_privilege('service_role', 'public.commit_booking_slot_lease(uuid)', 'execute')
-  and not has_function_privilege('service_role', 'public.validate_booking_intent_authority(uuid)', 'execute'),
+  and not has_function_privilege('service_role', 'public.validate_booking_intent_authority(uuid)', 'execute')
+  and not has_function_privilege('anon', 'public.validate_booking_intent_authority(uuid)', 'execute')
+  and not has_function_privilege('authenticated', 'public.validate_booking_intent_authority(uuid)', 'execute')
+  and not has_function_privilege('service_role', 'public.enforce_slot_offer_private_policy()', 'execute')
+  and not has_function_privilege('anon', 'public.enforce_slot_offer_private_policy()', 'execute')
+  and not has_function_privilege('authenticated', 'public.enforce_slot_offer_private_policy()', 'execute'),
   'removed booking RPCs are not executable by service_role'
 );
 

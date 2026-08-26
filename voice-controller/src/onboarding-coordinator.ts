@@ -108,6 +108,15 @@ export interface SnapshotRefreshRequest {
   rejectedDigest: string;
 }
 
+export interface PendingFollowup {
+  sourceRevision: number;
+  sourceDigest: string;
+  field: string;
+  subject?: string;
+  questionPt: string;
+  intentKey: string;
+}
+
 export interface ResponseIntentReceipt {
   intentKey: string;
   purpose: ResponsePurpose;
@@ -132,6 +141,7 @@ export interface OnboardingLifecycle {
   approvalCandidate?: ApprovalCandidate;
   approval?: PersistedApproval;
   snapshotRefresh?: SnapshotRefreshRequest;
+  pendingFollowup?: PendingFollowup;
   summary?: SummaryProof;
   signoff?: SignoffProof;
   invalidatedSummaryRevision?: number;
@@ -229,6 +239,15 @@ export type OnboardingCommand =
       coverageReceiptId: string;
       revision: number;
       digest: string;
+    }
+  | {
+      type: "persist_followup";
+      revision: number;
+      digest: string;
+      field: string;
+      subject?: string;
+      questionPt: string;
+      intentKey: string;
     }
   | {
       type: "resend_output";
@@ -352,6 +371,31 @@ export type OnboardingEvent =
         questionPt: string;
       };
     })
+  | (TimedEvent & {
+      type: "followup.persisted";
+      sourceRevision: number;
+      revision: number;
+      digest: string;
+      field: string;
+      subject?: string;
+      questionPt: string;
+      intentKey: string;
+    })
+  | (TimedEvent & {
+      type: "followup.persistence_failed";
+      sourceRevision: number;
+      field: string;
+      subject?: string;
+      code:
+        | "timeout"
+        | "query_error"
+        | "empty"
+        | "coverage_incomplete"
+        | "changed"
+        | "not_owner_bound"
+        | "invalid_fact";
+      safeDetail: string;
+    })
   | (TimedEvent & { type: "snapshot.loaded"; result: SnapshotResult })
   | (TimedEvent & {
       type: "snapshot.refresh_loaded";
@@ -391,7 +435,8 @@ export type OnboardingEvent =
         | "coverage_incomplete"
         | "changed"
         | "not_owner_bound"
-        | "invalid_fact";
+        | "invalid_fact"
+        | "indeterminate";
       safeDetail: string;
     })
   | (SocketEvent & { type: "tool.output_sent"; toolCallId: string })
@@ -592,7 +637,7 @@ function maybeAdvanceCoverage(
   commands: OnboardingCommand[],
   event: TimedEvent,
 ): void {
-  if (lifecycle.snapshotRefresh) return;
+  if (lifecycle.snapshotRefresh || lifecycle.pendingFollowup) return;
   const readyBatches = Object.values(lifecycle.toolBatches).filter(
     (batch) => batchIsReady(lifecycle, batch) && !batch.continuationRequested,
   );
@@ -631,32 +676,53 @@ function maybeAdvanceCoverage(
     }
     return;
   }
+  if (lifecycle.coverage.revision === 0 || !lifecycle.coverage.digest) {
+    for (const batch of readyBatches) {
+      const intentKey = `tool-batch:${batch.providerResponseId}:${batch.batchHash}`;
+      if (
+        queueResponse(lifecycle, commands, event, {
+          intentKey,
+          purpose: "tool_continuation",
+        })
+      ) batch.continuationRequested = true;
+    }
+    return;
+  }
+  if (readyBatches.length > 0 && !lifecycle.coverage.nextQuestion) {
+    block(
+      lifecycle,
+      commands,
+      event,
+      "follow_up_exhausted",
+      "incomplete coverage has no legal directed follow-up",
+    );
+    return;
+  }
   for (const batch of readyBatches) {
     const intentKey = `tool-batch:${batch.providerResponseId}:${batch.batchHash}`;
     if (lifecycle.coverage.nextQuestion) {
       lifecycle.phase = "follow_up";
-      commands.push({
-        type: "ask_follow_up",
+      lifecycle.pendingFollowup = {
+        sourceRevision: lifecycle.coverage.revision,
+        sourceDigest: lifecycle.coverage.digest ?? "",
         ...lifecycle.coverage.nextQuestion,
         intentKey,
-      });
+      };
       commands.push(
         telemetry(lifecycle, "onboarding.followup.selected", event, {
           intentKey,
           outcome: lifecycle.coverage.nextQuestion.field,
         }),
       );
-    }
-    if (
-      queueResponse(lifecycle, commands, event, {
+      commands.push({
+        type: "persist_followup",
+        revision: lifecycle.coverage.revision,
+        digest: lifecycle.coverage.digest ?? "",
+        ...lifecycle.coverage.nextQuestion,
         intentKey,
-        purpose: "tool_continuation",
-        ...(lifecycle.coverage.nextQuestion
-          ? { instructions: lifecycle.coverage.nextQuestion.questionPt }
-          : {}),
-      })
-    )
-      batch.continuationRequested = true;
+      });
+      return;
+    }
   }
 }
 
@@ -1494,6 +1560,7 @@ export function reduceOnboarding(
       }
       if (lifecycle.summary)
         lifecycle.invalidatedSummaryRevision = lifecycle.summary.revision;
+      delete lifecycle.pendingFollowup;
       terminalizeAuthorityResponseIntents(
         lifecycle,
         (intent) =>
@@ -1553,6 +1620,80 @@ export function reduceOnboarding(
           }),
         );
       maybeAdvanceCoverage(lifecycle, commands, event);
+      break;
+    }
+    case "followup.persisted": {
+      const pending = lifecycle.pendingFollowup;
+      if (
+        !pending ||
+        pending.sourceRevision !== event.sourceRevision ||
+        pending.sourceRevision !== lifecycle.coverage.revision ||
+        pending.field !== event.field ||
+        (pending.subject ?? "") !== (event.subject ?? "") ||
+        pending.questionPt !== event.questionPt ||
+        pending.intentKey !== event.intentKey ||
+        !Number.isSafeInteger(event.revision) ||
+        event.revision !== event.sourceRevision + 1 ||
+        !event.digest
+      ) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "followup_receipt_mismatch",
+          "directed follow-up receipt did not match the selected question",
+        );
+        break;
+      }
+      lifecycle.coverage.revision = event.revision;
+      lifecycle.coverage.digest = event.digest;
+      delete lifecycle.pendingFollowup;
+      lifecycle.phase = "follow_up";
+      commands.push({
+        type: "ask_follow_up",
+        field: event.field,
+        ...(event.subject ? { subject: event.subject } : {}),
+        questionPt: event.questionPt,
+        intentKey: event.intentKey,
+      });
+      if (
+        queueResponse(lifecycle, commands, event, {
+          intentKey: event.intentKey,
+          purpose: "tool_continuation",
+          instructions: event.questionPt,
+        })
+      ) {
+        const batch = Object.values(lifecycle.toolBatches).find(
+          (candidate) =>
+            `tool-batch:${candidate.providerResponseId}:${candidate.batchHash}` ===
+              event.intentKey,
+        );
+        if (batch) batch.continuationRequested = true;
+      }
+      break;
+    }
+    case "followup.persistence_failed": {
+      const pending = lifecycle.pendingFollowup;
+      if (
+        !pending ||
+        pending.sourceRevision !== event.sourceRevision ||
+        pending.field !== event.field ||
+        (pending.subject ?? "") !== (event.subject ?? "")
+      ) {
+        commands.push(
+          telemetry(lifecycle, "invariant.violation", event, {
+            outcome: "stale_followup_failure",
+          }),
+        );
+        break;
+      }
+      block(
+        lifecycle,
+        commands,
+        event,
+        event.code,
+        event.safeDetail,
+      );
       break;
     }
     case "snapshot.loaded": {

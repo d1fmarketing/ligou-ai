@@ -55,7 +55,16 @@ export function buildTrustedHermesContext(
 ): TrustedHermesContext {
   if (!(HERMES_TOPICS as readonly string[]).includes(topic)) throw new Error("hermes_topic_invalid");
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(serviceId)) throw new Error("hermes_service_invalid");
-  const approved = rules.some((rule) => rule?.structured?.service_type === serviceId);
+  const approved = rules.some((rule) => {
+    const structured = rule?.structured;
+    if (structured?.service_type !== serviceId) return false;
+    if (structured.schema !== "ligou.rule.service.v2") return true;
+    return structured.materialization_eligible === true &&
+      structured.review_ready === true &&
+      structured.operational_state !== "disabled" &&
+      structured.materialization_key === `service:${serviceId}` &&
+      /^[0-9a-f]{64}$/.test(String(structured.materialization_hash ?? ""));
+  });
   if (!approved) throw new Error("hermes_service_unknown");
   if (!Number.isSafeInteger(tenant.auth_epoch) || !Number.isSafeInteger(tenant.policy_epoch)) {
     throw new Error("hermes_authority_invalid");

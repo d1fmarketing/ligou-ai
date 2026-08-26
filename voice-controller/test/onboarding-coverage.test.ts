@@ -3,6 +3,7 @@ import {
   applyCoverageFact,
   buildSummaryAnchors,
   canonicalCoverage,
+  coverageKey,
   createCoverage,
   evaluateCoverage,
   recordDirectedFollowUp,
@@ -1210,5 +1211,70 @@ describe("onboarding coverage", () => {
       "Horário: seg, ter, 08:00, 18:00, início, fim",
     ]);
     expect(buildSummaryAnchors(first)).toEqual(buildSummaryAnchors(reversed));
+  });
+
+  test("one canonical coverage key rejects missing service subjects and every forbidden global subject", () => {
+    expect(() => coverageKey("service.price_target")).toThrow(
+      "coverage_subject_required",
+    );
+    expect(() => coverageKey("area.coverage", "Anaheim")).toThrow(
+      "coverage_subject_forbidden",
+    );
+    expect(() => coverageKey("service.catalog_closure", "catalog")).toThrow(
+      "coverage_subject_forbidden",
+    );
+    expect(coverageKey("service.price_target", "Drain Cleaning")).toBe(
+      "service:drain_cleaning:service.price_target",
+    );
+    expect(coverageKey("area.coverage")).toBe("area.coverage");
+
+    const fresh = createCoverage(identity);
+    expect(
+      applyCoverageFact(fresh, {
+        ...answer("area.coverage", ["Anaheim"]),
+        subject: "global-copy",
+      }),
+    ).toBe(fresh);
+  });
+
+  test("a directed follow-up is its own revision and cannot exceed two per group or twelve globally", () => {
+    let snapshot = createCoverage(identity);
+    const ref = { field: "area.coverage" as const };
+    const first = recordDirectedFollowUp(snapshot, ref);
+    expect(first).toMatchObject({
+      revision: 1,
+      followUps: 1,
+      followUpGroups: { "area.coverage": 1 },
+    });
+    const second = recordDirectedFollowUp(first, ref);
+    expect(second).toMatchObject({
+      revision: 2,
+      followUps: 2,
+      followUpGroups: { "area.coverage": 2 },
+    });
+    expect(recordDirectedFollowUp(second, ref)).toBe(second);
+
+    snapshot = createCoverage(identity);
+    const fields: CoverageField[] = [
+      "area.coverage",
+      "area.out_of_area_policy",
+      "area.travel_fee",
+      "schedule.business_hours",
+      "schedule.same_day_lead_time",
+      "schedule.capacity_buffer",
+      "schedule.reschedule_cancel",
+      "schedule.holidays",
+      "emergency.types",
+      "emergency.safety_escalation",
+      "emergency.after_hours",
+      "emergency.fee_authority",
+      "policy.payment_estimate",
+    ];
+    for (const field of fields.slice(0, 12))
+      snapshot = recordDirectedFollowUp(snapshot, { field });
+    expect(snapshot).toMatchObject({ revision: 12, followUps: 12 });
+    expect(recordDirectedFollowUp(snapshot, { field: fields[12]! })).toBe(
+      snapshot,
+    );
   });
 });

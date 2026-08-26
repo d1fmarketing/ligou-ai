@@ -98,6 +98,32 @@ export async function runAuthenticatedRlsSuite(options) {
        'onboarding_coverage', 'accepted', '${"e".repeat(64)}',
        '{"schema_version":1,"call_id":"72000000-0000-4000-8000-000000000002","revision":1,"complete":false,"snapshot_digest":"${"f".repeat(64)}","authority":{"rules_approved":false,"powers_granted":false,"operational_mode_changed":false}}'::jsonb,
        '${"1".repeat(64)}', '{"answer_hash":"${"2".repeat(64)}"}'::jsonb);
+    insert into public.receipts
+      (tenant_id, call_id, kind, outcome, external_id, readback, payload_hash, detail)
+    select
+      r.tenant_id,
+      r.call_id,
+      'onboarding_event_alias',
+      'accepted',
+      '${"3".repeat(64)}',
+      jsonb_build_object(
+        'schema_version', 2,
+        'call_id', r.call_id,
+        'target_kind', 'onboarding_coverage',
+        'target_receipt_id', r.id,
+        'target_revision', 1,
+        'target_digest', r.readback->>'snapshot_digest',
+        'authority', jsonb_build_object(
+          'rules_approved', false,
+          'powers_granted', false,
+          'operational_mode_changed', false
+        )
+      ),
+      '${"4".repeat(64)}',
+      jsonb_build_object('target_receipt_id', r.id)
+    from public.receipts r
+    where r.tenant_id = '71000000-0000-4000-8000-000000000001'
+      and r.kind = 'onboarding_coverage';
   `);
 
   const signIn = async (email) => {
@@ -131,18 +157,28 @@ export async function runAuthenticatedRlsSuite(options) {
   assert.equal(ownCalls.response.ok, true); assert.equal(ownCalls.body.length, 1); checks++;
   const ownReceipts = await rest(tokenA, "/rest/v1/receipts?select=tenant_id,kind&order=tenant_id");
   assert.equal(ownReceipts.response.ok, true);
-  assert.deepEqual(ownReceipts.body, [{ tenant_id: "71000000-0000-4000-8000-000000000001", kind: "onboarding_coverage" }]); checks++;
+  assert.deepEqual(ownReceipts.body, [
+    { tenant_id: "71000000-0000-4000-8000-000000000001", kind: "onboarding_coverage" },
+    { tenant_id: "71000000-0000-4000-8000-000000000001", kind: "onboarding_event_alias" },
+  ]); checks++;
   const crossReceipts = await rest(tokenA, "/rest/v1/receipts?select=id&tenant_id=eq.72000000-0000-4000-8000-000000000001");
   assert.equal(crossReceipts.response.ok, true); assert.deepEqual(crossReceipts.body, []); checks++;
   const serviceReceipt = await serviceRest(
     "/rest/v1/receipts?select=tenant_id,call_id,kind&call_id=eq.71000000-0000-4000-8000-000000000002",
   );
   assert.equal(serviceReceipt.response.status, 200, `service-role receipt read failed: ${serviceReceipt.safeError()}`);
-  assert.deepEqual(serviceReceipt.body, [{
-    tenant_id: "71000000-0000-4000-8000-000000000001",
-    call_id: "71000000-0000-4000-8000-000000000002",
-    kind: "onboarding_coverage",
-  }]); checks++;
+  assert.deepEqual(serviceReceipt.body, [
+    {
+      tenant_id: "71000000-0000-4000-8000-000000000001",
+      call_id: "71000000-0000-4000-8000-000000000002",
+      kind: "onboarding_coverage",
+    },
+    {
+      tenant_id: "71000000-0000-4000-8000-000000000001",
+      call_id: "71000000-0000-4000-8000-000000000002",
+      kind: "onboarding_event_alias",
+    },
+  ]); checks++;
   const crossRules = await rest(tokenB, "/rest/v1/effective_rules?select=id&tenant_id=eq.71000000-0000-4000-8000-000000000001");
   assert.equal(crossRules.response.ok, true); assert.deepEqual(crossRules.body, []); checks++;
   const ownRules = await rest(tokenB, "/rest/v1/effective_rules?select=id&tenant_id=eq.72000000-0000-4000-8000-000000000001");
@@ -180,6 +216,16 @@ export async function runAuthenticatedRlsSuite(options) {
       p_expected_revision: 1,
       p_expected_digest: "3".repeat(64),
       p_owner_words: "Aprovado.",
+    }],
+    ["record_onboarding_followup", {
+      p_tenant: "71000000-0000-4000-8000-000000000001",
+      p_call: "71000000-0000-4000-8000-000000000002",
+      p_owner: userA,
+      p_event_key: "4".repeat(64),
+      p_expected_revision: 1,
+      p_field: "area.coverage",
+      p_subject: null,
+      p_coverage: {},
     }],
   ]) {
     const denied = await rest(tokenA, `/rest/v1/rpc/${rpc}`, { method: "POST", body: JSON.stringify(body) });
@@ -266,7 +312,22 @@ export async function runAuthenticatedRlsSuite(options) {
     insert into public.rules (id, tenant_id, origem, escopo, status, category, text, structured)
     values ('${suggestedA}', '${bootTenantA}', 'onboarding', 'servico', 'sugerido', 'preco',
             'Basic visit: public quote $200.',
-            '{"service_type":"basic_visit","price_min":200,"price_target":200,"duration_min":60}'::jsonb);`);
+            '{
+              "schema":"ligou.rule.service.v2",
+              "materialization_key":"service:basic_visit",
+              "materialization_hash":"${"a".repeat(64)}",
+              "materialization_eligible":true,
+              "review_ready":true,
+              "operational_state":"active",
+              "service_type":"basic_visit",
+              "service_names":["Basic visit"],
+              "price_mode":"fixed",
+              "quoteable":true,
+              "negotiable":false,
+              "price_min":200,
+              "price_target":200,
+              "duration_min":60
+            }'::jsonb);`);
   const decideByB = await rest(tokenB, "/rest/v1/rpc/decide_rule", {
     method: "POST", body: JSON.stringify({ p_rule: suggestedA, p_decision: "aprovado" }),
   });
@@ -284,14 +345,62 @@ export async function runAuthenticatedRlsSuite(options) {
   });
   assert.equal(decideAgain.response.ok, false, "a decided suggestion cannot be decided twice"); checks++;
 
+  const legacyRaw = randomUUID();
+  psql(env, `
+    insert into public.rules
+      (id, tenant_id, origem, escopo, status, category, text, structured)
+    values (
+      '${legacyRaw}', '${bootTenantA}', 'onboarding', 'geral', 'sugerido',
+      'outro', 'Legacy raw model-authored onboarding rule',
+      '{"coverage_field":"business.languages_tone"}'::jsonb
+    );`);
+  const legacyRawDecision = await rest(tokenA, "/rest/v1/rpc/decide_rule", {
+    method: "POST",
+    body: JSON.stringify({ p_rule: legacyRaw, p_decision: "aprovado" }),
+  });
+  assert.equal(
+    legacyRawDecision.response.ok,
+    false,
+    "raw V1 onboarding evidence must never become effective policy",
+  ); checks++;
+
+  const ineligibleV2 = randomUUID();
+  psql(env, `
+    insert into public.rules
+      (id, tenant_id, origem, escopo, status, category, text, structured)
+    values (
+      '${ineligibleV2}', '${bootTenantA}', 'onboarding', 'servico', 'sugerido', 'preco',
+      'Unsafe incomplete materialization',
+      '{
+        "schema":"ligou.rule.service.v2",
+        "materialization_key":"service:unsafe",
+        "materialization_eligible":false,
+        "review_ready":false,
+        "operational_state":"incomplete",
+        "service_type":"unsafe",
+        "quoteable":false
+      }'::jsonb
+    );`);
+  const ineligibleDecision = await rest(tokenA, "/rest/v1/rpc/decide_rule", {
+    method: "POST",
+    body: JSON.stringify({ p_rule: ineligibleV2, p_decision: "aprovado" }),
+  });
+  assert.equal(
+    ineligibleDecision.response.ok,
+    false,
+    "owner cannot approve a V2 row that is not explicitly materialization-eligible",
+  ); checks++;
+
   const correctedGroup = randomUUID();
   const correctedOld = randomUUID();
   const correctedLatest = randomUUID();
   psql(env, `
-    insert into public.rules (id, tenant_id, rule_group_id, version, origem, escopo, status, category, text)
+    insert into public.rules (id, tenant_id, rule_group_id, version, origem, escopo, status, category, text, structured)
     values
-      ('${correctedOld}', '${bootTenantA}', '${correctedGroup}', 1, 'onboarding', 'geral', 'sugerido', 'agenda', 'Old answer'),
-      ('${correctedLatest}', '${bootTenantA}', '${correctedGroup}', 2, 'onboarding', 'geral', 'sugerido', 'agenda', 'Corrected answer');`);
+      ('${correctedOld}', '${bootTenantA}', '${correctedGroup}', 1, 'onboarding', 'geral', 'sugerido', 'agenda', 'Old answer',
+       '{"schema":"ligou.rule.schedule.v2","materialization_key":"domain:schedule","materialization_eligible":true,"review_ready":true}'::jsonb),
+      ('${correctedLatest}', '${bootTenantA}', '${correctedGroup}', 2, 'onboarding', 'geral', 'sugerido', 'agenda', 'Corrected answer',
+       '{"schema":"ligou.rule.schedule.v2","materialization_key":"domain:schedule","materialization_eligible":true,"review_ready":true}'::jsonb);`);
   const staleDecision = await rest(tokenA, "/rest/v1/rpc/decide_rule", {
     method: "POST", body: JSON.stringify({ p_rule: correctedOld, p_decision: "aprovado" }),
   });

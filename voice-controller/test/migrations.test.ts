@@ -890,3 +890,94 @@ describe("service-role onboarding receipt read grant contract", () => {
     expect(sql).not.toContain("authenticated");
   });
 });
+
+describe("onboarding transition safety migration contract", () => {
+  test("keeps the rollback-callable answer signature while replacing global dedupe with current-relative aliases", () => {
+    const sql = migrationSql("onboarding_transition_safety");
+
+    expect(sql).toContain("drop index if exists public.receipts_onboarding_answer_hash_unique");
+    expect(sql).toContain("create index receipts_onboarding_answer_hash_lookup");
+    expect(sql).toContain("onboarding_event_alias");
+    expect(sql).toContain("current_answer_hashes");
+    expect(sql).toContain("transition_kind");
+    expect(sql).toContain("exact event replay");
+    expect(sql).toContain("current-relative semantic alias");
+    expect(sql).toContain(
+      "function public.record_onboarding_answer( p_tenant uuid, p_call uuid, p_owner uuid, p_provider_tool_call_id text, p_event_key text, p_answer_hash text, p_expected_revision integer, p_fact jsonb, p_rule_group_id uuid, p_coverage jsonb )",
+    );
+    expect(sql).toContain("v_schema_version = 1");
+    expect(sql).toContain("v_schema_version = 2");
+    expect(sql).toContain("a -> b -> a");
+  });
+
+  test("persists only server-owned eligible composites and tombstones unsafe corrections atomically", () => {
+    const sql = migrationSql("onboarding_transition_safety");
+
+    expect(sql).toContain("materialization_key");
+    expect(sql).toContain("materialization_hash");
+    expect(sql).toContain("materialization_eligible");
+    expect(sql).toContain("review_ready");
+    expect(sql).toContain("ligou.rule.service.v2");
+    expect(sql).toContain("domain:area");
+    expect(sql).toContain("domain:schedule");
+    expect(sql).toContain("domain:emergency");
+    expect(sql).toContain("domain:business");
+    expect(sql).toContain("domain:policy");
+    expect(sql).toContain("domain:authority");
+    expect(sql).toContain("status, category, text, structured");
+    expect(sql).toContain("'rejeitado'");
+    expect(sql).toContain("selected_rule_ids");
+    expect(sql).toContain("summary_projection");
+    expect(sql).toContain("summary_hash");
+    expect(sql).toContain("rule_not_materialization_eligible");
+    expect(sql).toContain("v_rule.origem = 'onboarding'");
+  });
+
+  test("enforces canonical subjects and one service-role-only counter transition under the call lock", () => {
+    const sql = migrationSql("onboarding_transition_safety");
+    const start = sql.indexOf(
+      "create or replace function public.record_onboarding_followup",
+    );
+    const end = sql.indexOf(
+      "revoke all on function public.record_onboarding_followup",
+      start,
+    );
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const followup = sql.slice(start, end);
+
+    expect(sql).toContain("onboarding_subject_required");
+    expect(sql).toContain("onboarding_subject_forbidden");
+    expect(followup).toContain("security definer set search_path = ''");
+    expect(followup).toContain("pg_advisory_xact_lock(hashtextextended(");
+    expect(followup).toContain("for update of c, t, br");
+    expect(followup).toContain("p_expected_revision integer");
+    expect(followup).toContain("p_field text");
+    expect(followup).toContain("p_subject text");
+    expect(followup).toContain("followUps");
+    expect(followup).toContain("followUpGroups");
+    expect(followup).toContain("onboarding_followup_group_exhausted");
+    expect(followup).toContain("onboarding_followup_global_exhausted");
+    expect(followup).not.toContain("insert into public.rules");
+    expect(sql).toContain("revoke all on function public.record_onboarding_followup(");
+    expect(sql).toContain("uuid,uuid,uuid,text,integer,text,text,jsonb ) from public, anon, authenticated");
+    expect(sql).toContain("grant execute on function public.record_onboarding_followup(");
+    expect(sql).toContain("uuid,uuid,uuid,text,integer,text,text,jsonb ) to service_role");
+  });
+
+  test("keeps V2 owner-review and incomplete services outside every booking authority fence", () => {
+    const sql = migrationSql("onboarding_transition_safety");
+    for (const functionName of [
+      "authorize_booking_intent",
+      "validate_booking_intent_authority",
+      "consume_slot_offer",
+      "enforce_slot_offer_private_policy",
+    ])
+      expect(sql).toContain(`create or replace function public.${functionName}`);
+    expect(sql).toContain("ligou.rule.service.v2");
+    expect(sql).toContain("operational_state");
+    expect(sql).toContain("quoteable");
+    expect(sql).toContain("review_ready");
+    expect(sql).toContain("Strict legacy pricing compatibility");
+  });
+});

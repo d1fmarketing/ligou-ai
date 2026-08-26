@@ -26,6 +26,7 @@ const RULES = [
   { id: "r-nego", category: "negociacao", escopo: "geral", text: "Negotiate between min and target, never below min.", structured: { max_discount_pct: 10 } },
   { id: "r-emerg", category: "emergencia", escopo: "geral", text: "Gas smell: leave property, call 911.", structured: null },
 ];
+let activeRules = [...RULES];
 const POWERS = [{ id: "power-1", resource: "drain_cleaning", monetary_limit: 225, expires_at: null, conditions: {} }];
 
 let inserted: any[] = [];
@@ -42,6 +43,7 @@ function mockSupabase() {
       const api: any = {
         select() { return api; },
         eq(column: string, value: unknown) { filters[column] = value; return api; },
+        in() { return api; },
         is() { return api; },
         lt() { return api; },
         order() { return api; },
@@ -67,7 +69,7 @@ function mockSupabase() {
         then(resolve: (value: unknown) => unknown) {
           return Promise.resolve({
             data: table === "effective_rules"
-              ? RULES
+              ? activeRules
               : table === "powers"
                 ? POWERS
                 : table === "receipts" && coverageReceipt
@@ -127,6 +129,7 @@ beforeEach(() => {
   quoteRows = [];
   rpcCalls = [];
   coverageReceipt = null;
+  activeRules = [...RULES];
   TENANT.policy_epoch = 1;
   invalidateTenant("rocha-plumbing");
   _setClient(mockSupabase());
@@ -156,6 +159,93 @@ describe("quote_price", () => {
     const r = await runTool(cap(), "quote_price", { service_type: "emergency_callout" });
     expect(r.body.status).toBe("surcharge");
     expect(r.body.requires_team_confirmation).toBe(true);
+  });
+
+  test("quotes fixed and starting-at V2 services but routes estimate and owner-review modes to the owner", async () => {
+    const serviceRule = (
+      id: string,
+      serviceType: string,
+      mode: "fixed" | "starting_at" | "estimate" | "owner_review",
+      overrides: Record<string, unknown> = {},
+    ) => ({
+      id,
+      rule_group_id: `${id}-group`,
+      version: 1,
+      category: "preco",
+      escopo: "servico",
+      text: `Canonical ${serviceType}`,
+      structured: {
+        schema: "ligou.rule.service.v2",
+        materialization_key: `service:${serviceType}`,
+        materialization_hash: id.slice(-1).repeat(64),
+        materialization_eligible: true,
+        review_ready: true,
+        operational_state: mode === "owner_review"
+          ? "owner_review_required"
+          : "active",
+        service_type: serviceType,
+        service_names: [serviceType.replace(/_/g, " ")],
+        price_mode: mode,
+        quoteable: mode === "fixed" || mode === "starting_at",
+        negotiable: mode === "starting_at",
+        duration_min: 60,
+        owner_review_fields: mode === "owner_review"
+          ? ["service.price_mode"]
+          : [],
+        coverage_revision: 41,
+        source_call_id: "22222222-2222-4222-8222-222222222222",
+        ...overrides,
+      },
+    });
+    activeRules = [
+      serviceRule("v2a", "fixed_v2", "fixed", {
+        price_target: 149,
+        price_min: 149,
+      }),
+      serviceRule("v2b", "starting_v2", "starting_at", {
+        price_target: 225,
+        price_min: 175,
+      }),
+      serviceRule("v2c", "estimate_v2", "estimate"),
+      serviceRule("v2d", "owner_v2", "owner_review"),
+    ];
+    invalidateTenant(TENANT.slug);
+
+    const info = await runTool(cap(), "get_business_info", {});
+    expect(info.body.services).toEqual([
+      "estimate_v2",
+      "fixed_v2",
+      "owner_v2",
+      "starting_v2",
+    ]);
+
+    const fixed = await runTool(cap(), "quote_price", {
+      service_type: "fixed_v2",
+    });
+    expect(fixed.body).toMatchObject({
+      status: "quoted",
+      service_type: "fixed_v2",
+      quote_usd: 149,
+      price_mode: "fixed",
+      duration_min: 60,
+    });
+    const starting = await runTool(cap(), "quote_price", {
+      service_type: "starting_v2",
+    });
+    expect(starting.body).toMatchObject({
+      status: "quoted",
+      service_type: "starting_v2",
+      quote_usd: 225,
+      price_mode: "starting_at",
+    });
+    for (const service_type of ["estimate_v2", "owner_v2"]) {
+      const result = await runTool(cap(), "quote_price", { service_type });
+      expect(result.body).toMatchObject({
+        status: "needs_owner",
+        service_type,
+      });
+      expect(result.body.quote_usd).toBeUndefined();
+    }
   });
 });
 
@@ -256,6 +346,145 @@ describe("check_availability", () => {
     expect(r.body.status).toBe("unavailable");
     expect(r.body.reason).toBe("calendar_unreadable");
     expect(String(r.body.say)).toMatch(/team will confirm/i);
+  });
+});
+
+describe("V2 domain policies", () => {
+  const domainRule = (
+    id: string,
+    key: "domain:area" | "domain:schedule",
+    category: "area" | "agenda",
+    schema: "ligou.rule.area.v2" | "ligou.rule.schedule.v2",
+    structured: Record<string, unknown>,
+    text: string,
+  ) => ({
+    id,
+    rule_group_id: `${id}-group`,
+    version: 1,
+    category,
+    escopo: key === "domain:area" ? "localizacao" : "geral",
+    text,
+    structured: {
+      schema,
+      materialization_key: key,
+      materialization_hash: id.slice(-1).repeat(64),
+      materialization_eligible: true,
+      review_ready: true,
+      operational_state: "active",
+      ...structured,
+    },
+  });
+
+  test("prefers V2 area and typed hours over conflicting legacy domains", async () => {
+    activeRules = [
+      ...RULES,
+      domainRule(
+        "v2e",
+        "domain:area",
+        "area",
+        "ligou.rule.area.v2",
+        { cities: ["Irvine"], coverage_labels: ["Irvine"] },
+        "Somente Irvine.",
+      ),
+      domainRule(
+        "v2f",
+        "domain:schedule",
+        "agenda",
+        "ligou.rule.schedule.v2",
+        {
+          business_hours: {
+            days: ["tue"],
+            hours: { opens: "10:00", closes: "14:00" },
+          },
+        },
+        "Terça, 10:00–14:00.",
+      ),
+    ];
+    invalidateTenant(TENANT.slug);
+    const simulated = makeCapability(
+      TENANT.slug,
+      TENANT.id,
+      "call-v2-domains",
+      15,
+      "owner_browser",
+      { authEpoch: 1, policyEpoch: 1, simulation: true },
+      "u-1",
+    );
+
+    const info = await runTool(simulated, "get_business_info", {});
+    expect(info.body.service_area).toEqual(["Irvine"]);
+    expect(info.body.hours).toBe("Terça, 10:00–14:00.");
+
+    const deniedQuote = await runTool(simulated, "quote_price", {
+      service_type: "drain_cleaning",
+    });
+    const denied = await runTool(simulated, "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "Anaheim",
+      quote_id: deniedQuote.body.quote_id,
+    });
+    expect(denied.body).toMatchObject({
+      status: "needs_owner",
+      reason: "geography_not_served",
+    });
+
+    const quote = await runTool(simulated, "quote_price", {
+      service_type: "drain_cleaning",
+    });
+    const allowed = await runTool(simulated, "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "Irvine",
+      quote_id: quote.body.quote_id,
+    });
+    expect(allowed.body.status).toBe("ok");
+    const slots = allowed.body.slots as Array<{ local: string }>;
+    expect(slots.length).toBeGreaterThan(0);
+    expect(slots.every((slot) => /Tue/i.test(slot.local))).toBe(true);
+    expect(slots.every((slot) => /10:00|12:00/.test(slot.local))).toBe(true);
+  });
+
+  test("an approved owner-review schedule blocks availability instead of falling back to legacy hours", async () => {
+    activeRules = [
+      ...RULES,
+      domainRule(
+        "v2e",
+        "domain:area",
+        "area",
+        "ligou.rule.area.v2",
+        { cities: ["Irvine"] },
+        "Irvine.",
+      ),
+      domainRule(
+        "v2f",
+        "domain:schedule",
+        "agenda",
+        "ligou.rule.schedule.v2",
+        { operational_state: "owner_review_required" },
+        "Agenda depende do dono.",
+      ),
+    ];
+    invalidateTenant(TENANT.slug);
+    const simulated = makeCapability(
+      TENANT.slug,
+      TENANT.id,
+      "call-v2-owner-schedule",
+      15,
+      "owner_browser",
+      { authEpoch: 1, policyEpoch: 1, simulation: true },
+      "u-1",
+    );
+    const quote = await runTool(simulated, "quote_price", {
+      service_type: "drain_cleaning",
+    });
+    const result = await runTool(simulated, "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "Irvine",
+      quote_id: quote.body.quote_id,
+    });
+    expect(result.body).toMatchObject({
+      status: "needs_owner",
+      reason: "schedule_policy_requires_owner",
+    });
   });
 });
 
@@ -394,13 +623,21 @@ describe("capability boundary", () => {
     coverageReceipt = {
       id: "coverage-receipt-1",
       readback: {
+        schema_version: 1,
         tenant_id: TENANT.id,
         call_id: "call-onboarding",
         revision: 1,
         complete: true,
         snapshot_digest: "c".repeat(64),
         snapshot,
+        progress: { missingRequired: [], ambiguous: [] },
         selected_rule_ids: [],
+        next_action: { type: "prepare_summary" },
+        authority: {
+          rules_approved: false,
+          powers_granted: false,
+          operational_mode_changed: false,
+        },
       },
     };
     const onboarding = makeCapability(
@@ -704,6 +941,12 @@ describe("instructions builder", () => {
     ) as any;
     expect(record.description).toMatch(/exactly one owner-provided fact/i);
     expect(record.description).toMatch(/suggested evidence/i);
+    expect(record.parameters.properties.rule_text.description).toMatch(
+      /evidence paraphrase[^.]*never[^.]*operational policy/i,
+    );
+    expect(record.parameters.properties.rule_text.description).not.toMatch(
+      /the rule in clear operational language/i,
+    );
     expect(record.parameters.properties.subject.description).toMatch(
       /top-level[^.]*required[^.]*service\.\*/i,
     );

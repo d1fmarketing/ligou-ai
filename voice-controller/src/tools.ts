@@ -1,7 +1,14 @@
 // Voice tools — executed ONLY server-side under a CALLER capability. The model proposes; these handlers answer.
 // F1 surface: deterministic read/decision tools + create_async_case. Booking mutations arrive in F2 via the action worker.
 import { createHash, randomUUID } from "node:crypto";
-import { loadTenant, priceRules, supa } from "./rules.ts";
+import {
+  loadTenant,
+  priceRules,
+  ruleByMaterializationKey,
+  servicePolicies,
+  supa,
+  type Rule,
+} from "./rules.ts";
 import { calendarPort, overlapsBusy, zonedInstantIso, spokenLocal } from "./calendar.ts";
 import { checkPower, normalizeGeography } from "./powers.ts";
 import { issueQuote, issueSlotOffers, readQuote } from "./offers.ts";
@@ -222,7 +229,7 @@ const allToolSchemas = [
         field: { type: "string", enum: ONBOARDING_COVERAGE_FIELDS },
         subject: { type: "string", description: "Top-level normalized service identifier required for every service.* field; omit for service.catalog_closure and non-service fields." },
         disposition: { type: "string", enum: ["answered", "not_applicable", "owner_review_required"] },
-        rule_text: { type: "string", description: "the rule in clear operational language (English)" },
+        rule_text: { type: "string", description: "short evidence paraphrase only; the server never uses this model-authored text as operational policy" },
         structured: { type: "object", description: 'Use exactly {"value":...}: service.name_synonyms -> non-empty string array; service.price_mode -> fixed|starting_at|estimate|owner_review; service.price_target -> nonnegative number; service.negotiation -> {"floor":number} or "non_negotiable" when answered (or use owner_review_required disposition); service.duration -> positive minutes; service.catalog_closure -> true only after explicit no-more-services.' },
         owner_words: { type: "string", description: "the owner's exact words (Portuguese), as evidence" },
       },
@@ -295,6 +302,60 @@ const CAP_NAME: Record<string, string> = {
 
 export interface ToolResult { ok: boolean; body: Record<string, unknown>; durationMs: number }
 
+function hasDomainV2(rules: Rule[], key: string): boolean {
+  return rules.some((rule) => rule.structured?.materialization_key === key);
+}
+
+function areaCities(rule: Rule | undefined): string[] {
+  return Array.isArray(rule?.structured?.cities)
+    ? rule.structured.cities
+        .map((city) => normalizeGeography(String(city)))
+        .filter(Boolean)
+    : [];
+}
+
+function scheduleWindow(rules: Rule[]):
+  | { kind: "legacy"; days: Set<string>; opens: number; closes: number }
+  | { kind: "v2"; days: Set<string>; opens: number; closes: number }
+  | { kind: "blocked" } {
+  const key = "domain:schedule";
+  const rule = ruleByMaterializationKey(rules, key, "agenda");
+  if (!hasDomainV2(rules, key))
+    return {
+      kind: "legacy",
+      days: new Set(["mon", "tue", "wed", "thu", "fri", "sat"]),
+      opens: 8,
+      closes: 18,
+    };
+  if (
+    !rule || rule.structured?.operational_state !== "active" ||
+    !rule.structured.business_hours ||
+    typeof rule.structured.business_hours !== "object" ||
+    Array.isArray(rule.structured.business_hours)
+  ) return { kind: "blocked" };
+  const hours = rule.structured.business_hours as {
+    days?: unknown;
+    hours?: { opens?: unknown; closes?: unknown };
+  };
+  const allowedDays = new Set(["sun", "mon", "tue", "wed", "thu", "fri", "sat"]);
+  const days = Array.isArray(hours.days) && hours.days.every(
+      (day) => typeof day === "string" && allowedDays.has(day.toLowerCase()),
+    )
+    ? new Set(hours.days.map((day) => String(day).toLowerCase()))
+    : null;
+  const hour = (value: unknown) => {
+    const match = /^([01]?[0-9]|2[0-3]):00$/.exec(
+      String(value ?? ""),
+    );
+    return match ? Number(match[1]) : null;
+  };
+  const opens = hour(hours.hours?.opens);
+  const closes = hour(hours.hours?.closes);
+  return days && days.size > 0 && opens !== null && closes !== null && opens < closes
+    ? { kind: "v2", days, opens, closes }
+    : { kind: "blocked" };
+}
+
 export async function runTool(
   cap: Capability,
   name: string,
@@ -327,9 +388,13 @@ export async function runTool(
 
     switch (name) {
       case "get_business_info": {
-        const services = priceRules(rules).map((s) => s.service_type);
-        const area = rules.find((r) => r.category === "area");
-        const agenda = rules.find((r) => r.category === "agenda");
+        const services = servicePolicies(rules).map((s) => s.service_type);
+        const area = ruleByMaterializationKey(rules, "domain:area", "area");
+        const agenda = ruleByMaterializationKey(
+          rules,
+          "domain:schedule",
+          "agenda",
+        );
         return done({
           name: tenant.name,
           services,
@@ -340,13 +405,27 @@ export async function runTool(
       }
       case "quote_price": {
         const svc = String(args.service_type ?? "").toLowerCase().trim();
-        const match = priceRules(rules).find((s) => s.service_type === svc);
+        const match = servicePolicies(rules).find((s) => s.service_type === svc);
         if (!match) {
-          return done({ status: "needs_owner", reason: "service_not_in_approved_list", say: "Tell the caller you'll check with the team and take their contact info." });
+          return done({ status: "needs_owner", service_type: svc, reason: "service_not_in_approved_list", say: "Tell the caller you'll check with the team and take their contact info." });
         }
         if (match.surcharge != null) {
           return done({ status: "surcharge", service_type: svc, surcharge_usd: match.surcharge, requires_team_confirmation: true });
         }
+        if (
+          !match.quoteable ||
+          match.operational_state === "owner_review_required" ||
+          !Number.isFinite(Number(match.price_target)) ||
+          !Number.isFinite(Number(match.price_min)) ||
+          !Number.isFinite(Number(match.duration_min))
+        )
+          return done({
+            status: "needs_owner",
+            service_type: svc,
+            reason: match.price_mode === "estimate"
+              ? "estimate_requires_owner"
+              : "service_policy_requires_owner",
+          });
         const issued = await issueQuote({
           tenantId: cap.tenantId,
           callId: cap.callId,
@@ -360,7 +439,10 @@ export async function runTool(
           service_type: svc,
           quote_usd: match.price_target,
           quote_id: issued.quoteId,
-          negotiable_note: "If the caller makes another offer, use evaluate_offer. Never choose a negotiated price yourself.",
+          price_mode: match.price_mode === "legacy" ? "fixed" : match.price_mode,
+          negotiable_note: match.negotiable
+            ? "If the caller makes another offer, use evaluate_offer. Never choose a negotiated price yourself."
+            : "This approved public price is not negotiable; do not call evaluate_offer.",
           duration_min: match.duration_min ?? null,
         });
       }
@@ -369,6 +451,7 @@ export async function runTool(
         const offered = Number(args.offered_price ?? NaN);
         const match = priceRules(rules).find((s) => s.service_type === svc);
         if (!match || !Number.isFinite(offered) || match.surcharge != null
+          || (match.schema === "ligou.rule.service.v2" && !match.negotiable)
           || match.price_min == null || !Number.isFinite(Number(match.price_min))) {
           return done({ status: "needs_owner" });
         }
@@ -400,6 +483,24 @@ export async function runTool(
         }
         const geography = normalizeGeography(String(args.service_city ?? ""));
         if (!geography) return done({ status: "needs_owner", reason: "geography_required" });
+        const areaKey = "domain:area";
+        const areaRule = ruleByMaterializationKey(rules, areaKey, "area");
+        if (
+          hasDomainV2(rules, areaKey) &&
+          (!areaRule || areaRule.structured?.operational_state !== "active")
+        )
+          return done({
+            status: "needs_owner",
+            reason: "area_policy_requires_owner",
+            say: CUSTOMER_OUTCOME.needsTeam,
+          });
+        const cities = areaCities(areaRule);
+        if (cities.length > 0 && !cities.includes(geography))
+          return done({
+            status: "needs_owner",
+            reason: "geography_not_served",
+            say: CUSTOMER_OUTCOME.needsTeam,
+          });
         const quote = await readQuote({
           quoteId: String(args.quote_id ?? ""), tenantId: cap.tenantId, callId: cap.callId,
           serviceType: svc, policyEpoch: cap.policyEpoch,
@@ -411,6 +512,13 @@ export async function runTool(
         const tz = tenant.timezone;
         const now = new Date();
         const durH = Math.ceil((match.duration_min ?? 60) / 60);
+        const schedule = scheduleWindow(rules);
+        if (schedule.kind === "blocked")
+          return done({
+            status: "needs_owner",
+            reason: "schedule_policy_requires_owner",
+            say: CUSTOMER_OUTCOME.needsTeam,
+          });
         // Slots must be real instants (ISO/Z) derived from the TENANT's wall clock. A bare local string
         // ("2026-08-20T08:00:00") is rejected by Google freeBusy (HTTP 400) and is silently read by
         // Date.parse as the SERVER's zone — on the UTC EC2 that shifts every slot 7h and would offer
@@ -418,10 +526,20 @@ export async function runTool(
         const candidates: Array<{ start: string; end: string; local: string; price_usd: number | null }> = [];
         for (let d = 1; d <= 7 && candidates.length < 12; d++) {
           const day = new Date(now.getTime() + d * 86_400_000);
-          if (new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(day) === "Sun") continue;
+          const weekday = new Intl.DateTimeFormat("en-US", {
+            timeZone: tz,
+            weekday: "short",
+          }).format(day).slice(0, 3).toLowerCase();
+          if (!schedule.days.has(weekday)) continue;
           const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(day);
-          for (const hour of [8, 10, 13, 15]) {
-            if (hour + durH > 18) continue; // must finish inside business hours
+          const candidateHours = schedule.kind === "legacy"
+            ? [8, 10, 13, 15]
+            : Array.from(
+                { length: Math.ceil((schedule.closes - schedule.opens) / 2) },
+                (_unused, index) => schedule.opens + index * 2,
+              );
+          for (const hour of candidateHours) {
+            if (hour + durH > schedule.closes) continue;
             const start = zonedInstantIso(ymd, hour, tz);
             candidates.push({
               start,
@@ -447,13 +565,6 @@ export async function runTool(
           // enter the offers ledger and no booking power is consulted or required.
           // The approved service area IS still rehearsed, so the owner sees the
           // agent refuse geographies the business does not serve.
-          const areaRule = rules.find((r) => r.category === "area");
-          const cities = Array.isArray((areaRule?.structured as any)?.cities)
-            ? ((areaRule?.structured as any).cities as unknown[]).map((c) => normalizeGeography(String(c)))
-            : [];
-          if (cities.length && !cities.includes(geography)) {
-            return done({ status: "needs_owner", reason: "geography_not_served", say: CUSTOMER_OUTCOME.needsTeam });
-          }
           const chosen = freeCandidates.slice(0, 3);
           if (!chosen.length) return done({ status: "no_slots", timezone: tz, say: CUSTOMER_OUTCOME.noSlots });
           const slots = mintSimulationSlots(cap.callId, cap.tenantId, svc, Number(quote.public_quote), chosen);

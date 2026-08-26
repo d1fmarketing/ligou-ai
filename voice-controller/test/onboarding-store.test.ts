@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
+import {
+  applyCoverageFact,
+  createCoverage,
+  evaluateCoverage,
+  type CoverageField,
+  type CoverageSnapshot,
+} from "../src/onboarding-coverage.ts";
+import { materializeCoverage } from "../src/onboarding-materialization.ts";
 import { createOnboardingStore } from "../src/onboarding-store.ts";
 
 const TENANT_ID = "11111111-1111-4111-8111-111111111111";
@@ -73,6 +81,10 @@ class SupabaseBoundaryFake {
     data: null,
     error: null,
   };
+  rpcResults: Array<{ data: unknown; error: QueryError | null }> = [];
+  rpcNeverResolves = false;
+  rpcCommitReceipt: ReceiptRow | null = null;
+  rpcAbortSignals: AbortSignal[] = [];
   receiptNeverResolves = false;
   ignoreRuleInFilter = false;
 
@@ -170,7 +182,29 @@ class SupabaseBoundaryFake {
       },
       rpc(name: string, args: Record<string, unknown>) {
         boundary.rpcCalls.push({ name, args });
-        return Promise.resolve(boundary.rpcResult);
+        if (boundary.rpcCommitReceipt) {
+          const eventKey = String(args.p_event_key ?? "");
+          boundary.eventReceiptRows.set(eventKey, boundary.rpcCommitReceipt);
+        }
+        let signal: AbortSignal | undefined;
+        const result = boundary.rpcResults.length > 0
+          ? boundary.rpcResults.shift()!
+          : boundary.rpcResult;
+        const operation: any = {
+          abortSignal(nextSignal: AbortSignal) {
+            signal = nextSignal;
+            boundary.rpcAbortSignals.push(nextSignal);
+            return operation;
+          },
+          then(resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) {
+            if (boundary.rpcNeverResolves)
+              return new Promise(() => {}).then(resolve, reject);
+            if (signal?.aborted)
+              return Promise.reject(new Error("aborted")).then(resolve, reject);
+            return Promise.resolve(result).then(resolve, reject);
+          },
+        };
+        return operation;
       },
     };
   }
@@ -206,6 +240,39 @@ const AREA_FACT = {
   structured: { value: ["Anaheim", "Irvine"] },
   owner_words: "Atendemos Anaheim e Irvine.",
 };
+
+const UNIVERSAL_FIELDS: CoverageField[] = [
+  "business.customer_types", "business.excluded_work",
+  "business.languages_tone", "area.coverage", "area.out_of_area_policy",
+  "area.travel_fee", "schedule.business_hours", "schedule.same_day_lead_time",
+  "schedule.capacity_buffer", "schedule.reschedule_cancel", "schedule.holidays",
+  "emergency.types", "emergency.safety_escalation", "emergency.after_hours",
+  "emergency.fee_authority", "policy.payment_estimate",
+  "policy.warranty_materials", "policy.access_cancellation",
+  "policy.complaints_returns", "authority.quote_price",
+  "authority.negotiate_floor", "authority.read_calendar", "authority.book",
+  "authority.reschedule_cancel", "authority.charge_fee",
+  "authority.emergency", "authority.out_of_area",
+];
+
+function completeV2Snapshot(): CoverageSnapshot {
+  let snapshot = createCoverage({ tenantId: TENANT_ID, callId: CALL_ID });
+  snapshot = applyCoverageFact(snapshot, {
+    field: "service.catalog_closure",
+    disposition: "answered",
+    value: true,
+    ownerWords: "Não há outros serviços.",
+  });
+  for (const field of UNIVERSAL_FIELDS)
+    snapshot = applyCoverageFact(snapshot, {
+      field,
+      disposition: "owner_review_required",
+      value: null,
+      ownerWords: "Preciso revisar isso depois.",
+    });
+  expect(evaluateCoverage(snapshot).readyForReview).toBe(true);
+  return snapshot;
+}
 
 describe("recordOnboardingAnswer", () => {
   test("sends the exact first-revision RPC shape with controller-derived hashes and pure-engine coverage", async () => {
@@ -273,18 +340,25 @@ describe("recordOnboardingAnswer", () => {
       p_event_key:
         "a40d8aa6433a3670a0ed179cd1a279c79369fc5c3d62722406095c747fd70fca",
       p_answer_hash:
-        "8185a9352a4e9250a7de1b622aabd5eadf8b2231d1561978a42f34afe38b3a36",
+        "80a3fab6a38ce442e5372ee37aa0aa7f4384723f42b72305730ecf766908a4a0",
       p_expected_revision: 0,
       p_rule_group_id: null,
       p_fact: AREA_FACT,
     });
     expect(args.p_coverage).toMatchObject({
-      schema_version: 1,
+      schema_version: 2,
+      transition_kind: "answer",
       tenant_id: TENANT_ID,
       call_id: CALL_ID,
       revision: 1,
       complete: false,
       selected_rule_ids: [],
+      current_answer_hashes: {
+        "area.coverage":
+          "80a3fab6a38ce442e5372ee37aa0aa7f4384723f42b72305730ecf766908a4a0",
+      },
+      summary_projection: null,
+      summary_hash: null,
       snapshot: {
         tenantId: TENANT_ID,
         callId: CALL_ID,
@@ -311,9 +385,23 @@ describe("recordOnboardingAnswer", () => {
         operational_mode_changed: false,
       },
     });
+    expect((args.p_coverage as any).materializations).toContainEqual(
+      expect.objectContaining({
+        key: "domain:area",
+        category: "area",
+        scope: "localizacao",
+        state: "incomplete",
+        review_ready: false,
+        structured: expect.objectContaining({
+          schema: "ligou.rule.area.v2",
+          materialization_key: "domain:area",
+          materialization_eligible: false,
+        }),
+      }),
+    );
   });
 
-  test("derives a correction group from the latest same-call onboarding rule metadata", async () => {
+  test("removes the affected composite from selected IDs without accepting caller-authored group authority", async () => {
     const fake = new SupabaseBoundaryFake();
     const prior = receipt({
       complete: false,
@@ -342,6 +430,7 @@ describe("recordOnboardingAnswer", () => {
         structured: {
           coverage_field: "area.coverage",
           coverage_subject: null,
+          materialization_key: "domain:area",
         },
         created_at: "2026-08-25T01:00:00.000Z",
       },
@@ -352,6 +441,7 @@ describe("recordOnboardingAnswer", () => {
         structured: {
           coverage_field: "area.coverage",
           coverage_subject: null,
+          materialization_key: "domain:area",
         },
         created_at: "2026-08-25T02:00:00.000Z",
       },
@@ -396,12 +486,86 @@ describe("recordOnboardingAnswer", () => {
 
     expect(fake.rpcCalls[0]?.args).toMatchObject({
       p_expected_revision: 1,
-      p_rule_group_id: "correct-latest-group",
+      p_rule_group_id: null,
       p_coverage: {
+        schema_version: 2,
         revision: 2,
         selected_rule_ids: [],
       },
     });
+  });
+
+  test("rebases the first V2 answer after a V1 receipt without retaining raw facts or selected rule IDs", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.receiptRows = [receipt({
+      revision: 7,
+      complete: true,
+      snapshot: {
+        ...emptySnapshot(7),
+        cells: {
+          "business.languages_tone": {
+            state: "answered",
+            attempts: 1,
+            value: "legacy raw model fact",
+          },
+        },
+      },
+      selected_rule_ids: ["raw-v1-rule"],
+      snapshot_digest: "7".repeat(64),
+    })];
+    fake.rpcResult = {
+      data: {
+        status: "recorded",
+        rule_id: null,
+        rule_group_id: null,
+        coverage_receipt_id: "v2-rebased-receipt",
+        revision: 8,
+        snapshot_digest: "8".repeat(64),
+        complete: false,
+        missing: [{ field: "service.catalog_closure" }],
+        ambiguous: [],
+        next_action: {
+          type: "ask",
+          field: "service.catalog_closure",
+          question_pt: "Quais serviços sua empresa oferece?",
+        },
+        coverage: {},
+      },
+      error: null,
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 20,
+      timeoutMs: 100,
+    });
+
+    expect(await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-v1-to-v2",
+      AREA_FACT,
+    )).toMatchObject({ ok: true, revision: 8 });
+    expect(fake.rpcCalls[0]?.args).toMatchObject({
+      p_expected_revision: 7,
+      p_rule_group_id: null,
+      p_coverage: {
+        schema_version: 2,
+        revision: 8,
+        selected_rule_ids: [],
+        snapshot: {
+          revision: 8,
+          cells: {
+            "area.coverage": {
+              state: "answered",
+              value: ["Anaheim", "Irvine"],
+            },
+          },
+        },
+      },
+    });
+    expect((fake.rpcCalls[0]!.args.p_coverage as any).snapshot.cells)
+      .not.toHaveProperty("business.languages_tone");
+    expect(JSON.stringify(fake.rpcCalls[0]!.args.p_coverage))
+      .not.toContain("raw-v1-rule");
   });
 
   test("selects the numeric maximum coverage revision even when its created_at is earlier", async () => {
@@ -464,8 +628,14 @@ describe("recordOnboardingAnswer", () => {
     const fake = new SupabaseBoundaryFake();
     fake.receiptRows = [
       receipt({
+        schema_version: 2,
+        transition_kind: "answer",
         complete: false,
         selected_rule_ids: [],
+        current_answer_hashes: {},
+        materializations: [],
+        summary_projection: null,
+        summary_hash: null,
         snapshot: {
           ...emptySnapshot(1),
           services: ["z_service", "a_service"],
@@ -635,6 +805,217 @@ describe("recordOnboardingAnswer", () => {
     expect(fake.rpcCalls).toHaveLength(0);
   });
 
+  test("rejects every subject on non-service fields before any receipt or RPC boundary", async () => {
+    const fake = new SupabaseBoundaryFake();
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 10,
+      timeoutMs: 100,
+    });
+
+    expect(await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-global-subject",
+      { ...AREA_FACT, subject: "global-copy" },
+    )).toEqual({
+      ok: false,
+      code: "invalid_fact",
+      safeDetail: "onboarding fact is invalid",
+      durationMs: 0,
+    });
+    expect(fake.receiptSetReads).toBe(0);
+    expect(fake.rpcCalls).toHaveLength(0);
+  });
+
+  test("rejects legacy bundled fields before one provider event can mutate multiple coverage keys", async () => {
+    const fake = new SupabaseBoundaryFake();
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 10,
+      timeoutMs: 100,
+    });
+    expect(await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-bundled-fields",
+      {
+        ...AREA_FACT,
+        structured: {
+          value: {
+            fields: {
+              "area.coverage": ["Irvine"],
+              "area.out_of_area_policy": "owner_review",
+            },
+          },
+        },
+      },
+    )).toMatchObject({ ok: false, code: "invalid_fact" });
+    expect(fake.rpcCalls).toHaveLength(0);
+  });
+
+  test("reconciles a committed answer after client timeout without a second rule or orphaned revision", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.rpcNeverResolves = true;
+    fake.rpcCommitReceipt = {
+      id: "late-commit-receipt",
+      detail: {
+        fact: AREA_FACT,
+        answer_hash:
+          "8185a9352a4e9250a7de1b622aabd5eadf8b2231d1561978a42f34afe38b3a36",
+        provider_tool_call_id: "provider-late-commit",
+      },
+      readback: {
+        ...receipt({ selected_rule_ids: [] }).readback,
+        rule_id: "late-rule",
+        rule_group_id: "late-group",
+        revision: 1,
+        complete: false,
+        snapshot: {
+          ...emptySnapshot(1),
+          cells: {
+            "area.coverage": {
+              state: "answered",
+              attempts: 1,
+              value: ["Anaheim", "Irvine"],
+            },
+          },
+        },
+        progress: {
+          missingRequired: [{ field: "service.catalog_closure" }],
+          ambiguous: [],
+        },
+        next_action: {
+          type: "ask",
+          field: "service.catalog_closure",
+          question_pt: "Quais serviços sua empresa oferece?",
+        },
+        snapshot_digest: "d".repeat(64),
+      },
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: (() => {
+        let value = 0;
+        return () => value++;
+      })(),
+      timeoutMs: 5,
+    });
+
+    const result = await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-late-commit",
+      AREA_FACT,
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      status: "reused",
+      ruleId: "late-rule",
+      ruleGroupId: "late-group",
+      coverageReceiptId: "late-commit-receipt",
+      revision: 1,
+      digest: "d".repeat(64),
+    });
+    expect(fake.rpcCalls).toHaveLength(1);
+    expect(fake.rpcAbortSignals).toHaveLength(1);
+    expect(fake.rpcAbortSignals[0]?.aborted).toBe(true);
+  });
+
+  test("treats a fetch transport error as ambiguous and reconciles its exact committed event", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.rpcResults = [{
+      data: null,
+      error: { message: "TypeError: fetch failed" },
+    }];
+    fake.rpcCommitReceipt = {
+      id: "transport-commit-receipt",
+      detail: {
+        fact: AREA_FACT,
+        provider_tool_call_id: "provider-transport-commit",
+      },
+      readback: {
+        ...receipt({ selected_rule_ids: [] }).readback,
+        rule_id: "transport-rule",
+        rule_group_id: "transport-group",
+        revision: 1,
+        complete: false,
+        progress: {
+          missingRequired: [{ field: "service.catalog_closure" }],
+          ambiguous: [],
+        },
+        next_action: {
+          type: "ask",
+          field: "service.catalog_closure",
+          question_pt: "Quais serviços sua empresa oferece?",
+        },
+        snapshot_digest: "f".repeat(64),
+      },
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 50,
+      timeoutMs: 100,
+    });
+
+    expect(await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-transport-commit",
+      AREA_FACT,
+    )).toMatchObject({
+      ok: true,
+      status: "reused",
+      coverageReceiptId: "transport-commit-receipt",
+      ruleId: "transport-rule",
+      revision: 1,
+      digest: "f".repeat(64),
+    });
+    expect(fake.rpcCalls).toHaveLength(1);
+  });
+
+  test("two ambiguous mutation attempts stay indeterminate instead of becoming a definitive block", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.rpcResults = [
+      { data: null, error: { message: "fetch failed" } },
+      { data: null, error: { message: "network socket closed" } },
+    ];
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 60,
+      timeoutMs: 100,
+    });
+
+    expect(await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-double-ambiguous",
+      AREA_FACT,
+    )).toEqual({
+      ok: false,
+      code: "indeterminate",
+      safeDetail: "onboarding answer persistence is indeterminate",
+      durationMs: 0,
+    });
+    expect(fake.rpcCalls).toHaveLength(2);
+  });
+
+  test("a transient preflight receipt timeout is indeterminate and never invokes a new mutation", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.receiptNeverResolves = true;
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 70,
+      timeoutMs: 5,
+    });
+    expect(await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-preflight-timeout",
+      AREA_FACT,
+    )).toMatchObject({
+      ok: false,
+      code: "indeterminate",
+      safeDetail: "onboarding answer persistence is indeterminate",
+    });
+    expect(fake.rpcCalls).toHaveLength(0);
+  });
+
   test("does not forward capability secrets, transcripts, or model-supplied authority fields", async () => {
     const fake = new SupabaseBoundaryFake();
     fake.rpcResult = {
@@ -677,6 +1058,107 @@ describe("recordOnboardingAnswer", () => {
     expect(serialized).not.toContain("model-authored-event-key");
     expect(serialized).not.toContain("model-authored-digest");
     expect(serialized).not.toContain("model-authored-transcript");
+  });
+});
+
+describe("recordOnboardingFollowup", () => {
+  test("persists the exact selected question as a counter-only revision before it can be spoken", async () => {
+    const fake = new SupabaseBoundaryFake();
+    const prior = receipt({
+      complete: false,
+      selected_rule_ids: [],
+      snapshot: emptySnapshot(1),
+      progress: {
+        missingRequired: [{ field: "area.coverage" }],
+        ambiguous: [],
+      },
+      next_action: {
+        type: "ask",
+        field: "area.coverage",
+        question_pt: "Quais cidades vocês atendem?",
+      },
+    });
+    fake.receiptRows = [prior];
+    fake.rpcResult = {
+      data: {
+        status: "recorded",
+        coverage_receipt_id: "followup-receipt-2",
+        revision: 2,
+        snapshot_digest: "e".repeat(64),
+        complete: false,
+        missing: [{ field: "area.coverage" }],
+        ambiguous: [],
+        next_action: prior.readback.next_action,
+        coverage: {},
+      },
+      error: null,
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 30,
+      timeoutMs: 100,
+    });
+
+    const result = await store.recordOnboardingFollowup(
+      ownerCapability(),
+      {
+        revision: 1,
+        digest: "a".repeat(64),
+        field: "area.coverage",
+        questionPt: "Quais cidades vocês atendem?",
+      },
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      status: "recorded",
+      coverageReceiptId: "followup-receipt-2",
+      revision: 2,
+      digest: "e".repeat(64),
+    });
+    expect(fake.rpcCalls).toHaveLength(1);
+    expect(fake.rpcCalls[0]).toMatchObject({
+      name: "record_onboarding_followup",
+      args: {
+        p_tenant: TENANT_ID,
+        p_call: CALL_ID,
+        p_owner: OWNER_ID,
+        p_expected_revision: 1,
+        p_field: "area.coverage",
+        p_subject: null,
+        p_coverage: {
+          schema_version: 2,
+          revision: 2,
+          selected_rule_ids: [],
+          snapshot: {
+            revision: 2,
+            followUps: 1,
+            followUpGroups: { "area.coverage": 1 },
+          },
+        },
+      },
+    });
+  });
+
+  test("follow-up preflight timeout remains indeterminate for reattach retry", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.receiptNeverResolves = true;
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 30,
+      timeoutMs: 5,
+    });
+    expect(await store.recordOnboardingFollowup(ownerCapability(), {
+      revision: 1,
+      digest: "a".repeat(64),
+      field: "area.coverage",
+      questionPt: "Quais cidades vocês atendem?",
+    })).toMatchObject({
+      ok: false,
+      code: "indeterminate",
+      safeDetail: "onboarding follow-up persistence is indeterminate",
+    });
+    expect(fake.rpcCalls).toHaveLength(0);
   });
 });
 
@@ -739,6 +1221,88 @@ describe("loadOnboardingSnapshot", () => {
           version: 1,
         },
       ],
+    });
+  });
+
+  test("recomputes the complete V2 summary and exact selected materialization hashes before returning it", async () => {
+    const snapshot = completeV2Snapshot();
+    const progress = evaluateCoverage(snapshot);
+    const materialized = materializeCoverage(snapshot, progress);
+    expect(materialized.summary).not.toBeNull();
+    const selected = materialized.rules.filter((rule) => rule.reviewReady);
+    const row: ReceiptRow = {
+      id: "77777777-7777-4777-8777-777777777777",
+      readback: {
+        schema_version: 2,
+        transition_kind: "answer",
+        tenant_id: TENANT_ID,
+        call_id: CALL_ID,
+        revision: snapshot.revision,
+        complete: true,
+        snapshot,
+        progress,
+        selected_rule_ids: selected.map((_rule, index) => `v2-rule-${index}`),
+        next_action: { type: "prepare_summary" },
+        current_answer_hashes: {},
+        materializations: materialized.rules,
+        summary_projection: materialized.summary,
+        summary_hash: materialized.summary!.summaryHash,
+        snapshot_digest: "7".repeat(64),
+        authority: {
+          rules_approved: false,
+          powers_granted: false,
+          operational_mode_changed: false,
+        },
+      },
+    };
+    const fake = new SupabaseBoundaryFake();
+    fake.receiptRows = [row];
+    fake.ruleRows = selected.map((rule, index) => ({
+      id: `v2-rule-${index}`,
+      rule_group_id: `v2-group-${index}`,
+      version: 1,
+      structured: rule.structured,
+      created_at: `2026-08-25T00:00:${String(index).padStart(2, "0")}.000Z`,
+    }));
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 200,
+      timeoutMs: 100,
+    });
+
+    const result = await store.loadOnboardingSnapshot(ownerCapability());
+    expect(result).toMatchObject({
+      ok: true,
+      receiptId: row.id,
+      revision: snapshot.revision,
+      digest: "7".repeat(64),
+      summary: {
+        schemaVersion: 2,
+        summaryHash: materialized.summary!.summaryHash,
+      },
+      requiredAnchors: materialized.summary!.anchors,
+    });
+    expect(result.ok && result.summary.entries.map((entry) => entry.key).sort())
+      .toEqual(materialized.summary!.entries.map((entry) => entry.key).sort());
+    expect(result.ok && result.requiredAnchors).toContain(
+      "Idioma e tom: Não executar nem confirmar idioma e tom autonomamente; encaminhar a decisão ao dono.",
+    );
+
+    const tampered = structuredClone(row);
+    (tampered.readback.summary_projection as any).entries.pop();
+    const changedFake = new SupabaseBoundaryFake();
+    changedFake.receiptRows = [tampered];
+    changedFake.ruleRows = fake.ruleRows;
+    const changedStore = createOnboardingStore({
+      client: changedFake.client() as any,
+      now: () => 201,
+      timeoutMs: 100,
+    });
+    expect(await changedStore.loadOnboardingSnapshot(ownerCapability())).toEqual({
+      ok: false,
+      code: "changed",
+      safeDetail: "coverage snapshot changed",
+      durationMs: 0,
     });
   });
 
@@ -1090,6 +1654,74 @@ describe("recordOnboardingVoiceApproval", () => {
       expect(result).toMatchObject({ ok: false, code });
       expect(JSON.stringify(result)).not.toContain("secret");
     }
+  });
+
+  test("reconciles an approval receipt committed after the response times out", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.receiptRows = [receipt({ selected_rule_ids: [] })];
+    fake.rpcNeverResolves = true;
+    fake.rpcCommitReceipt = {
+      id: "late-approval-receipt",
+      detail: {
+        owner_words: "Aprovado.",
+        provider_tool_call_id: "approval-late",
+      },
+      readback: {
+        schema_version: 1,
+        call_id: CALL_ID,
+        snapshot_receipt_id: receipt().id,
+        snapshot_revision: 1,
+        snapshot_digest: "a".repeat(64),
+        authority: {
+          rules_approved: false,
+          powers_granted: false,
+          operational_mode_changed: false,
+        },
+      },
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: (() => {
+        let value = 0;
+        return () => value++;
+      })(),
+      timeoutMs: 5,
+    });
+
+    expect(await store.recordOnboardingVoiceApproval(
+      ownerCapability(),
+      "approval-late",
+      "Aprovado.",
+    )).toMatchObject({
+      ok: true,
+      status: "reused",
+      approvalReceiptId: "late-approval-receipt",
+      coverageReceiptId: receipt().id,
+      revision: 1,
+      digest: "a".repeat(64),
+    });
+    expect(fake.rpcCalls).toHaveLength(1);
+    expect(fake.rpcAbortSignals[0]?.aborted).toBe(true);
+  });
+
+  test("approval preflight timeout remains indeterminate for reattach retry", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.receiptNeverResolves = true;
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 10,
+      timeoutMs: 5,
+    });
+    expect(await store.recordOnboardingVoiceApproval(
+      ownerCapability(),
+      "approval-preflight-timeout",
+      "Aprovado.",
+    )).toMatchObject({
+      ok: false,
+      code: "indeterminate",
+      safeDetail: "onboarding approval persistence is indeterminate",
+    });
+    expect(fake.rpcCalls).toHaveLength(0);
   });
 });
 

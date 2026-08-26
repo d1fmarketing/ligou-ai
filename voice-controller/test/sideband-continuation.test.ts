@@ -510,20 +510,26 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     const cap = onboardingCap("call-semantic-reused");
     const boundary = sequentialAnswerBoundary([
       { status: "reused", revision: 1, digest: "1".repeat(64) },
-      { status: "recorded", revision: 3, digest: "3".repeat(64) },
+      { status: "recorded", revision: 4, digest: "4".repeat(64) },
     ]);
     _setClient(boundary.client);
     const l = ledger(cap.callId);
     const ws = socket();
     await handleEvent(cap, l, ws as any, responseCreated("resp-bootstrap"));
     await handleEvent(cap, l, ws as any, responseDone("resp-bootstrap"));
+    const nextQuestion = {
+      field: "service.catalog_closure",
+      questionPt: "Esses são todos os serviços?",
+    };
     l.onboarding!.lifecycle.coverage = {
       revision: 2,
       digest: "2".repeat(64),
       complete: false,
-      missing: [],
+      missing: [{ field: "service.catalog_closure" }],
       ambiguous: [],
+      nextQuestion,
     };
+    boundary.seedCoverage(cap, 2, "2".repeat(64), nextQuestion);
     const reusedArgs = {
       topic: "area", field: "area.coverage", disposition: "answered",
       rule_text: "Serve Irvine.", structured: { value: ["Irvine"] },
@@ -552,7 +558,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     ));
     await handleEvent(cap, l, ws as any, responseDone("resp-advance"));
     expect(l.onboarding!.lifecycle.coverage).toMatchObject({
-      revision: 3, digest: "3".repeat(64),
+      revision: 4, digest: "4".repeat(64),
     });
   });
 
@@ -1190,31 +1196,102 @@ function sequentialAnswerBoundary(results: Array<{
   digest: string;
 }>) {
   const rpcFacts: Array<Record<string, unknown>> = [];
+  let receiptRows: Array<{ id: string; readback: Record<string, unknown> }> = [];
   let resultIndex = 0;
   return {
     rpcFacts,
+    seedCoverage(
+      cap: Capability,
+      revision: number,
+      digest: string,
+      nextQuestion: { field: string; subject?: string; questionPt: string },
+    ) {
+      receiptRows = [{
+        id: `seed-receipt-${revision}`,
+        readback: {
+          schema_version: 1,
+          tenant_id: cap.tenantId,
+          call_id: cap.callId,
+          revision,
+          complete: false,
+          snapshot: {
+            ...createCoverage({ tenantId: cap.tenantId, callId: cap.callId }),
+            revision,
+          },
+          progress: {
+            missingRequired: [{
+              field: nextQuestion.field,
+              ...(nextQuestion.subject ? { subject: nextQuestion.subject } : {}),
+            }],
+            ambiguous: [],
+          },
+          selected_rule_ids: [],
+          next_action: {
+            type: "ask",
+            field: nextQuestion.field,
+            ...(nextQuestion.subject ? { subject: nextQuestion.subject } : {}),
+            question_pt: nextQuestion.questionPt,
+          },
+          snapshot_digest: digest,
+          authority: {
+            rules_approved: false,
+            powers_granted: false,
+            operational_mode_changed: false,
+          },
+        },
+      }];
+    },
     client: {
       from(table: string) {
         const query: any = {
           select() { return query; }, eq() { return query; }, order() { return query; },
+          in() { return query; },
           limit() { return query; },
           maybeSingle: async () => ({ data: null, error: null }),
           then(resolve: (value: unknown) => unknown) {
             return Promise.resolve({
-              data: table === "receipts" ? [] : [], error: null,
+              data: table === "receipts" ? receiptRows : [], error: null,
             }).then(resolve);
           },
         };
         return query;
       },
       rpc(name: string, args: Record<string, unknown>) {
+        if (name === "record_onboarding_followup") {
+          const coverage = structuredClone(
+            args.p_coverage as Record<string, unknown>,
+          );
+          const revision = Number(args.p_expected_revision) + 1;
+          const digest = String(revision).slice(-1).repeat(64);
+          receiptRows = [{
+            id: `followup-receipt-${revision}`,
+            readback: {
+              ...coverage,
+              revision,
+              snapshot_digest: digest,
+            },
+          }];
+          return Promise.resolve({
+            data: {
+              status: "recorded",
+              coverage_receipt_id: `followup-receipt-${revision}`,
+              revision,
+              snapshot_digest: digest,
+              complete: false,
+              missing: (coverage.progress as any)?.missingRequired ?? [],
+              ambiguous: (coverage.progress as any)?.ambiguous ?? [],
+              next_action: coverage.next_action,
+              coverage: receiptRows[0]!.readback,
+            },
+            error: null,
+          });
+        }
         if (name !== "record_onboarding_answer")
           return Promise.resolve({ data: null, error: { message: "unexpected rpc" } });
         rpcFacts.push(args.p_fact as Record<string, unknown>);
         const next = results[Math.min(resultIndex, results.length - 1)]!;
         resultIndex += 1;
-        return Promise.resolve({
-          data: {
+        const response = {
             status: next.status,
             rule_id: `rule-${resultIndex}`,
             rule_group_id: `group-${resultIndex}`,
@@ -1230,7 +1307,23 @@ function sequentialAnswerBoundary(results: Array<{
               question_pt: "Esses são todos os serviços?",
             },
             coverage: {},
-          },
+        };
+        if (next.status === "recorded") {
+          const coverage = structuredClone(
+            args.p_coverage as Record<string, unknown>,
+          );
+          coverage.revision = next.revision;
+          if (coverage.snapshot && typeof coverage.snapshot === "object")
+            (coverage.snapshot as Record<string, unknown>).revision = next.revision;
+          coverage.snapshot_digest = next.digest;
+          response.coverage = coverage;
+          receiptRows = [{
+            id: `receipt-${next.revision}`,
+            readback: coverage,
+          }];
+        }
+        return Promise.resolve({
+          data: response,
           error: null,
         });
       },
@@ -1900,6 +1993,7 @@ describe("physical socket attach and reconnect", () => {
       from(table: string) {
         const query: any = {
           select() { return query; }, eq() { return query; }, order() { return query; },
+          in() { return query; },
           limit() { return query; },
           maybeSingle: async () => ({ data: null, error: null }),
           then(resolve: (value: unknown) => unknown) {
@@ -1977,6 +2071,124 @@ describe("physical socket attach and reconnect", () => {
       expect(functionOutputs(second)).toHaveLength(1);
       expect(functionOutputs(second)[0].item.id)
         .toBe("tool-output:fc-mid-persist");
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+      _setClient(null);
+    }
+  });
+
+  test("indeterminate mutation retries the exact event on reattach and emits one output without blocking", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-indeterminate-reattach");
+    let answerAttempts = 0;
+    _setClient({
+      from() {
+        const query: any = {
+          select() { return query; },
+          eq() { return query; },
+          in() { return query; },
+          order() { return query; },
+          limit() { return query; },
+          maybeSingle: async () => ({ data: null, error: null }),
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({ data: [], error: null }).then(resolve);
+          },
+        };
+        return query;
+      },
+      rpc(name: string, args: Record<string, unknown>) {
+        if (name !== "record_onboarding_answer")
+          return Promise.resolve({
+            data: null,
+            error: { message: `unexpected rpc ${name}` },
+          });
+        answerAttempts += 1;
+        if (answerAttempts <= 2)
+          return Promise.resolve({
+            data: null,
+            error: { message: answerAttempts === 1
+              ? "fetch failed"
+              : "network socket closed" },
+          });
+        return Promise.resolve({
+          data: {
+            status: "recorded",
+            rule_id: null,
+            rule_group_id: null,
+            coverage_receipt_id: "receipt-after-reattach",
+            revision: 1,
+            snapshot_digest: "9".repeat(64),
+            complete: false,
+            missing: [{ field: "service.catalog_closure" }],
+            ambiguous: [],
+            next_action: {
+              type: "ask",
+              field: "service.catalog_closure",
+              question_pt: "Há mais algum serviço?",
+            },
+            coverage: args.p_coverage,
+          },
+          error: null,
+        });
+      },
+    } as any);
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-indeterminate-reattach",
+        "gpt-realtime-2.1",
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      first.message(responseCreated("resp-greeting", `greeting:${cap.callId}`));
+      first.message(responseDone("resp-greeting"));
+      await flushAsync();
+      first.message(responseCreated("resp-indeterminate"));
+      first.message(functionCallDone(
+        "resp-indeterminate",
+        "fc-indeterminate",
+        "record_interview_answer",
+        JSON.stringify({
+          topic: "area",
+          field: "area.coverage",
+          disposition: "answered",
+          rule_text: "Atende Irvine.",
+          structured: { value: ["Irvine"] },
+          owner_words: "Atendemos Irvine.",
+        }),
+      ));
+      first.message(responseDone("resp-indeterminate"));
+      await flushAsync();
+
+      expect(answerAttempts).toBe(2);
+      expect(functionOutputs(first)).toHaveLength(0);
+      expect(control.ledger.onboarding!.lifecycle.phase).not.toBe("blocked");
+      expect(control.ledger.onboarding!.lifecycle.toolOutbox["fc-indeterminate"]?.state)
+        .toBe("running");
+      expect(Object.keys(control.ledger.onboarding!.pendingMutationCommands))
+        .toEqual(["fact:fc-indeterminate"]);
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      expect(answerAttempts).toBe(3);
+      expect(functionOutputs(second)).toHaveLength(1);
+      expect(functionOutputs(second)[0].item).toMatchObject({
+        id: "tool-output:fc-indeterminate",
+        call_id: "fc-indeterminate",
+      });
+      expect(control.ledger.onboarding!.lifecycle.toolOutbox["fc-indeterminate"]?.state)
+        .toBe("output_pending");
+      expect(control.ledger.onboarding!.pendingMutationCommands).toEqual({});
+      expect(control.ledger.onboarding!.lifecycle.phase).not.toBe("blocked");
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);

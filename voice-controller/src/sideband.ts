@@ -18,14 +18,29 @@ import {
 import {
   loadOnboardingSnapshot,
   recordOnboardingAnswer,
+  recordOnboardingFollowup,
   recordOnboardingVoiceApproval,
   type OnboardingAnswerArgs,
 } from "./onboarding-store.ts";
+import type { CoverageField } from "./onboarding-coverage.ts";
 
 type RequestResponseCommand = Extract<
   OnboardingCommand,
   { type: "request_response" }
 >;
+type PersistFactCommand = Extract<OnboardingCommand, { type: "persist_fact" }>;
+type PersistFollowupCommand = Extract<
+  OnboardingCommand,
+  { type: "persist_followup" }
+>;
+type PersistApprovalCommand = Extract<
+  OnboardingCommand,
+  { type: "persist_approval" }
+>;
+type PendingMutationCommand =
+  | PersistFactCommand
+  | PersistFollowupCommand
+  | PersistApprovalCommand;
 
 interface BufferedOnboardingTool {
   toolCallId: string;
@@ -64,6 +79,7 @@ export interface OnboardingAdapterState {
   interrupted: boolean;
   pendingHangupIntentKey?: string;
   pendingResponseCommands: Record<string, RequestResponseCommand>;
+  pendingMutationCommands: Record<string, PendingMutationCommand>;
   speechGeneration: number;
   speechPending: boolean;
   speechResponseId?: string;
@@ -71,6 +87,7 @@ export interface OnboardingAdapterState {
 
 const MAX_ADAPTER_RESPONSES = 512;
 const MAX_PENDING_RESPONSE_COMMANDS = 512;
+const MAX_PENDING_MUTATION_COMMANDS = 512;
 const MAX_ADAPTER_TOOL_RECEIPTS = 512;
 const MAX_ADAPTER_TOOL_BATCHES = 512;
 
@@ -146,6 +163,7 @@ function createOnboardingAdapter(callId: string): OnboardingAdapterState {
     callerTurnSequence: 0,
     interrupted: false,
     pendingResponseCommands: {},
+    pendingMutationCommands: {},
     speechGeneration: 0,
     speechPending: false,
   };
@@ -333,6 +351,13 @@ function sameCoverageRef(
   return ref.field === candidate.field && (ref.subject ?? "") === (candidate.subject ?? "");
 }
 
+function pendingMutationKey(command: PendingMutationCommand): string {
+  if (command.type === "persist_fact") return `fact:${command.toolCallId}`;
+  if (command.type === "persist_approval")
+    return `approval:${command.toolCallId}`;
+  return `followup:${command.revision}:${command.field}:${command.subject ?? ""}`;
+}
+
 async function executeOnboardingCommands(
   context: OnboardingCommandContext,
   commands: OnboardingCommand[],
@@ -344,6 +369,27 @@ async function executeOnboardingCommands(
   for (const command of commands) {
     if (!retainsCallAuthority() && command.type !== "telemetry") return;
     const adapter = ensureOnboardingAdapter(ledger);
+    if (
+      command.type === "persist_fact" ||
+      command.type === "persist_followup" ||
+      command.type === "persist_approval"
+    ) {
+      const key = pendingMutationKey(command);
+      if (
+        !adapter.pendingMutationCommands[key] &&
+        Object.keys(adapter.pendingMutationCommands).length >=
+          MAX_PENDING_MUTATION_COMMANDS
+      ) {
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "adapter_capacity_exceeded",
+          safeDetail: "pending mutation registry reached its deterministic bound",
+          elapsedMs: 0,
+        });
+        continue;
+      }
+      adapter.pendingMutationCommands[key] = structuredClone(command);
+    }
     if (command.type === "request_response") {
       if (!pendingResponseCommandIsCurrent(adapter, command)) {
         delete adapter.pendingResponseCommands[command.intentKey];
@@ -438,6 +484,7 @@ async function executeOnboardingCommands(
         break;
       }
       case "persist_fact": {
+        const mutationKey = pendingMutationKey(command);
         ledger.pendingToolCalls = (ledger.pendingToolCalls ?? 0) + 1;
         const result = await recordOnboardingAnswer(
           cap,
@@ -469,6 +516,8 @@ async function executeOnboardingCommands(
           durationMs: result.durationMs,
         });
         if (!result.ok) {
+          if (result.code === "indeterminate") break;
+          delete adapter.pendingMutationCommands[mutationKey];
           await dispatchOnboardingEvent(context, {
             type: "tool.execution_failed",
             toolCallId: command.toolCallId,
@@ -479,6 +528,7 @@ async function executeOnboardingCommands(
           adapter.interrupted = true;
           break;
         }
+        delete adapter.pendingMutationCommands[mutationKey];
         const currentCoverage = adapter.lifecycle.coverage;
         const nonAdvancingReuse = result.status === "reused" &&
           result.revision <= currentCoverage.revision;
@@ -527,6 +577,44 @@ async function executeOnboardingCommands(
         });
         break;
       }
+      case "persist_followup": {
+        const mutationKey = pendingMutationKey(command);
+        const result = await recordOnboardingFollowup(cap, {
+          revision: command.revision,
+          digest: command.digest,
+          field: command.field as CoverageField,
+          ...(command.subject ? { subject: command.subject } : {}),
+          questionPt: command.questionPt,
+        });
+        if (!retainsCallAuthority()) return;
+        if (!result.ok) {
+          if (result.code === "indeterminate") break;
+          delete adapter.pendingMutationCommands[mutationKey];
+          await dispatchOnboardingEvent(context, {
+            type: "followup.persistence_failed",
+            sourceRevision: command.revision,
+            field: command.field,
+            ...(command.subject ? { subject: command.subject } : {}),
+            code: result.code,
+            safeDetail: result.safeDetail,
+            elapsedMs: result.durationMs,
+          });
+          break;
+        }
+        delete adapter.pendingMutationCommands[mutationKey];
+        await dispatchOnboardingEvent(context, {
+          type: "followup.persisted",
+          sourceRevision: command.revision,
+          revision: result.revision,
+          digest: result.digest,
+          field: command.field,
+          ...(command.subject ? { subject: command.subject } : {}),
+          questionPt: command.questionPt,
+          intentKey: command.intentKey,
+          elapsedMs: result.durationMs,
+        });
+        break;
+      }
       case "execute_tool": {
         ledger.pendingToolCalls = (ledger.pendingToolCalls ?? 0) + 1;
         const result = await runTool(
@@ -553,6 +641,7 @@ async function executeOnboardingCommands(
         break;
       }
       case "persist_approval": {
+        const mutationKey = pendingMutationKey(command);
         ledger.pendingToolCalls = (ledger.pendingToolCalls ?? 0) + 1;
         const result = await recordOnboardingVoiceApproval(
           cap,
@@ -567,6 +656,8 @@ async function executeOnboardingCommands(
           durationMs: result.durationMs,
         });
         if (!result.ok) {
+          if (result.code === "indeterminate") break;
+          delete adapter.pendingMutationCommands[mutationKey];
           await dispatchOnboardingEvent(context, {
             type: "approval.persistence_failed",
             toolCallId: command.toolCallId,
@@ -576,6 +667,7 @@ async function executeOnboardingCommands(
           });
           break;
         }
+        delete adapter.pendingMutationCommands[mutationKey];
         const output = safeToolOutput({
           status: result.status,
           approval_receipt_id: result.approvalReceiptId,
@@ -676,12 +768,22 @@ async function attachOnboardingSocket(
     (context.ledger.onboarding = createOnboardingAdapter(context.ledger.callId));
   const pendingBeforeAttach = Object.values(adapter.pendingResponseCommands)
     .map((command) => structuredClone(command));
+  const pendingMutationsBeforeAttach = Object.values(
+    adapter.pendingMutationCommands,
+  ).map((command) => structuredClone(command));
   const generation = adapter.lifecycle.socketGeneration + 1;
   await dispatchOnboardingEvent(context, {
     type: "socket.attached",
     socketGeneration: generation,
     elapsedMs: 0,
   });
+  if (
+    adapter.lifecycle.phase !== "blocked" &&
+    adapter.lifecycle.phase !== "closed" &&
+    adapter.lifecycle.phase !== "provider_terminating"
+  )
+    for (const command of pendingMutationsBeforeAttach)
+      await executeOnboardingCommands(context, [command]);
   for (const command of pendingBeforeAttach)
     await executeOnboardingCommands(context, [command]);
 }

@@ -1262,23 +1262,26 @@ describe("reconnect-safe onboarding tool outbox", () => {
       elapsedMs: 17,
     });
     expect(
-      complete.commands.filter(
+      complete.commands.filter((command) => command.type === "persist_followup"),
+    ).toHaveLength(1);
+    const persisted = step(complete.lifecycle, {
+      type: "followup.persisted",
+      sourceRevision: 3,
+      revision: 4,
+      digest: "digest-4-followup",
+      field: "area.coverage",
+      questionPt: "Quais cidades vocês atendem?",
+      intentKey: "tool-batch:response-three-prices:three-price-hash",
+      elapsedMs: 18,
+    });
+    expect(
+      persisted.commands.filter(
         (command) =>
           command.type === "request_response" &&
           command.intentKey ===
             "tool-batch:response-three-prices:three-price-hash",
       ),
     ).toHaveLength(1);
-    const replay = step(complete.lifecycle, {
-      type: "tool.output_acked",
-      toolCallId: "tool-3",
-      outputItemId: "tool-output:tool-3",
-      socketGeneration: 1,
-      elapsedMs: 18,
-    });
-    expect(
-      replay.commands.filter((command) => command.type === "request_response"),
-    ).toHaveLength(0);
   });
 });
 
@@ -1352,12 +1355,31 @@ describe("canonical 7f58ee06 cadence", () => {
       },
       elapsedMs: 45,
     }));
-    ({ lifecycle } = step(lifecycle, {
+    const parentTerminal = step(lifecycle, {
       type: "response.done",
       responseId: "response-prices",
       socketGeneration: 1,
       elapsedMs: 46,
-    }));
+    });
+    lifecycle = parentTerminal.lifecycle;
+    beforeCoverage.push(...parentTerminal.commands);
+    expect(
+      parentTerminal.commands.filter((command) =>
+        command.type === "persist_followup"
+      ),
+    ).toHaveLength(1);
+    const durableFollowup = step(lifecycle, {
+      type: "followup.persisted",
+      sourceRevision: 3,
+      revision: 4,
+      digest: "digest-prices-followup",
+      field: "area.coverage",
+      questionPt: "Quais cidades vocês atendem?",
+      intentKey: "tool-batch:response-prices:three-prices",
+      elapsedMs: 47,
+    });
+    lifecycle = durableFollowup.lifecycle;
+    beforeCoverage.push(...durableFollowup.commands);
 
     for (let interval = 1; interval <= 3; interval += 1) {
       let result = step(lifecycle, {
@@ -1731,6 +1753,18 @@ describe("Task 4 review fixes", () => {
       "awaiting_owner_approval",
     );
     expect(punctuationAccentCaseVariant.summary?.validated).toBe(true);
+  });
+
+  test("requires each subject-qualified service anchor even when values are identical", () => {
+    const lifecycle = proveSummaryTranscript(
+      beginSummaryWithAnchors([
+        "Preço público (drain cleaning): 149",
+        "Preço público (sewer cleaning): 149",
+      ]),
+      "Preço público (drain cleaning): 149. Você confirma que está correto?",
+    );
+    expect(lifecycle.summary?.validated).toBe(false);
+    expect(lifecycle.phase).toBe("summary_speaking");
   });
 
   test("approval changed refreshes and prepares only the correlated latest snapshot", () => {
@@ -2763,4 +2797,106 @@ test("coverage correction invalidates queued or sent old signoff and corrected a
     command.type === "request_response" &&
     command.intentKey === "final-signoff:approval-B"
   )).toBe(true);
+});
+
+describe("durable directed follow-up ownership", () => {
+  function collectingWithReadyAnswerBatch(): OnboardingLifecycle {
+    const lifecycle = startCollecting();
+    lifecycle.toolOutbox["answer-followup"] = {
+      toolCallId: "answer-followup",
+      toolName: "record_interview_answer",
+      argsHash: "args-followup",
+      state: "output_acked",
+      providerResponseId: "response-followup",
+      batchHash: "batch-followup",
+      outputItemId: "tool-output:answer-followup",
+      socketGeneration: 1,
+    };
+    lifecycle.toolBatches["response-followup:batch-followup"] = {
+      providerResponseId: "response-followup",
+      batchHash: "batch-followup",
+      toolCallIds: ["answer-followup"],
+      closed: true,
+      continuationRequested: false,
+    };
+    lifecycle.terminalResponseIds.push("response-followup");
+    return lifecycle;
+  }
+
+  test("persists the selected question before speaking so repeated ambiguity cannot leave counters at zero", () => {
+    const changed = step(collectingWithReadyAnswerBatch(), {
+      type: "coverage.changed",
+      revision: 1,
+      digest: "followup-digest-1",
+      complete: false,
+      missing: [{ field: "area.coverage" }],
+      ambiguous: [],
+      nextQuestion: {
+        field: "area.coverage",
+        questionPt: "Quais cidades vocês atendem?",
+      },
+      elapsedMs: 1,
+    });
+
+    expect(changed.commands).toContainEqual({
+      type: "persist_followup",
+      revision: 1,
+      digest: "followup-digest-1",
+      field: "area.coverage",
+      questionPt: "Quais cidades vocês atendem?",
+      intentKey: "tool-batch:response-followup:batch-followup",
+    });
+    expect(changed.commands.some((command) => command.type === "ask_follow_up"))
+      .toBe(false);
+    expect(changed.commands.some((command) => command.type === "request_response"))
+      .toBe(false);
+
+    const persisted = step(changed.lifecycle, {
+      type: "followup.persisted",
+      sourceRevision: 1,
+      revision: 2,
+      digest: "followup-digest-2",
+      field: "area.coverage",
+      questionPt: "Quais cidades vocês atendem?",
+      intentKey: "tool-batch:response-followup:batch-followup",
+      elapsedMs: 2,
+    } as any);
+    expect(persisted.lifecycle.coverage).toMatchObject({
+      revision: 2,
+      digest: "followup-digest-2",
+      complete: false,
+    });
+    expect(persisted.commands).toContainEqual({
+      type: "ask_follow_up",
+      field: "area.coverage",
+      questionPt: "Quais cidades vocês atendem?",
+      intentKey: "tool-batch:response-followup:batch-followup",
+    });
+    expect(persisted.commands).toContainEqual({
+      type: "request_response",
+      intentKey: "tool-batch:response-followup:batch-followup",
+      purpose: "tool_continuation",
+      instructions: "Quais cidades vocês atendem?",
+    });
+  });
+
+  test("incomplete exhausted coverage blocks explicitly and emits no instructionless continuation", () => {
+    const exhausted = step(collectingWithReadyAnswerBatch(), {
+      type: "coverage.changed",
+      revision: 12,
+      digest: "followup-exhausted",
+      complete: false,
+      missing: [{ field: "policy.payment_estimate" }],
+      ambiguous: [],
+      elapsedMs: 12,
+    });
+
+    expect(exhausted.lifecycle.phase).toBe("blocked");
+    expect(exhausted.commands).toContainEqual(expect.objectContaining({
+      type: "block",
+      code: "follow_up_exhausted",
+    }));
+    expect(exhausted.commands.some((command) => command.type === "request_response"))
+      .toBe(false);
+  });
 });

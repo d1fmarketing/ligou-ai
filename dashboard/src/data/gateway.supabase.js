@@ -2,6 +2,7 @@
 // The prototype's model.js remains the vocabulary; here every decision flows through server RPCs.
 import { supabase } from "../lib/supabase.js";
 import { decideMemoryVia } from "./memory-decisions.js";
+import { mapRuleGroups } from "./gateway-rule-mapping.js";
 
 const SCOPE_TO_DB = {
   service: "servico", "serviço": "servico", servico: "servico",
@@ -9,50 +10,9 @@ const SCOPE_TO_DB = {
   client: "cliente", cliente: "cliente",
   general: "geral", geral: "geral",
 };
-const STATUS_FROM_DB = { aprovado: "ativa", sugerido: "sugerida", revogado: "revogada", rejeitado: "rejeitada" };
 
 function fmtTime(iso) {
   try { return new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }); } catch { return ""; }
-}
-
-function mapRuleGroups(rules) {
-  // latest version per rule_group_id wins; earlier versions become history
-  const groups = new Map();
-  for (const r of rules) {
-    const g = groups.get(r.rule_group_id) ?? [];
-    g.push(r);
-    groups.set(r.rule_group_id, g);
-  }
-  const entries = [];
-  for (const versions of groups.values()) {
-    versions.sort((a, b) => a.version - b.version);
-    const latest = versions[versions.length - 1];
-    if (latest.status === "rejeitado") continue; // rejected suggestions disappear from the working memory list
-    const status = latest.structured?.effective_until ? "temporária" : (STATUS_FROM_DB[latest.status] ?? latest.status);
-    entries.push({
-      id: latest.id,
-      title: latest.category === "preco" ? `Preço · ${latest.structured?.service_type ?? ""}` : latest.category,
-      text: latest.text,
-      category: latest.category,
-      structured: latest.structured ?? null,
-      status,
-      origin: { onboarding: "Entrevista de onboarding", escalacao: "Aprovação de caso", edicao_manual: "Edição manual", aprendizado: "Aprendizado em chamada" }[latest.origem] ?? latest.origem,
-      scope: latest.escopo,
-      version: latest.version,
-      evidenceQuote: latest.evidence_quote ?? null,
-      effectiveFrom: latest.approved_at?.slice(0, 10) ?? null,
-      approvedBy: latest.approved_by ? "Você" : null,
-      updatedAt: latest.created_at,
-      history: versions.slice(0, -1).map((v, i) => ({
-        version: v.version,
-        changedAt: versions[i + 1].created_at,
-        before: v.text,
-        after: versions[i + 1].text,
-      })),
-    });
-  }
-  entries.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
-  return entries;
 }
 
 function mapCase(c) {

@@ -286,11 +286,12 @@ const templates: Record<CoverageField, string> = {
   "service.escalation": "Em que situação este serviço exige aprovação do dono?",
 };
 const inputFields = new Set<string>(Object.keys(templates));
-const isServiceField = (field: CoverageField) =>
+export function isCoverageField(value: unknown): value is CoverageField {
+  return typeof value === "string" && inputFields.has(value);
+}
+export const isServiceCoverageField = (field: CoverageField) =>
   field.startsWith("service.") && field !== "service.catalog_closure";
-const keyFor = (field: CoverageField, subject?: string) =>
-  subject && isServiceField(field) ? `service:${subject}:${field}` : field;
-const normalizeSubject = (subject: string) =>
+export const normalizeCoverageSubject = (subject: string) =>
   subject
     .trim()
     .normalize("NFD")
@@ -298,6 +299,18 @@ const normalizeSubject = (subject: string) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_|_$/g, "");
+export function coverageKey(field: CoverageField, subject?: string): string {
+  if (isServiceCoverageField(field)) {
+    const normalized = typeof subject === "string"
+      ? normalizeCoverageSubject(subject)
+      : "";
+    if (!normalized) throw new Error("coverage_subject_required");
+    return `service:${normalized}:${field}`;
+  }
+  if (subject !== undefined) throw new Error("coverage_subject_forbidden");
+  return field;
+}
+const keyFor = coverageKey;
 const missing = (attempts = 0): CoverageCell => ({
   state: "missing",
   attempts,
@@ -470,11 +483,15 @@ function applyOne(
   fact: CoverageFact,
 ): CoverageSnapshot {
   if (!inputFields.has(fact.field)) return snapshot;
-  const subject =
-    fact.subject && isServiceField(fact.field)
-      ? normalizeSubject(fact.subject)
+  let subject: string | undefined;
+  try {
+    coverageKey(fact.field, fact.subject);
+    subject = isServiceCoverageField(fact.field)
+      ? normalizeCoverageSubject(fact.subject!)
       : undefined;
-  if (isServiceField(fact.field) && !subject) return snapshot;
+  } catch {
+    return snapshot;
+  }
   const previouslyReady = ready(snapshot);
   const cells = { ...snapshot.cells };
   const services = [...snapshot.services];
@@ -727,6 +744,7 @@ export function recordDirectedFollowUp(
     return snapshot;
   return {
     ...snapshot,
+    revision: snapshot.revision + 1,
     followUps: snapshot.followUps + 1,
     followUpGroups: {
       ...snapshot.followUpGroups,

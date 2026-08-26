@@ -23,6 +23,7 @@ const RULES = [
 let inserted: any[] = [];
 let rpcCalls: any[] = [];
 let quoteRows: any[] = [];
+let coverageRows: any[] = [];
 
 function mockSupabase() {
   return {
@@ -31,6 +32,7 @@ function mockSupabase() {
       const api: any = {
         select() { return api; },
         eq(column: string, value: unknown) { filters[column] = value; return api; },
+        in() { return api; },
         is() { return api; },
         lt() { return api; },
         order() { return api; },
@@ -50,7 +52,14 @@ function mockSupabase() {
           return api;
         },
         then(resolve: (value: unknown) => unknown) {
-          return Promise.resolve({ data: table === "effective_rules" ? RULES : [], error: null }).then(resolve);
+          return Promise.resolve({
+            data: table === "effective_rules"
+              ? RULES
+              : table === "receipts"
+                ? coverageRows
+                : [],
+            error: null,
+          }).then(resolve);
         },
       };
       return api;
@@ -58,19 +67,61 @@ function mockSupabase() {
     rpc: async (name: string, args: unknown) => {
       rpcCalls.push({ name, args });
       if (name === "record_onboarding_answer") {
+        const input = args as any;
+        const revision = Number(input.p_coverage.revision);
+        const digest = String(revision % 10).repeat(64);
+        const readback = {
+          ...input.p_coverage,
+          rule_id: `onboarding-rule-${rpcCalls.length}`,
+          rule_group_id: `onboarding-group-${rpcCalls.length}`,
+          selected_rule_ids: [],
+          snapshot_digest: digest,
+        };
+        coverageRows = [{
+          id: `onboarding-receipt-${revision}`,
+          readback,
+        }];
         return {
           data: {
             status: "recorded",
             rule_id: `onboarding-rule-${rpcCalls.length}`,
             rule_group_id: `onboarding-group-${rpcCalls.length}`,
             coverage_receipt_id: `onboarding-receipt-${rpcCalls.length}`,
-            revision: 1,
-            snapshot_digest: "a".repeat(64),
+            revision,
+            snapshot_digest: digest,
             complete: false,
-            missing: [],
-            ambiguous: [],
-            next_action: { type: "ask", field: "service.catalog_closure" },
-            coverage: {},
+            missing: input.p_coverage.progress.missingRequired,
+            ambiguous: input.p_coverage.progress.ambiguous,
+            next_action: input.p_coverage.next_action,
+            coverage: readback,
+          },
+          error: null,
+        };
+      }
+      if (name === "record_onboarding_followup") {
+        const input = args as any;
+        const revision = Number(input.p_coverage.revision);
+        const digest = String(revision % 10).repeat(64);
+        const readback = {
+          ...input.p_coverage,
+          rule_id: coverageRows[0]?.readback?.rule_id ?? null,
+          rule_group_id: coverageRows[0]?.readback?.rule_group_id ?? null,
+          materialization_action:
+            coverageRows[0]?.readback?.materialization_action ?? "coverage_only",
+          snapshot_digest: digest,
+        };
+        coverageRows = [{ id: `followup-receipt-${revision}`, readback }];
+        return {
+          data: {
+            status: "recorded",
+            coverage_receipt_id: coverageRows[0].id,
+            revision,
+            snapshot_digest: digest,
+            complete: false,
+            missing: readback.progress.missingRequired,
+            ambiguous: readback.progress.ambiguous,
+            next_action: readback.next_action,
+            coverage: readback,
           },
           error: null,
         };
@@ -90,6 +141,7 @@ beforeEach(() => {
   inserted = [];
   rpcCalls = [];
   quoteRows = [];
+  coverageRows = [];
   _setClient(mockSupabase() as any);
   invalidateTenant(TENANT.slug);
   _resetSimulationStore();
@@ -337,6 +389,7 @@ test("serialized sideband passes exact provider call_id and acknowledges simulat
   });
   expect(ledger.onboarding!.lifecycle.toolOutbox["provider-sideband-answer-1"]?.state)
     .toBe("output_acked");
+  expect(ledger.onboarding!.lifecycle.phase).not.toBe("blocked");
   expect(inserted.some((entry) => [
     "rules", "bookings", "action_intents", "powers",
   ].includes(entry.table))).toBe(false);

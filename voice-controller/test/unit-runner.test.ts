@@ -41,6 +41,17 @@ test("canonical unit runner starts onboarding coverage once in an isolated proce
   expect(coverageRuns[0]!.options.cwd).toMatch(/^\/tmp\/ligou-unit-test-/);
 });
 
+test("canonical unit runner starts onboarding materialization once in an isolated process", () => {
+  const runs: Array<{ args: string[]; options: { cwd: string } }> = [];
+  runUnitTests((_command, args, options) => runs.push({ args, options }));
+
+  const materializationRuns = runs.filter((run) =>
+    run.args[1].endsWith("/test/onboarding-materialization.test.ts")
+  );
+  expect(materializationRuns).toHaveLength(1);
+  expect(materializationRuns[0]!.options.cwd).toMatch(/^\/tmp\/ligou-unit-test-/);
+});
+
 test("canonical unit runner starts onboarding lifecycle once in an isolated process", () => {
   const runs: Array<{ args: string[]; options: { cwd: string } }> = [];
   runUnitTests((_command, args, options) => runs.push({ args, options }));
