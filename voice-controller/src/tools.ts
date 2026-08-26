@@ -17,7 +17,6 @@ import { CUSTOMER_OUTCOME } from "./customer-language.ts";
 import { buildTrustedHermesContext, consultHermes, HERMES_TOPICS } from "./hermes.ts";
 import { mintSimulationSlots } from "./simulation.ts";
 import {
-  canonicalizeLocalityInput,
   isCanonicalLocalityList,
   isExactCityList,
   isExecutableBusinessHours,
@@ -162,8 +161,8 @@ const allToolSchemas = [
         service_type: { type: "string" },
         quote_id: { type: "string", description: "Opaque quote_id returned by quote_price or evaluate_offer" },
         service_city: { type: "string", description: "City where service will occur" },
-        service_region: { type: "string", description: "Two-letter region code for typed V2 locality matching" },
-        service_country: { type: "string", description: "Two-letter country code for typed V2 locality matching" },
+        service_region: { type: "string", description: "Optional two-letter region code used only to disambiguate approved localities with the same city name" },
+        service_country: { type: "string", description: "Optional two-letter country code used only to disambiguate approved localities with the same city name" },
         date_preference: { type: "string", description: "caller preference in natural language, optional" },
       },
       required: ["service_type", "quote_id", "service_city"],
@@ -433,6 +432,7 @@ export async function runTool(
                   `${locality.display_name}, ${locality.region_code}, ${locality.country_code}`
                 )
               : ((area.structured as any)?.cities ?? area.text),
+          service_localities: localities ?? null,
           hours: agenda?.text ?? null,
           now_local: new Date().toLocaleString("en-US", { timeZone: tenant.timezone }),
         });
@@ -540,16 +540,30 @@ export async function runTool(
             say: CUSTOMER_OUTCOME.needsTeam,
           });
         if (localities) {
-          const requested = canonicalizeLocalityInput({
-            display_name: String(args.service_city ?? ""),
-            region_code: String(args.service_region ?? ""),
-            country_code: String(args.service_country ?? ""),
-          });
-          if (!requested)
+          const label = String(args.service_city ?? "").trim()
+            .replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+          if (!label)
             return done({ status: "needs_owner", reason: "locality_required" });
-          if (!localities.some((locality) =>
-            locality.locality_id === requested.locality_id
-          ))
+          const region = typeof args.service_region === "string" &&
+              args.service_region.trim()
+            ? args.service_region.trim().toUpperCase()
+            : null;
+          const country = typeof args.service_country === "string" &&
+              args.service_country.trim()
+            ? args.service_country.trim().toUpperCase()
+            : null;
+          const matches = localities.filter((locality) =>
+            locality.display_name.trim().replace(/\s+/g, " ")
+                .toLocaleLowerCase("en-US") === label &&
+            (region === null || locality.region_code === region) &&
+            (country === null || locality.country_code === country)
+          );
+          if (matches.length > 1)
+            return done({
+              status: "needs_clarification",
+              reason: "locality_ambiguous",
+            });
+          if (matches.length === 0)
             return done({
               status: "needs_owner",
               reason: "geography_not_served",

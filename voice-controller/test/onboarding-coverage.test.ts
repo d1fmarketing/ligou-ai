@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   applyCoverageFact,
   buildSummaryAnchors,
+  canonicalizeLocalityInput,
   canonicalCoverage,
   coverageKey,
   createCoverage,
@@ -33,11 +34,13 @@ function localityValue(
   ...localities: Array<[display_name: string, region_code: string]>
 ) {
   return {
-    localities: localities.map(([display_name, region_code]) => ({
-      display_name,
-      country_code: "US",
-      region_code,
-    })),
+    localities: localities.map(([display_name, region_code]) =>
+      canonicalizeLocalityInput({
+        display_name,
+        country_code: "US",
+        region_code,
+      })!
+    ),
   };
 }
 
@@ -259,6 +262,49 @@ describe("onboarding coverage", () => {
     });
     expect(buildSummaryAnchors(snapshot)).toContain(
       "Mínimo: não negociável (149)",
+    );
+  });
+
+  test("a target correction retains a safe negotiable floor and invalidates an inverted floor", () => {
+    const subject = "drain_cleaning";
+    let snapshot = createCoverage(identity);
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.name_synonyms", ["Drain cleaning"], subject),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 100, subject),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.negotiation", { floor: 80 }, subject),
+    );
+    const negotiationKey = `service:${subject}:service.negotiation`;
+
+    const retained = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 90, subject),
+    );
+    expect(retained.cells[negotiationKey]).toMatchObject({
+      state: "answered",
+      value: { mode: "negotiable", floor: 80 },
+    });
+
+    const inverted = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 50, subject),
+    );
+    expect(inverted.cells[negotiationKey]).toMatchObject({
+      state: "ambiguous",
+      reason: "negotiation_floor_requires_public_price",
+    });
+    expect(evaluateCoverage(inverted).ambiguous).toContainEqual({
+      field: "service.negotiation",
+      subject,
+    });
+    expect(buildSummaryAnchors(inverted).join("\n")).not.toContain(
+      "Mínimo: 80",
     );
   });
 
@@ -1417,15 +1463,13 @@ describe("onboarding coverage", () => {
     });
   });
 
-  test("requires exact typed locality identities and derives stable IDs inside the application", () => {
+  test("accepts only application-resolved canonical locality identities", () => {
     const valid = applyCoverageFact(
       createCoverage(identity),
-      answer("area.coverage", {
-        localities: [
-          { display_name: "New York", country_code: "US", region_code: "NY" },
-          { display_name: "Washington", country_code: "US", region_code: "DC" },
-        ],
-      }),
+      answer(
+        "area.coverage",
+        localityValue(["New York", "NY"], ["Washington", "DC"]),
+      ),
     );
     expect(valid.cells["area.coverage"]).toEqual({
       state: "answered",

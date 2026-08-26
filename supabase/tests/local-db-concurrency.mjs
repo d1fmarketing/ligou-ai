@@ -148,6 +148,26 @@ function canonicalValue(value) {
   return value;
 }
 
+function coverageCellHash(key, cell) {
+  const semantic = structuredClone(cell);
+  delete semantic.attempts;
+  if (
+    key.endsWith(":service.negotiation") &&
+    semantic.state === "answered" &&
+    semantic.value?.mode === "non_negotiable"
+  ) semantic.value = { mode: "non_negotiable" };
+  return sha256(JSON.stringify(canonicalValue({
+    coverage_key: key,
+    cell: semantic,
+  })));
+}
+
+function snapshotCellHashes(snapshot) {
+  return Object.fromEntries(Object.entries(snapshot.cells).map(
+    ([key, cell]) => [key, coverageCellHash(key, cell)],
+  ));
+}
+
 function finalizeMaterialization(item) {
   const structured = { ...item.structured };
   delete structured.coverage_revision;
@@ -1391,6 +1411,21 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       ('${tenant}', '${owner}', 'onboarding', 'offer-v2', 'ready', 'answer-v2', '${call}', now());
   `), "V2 onboarding fixture");
 
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      count(*)::text || ':' ||
+      count(*) filter (where display_name in (
+        'Concord','Walnut Creek','Pleasant Hill','Martinez','Anaheim',
+        'Santa Ana','Irvine','Orange','Tustin','Costa Mesa','New York',
+        'Washington','State College'
+      ))::text || ':' ||
+      has_table_privilege('service_role',
+        'public.onboarding_locality_registry', 'select')::text || ':' ||
+      has_table_privilege('authenticated',
+        'public.onboarding_locality_registry', 'select')::text
+    from public.onboarding_locality_registry;
+  `), "authoritative locality registry seed and grants"), "13:13:true:false");
+
   const structuredTruth = scalar(await runSql(connection, home, `
     select
       public.onboarding_answer_value_valid_v2(
@@ -1459,6 +1494,9 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       )::text || ':' ||
       public.onboarding_answer_value_valid_v2(
         'area.coverage', '{"localities":[{"display_name":"DC","country_code":"US","region_code":"DC"}]}'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'area.coverage', '{"localities":[{"display_name":"Greater Los Angeles","country_code":"US","region_code":"CA"}]}'::jsonb
       )::text;
   `), "V2 universal SQL structured truth table");
 
@@ -1532,19 +1570,27 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
           "price_target":149,
           "price_min":149
         }'::jsonb, 'drain_cleaning', 149
+      )::text || ':' ||
+      public.onboarding_booking_rule_safe(
+        'preco', 'geral', '{
+          "service_type":"drain_cleaning",
+          "price_target":149,
+          "price_min":100,
+          "duration_min":60
+        }'::jsonb, 'drain_cleaning', 149
       )::text;
   `), "reserved booking namespace and negotiation invariant"),
-    "true:false:false:true:false:false");
-  const hashA = sha256(JSON.stringify({
-    key: "service:drain_cleaning:service.price_target",
-    state: "answered",
-    value: 149,
-  }));
-  const hashB = sha256(JSON.stringify({
-    key: "service:drain_cleaning:service.price_target",
-    state: "answered",
-    value: 199,
-  }));
+    "true:false:false:true:false:false:false");
+  const priceTargetKey = "service:drain_cleaning:service.price_target";
+  const hashA = coverageCellHash(priceTargetKey, {
+    state: "answered", attempts: 1, value: 149,
+  });
+  const hashB = coverageCellHash(priceTargetKey, {
+    state: "answered", attempts: 2, value: 199,
+  });
+  const hashC = coverageCellHash(priceTargetKey, {
+    state: "answered", attempts: 3, value: 249,
+  });
 
   const hostileWithoutStructured = fact(149, "Não faço obra estrutural.");
   delete hostileWithoutStructured.structured;
@@ -1614,6 +1660,461 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       (select count(*) from public.rules where tenant_id = '${tenant}')::text;
   `), "V2 hostile typed rollback"), "0:0");
 
+  const staleFloorPrior = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    target: 149,
+    answerHash: hashA,
+    hashCharacter: "8",
+  });
+  staleFloorPrior.snapshot.cells[
+    "service:drain_cleaning:service.negotiation"
+  ].value.floor = 100;
+  staleFloorPrior.current_answer_hashes = snapshotCellHashes(
+    staleFloorPrior.snapshot,
+  );
+  const normalizedFloorCandidate = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 2,
+    target: 149,
+    answerHash: hashA,
+    hashCharacter: "7",
+  });
+  const staleFloorResult = await runSql(connection, home, `
+    begin;
+    insert into public.receipts (
+      tenant_id, call_id, kind, outcome, external_id, readback,
+      payload_hash, detail
+    ) values (
+      '${tenant}', '${call}', 'onboarding_coverage', 'accepted',
+      '${sha256("round4-stale-floor-baseline-event")}',
+      ${jsonb({
+        ...staleFloorPrior,
+        rule_id: null,
+        rule_group_id: null,
+        materialization_action: "coverage_only",
+        snapshot_digest: "8".repeat(64),
+      })},
+      '${sha256("round4-stale-floor-baseline-payload")}',
+      ${jsonb({
+        transition_kind: "answer",
+        answer_hash: hashA,
+        coverage_key: priceTargetKey,
+      })}
+    );
+    set local role service_role;
+    select set_config('request.jwt.claim.role', 'service_role', true);
+    ${onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-normalize-stale-nonneg-floor",
+      answerHash: hashA,
+      expectedRevision: 1,
+      fact: fact(149),
+      coverage: normalizedFloorCandidate,
+    })}
+    rollback;
+  `);
+  requireSuccess(staleFloorResult, "same-target stale floor normalization");
+  assert.match(staleFloorResult.stdout, /"status": "recorded"/);
+  assert.match(staleFloorResult.stdout, /"floor": 149/);
+  assert.doesNotMatch(staleFloorResult.stdout, /"floor": 100/);
+
+  const overflowServices = Array.from(
+    { length: 20 }, (_unused, index) => `service_${index}`,
+  );
+  const overflowSubject = "service_20";
+  const overflowKey = `service:${overflowSubject}:service.name_synonyms`;
+  const overflowHash = sha256(JSON.stringify(canonicalValue({
+    coverage_key: overflowKey,
+  })));
+  const overflowPriorSnapshot = {
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    services: overflowServices,
+    currentSubject: "service_19",
+    cells: {},
+    followUps: 0,
+    followUpGroups: {},
+    summaryInvalidated: false,
+  };
+  const overflowCoverage = {
+    schema_version: 2,
+    transition_kind: "answer",
+    tenant_id: tenant,
+    call_id: call,
+    revision: 2,
+    complete: false,
+    snapshot: {
+      ...overflowPriorSnapshot,
+      revision: 2,
+      currentSubject: overflowSubject,
+      catalogOverflow: {
+        services: [overflowSubject],
+        safeRestriction:
+          "Não aceitar, precificar ou agendar serviços além dos vinte primeiros autonomamente; encaminhar o catálogo ao dono.",
+        ownerWords: "Também fazemos o serviço vinte e um.",
+      },
+    },
+    progress: {
+      missingRequired: [],
+      ambiguous: [],
+      ownerReviewRequired: [{
+        field: "service.catalog_overflow",
+        applicationOwned: true,
+      }],
+    },
+    selected_rule_ids: [],
+    next_action: { type: "prepare_summary" },
+    current_answer_hashes: { [overflowKey]: overflowHash },
+    materializations: [],
+    summary_projection: null,
+    summary_hash: null,
+    authority: {
+      rules_approved: false,
+      powers_granted: false,
+      operational_mode_changed: false,
+    },
+  };
+  const overflowFact = {
+    topic: "servicos",
+    field: "service.name_synonyms",
+    subject: overflowSubject,
+    disposition: "answered",
+    rule_text: "Serviço adicional como evidência apenas.",
+    structured: { value: ["Serviço vinte e um"] },
+    owner_words: "Também fazemos o serviço vinte e um.",
+  };
+  const overflowResult = await runSql(connection, home, `
+    begin;
+    insert into public.receipts (
+      tenant_id, call_id, kind, outcome, external_id, readback,
+      payload_hash, detail
+    ) values (
+      '${tenant}', '${call}', 'onboarding_coverage', 'accepted',
+      '${sha256("round4-overflow-baseline-event")}',
+      ${jsonb({
+        schema_version: 2,
+        transition_kind: "answer",
+        tenant_id: tenant,
+        call_id: call,
+        revision: 1,
+        complete: false,
+        snapshot: overflowPriorSnapshot,
+        progress: { missingRequired: [], ambiguous: [] },
+        selected_rule_ids: [],
+        next_action: { type: "prepare_summary" },
+        current_answer_hashes: {},
+        materializations: [],
+        summary_projection: null,
+        summary_hash: null,
+        authority: {
+          rules_approved: false,
+          powers_granted: false,
+          operational_mode_changed: false,
+        },
+        snapshot_digest: "6".repeat(64),
+      })},
+      '${sha256("round4-overflow-baseline-payload")}',
+      ${jsonb({
+        transition_kind: "answer",
+        answer_hash: "6".repeat(64),
+        coverage_key: "service.catalog_closure",
+      })}
+    );
+    set local role service_role;
+    select set_config('request.jwt.claim.role', 'service_role', true);
+    ${onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-safe-catalog-overflow",
+      answerHash: overflowHash,
+      expectedRevision: 1,
+      fact: overflowFact,
+      coverage: overflowCoverage,
+    })}
+    rollback;
+  `);
+  requireSuccess(overflowResult, "durable safe catalog overflow");
+  assert.match(overflowResult.stdout, /"status": "recorded"/);
+  assert.match(overflowResult.stdout, /"service_20"/);
+
+  // Rich projection tests start from an explicit durable V2 baseline. Every
+  // RPC below must now prove a single-cell revision 1 -> 2 transition.
+  const baselineCoverage = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    target: 149,
+    answerHash: hashA,
+    hashCharacter: "9",
+  });
+  baselineCoverage.current_answer_hashes = snapshotCellHashes(
+    baselineCoverage.snapshot,
+  );
+  const baselineReadback = {
+    ...baselineCoverage,
+    rule_id: null,
+    rule_group_id: null,
+    materialization_action: "coverage_only",
+    snapshot_digest: "9".repeat(64),
+  };
+  requireSuccess(await runSql(connection, home, `
+    insert into public.receipts (
+      tenant_id, call_id, kind, outcome, external_id, readback,
+      payload_hash, detail
+    ) values (
+      '${tenant}', '${call}', 'onboarding_coverage', 'accepted',
+      '${sha256("round4-rich-baseline-event")}',
+      ${jsonb(baselineReadback)},
+      '${sha256("round4-rich-baseline-payload")}',
+      ${jsonb({
+        transition_kind: "answer",
+        answer_hash: hashA,
+        coverage_key: priceTargetKey,
+      })}
+    );
+  `), "durable rich V2 projection baseline");
+
+  const negotiationKey = "service:drain_cleaning:service.negotiation";
+  const directNonNegotiableFact = {
+    topic: "precos",
+    field: "service.negotiation",
+    subject: "drain_cleaning",
+    disposition: "answered",
+    rule_text: "Não negociável.",
+    structured: { value: "non_negotiable" },
+    owner_words: "O preço não é negociável.",
+  };
+  const hostileDirectNonNegotiable = v2CoverageSnapshot({
+    tenantId: tenant, callId: call, revision: 2, target: 149,
+    answerHash: hashA, hashCharacter: "6",
+  });
+  hostileDirectNonNegotiable.snapshot.cells[priceTargetKey].attempts = 1;
+  hostileDirectNonNegotiable.snapshot.cells[negotiationKey] = {
+    state: "answered", attempts: 2,
+    value: { mode: "non_negotiable", floor: 1 },
+  };
+  hostileDirectNonNegotiable.materializations = [JSON.parse(scalar(
+    await runSql(connection, home, `
+      select public.onboarding_materialization_v3(
+        ${jsonb(hostileDirectNonNegotiable.snapshot)},
+        'service:drain_cleaning', 2, '${call}'
+      )::text;
+    `), "hostile direct non-negotiable canonical materialization",
+  ))];
+  const hostileDirectResult = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-hostile-direct-nonneg-floor",
+      answerHash: coverageCellHash(
+        negotiationKey,
+        hostileDirectNonNegotiable.snapshot.cells[negotiationKey],
+      ),
+      expectedRevision: 1,
+      fact: directNonNegotiableFact,
+      coverage: hostileDirectNonNegotiable,
+    })),
+  );
+  assert.notEqual(hostileDirectResult.code, 0);
+  assert.match(
+    hostileDirectResult.stderr,
+    /onboarding_structured_projection_invalid/,
+  );
+
+  const invertedDirectNegotiation = v2CoverageSnapshot({
+    tenantId: tenant, callId: call, revision: 2, target: 149,
+    answerHash: hashA, hashCharacter: "5",
+  });
+  invertedDirectNegotiation.snapshot.cells[priceTargetKey].attempts = 1;
+  invertedDirectNegotiation.snapshot.cells[negotiationKey] = {
+    state: "ambiguous", attempts: 2,
+    reason: "negotiation_floor_requires_public_price",
+  };
+  invertedDirectNegotiation.materializations = [JSON.parse(scalar(
+    await runSql(connection, home, `
+      select public.onboarding_materialization_v3(
+        ${jsonb(invertedDirectNegotiation.snapshot)},
+        'service:drain_cleaning', 2, '${call}'
+      )::text;
+    `), "inverted direct negotiation canonical materialization",
+  ))];
+  const invertedDirectHash = coverageCellHash(
+    negotiationKey,
+    invertedDirectNegotiation.snapshot.cells[negotiationKey],
+  );
+  const invertedDirectResult = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-inverted-direct-negotiation-safe",
+      answerHash: invertedDirectHash,
+      expectedRevision: 1,
+      fact: {
+        ...directNonNegotiableFact,
+        rule_text: "Piso duzentos.",
+        structured: { value: { floor: 200 } },
+        owner_words: "O mínimo seria duzentos.",
+      },
+      coverage: invertedDirectNegotiation,
+    })),
+  );
+  requireSuccess(invertedDirectResult, "safe ambiguous direct negotiation");
+  assert.match(invertedDirectResult.stdout, /"status": "recorded"/);
+
+  const ownerReviewTargetCoverage = v2CoverageSnapshot({
+    tenantId: tenant, callId: call, revision: 2, target: 149,
+    answerHash: hashA, hashCharacter: "4",
+  });
+  ownerReviewTargetCoverage.snapshot.cells[priceTargetKey] = {
+    state: "owner_review_required",
+    attempts: 2,
+    safeRestriction:
+      "Não executar nem confirmar preço público autonomamente; encaminhar a decisão ao dono.",
+  };
+  ownerReviewTargetCoverage.snapshot.cells[negotiationKey] = {
+    state: "ambiguous", attempts: 1,
+    reason: "non_negotiable_requires_public_target",
+  };
+  ownerReviewTargetCoverage.materializations = [JSON.parse(scalar(
+    await runSql(connection, home, `
+      select public.onboarding_materialization_v3(
+        ${jsonb(ownerReviewTargetCoverage.snapshot)},
+        'service:drain_cleaning', 2, '${call}'
+      )::text;
+    `), "owner-review target canonical materialization",
+  ))];
+  const ownerReviewTargetHash = coverageCellHash(
+    priceTargetKey,
+    ownerReviewTargetCoverage.snapshot.cells[priceTargetKey],
+  );
+  const ownerReviewTargetResult = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-owner-review-target-invalidates-floor",
+      answerHash: ownerReviewTargetHash,
+      expectedRevision: 1,
+      fact: {
+        topic: "precos",
+        field: "service.price_target",
+        subject: "drain_cleaning",
+        disposition: "owner_review_required",
+        rule_text: "Preço depende do dono.",
+        structured: { value: null },
+        owner_words: "Preciso revisar o preço.",
+      },
+      coverage: ownerReviewTargetCoverage,
+    })),
+  );
+  requireSuccess(
+    ownerReviewTargetResult,
+    "owner-review target invalidates negotiable floor",
+  );
+  assert.match(ownerReviewTargetResult.stdout, /"status": "recorded"/);
+
+  const negotiableOwnerReviewPrior = v2CoverageSnapshot({
+    tenantId: tenant, callId: call, revision: 3, target: 149,
+    answerHash: hashA, hashCharacter: "3",
+  });
+  negotiableOwnerReviewPrior.snapshot.cells[priceTargetKey].attempts = 1;
+  negotiableOwnerReviewPrior.snapshot.cells[negotiationKey] = {
+    state: "answered", attempts: 1,
+    value: { mode: "negotiable", floor: 125 },
+  };
+  negotiableOwnerReviewPrior.current_answer_hashes = snapshotCellHashes(
+    negotiableOwnerReviewPrior.snapshot,
+  );
+  const negotiableOwnerReviewCandidate = v2CoverageSnapshot({
+    tenantId: tenant, callId: call, revision: 4, target: 149,
+    answerHash: hashA, hashCharacter: "2",
+  });
+  negotiableOwnerReviewCandidate.snapshot.cells[priceTargetKey] = {
+    state: "owner_review_required", attempts: 2,
+    safeRestriction:
+      "Não executar nem confirmar preço público autonomamente; encaminhar a decisão ao dono.",
+  };
+  negotiableOwnerReviewCandidate.snapshot.cells[negotiationKey] = {
+    state: "ambiguous", attempts: 1,
+    reason: "negotiation_floor_requires_public_price",
+  };
+  negotiableOwnerReviewCandidate.materializations = [JSON.parse(scalar(
+    await runSql(connection, home, `
+      select public.onboarding_materialization_v3(
+        ${jsonb(negotiableOwnerReviewCandidate.snapshot)},
+        'service:drain_cleaning', 4, '${call}'
+      )::text;
+    `), "negotiable owner-review target canonical materialization",
+  ))];
+  const negotiableOwnerReviewHash = coverageCellHash(
+    priceTargetKey,
+    negotiableOwnerReviewCandidate.snapshot.cells[priceTargetKey],
+  );
+  const negotiableOwnerReviewResult = await runSql(connection, home, `
+    begin;
+    insert into public.receipts (
+      tenant_id, call_id, kind, outcome, external_id, readback,
+      payload_hash, detail
+    ) values (
+      '${tenant}', '${call}', 'onboarding_coverage', 'accepted',
+      '${sha256("round4-negotiable-owner-review-event")}',
+      ${jsonb({
+        ...negotiableOwnerReviewPrior,
+        rule_id: null,
+        rule_group_id: null,
+        materialization_action: "coverage_only",
+        snapshot_digest: "3".repeat(64),
+      })},
+      '${sha256("round4-negotiable-owner-review-payload")}',
+      ${jsonb({
+        transition_kind: "answer",
+        answer_hash: hashA,
+        coverage_key: priceTargetKey,
+      })}
+    );
+    set local role service_role;
+    select set_config('request.jwt.claim.role', 'service_role', true);
+    ${onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-negotiable-owner-review-target",
+      answerHash: negotiableOwnerReviewHash,
+      expectedRevision: 3,
+      fact: {
+        topic: "precos",
+        field: "service.price_target",
+        subject: "drain_cleaning",
+        disposition: "owner_review_required",
+        rule_text: "Preço depende do dono.",
+        structured: { value: null },
+        owner_words: "Preciso revisar o preço.",
+      },
+      coverage: negotiableOwnerReviewCandidate,
+    })}
+    rollback;
+  `);
+  requireSuccess(
+    negotiableOwnerReviewResult,
+    "negotiable owner-review target invalidates floor",
+  );
+  assert.match(negotiableOwnerReviewResult.stdout, /"status": "recorded"/);
+
   const ownerReviewDurationFact = {
     topic: "precos",
     field: "service.duration",
@@ -1623,22 +2124,28 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     structured: { value: null },
     owner_words: "Preciso revisar a duração.",
   };
-  const ownerReviewDurationHash = sha256(
-    JSON.stringify(ownerReviewDurationFact),
+  const ownerReviewDurationHash = coverageCellHash(
+    "service:drain_cleaning:service.duration",
+    {
+      state: "owner_review_required",
+      attempts: 2,
+      safeRestriction: "Revisão do dono.",
+    },
   );
   const ownerReviewDurationCoverage = v2CoverageSnapshot({
     tenantId: tenant,
     callId: call,
-    revision: 1,
+    revision: 2,
     target: 149,
     answerHash: ownerReviewDurationHash,
     hashCharacter: "5",
   });
+  ownerReviewDurationCoverage.snapshot.cells[priceTargetKey].attempts = 1;
   ownerReviewDurationCoverage.snapshot.cells[
     "service:drain_cleaning:service.duration"
   ] = {
     state: "owner_review_required",
-    attempts: 1,
+    attempts: 2,
     safeRestriction: "Revisão do dono.",
   };
   ownerReviewDurationCoverage.current_answer_hashes = {
@@ -1668,7 +2175,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       ownerId: owner,
       providerToolCallId: "v2-owner-review-duration-positive",
       answerHash: ownerReviewDurationHash,
-      expectedRevision: 0,
+      expectedRevision: 1,
       fact: ownerReviewDurationFact,
       coverage: ownerReviewDurationCoverage,
     })),
@@ -1688,18 +2195,22 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     structured: { value: ["\tDrain cleaning\t"] },
     owner_words: "Drain cleaning",
   };
-  const trimmedNamesHash = sha256(JSON.stringify(trimmedNamesFact));
+  const trimmedNamesHash = coverageCellHash(
+    "service:drain_cleaning:service.name_synonyms",
+    { state: "answered", attempts: 2, value: ["\tDrain cleaning\t"] },
+  );
   const trimmedNamesCoverage = v2CoverageSnapshot({
     tenantId: tenant,
     callId: call,
-    revision: 1,
+    revision: 2,
     target: 149,
     answerHash: trimmedNamesHash,
     hashCharacter: "4",
   });
+  trimmedNamesCoverage.snapshot.cells[priceTargetKey].attempts = 1;
   trimmedNamesCoverage.snapshot.cells[
     "service:drain_cleaning:service.name_synonyms"
-  ] = { state: "answered", attempts: 1, value: ["\tDrain cleaning\t"] };
+  ] = { state: "answered", attempts: 2, value: ["\tDrain cleaning\t"] };
   trimmedNamesCoverage.current_answer_hashes = {
     "service:drain_cleaning:service.name_synonyms": trimmedNamesHash,
   };
@@ -1712,7 +2223,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       ownerId: owner,
       providerToolCallId: "v2-trimmed-service-names-positive",
       answerHash: trimmedNamesHash,
-      expectedRevision: 0,
+      expectedRevision: 1,
       fact: trimmedNamesFact,
       coverage: trimmedNamesCoverage,
     })),
@@ -1729,20 +2240,22 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     structured: { value: "call_anything" },
     owner_words: "Ainda não defini o modo de preço.",
   };
-  const ambiguousPriceModeHash = sha256(
-    JSON.stringify(ambiguousPriceModeFact),
+  const ambiguousPriceModeHash = coverageCellHash(
+    "service:drain_cleaning:service.price_mode",
+    { state: "ambiguous", attempts: 2, reason: "invalid_price_mode" },
   );
   const ambiguousPriceModeCoverage = v2CoverageSnapshot({
     tenantId: tenant,
     callId: call,
-    revision: 1,
+    revision: 2,
     target: 149,
     answerHash: ambiguousPriceModeHash,
     hashCharacter: "3",
   });
+  ambiguousPriceModeCoverage.snapshot.cells[priceTargetKey].attempts = 1;
   ambiguousPriceModeCoverage.snapshot.cells[
     "service:drain_cleaning:service.price_mode"
-  ] = { state: "ambiguous", attempts: 1, reason: "invalid_price_mode" };
+  ] = { state: "ambiguous", attempts: 2, reason: "invalid_price_mode" };
   ambiguousPriceModeCoverage.current_answer_hashes = {
     "service:drain_cleaning:service.price_mode": ambiguousPriceModeHash,
   };
@@ -1769,7 +2282,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       ownerId: owner,
       providerToolCallId: "v2-ambiguous-price-mode-positive",
       answerHash: ambiguousPriceModeHash,
-      expectedRevision: 0,
+      expectedRevision: 1,
       fact: ambiguousPriceModeFact,
       coverage: ambiguousPriceModeCoverage,
     })),
@@ -1788,17 +2301,23 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     structured: { value: null },
     owner_words: "Preciso revisar o horário.",
   };
-  const ownerReviewScheduleHash = sha256(
-    JSON.stringify(ownerReviewScheduleFact),
+  const ownerReviewScheduleHash = coverageCellHash(
+    "schedule.business_hours",
+    {
+      state: "owner_review_required",
+      attempts: 1,
+      safeRestriction: "Revisão do dono.",
+    },
   );
   const ownerReviewScheduleCoverage = v2CoverageSnapshot({
     tenantId: tenant,
     callId: call,
-    revision: 1,
+    revision: 2,
     target: 149,
     answerHash: ownerReviewScheduleHash,
     hashCharacter: "2",
   });
+  ownerReviewScheduleCoverage.snapshot.cells[priceTargetKey].attempts = 1;
   ownerReviewScheduleCoverage.snapshot.cells["schedule.business_hours"] = {
     state: "owner_review_required",
     attempts: 1,
@@ -1830,7 +2349,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       materialization_eligible: false,
       review_ready: false,
       owner_review_fields: ["schedule.business_hours"],
-      coverage_revision: 1,
+      coverage_revision: 2,
       source_call_id: call,
       source_refs: [
         "schedule.business_hours",
@@ -1852,7 +2371,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       ownerId: owner,
       providerToolCallId: "v2-owner-review-schedule-positive",
       answerHash: ownerReviewScheduleHash,
-      expectedRevision: 0,
+      expectedRevision: 1,
       fact: ownerReviewScheduleFact,
       coverage: ownerReviewScheduleCoverage,
     })),
@@ -1895,14 +2414,15 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     const hostileCoverage = v2CoverageSnapshot({
       tenantId: tenant,
       callId: call,
-      revision: 1,
+      revision: 2,
       target: 149,
       answerHash: hostilePriceModeHash,
       hashCharacter: "6",
     });
+    hostileCoverage.snapshot.cells[priceTargetKey].attempts = 1;
     hostileCoverage.snapshot.cells[
       "service:drain_cleaning:service.price_mode"
-    ] = hostileCase.cell;
+    ] = { ...hostileCase.cell, attempts: 2 };
     hostileCoverage.current_answer_hashes = {
       "service:drain_cleaning:service.price_mode": hostilePriceModeHash,
     };
@@ -1915,7 +2435,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
         ownerId: owner,
         providerToolCallId: hostileCase.providerToolCallId,
         answerHash: hostilePriceModeHash,
-        expectedRevision: 0,
+        expectedRevision: 1,
         fact: hostilePriceModeFact,
         coverage: hostileCoverage,
       })),
@@ -1930,7 +2450,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     select
       (select count(*) from public.receipts where tenant_id = '${tenant}')::text || ':' ||
       (select count(*) from public.rules where tenant_id = '${tenant}')::text;
-  `), "V2 hostile price-mode materialization rollback"), "0:0");
+  `), "V2 hostile price-mode materialization rollback"), "1:0");
 
   const compositeTamperResults = [];
   const captureCompositeTamper = async (
@@ -1948,7 +2468,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
         ownerId: owner,
         providerToolCallId,
         answerHash: sha256(JSON.stringify(tamperedFact)),
-        expectedRevision: 0,
+        expectedRevision: 1,
         fact: tamperedFact,
         coverage: tamperedCoverage,
       })),
@@ -1963,7 +2483,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
   const hostileNonNegotiableCoverage = v2CoverageSnapshot({
     tenantId: tenant,
     callId: call,
-    revision: 1,
+    revision: 2,
     target: 149,
     answerHash: hostileNonNegotiableHash,
     hashCharacter: "1",
@@ -1986,7 +2506,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
   const hostileSiblingCoverage = v2CoverageSnapshot({
     tenantId: tenant,
     callId: call,
-    revision: 1,
+    revision: 2,
     target: 149,
     answerHash: hostileSiblingHash,
     hashCharacter: "0",
@@ -2032,7 +2552,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
   const hostileScheduleCoverage = v2CoverageSnapshot({
     tenantId: tenant,
     callId: call,
-    revision: 1,
+    revision: 2,
     target: 149,
     answerHash: scheduleHash,
     hashCharacter: "8",
@@ -2071,7 +2591,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       materialization_eligible: true,
       review_ready: true,
       owner_review_fields: [],
-      coverage_revision: 1,
+      coverage_revision: 2,
       source_call_id: call,
       source_refs: ["schedule.business_hours", "schedule.holidays"],
       fields: { business_hours: "all day", holidays: "always open" },
@@ -2100,7 +2620,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
   const hostileAuthorityCoverage = v2CoverageSnapshot({
     tenantId: tenant,
     callId: call,
-    revision: 1,
+    revision: 2,
     target: 149,
     answerHash: authorityHash,
     hashCharacter: "7",
@@ -2135,7 +2655,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       materialization_eligible: true,
       review_ready: true,
       owner_review_fields: [],
-      coverage_revision: 1,
+      coverage_revision: 2,
       source_call_id: call,
       source_refs: ["authority.book", "authority.charge_fee"],
       fields: {
@@ -2170,7 +2690,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     );
   assert.equal(
     structuredTruth,
-    "true:false:true:false:true:false:true:false:true:false:true:false:true:false:false:true:false:false:false:false:false:false",
+    "true:false:true:false:true:false:true:false:true:false:true:false:true:false:false:true:false:false:false:false:false:false:false",
   );
 
   const answerA1 = {
@@ -2178,51 +2698,6 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     callId: call,
     ownerId: owner,
     providerToolCallId: "v2-answer-a1",
-    answerHash: hashA,
-    expectedRevision: 0,
-    fact: fact(149),
-    coverage: v2CoverageSnapshot({
-      tenantId: tenant,
-      callId: call,
-      revision: 1,
-      target: 149,
-      answerHash: hashA,
-      hashCharacter: "a",
-    }),
-  };
-  const a1 = JSON.parse(scalar(await runSql(
-    connection,
-    home,
-    serviceTransaction(onboardingAnswerSql(answerA1)),
-  ), "V2 answer A1"));
-  assert.equal(a1.status, "recorded");
-  assert.equal(a1.revision, 1);
-
-  const aliasA = {
-    ...answerA1,
-    providerToolCallId: "v2-answer-a-alias",
-    expectedRevision: 1,
-    coverage: v2CoverageSnapshot({
-      tenantId: tenant,
-      callId: call,
-      revision: 2,
-      target: 149,
-      answerHash: hashA,
-      hashCharacter: "b",
-    }),
-  };
-  const alias = JSON.parse(scalar(await runSql(
-    connection,
-    home,
-    serviceTransaction(onboardingAnswerSql(aliasA)),
-  ), "V2 current A alias"));
-  assert.equal(alias.status, "reused");
-  assert.equal(alias.revision, 1);
-  assert.equal(alias.coverage_receipt_id, a1.coverage_receipt_id);
-
-  const answerB = {
-    ...answerA1,
-    providerToolCallId: "v2-answer-b",
     answerHash: hashB,
     expectedRevision: 1,
     fact: fact(199),
@@ -2232,6 +2707,98 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       revision: 2,
       target: 199,
       answerHash: hashB,
+      hashCharacter: "a",
+    }),
+  };
+  const a1 = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingAnswerSql(answerA1)),
+  ), "V2 answer A1"));
+  assert.equal(a1.status, "recorded");
+  assert.equal(a1.revision, 2);
+
+  const selfConsistentSiblingCoverage = withoutCoverageServerFields(a1.coverage);
+  selfConsistentSiblingCoverage.revision = 3;
+  selfConsistentSiblingCoverage.snapshot.revision = 3;
+  selfConsistentSiblingCoverage.snapshot.cells[
+    "service:drain_cleaning:service.price_target"
+  ] = { state: "answered", attempts: 3, value: 249 };
+  selfConsistentSiblingCoverage.snapshot.cells[
+    "service:drain_cleaning:service.negotiation"
+  ] = {
+    state: "answered",
+    attempts: 1,
+    value: { mode: "non_negotiable", floor: 249 },
+  };
+  selfConsistentSiblingCoverage.snapshot.cells[
+    "service:drain_cleaning:service.duration"
+  ] = { state: "answered", attempts: 1, value: 5 };
+  selfConsistentSiblingCoverage.current_answer_hashes = {
+    ...selfConsistentSiblingCoverage.current_answer_hashes,
+    "service:drain_cleaning:service.price_target": hashC,
+  };
+  selfConsistentSiblingCoverage.materializations = [JSON.parse(scalar(
+    await runSql(connection, home, `
+      select public.onboarding_materialization_v3(
+        ${jsonb(selfConsistentSiblingCoverage.snapshot)},
+        'service:drain_cleaning', 3, '${call}'
+      )::text;
+    `),
+    "server canonical self-consistent sibling materialization",
+  ))];
+  const selfConsistentSiblingTamper = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      ...answerA1,
+      providerToolCallId: "v2-self-consistent-sibling-tamper",
+      answerHash: hashC,
+      expectedRevision: 2,
+      fact: fact(249),
+      coverage: selfConsistentSiblingCoverage,
+    })),
+  );
+  assert.notEqual(selfConsistentSiblingTamper.code, 0);
+  assert.match(
+    selfConsistentSiblingTamper.stderr,
+    /onboarding_snapshot_transition_invalid/,
+  );
+
+  const aliasA = {
+    ...answerA1,
+    providerToolCallId: "v2-answer-a-alias",
+    expectedRevision: 2,
+    coverage: v2CoverageSnapshot({
+      tenantId: tenant,
+      callId: call,
+      revision: 3,
+      target: 199,
+      answerHash: hashB,
+      hashCharacter: "b",
+    }),
+  };
+  const alias = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingAnswerSql(aliasA)),
+  ), "V2 current A alias"));
+  assert.equal(alias.status, "reused");
+  assert.equal(alias.revision, 2);
+  assert.equal(alias.coverage_receipt_id, a1.coverage_receipt_id);
+
+  const answerB = {
+    ...answerA1,
+    providerToolCallId: "v2-answer-b",
+    answerHash: hashC,
+    expectedRevision: 2,
+    fact: fact(249),
+    coverage: v2CoverageSnapshot({
+      tenantId: tenant,
+      callId: call,
+      revision: 3,
+      target: 249,
+      answerHash: hashC,
       hashCharacter: "c",
     }),
   };
@@ -2241,7 +2808,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     serviceTransaction(onboardingAnswerSql(answerB)),
   ), "V2 answer B"));
   assert.equal(b.status, "recorded");
-  assert.equal(b.revision, 2);
+  assert.equal(b.revision, 3);
 
   const replayedAlias = JSON.parse(scalar(await runSql(
     connection,
@@ -2249,19 +2816,19 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     serviceTransaction(onboardingAnswerSql(aliasA)),
   ), "V2 exact alias replay after B"));
   assert.equal(replayedAlias.status, "reused");
-  assert.equal(replayedAlias.revision, 1);
+  assert.equal(replayedAlias.revision, 2);
   assert.equal(replayedAlias.coverage_receipt_id, a1.coverage_receipt_id);
 
   const answerA3 = {
     ...answerA1,
     providerToolCallId: "v2-answer-a3",
-    expectedRevision: 2,
+    expectedRevision: 3,
     coverage: v2CoverageSnapshot({
       tenantId: tenant,
       callId: call,
-      revision: 3,
-      target: 149,
-      answerHash: hashA,
+      revision: 4,
+      target: 199,
+      answerHash: hashB,
       hashCharacter: "d",
     }),
   };
@@ -2271,7 +2838,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     serviceTransaction(onboardingAnswerSql(answerA3)),
   ), "V2 answer A3"));
   assert.equal(a3.status, "recorded");
-  assert.equal(a3.revision, 3);
+  assert.equal(a3.revision, 4);
 
   assert.equal(scalar(await runSql(connection, home, `
     select
@@ -2279,7 +2846,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       string_agg(version::text || '=' || (structured->>'price_target'), ',' order by version)
     from public.rules
     where tenant_id = '${tenant}' and structured->>'materialization_key' = 'service:drain_cleaning';
-  `), "V2 A-B-A rule versions"), "3:1:1=149,2=199,3=149");
+  `), "V2 A-B-A rule versions"), "3:1:1=199,2=249,3=199");
   assert.equal(scalar(await runSql(connection, home, `
     select
       (select count(*) from public.receipts where tenant_id = '${tenant}' and kind = 'onboarding_coverage')::text || ':' ||
@@ -2289,7 +2856,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       (select count(*) from public.bookings where tenant_id = '${tenant}')::text || ':' ||
       (select count(*) from public.action_intents where tenant_id = '${tenant}')::text || ':' ||
       (select auth_epoch::text || '/' || policy_epoch::text || '/' || operational_mode from public.tenants where id = '${tenant}');
-  `), "V2 pre-decision no-authority"), "3:1:0:0:0:0:1/1/simulation_only");
+  `), "V2 pre-decision no-authority"), "4:1:0:0:0:0:1/1/simulation_only");
   assert.equal(scalar(await runSql(connection, home, `
     select bool_and(text not like '%HOSTILE MODEL TEXT%')::text
     from public.rules where tenant_id = '${tenant}';
@@ -2322,7 +2889,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       min(structured->>'price_min') || ':' || min(structured->>'duration_min') || ':' ||
       (select policy_epoch::text from public.tenants where id = '${tenant}')
     from public.effective_rules where tenant_id = '${tenant}';
-  `), "effective V2 service reload"), "1:ligou.rule.service.v2:drain_cleaning:149:149:60:2");
+  `), "effective V2 service reload"), "1:ligou.rule.service.v2:drain_cleaning:199:199:60:2");
 
   const followOneCoverage = structuredClone(a3.coverage);
   for (const key of [
@@ -2332,10 +2899,10 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     "materialization_action",
   ]) delete followOneCoverage[key];
   followOneCoverage.transition_kind = "directed_followup";
-  followOneCoverage.revision = 4;
+  followOneCoverage.revision = 5;
   followOneCoverage.snapshot = {
     ...followOneCoverage.snapshot,
-    revision: 4,
+    revision: 5,
     followUps: 1,
     followUpGroups: {
       "service:drain_cleaning:service.inclusions_exclusions": 1,
@@ -2348,13 +2915,13 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       tenantId: tenant,
       callId: call,
       ownerId: owner,
-      expectedRevision: 3,
+      expectedRevision: 4,
       field: "service.inclusions_exclusions",
       subject: "drain_cleaning",
       coverage: followOneCoverage,
     })),
   ), "first durable V2 followup"));
-  assert.equal(followOne.revision, 4);
+  assert.equal(followOne.revision, 5);
   assert.equal(followOne.coverage.snapshot.followUps, 1);
   assert.equal(scalar(await runSql(connection, home, `
     select
@@ -2371,10 +2938,10 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     "rule_group_id",
     "materialization_action",
   ]) delete followTwoCoverage[key];
-  followTwoCoverage.revision = 5;
+  followTwoCoverage.revision = 6;
   followTwoCoverage.snapshot = {
     ...followTwoCoverage.snapshot,
-    revision: 5,
+    revision: 6,
     followUps: 2,
     followUpGroups: {
       "service:drain_cleaning:service.inclusions_exclusions": 2,
@@ -2387,13 +2954,13 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       tenantId: tenant,
       callId: call,
       ownerId: owner,
-      expectedRevision: 4,
+      expectedRevision: 5,
       field: "service.inclusions_exclusions",
       subject: "drain_cleaning",
       coverage: followTwoCoverage,
     })),
   ), "second durable V2 followup"));
-  assert.equal(followTwo.revision, 5);
+  assert.equal(followTwo.revision, 6);
 
   const illegalThirdCoverage = structuredClone(followTwo.coverage);
   for (const key of [
@@ -2402,10 +2969,10 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     "rule_group_id",
     "materialization_action",
   ]) delete illegalThirdCoverage[key];
-  illegalThirdCoverage.revision = 6;
+  illegalThirdCoverage.revision = 7;
   illegalThirdCoverage.snapshot = {
     ...illegalThirdCoverage.snapshot,
-    revision: 6,
+    revision: 7,
     followUps: 3,
     followUpGroups: {
       "service:drain_cleaning:service.inclusions_exclusions": 3,
@@ -2418,7 +2985,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       tenantId: tenant,
       callId: call,
       ownerId: owner,
-      expectedRevision: 5,
+      expectedRevision: 6,
       field: "service.inclusions_exclusions",
       subject: "drain_cleaning",
       coverage: illegalThirdCoverage,
@@ -2430,7 +2997,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     select
       (select count(*) from public.rules where tenant_id = '${tenant}')::text || ':' ||
       (select max((readback->>'revision')::integer) from public.receipts where tenant_id = '${tenant}' and kind = 'onboarding_coverage')::text;
-  `), "followup inserts no rule and third rolls back"), "4:5");
+  `), "followup inserts no rule and third rolls back"), "4:6");
 }
 
 async function concurrentOnboardingAnswerAndFollowup(connection, home) {
@@ -2456,8 +3023,16 @@ async function concurrentOnboardingAnswerAndFollowup(connection, home) {
       'ready', 'answer-followup-race', '${call}', now()
     );
   `), "concurrent followup fixture");
-  const hashA = sha256("followup-race-A");
-  const hashB = sha256("followup-race-B");
+  const targetKey = "service:drain_cleaning:service.price_target";
+  const hashA = coverageCellHash(targetKey, {
+    state: "answered", attempts: 1, value: 149,
+  });
+  const hashB = coverageCellHash(targetKey, {
+    state: "answered", attempts: 2, value: 199,
+  });
+  const hashC = coverageCellHash(targetKey, {
+    state: "answered", attempts: 3, value: 249,
+  });
   const fact = (target) => ({
     topic: "precos",
     field: "service.price_target",
@@ -2467,6 +3042,39 @@ async function concurrentOnboardingAnswerAndFollowup(connection, home) {
     structured: { value: target },
     owner_words: `Preço ${target}.`,
   });
+  const raceBaselineCoverage = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    target: 149,
+    answerHash: hashA,
+    hashCharacter: "d",
+  });
+  raceBaselineCoverage.current_answer_hashes = snapshotCellHashes(
+    raceBaselineCoverage.snapshot,
+  );
+  requireSuccess(await runSql(connection, home, `
+    insert into public.receipts (
+      tenant_id, call_id, kind, outcome, external_id, readback,
+      payload_hash, detail
+    ) values (
+      '${tenant}', '${call}', 'onboarding_coverage', 'accepted',
+      '${sha256("round4-race-baseline-event")}',
+      ${jsonb({
+        ...raceBaselineCoverage,
+        rule_id: null,
+        rule_group_id: null,
+        materialization_action: "coverage_only",
+        snapshot_digest: "d".repeat(64),
+      })},
+      '${sha256("round4-race-baseline-payload")}',
+      ${jsonb({
+        transition_kind: "answer",
+        answer_hash: hashA,
+        coverage_key: targetKey,
+      })}
+    );
+  `), "durable concurrent V2 baseline");
   const initial = JSON.parse(scalar(await runSql(
     connection,
     home,
@@ -2475,15 +3083,15 @@ async function concurrentOnboardingAnswerAndFollowup(connection, home) {
       callId: call,
       ownerId: owner,
       providerToolCallId: "race-initial-answer",
-      answerHash: hashA,
-      expectedRevision: 0,
-      fact: fact(149),
+      answerHash: hashB,
+      expectedRevision: 1,
+      fact: fact(199),
       coverage: v2CoverageSnapshot({
         tenantId: tenant,
         callId: call,
-        revision: 1,
-        target: 149,
-        answerHash: hashA,
+        revision: 2,
+        target: 199,
+        answerHash: hashB,
         hashCharacter: "e",
       }),
     })),
@@ -2491,10 +3099,10 @@ async function concurrentOnboardingAnswerAndFollowup(connection, home) {
 
   const firstFollowupCoverage = withoutCoverageServerFields(initial.coverage);
   firstFollowupCoverage.transition_kind = "directed_followup";
-  firstFollowupCoverage.revision = 2;
+  firstFollowupCoverage.revision = 3;
   firstFollowupCoverage.snapshot = {
     ...firstFollowupCoverage.snapshot,
-    revision: 2,
+    revision: 3,
     followUps: 1,
     followUpGroups: {
       "service:drain_cleaning:service.inclusions_exclusions": 1,
@@ -2504,7 +3112,7 @@ async function concurrentOnboardingAnswerAndFollowup(connection, home) {
     tenantId: tenant,
     callId: call,
     ownerId: owner,
-    expectedRevision: 1,
+    expectedRevision: 2,
     field: "service.inclusions_exclusions",
     subject: "drain_cleaning",
     coverage: firstFollowupCoverage,
@@ -2529,10 +3137,10 @@ async function concurrentOnboardingAnswerAndFollowup(connection, home) {
   const latest = sameResults[0];
   const secondFollowupCoverage = withoutCoverageServerFields(latest.coverage);
   secondFollowupCoverage.transition_kind = "directed_followup";
-  secondFollowupCoverage.revision = 3;
+  secondFollowupCoverage.revision = 4;
   secondFollowupCoverage.snapshot = {
     ...secondFollowupCoverage.snapshot,
-    revision: 3,
+    revision: 4,
     followUps: 2,
     followUpGroups: {
       "service:drain_cleaning:service.inclusions_exclusions": 2,
@@ -2541,31 +3149,32 @@ async function concurrentOnboardingAnswerAndFollowup(connection, home) {
   const answerCoverage = v2CoverageSnapshot({
     tenantId: tenant,
     callId: call,
-    revision: 3,
-    target: 199,
-    answerHash: hashB,
+    revision: 4,
+    target: 249,
+    answerHash: hashC,
     hashCharacter: "f",
     followUps: 1,
     followUpGroups: {
       "service:drain_cleaning:service.inclusions_exclusions": 1,
     },
   });
+  answerCoverage.snapshot.cells[targetKey].attempts = 3;
   const [racedAnswer, racedFollowup] = await Promise.all([
     runSql(connection, home, serviceTransaction(onboardingAnswerSql({
       tenantId: tenant,
       callId: call,
       ownerId: owner,
       providerToolCallId: "race-answer-versus-followup",
-      answerHash: hashB,
-      expectedRevision: 2,
-      fact: fact(199),
+      answerHash: hashC,
+      expectedRevision: 3,
+      fact: fact(249),
       coverage: answerCoverage,
     }))),
     runSql(connection, home, serviceTransaction(onboardingFollowupSql({
       tenantId: tenant,
       callId: call,
       ownerId: owner,
-      expectedRevision: 2,
+      expectedRevision: 3,
       field: "service.inclusions_exclusions",
       subject: "drain_cleaning",
       coverage: secondFollowupCoverage,
@@ -2586,7 +3195,7 @@ async function concurrentOnboardingAnswerAndFollowup(connection, home) {
         where tenant_id = '${tenant}' and kind = 'onboarding_coverage')::text || ':' ||
       (select count(*) from public.rules where tenant_id = '${tenant}')::text;
   `), "answer-followup serialization invariant"),
-    race[0].code === 0 ? "3:3:2" : "3:3:1",
+    race[0].code === 0 ? "4:4:2" : "4:4:1",
   );
 }
 

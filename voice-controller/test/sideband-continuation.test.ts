@@ -6,6 +6,7 @@ import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { emptyUsage } from "../src/config.ts";
 import {
   applyCoverageFact,
+  canonicalizeLocalityInput,
   createCoverage,
   evaluateCoverage,
   type CoverageFact,
@@ -727,7 +728,11 @@ describe("onboarding raw correlation and durable tool outbox", () => {
           field: "area.coverage",
           disposition: "answered",
           rule_text: "Blocked member must never persist.",
-          structured: { value: ["Anaheim"] },
+          structured: { value: { localities: [{
+            display_name: "Anaheim",
+            country_code: "US",
+            region_code: "CA",
+          }] } },
           owner_words: "Também não deve persistir.",
         }),
         0,
@@ -1039,7 +1044,9 @@ function completeCoverage(cap: Capability, revision: number): CoverageSnapshot {
   for (const field of universalFields) {
     const values: Partial<Record<CoverageField, unknown>> = {
       "business.customer_types": ["residencial"],
-      "area.coverage": { localities: [{ display_name: "Irvine", country_code: "US", region_code: "CA" }] },
+      "area.coverage": { localities: [canonicalizeLocalityInput({
+        display_name: "Irvine", country_code: "US", region_code: "CA",
+      })!] },
       "schedule.business_hours": {
         days: ["mon", "tue", "wed", "thu", "fri"],
         hours: { opens: "08:00", closes: "18:00" },
@@ -1388,6 +1395,17 @@ function staleSummaryCorrectionBoundary(
                 : ruleRows;
               return resolve({ data, error: null });
             }
+            if (table === "onboarding_locality_registry")
+              return resolve({
+                data: [{
+                  locality_id: "loc_4bc5a435c3c9a7013a252ae4",
+                  display_name: "Anaheim",
+                  country_code: "US",
+                  region_code: "CA",
+                  aliases: ["anaheim"],
+                }],
+                error: null,
+              });
             return resolve({ data: null, error: null });
           },
         };

@@ -1054,4 +1054,30 @@ describe("onboarding V2 reconciliation migration contract", () => {
       expect(sql).toContain(`grant execute on function public.${signature}`);
     }
   });
+
+  test("owns locality membership and one-fact snapshot transitions inside the database boundary", () => {
+    const sql = migrationSql("onboarding_v2_reconciliation");
+    expect(sql).toContain("create table public.onboarding_locality_registry");
+    expect(sql).toContain("locality_id text primary key");
+    expect(sql).toContain("aliases text[]");
+    expect(sql).toContain(
+      "alter table public.onboarding_locality_registry enable row level security",
+    );
+    expect(sql).toContain(
+      "alter table public.onboarding_locality_registry force row level security",
+    );
+    expect(sql).toContain(
+      "grant select on table public.onboarding_locality_registry to service_role",
+    );
+    expect(sql).toContain(
+      "create or replace function public.onboarding_resolve_locality_v1",
+    );
+    expect(sql).toContain(
+      "create or replace function public.onboarding_cell_semantic_hash_v1",
+    );
+    expect(sql).toContain(
+      "create or replace function public.onboarding_validate_answer_transition_v2",
+    );
+    expect(sql).toContain("onboarding_snapshot_transition_invalid");
+  });
 });

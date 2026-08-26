@@ -88,6 +88,22 @@ class SupabaseBoundaryFake {
   rpcAbortSignals: AbortSignal[] = [];
   receiptNeverResolves = false;
   ignoreRuleInFilter = false;
+  localityRows = [
+    {
+      locality_id: "loc_4bc5a435c3c9a7013a252ae4",
+      display_name: "Anaheim",
+      country_code: "US",
+      region_code: "CA",
+      aliases: ["anaheim"],
+    },
+    {
+      locality_id: "loc_9971eda617977d43d7df9fd5",
+      display_name: "Irvine",
+      country_code: "US",
+      region_code: "CA",
+      aliases: ["irvine"],
+    },
+  ];
 
   client() {
     const boundary = this;
@@ -150,6 +166,15 @@ class SupabaseBoundaryFake {
               return Promise.resolve({
                 data: rows.slice(0, limitValue),
                 error: boundary.receiptError,
+              }).then(resolve);
+            }
+            if (table === "onboarding_locality_registry") {
+              expect(selected).toBe(
+                "locality_id,display_name,country_code,region_code,aliases",
+              );
+              return Promise.resolve({
+                data: boundary.localityRows,
+                error: null,
               }).then(resolve);
             }
             if (table !== "rules") {
@@ -573,6 +598,63 @@ describe("recordOnboardingAnswer", () => {
         structured: expect.objectContaining({
           schema: "ligou.rule.area.v2",
           materialization_key: "domain:area",
+          materialization_eligible: false,
+        }),
+      }),
+    );
+  });
+
+  test("keeps an unknown locality tuple ambiguous instead of minting operational locality authority", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.rpcResult = {
+      data: {
+        status: "recorded",
+        rule_id: null,
+        rule_group_id: null,
+        coverage_receipt_id: "receipt-unknown-locality",
+        revision: 1,
+        snapshot_digest: "b".repeat(64),
+        complete: false,
+        missing: [],
+        ambiguous: [{ field: "area.coverage" }],
+        next_action: { type: "ask", field: "area.coverage" },
+        coverage: {},
+      },
+      error: null,
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 10,
+      timeoutMs: 100,
+    });
+    const result = await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-unknown-locality",
+      {
+        ...AREA_FACT,
+        structured: { value: { localities: [{
+          display_name: "All of California",
+          country_code: "US",
+          region_code: "CA",
+          locality_id: "loc_152270f3d478268fe520252b",
+        }] } },
+        owner_words: "Atendemos toda a Califórnia.",
+      },
+    );
+    expect(result.ok).toBe(true);
+    const answerCall = fake.rpcCalls.find(
+      (call) => call.name === "record_onboarding_answer",
+    );
+    expect(answerCall).toBeDefined();
+    const projection = answerCall!.args.p_coverage as any;
+    expect(projection.snapshot.cells["area.coverage"]).toMatchObject({
+      state: "ambiguous",
+    });
+    expect(projection.materializations).toContainEqual(
+      expect.objectContaining({
+        key: "domain:area",
+        review_ready: false,
+        structured: expect.objectContaining({
           materialization_eligible: false,
         }),
       }),

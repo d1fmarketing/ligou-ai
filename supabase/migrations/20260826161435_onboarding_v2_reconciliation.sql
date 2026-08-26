@@ -14,6 +14,51 @@ begin
 end
 $$;
 
+-- Application-owned locality membership.  Voice/model text can propose a
+-- tuple, but only a unique registry row can mint the stable operational ID.
+create table public.onboarding_locality_registry (
+  locality_id text primary key
+    check (locality_id ~ '^loc_[0-9a-f]{24}$'),
+  display_name text not null check (
+    display_name = btrim(display_name) and length(display_name) between 1 and 100
+  ),
+  country_code text not null check (country_code ~ '^[A-Z]{2}$'),
+  region_code text not null check (region_code ~ '^[A-Z]{2}$'),
+  aliases text[] not null check (cardinality(aliases) > 0),
+  created_at timestamptz not null default now()
+);
+
+create unique index onboarding_locality_registry_identity_unique
+  on public.onboarding_locality_registry (
+    country_code, region_code, lower(display_name)
+  );
+
+insert into public.onboarding_locality_registry (
+  locality_id, display_name, country_code, region_code, aliases
+) values
+  ('loc_06b5af1ac7ab0ac5ffaa565a', 'Concord', 'US', 'CA', array['concord']),
+  ('loc_103311f819190c5e34075124', 'Walnut Creek', 'US', 'CA', array['walnut creek']),
+  ('loc_49cae77e3299fdc874706952', 'Pleasant Hill', 'US', 'CA', array['pleasant hill']),
+  ('loc_fcc2e7491cf2266b3cc824d5', 'Martinez', 'US', 'CA', array['martinez']),
+  ('loc_4bc5a435c3c9a7013a252ae4', 'Anaheim', 'US', 'CA', array['anaheim']),
+  ('loc_f523ab817485998b9f27a274', 'Santa Ana', 'US', 'CA', array['santa ana']),
+  ('loc_9971eda617977d43d7df9fd5', 'Irvine', 'US', 'CA', array['irvine']),
+  ('loc_1775cd185638a4eb34fa8b78', 'Orange', 'US', 'CA', array['orange']),
+  ('loc_62bcd7af7bfab0878130f238', 'Tustin', 'US', 'CA', array['tustin']),
+  ('loc_7a99602020a0ced6f4ceea63', 'Costa Mesa', 'US', 'CA', array['costa mesa']),
+  ('loc_c0f300f553807cd44f5f7ede', 'New York', 'US', 'NY',
+    array['new york','new york city','nyc']),
+  ('loc_e939e6896203b54b290f9224', 'Washington', 'US', 'DC',
+    array['washington','washington dc','washington, dc']),
+  ('loc_598cce799aeb20c5d2116b74', 'State College', 'US', 'PA',
+    array['state college']);
+
+alter table public.onboarding_locality_registry enable row level security;
+alter table public.onboarding_locality_registry force row level security;
+revoke all on table public.onboarding_locality_registry
+  from public, anon, authenticated, service_role;
+grant select on table public.onboarding_locality_registry to service_role;
+
 alter table public.receipts
   drop constraint if exists receipts_onboarding_shape_check;
 alter table public.receipts add constraint receipts_onboarding_shape_check check (
@@ -162,7 +207,7 @@ alter table public.receipts add constraint receipts_onboarding_shape_check check
 alter table public.receipts
   validate constraint receipts_onboarding_shape_check;
 
-create or replace function public.onboarding_locality_value_v1(
+create or replace function public.onboarding_resolve_locality_v1(
   p_value jsonb
 ) returns jsonb
 language plpgsql
@@ -171,30 +216,13 @@ set search_path = ''
 as $$
 declare
   v_item jsonb;
-  v_display text;
+  v_display_key text;
   v_country text;
   v_region text;
-  v_key text;
-  v_id text;
+  v_match_count integer;
+  v_match public.onboarding_locality_registry;
   v_result jsonb := '[]'::jsonb;
   v_ids text[] := array[]::text[];
-  v_states constant text[] := array[
-    'alabama','alaska','arizona','arkansas','california','colorado',
-    'connecticut','delaware','florida','georgia','hawaii','idaho',
-    'illinois','indiana','iowa','kansas','kentucky','louisiana','maine',
-    'maryland','massachusetts','michigan','minnesota','mississippi',
-    'missouri','montana','nebraska','nevada','new hampshire','new jersey',
-    'new mexico','new york','north carolina','north dakota','ohio',
-    'oklahoma','oregon','pennsylvania','rhode island','south carolina',
-    'south dakota','tennessee','texas','utah','vermont','virginia',
-    'washington','west virginia','wisconsin','wyoming'
-  ];
-  v_regions constant text[] := array[
-    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN',
-    'IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV',
-    'NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN',
-    'TX','UT','VT','VA','WA','WV','WI','WY','DC'
-  ];
 begin
   if jsonb_typeof(p_value) <> 'object'
      or (select count(*) from jsonb_object_keys(p_value)) <> 1
@@ -214,62 +242,71 @@ begin
        or jsonb_typeof(v_item->'region_code') <> 'string' then
       return null;
     end if;
-    v_display := v_item->>'display_name';
-    v_country := v_item->>'country_code';
-    v_region := v_item->>'region_code';
-    if v_display <> regexp_replace(
-         v_display, '^[[:space:]]+|[[:space:]]+$', '', 'g'
-       )
-       or v_country <> 'US'
-       or not (v_region = any(v_regions))
-       or upper(v_display) = any(v_regions)
-       or length(v_display) < 1 or length(v_display) > 100
-       or v_display ~ '[0-9]'
-       or v_display !~ '^[[:alpha:]][[:alpha:].'' -]*$' then
+    v_display_key := lower(regexp_replace(
+      btrim(v_item->>'display_name'), '[[:space:]]+', ' ', 'g'
+    ));
+    v_country := upper(btrim(v_item->>'country_code'));
+    v_region := upper(btrim(v_item->>'region_code'));
+    if v_display_key = '' or v_country !~ '^[A-Z]{2}$'
+       or v_region !~ '^[A-Z]{2}$' then
       return null;
     end if;
-    v_key := lower(regexp_replace(v_display, '[[:space:]]+', ' ', 'g'));
-    if not (
-         (v_display = 'New York' and v_region = 'NY')
-         or (v_display = 'Washington' and v_region = 'DC')
-       ) and (
-         v_key = any(v_states)
-         or regexp_replace(v_key, '[^[:alpha:]]', '', 'g') in (
-           'unitedstates','unitedstatesofamerica','usa','us','america',
-           'canada'
-         )
-         or v_key in ('state','estado')
-         or v_key ~ '(^|[^[:alpha:]])(county|condado|region|regiao|região|province|provincia|província|metropolitan|metro|area|área|zip|cep|postal)([^[:alpha:]]|$)'
-         or (
-           v_key ~ '^(north(?:ern)?|south(?:ern)?|east(?:ern)?|west(?:ern)?|central) '
-           and regexp_replace(v_key, '^[^ ]+ ', '') = any(v_states)
-         )
-         or (
-           v_key ~ '^(state of|estado de) '
-           and regexp_replace(v_key, '^(state of|estado de) ', '') = any(v_states)
-         )
-         or (
-           v_key ~ ' (state|estado)$'
-           and regexp_replace(v_key, ' (state|estado)$', '') = any(v_states)
-         )
-       ) then
-      return null;
-    end if;
-    v_id := 'loc_' || substring(encode(extensions.digest(
-      convert_to(v_country || ':' || v_region || ':' || v_key, 'UTF8'),
-      'sha256'
-    ), 'hex') from 1 for 24);
-    if v_id = any(v_ids) then return null; end if;
-    v_ids := array_append(v_ids, v_id);
+    select count(*) into v_match_count
+    from public.onboarding_locality_registry registry
+    where registry.country_code = v_country
+      and registry.region_code = v_region
+      and (
+        lower(regexp_replace(
+          btrim(registry.display_name), '[[:space:]]+', ' ', 'g'
+        )) = v_display_key
+        or exists (
+          select 1 from unnest(registry.aliases) alias
+          where lower(regexp_replace(
+            btrim(alias), '[[:space:]]+', ' ', 'g'
+          )) = v_display_key
+        )
+      );
+    if v_match_count <> 1 then return null; end if;
+    select registry.* into v_match
+    from public.onboarding_locality_registry registry
+    where registry.country_code = v_country
+      and registry.region_code = v_region
+      and (
+        lower(regexp_replace(
+          btrim(registry.display_name), '[[:space:]]+', ' ', 'g'
+        )) = v_display_key
+        or exists (
+          select 1 from unnest(registry.aliases) alias
+          where lower(regexp_replace(
+            btrim(alias), '[[:space:]]+', ' ', 'g'
+          )) = v_display_key
+        )
+      )
+    limit 1;
+    if v_match.locality_id = any(v_ids) then return null; end if;
+    v_ids := array_append(v_ids, v_match.locality_id);
     v_result := v_result || jsonb_build_array(jsonb_build_object(
-      'display_name', v_display,
-      'country_code', v_country,
-      'region_code', v_region,
-      'locality_id', v_id
+      'display_name', v_match.display_name,
+      'country_code', v_match.country_code,
+      'region_code', v_match.region_code,
+      'locality_id', v_match.locality_id
     ));
   end loop;
   return jsonb_build_object('localities', v_result);
 end
+$$;
+
+revoke all on function public.onboarding_resolve_locality_v1(jsonb)
+from public, anon, authenticated, service_role;
+
+create or replace function public.onboarding_locality_value_v1(
+  p_value jsonb
+) returns jsonb
+language sql
+stable
+set search_path = ''
+as $$
+  select public.onboarding_resolve_locality_v1(p_value);
 $$;
 
 revoke all on function public.onboarding_locality_value_v1(jsonb)
@@ -425,6 +462,319 @@ $$;
 
 revoke all on function public.onboarding_canonical_json_v1(jsonb)
 from public, anon, authenticated, service_role;
+
+create or replace function public.onboarding_cell_semantic_hash_v1(
+  p_coverage_key text,
+  p_cell jsonb
+) returns text
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  v_cell jsonb;
+  v_payload jsonb;
+begin
+  if coalesce(p_coverage_key, '') = '' or jsonb_typeof(p_cell) <> 'object'
+  then return null; end if;
+  v_cell := p_cell - 'attempts';
+  if p_coverage_key like 'service:%:service.negotiation'
+     and v_cell->>'state' = 'answered'
+     and v_cell->'value'->>'mode' = 'non_negotiable' then
+    v_cell := v_cell || jsonb_build_object(
+      'value', jsonb_build_object('mode', 'non_negotiable')
+    );
+  end if;
+  v_payload := jsonb_build_object(
+    'coverage_key', p_coverage_key,
+    'cell', v_cell
+  );
+  return encode(extensions.digest(convert_to(
+    public.onboarding_canonical_json_v1(v_payload), 'UTF8'
+  ), 'sha256'), 'hex');
+end
+$$;
+
+revoke all on function public.onboarding_cell_semantic_hash_v1(text,jsonb)
+from public, anon, authenticated, service_role;
+
+create or replace function public.onboarding_absent_cell_hash_v1(
+  p_coverage_key text
+) returns text
+language sql
+stable
+set search_path = ''
+as $$
+  select encode(extensions.digest(convert_to(
+    public.onboarding_canonical_json_v1(jsonb_build_object(
+      'coverage_key', p_coverage_key
+    )), 'UTF8'
+  ), 'sha256'), 'hex');
+$$;
+
+revoke all on function public.onboarding_absent_cell_hash_v1(text)
+from public, anon, authenticated, service_role;
+
+create or replace function public.onboarding_snapshot_hashes_v1(
+  p_snapshot jsonb
+) returns jsonb
+language sql
+stable
+set search_path = ''
+as $$
+  select coalesce(jsonb_object_agg(
+    key, public.onboarding_cell_semantic_hash_v1(key, value)
+    order by key
+  ), '{}'::jsonb)
+  from jsonb_each(p_snapshot->'cells');
+$$;
+
+revoke all on function public.onboarding_snapshot_hashes_v1(jsonb)
+from public, anon, authenticated, service_role;
+
+create or replace function public.onboarding_validate_answer_transition_v2(
+  p_prior_readback jsonb,
+  p_candidate jsonb,
+  p_fact jsonb,
+  p_answer_hash text
+) returns boolean
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  v_prior_schema integer := coalesce(
+    (p_prior_readback->>'schema_version')::integer, 0
+  );
+  v_prior_revision integer := coalesce(
+    (p_prior_readback->>'revision')::integer, 0
+  );
+  v_prior jsonb;
+  v_candidate jsonb := p_candidate->'snapshot';
+  v_field text := p_fact->>'field';
+  v_subject text := nullif(p_fact->>'subject', '');
+  v_current_key text;
+  v_negotiation_key text;
+  v_prior_cell jsonb;
+  v_candidate_cell jsonb;
+  v_prior_negotiation jsonb;
+  v_candidate_negotiation jsonb;
+  v_expected_negotiation jsonb;
+  v_prior_services jsonb;
+  v_new_service boolean := false;
+  v_overflow boolean := false;
+  v_expected_catalog jsonb;
+  v_key text;
+  v_value jsonb;
+  v_target numeric;
+  v_floor numeric;
+begin
+  if jsonb_typeof(p_candidate) <> 'object'
+     or p_candidate->'schema_version' is distinct from '2'::jsonb
+     or p_candidate->>'transition_kind' <> 'answer'
+     or jsonb_typeof(v_candidate) <> 'object'
+     or jsonb_typeof(v_candidate->'cells') <> 'object'
+     or jsonb_typeof(v_candidate->'services') <> 'array'
+     or jsonb_typeof(v_candidate->'followUps') <> 'number'
+     or jsonb_typeof(v_candidate->'followUpGroups') <> 'object'
+     or jsonb_typeof(v_candidate->'summaryInvalidated') <> 'boolean'
+     or coalesce(p_answer_hash ~ '^[0-9a-f]{64}$', false) = false
+     or exists (
+       select 1 from jsonb_object_keys(v_candidate) key
+       where key not in (
+         'tenantId','callId','revision','services','currentSubject','cells',
+         'followUps','followUpGroups','summaryInvalidated','catalogOverflow'
+       )
+     ) then return false;
+  end if;
+  if (p_candidate->>'revision')::integer <> v_prior_revision + 1
+     or (v_candidate->>'revision')::integer <> v_prior_revision + 1 then
+    return false;
+  end if;
+
+  v_prior := case when v_prior_schema = 2 then p_prior_readback->'snapshot'
+    else jsonb_build_object(
+      'tenantId', v_candidate->>'tenantId',
+      'callId', v_candidate->>'callId',
+      'revision', v_prior_revision,
+      'services', '[]'::jsonb,
+      'cells', '{}'::jsonb,
+      'followUps', 0,
+      'followUpGroups', '{}'::jsonb,
+      'summaryInvalidated', false
+    ) end;
+  if jsonb_typeof(v_prior) <> 'object'
+     or jsonb_typeof(v_prior->'cells') <> 'object'
+     or jsonb_typeof(v_prior->'services') <> 'array'
+     or v_candidate->>'tenantId' is distinct from v_prior->>'tenantId'
+     or v_candidate->>'callId' is distinct from v_prior->>'callId'
+     or v_candidate->'followUps' is distinct from v_prior->'followUps'
+     or v_candidate->'followUpGroups' is distinct from v_prior->'followUpGroups'
+     or (
+       coalesce((v_prior->>'summaryInvalidated')::boolean, false)
+       and not coalesce((v_candidate->>'summaryInvalidated')::boolean, false)
+     ) then return false;
+  end if;
+
+  v_current_key := case
+    when v_field like 'service.%' and v_field <> 'service.catalog_closure'
+      then 'service:' || coalesce(v_subject, '') || ':' || v_field
+    else v_field
+  end;
+  if coalesce(v_current_key, '') = '' then return false; end if;
+  v_prior_services := v_prior->'services';
+  if v_field like 'service.%' and v_field <> 'service.catalog_closure' then
+    if coalesce(v_subject, '') !~ '^[a-z0-9][a-z0-9_]{0,199}$' then
+      return false;
+    end if;
+    v_new_service := not (v_prior_services ? v_subject);
+    if v_candidate->>'currentSubject' is distinct from v_subject then
+      return false;
+    end if;
+    if v_new_service then
+      v_overflow := jsonb_array_length(v_prior_services) >= 20;
+      if v_overflow then
+        if v_candidate->'services' is distinct from v_prior_services
+           or v_candidate->'cells' is distinct from v_prior->'cells'
+           or v_candidate->'catalogOverflow' is distinct from
+             jsonb_build_object(
+               'services', coalesce(
+                 v_prior->'catalogOverflow'->'services', '[]'::jsonb
+               ) || jsonb_build_array(v_subject),
+               'safeRestriction',
+                 'Não aceitar, precificar ou agendar serviços além dos vinte primeiros autonomamente; encaminhar o catálogo ao dono.',
+               'ownerWords', p_fact->>'owner_words'
+             )
+           or v_candidate->'cells' ? v_current_key
+           or public.onboarding_absent_cell_hash_v1(v_current_key)
+                is distinct from p_answer_hash then
+          return false;
+        end if;
+        return true;
+      else
+        if v_candidate->'services' is distinct from
+             (v_prior_services || jsonb_build_array(v_subject)) then
+          return false;
+        end if;
+        v_expected_catalog := jsonb_build_object(
+          'state', 'missing',
+          'attempts', coalesce(
+            (v_prior->'cells'->'service.catalog_closure'->>'attempts')::integer,
+            0
+          )
+        );
+        if v_candidate->'cells'->'service.catalog_closure'
+             is distinct from v_expected_catalog then return false; end if;
+      end if;
+    elsif v_candidate->'services' is distinct from v_prior_services then
+      return false;
+    end if;
+  else
+    if v_candidate->'services' is distinct from v_prior_services
+       or v_candidate->'currentSubject'
+            is distinct from v_prior->'currentSubject' then
+      return false;
+    end if;
+  end if;
+  if v_candidate->'catalogOverflow' is distinct from
+       v_prior->'catalogOverflow' then return false; end if;
+
+  if exists (
+    select 1 from jsonb_each(v_prior->'cells') prior_cell
+    where not (v_candidate->'cells' ? prior_cell.key)
+  ) then return false; end if;
+  if exists (
+    select 1 from jsonb_each(v_candidate->'cells') candidate_cell
+    where not (v_prior->'cells' ? candidate_cell.key)
+      and candidate_cell.key <> v_current_key
+      and not (v_new_service and candidate_cell.key = 'service.catalog_closure')
+  ) then return false; end if;
+
+  v_negotiation_key := case when v_field = 'service.price_target'
+    then 'service:' || v_subject || ':service.negotiation' else null end;
+  for v_key, v_value in select key, value from jsonb_each(v_prior->'cells')
+  loop
+    if v_key = v_current_key or v_key = v_negotiation_key
+       or (v_new_service and v_key = 'service.catalog_closure') then
+      continue;
+    end if;
+    v_candidate_cell := v_candidate->'cells'->v_key;
+    if public.onboarding_cell_semantic_hash_v1(v_key, v_candidate_cell)
+         is distinct from public.onboarding_cell_semantic_hash_v1(v_key, v_value)
+       or v_candidate_cell->'attempts' is distinct from v_value->'attempts'
+    then return false; end if;
+  end loop;
+
+  v_prior_cell := v_prior->'cells'->v_current_key;
+  v_candidate_cell := v_candidate->'cells'->v_current_key;
+  if jsonb_typeof(v_candidate_cell) <> 'object'
+     or coalesce((v_candidate_cell->>'attempts')::integer, -1) <>
+       coalesce((v_prior_cell->>'attempts')::integer, 0) + 1
+     or public.onboarding_cell_semantic_hash_v1(
+       v_current_key, v_candidate_cell
+     ) is distinct from p_answer_hash then
+    return false;
+  end if;
+
+  if v_negotiation_key is not null then
+    v_prior_negotiation := v_prior->'cells'->v_negotiation_key;
+    v_candidate_negotiation := v_candidate->'cells'->v_negotiation_key;
+    if v_prior_negotiation is null then
+      if v_candidate_negotiation is not null then return false; end if;
+    else
+      v_expected_negotiation := v_prior_negotiation;
+      if v_prior_negotiation->>'state' = 'answered'
+         and v_prior_negotiation->'value'->>'mode' = 'non_negotiable' then
+        if v_candidate_cell->>'state' = 'answered'
+           and jsonb_typeof(v_candidate_cell->'value') = 'number' then
+          v_expected_negotiation := jsonb_set(
+            v_prior_negotiation, '{value,floor}',
+            v_candidate_cell->'value', true
+          );
+        else
+          v_expected_negotiation := jsonb_build_object(
+            'state', 'ambiguous',
+            'attempts', (v_prior_negotiation->>'attempts')::integer,
+            'reason', 'non_negotiable_requires_public_target'
+          );
+        end if;
+      elsif v_prior_negotiation->>'state' = 'answered'
+            and v_prior_negotiation->'value'->>'mode' = 'negotiable'
+            and jsonb_typeof(v_prior_negotiation->'value'->'floor') = 'number'
+      then
+        v_floor := (v_prior_negotiation->'value'->>'floor')::numeric;
+        if v_candidate_cell->>'state' <> 'answered'
+           or jsonb_typeof(v_candidate_cell->'value') <> 'number' then
+          v_expected_negotiation := jsonb_build_object(
+            'state', 'ambiguous',
+            'attempts', (v_prior_negotiation->>'attempts')::integer,
+            'reason', 'negotiation_floor_requires_public_price'
+          );
+        else
+          v_target := (v_candidate_cell->>'value')::numeric;
+        end if;
+        if v_target is not null and v_floor > v_target then
+          v_expected_negotiation := jsonb_build_object(
+            'state', 'ambiguous',
+            'attempts', (v_prior_negotiation->>'attempts')::integer,
+            'reason', 'negotiation_floor_requires_public_price'
+          );
+        end if;
+      end if;
+      if v_candidate_negotiation is distinct from v_expected_negotiation then
+        return false;
+      end if;
+    end if;
+  end if;
+  return true;
+exception when others then
+  return false;
+end
+$$;
+
+revoke all on function public.onboarding_validate_answer_transition_v2(
+  jsonb,jsonb,jsonb,text
+) from public, anon, authenticated, service_role;
 
 create or replace function public.onboarding_scalar_text_v1(
   p_value jsonb
@@ -951,6 +1301,7 @@ set search_path = ''
 as $$
   select case
     when p_category is distinct from 'preco'
+      or p_scope is distinct from 'servico'
       or jsonb_typeof(p_structured) is distinct from 'object'
       or p_structured->>'service_type' is distinct from p_service
       or jsonb_typeof(p_structured->'price_min') is distinct from 'number'
@@ -1007,12 +1358,9 @@ language sql
 immutable
 set search_path = ''
 as $$
-  select p_category = 'preco'
-    and jsonb_typeof(p_structured) = 'object'
-    and not (p_structured ? 'schema' or p_structured ? 'materialization_key')
-    and p_structured->>'service_type' = p_service
-    and jsonb_typeof(p_structured->'price_min') = 'number'
-    and p_price >= (p_structured->>'price_min')::numeric;
+  -- Scope-less predecessor callers cannot prove service scope. All current
+  -- booking fences use the five-argument overload above.
+  select false;
 $$;
 
 revoke all on function public.onboarding_booking_rule_safe(
@@ -1386,6 +1734,27 @@ declare
   v_request_id uuid;
   v_existing_event uuid;
   v_expected_value jsonb;
+  v_latest public.receipts;
+  v_latest_rule public.rules;
+  v_latest_revision integer;
+  v_expected_event_key text;
+  v_payload jsonb;
+  v_payload_hash text;
+  v_revision integer;
+  v_rule_id uuid;
+  v_rule_group_id uuid;
+  v_rule_version integer;
+  v_receipt_id uuid;
+  v_readback jsonb;
+  v_alias_readback jsonb;
+  v_snapshot_digest text;
+  v_materialization_count integer;
+  v_materialization_distinct integer;
+  v_selected_base jsonb;
+  v_selected_final jsonb;
+  v_current_hashes jsonb;
+  v_materialization_action text := 'coverage_only';
+  v_catalog_overflow boolean := false;
 begin
   v_request_role := coalesce(
     nullif(current_setting('request.jwt.claim.role', true), ''),
@@ -1442,6 +1811,56 @@ begin
     );
   end if;
   if p_coverage->'schema_version' is not distinct from '2'::jsonb then
+    v_expected_event_key := encode(extensions.digest(convert_to(
+      'ligou.v0_2.onboarding_answer:v1:' || p_tenant::text || ':' ||
+        p_call::text || ':' || p_provider_tool_call_id,
+      'UTF8'
+    ), 'sha256'), 'hex');
+    if p_event_key is distinct from v_expected_event_key
+       or coalesce(p_answer_hash ~ '^[0-9a-f]{64}$', false) = false
+       or p_expected_revision is null or p_expected_revision < 0 then
+      raise exception using errcode = '22023',
+        message = 'onboarding_hash_or_event_invalid';
+    end if;
+    v_payload := jsonb_build_object(
+      'schema_version', 2,
+      'tenant_id', p_tenant,
+      'call_id', p_call,
+      'owner_id', p_owner,
+      'provider_tool_call_id', p_provider_tool_call_id,
+      'event_key', p_event_key,
+      'answer_hash', p_answer_hash,
+      'expected_revision', p_expected_revision,
+      'fact', p_fact,
+      'rule_group_id', p_rule_group_id,
+      'coverage', p_coverage
+    );
+    v_payload_hash := encode(extensions.digest(
+      convert_to(v_payload::text, 'UTF8'), 'sha256'
+    ), 'hex');
+    select r.* into v_latest
+    from public.receipts r
+    where r.tenant_id = p_tenant
+      and r.call_id = p_call
+      and r.kind = 'onboarding_coverage'
+    order by (r.readback->>'revision')::integer desc,
+      r.created_at desc, r.id desc
+    limit 1;
+    v_latest_revision := coalesce(
+      (v_latest.readback->>'revision')::integer, 0
+    );
+    if v_latest_revision <> p_expected_revision then
+      raise exception using errcode = '40001',
+        message = 'onboarding_revision_changed';
+    end if;
+    if v_latest.readback->'schema_version' = '2'::jsonb
+       and v_latest.detail->'transition_schema' is not distinct from '2'::jsonb
+       and v_latest.readback->'current_answer_hashes' is distinct from
+         public.onboarding_snapshot_hashes_v1(v_latest.readback->'snapshot')
+    then
+      raise exception using errcode = '22023',
+        message = 'onboarding_snapshot_transition_invalid';
+    end if;
     if not (
          jsonb_typeof(p_fact->'structured') = 'object'
          and p_fact->'structured' ? 'value'
@@ -1486,11 +1905,23 @@ begin
       when p_fact->>'field' like 'authority.%' then 'domain:authority'
       else null
     end;
+    v_catalog_overflow := p_fact->>'field' like 'service.%'
+      and p_fact->>'field' <> 'service.catalog_closure'
+      and v_latest.readback->'schema_version' = '2'::jsonb
+      and not (
+        v_latest.readback->'snapshot'->'services' ? (p_fact->>'subject')
+      )
+      and jsonb_array_length(
+        v_latest.readback->'snapshot'->'services'
+      ) >= 20;
+    if v_catalog_overflow then v_materialization_key := null; end if;
     v_cell := p_coverage->'snapshot'->'cells'->v_coverage_key;
     v_value := p_fact->'structured'->'value';
     v_value_valid := false;
 
-    if p_fact->>'disposition' = 'answered' then
+    if v_catalog_overflow then
+      v_value_valid := false;
+    elsif p_fact->>'disposition' = 'answered' then
       v_value_valid := public.onboarding_answer_value_valid_v2(
         p_fact->>'field', v_value
       );
@@ -1509,22 +1940,50 @@ begin
         end if;
       elsif p_fact->>'field' = 'service.negotiation' then
         if jsonb_typeof(v_value) = 'string' then
-          if v_cell->>'state' <> 'answered'
-             or v_cell->'value'->>'mode' <> 'non_negotiable'
-             or jsonb_typeof(v_cell->'value'->'floor') <> 'number' then
+          v_expected_value := jsonb_extract_path(
+            p_coverage->'snapshot'->'cells',
+            'service:' || (p_fact->>'subject') || ':service.price_target'
+          );
+          if v_expected_value->>'state' = 'answered'
+             and jsonb_typeof(v_expected_value->'value') = 'number' then
+            if v_cell->>'state' <> 'answered'
+               or v_cell->'value' is distinct from jsonb_build_object(
+                 'mode', 'non_negotiable',
+                 'floor', v_expected_value->'value'
+               ) then
+              raise exception using errcode = '22023',
+                message = 'onboarding_structured_projection_invalid';
+            end if;
+          elsif v_cell is distinct from jsonb_build_object(
+            'state', 'ambiguous',
+            'attempts', coalesce((v_cell->>'attempts')::integer, 1),
+            'reason', 'non_negotiable_requires_public_target'
+          ) then
             raise exception using errcode = '22023',
               message = 'onboarding_structured_projection_invalid';
           end if;
-        elsif v_cell->>'state' <> 'answered'
-              or v_cell->'value'->>'mode' <> 'negotiable'
-              or v_cell->'value'->'floor' is distinct from (
-                case
-                  when jsonb_typeof(v_value) = 'object' then v_value->'floor'
-                  else v_value
-                end
-              ) then
-          raise exception using errcode = '22023',
-            message = 'onboarding_structured_projection_invalid';
+        else
+          v_expected_value := jsonb_extract_path(
+            p_coverage->'snapshot'->'cells',
+            'service:' || (p_fact->>'subject') || ':service.price_target'
+          );
+          if v_expected_value->>'state' = 'answered'
+             and jsonb_typeof(v_expected_value->'value') = 'number'
+             and (v_value->>'floor')::numeric <=
+               (v_expected_value->>'value')::numeric then
+            if v_cell->>'state' <> 'answered'
+               or v_cell->'value' is distinct from jsonb_build_object(
+                 'mode', 'negotiable', 'floor', v_value->'floor'
+               ) then
+              raise exception using errcode = '22023',
+                message = 'onboarding_structured_projection_invalid';
+            end if;
+          elsif v_cell->>'state' <> 'ambiguous'
+                or v_cell->>'reason' <>
+                  'negotiation_floor_requires_public_price' then
+            raise exception using errcode = '22023',
+              message = 'onboarding_structured_projection_invalid';
+          end if;
         end if;
       elsif v_cell->>'state' <> 'answered'
             or v_cell->'value' is distinct from v_value then
@@ -1539,9 +1998,22 @@ begin
           message = 'onboarding_structured_projection_invalid';
       end if;
     elsif p_fact->>'field' = 'service.negotiation' then
-      if v_cell->>'state' <> 'answered'
-         or v_cell->'value'->>'mode' <> 'non_negotiable'
-         or jsonb_typeof(v_cell->'value'->'floor') <> 'number' then
+      v_expected_value := jsonb_extract_path(
+        p_coverage->'snapshot'->'cells',
+        'service:' || (p_fact->>'subject') || ':service.price_target'
+      );
+      if v_expected_value->>'state' = 'answered'
+         and jsonb_typeof(v_expected_value->'value') = 'number' then
+        if v_cell->>'state' <> 'answered'
+           or v_cell->'value' is distinct from jsonb_build_object(
+             'mode', 'non_negotiable', 'floor', v_expected_value->'value'
+           ) then
+          raise exception using errcode = '22023',
+            message = 'onboarding_structured_projection_invalid';
+        end if;
+      elsif v_cell->>'state' <> 'ambiguous'
+            or v_cell->>'reason' <> 'non_negotiable_requires_public_target'
+      then
         raise exception using errcode = '22023',
           message = 'onboarding_structured_projection_invalid';
       end if;
@@ -1710,6 +2182,274 @@ begin
       raise exception using errcode = '22023',
         message = 'onboarding_materialization_projection_invalid';
     end if;
+    if not public.onboarding_validate_answer_transition_v2(
+      v_latest.readback, p_coverage, p_fact, p_answer_hash
+    ) then
+      raise exception using errcode = '22023',
+        message = 'onboarding_snapshot_transition_invalid';
+    end if;
+
+    if p_rule_group_id is not null
+       or p_coverage->>'transition_kind' <> 'answer'
+       or p_coverage->>'tenant_id' is distinct from p_tenant::text
+       or p_coverage->>'call_id' is distinct from p_call::text
+       or jsonb_typeof(p_coverage->'complete') <> 'boolean'
+       or jsonb_typeof(p_coverage->'progress') <> 'object'
+       or jsonb_typeof(p_coverage->'selected_rule_ids') <> 'array'
+       or jsonb_typeof(p_coverage->'next_action') <> 'object'
+       or jsonb_typeof(p_coverage->'current_answer_hashes') <> 'object'
+       or p_coverage->'authority' is distinct from jsonb_build_object(
+         'rules_approved', false,
+         'powers_granted', false,
+         'operational_mode_changed', false
+       ) then
+      raise exception using errcode = '22023',
+        message = 'onboarding_coverage_shape_invalid';
+    end if;
+    v_revision := (p_coverage->>'revision')::integer;
+    if v_revision <> p_expected_revision + 1
+       or jsonb_typeof(p_coverage->'progress'->'missingRequired') <> 'array'
+       or jsonb_typeof(p_coverage->'progress'->'ambiguous') <> 'array'
+       or (
+         (p_coverage->>'complete')::boolean
+         and (
+           jsonb_typeof(p_coverage->'summary_projection') <> 'object'
+           or coalesce(p_coverage->>'summary_hash' ~ '^[0-9a-f]{64}$', false) = false
+           or p_coverage->>'summary_hash' <>
+             p_coverage->'summary_projection'->>'summaryHash'
+         )
+       )
+       or (
+         not (p_coverage->>'complete')::boolean
+         and (
+           p_coverage->'summary_projection' is distinct from 'null'::jsonb
+           or p_coverage->'summary_hash' is distinct from 'null'::jsonb
+         )
+       ) then
+      raise exception using errcode = '22023',
+        message = 'onboarding_coverage_projection_invalid';
+    end if;
+
+    select count(*), count(distinct item->>'key')
+      into v_materialization_count, v_materialization_distinct
+    from jsonb_array_elements(p_coverage->'materializations') item;
+    if v_materialization_count <> v_materialization_distinct
+       or exists (
+         select 1 from jsonb_array_elements(
+           p_coverage->'materializations'
+         ) item
+         where item is distinct from public.onboarding_materialization_v3(
+           p_coverage->'snapshot', item->>'key', v_revision, p_call
+         )
+       ) then
+      raise exception using errcode = '22023',
+        message = 'onboarding_materializations_invalid';
+    end if;
+
+    v_rule_group_id := case when v_materialization_key is null then null
+      else (md5(
+        'ligou.rule.materialization.v2:' || p_tenant::text || ':' ||
+        v_materialization_key
+      ))::uuid end;
+    if exists (
+      select 1 from jsonb_array_elements_text(
+        p_coverage->'selected_rule_ids'
+      ) selected(value)
+      where selected.value !~
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    ) then
+      raise exception using errcode = '22023',
+        message = 'onboarding_selected_rules_invalid';
+    end if;
+    select coalesce(jsonb_agg(value order by value), '[]'::jsonb)
+      into v_selected_base
+    from jsonb_array_elements_text(
+      case when v_latest.readback->'schema_version' = '2'::jsonb
+        then coalesce(v_latest.readback->'selected_rule_ids', '[]'::jsonb)
+        else '[]'::jsonb end
+    ) selected(value)
+    left join public.rules selected_rule
+      on selected_rule.id = selected.value::uuid
+     and selected_rule.tenant_id = p_tenant
+    where v_rule_group_id is null
+       or selected_rule.rule_group_id is distinct from v_rule_group_id;
+    if p_coverage->'selected_rule_ids' is distinct from v_selected_base then
+      raise exception using errcode = '22023',
+        message = 'onboarding_selected_rules_invalid';
+    end if;
+
+    v_current_hashes := public.onboarding_snapshot_hashes_v1(
+      p_coverage->'snapshot'
+    );
+    if not v_catalog_overflow
+       and v_current_hashes->>v_coverage_key is distinct from p_answer_hash then
+      raise exception using errcode = '22023',
+        message = 'onboarding_current_answer_hashes_invalid';
+    end if;
+
+    -- Alias only when the durable cell itself is semantically identical.
+    -- The predecessor hash map is evidence, never authority for this decision.
+    if not v_catalog_overflow
+       and v_latest.id is not null
+       and v_latest.readback->'schema_version' = '2'::jsonb
+       and public.onboarding_cell_semantic_hash_v1(
+         v_coverage_key,
+         v_latest.readback->'snapshot'->'cells'->v_coverage_key
+       ) = p_answer_hash
+       and v_current_hashes is not distinct from
+         public.onboarding_snapshot_hashes_v1(v_latest.readback->'snapshot')
+       and (
+         p_fact->>'field' <> 'service.price_target'
+         or jsonb_extract_path(
+           p_coverage->'snapshot'->'cells',
+           'service:' || (p_fact->>'subject') || ':service.negotiation'
+         ) is not distinct from jsonb_extract_path(
+           v_latest.readback->'snapshot'->'cells',
+           'service:' || (p_fact->>'subject') || ':service.negotiation'
+         )
+       ) then
+      v_alias_readback := v_latest.readback || jsonb_build_object(
+        'schema_version', 2,
+        'target_kind', 'onboarding_coverage',
+        'target_receipt_id', v_latest.id,
+        'target_revision', (v_latest.readback->>'revision')::integer,
+        'target_digest', v_latest.readback->>'snapshot_digest',
+        'alias_target_receipt_id', v_latest.id,
+        'rule_id', null,
+        'rule_group_id', null
+      );
+      insert into public.receipts (
+        tenant_id, call_id, kind, outcome, external_id, readback,
+        payload_hash, detail
+      ) values (
+        p_tenant, p_call, 'onboarding_event_alias', 'accepted', p_event_key,
+        v_alias_readback, v_payload_hash,
+        jsonb_build_object(
+          'answer_hash', p_answer_hash,
+          'provider_tool_call_id', p_provider_tool_call_id,
+          'fact', p_fact,
+          'coverage_key', v_coverage_key,
+          'target_receipt_id', v_latest.id,
+          'browser_request_id', v_request_id
+        )
+      );
+      return jsonb_build_object(
+        'status', 'reused',
+        'rule_id', null,
+        'rule_group_id', null,
+        'coverage_receipt_id', v_latest.id,
+        'revision', (v_latest.readback->>'revision')::integer,
+        'snapshot_digest', v_latest.readback->>'snapshot_digest',
+        'complete', (v_latest.readback->>'complete')::boolean,
+        'missing', v_latest.readback->'progress'->'missingRequired',
+        'ambiguous', v_latest.readback->'progress'->'ambiguous',
+        'next_action', v_latest.readback->'next_action',
+        'coverage', v_latest.readback
+      );
+    end if;
+
+    perform pg_advisory_xact_lock(hashtextextended(
+      'ligou.v0_2.rules_versioning:' || p_tenant::text, 0
+    ));
+    if v_rule_group_id is not null then
+      select r.* into v_latest_rule
+      from public.rules r
+      where r.tenant_id = p_tenant
+        and r.rule_group_id = v_rule_group_id
+      order by r.version desc, r.created_at desc, r.id desc
+      limit 1;
+      v_rule_version := coalesce(v_latest_rule.version, 0) + 1;
+      if (v_materialization->>'review_ready')::boolean then
+        insert into public.rules (
+          tenant_id, rule_group_id, version, origem, escopo, status,
+          category, text, structured, evidence_quote, related_call_id
+        ) values (
+          p_tenant, v_rule_group_id, v_rule_version, 'onboarding',
+          v_materialization->>'scope', 'sugerido',
+          v_materialization->>'category', v_materialization->>'text',
+          v_materialization->'structured', p_fact->>'owner_words', p_call
+        ) returning id into v_rule_id;
+        v_materialization_action := 'suggested';
+      elsif v_latest_rule.id is not null then
+        insert into public.rules (
+          tenant_id, rule_group_id, version, origem, escopo, status,
+          category, text, structured, evidence_quote, related_call_id
+        ) values (
+          p_tenant, v_rule_group_id, v_rule_version, 'onboarding',
+          v_materialization->>'scope', 'rejeitado',
+          v_materialization->>'category',
+          coalesce(nullif(v_materialization->>'text', ''),
+            'Materialização incompleta; revisão necessária.'),
+          v_materialization->'structured', p_fact->>'owner_words', p_call
+        ) returning id into v_rule_id;
+        v_materialization_action := 'rejected_tombstone';
+      end if;
+    end if;
+    select coalesce(jsonb_agg(value order by value), '[]'::jsonb)
+      into v_selected_final
+    from (
+      select value from jsonb_array_elements_text(v_selected_base) item(value)
+      union all
+      select v_rule_id::text where v_materialization_action = 'suggested'
+    ) selected;
+    v_readback := (p_coverage - 'snapshot_digest') || jsonb_build_object(
+      'schema_version', 2,
+      'transition_kind', 'answer',
+      'tenant_id', p_tenant,
+      'call_id', p_call,
+      'revision', v_revision,
+      'rule_id', v_rule_id,
+      'rule_group_id', v_rule_group_id,
+      'materialization_action', v_materialization_action,
+      'selected_rule_ids', v_selected_final,
+      'current_answer_hashes', v_current_hashes,
+      'authority', jsonb_build_object(
+        'rules_approved', false,
+        'powers_granted', false,
+        'operational_mode_changed', false
+      )
+    );
+    v_snapshot_digest := encode(extensions.digest(
+      convert_to(v_readback::text, 'UTF8'), 'sha256'
+    ), 'hex');
+    v_readback := v_readback || jsonb_build_object(
+      'snapshot_digest', v_snapshot_digest
+    );
+    insert into public.receipts (
+      tenant_id, call_id, kind, outcome, external_id, readback,
+      payload_hash, detail
+    ) values (
+      p_tenant, p_call, 'onboarding_coverage', 'accepted', p_event_key,
+      v_readback, v_payload_hash,
+      jsonb_build_object(
+        'transition_kind', 'answer',
+        'transition_schema', 2,
+        'source_revision', p_expected_revision,
+        'source_digest', v_latest.readback->>'snapshot_digest',
+        'answer_hash', p_answer_hash,
+        'provider_tool_call_id', p_provider_tool_call_id,
+        'fact', p_fact,
+        'coverage_key', v_coverage_key,
+        'materialization_key', v_materialization_key,
+        'materialization_action', v_materialization_action,
+        'rule_id', v_rule_id,
+        'rule_group_id', v_rule_group_id,
+        'browser_request_id', v_request_id
+      )
+    ) returning id into v_receipt_id;
+    return jsonb_build_object(
+      'status', 'recorded',
+      'rule_id', v_rule_id,
+      'rule_group_id', v_rule_group_id,
+      'coverage_receipt_id', v_receipt_id,
+      'revision', v_revision,
+      'snapshot_digest', v_snapshot_digest,
+      'complete', (v_readback->>'complete')::boolean,
+      'missing', v_readback->'progress'->'missingRequired',
+      'ambiguous', v_readback->'progress'->'ambiguous',
+      'next_action', v_readback->'next_action',
+      'coverage', v_readback
+    );
   end if;
   return public.record_onboarding_answer_v2_base(
     p_tenant, p_call, p_owner, p_provider_tool_call_id, p_event_key,

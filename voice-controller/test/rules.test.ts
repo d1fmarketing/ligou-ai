@@ -377,6 +377,39 @@ describe("V2 service policy projection", () => {
     };
     expect(servicePolicies([legacy, wrongCategory])).toEqual([]);
   });
+
+  test("a padded marked service key shadows legacy even without a redundant service_type", () => {
+    const legacy = rule("legacy-padded-shadow", {
+      service_type: "drain_cleaning",
+      price_target: 225,
+      price_min: 149,
+      duration_min: 60,
+    });
+    for (const materializationKey of [
+      " service:drain_cleaning ",
+      "\tservice:drain_cleaning\n",
+    ]) {
+      const marked = rule("padded-key", {
+        schema: "ligou.rule.service.v2",
+        materialization_key: materializationKey,
+        materialization_hash: "f".repeat(64),
+        materialization_eligible: true,
+        review_ready: true,
+        operational_state: "active",
+        service_names: ["Drain cleaning"],
+        price_mode: "fixed",
+        quoteable: true,
+        negotiable: false,
+        price_target: 1,
+        price_min: 1,
+        duration_min: 1,
+        coverage_revision: 1,
+        source_call_id: "22222222-2222-4222-8222-222222222222",
+      });
+      expect(servicePolicies([legacy, marked]), materializationKey).toEqual([]);
+      expect(priceRules([legacy, marked]), materializationKey).toEqual([]);
+    }
+  });
 });
 
 describe("V2 domain policy projection", () => {

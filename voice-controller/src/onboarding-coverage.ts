@@ -59,6 +59,9 @@ export interface LocalityInput {
 export interface CanonicalLocality extends LocalityInput {
   locality_id: string;
 }
+export interface LocalityRegistryEntry extends CanonicalLocality {
+  aliases: string[];
+}
 export type CoverageCell =
   | { state: "missing"; attempts: number }
   | { state: "answered"; attempts: number; value: unknown }
@@ -553,12 +556,61 @@ export function canonicalizeLocalityValue(
     !Array.isArray(row.localities) ||
     row.localities.length === 0
   ) return null;
-  const localities = row.localities.map(canonicalizeLocalityInput);
-  if (localities.some((locality) => locality === null)) return null;
-  const canonical = localities as CanonicalLocality[];
-  if (new Set(canonical.map((locality) => locality.locality_id)).size !== canonical.length)
-    return null;
-  return { localities: canonical };
+  return isCanonicalLocalityList(row.localities)
+    ? { localities: row.localities }
+    : null;
+}
+
+function normalizedLocalityLabel(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+}
+
+export function resolveLocalityValueFromRegistry(
+  value: unknown,
+  registry: LocalityRegistryEntry[],
+): { localities: CanonicalLocality[] } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (
+    Object.keys(row).length !== 1 ||
+    !Array.isArray(row.localities) || row.localities.length === 0
+  ) return null;
+  const resolved: CanonicalLocality[] = [];
+  for (const candidate of row.localities) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+      return null;
+    const input = candidate as Record<string, unknown>;
+    if (
+      Object.keys(input).sort().join(",") !==
+        "country_code,display_name,region_code" ||
+      typeof input.display_name !== "string" ||
+      typeof input.country_code !== "string" ||
+      typeof input.region_code !== "string"
+    ) return null;
+    const label = normalizedLocalityLabel(input.display_name);
+    const country = input.country_code.trim().toUpperCase();
+    const region = input.region_code.trim().toUpperCase();
+    const matches = registry.filter((entry) =>
+      entry.country_code === country && entry.region_code === region &&
+      [entry.display_name, ...entry.aliases].some(
+        (alias) => normalizedLocalityLabel(alias) === label,
+      )
+    );
+    if (matches.length !== 1) return null;
+    const match = matches[0]!;
+    const canonical = {
+      locality_id: match.locality_id,
+      display_name: match.display_name,
+      country_code: match.country_code,
+      region_code: match.region_code,
+    };
+    if (!isCanonicalLocalityList([canonical])) return null;
+    resolved.push(canonical);
+  }
+  return new Set(resolved.map((locality) => locality.locality_id)).size ===
+      resolved.length
+    ? { localities: resolved }
+    : null;
 }
 export function isCanonicalLocalityList(
   value: unknown,
@@ -777,22 +829,33 @@ function applyOne(
   if (fact.field === "service.price_target" && subject) {
     const negotiationKey = keyFor("service.negotiation", subject);
     const negotiation = cells[negotiationKey];
-    if (
-      negotiation?.state === "answered" &&
-      negotiation.value && typeof negotiation.value === "object" &&
-      (negotiation.value as { mode?: unknown }).mode === "non_negotiable"
-    ) {
-      cells[negotiationKey] = cell.state === "answered" &&
-          typeof cell.value === "number"
-        ? {
-            ...negotiation,
-            value: { mode: "non_negotiable", floor: cell.value },
-          }
-        : {
-            state: "ambiguous",
-            attempts: negotiation.attempts,
-            reason: "non_negotiable_requires_public_target",
-          };
+    if (negotiation?.state === "answered" && negotiation.value &&
+        typeof negotiation.value === "object") {
+      const value = negotiation.value as { mode?: unknown; floor?: unknown };
+      if (value.mode === "non_negotiable")
+        cells[negotiationKey] = cell.state === "answered" &&
+            typeof cell.value === "number"
+          ? {
+              ...negotiation,
+              value: { mode: "non_negotiable", floor: cell.value },
+            }
+          : {
+              state: "ambiguous",
+              attempts: negotiation.attempts,
+              reason: "non_negotiable_requires_public_target",
+            };
+      else if (
+        value.mode === "negotiable" &&
+        (
+          cell.state !== "answered" || typeof cell.value !== "number" ||
+          typeof value.floor !== "number" || value.floor > cell.value
+        )
+      )
+        cells[negotiationKey] = {
+          state: "ambiguous",
+          attempts: negotiation.attempts,
+          reason: "negotiation_floor_requires_public_price",
+        };
     }
   }
   return {

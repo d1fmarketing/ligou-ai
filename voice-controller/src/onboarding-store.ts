@@ -9,12 +9,14 @@ import {
   isServiceCoverageField,
   normalizeCoverageSubject,
   recordDirectedFollowUp,
+  resolveLocalityValueFromRegistry,
   type CoverageDisposition,
   type CoverageFact,
   type CoverageField,
   type CoverageProgress,
   type CoverageRef,
   type CoverageSnapshot,
+  type LocalityRegistryEntry,
 } from "./onboarding-coverage.ts";
 import {
   materializeCoverage,
@@ -846,6 +848,14 @@ export function createOnboardingStore(
       .eq("origem", "onboarding")
       .order("created_at", { ascending: false }), signal);
 
+  const localityRegistry = async (
+    signal: AbortSignal,
+  ): Promise<BoundaryResult<LocalityRegistryEntry[]>> =>
+    await abortable<BoundaryResult<LocalityRegistryEntry[]>>(client
+      .from("onboarding_locality_registry")
+      .select("locality_id,display_name,country_code,region_code,aliases")
+      .order("locality_id", { ascending: true }), signal);
+
   const selectedRulesForReceipt = async (
     cap: Capability,
     selectedRuleIds: string[],
@@ -1230,16 +1240,38 @@ export function createOnboardingStore(
             ...createCoverage({ tenantId: cap.tenantId, callId: cap.callId }),
             revision: parsed?.revision ?? 0,
           };
+      let factValue = coverageValue(
+        persistedFact.disposition as CoverageDisposition,
+        persistedFact.structured as Record<string, unknown> | undefined,
+      );
+      if (
+        persistedFact.field === "area.coverage" &&
+        persistedFact.disposition === "answered"
+      ) {
+        const registryResult = await bounded(localityRegistry);
+        if (registryResult.error || !Array.isArray(registryResult.data))
+          return failure(
+            registryResult.error && ambiguousBoundaryFailure(registryResult.error)
+              ? "indeterminate"
+              : "query_error",
+            registryResult.error && ambiguousBoundaryFailure(registryResult.error)
+              ? "onboarding answer persistence is indeterminate"
+              : "locality registry query failed",
+            now,
+            started,
+          );
+        factValue = resolveLocalityValueFromRegistry(
+          factValue,
+          registryResult.data,
+        );
+      }
       const coverageFact: CoverageFact = {
         field: persistedFact.field as CoverageField,
         ...(persistedFact.subject
           ? { subject: String(persistedFact.subject) }
           : {}),
         disposition: persistedFact.disposition as CoverageDisposition,
-        value: coverageValue(
-          persistedFact.disposition as CoverageDisposition,
-          persistedFact.structured as Record<string, unknown> | undefined,
-        ),
+        value: factValue,
         ruleText: String(persistedFact.rule_text),
         ownerWords: String(persistedFact.owner_words),
       };

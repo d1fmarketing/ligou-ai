@@ -1,7 +1,7 @@
 begin;
 
 create extension if not exists pgtap with schema extensions;
-select extensions.plan(28);
+select extensions.plan(29);
 
 select extensions.ok(
   not exists (
@@ -447,7 +447,8 @@ select extensions.ok(
       ('owner_profiles', 'select'),
       ('oauth_states', 'select'), ('oauth_states', 'insert'), ('oauth_states', 'update'),
       ('phone_lifecycle_legacy_conflicts', 'select'), ('phone_lifecycle_legacy_conflicts', 'insert'), ('phone_lifecycle_legacy_conflicts', 'update'),
-      ('receipts', 'select')
+      ('receipts', 'select'),
+      ('onboarding_locality_registry', 'select')
     ) required(relation, privilege)
     where not has_table_privilege('service_role', format('public.%I', relation), privilege)
   ),
@@ -463,6 +464,26 @@ select extensions.ok(
   and not has_table_privilege('anon', 'public.receipts', 'select,insert,update,delete')
   and not has_table_privilege('authenticated', 'public.receipts', 'insert,update,delete'),
   'receipt ledger grants are least-privilege and keep owner reads RLS-bound'
+);
+
+select extensions.ok(
+  has_table_privilege(
+    'service_role', 'public.onboarding_locality_registry', 'select'
+  )
+  and not has_table_privilege(
+    'service_role', 'public.onboarding_locality_registry',
+    'insert,update,delete,truncate,references,trigger'
+  )
+  and not has_table_privilege(
+    'anon', 'public.onboarding_locality_registry',
+    'select,insert,update,delete'
+  )
+  and not has_table_privilege(
+    'authenticated', 'public.onboarding_locality_registry',
+    'select,insert,update,delete'
+  )
+  and (select count(*) from public.onboarding_locality_registry) = 13,
+  'locality registry is seeded and service-role read-only'
 );
 
 select extensions.ok(

@@ -9,6 +9,7 @@ import {
 } from "../src/tools.ts";
 import { overlapsBusy } from "../src/calendar.ts";
 import { buildInstructions } from "../src/instructions.ts";
+import { canonicalizeLocalityInput } from "../src/onboarding-coverage.ts";
 
 const TENANT = {
   id: "11111111-1111-4111-8111-111111111111", slug: "rocha-plumbing", name: "Rocha Plumbing LLC", vertical: "plumbing",
@@ -75,6 +76,30 @@ function mockSupabase() {
               ? activeRules
               : table === "powers"
                 ? POWERS
+                : table === "onboarding_locality_registry"
+                  ? [
+                      {
+                        locality_id: "loc_4bc5a435c3c9a7013a252ae4",
+                        display_name: "Anaheim",
+                        country_code: "US",
+                        region_code: "CA",
+                        aliases: ["anaheim"],
+                      },
+                      {
+                        locality_id: "loc_9971eda617977d43d7df9fd5",
+                        display_name: "Irvine",
+                        country_code: "US",
+                        region_code: "CA",
+                        aliases: ["irvine"],
+                      },
+                      {
+                        locality_id: "loc_598cce799aeb20c5d2116b74",
+                        display_name: "State College",
+                        country_code: "US",
+                        region_code: "PA",
+                        aliases: ["state college"],
+                      },
+                    ]
                 : table === "receipts" && coverageReceipt
                   ? [coverageReceipt]
                   : [],
@@ -694,6 +719,7 @@ describe("V2 domain policies", () => {
       "New York, NY, US",
       "Washington, DC, US",
     ]);
+    expect(info.body.service_localities).toEqual(localities);
     const schema = toolSchemas.find(
       (candidate) => candidate.name === "check_availability",
     ) as any;
@@ -701,6 +727,13 @@ describe("V2 domain policies", () => {
       service_region: { type: "string" },
       service_country: { type: "string" },
     });
+    expect(schema.parameters.required).toEqual([
+      "service_type", "quote_id", "service_city",
+    ]);
+    expect(schema.parameters.properties.service_region.description)
+      .toMatch(/optional.*disambigu/i);
+    expect(schema.parameters.properties.service_country.description)
+      .toMatch(/optional.*disambigu/i);
     const quote = await runTool(cap(), "quote_price", {
       service_type: "drain_cleaning",
     });
@@ -712,15 +745,18 @@ describe("V2 domain policies", () => {
       quote_id: quote.body.quote_id,
     });
     expect(allowed.body.status).toBe("ok");
-    const missingCodes = await runTool(cap(), "check_availability", {
+    const inferredCodes = await runTool(cap(), "check_availability", {
       service_type: "drain_cleaning",
       service_city: "New York",
       quote_id: quote.body.quote_id,
     });
-    expect(missingCodes.body).toMatchObject({
-      status: "needs_owner",
-      reason: "locality_required",
+    expect(inferredCodes.body.status).toBe("ok");
+    const normalizedAlias = await runTool(cap(), "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "  new   york  ",
+      quote_id: quote.body.quote_id,
     });
+    expect(normalizedAlias.body.status).toBe("ok");
     const denied = await runTool(cap(), "check_availability", {
       service_type: "drain_cleaning",
       service_city: "California",
@@ -730,7 +766,7 @@ describe("V2 domain policies", () => {
     });
     expect(denied.body).toMatchObject({
       status: "needs_owner",
-      reason: "locality_required",
+      reason: "geography_not_served",
     });
 
     activeRules = [
@@ -756,6 +792,54 @@ describe("V2 domain policies", () => {
       status: "needs_owner",
       reason: "area_policy_requires_owner",
     });
+  });
+
+  test("availability asks for locality clarification only when approved names are non-unique", async () => {
+    const localities = [
+      canonicalizeLocalityInput({
+        display_name: "Concord",
+        country_code: "US",
+        region_code: "CA",
+      }),
+      canonicalizeLocalityInput({
+        display_name: "Concord",
+        country_code: "US",
+        region_code: "NH",
+      }),
+    ];
+    expect(localities.every(Boolean)).toBe(true);
+    activeRules = [
+      ...RULES,
+      domainRule(
+        "v2c",
+        "domain:area",
+        "area",
+        "ligou.rule.area.v2",
+        { localities },
+        "Concord, CA e Concord, NH.",
+      ),
+    ];
+    invalidateTenant(TENANT.slug);
+    const quote = await runTool(cap(), "quote_price", {
+      service_type: "drain_cleaning",
+    });
+    const ambiguous = await runTool(cap(), "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "Concord",
+      quote_id: quote.body.quote_id,
+    });
+    expect(ambiguous.body).toMatchObject({
+      status: "needs_clarification",
+      reason: "locality_ambiguous",
+    });
+    const disambiguated = await runTool(cap(), "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "concord",
+      service_region: " ca ",
+      service_country: " us ",
+      quote_id: quote.body.quote_id,
+    });
+    expect(disambiguated.body.status).toBe("ok");
   });
 
   test("extra schedule keys are neither exposed as configured hours nor used for slots", async () => {

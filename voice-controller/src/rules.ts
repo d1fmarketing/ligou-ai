@@ -143,13 +143,15 @@ function normalizedServiceSubject(value: unknown): string | null {
 function v2ServicePresenceSubjects(rule: Rule): string[] {
   const structured = rule.structured;
   if (!structured || !isV2MarkedRule(rule)) return [];
+  const normalizedKey = typeof structured.materialization_key === "string"
+    ? structured.materialization_key.trim()
+    : "";
   const keyMatch = /^service:([a-z0-9][a-z0-9_]{0,199})$/.exec(
-    String(structured.materialization_key ?? ""),
+    normalizedKey,
   );
   const schemaClaimsService = typeof structured.schema === "string" &&
     /^ligou[.]rule[.]service[.]/.test(structured.schema.trim());
-  const keyClaimsService = typeof structured.materialization_key === "string" &&
-    /^service:/.test(structured.materialization_key.trim());
+  const keyClaimsService = /^service:/.test(normalizedKey);
   const explicitServiceType = normalizedServiceSubject(structured.service_type);
   const claimsService = rule.category === "preco" || schemaClaimsService ||
     keyClaimsService || Boolean(keyMatch) || explicitServiceType !== null;

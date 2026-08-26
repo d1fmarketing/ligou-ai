@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   applyCoverageFact,
+  canonicalizeLocalityInput,
   coverageKey,
   createCoverage,
   evaluateCoverage,
@@ -46,6 +47,20 @@ const UNIVERSAL_FIELDS: CoverageField[] = [
 
 function apply(snapshot: CoverageSnapshot, fact: CoverageFact) {
   return applyCoverageFact(snapshot, fact);
+}
+
+function resolvedLocalityValue(
+  ...localities: Array<[display_name: string, region_code: string]>
+) {
+  return {
+    localities: localities.map(([display_name, region_code]) =>
+      canonicalizeLocalityInput({
+        display_name,
+        country_code: "US",
+        region_code,
+      })!
+    ),
+  };
 }
 
 function readySnapshot(
@@ -140,10 +155,7 @@ function readySnapshot(
     "business.customer_types": ["residencial", "comercial"],
     "business.excluded_work": "Nao realiza obra estrutural.",
     "business.languages_tone": "Portugues e ingles, tom direto.",
-    "area.coverage": { localities: [
-      { display_name: "Anaheim", country_code: "US", region_code: "CA" },
-      { display_name: "Irvine", country_code: "US", region_code: "CA" },
-    ] },
+    "area.coverage": resolvedLocalityValue(["Anaheim", "CA"], ["Irvine", "CA"]),
     "area.out_of_area_policy": "Fora da area exige revisao do dono.",
     "schedule.business_hours": {
       days: ["mon", "tue", "wed", "thu", "fri"],
@@ -378,10 +390,7 @@ describe("deterministic onboarding materialization", () => {
     snapshot = apply(snapshot, {
       field: "area.coverage",
       disposition: "answered",
-      value: { localities: [
-        { display_name: "State College", country_code: "US", region_code: "PA" },
-        { display_name: "Irvine", country_code: "US", region_code: "CA" },
-      ] },
+      value: resolvedLocalityValue(["State College", "PA"], ["Irvine", "CA"]),
       ownerWords: "Atendemos State College e Irvine.",
     });
     const area = materializeCoverage(snapshot, evaluateCoverage(snapshot)).rules
@@ -410,12 +419,7 @@ describe("deterministic onboarding materialization", () => {
     snapshot = apply(snapshot, {
       field: "area.coverage",
       disposition: "answered",
-      value: {
-        localities: [
-          { display_name: "New York", country_code: "US", region_code: "NY" },
-          { display_name: "Washington", country_code: "US", region_code: "DC" },
-        ],
-      },
+      value: resolvedLocalityValue(["New York", "NY"], ["Washington", "DC"]),
       ownerWords: "Atendemos New York e Washington, DC.",
     });
     const area = materializeCoverage(snapshot, evaluateCoverage(snapshot)).rules
