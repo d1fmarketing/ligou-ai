@@ -29,12 +29,24 @@ function answer(
   };
 }
 
+function localityValue(
+  ...localities: Array<[display_name: string, region_code: string]>
+) {
+  return {
+    localities: localities.map(([display_name, region_code]) => ({
+      display_name,
+      country_code: "US",
+      region_code,
+    })),
+  };
+}
+
 function coveredUniversal(snapshot = createCoverage(identity)) {
   const values: Record<string, unknown> = {
     "business.customer_types": ["residencial"],
     "business.excluded_work": "nenhum",
     "business.languages_tone": "português cordial",
-    "area.coverage": { cities: ["Irvine"] },
+    "area.coverage": localityValue(["Irvine", "CA"]),
     "area.out_of_area_policy": "owner_review",
     "area.travel_fee": "not_applicable",
     "schedule.business_hours": {
@@ -216,6 +228,40 @@ describe("onboarding coverage", () => {
     });
   });
 
+  test("a pure target correction rederives a non-negotiable floor without granting negotiation", () => {
+    const subject = "drain_cleaning";
+    let snapshot = createCoverage(identity);
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.name_synonyms", ["Drain cleaning"], subject),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 100, subject),
+    );
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.negotiation", "non_negotiable", subject),
+    );
+    const negotiationKey = `service:${subject}:service.negotiation`;
+    expect(snapshot.cells[negotiationKey]).toMatchObject({
+      state: "answered",
+      value: { mode: "non_negotiable", floor: 100 },
+    });
+
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.price_target", 149, subject),
+    );
+    expect(snapshot.cells[negotiationKey]).toMatchObject({
+      state: "answered",
+      value: { mode: "non_negotiable", floor: 149 },
+    });
+    expect(buildSummaryAnchors(snapshot)).toContain(
+      "Mínimo: não negociável (149)",
+    );
+  });
+
   test("starts incomplete and five generic records cannot complete five topics", () => {
     const fresh = createCoverage(identity);
     expect(evaluateCoverage(fresh).readyForReview).toBe(false);
@@ -370,7 +416,7 @@ describe("onboarding coverage", () => {
 
     const first = applyCoverageFact(
       createCoverage(identity),
-      answer("area.coverage", { cities: ["Irvine"] }),
+      answer("area.coverage", localityValue(["Irvine", "CA"])),
     );
     const second = applyCoverageFact(
       createCoverage(identity),
@@ -378,7 +424,7 @@ describe("onboarding coverage", () => {
     );
     const reversed = applyCoverageFact(
       second,
-      answer("area.coverage", { cities: ["Irvine"] }),
+      answer("area.coverage", localityValue(["Irvine", "CA"])),
     );
     const normal = applyCoverageFact(
       first,
@@ -501,7 +547,7 @@ describe("onboarding coverage", () => {
 
     const left = applyCoverageFact(
       createCoverage(identity),
-      answer("area.coverage", { cities: ["Irvine"] }),
+      answer("area.coverage", localityValue(["Irvine", "CA"])),
     );
     const right = applyCoverageFact(
       createCoverage(identity),
@@ -514,7 +560,10 @@ describe("onboarding coverage", () => {
       ),
     );
     const canonicalB = canonicalCoverage(
-      applyCoverageFact(right, answer("area.coverage", { cities: ["Irvine"] })),
+      applyCoverageFact(
+        right,
+        answer("area.coverage", localityValue(["Irvine", "CA"])),
+      ),
     );
     expect(canonicalA).toBe(canonicalB);
     expect(buildSummaryAnchors(ready).join("\n")).toContain(
@@ -723,7 +772,7 @@ describe("onboarding coverage", () => {
       "schedule.holidays",
     ] as CoverageField[]) {
       const value = field === "area.coverage"
-        ? { cities: ["Irvine"] }
+        ? localityValue(["Irvine", "CA"])
         : field === "schedule.business_hours"
           ? {
               days: ["mon", "tue", "wed", "thu", "fri"],
@@ -853,7 +902,7 @@ describe("onboarding coverage", () => {
     );
     snapshot = applyCoverageFact(
       snapshot,
-      answer("area.coverage", { cities: ["Irvine"] }),
+      answer("area.coverage", localityValue(["Irvine", "CA"])),
     );
     expect(evaluateCoverage(snapshot).summaryInvalidated).toBe(false);
   });
@@ -1286,16 +1335,30 @@ describe("onboarding coverage", () => {
       );
       expect(snapshot.cells["area.coverage"]).toMatchObject({
         state: "ambiguous",
-        reason: "must_be_declared_exact_cities",
+        reason: "must_be_declared_localities",
       });
     }
     const valid = applyCoverageFact(
       createCoverage(identity),
-      answer("area.coverage", { cities: ["Irvine", "Los Angeles"] }),
+      answer(
+        "area.coverage",
+        localityValue(["Irvine", "CA"], ["Los Angeles", "CA"]),
+      ),
     );
     expect(valid.cells["area.coverage"]).toMatchObject({
       state: "answered",
-      value: { cities: ["Irvine", "Los Angeles"] },
+      value: {
+        localities: [
+          {
+            display_name: "Irvine", country_code: "US", region_code: "CA",
+            locality_id: "loc_9971eda617977d43d7df9fd5",
+          },
+          {
+            display_name: "Los Angeles", country_code: "US", region_code: "CA",
+            locality_id: "loc_f30f445b562ccdf8f6c2f9e8",
+          },
+        ],
+      },
     });
   });
 
@@ -1326,18 +1389,140 @@ describe("onboarding coverage", () => {
       );
       expect(snapshot.cells["area.coverage"]).toMatchObject({
         state: "ambiguous",
-        reason: "must_be_declared_exact_cities",
+        reason: "must_be_declared_localities",
       });
     }
     const valid = applyCoverageFact(
       createCoverage(identity),
-      answer("area.coverage", { cities: ["State College", "Irvine"] }),
+      answer(
+        "area.coverage",
+        localityValue(["State College", "PA"], ["Irvine", "CA"]),
+      ),
     );
     expect(valid.cells["area.coverage"]).toEqual({
       state: "answered",
       attempts: 1,
-      value: { cities: ["State College", "Irvine"] },
+      value: {
+        localities: [
+          {
+            display_name: "State College", country_code: "US", region_code: "PA",
+            locality_id: "loc_598cce799aeb20c5d2116b74",
+          },
+          {
+            display_name: "Irvine", country_code: "US", region_code: "CA",
+            locality_id: "loc_9971eda617977d43d7df9fd5",
+          },
+        ],
+      },
     });
+  });
+
+  test("requires exact typed locality identities and derives stable IDs inside the application", () => {
+    const valid = applyCoverageFact(
+      createCoverage(identity),
+      answer("area.coverage", {
+        localities: [
+          { display_name: "New York", country_code: "US", region_code: "NY" },
+          { display_name: "Washington", country_code: "US", region_code: "DC" },
+        ],
+      }),
+    );
+    expect(valid.cells["area.coverage"]).toEqual({
+      state: "answered",
+      attempts: 1,
+      value: {
+        localities: [
+          {
+            display_name: "New York",
+            country_code: "US",
+            region_code: "NY",
+            locality_id: "loc_c0f300f553807cd44f5f7ede",
+          },
+          {
+            display_name: "Washington",
+            country_code: "US",
+            region_code: "DC",
+            locality_id: "loc_e939e6896203b54b290f9224",
+          },
+        ],
+      },
+    });
+
+    for (const value of [
+      { cities: ["Irvine"] },
+      {
+        localities: [{
+          display_name: "Irvine",
+          country_code: "US",
+          region_code: "CA",
+          locality_id: "caller-supplied",
+        }],
+      },
+      {
+        localities: [{
+          display_name: "California",
+          country_code: "US",
+          region_code: "CA",
+        }],
+      },
+      {
+        localities: [{
+          display_name: "Canada",
+          country_code: "CA",
+          region_code: "ON",
+        }],
+      },
+      {
+        localities: [{
+          display_name: "Canada",
+          country_code: "US",
+          region_code: "CA",
+        }],
+      },
+      {
+        localities: [{
+          display_name: "CA",
+          country_code: "US",
+          region_code: "CA",
+        }],
+      },
+      {
+        localities: [{
+          display_name: "CA",
+          country_code: "US",
+          region_code: "NY",
+        }],
+      },
+      {
+        localities: [{
+          display_name: "DC",
+          country_code: "US",
+          region_code: "DC",
+        }],
+      },
+      {
+        localities: [{
+          display_name: "Southern California",
+          country_code: "US",
+          region_code: "CA",
+        }],
+      },
+      {
+        localities: [
+          { display_name: "Irvine", country_code: "US", region_code: "CA" },
+          { display_name: "Irvine", country_code: "US", region_code: "CA" },
+        ],
+      },
+    ]) {
+      const invalid = applyCoverageFact(
+        createCoverage(identity),
+        answer("area.coverage", value),
+      );
+      expect(invalid.cells["area.coverage"]).toMatchObject({
+        state: "ambiguous",
+        reason: "must_be_declared_localities",
+      });
+    }
   });
 
   test("an estimate service becomes review-ready without quote target or negotiation fields", () => {
@@ -1444,7 +1629,7 @@ describe("onboarding coverage", () => {
     const fresh = createCoverage(identity);
     expect(
       applyCoverageFact(fresh, {
-        ...answer("area.coverage", { cities: ["Anaheim"] }),
+        ...answer("area.coverage", localityValue(["Anaheim", "CA"])),
         subject: "global-copy",
       }),
     ).toBe(fresh);

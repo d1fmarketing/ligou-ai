@@ -138,6 +138,35 @@ function sha256(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value && typeof value === "object")
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, nested]) => nested !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => [key, canonicalValue(nested)]));
+  return value;
+}
+
+function finalizeMaterialization(item) {
+  const structured = { ...item.structured };
+  delete structured.coverage_revision;
+  delete structured.materialization_hash;
+  const materializationHash = sha256(JSON.stringify(canonicalValue({
+    key: item.key,
+    category: item.category,
+    scope: item.scope,
+    state: item.state,
+    reviewReady: item.review_ready,
+    text: item.text,
+    structured,
+    sourceRefs: item.source_refs,
+  })));
+  item.materialization_hash = materializationHash;
+  item.structured.materialization_hash = materializationHash;
+  return item;
+}
+
 function onboardingEventKey(kind, tenantId, callId, providerToolCallId) {
   return sha256(`ligou.v0_2.${kind}:v1:${tenantId}:${callId}:${providerToolCallId}`);
 }
@@ -179,29 +208,34 @@ function coverageSnapshot(tenantId, callId, revision, complete) {
   };
 }
 
-function v2ServiceMaterialization(callId, revision, target, hashCharacter) {
+function v2ServiceMaterialization(callId, revision, target, _hashCharacter) {
   const key = "service:drain_cleaning";
-  const materializationHash = hashCharacter.repeat(64);
-  return {
+  const sourceRefs = [
+    "service:drain_cleaning:service.duration",
+    "service:drain_cleaning:service.emergency_eligibility",
+    "service:drain_cleaning:service.escalation",
+    "service:drain_cleaning:service.inclusions_exclusions",
+    "service:drain_cleaning:service.materials_parts",
+    "service:drain_cleaning:service.name_synonyms",
+    "service:drain_cleaning:service.negotiation",
+    "service:drain_cleaning:service.price_mode",
+    "service:drain_cleaning:service.price_target",
+    "service:drain_cleaning:service.warranty",
+  ];
+  return finalizeMaterialization({
     key,
     category: "preco",
     scope: "servico",
     state: "active",
     review_ready: true,
-    text: `Drain cleaning: fixed public price ${target}; non-negotiable; 60 minutes.`,
-    materialization_hash: materializationHash,
-    source_refs: [
-      "service:drain_cleaning:service.name_synonyms",
-      "service:drain_cleaning:service.price_mode",
-      "service:drain_cleaning:service.price_target",
-      "service:drain_cleaning:service.negotiation",
-      "service:drain_cleaning:service.duration",
-    ],
+    text: `Serviço Drain cleaning. Duração: 60 minutos. Elegibilidade de emergência: não. Escalonamento: Escalate structural damage.. Inclusões e exclusões: Labor only.. Materiais e peças: Não se aplica. Nomes do serviço: Drain cleaning. Negociação: não negociável (${target}). Modo de preço: fixo. Preço público: ${target}. Garantia: 30 days.`,
+    source_refs: sourceRefs,
     structured: {
       schema: "ligou.rule.service.v2",
       service_type: "drain_cleaning",
       service_names: ["Drain cleaning"],
       price_mode: "fixed",
+      negotiation_mode: "non_negotiable",
       quoteable: true,
       negotiable: false,
       price_target: target,
@@ -210,20 +244,18 @@ function v2ServiceMaterialization(callId, revision, target, hashCharacter) {
       operational_state: "active",
       owner_review_fields: [],
       materialization_key: key,
-      materialization_hash: materializationHash,
       materialization_eligible: true,
       review_ready: true,
       coverage_revision: revision,
       source_call_id: callId,
-      source_refs: [
-        "service:drain_cleaning:service.name_synonyms",
-        "service:drain_cleaning:service.price_mode",
-        "service:drain_cleaning:service.price_target",
-        "service:drain_cleaning:service.negotiation",
-        "service:drain_cleaning:service.duration",
-      ],
+      source_refs: sourceRefs,
+      inclusions_exclusions: "Labor only.",
+      materials_parts: null,
+      warranty: "30 days",
+      emergency_eligible: false,
+      escalation: "Escalate structural damage.",
     },
-  };
+  });
 }
 
 function v2CoverageSnapshot({
@@ -286,6 +318,21 @@ function v2CoverageSnapshot({
           state: "answered",
           attempts: 1,
           value: 60,
+        },
+        "service:drain_cleaning:service.inclusions_exclusions": {
+          state: "answered", attempts: 1, value: "Labor only.",
+        },
+        "service:drain_cleaning:service.materials_parts": {
+          state: "not_applicable", attempts: 1,
+        },
+        "service:drain_cleaning:service.warranty": {
+          state: "answered", attempts: 1, value: "30 days",
+        },
+        "service:drain_cleaning:service.emergency_eligibility": {
+          state: "answered", attempts: 1, value: false,
+        },
+        "service:drain_cleaning:service.escalation": {
+          state: "answered", attempts: 1, value: "Escalate structural damage.",
         },
       },
       followUps,
@@ -1344,7 +1391,7 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       ('${tenant}', '${owner}', 'onboarding', 'offer-v2', 'ready', 'answer-v2', '${call}', now());
   `), "V2 onboarding fixture");
 
-  assert.equal(scalar(await runSql(connection, home, `
+  const structuredTruth = scalar(await runSql(connection, home, `
     select
       public.onboarding_answer_value_valid_v2(
         'business.customer_types', '["residencial"]'::jsonb
@@ -1353,10 +1400,10 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
         'business.customer_types', '"residencial"'::jsonb
       )::text || ':' ||
       public.onboarding_answer_value_valid_v2(
-        'area.coverage', '{"cities":["State College","Irvine"]}'::jsonb
+        'area.coverage', '{"localities":[{"display_name":"New York","country_code":"US","region_code":"NY"},{"display_name":"Washington","country_code":"US","region_code":"DC"}]}'::jsonb
       )::text || ':' ||
       public.onboarding_answer_value_valid_v2(
-        'area.coverage', '{"cities":["Bay Area"]}'::jsonb
+        'area.coverage', '{"cities":["Irvine"]}'::jsonb
       )::text || ':' ||
       public.onboarding_answer_value_valid_v2(
         'schedule.business_hours',
@@ -1396,13 +1443,24 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
         'service.name_synonyms', jsonb_build_array(E'\tDrain cleaning\t')
       )::text || ':' ||
       public.onboarding_answer_value_valid_v2(
-        'area.coverage', '{"cities":["U S A"]}'::jsonb
+        'area.coverage', '{"localities":[{"display_name":"Irvine","country_code":"US","region_code":"CA","locality_id":"caller"}]}'::jsonb
       )::text || ':' ||
       public.onboarding_answer_value_valid_v2(
-        'area.coverage', '{"cities":["State of California"]}'::jsonb
+        'area.coverage', '{"localities":[{"display_name":"California","country_code":"US","region_code":"CA"}]}'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'area.coverage', '{"localities":[{"display_name":"Canada","country_code":"US","region_code":"CA"}]}'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'area.coverage', '{"localities":[{"display_name":"CA","country_code":"US","region_code":"CA"}]}'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'area.coverage', '{"localities":[{"display_name":"CA","country_code":"US","region_code":"NY"}]}'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'area.coverage', '{"localities":[{"display_name":"DC","country_code":"US","region_code":"DC"}]}'::jsonb
       )::text;
-  `), "V2 universal SQL structured truth table"),
-    "true:false:true:false:true:false:true:false:true:false:true:false:true:false:false:true:false:false");
+  `), "V2 universal SQL structured truth table");
 
   const fact = (target, ownerWords = `Preço ${target}.`) => ({
     topic: "precos",
@@ -1413,6 +1471,70 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     structured: { value: target },
     owner_words: ownerWords,
   });
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      public.onboarding_booking_rule_safe(
+        'preco', 'servico', '{"service_type":"drain_cleaning","price_min":100}'::jsonb,
+        'drain_cleaning', 149
+      )::text || ':' ||
+      public.onboarding_booking_rule_safe(
+        'preco', 'servico', '{"schema":null,"service_type":"drain_cleaning","price_min":1}'::jsonb,
+        'drain_cleaning', 149
+      )::text || ':' ||
+      public.onboarding_booking_rule_safe(
+        'preco', 'servico', '{"materialization_key":{},"service_type":"drain_cleaning","price_min":1}'::jsonb,
+        'drain_cleaning', 149
+      )::text || ':' ||
+      public.onboarding_booking_rule_safe(
+        'preco', 'servico', '{
+          "schema":"ligou.rule.service.v2",
+          "materialization_key":"service:drain_cleaning",
+          "service_type":"drain_cleaning",
+          "materialization_eligible":true,
+          "review_ready":true,
+          "operational_state":"active",
+          "quoteable":true,
+          "price_mode":"fixed",
+          "negotiation_mode":"non_negotiable",
+          "negotiable":false,
+          "price_target":149,
+          "price_min":149
+        }'::jsonb, 'drain_cleaning', 149
+      )::text || ':' ||
+      public.onboarding_booking_rule_safe(
+        'preco', 'servico', '{
+          "schema":"ligou.rule.service.v2",
+          "materialization_key":"service:drain_cleaning",
+          "service_type":"drain_cleaning",
+          "materialization_eligible":true,
+          "review_ready":true,
+          "operational_state":"active",
+          "quoteable":true,
+          "price_mode":"fixed",
+          "negotiation_mode":"non_negotiable",
+          "negotiable":true,
+          "price_target":149,
+          "price_min":1
+        }'::jsonb, 'drain_cleaning', 149
+      )::text || ':' ||
+      public.onboarding_booking_rule_safe(
+        'preco', 'geral', '{
+          "schema":"ligou.rule.service.v2",
+          "materialization_key":"service:drain_cleaning",
+          "service_type":"drain_cleaning",
+          "materialization_eligible":true,
+          "review_ready":true,
+          "operational_state":"active",
+          "quoteable":true,
+          "price_mode":"fixed",
+          "negotiation_mode":"non_negotiable",
+          "negotiable":false,
+          "price_target":149,
+          "price_min":149
+        }'::jsonb, 'drain_cleaning', 149
+      )::text;
+  `), "reserved booking namespace and negotiation invariant"),
+    "true:false:false:true:false:false");
   const hashA = sha256(JSON.stringify({
     key: "service:drain_cleaning:service.price_target",
     state: "answered",
@@ -1534,6 +1656,9 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
   delete ownerReviewDurationMaterialization.structured.duration_min;
   delete ownerReviewDurationMaterialization.structured.price_target;
   delete ownerReviewDurationMaterialization.structured.price_min;
+  ownerReviewDurationMaterialization.text =
+    "Serviço Drain cleaning. Duração: Revisão do dono.. Elegibilidade de emergência: não. Escalonamento: Escalate structural damage.. Inclusões e exclusões: Labor only.. Materiais e peças: Não se aplica. Nomes do serviço: Drain cleaning. Negociação: não negociável (149). Modo de preço: fixo. Preço público: 149. Garantia: 30 days.";
+  finalizeMaterialization(ownerReviewDurationMaterialization);
   const ownerReviewDurationResult = await runSql(
     connection,
     home,
@@ -1632,6 +1757,9 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
   ambiguousPriceModeMaterialization.structured.quoteable = false;
   delete ambiguousPriceModeMaterialization.structured.price_target;
   delete ambiguousPriceModeMaterialization.structured.price_min;
+  ambiguousPriceModeMaterialization.text =
+    "Serviço Drain cleaning. Duração: 60 minutos. Elegibilidade de emergência: não. Escalonamento: Escalate structural damage.. Inclusões e exclusões: Labor only.. Materiais e peças: Não se aplica. Nomes do serviço: Drain cleaning. Negociação: não negociável (149). Preço público: 149. Garantia: 30 days.";
+  finalizeMaterialization(ambiguousPriceModeMaterialization);
   const ambiguousPriceModeResult = await runSql(
     connection,
     home,
@@ -1683,25 +1811,38 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     key: "domain:schedule",
     category: "agenda",
     scope: "geral",
-    state: "owner_review_required",
-    review_ready: true,
-    text: "Horário comercial: revisão do dono.",
+    state: "incomplete",
+    review_ready: false,
+    text: "Horário comercial: Revisão do dono..",
     materialization_hash: "2".repeat(64),
-    source_refs: ["schedule.business_hours"],
+    source_refs: [
+      "schedule.business_hours",
+      "schedule.capacity_buffer",
+      "schedule.holidays",
+      "schedule.reschedule_cancel",
+      "schedule.same_day_lead_time",
+    ],
     structured: {
       schema: "ligou.rule.schedule.v2",
       materialization_key: "domain:schedule",
       materialization_hash: "2".repeat(64),
-      operational_state: "owner_review_required",
-      materialization_eligible: true,
-      review_ready: true,
+      operational_state: "incomplete",
+      materialization_eligible: false,
+      review_ready: false,
       owner_review_fields: ["schedule.business_hours"],
       coverage_revision: 1,
       source_call_id: call,
-      source_refs: ["schedule.business_hours"],
-      fields: {},
+      source_refs: [
+        "schedule.business_hours",
+        "schedule.capacity_buffer",
+        "schedule.holidays",
+        "schedule.reschedule_cancel",
+        "schedule.same_day_lead_time",
+      ],
+      fields: { business_hours: "Revisão do dono." },
     },
   }];
+  finalizeMaterialization(ownerReviewScheduleCoverage.materializations[0]);
   const ownerReviewScheduleResult = await runSql(
     connection,
     home,
@@ -1790,6 +1931,247 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       (select count(*) from public.receipts where tenant_id = '${tenant}')::text || ':' ||
       (select count(*) from public.rules where tenant_id = '${tenant}')::text;
   `), "V2 hostile price-mode materialization rollback"), "0:0");
+
+  const compositeTamperResults = [];
+  const captureCompositeTamper = async (
+    label,
+    providerToolCallId,
+    tamperedFact,
+    tamperedCoverage,
+  ) => {
+    const result = await runSql(
+      connection,
+      home,
+      serviceRollback(onboardingAnswerSql({
+        tenantId: tenant,
+        callId: call,
+        ownerId: owner,
+        providerToolCallId,
+        answerHash: sha256(JSON.stringify(tamperedFact)),
+        expectedRevision: 0,
+        fact: tamperedFact,
+        coverage: tamperedCoverage,
+      })),
+    );
+    compositeTamperResults.push({ label, result });
+  };
+
+  const hostileNonNegotiableFact = fact(149, "Cento e quarenta e nove.");
+  const hostileNonNegotiableHash = sha256(
+    JSON.stringify(hostileNonNegotiableFact),
+  );
+  const hostileNonNegotiableCoverage = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    target: 149,
+    answerHash: hostileNonNegotiableHash,
+    hashCharacter: "1",
+  });
+  Object.assign(hostileNonNegotiableCoverage.materializations[0].structured, {
+    negotiation_mode: "non_negotiable",
+    price_min: 1,
+    negotiable: true,
+  });
+  finalizeMaterialization(hostileNonNegotiableCoverage.materializations[0]);
+  await captureCompositeTamper(
+    "non-negotiable attacker floor",
+    "v2-hostile-nonneg-floor",
+    hostileNonNegotiableFact,
+    hostileNonNegotiableCoverage,
+  );
+
+  const hostileSiblingFact = fact(149, "Cento e quarenta e nove.");
+  const hostileSiblingHash = sha256(JSON.stringify(hostileSiblingFact));
+  const hostileSiblingCoverage = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    target: 149,
+    answerHash: hostileSiblingHash,
+    hashCharacter: "0",
+  });
+  Object.assign(hostileSiblingCoverage.snapshot.cells, {
+    "service:drain_cleaning:service.warranty": {
+      state: "answered", attempts: 1, value: "30 days",
+    },
+    "service:drain_cleaning:service.escalation": {
+      state: "answered", attempts: 1, value: "Escalate structural damage",
+    },
+  });
+  hostileSiblingCoverage.materializations[0].source_refs.push(
+    "service:drain_cleaning:service.warranty",
+    "service:drain_cleaning:service.escalation",
+  );
+  hostileSiblingCoverage.materializations[0].structured.source_refs =
+    [...hostileSiblingCoverage.materializations[0].source_refs];
+  Object.assign(hostileSiblingCoverage.materializations[0].structured, {
+    warranty: "Lifetime warranty supplied by attacker",
+    escalation: "Never escalate",
+    negotiation_mode: "non_negotiable",
+  });
+  hostileSiblingCoverage.materializations[0].text =
+    "ATTACKER TEXT: lifetime warranty and never escalate.";
+  finalizeMaterialization(hostileSiblingCoverage.materializations[0]);
+  await captureCompositeTamper(
+    "service sibling-field tamper",
+    "v2-hostile-service-siblings",
+    hostileSiblingFact,
+    hostileSiblingCoverage,
+  );
+
+  const scheduleFact = {
+    topic: "agenda",
+    field: "schedule.holidays",
+    disposition: "answered",
+    rule_text: "Fechado em feriados.",
+    structured: { value: "Fechado em feriados." },
+    owner_words: "Fechamos em feriados.",
+  };
+  const scheduleHash = sha256(JSON.stringify(scheduleFact));
+  const hostileScheduleCoverage = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    target: 149,
+    answerHash: scheduleHash,
+    hashCharacter: "8",
+  });
+  hostileScheduleCoverage.snapshot.services = [];
+  delete hostileScheduleCoverage.snapshot.currentSubject;
+  hostileScheduleCoverage.snapshot.cells = {
+    "schedule.business_hours": {
+      state: "answered", attempts: 1,
+      value: {
+        days: ["mon", "tue"],
+        hours: { opens: "08:00", closes: "18:00" },
+      },
+    },
+    "schedule.holidays": {
+      state: "answered", attempts: 1, value: "Fechado em feriados.",
+    },
+  };
+  hostileScheduleCoverage.current_answer_hashes = {
+    "schedule.holidays": scheduleHash,
+  };
+  hostileScheduleCoverage.materializations = [{
+    key: "domain:schedule",
+    category: "agenda",
+    scope: "geral",
+    state: "active",
+    review_ready: true,
+    text: "ATTACKER TEXT: open every holiday, midnight to midnight.",
+    materialization_hash: "8".repeat(64),
+    source_refs: ["schedule.business_hours", "schedule.holidays"],
+    structured: {
+      schema: "ligou.rule.schedule.v2",
+      materialization_key: "domain:schedule",
+      materialization_hash: "8".repeat(64),
+      operational_state: "active",
+      materialization_eligible: true,
+      review_ready: true,
+      owner_review_fields: [],
+      coverage_revision: 1,
+      source_call_id: call,
+      source_refs: ["schedule.business_hours", "schedule.holidays"],
+      fields: { business_hours: "all day", holidays: "always open" },
+      business_hours: {
+        days: ["sun"], hours: { opens: "00:00", closes: "23:00" },
+      },
+    },
+  }];
+  finalizeMaterialization(hostileScheduleCoverage.materializations[0]);
+  await captureCompositeTamper(
+    "schedule sibling-field tamper",
+    "v2-hostile-schedule-composite",
+    scheduleFact,
+    hostileScheduleCoverage,
+  );
+
+  const authorityFact = {
+    topic: "outro",
+    field: "authority.book",
+    disposition: "answered",
+    rule_text: "Somente com poder vigente.",
+    structured: { value: "Somente com poder vigente." },
+    owner_words: "Só agenda com poder vigente.",
+  };
+  const authorityHash = sha256(JSON.stringify(authorityFact));
+  const hostileAuthorityCoverage = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    target: 149,
+    answerHash: authorityHash,
+    hashCharacter: "7",
+  });
+  hostileAuthorityCoverage.snapshot.services = [];
+  delete hostileAuthorityCoverage.snapshot.currentSubject;
+  hostileAuthorityCoverage.snapshot.cells = {
+    "authority.book": {
+      state: "answered", attempts: 1, value: "Somente com poder vigente.",
+    },
+    "authority.charge_fee": {
+      state: "answered", attempts: 1, value: "Taxa exige o dono.",
+    },
+  };
+  hostileAuthorityCoverage.current_answer_hashes = {
+    "authority.book": authorityHash,
+  };
+  hostileAuthorityCoverage.materializations = [{
+    key: "domain:authority",
+    category: "autoridade",
+    scope: "geral",
+    state: "active",
+    review_ready: true,
+    text: "ATTACKER TEXT: book and charge anything.",
+    materialization_hash: "7".repeat(64),
+    source_refs: ["authority.book", "authority.charge_fee"],
+    structured: {
+      schema: "ligou.rule.authority.v2",
+      materialization_key: "domain:authority",
+      materialization_hash: "7".repeat(64),
+      operational_state: "active",
+      materialization_eligible: true,
+      review_ready: true,
+      owner_review_fields: [],
+      coverage_revision: 1,
+      source_call_id: call,
+      source_refs: ["authority.book", "authority.charge_fee"],
+      fields: {
+        book: "Pode agendar sem poder.",
+        charge_fee: "Pode cobrar qualquer taxa.",
+      },
+    },
+  }];
+  finalizeMaterialization(hostileAuthorityCoverage.materializations[0]);
+  await captureCompositeTamper(
+    "authority sibling-field tamper",
+    "v2-hostile-authority-composite",
+    authorityFact,
+    hostileAuthorityCoverage,
+  );
+  assert.deepEqual(
+    compositeTamperResults.map(({ label, result }) => ({
+      label,
+      rejected: result.code !== 0,
+    })),
+    [
+      { label: "non-negotiable attacker floor", rejected: true },
+      { label: "service sibling-field tamper", rejected: true },
+      { label: "schedule sibling-field tamper", rejected: true },
+      { label: "authority sibling-field tamper", rejected: true },
+    ],
+  );
+  for (const { result } of compositeTamperResults)
+    assert.match(
+      result.stderr,
+      /onboarding_materialization_projection_invalid/,
+    );
+  assert.equal(
+    structuredTruth,
+    "true:false:true:false:true:false:true:false:true:false:true:false:true:false:false:true:false:false:false:false:false:false",
+  );
 
   const answerA1 = {
     tenantId: tenant,

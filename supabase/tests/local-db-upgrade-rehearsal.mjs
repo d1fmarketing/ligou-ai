@@ -174,6 +174,106 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
     BigInt(migrationVersion(name)) <= BigInt(migrationVersion(fixAFile))
   );
   const tenantId = "60000000-0000-4000-8000-000000000001";
+  const predecessorV2 = {
+    ownerId: "60000000-0000-4000-8000-000000000201",
+    tenantId: "60000000-0000-4000-8000-000000000221",
+    callId: "60000000-0000-4000-8000-000000000222",
+    providerToolCallId: "upgrade-v2-predecessor-event",
+    answerHash: "6".repeat(64),
+  };
+  const predecessorV2Fact = {
+    topic: "outro",
+    field: "business.excluded_work",
+    disposition: "answered",
+    rule_text: "Legacy V2 evidence shape.",
+    structured: { legacy_value: "No roof work" },
+    owner_words: "Não fazemos telhados.",
+  };
+  const predecessorV2Coverage = {
+    schema_version: 2,
+    transition_kind: "answer",
+    tenant_id: predecessorV2.tenantId,
+    call_id: predecessorV2.callId,
+    revision: 1,
+    complete: false,
+    snapshot: {
+      tenantId: predecessorV2.tenantId,
+      callId: predecessorV2.callId,
+      revision: 1,
+      services: [],
+      cells: {
+        "business.excluded_work": {
+          state: "ambiguous",
+          attempts: 1,
+          reason: "legacy_structured_shape",
+        },
+      },
+      followUps: 0,
+      followUpGroups: {},
+      summaryInvalidated: false,
+    },
+    progress: {
+      missingRequired: [{ field: "business.customer_types" }],
+      ambiguous: [{ field: "business.excluded_work" }],
+    },
+    selected_rule_ids: [],
+    next_action: {
+      type: "ask",
+      field: "business.excluded_work",
+      question_pt: "Quais serviços não realiza?",
+    },
+    current_answer_hashes: {
+      "business.excluded_work": predecessorV2.answerHash,
+    },
+    materializations: [{
+      key: "domain:business",
+      category: "negocio",
+      scope: "geral",
+      state: "incomplete",
+      review_ready: false,
+      text: "",
+      materialization_hash: "5".repeat(64),
+      source_refs: ["business.excluded_work"],
+      structured: {
+        schema: "ligou.rule.business.v2",
+        materialization_key: "domain:business",
+        materialization_hash: "5".repeat(64),
+        operational_state: "incomplete",
+        materialization_eligible: false,
+        review_ready: false,
+        owner_review_fields: [],
+        coverage_revision: 1,
+        source_call_id: predecessorV2.callId,
+        source_refs: ["business.excluded_work"],
+        fields: {},
+      },
+    }],
+    summary_projection: null,
+    summary_hash: null,
+    authority: {
+      rules_approved: false,
+      powers_granted: false,
+      operational_mode_changed: false,
+    },
+  };
+  const predecessorV2Sql = ({
+    providerToolCallId = predecessorV2.providerToolCallId,
+    eventProviderToolCallId = providerToolCallId,
+    expectedRevision = 0,
+    fact = predecessorV2Fact,
+    coverage = predecessorV2Coverage,
+  } = {}) => `select public.record_onboarding_answer(
+    '${predecessorV2.tenantId}', '${predecessorV2.callId}',
+    '${predecessorV2.ownerId}', '${providerToolCallId}',
+    encode(extensions.digest(convert_to(
+      'ligou.v0_2.onboarding_answer:v1:${predecessorV2.tenantId}:${predecessorV2.callId}:${eventProviderToolCallId}',
+      'UTF8'
+    ), 'sha256'), 'hex'),
+    '${predecessorV2.answerHash}', ${expectedRevision},
+    '${JSON.stringify(fact).replaceAll("'", "''")}'::jsonb,
+    null::uuid,
+    '${JSON.stringify(coverage).replaceAll("'", "''")}'::jsonb
+  )::text;`;
   let assertions = 0;
 
   await mkdir(home, { recursive: true });
@@ -575,7 +675,48 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
         '${"4".repeat(64)}',
         '{"answer_hash":"${"2".repeat(64)}"}'::jsonb
       );
+
+      insert into public.tenants
+        (id, slug, name, owner_user_id, status, operational_mode)
+      values (
+        '${predecessorV2.tenantId}',
+        'synthetic-v2-predecessor-upgrade',
+        'Synthetic V2 Predecessor Upgrade',
+        '${predecessorV2.ownerId}',
+        'onboarding',
+        'simulation_only'
+      );
+      insert into public.calls (id, tenant_id, channel, session_type, status)
+      values (
+        '${predecessorV2.callId}', '${predecessorV2.tenantId}',
+        'browser', 'onboarding', 'active'
+      );
+      insert into public.browser_session_requests (
+        tenant_id, user_id, session_type, offer_sdp, status, answer_sdp,
+        call_id, handled_at
+      ) values (
+        '${predecessorV2.tenantId}', '${predecessorV2.ownerId}',
+        'onboarding', 'v2-predecessor-offer', 'ready',
+        'v2-predecessor-answer', '${predecessorV2.callId}', now()
+      );
     `), "migration57 predecessor rows", connection.password);
+    assertions += 1;
+
+    const predecessorRecorded = successful(await runPsql(
+      connection,
+      home,
+      `begin;
+       set local role service_role;
+       select set_config('request.jwt.claim.role', 'service_role', true);
+       ${predecessorV2Sql()}
+       commit;`,
+    ), "migration57 V2 predecessor event", connection.password);
+    const predecessorRecordedJson = predecessorRecorded.split("\n")
+      .find((line) => line.startsWith("{"));
+    assert.ok(predecessorRecordedJson);
+    const predecessorRecordedResult = JSON.parse(predecessorRecordedJson);
+    assert.equal(predecessorRecordedResult.status, "recorded");
+    assert.equal(predecessorRecordedResult.revision, 1);
     assertions += 1;
 
     for (const fileName of allMigrations.slice(throughFixA.length))
@@ -586,6 +727,61 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
       "reconciliation and remaining timestamp migrations",
     );
     assertHistory(allMigrations, await history(connection, home));
+    assertions += 1;
+
+    const predecessorReplay = successful(await runPsql(
+      connection,
+      home,
+      `begin;
+       set local role service_role;
+       select set_config('request.jwt.claim.role', 'service_role', true);
+       ${predecessorV2Sql()}
+       commit;`,
+    ), "migration57 V2 exact replay after migration58", connection.password);
+    const predecessorReplayJson = predecessorReplay.split("\n")
+      .find((line) => line.startsWith("{"));
+    assert.ok(predecessorReplayJson);
+    const predecessorReplayResult = JSON.parse(predecessorReplayJson);
+    assert.equal(predecessorReplayResult.status, "reused");
+    assert.equal(
+      predecessorReplayResult.coverage_receipt_id,
+      predecessorRecordedResult.coverage_receipt_id,
+    );
+    assert.equal(predecessorReplayResult.revision, 1);
+    assertions += 1;
+
+    const predecessorMismatch = await runPsql(
+      connection,
+      home,
+      `begin;
+       set local role service_role;
+       select set_config('request.jwt.claim.role', 'service_role', true);
+       ${predecessorV2Sql({
+         fact: {
+           ...predecessorV2Fact,
+           owner_words: "Payload diferente para o mesmo evento.",
+         },
+       })}`,
+    );
+    assert.notEqual(predecessorMismatch.code, 0);
+    assert.match(predecessorMismatch.stderr, /onboarding_event_payload_mismatch/);
+
+    const strictNewEvent = await runPsql(
+      connection,
+      home,
+      `begin;
+       set local role service_role;
+       select set_config('request.jwt.claim.role', 'service_role', true);
+       ${predecessorV2Sql({
+         providerToolCallId: "upgrade-v2-new-strict-event",
+         expectedRevision: 1,
+       })}`,
+    );
+    assert.notEqual(strictNewEvent.code, 0);
+    assert.match(
+      strictNewEvent.stderr,
+      /onboarding_structured_contract_invalid/,
+    );
     assertions += 1;
 
     assert.equal(successful(await runPsql(connection, home, `

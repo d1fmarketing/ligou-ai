@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export type CoverageField =
   | "business.customer_types"
   | "business.excluded_work"
@@ -48,6 +50,14 @@ export interface CoverageFact {
   value: unknown;
   ruleText?: string;
   ownerWords: string;
+}
+export interface LocalityInput {
+  display_name: string;
+  country_code: string;
+  region_code: string;
+}
+export interface CanonicalLocality extends LocalityInput {
+  locality_id: string;
 }
 export type CoverageCell =
   | { state: "missing"; attempts: number }
@@ -448,7 +458,14 @@ const US_STATE_NAMES = new Set([
   "vt", "va", "wa", "wv", "wi", "wy",
 ]);
 const COUNTRY_NAMES = new Set([
-  "unitedstates", "unitedstatesofamerica", "usa", "us", "america",
+  "unitedstates", "unitedstatesofamerica", "usa", "us", "america", "canada",
+]);
+const US_REGION_CODES = new Set([
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI",
+  "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI",
+  "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC",
+  "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT",
+  "VT", "VA", "WA", "WV", "WI", "WY", "DC",
 ]);
 const NON_CITY_FORM = /(?:^|[^\p{L}\p{M}])(?:county|condado|region|regiao|região|province|provincia|província|metropolitan|metro|area|área|zip|cep|postal)(?:$|[^\p{L}\p{M}])/iu;
 const DIRECTIONAL_STATE_FORM = /^(?:north(?:ern)?|south(?:ern)?|east(?:ern)?|west(?:ern)?|central)\s+(.+)$/u;
@@ -486,6 +503,86 @@ export function isDeclaredCitiesValue(
     Object.prototype.hasOwnProperty.call(value, "cities") &&
     isExactCityList((value as { cities?: unknown }).cities),
   );
+}
+function localityDisplayKey(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+}
+function localityId(input: LocalityInput): string {
+  return `loc_${createHash("sha256").update(
+    `${input.country_code}:${input.region_code}:${localityDisplayKey(input.display_name)}`,
+    "utf8",
+  ).digest("hex").slice(0, 24)}`;
+}
+export function canonicalizeLocalityInput(
+  value: unknown,
+): CanonicalLocality | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (
+    Object.keys(row).sort().join(",") !==
+      "country_code,display_name,region_code" ||
+    typeof row.display_name !== "string" ||
+    typeof row.country_code !== "string" ||
+    typeof row.region_code !== "string" ||
+    row.display_name !== row.display_name.trim() ||
+    row.country_code !== row.country_code.trim() ||
+    row.region_code !== row.region_code.trim() ||
+    row.country_code !== "US" ||
+    !US_REGION_CODES.has(row.region_code) ||
+    US_REGION_CODES.has(row.display_name.toUpperCase())
+  ) return null;
+  const collisionAllowed =
+    (row.display_name === "New York" && row.region_code === "NY") ||
+    (row.display_name === "Washington" && row.region_code === "DC");
+  if (!collisionAllowed && !isExactCityName(row.display_name)) return null;
+  const input: LocalityInput = {
+    display_name: row.display_name,
+    country_code: row.country_code,
+    region_code: row.region_code,
+  };
+  return { ...input, locality_id: localityId(input) };
+}
+export function canonicalizeLocalityValue(
+  value: unknown,
+): { localities: CanonicalLocality[] } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (
+    Object.keys(row).length !== 1 ||
+    !Object.prototype.hasOwnProperty.call(row, "localities") ||
+    !Array.isArray(row.localities) ||
+    row.localities.length === 0
+  ) return null;
+  const localities = row.localities.map(canonicalizeLocalityInput);
+  if (localities.some((locality) => locality === null)) return null;
+  const canonical = localities as CanonicalLocality[];
+  if (new Set(canonical.map((locality) => locality.locality_id)).size !== canonical.length)
+    return null;
+  return { localities: canonical };
+}
+export function isCanonicalLocalityList(
+  value: unknown,
+): value is CanonicalLocality[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  const seen = new Set<string>();
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+      return false;
+    const row = candidate as Record<string, unknown>;
+    if (
+      Object.keys(row).sort().join(",") !==
+        "country_code,display_name,locality_id,region_code"
+    ) return false;
+    const canonical = canonicalizeLocalityInput({
+      display_name: row.display_name,
+      country_code: row.country_code,
+      region_code: row.region_code,
+    });
+    if (!canonical || row.locality_id !== canonical.locality_id || seen.has(canonical.locality_id))
+      return false;
+    seen.add(canonical.locality_id);
+  }
+  return true;
 }
 function validAnswer(
   field: CoverageField,
@@ -544,9 +641,9 @@ function validAnswer(
       ? null
       : "must_be_known_customer_types";
   if (field === "area.coverage")
-    return isDeclaredCitiesValue(value)
+    return canonicalizeLocalityValue(value)
       ? null
-      : "must_be_declared_exact_cities";
+      : "must_be_declared_localities";
   if (["emergency.types", "service.name_synonyms"].includes(field))
     return nonEmptyStrings(value) ? null : "must_be_nonempty_string_list";
   if (textFields.has(field))
@@ -655,8 +752,9 @@ function applyOne(
     const publicPrice = publicTarget?.state === "answered"
       ? publicTarget.value
       : undefined;
-    const storedValue =
-      fact.field === "service.negotiation" && error === null
+    const storedValue = fact.field === "area.coverage" && error === null
+      ? canonicalizeLocalityValue(fact.value)
+      : fact.field === "service.negotiation" && error === null
         ? fact.value === "non_negotiable" && typeof publicPrice === "number"
           ? { mode: "non_negotiable", floor: publicPrice }
           : typeof fact.value === "string"
@@ -676,6 +774,27 @@ function applyOne(
       : { state: "answered", attempts, value: storedValue };
   }
   cells[key] = cell;
+  if (fact.field === "service.price_target" && subject) {
+    const negotiationKey = keyFor("service.negotiation", subject);
+    const negotiation = cells[negotiationKey];
+    if (
+      negotiation?.state === "answered" &&
+      negotiation.value && typeof negotiation.value === "object" &&
+      (negotiation.value as { mode?: unknown }).mode === "non_negotiable"
+    ) {
+      cells[negotiationKey] = cell.state === "answered" &&
+          typeof cell.value === "number"
+        ? {
+            ...negotiation,
+            value: { mode: "non_negotiable", floor: cell.value },
+          }
+        : {
+            state: "ambiguous",
+            attempts: negotiation.attempts,
+            reason: "non_negotiable_requires_public_target",
+          };
+    }
+  }
   return {
     ...snapshot,
     services,
@@ -887,6 +1006,17 @@ function valueFor(
   subject?: string,
 ): string | undefined {
   const cell = snapshot.cells[keyFor(field, subject)];
+  if (
+    field === "area.coverage" && cell?.state === "answered" &&
+    cell.value && typeof cell.value === "object" &&
+    isCanonicalLocalityList(
+      (cell.value as { localities?: unknown }).localities,
+    )
+  )
+    return (cell.value as { localities: CanonicalLocality[] }).localities
+      .map((locality) =>
+        `${locality.display_name}, ${locality.region_code}, ${locality.country_code}`
+      ).join("; ");
   return cell?.state === "answered"
     ? scalarValues(cell.value).join(", ") || undefined
     : cell?.state === "owner_review_required"

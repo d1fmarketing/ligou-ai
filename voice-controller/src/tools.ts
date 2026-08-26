@@ -17,8 +17,11 @@ import { CUSTOMER_OUTCOME } from "./customer-language.ts";
 import { buildTrustedHermesContext, consultHermes, HERMES_TOPICS } from "./hermes.ts";
 import { mintSimulationSlots } from "./simulation.ts";
 import {
+  canonicalizeLocalityInput,
+  isCanonicalLocalityList,
   isExactCityList,
   isExecutableBusinessHours,
+  type CanonicalLocality,
 } from "./onboarding-coverage.ts";
 import {
   recordOnboardingAnswer,
@@ -159,6 +162,8 @@ const allToolSchemas = [
         service_type: { type: "string" },
         quote_id: { type: "string", description: "Opaque quote_id returned by quote_price or evaluate_offer" },
         service_city: { type: "string", description: "City where service will occur" },
+        service_region: { type: "string", description: "Two-letter region code for typed V2 locality matching" },
+        service_country: { type: "string", description: "Two-letter country code for typed V2 locality matching" },
         date_preference: { type: "string", description: "caller preference in natural language, optional" },
       },
       required: ["service_type", "quote_id", "service_city"],
@@ -244,7 +249,7 @@ const allToolSchemas = [
               type: ["string", "number", "boolean", "array", "object", "null"],
             },
           },
-          description: 'Use exactly {"value":...}; business.* -> allowed string or string array; area.coverage -> {"cities":["Irvine","State College"]}; schedule.business_hours -> {"days":["sun"|"mon"|"tue"|"wed"|"thu"|"fri"|"sat"],"hours":{"opens":"HH:00","closes":"HH:00"}} with unique days and opens before closes; emergency.* -> non-empty string or emergency.types string array; policy.* -> non-empty string; authority.* -> non-empty string; service.* -> typed value per field: service.name_synonyms non-empty string array, service.price_mode fixed|starting_at|estimate|owner_review, service.price_target nonnegative number, service.negotiation {"floor":number} or "non_negotiable", service.duration positive minutes, service.catalog_closure true after explicit no-more-services; owner_review_required|not_applicable -> {"value":null}.'
+          description: 'Use exactly {"value":...}; business.* -> allowed string or string array; area.coverage -> {"localities":[{"display_name":"Irvine","country_code":"US","region_code":"CA"}]} with exact keys and no locality_id (the application derives it); schedule.business_hours -> {"days":["sun"|"mon"|"tue"|"wed"|"thu"|"fri"|"sat"],"hours":{"opens":"HH:00","closes":"HH:00"}} with unique days and opens before closes; emergency.* -> non-empty string or emergency.types string array; policy.* -> non-empty string; authority.* -> non-empty string; service.* -> typed value per field: service.name_synonyms non-empty string array, service.price_mode fixed|starting_at|estimate|owner_review, service.price_target nonnegative number, service.negotiation {"floor":number} or "non_negotiable", service.duration positive minutes, service.catalog_closure true after explicit no-more-services; owner_review_required|not_applicable -> {"value":null}.'
         },
         owner_words: { type: "string", description: "the owner's exact words (Portuguese), as evidence" },
       },
@@ -330,6 +335,15 @@ function areaCities(rule: Rule | undefined): string[] | null {
         .filter(Boolean);
 }
 
+function areaLocalities(
+  rule: Rule | undefined,
+): CanonicalLocality[] | null | undefined {
+  if (rule?.structured?.schema !== "ligou.rule.area.v2") return undefined;
+  return isCanonicalLocalityList(rule.structured.localities)
+    ? rule.structured.localities
+    : null;
+}
+
 function scheduleWindow(rules: Rule[]):
   | { kind: "legacy"; days: Set<string>; opens: number; closes: number }
   | { kind: "v2"; days: Set<string>; opens: number; closes: number }
@@ -408,12 +422,17 @@ export async function runTool(
           "domain:schedule",
           "agenda",
         );
+        const localities = areaLocalities(area);
         return done({
           name: tenant.name,
           services,
-          service_area: area
-            ? ((area.structured as any)?.cities ?? area.text)
-            : null,
+          service_area: !area || localities === null
+            ? null
+            : localities
+              ? localities.map((locality) =>
+                  `${locality.display_name}, ${locality.region_code}, ${locality.country_code}`
+                )
+              : ((area.structured as any)?.cities ?? area.text),
           hours: agenda?.text ?? null,
           now_local: new Date().toLocaleString("en-US", { timeZone: tenant.timezone }),
         });
@@ -513,7 +532,31 @@ export async function runTool(
             reason: "area_policy_requires_owner",
             say: CUSTOMER_OUTCOME.needsTeam,
           });
-        const cities = areaCities(areaRule);
+        const localities = areaLocalities(areaRule);
+        if (localities === null)
+          return done({
+            status: "needs_owner",
+            reason: "area_policy_requires_owner",
+            say: CUSTOMER_OUTCOME.needsTeam,
+          });
+        if (localities) {
+          const requested = canonicalizeLocalityInput({
+            display_name: String(args.service_city ?? ""),
+            region_code: String(args.service_region ?? ""),
+            country_code: String(args.service_country ?? ""),
+          });
+          if (!requested)
+            return done({ status: "needs_owner", reason: "locality_required" });
+          if (!localities.some((locality) =>
+            locality.locality_id === requested.locality_id
+          ))
+            return done({
+              status: "needs_owner",
+              reason: "geography_not_served",
+              say: CUSTOMER_OUTCOME.needsTeam,
+            });
+        }
+        const cities = localities === undefined ? areaCities(areaRule) : [];
         if (cities === null)
           return done({
             status: "needs_owner",

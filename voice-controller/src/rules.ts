@@ -2,7 +2,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { config } from "./config.ts";
 import {
-  isExactCityList,
+  isCanonicalLocalityList,
   isExecutableBusinessHours,
 } from "./onboarding-coverage.ts";
 
@@ -106,13 +106,16 @@ function finitePositive(value: unknown): value is number {
 }
 
 function isV2MarkedRule(rule: Rule): boolean {
-  const schema = String(rule.structured?.schema ?? "");
-  const key = String(rule.structured?.materialization_key ?? "");
-  return (
-    schema.startsWith("ligou.rule.") &&
-    schema.endsWith(".v2")
-  ) ||
-    /^(?:domain|service):/.test(key);
+  return Boolean(
+    rule.structured &&
+    (
+      Object.prototype.hasOwnProperty.call(rule.structured, "schema") ||
+      Object.prototype.hasOwnProperty.call(
+        rule.structured,
+        "materialization_key",
+      )
+    ),
+  );
 }
 
 function v2ServiceSubject(rule: Rule): string | null {
@@ -143,11 +146,16 @@ function v2ServicePresenceSubjects(rule: Rule): string[] {
   const keyMatch = /^service:([a-z0-9][a-z0-9_]{0,199})$/.exec(
     String(structured.materialization_key ?? ""),
   );
-  const claimsService = rule.category === "preco" ||
-    structured.schema === "ligou.rule.service.v2" || Boolean(keyMatch);
+  const schemaClaimsService = typeof structured.schema === "string" &&
+    /^ligou[.]rule[.]service[.]/.test(structured.schema.trim());
+  const keyClaimsService = typeof structured.materialization_key === "string" &&
+    /^service:/.test(structured.materialization_key.trim());
+  const explicitServiceType = normalizedServiceSubject(structured.service_type);
+  const claimsService = rule.category === "preco" || schemaClaimsService ||
+    keyClaimsService || Boolean(keyMatch) || explicitServiceType !== null;
   if (!claimsService) return [];
   return [...new Set([
-    normalizedServiceSubject(structured.service_type),
+    explicitServiceType,
     keyMatch?.[1] ?? null,
   ].filter((value): value is string => value !== null))];
 }
@@ -162,6 +170,7 @@ function parseV2Service(rule: Rule): ServicePolicy | null {
       ).map((name) => name.trim())
     : [];
   const mode = structured.price_mode;
+  const negotiationMode = structured.negotiation_mode;
   const state = structured.operational_state;
   if (
     structured.materialization_eligible !== true ||
@@ -188,6 +197,20 @@ function parseV2Service(rule: Rule): ServicePolicy | null {
     )
   ) return null;
   if (
+    quoteable &&
+    (
+      !["negotiable", "non_negotiable"].includes(String(negotiationMode)) ||
+      (
+        negotiationMode === "non_negotiable" &&
+        (structured.negotiable !== false || floor !== target)
+      ) ||
+      (
+        negotiationMode === "negotiable" &&
+        (structured.negotiable !== true || (floor as number) > (target as number))
+      )
+    )
+  ) return null;
+  if (
     (mode === "estimate" || mode === "owner_review" ||
       state === "owner_review_required") && quoteable
   ) return null;
@@ -197,7 +220,7 @@ function parseV2Service(rule: Rule): ServicePolicy | null {
     service_names: names,
     price_mode: mode as ServicePolicy["price_mode"],
     quoteable,
-    negotiable: quoteable && structured.negotiable === true,
+    negotiable: quoteable && negotiationMode === "negotiable",
     operational_state: state as ServicePolicy["operational_state"],
     ...(quoteable ? { price_target: target as number, price_min: floor as number } : {}),
     ...(finitePositive(duration) ? { duration_min: duration } : {}),
@@ -316,11 +339,20 @@ function domainV2Candidates(
 ): Rule[] {
   const schema = DOMAIN_SCHEMAS[key];
   const category = DOMAIN_CATEGORIES[key];
+  const domainName = key.slice("domain:".length);
   return rules.filter((rule) =>
     isV2MarkedRule(rule) &&
     (
       rule.structured?.schema === schema ||
       rule.structured?.materialization_key === key ||
+      (
+        typeof rule.structured?.schema === "string" &&
+        rule.structured.schema.trim().startsWith(`ligou.rule.${domainName}.`)
+      ) ||
+      (
+        typeof rule.structured?.materialization_key === "string" &&
+        rule.structured.materialization_key.trim().startsWith(`${key}`)
+      ) ||
       rule.category === category
     )
   );
@@ -345,7 +377,7 @@ function canonicalV2DomainRule(
   ) return false;
   if (
     structured.operational_state === "active" && key === "domain:area"
-  ) return isExactCityList(structured.cities);
+  ) return isCanonicalLocalityList(structured.localities);
   if (
     structured.operational_state === "active" && key === "domain:schedule"
   )

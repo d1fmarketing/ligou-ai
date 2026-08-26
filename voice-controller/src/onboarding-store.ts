@@ -584,9 +584,14 @@ function materializationProjection(rule: MaterializedRuleV2) {
   };
 }
 
-function semanticCell(cell: unknown): unknown {
+function semanticCell(cell: unknown, field: CoverageField): unknown {
   if (!cell || typeof cell !== "object" || Array.isArray(cell)) return cell;
   const { attempts: _attempts, ...semantic } = cell as Record<string, unknown>;
+  if (
+    field === "service.negotiation" && semantic.state === "answered" &&
+    semantic.value && typeof semantic.value === "object" &&
+    (semantic.value as { mode?: unknown }).mode === "non_negotiable"
+  ) semantic.value = { mode: "non_negotiable" };
   return canonicalValue(semantic);
 }
 
@@ -598,7 +603,7 @@ function answerHashFor(
   const key = coverageKey(field, subject);
   return sha256(canonicalJson({
     coverage_key: key,
-    cell: semanticCell(snapshot.cells[key]),
+    cell: semanticCell(snapshot.cells[key], field),
   }));
 }
 

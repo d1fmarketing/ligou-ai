@@ -478,7 +478,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     const firstArgs = {
       topic: "area", field: "area.coverage", disposition: "answered",
       rule_text: "FIRST authoritative correction.",
-      structured: { value: { cities: ["Irvine"] } }, owner_words: "Primeiro Irvine.",
+      structured: { value: { localities: [{ display_name: "Irvine", country_code: "US", region_code: "CA" }] } }, owner_words: "Primeiro Irvine.",
     };
     const secondArgs = {
       topic: "area", field: "area.out_of_area_policy", disposition: "answered",
@@ -532,7 +532,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     boundary.seedCoverage(cap, 2, "2".repeat(64), nextQuestion);
     const reusedArgs = {
       topic: "area", field: "area.coverage", disposition: "answered",
-      rule_text: "Serve Irvine.", structured: { value: { cities: ["Irvine"] } },
+      rule_text: "Serve Irvine.", structured: { value: { localities: [{ display_name: "Irvine", country_code: "US", region_code: "CA" }] } },
       owner_words: "Atendemos Irvine.",
     };
     await handleEvent(cap, l, ws as any, responseCreated("resp-reused"));
@@ -704,7 +704,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
           field: "area.coverage",
           disposition: "answered",
           rule_text: "Sibling must never persist.",
-          structured: { value: { cities: ["Irvine"] } },
+          structured: { value: { localities: [{ display_name: "Irvine", country_code: "US", region_code: "CA" }] } },
           owner_words: "Nunca deve persistir.",
         }),
         4,
@@ -1039,7 +1039,7 @@ function completeCoverage(cap: Capability, revision: number): CoverageSnapshot {
   for (const field of universalFields) {
     const values: Partial<Record<CoverageField, unknown>> = {
       "business.customer_types": ["residencial"],
-      "area.coverage": { cities: ["Irvine"] },
+      "area.coverage": { localities: [{ display_name: "Irvine", country_code: "US", region_code: "CA" }] },
       "schedule.business_hours": {
         days: ["mon", "tue", "wed", "thu", "fri"],
         hours: { opens: "08:00", closes: "18:00" },
@@ -2034,7 +2034,7 @@ describe("physical socket attach and reconnect", () => {
           field: "area.coverage",
           disposition: "answered",
           rule_text: "Atende Irvine.",
-          structured: { value: { cities: ["Irvine"] } },
+          structured: { value: { localities: [{ display_name: "Irvine", country_code: "US", region_code: "CA" }] } },
           owner_words: "Atendemos Irvine.",
         }),
       ));
@@ -2161,7 +2161,7 @@ describe("physical socket attach and reconnect", () => {
           field: "area.coverage",
           disposition: "answered",
           rule_text: "Atende Irvine.",
-          structured: { value: { cities: ["Irvine"] } },
+          structured: { value: { localities: [{ display_name: "Irvine", country_code: "US", region_code: "CA" }] } },
           owner_words: "Atendemos Irvine.",
         }),
       ));

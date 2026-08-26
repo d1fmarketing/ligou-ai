@@ -171,7 +171,7 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
       `Use service.name_synonyms com uma lista não vazia; service.price_mode com fixed, starting_at, estimate ou owner_review; service.price_target com número não negativo; service.negotiation com structured={value:{floor:n}} quando negociável, structured={value:"non_negotiable"} quando não negociável ou disposition=owner_review_required quando depender do dono; service.duration com minutos positivos. ` +
       `Envie service.price_target e service.negotiation somente para price_mode fixed ou starting_at; para estimate ou owner_review, não envie esses dois campos. ` +
       `Use business.* com structured={value:...} tipado como lista permitida ou texto não vazio. ` +
-      `Use area.coverage somente com nomes exatos de cidades em structured={value:{cities:["Irvine","State College"]}}. ` +
+      `Use area.coverage somente com localidades exatas em structured={value:{localities:[{display_name:"Irvine",country_code:"US",region_code:"CA"}]}}; nunca envie locality_id, pois a aplicação o deriva. ` +
       `Use schedule.business_hours com structured={value:{days:["sun","mon","tue","wed","thu","fri","sat"],hours:{opens:"08:00",closes:"18:00"}}}; escolha dias únicos do enum, horas inteiras HH:00 e abertura anterior ao fechamento. ` +
       `Use emergency.* com structured={value:...} tipado como lista de tipos ou texto não vazio. ` +
       `Use policy.* com structured={value:...} tipado como texto não vazio. ` +

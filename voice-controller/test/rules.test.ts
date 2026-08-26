@@ -128,6 +128,7 @@ describe("V2 service policy projection", () => {
       service_type: "drain_cleaning",
       service_names: ["Drain cleaning", "Unclog drain"],
       price_mode: "fixed",
+      negotiation_mode: "non_negotiable",
       quoteable: true,
       negotiable: false,
       price_target: 149,
@@ -325,6 +326,57 @@ describe("V2 service policy projection", () => {
     expect(servicePolicies([legacy, scheduleAsPrice])).toEqual([]);
     expect(priceRules([legacy, scheduleAsPrice])).toEqual([]);
   });
+
+  test("any present reserved marker makes a service row nonlegacy regardless of marker value", () => {
+    const legacy = rule("legacy-reserved-shadow", {
+      service_type: "drain_cleaning",
+      price_target: 225,
+      price_min: 149,
+      duration_min: 60,
+    });
+    const markerValues: unknown[] = [
+      undefined,
+      null,
+      "",
+      "   ",
+      "\nligou.rule.service.v2\t",
+      "ligou.rule.service.v3",
+      3,
+      {},
+      [],
+    ];
+    for (const [index, marker] of markerValues.entries()) {
+      const schemaMarked = rule(`schema-marker-${index}`, {
+        schema: marker,
+        service_type: "drain_cleaning",
+        price_target: 1,
+        price_min: 1,
+        duration_min: 1,
+      });
+      const keyMarked = rule(`key-marker-${index}`, {
+        materialization_key: marker,
+        service_type: "drain_cleaning",
+        price_target: 1,
+        price_min: 1,
+        duration_min: 1,
+      });
+      expect(servicePolicies([legacy, schemaMarked]), `schema ${index}`)
+        .toEqual([]);
+      expect(servicePolicies([legacy, keyMarked]), `key ${index}`)
+        .toEqual([]);
+    }
+    const wrongCategory: Rule = {
+      ...rule("reserved-wrong-category", {
+        schema: null,
+        service_type: "drain_cleaning",
+        price_target: 1,
+        price_min: 1,
+        duration_min: 1,
+      }),
+      category: "outro",
+    };
+    expect(servicePolicies([legacy, wrongCategory])).toEqual([]);
+  });
 });
 
 describe("V2 domain policy projection", () => {
@@ -428,5 +480,30 @@ describe("V2 domain policy projection", () => {
       "domain:schedule",
       "agenda",
     )).toBeUndefined();
+  });
+
+  test("any present reserved marker shadows a same-category legacy domain", () => {
+    const markerValues: unknown[] = [
+      null,
+      " ",
+      "\nligou.rule.area.v3\t",
+      9,
+      {},
+      [],
+    ];
+    for (const [index, marker] of markerValues.entries()) {
+      const marked: Rule = {
+        ...legacyArea,
+        id: `reserved-area-${index}`,
+        rule_group_id: `reserved-area-group-${index}`,
+        text: "Reserved marker must never become area authority.",
+        structured: { schema: marker, cities: ["Irvine"] },
+      };
+      expect(ruleByMaterializationKey(
+        [legacyArea, marked],
+        "domain:area",
+        "area",
+      )).toBeUndefined();
+    }
   });
 });

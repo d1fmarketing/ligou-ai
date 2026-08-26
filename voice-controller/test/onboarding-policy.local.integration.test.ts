@@ -148,11 +148,65 @@ test("real onboarding RPC approval reloads into servicePolicies and quote_price"
       .select("id")
       .eq("tenant_id", tenantId)).data).toEqual([]);
 
+    const localityEvidence = await store.recordOnboardingAnswer(
+      onboardingCapability,
+      "runtime-typed-locality",
+      {
+        topic: "area",
+        field: "area.coverage",
+        disposition: "answered",
+        rule_text: "Atende New York e Washington, DC.",
+        structured: { value: { localities: [
+          { display_name: "New York", country_code: "US", region_code: "NY" },
+          { display_name: "Washington", country_code: "US", region_code: "DC" },
+        ] } },
+        owner_words: "Atendemos New York e Washington, DC.",
+      },
+    );
+    expect(localityEvidence).toMatchObject({ ok: true, complete: false });
+    const localityReceipt = await service.from("receipts")
+      .select("readback")
+      .eq("tenant_id", tenantId)
+      .eq("call_id", callId)
+      .eq("kind", "onboarding_coverage")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+    expect(localityReceipt.error).toBeNull();
+    expect(localityReceipt.data?.readback).toMatchObject({
+      snapshot: {
+        cells: {
+          "area.coverage": {
+            state: "answered",
+            value: { localities: [
+              {
+                display_name: "New York", country_code: "US", region_code: "NY",
+                locality_id: "loc_c0f300f553807cd44f5f7ede",
+              },
+              {
+                display_name: "Washington", country_code: "US", region_code: "DC",
+                locality_id: "loc_e939e6896203b54b290f9224",
+              },
+            ] },
+          },
+        },
+      },
+    });
+    const areaMaterialization = (localityReceipt.data?.readback as any)
+      .materializations.find((item: any) => item.key === "domain:area");
+    expect(areaMaterialization).toMatchObject({
+      key: "domain:area",
+      structured: {
+        localities: expect.any(Array),
+        materialization_eligible: false,
+      },
+    });
+
     const subject = "drain_cleaning";
     const facts = [
       ["service.name_synonyms", "answered", ["Drain cleaning"], "Limpeza de ralo."],
       ["service.price_mode", "answered", "fixed", "Preço fixo."],
-      ["service.price_target", "answered", 149, "Cento e quarenta e nove."],
+      ["service.price_target", "answered", 100, "Cem."],
       ["service.negotiation", "answered", "non_negotiable", "Não é negociável."],
       ["service.duration", "answered", 60, "Sessenta minutos."],
       ["service.inclusions_exclusions", "answered", "Inclui mão de obra; peças à parte.", "Mão de obra, peças à parte."],
@@ -189,6 +243,45 @@ test("real onboarding RPC approval reloads into servicePolicies and quote_price"
       }
       if (result.ok && result.ruleId) suggestedRuleId = result.ruleId;
     }
+    const targetCorrection = await store.recordOnboardingAnswer(
+      onboardingCapability,
+      "runtime-service.price_target-correction-149",
+      {
+        topic: "precos",
+        field: "service.price_target",
+        subject,
+        disposition: "answered",
+        rule_text: "Evidence for corrected target.",
+        structured: { value: 149 },
+        owner_words: "Agora custa cento e quarenta e nove.",
+      },
+    );
+    expect(targetCorrection).toMatchObject({ ok: true, complete: false });
+    if (targetCorrection.ok && targetCorrection.ruleId)
+      suggestedRuleId = targetCorrection.ruleId;
+    const latestCoverage = await service.from("receipts")
+      .select("readback")
+      .eq("tenant_id", tenantId)
+      .eq("call_id", callId)
+      .eq("kind", "onboarding_coverage")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+    expect(latestCoverage.error).toBeNull();
+    expect(latestCoverage.data?.readback).toMatchObject({
+      current_answer_hashes: {
+        "service:drain_cleaning:service.negotiation":
+          "ed986f002ebf3a0816afaa88b903ff626aa746717ebc07751ef6ac9aa5516041",
+      },
+      snapshot: {
+        cells: {
+          "service:drain_cleaning:service.negotiation": {
+            state: "answered",
+            value: { mode: "non_negotiable", floor: 149 },
+          },
+        },
+      },
+    });
     expect(suggestedRuleId).toMatch(/^[0-9a-f-]{36}$/);
     const suggested = await service.from("rules")
       .select("id,status,structured")

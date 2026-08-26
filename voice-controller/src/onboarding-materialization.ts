@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import {
   coverageKey,
-  isDeclaredCitiesValue,
+  isCanonicalLocalityList,
   isExecutableBusinessHours,
+  type CanonicalLocality,
   type CoverageCell,
   type CoverageDisposition,
   type CoverageField,
@@ -252,6 +253,14 @@ function renderAnswered(field: CoverageField, value: unknown): string {
     const valuePt = scalarValues(value).join(", ");
     return valuePt ? `${valuePt} minutos` : "";
   }
+  if (
+    field === "area.coverage" && value && typeof value === "object" &&
+    isCanonicalLocalityList((value as { localities?: unknown }).localities)
+  )
+    return (value as { localities: CanonicalLocality[] }).localities
+      .map((locality) =>
+        `${locality.display_name}, ${locality.region_code}, ${locality.country_code}`
+      ).join("; ");
   return scalarValues(value).join(", ");
 }
 
@@ -414,7 +423,12 @@ function serviceRule(
   const targetValid = typeof target === "number" && Number.isFinite(target) && target >= 0;
   const durationValid = typeof duration === "number" && Number.isFinite(duration) && duration > 0;
   const floor = negotiation?.floor;
-  const floorValid = typeof floor === "number" && Number.isFinite(floor) && floor >= 0 && targetValid && floor <= target;
+  const floorValid = typeof floor === "number" && Number.isFinite(floor) &&
+    floor >= 0 && targetValid && floor <= target &&
+    (
+      negotiation?.mode === "negotiable" ||
+      (negotiation?.mode === "non_negotiable" && floor === target)
+    );
   const pricingMode = mode === "fixed" || mode === "starting_at";
   const quoteable = status.reviewReady && status.state === "active" &&
     pricingMode && targetValid && floorValid && durationValid;
@@ -437,6 +451,10 @@ function serviceRule(
     service_type: subject,
     service_names: serviceNames,
     price_mode: mode,
+    ...(negotiation?.mode === "negotiable" ||
+        negotiation?.mode === "non_negotiable"
+      ? { negotiation_mode: negotiation.mode }
+      : {}),
     quoteable,
     negotiable,
     operational_state:
@@ -511,7 +529,15 @@ function domainRule(
     ? cellFor(snapshot, { field: "schedule.business_hours" })
     : undefined;
   const invalidEnforcementValue =
-    (area?.state === "answered" && !isDeclaredCitiesValue(area.value)) ||
+    (
+      area?.state === "answered" &&
+      (
+        !area.value || typeof area.value !== "object" ||
+        !isCanonicalLocalityList(
+          (area.value as { localities?: unknown }).localities,
+        )
+      )
+    ) ||
     (hours?.state === "answered" && !isExecutableBusinessHours(hours.value));
   const status = invalidEnforcementValue
     ? { ...baseStatus, state: "incomplete" as const, reviewReady: false }
@@ -542,9 +568,20 @@ function domainRule(
     fields: fieldValues,
   };
   if (definition.key === "domain:area") {
-    if (area?.state === "answered" && isDeclaredCitiesValue(area.value)) {
-      structured.coverage_labels = area.value.cities;
-      structured.cities = area.value.cities;
+    if (
+      area?.state === "answered" && area.value &&
+      typeof area.value === "object" &&
+      isCanonicalLocalityList(
+        (area.value as { localities?: unknown }).localities,
+      )
+    ) {
+      const localities = (area.value as {
+        localities: CanonicalLocality[];
+      }).localities;
+      structured.coverage_labels = localities.map((locality) =>
+        `${locality.display_name}, ${locality.region_code}, ${locality.country_code}`
+      );
+      structured.localities = localities;
     }
   }
   if (definition.key === "domain:schedule") {

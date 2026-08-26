@@ -189,6 +189,11 @@ describe("quote_price", () => {
         service_type: serviceType,
         service_names: [serviceType.replace(/_/g, " ")],
         price_mode: mode,
+        ...(mode === "fixed"
+          ? { negotiation_mode: "non_negotiable" }
+          : mode === "starting_at"
+            ? { negotiation_mode: "negotiable" }
+            : {}),
         quoteable: mode === "fixed" || mode === "starting_at",
         negotiable: mode === "starting_at",
         duration_min: 60,
@@ -249,6 +254,44 @@ describe("quote_price", () => {
       });
       expect(result.body.quote_usd).toBeUndefined();
     }
+  });
+
+  test("a non-negotiable V2 policy cannot carry an attacker floor or negotiable flag", async () => {
+    activeRules = [{
+      id: "v2-hostile-nonneg",
+      rule_group_id: "v2-hostile-nonneg-group",
+      version: 1,
+      category: "preco",
+      escopo: "servico",
+      text: "Hostile non-negotiable rule.",
+      structured: {
+        schema: "ligou.rule.service.v2",
+        materialization_key: "service:drain_cleaning",
+        materialization_hash: "9".repeat(64),
+        materialization_eligible: true,
+        review_ready: true,
+        operational_state: "active",
+        service_type: "drain_cleaning",
+        service_names: ["Drain cleaning"],
+        price_mode: "fixed",
+        negotiation_mode: "non_negotiable",
+        quoteable: true,
+        negotiable: true,
+        price_target: 149,
+        price_min: 1,
+        duration_min: 60,
+        coverage_revision: 42,
+        source_call_id: "22222222-2222-4222-8222-222222222222",
+      },
+    }];
+    invalidateTenant(TENANT.slug);
+    const quote = await runTool(cap(), "quote_price", {
+      service_type: "drain_cleaning",
+    });
+    expect(quote.body).toMatchObject({
+      status: "needs_owner",
+      reason: "service_not_in_approved_list",
+    });
   });
 });
 
@@ -386,7 +429,10 @@ describe("V2 domain policies", () => {
         "domain:area",
         "area",
         "ligou.rule.area.v2",
-        { cities: ["Irvine"], coverage_labels: ["Irvine"] },
+        { localities: [{
+          display_name: "Irvine", country_code: "US", region_code: "CA",
+          locality_id: "loc_9971eda617977d43d7df9fd5",
+        }] },
         "Somente Irvine.",
       ),
       domainRule(
@@ -415,7 +461,7 @@ describe("V2 domain policies", () => {
     );
 
     const info = await runTool(simulated, "get_business_info", {});
-    expect(info.body.service_area).toEqual(["Irvine"]);
+    expect(info.body.service_area).toEqual(["Irvine, CA, US"]);
     expect(info.body.hours).toBe("Terça, 10:00–14:00.");
 
     const deniedQuote = await runTool(simulated, "quote_price", {
@@ -424,6 +470,8 @@ describe("V2 domain policies", () => {
     const denied = await runTool(simulated, "check_availability", {
       service_type: "drain_cleaning",
       service_city: "Anaheim",
+      service_region: "CA",
+      service_country: "US",
       quote_id: deniedQuote.body.quote_id,
     });
     expect(denied.body).toMatchObject({
@@ -437,6 +485,8 @@ describe("V2 domain policies", () => {
     const allowed = await runTool(simulated, "check_availability", {
       service_type: "drain_cleaning",
       service_city: "Irvine",
+      service_region: "CA",
+      service_country: "US",
       quote_id: quote.body.quote_id,
     });
     expect(allowed.body.status).toBe("ok");
@@ -454,7 +504,10 @@ describe("V2 domain policies", () => {
         "domain:area",
         "area",
         "ligou.rule.area.v2",
-        { cities: ["Irvine"] },
+        { localities: [{
+          display_name: "Irvine", country_code: "US", region_code: "CA",
+          locality_id: "loc_9971eda617977d43d7df9fd5",
+        }] },
         "Irvine.",
       ),
       domainRule(
@@ -480,11 +533,13 @@ describe("V2 domain policies", () => {
       service_type: "drain_cleaning",
     });
     const info = await runTool(simulated, "get_business_info", {});
-    expect(info.body.service_area).toEqual(["Irvine"]);
+    expect(info.body.service_area).toEqual(["Irvine, CA, US"]);
     expect(info.body.hours).toBeNull();
     const result = await runTool(simulated, "check_availability", {
       service_type: "drain_cleaning",
       service_city: "Irvine",
+      service_region: "CA",
+      service_country: "US",
       quote_id: quote.body.quote_id,
     });
     expect(result.body).toMatchObject({
@@ -584,22 +639,123 @@ describe("V2 domain policies", () => {
         "domain:area",
         "area",
         "ligou.rule.area.v2",
-        { cities: ["State College"], coverage_labels: ["State College"] },
+        { localities: [{
+          display_name: "State College", country_code: "US", region_code: "PA",
+          locality_id: "loc_598cce799aeb20c5d2116b74",
+        }] },
         "State College.",
       ),
     ];
     invalidateTenant(TENANT.slug);
     const info = await runTool(cap(), "get_business_info", {});
-    expect(info.body.service_area).toEqual(["State College"]);
+    expect(info.body.service_area).toEqual(["State College, PA, US"]);
     const quote = await runTool(cap(), "quote_price", {
       service_type: "drain_cleaning",
     });
     const availability = await runTool(cap(), "check_availability", {
       service_type: "drain_cleaning",
       service_city: "State College",
+      service_region: "PA",
+      service_country: "US",
       quote_id: quote.body.quote_id,
     });
     expect(availability.body.status).toBe("ok");
+  });
+
+  test("V2 availability matches canonical locality identity and fails closed without codes or on duplicates", async () => {
+    const localities = [
+      {
+        display_name: "New York",
+        country_code: "US",
+        region_code: "NY",
+        locality_id: "loc_c0f300f553807cd44f5f7ede",
+      },
+      {
+        display_name: "Washington",
+        country_code: "US",
+        region_code: "DC",
+        locality_id: "loc_e939e6896203b54b290f9224",
+      },
+    ];
+    activeRules = [
+      ...RULES,
+      domainRule(
+        "v2a",
+        "domain:area",
+        "area",
+        "ligou.rule.area.v2",
+        { localities },
+        "New York, NY e Washington, DC.",
+      ),
+    ];
+    invalidateTenant(TENANT.slug);
+    const info = await runTool(cap(), "get_business_info", {});
+    expect(info.body.service_area).toEqual([
+      "New York, NY, US",
+      "Washington, DC, US",
+    ]);
+    const schema = toolSchemas.find(
+      (candidate) => candidate.name === "check_availability",
+    ) as any;
+    expect(schema.parameters.properties).toMatchObject({
+      service_region: { type: "string" },
+      service_country: { type: "string" },
+    });
+    const quote = await runTool(cap(), "quote_price", {
+      service_type: "drain_cleaning",
+    });
+    const allowed = await runTool(cap(), "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "New York",
+      service_region: "NY",
+      service_country: "US",
+      quote_id: quote.body.quote_id,
+    });
+    expect(allowed.body.status).toBe("ok");
+    const missingCodes = await runTool(cap(), "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "New York",
+      quote_id: quote.body.quote_id,
+    });
+    expect(missingCodes.body).toMatchObject({
+      status: "needs_owner",
+      reason: "locality_required",
+    });
+    const denied = await runTool(cap(), "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "California",
+      service_region: "CA",
+      service_country: "US",
+      quote_id: quote.body.quote_id,
+    });
+    expect(denied.body).toMatchObject({
+      status: "needs_owner",
+      reason: "locality_required",
+    });
+
+    activeRules = [
+      ...RULES,
+      domainRule(
+        "v2b",
+        "domain:area",
+        "area",
+        "ligou.rule.area.v2",
+        { localities: [localities[0], localities[0]] },
+        "Duplicate locality must block.",
+      ),
+    ];
+    invalidateTenant(TENANT.slug);
+    const duplicate = await runTool(cap(), "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "New York",
+      service_region: "NY",
+      service_country: "US",
+      quote_id: quote.body.quote_id,
+    });
+    expect(duplicate.body).toMatchObject({
+      status: "needs_owner",
+      reason: "area_policy_requires_owner",
+    });
   });
 
   test("extra schedule keys are neither exposed as configured hours nor used for slots", async () => {
@@ -610,7 +766,10 @@ describe("V2 domain policies", () => {
         "domain:area",
         "area",
         "ligou.rule.area.v2",
-        { cities: ["Irvine"], coverage_labels: ["Irvine"] },
+        { localities: [{
+          display_name: "Irvine", country_code: "US", region_code: "CA",
+          locality_id: "loc_9971eda617977d43d7df9fd5",
+        }] },
         "Irvine.",
       ),
       domainRule(
@@ -646,6 +805,8 @@ describe("V2 domain policies", () => {
     const result = await runTool(simulated, "check_availability", {
       service_type: "drain_cleaning",
       service_city: "Irvine",
+      service_region: "CA",
+      service_country: "US",
       quote_id: quote.body.quote_id,
     });
     expect(result.body).toMatchObject({
@@ -751,7 +912,10 @@ describe("capability boundary", () => {
     );
     const examples = [
       ["outro", "business.customer_types", undefined, "answered", ["residencial"], "answered"],
-      ["area", "area.coverage", undefined, "answered", { cities: ["Irvine", "State College"] }, "answered"],
+      ["area", "area.coverage", undefined, "answered", { localities: [
+        { display_name: "Irvine", country_code: "US", region_code: "CA" },
+        { display_name: "State College", country_code: "US", region_code: "PA" },
+      ] }, "answered"],
       ["agenda", "schedule.business_hours", undefined, "answered", {
         days: ["mon", "tue"], hours: { opens: "08:00", closes: "18:00" },
       }, "answered"],
@@ -1212,6 +1376,43 @@ describe("instructions builder", () => {
     expect(instructions).not.toContain("- drain_cleaning:");
   });
 
+  test("reserved marker properties never re-enter customer prompt legacy fallback", () => {
+    const reservedArea = {
+      id: "reserved-area-marker",
+      rule_group_id: "reserved-area-marker-group",
+      version: 1,
+      category: "area",
+      escopo: "localizacao",
+      text: "RESERVED MARKER TEXT MUST NOT ENTER PROMPT.",
+      structured: {
+        schema: "  ligou.rule.area.v3\n",
+        cities: ["Irvine"],
+      },
+    };
+    const prompt = buildInstructions(
+      TENANT as any,
+      [...RULES, reservedArea, {
+        id: "reserved-service-wrong-category",
+        rule_group_id: "reserved-service-wrong-category-group",
+        version: 1,
+        category: "outro",
+        escopo: "servico",
+        text: "RESERVED SERVICE MUST SHADOW LEGACY.",
+        structured: {
+          schema: null,
+          service_type: "drain_cleaning",
+          price_target: 1,
+          price_min: 1,
+          duration_min: 1,
+        },
+      }] as any,
+      "customer",
+    );
+    expect(prompt).not.toContain("RESERVED MARKER TEXT");
+    expect(prompt).not.toContain("Orange County only:");
+    expect(prompt).not.toContain("- drain_cleaning:");
+  });
+
   test("stable prefix is byte-identical across builds (cache hygiene)", () => {
     const a = buildInstructions(TENANT as any, RULES as any, "customer");
     const b = buildInstructions(TENANT as any, RULES as any, "customer");
@@ -1358,7 +1559,10 @@ describe("instructions builder", () => {
     expect(structured).toContain("non_negotiable");
     expect(structured).toContain("service.duration");
     expect(structured).toContain("service.catalog_closure");
-    expect(structured).toContain('area.coverage -> {"cities":["Irvine","State College"]}');
+    expect(structured).toContain(
+      'area.coverage -> {"localities":[{"display_name":"Irvine","country_code":"US","region_code":"CA"}]}',
+    );
+    expect(structured).not.toContain('area.coverage -> {"cities"');
     expect(structured).toContain(
       'schedule.business_hours -> {"days":["sun"|"mon"|"tue"|"wed"|"thu"|"fri"|"sat"],"hours":{"opens":"HH:00","closes":"HH:00"}}',
     );
@@ -1371,8 +1575,10 @@ describe("instructions builder", () => {
       "service.* ->",
       'owner_review_required|not_applicable -> {"value":null}',
     ]) expect(structured).toContain(groupExample);
-    expect(instructions).toMatch(/area\.coverage[^.]*nomes exatos de cidades/i);
-    expect(instructions).not.toMatch(/area\.coverage[^.]*regiões|area\.coverage[^.]*CEPs/i);
+    expect(instructions).toMatch(
+      /area\.coverage[^.]*display_name[^.]*country_code[^.]*region_code/i,
+    );
+    expect(instructions).toMatch(/locality_id[^.]*aplicação/i);
     expect(instructions).toContain(
       'schedule.business_hours com structured={value:{days:["sun","mon","tue","wed","thu","fri","sat"],hours:{opens:"08:00",closes:"18:00"}}}',
     );

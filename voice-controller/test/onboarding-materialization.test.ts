@@ -140,7 +140,10 @@ function readySnapshot(
     "business.customer_types": ["residencial", "comercial"],
     "business.excluded_work": "Nao realiza obra estrutural.",
     "business.languages_tone": "Portugues e ingles, tom direto.",
-    "area.coverage": { cities: ["Anaheim", "Irvine"] },
+    "area.coverage": { localities: [
+      { display_name: "Anaheim", country_code: "US", region_code: "CA" },
+      { display_name: "Irvine", country_code: "US", region_code: "CA" },
+    ] },
     "area.out_of_area_policy": "Fora da area exige revisao do dono.",
     "schedule.business_hours": {
       days: ["mon", "tue", "wed", "thu", "fri"],
@@ -370,12 +373,15 @@ describe("deterministic onboarding materialization", () => {
     });
   });
 
-  test("materializes only explicitly declared cities without lexical reinterpretation", () => {
+  test("materializes only explicitly declared localities without lexical reinterpretation", () => {
     let snapshot = readySnapshot("fixed");
     snapshot = apply(snapshot, {
       field: "area.coverage",
       disposition: "answered",
-      value: { cities: ["State College", "Irvine"] },
+      value: { localities: [
+        { display_name: "State College", country_code: "US", region_code: "PA" },
+        { display_name: "Irvine", country_code: "US", region_code: "CA" },
+      ] },
       ownerWords: "Atendemos State College e Irvine.",
     });
     const area = materializeCoverage(snapshot, evaluateCoverage(snapshot)).rules
@@ -384,9 +390,82 @@ describe("deterministic onboarding materialization", () => {
       state: "active",
       reviewReady: true,
       structured: {
-        cities: ["State College", "Irvine"],
-        coverage_labels: ["State College", "Irvine"],
+        localities: [
+          {
+            display_name: "State College", country_code: "US", region_code: "PA",
+            locality_id: "loc_598cce799aeb20c5d2116b74",
+          },
+          {
+            display_name: "Irvine", country_code: "US", region_code: "CA",
+            locality_id: "loc_9971eda617977d43d7df9fd5",
+          },
+        ],
+        coverage_labels: ["State College, PA, US", "Irvine, CA, US"],
       },
+    });
+  });
+
+  test("materializes canonical locality identities and never caller-supplied locality IDs", () => {
+    let snapshot = readySnapshot("fixed");
+    snapshot = apply(snapshot, {
+      field: "area.coverage",
+      disposition: "answered",
+      value: {
+        localities: [
+          { display_name: "New York", country_code: "US", region_code: "NY" },
+          { display_name: "Washington", country_code: "US", region_code: "DC" },
+        ],
+      },
+      ownerWords: "Atendemos New York e Washington, DC.",
+    });
+    const area = materializeCoverage(snapshot, evaluateCoverage(snapshot)).rules
+      .find((rule) => rule.key === "domain:area")!;
+    expect(area).toMatchObject({
+      state: "active",
+      reviewReady: true,
+      structured: {
+        localities: [
+          {
+            display_name: "New York",
+            country_code: "US",
+            region_code: "NY",
+            locality_id: "loc_c0f300f553807cd44f5f7ede",
+          },
+          {
+            display_name: "Washington",
+            country_code: "US",
+            region_code: "DC",
+            locality_id: "loc_e939e6896203b54b290f9224",
+          },
+        ],
+      },
+    });
+    expect(area.structured).not.toHaveProperty("cities");
+  });
+
+  test("a target correction keeps non-negotiable price policy target-bound", () => {
+    let snapshot = readySnapshot("fixed");
+    snapshot = apply(snapshot, {
+      field: "service.negotiation",
+      subject: SERVICE,
+      disposition: "answered",
+      value: "non_negotiable",
+      ownerWords: "O preço não é negociável.",
+    });
+    snapshot = apply(snapshot, {
+      field: "service.price_target",
+      subject: SERVICE,
+      disposition: "answered",
+      value: 199,
+      ownerWords: "Agora o preço é cento e noventa e nove.",
+    });
+    const service = materializeCoverage(snapshot, evaluateCoverage(snapshot)).rules
+      .find((rule) => rule.key === `service:${SERVICE}`)!;
+    expect(service.structured).toMatchObject({
+      price_target: 199,
+      price_min: 199,
+      negotiation_mode: "non_negotiable",
+      negotiable: false,
     });
   });
 

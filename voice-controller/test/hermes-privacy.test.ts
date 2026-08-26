@@ -84,7 +84,7 @@ describe("trusted structured Hermes context", () => {
       id: "malformed-v2",
       rule_group_id: "malformed-v2-group",
       version: 2,
-      category: "preco",
+      category: "outro",
       escopo: "servico",
       text: "Malformed V2 must shadow legacy.",
       structured: {
@@ -140,6 +140,30 @@ describe("trusted structured Hermes context", () => {
       "drain_cleaning",
       TENANT as any,
       [RULES[0]!, scheduleAsPrice] as any,
+    )).toThrow("hermes_service_unknown");
+  });
+
+  test("any reserved marker property blocks Hermes legacy service fallback", () => {
+    const marked = {
+      id: "reserved-marker-price",
+      rule_group_id: "reserved-marker-price-group",
+      version: 1,
+      category: "outro",
+      escopo: "servico",
+      text: "Reserved marker must block Hermes.",
+      structured: {
+        schema: { future: "ligou.rule.service.v4" },
+        service_type: "drain_cleaning",
+        price_target: 1,
+        price_min: 1,
+        duration_min: 1,
+      },
+    };
+    expect(() => buildTrustedHermesContext(
+      "customer_upset",
+      "drain_cleaning",
+      TENANT as any,
+      [RULES[0]!, marked] as any,
     )).toThrow("hermes_service_unknown");
   });
 

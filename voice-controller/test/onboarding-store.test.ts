@@ -238,7 +238,10 @@ const AREA_FACT = {
   field: "area.coverage",
   disposition: "answered",
   rule_text: "Serve Anaheim and Irvine.",
-  structured: { value: { cities: ["Anaheim", "Irvine"] } },
+  structured: { value: { localities: [
+    { display_name: "Anaheim", country_code: "US", region_code: "CA" },
+    { display_name: "Irvine", country_code: "US", region_code: "CA" },
+  ] } },
   owner_words: "Atendemos Anaheim e Irvine.",
 };
 
@@ -506,7 +509,7 @@ describe("recordOnboardingAnswer", () => {
       p_event_key:
         "a40d8aa6433a3670a0ed179cd1a279c79369fc5c3d62722406095c747fd70fca",
       p_answer_hash:
-        "519e578d7575832d5168a4ac8046bcfb57320546b92b54bf1eb6df526dadb653",
+        "d7e9ff907136cacf6151cdc1d9720405518d757cb9ed07b999799e3c3bde8464",
       p_expected_revision: 0,
       p_rule_group_id: null,
       p_fact: AREA_FACT,
@@ -521,7 +524,7 @@ describe("recordOnboardingAnswer", () => {
       selected_rule_ids: [],
       current_answer_hashes: {
         "area.coverage":
-          "519e578d7575832d5168a4ac8046bcfb57320546b92b54bf1eb6df526dadb653",
+          "d7e9ff907136cacf6151cdc1d9720405518d757cb9ed07b999799e3c3bde8464",
       },
       summary_projection: null,
       summary_hash: null,
@@ -534,7 +537,16 @@ describe("recordOnboardingAnswer", () => {
           "area.coverage": {
             state: "answered",
             attempts: 1,
-            value: { cities: ["Anaheim", "Irvine"] },
+            value: { localities: [
+              {
+                display_name: "Anaheim", country_code: "US", region_code: "CA",
+                locality_id: "loc_4bc5a435c3c9a7013a252ae4",
+              },
+              {
+                display_name: "Irvine", country_code: "US", region_code: "CA",
+                locality_id: "loc_9971eda617977d43d7df9fd5",
+              },
+            ] },
           },
         },
       },
@@ -661,6 +673,157 @@ describe("recordOnboardingAnswer", () => {
     });
   });
 
+  test("non-negotiable answer hashes exclude the derived floor and stay valid across target correction", async () => {
+    const subject = "drain_cleaning";
+    const targetKey = `service:${subject}:service.price_target`;
+    const negotiationKey = `service:${subject}:service.negotiation`;
+    const baseCells = {
+      [`service:${subject}:service.name_synonyms`]: {
+        state: "answered" as const,
+        attempts: 1,
+        value: ["Drain cleaning"],
+      },
+      [targetKey]: {
+        state: "answered" as const,
+        attempts: 1,
+        value: 100,
+      },
+    };
+    const priorForNegotiation = receipt({
+      schema_version: 2,
+      revision: 2,
+      complete: false,
+      snapshot: {
+        ...emptySnapshot(2),
+        services: [subject],
+        cells: baseCells,
+      },
+      selected_rule_ids: [],
+      current_answer_hashes: {
+        [targetKey]:
+          "1e8aa7792ef11a4c0897cfae329bbb87037b7600e1b13cf0826968a3018e3db4",
+      },
+      materializations: [],
+      summary_projection: null,
+      summary_hash: null,
+      snapshot_digest: "2".repeat(64),
+    });
+    const first = new SupabaseBoundaryFake();
+    first.receiptRows = [priorForNegotiation];
+    first.rpcResult = {
+      data: {
+        status: "recorded",
+        coverage_receipt_id: "nonneg-receipt",
+        revision: 3,
+        snapshot_digest: "3".repeat(64),
+        complete: false,
+        missing: [],
+        ambiguous: [],
+        coverage: {},
+      },
+      error: null,
+    };
+    const firstStore = createOnboardingStore({
+      client: first.client() as any,
+      now: () => 20,
+      timeoutMs: 100,
+    });
+    expect(await firstStore.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-nonneg",
+      {
+        topic: "precos",
+        field: "service.negotiation",
+        subject,
+        disposition: "answered",
+        rule_text: "Preço não negociável.",
+        structured: { value: "non_negotiable" },
+        owner_words: "O preço não é negociável.",
+      },
+    )).toMatchObject({ ok: true, revision: 3 });
+    const firstCoverage = first.rpcCalls[0]!.args.p_coverage as any;
+    expect(firstCoverage.snapshot.cells[negotiationKey].value).toEqual({
+      mode: "non_negotiable",
+      floor: 100,
+    });
+    expect(firstCoverage.current_answer_hashes[negotiationKey]).toBe(
+      "ed986f002ebf3a0816afaa88b903ff626aa746717ebc07751ef6ac9aa5516041",
+    );
+
+    const priorForTarget = receipt({
+      schema_version: 2,
+      revision: 3,
+      complete: false,
+      snapshot: {
+        ...emptySnapshot(3),
+        services: [subject],
+        cells: {
+          ...baseCells,
+          [negotiationKey]: {
+            state: "answered",
+            attempts: 1,
+            value: { mode: "non_negotiable", floor: 100 },
+          },
+        },
+      },
+      selected_rule_ids: [],
+      current_answer_hashes: {
+        [targetKey]:
+          "1e8aa7792ef11a4c0897cfae329bbb87037b7600e1b13cf0826968a3018e3db4",
+        [negotiationKey]:
+          "ed986f002ebf3a0816afaa88b903ff626aa746717ebc07751ef6ac9aa5516041",
+      },
+      materializations: [],
+      summary_projection: null,
+      summary_hash: null,
+      snapshot_digest: "3".repeat(64),
+    });
+    const second = new SupabaseBoundaryFake();
+    second.receiptRows = [priorForTarget];
+    second.rpcResult = {
+      data: {
+        status: "recorded",
+        coverage_receipt_id: "target-correction-receipt",
+        revision: 4,
+        snapshot_digest: "4".repeat(64),
+        complete: false,
+        missing: [],
+        ambiguous: [],
+        coverage: {},
+      },
+      error: null,
+    };
+    const secondStore = createOnboardingStore({
+      client: second.client() as any,
+      now: () => 20,
+      timeoutMs: 100,
+    });
+    expect(await secondStore.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-target-149",
+      {
+        topic: "precos",
+        field: "service.price_target",
+        subject,
+        disposition: "answered",
+        rule_text: "Preço 149.",
+        structured: { value: 149 },
+        owner_words: "Agora custa cento e quarenta e nove.",
+      },
+    )).toMatchObject({ ok: true, revision: 4 });
+    const secondCoverage = second.rpcCalls[0]!.args.p_coverage as any;
+    expect(secondCoverage.snapshot.cells[negotiationKey].value).toEqual({
+      mode: "non_negotiable",
+      floor: 149,
+    });
+    expect(secondCoverage.current_answer_hashes).toMatchObject({
+      [targetKey]:
+        "9a85c1c3d621252a32fe1fa5a10d938af2593cb8ddb806eced4adf44b03c8b7a",
+      [negotiationKey]:
+        "ed986f002ebf3a0816afaa88b903ff626aa746717ebc07751ef6ac9aa5516041",
+    });
+  });
+
   test("rebases the first V2 answer after a V1 receipt without retaining raw facts or selected rule IDs", async () => {
     const fake = new SupabaseBoundaryFake();
     fake.receiptRows = [receipt({
@@ -722,7 +885,16 @@ describe("recordOnboardingAnswer", () => {
           cells: {
             "area.coverage": {
               state: "answered",
-              value: { cities: ["Anaheim", "Irvine"] },
+              value: { localities: [
+                {
+                  display_name: "Anaheim", country_code: "US", region_code: "CA",
+                  locality_id: "loc_4bc5a435c3c9a7013a252ae4",
+                },
+                {
+                  display_name: "Irvine", country_code: "US", region_code: "CA",
+                  locality_id: "loc_9971eda617977d43d7df9fd5",
+                },
+              ] },
             },
           },
         },
