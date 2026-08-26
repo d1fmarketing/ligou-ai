@@ -2,7 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { IconMicrophone2, IconPhoneOff } from "@tabler/icons-react";
 import { Dialog } from "../components/Dialog.jsx";
 import { supabase } from "../lib/supabase.js";
-import { startVoiceSession } from "./session.js";
+import {
+  onboardingOutcomeCopy,
+  resolveOnboardingOutcome,
+  settleStartedSession,
+  startVoiceSession,
+} from "./session.js";
 import { statusLineFor } from "./panel-copy.js";
 
 // Live voice panel: role-play a caller or run the Portuguese onboarding interview.
@@ -15,6 +20,7 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
   const [liveSuggestions, setLiveSuggestions] = useState([]);
   const [model, setModel] = useState("gpt-realtime-2.1");
   const [sessionType, setSessionType] = useState(initialSessionType);
+  const [onboardingOutcome, setOnboardingOutcome] = useState(null);
   const sessionRef = useRef(null);
 
   useEffect(() => {
@@ -39,14 +45,44 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
   // Um hangup remoto pode disparar onEnd enquanto o setup ainda está em voo; a
   // exceção de setup que sobra não pode sobrescrever o estado "ended" com erro cru.
   const endedRef = useRef(false);
+  // Uma leitura durável iniciada por uma sessão antiga não pode sobrescrever a
+  // próxima chamada se o usuário ligar de novo antes de a consulta terminar.
+  const outcomeRunRef = useRef(0);
 
-  useEffect(() => () => { cancelledRef.current = true; sessionRef.current?.end?.(); }, []);
+  useEffect(() => () => {
+    outcomeRunRef.current += 1;
+    cancelledRef.current = true;
+    sessionRef.current?.end?.("dialog_close");
+  }, []);
+
+  function handleEnd(event, endedSessionType) {
+    const end = event && typeof event === "object"
+      ? event
+      : { reason: "remote_hangup", callId: null };
+    endedRef.current = true;
+    sessionRef.current = null;
+    setStatus("ended");
+    setOnboardingOutcome(null);
+    const run = ++outcomeRunRef.current;
+    if (endedSessionType !== "onboarding") return;
+    void resolveOnboardingOutcome({
+      client: supabase,
+      reason: end.reason,
+      callId: end.callId,
+    }).then((outcome) => {
+      if (outcomeRunRef.current !== run || !endedRef.current) return;
+      setOnboardingOutcome(outcome);
+    });
+  }
 
   async function begin() {
+    const startedSessionType = sessionType;
+    outcomeRunRef.current += 1;
     cancelledRef.current = false;
     endedRef.current = false;
     setStatus("connecting");
     setError(null);
+    setOnboardingOutcome(null);
     setLines([]);
     setLiveCases([]);
     setLiveSuggestions([]);
@@ -57,16 +93,19 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
       const session = await startVoiceSession({
         accessToken: token,
         model,
-        sessionType,
+        sessionType: startedSessionType,
         onEvent: (ev) => setLines((prev) => [...prev.slice(-30), ev]),
-        onEnd: () => { endedRef.current = true; setStatus("ended"); },
+        onEnd: (event) => handleEnd(event, startedSessionType),
       });
-      if (cancelledRef.current) {
-        session?.end?.();
-        return;
-      }
-      sessionRef.current = session;
-      setStatus("live");
+      settleStartedSession({
+        session,
+        cancelled: cancelledRef.current,
+        ended: endedRef.current,
+        onAccepted: (acceptedSession) => {
+          sessionRef.current = acceptedSession;
+          setStatus("live");
+        },
+      });
     } catch (e) {
       if (cancelledRef.current || endedRef.current) return;
       setError(e.message);
@@ -76,9 +115,10 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
 
   function hangup() {
     cancelledRef.current = true;
-    sessionRef.current?.end?.();
+    const session = sessionRef.current;
     sessionRef.current = null;
-    setStatus("ended");
+    if (session?.end) session.end("manual_hangup");
+    else handleEnd({ reason: "manual_hangup", callId: null }, sessionType);
   }
 
   const interviewing = sessionType === "onboarding";
@@ -116,7 +156,7 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
             {status === "ended" ? (
               <p className="voice-live-note">
                 {interviewing
-                  ? "Entrevista encerrada. Aprove as sugestões na aba Memória para o Ligou passar a usá-las."
+                  ? (onboardingOutcome ? onboardingOutcomeCopy(onboardingOutcome) : null)
                   : "Chamada encerrada. Resumo e custo aparecem no histórico."}
               </p>
             ) : null}
