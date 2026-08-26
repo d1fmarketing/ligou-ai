@@ -638,6 +638,141 @@ describe("sideband budget finalization", () => {
     }
   });
 
+  test("approval-bound onboarding hangup closes only after durable provider and terminal proof while budget defers", async () => {
+    const originalWebSocket = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const onboardingCap = makeCapability(
+      "rocha-plumbing",
+      "tenant-1",
+      "call-onboarding-close",
+      15,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1, simulation: true },
+      "owner-1",
+    );
+    const providerCalls: string[] = [];
+    let providerConfirmed = false;
+    let fetchCount = 0;
+    _setClient({
+      from(table: string) {
+        const api: any = {
+          update() { return api; },
+          select() { return api; },
+          eq() { return api; },
+          maybeSingle: async () => table === "calls" && providerConfirmed
+            ? {
+                data: {
+                  id: onboardingCap.callId,
+                  status: "ended",
+                  provider_termination_state: "confirmed",
+                },
+                error: null,
+              }
+            : { data: null, error: null },
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({ data: null, error: null }).then(resolve);
+          },
+        };
+        return api;
+      },
+      rpc(name: string) {
+        providerCalls.push(name);
+        if (name === "begin_provider_termination_attempt")
+          return Promise.resolve({
+            data: {
+              should_attempt: true,
+              attempt_id: "attempt-1",
+              request_id: "request-1",
+              openai_call_id: "rtc-onboarding-close",
+              provider_termination_mode: "hangup",
+            },
+            error: null,
+          });
+        if (name === "complete_provider_termination_attempt") {
+          providerConfirmed = true;
+          return Promise.resolve({ data: true, error: null });
+        }
+        if (name === "settle_call_budget")
+          return Promise.resolve({ data: "unexpected-settlement", error: null });
+        return Promise.resolve({ data: true, error: null });
+      },
+    } as any);
+    try {
+      const control = attachSideband(
+        onboardingCap,
+        "rtc-onboarding-close",
+        "gpt-realtime-2.1",
+        {
+          fetchImpl: async () => {
+            fetchCount += 1;
+            return new Response(null, { status: 200 });
+          },
+        },
+      );
+      const socket = SyntheticWebSocket.instances[0]!;
+      socket.emit("open");
+      await control.opened;
+      control.ledger.responseActive = false;
+      const lifecycle = control.ledger.onboarding!.lifecycle;
+      lifecycle.phase = "final_signoff_speaking";
+      lifecycle.coverage = {
+        revision: 7,
+        digest: "7".repeat(64),
+        complete: true,
+        missing: [],
+        ambiguous: [],
+      };
+      lifecycle.preparedSnapshotDigests = ["7".repeat(64)];
+      lifecycle.approval = {
+        toolCallId: "approval-tool-7",
+        approvalReceiptId: "approval-receipt-7",
+        coverageReceiptId: "coverage-receipt-7",
+        revision: 7,
+        digest: "7".repeat(64),
+      };
+      lifecycle.signoff = {
+        approvalReceiptId: "approval-receipt-7",
+        responseId: "resp-final-7",
+        audioDone: false,
+        responseDone: false,
+        playbackStopped: false,
+        interrupted: false,
+      };
+      lifecycle.activeResponseId = "resp-final-7";
+
+      socket.emit("message", { data: JSON.stringify({
+        type: "response.output_audio.done",
+        response_id: "resp-final-7",
+      }) });
+      socket.emit("message", { data: JSON.stringify({
+        type: "response.done",
+        response: { id: "resp-final-7" },
+      }) });
+      socket.emit("message", { data: JSON.stringify({
+        type: "output_audio_buffer.stopped",
+        response_id: "resp-final-7",
+      }) });
+      await flushAsync();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("closed");
+      expect(control.ledger.onboarding!.lifecycle.providerTerminationConfirmed)
+        .toBe(true);
+      expect(fetchCount).toBe(1);
+      expect(providerCalls.filter((name) => name === "begin_provider_termination_attempt"))
+        .toHaveLength(1);
+      expect(providerCalls.filter((name) => name === "complete_provider_termination_attempt"))
+        .toHaveLength(1);
+      expect(providerCalls.filter((name) => name === "settle_call_budget"))
+        .toHaveLength(0);
+      expect(liveSessions.has(onboardingCap.callId)).toBe(false);
+    } finally {
+      liveSessions.delete(onboardingCap.callId);
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+
   test("reattach exhaustion and terminal OpenAI errors transition to error", async () => {
     expect(terminalStatusForReason("active", "reattach_exhausted")).toBe("error");
     const active = ledger("active");

@@ -282,6 +282,15 @@ type SocketEvent = TimedEvent & { socketGeneration: number };
 
 export type OnboardingEvent =
   | (TimedEvent & { type: "socket.attached"; socketGeneration: number })
+  | (TimedEvent & {
+      type: "adapter.invariant_failed";
+      code:
+        | "tool_args_mismatch"
+        | "function_item_identity_missing"
+        | "function_item_after_terminal_response"
+        | "tool_batch_too_large";
+      safeDetail: string;
+    })
   | (SocketEvent & { type: "response.intent_sent"; intentKey: string })
   | (SocketEvent & {
       type: "response.created";
@@ -353,6 +362,19 @@ export type OnboardingEvent =
       toolCallId: string;
       output: string;
       resultHash: string;
+    })
+  | (TimedEvent & {
+      type: "tool.execution_failed";
+      toolCallId: string;
+      code:
+        | "timeout"
+        | "query_error"
+        | "empty"
+        | "coverage_incomplete"
+        | "changed"
+        | "not_owner_bound"
+        | "invalid_fact";
+      safeDetail: string;
     })
   | (SocketEvent & { type: "tool.output_sent"; toolCallId: string })
   | (SocketEvent & {
@@ -480,13 +502,13 @@ function queueResponse(
     purpose: request.purpose,
     state: "queued",
   };
-  commands.push({ type: "request_response", ...request });
   commands.push(
     telemetry(lifecycle, "voice.response.intent_queued", event, {
       intentKey: request.intentKey,
       outcome: request.purpose,
     }),
   );
+  commands.push({ type: "request_response", ...request });
   return true;
 }
 
@@ -532,19 +554,35 @@ function maybeAdvanceCoverage(
     if (lifecycle.activeResponseId) return;
     if (!everyAdmittedCallIsInAReadyBatch(lifecycle)) return;
     const digest = lifecycle.coverage.digest;
-    if (!digest || lifecycle.preparedSnapshotDigests.includes(digest)) return;
-    lifecycle.phase = "snapshot_preparing";
-    lifecycle.preparedSnapshotDigests.push(digest);
-    commands.push({
-      type: "prepare_summary",
-      revision: lifecycle.coverage.revision,
-      digest,
-    });
-    commands.push(
-      telemetry(lifecycle, "onboarding.snapshot.prepare_started", event, {
-        outcome: "coverage_complete",
-      }),
-    );
+    if (!digest) return;
+    if (!lifecycle.preparedSnapshotDigests.includes(digest)) {
+      lifecycle.phase = "snapshot_preparing";
+      lifecycle.preparedSnapshotDigests.push(digest);
+      commands.push(
+        telemetry(lifecycle, "onboarding.snapshot.prepare_started", event, {
+          outcome: "coverage_complete",
+        }),
+      );
+      commands.push({
+        type: "prepare_summary",
+        revision: lifecycle.coverage.revision,
+        digest,
+      });
+      return;
+    }
+    // A refused/ordinary tool still needs exactly one model continuation after
+    // its durable output is acknowledged. Prepared coverage suppresses duplicate
+    // summaries, not the response required to consume the tool result.
+    for (const batch of readyBatches) {
+      const intentKey = `tool-batch:${batch.providerResponseId}:${batch.batchHash}`;
+      if (
+        queueResponse(lifecycle, commands, event, {
+          intentKey,
+          purpose: "tool_continuation",
+        })
+      )
+        batch.continuationRequested = true;
+    }
     return;
   }
   for (const batch of readyBatches) {
@@ -758,11 +796,6 @@ function maybeFinishSignoff(
   const intentKey = `hangup:${approval.approvalReceiptId}`;
   if (lifecycle.requestedHangupKeys.includes(intentKey)) return;
   lifecycle.requestedHangupKeys.push(intentKey);
-  commands.push({
-    type: "request_hangup",
-    intentKey,
-    approvalReceiptId: approval.approvalReceiptId,
-  });
   commands.push(
     telemetry(lifecycle, "closing.provider_requested", event, {
       intentKey,
@@ -770,6 +803,11 @@ function maybeFinishSignoff(
       outcome: "signoff_playback_proven",
     }),
   );
+  commands.push({
+    type: "request_hangup",
+    intentKey,
+    approvalReceiptId: approval.approvalReceiptId,
+  });
 }
 
 function startSignoff(
@@ -802,6 +840,23 @@ function startSignoff(
     instructions,
     approvalReceiptId: approval.approvalReceiptId,
   });
+}
+
+function maybeStartSignoffForReadyBatch(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+): boolean {
+  const approval = lifecycle.approval;
+  if (!approval || lifecycle.phase !== "approval_persisting") return false;
+  const receipt = lifecycle.toolOutbox[approval.toolCallId];
+  if (!receipt || receipt.state !== "output_acked") return false;
+  const batch = lifecycle.toolBatches[
+    batchKey(receipt.providerResponseId, receipt.batchHash)
+  ];
+  if (!batch || !batchIsReady(lifecycle, batch)) return false;
+  startSignoff(lifecycle, commands, event);
+  return true;
 }
 
 function resendOutput(
@@ -926,6 +981,16 @@ export function reduceOnboarding(
   const commands: OnboardingCommand[] = [];
 
   switch (event.type) {
+    case "adapter.invariant_failed": {
+      block(
+        lifecycle,
+        commands,
+        event,
+        event.code,
+        event.safeDetail,
+      );
+      break;
+    }
     case "socket.attached": {
       const firstAttach =
         lifecycle.socketGeneration === 0 &&
@@ -1538,6 +1603,29 @@ export function reduceOnboarding(
       resendOutput(lifecycle, commands, event, receipt, false);
       break;
     }
+    case "tool.execution_failed": {
+      const receipt = lifecycle.toolOutbox[event.toolCallId];
+      if (!receipt || receipt.state !== "running") {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "tool_execution_transition_invalid",
+          "tool failure did not match a running execution",
+          event.toolCallId,
+        );
+        break;
+      }
+      block(
+        lifecycle,
+        commands,
+        event,
+        event.code,
+        event.safeDetail,
+        event.toolCallId,
+      );
+      break;
+    }
     case "tool.output_sent": {
       const receipt = lifecycle.toolOutbox[event.toolCallId];
       if (
@@ -1589,12 +1677,8 @@ export function reduceOnboarding(
           outcome: "acknowledged",
         }),
       );
-      if (
-        lifecycle.approval?.toolCallId === event.toolCallId &&
-        lifecycle.phase === "approval_persisting"
-      )
-        startSignoff(lifecycle, commands, event);
-      else maybeAdvanceCoverage(lifecycle, commands, event);
+      if (!maybeStartSignoffForReadyBatch(lifecycle, commands, event))
+        maybeAdvanceCoverage(lifecycle, commands, event);
       break;
     }
     case "tool.batch_closed": {
@@ -1687,6 +1771,22 @@ export function reduceOnboarding(
     }
     case "approval.persistence_failed": {
       if (event.code === "changed") {
+        const receipt = lifecycle.toolOutbox[event.toolCallId];
+        if (
+          !receipt ||
+          receipt.toolName !== "approve_onboarding_summary" ||
+          receipt.state !== "running"
+        ) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "approval_failure_transition_invalid",
+            "changed approval did not match a running approval tool",
+            event.toolCallId,
+          );
+          break;
+        }
         const rejected = lifecycle.summary;
         if (!rejected) {
           block(
@@ -1699,6 +1799,13 @@ export function reduceOnboarding(
           );
           break;
         }
+        const output = JSON.stringify({
+          status: "snapshot_changed",
+          retrying_summary: true,
+        });
+        receipt.state = "executed";
+        receipt.output = output;
+        receipt.resultHash = hashOnboardingToolArgs({ output });
         const requestId =
           `snapshot-refresh:${event.toolCallId}:` +
           `${rejected.revision}:${rejected.digest}`;
@@ -1712,12 +1819,21 @@ export function reduceOnboarding(
           rejectedRevision: rejected.revision,
           rejectedDigest: rejected.digest,
         };
+        commands.push(
+          telemetry(lifecycle, "onboarding.approval.rejected", event, {
+            toolCallId: event.toolCallId,
+            errorCode: event.code,
+            outcome: "persistence_failed",
+          }),
+        );
+        resendOutput(lifecycle, commands, event, receipt, false);
         commands.push({
           type: "refresh_snapshot",
           requestId,
           afterRevision: rejected.revision,
           rejectedDigest: rejected.digest,
         });
+        break;
       } else {
         lifecycle.phase = "blocked";
         commands.push({

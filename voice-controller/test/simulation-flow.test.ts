@@ -2,7 +2,9 @@
 // real rules, real quotes, real free/busy — but nothing ever reaches the provider,
 // the offers ledger, or the powers system. Zero powers stay zero.
 import { describe, expect, test, beforeEach } from "bun:test";
+import { emptyUsage } from "../src/config.ts";
 import { _setClient, invalidateTenant } from "../src/rules.ts";
+import { handleEvent, type SessionLedger } from "../src/sideband.ts";
 import { makeCapability, runTool } from "../src/tools.ts";
 import { buildInstructions } from "../src/instructions.ts";
 import { _resetSimulationStore, _seedSimulationBooking } from "../src/simulation.ts";
@@ -248,6 +250,94 @@ test("junk price targets remain ambiguous coverage and never become authority", 
     });
   }
   expect(inserted.some((entry) => entry.table === "rules")).toBe(false);
+});
+
+test("serialized sideband passes exact provider call_id and acknowledges simulation output without authority writes", async () => {
+  const cap = makeCapability(
+    TENANT.slug,
+    TENANT.id,
+    "call-ob-sideband",
+    30,
+    "onboarding",
+    { authEpoch: 1, policyEpoch: 1, simulation: true },
+    "owner-a",
+  );
+  const ledger: SessionLedger = {
+    callId: cap.callId,
+    openaiCallId: "rtc-ob-sideband",
+    model: "gpt-realtime-2.1",
+    startedAt: Date.now(),
+    usage: emptyUsage(),
+    providerUsageEvidence: {
+      eventCount: 0,
+      lastResponseId: null,
+      lastReceivedAt: null,
+      continuous: true,
+      terminal: false,
+    },
+    transcript: [],
+    toolLog: [],
+    status: "active",
+  };
+  const ws = {
+    sent: [] as string[],
+    send(frame: string) { this.sent.push(frame); },
+    close() {},
+  };
+  await handleEvent(cap, ledger, ws as any, {
+    type: "response.created",
+    response: { id: "resp-sideband-answer", metadata: {} },
+  });
+  await handleEvent(cap, ledger, ws as any, {
+    type: "response.output_item.done",
+    response_id: "resp-sideband-answer",
+    item: {
+      type: "function_call",
+      name: "record_interview_answer",
+      call_id: "provider-sideband-answer-1",
+      arguments: JSON.stringify({
+        topic: "precos",
+        field: "service.price_target",
+        subject: "basic_visit",
+        disposition: "answered",
+        rule_text: "Basic visit has a public price of $200.",
+        structured: { price_target: 200 },
+        owner_words: "A visita básica custa duzentos dólares.",
+      }),
+    },
+  });
+  expect(ws.sent).toEqual([]);
+  await handleEvent(cap, ledger, ws as any, {
+    type: "response.done",
+    response: { id: "resp-sideband-answer" },
+  });
+
+  const persistence = rpcCalls.find(
+    (call) => call.name === "record_onboarding_answer",
+  );
+  expect(persistence.args.p_provider_tool_call_id)
+    .toBe("provider-sideband-answer-1");
+  const outputFrame = ws.sent.map((frame) => JSON.parse(frame)).find(
+    (frame) => frame.item?.type === "function_call_output",
+  );
+  expect(outputFrame.item).toMatchObject({
+    id: "tool-output:provider-sideband-answer-1",
+    call_id: "provider-sideband-answer-1",
+  });
+  expect(ledger.onboarding!.lifecycle.toolOutbox["provider-sideband-answer-1"]?.state)
+    .toBe("output_pending");
+  await handleEvent(cap, ledger, ws as any, {
+    type: "conversation.item.created",
+    item: {
+      id: "tool-output:provider-sideband-answer-1",
+      type: "function_call_output",
+    },
+  });
+  expect(ledger.onboarding!.lifecycle.toolOutbox["provider-sideband-answer-1"]?.state)
+    .toBe("output_acked");
+  expect(inserted.some((entry) => [
+    "rules", "bookings", "action_intents", "powers",
+  ].includes(entry.table))).toBe(false);
 });
 
 describe("instructions", () => {

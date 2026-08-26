@@ -1,11 +1,63 @@
 // Authoritative sideband: the controller owns tools, transcripts, usage, deadline and finalization.
 // The browser only carries audio; it never executes tools and never holds credentials beyond its own mic.
+import { createHash } from "node:crypto";
 import { config, emptyUsage, sessionCostUsd, type UsageTotals } from "./config.ts";
 import { runTool, type Capability } from "./tools.ts";
 import { supa } from "./rules.ts";
 import { finalizeTerminalBudget, type BudgetOutcome } from "./budget.ts";
-import { requestProviderTermination, type FetchLike, type ProviderTerminationMode } from "./provider-termination.ts";
+import { requestProviderTermination, type FetchLike } from "./provider-termination.ts";
 import { admitToolCall, evt, requestResponse, setPhase } from "./response-coordinator.ts";
+import {
+  createOnboardingLifecycle,
+  hashOnboardingToolArgs,
+  reduceOnboarding,
+  type OnboardingCommand,
+  type OnboardingEvent,
+  type OnboardingLifecycle,
+} from "./onboarding-coordinator.ts";
+import {
+  loadOnboardingSnapshot,
+  recordOnboardingAnswer,
+  recordOnboardingVoiceApproval,
+  type OnboardingAnswerArgs,
+} from "./onboarding-store.ts";
+
+type RequestResponseCommand = Extract<
+  OnboardingCommand,
+  { type: "request_response" }
+>;
+
+interface BufferedOnboardingTool {
+  toolCallId: string;
+  name: string;
+  args: Record<string, unknown>;
+  argsHash: string;
+}
+
+interface BufferedOnboardingResponse {
+  responseId: string;
+  tools: BufferedOnboardingTool[];
+  terminal: boolean;
+  invariant?: {
+    code:
+      | "tool_args_mismatch"
+      | "function_item_identity_missing"
+      | "function_item_after_terminal_response"
+      | "tool_batch_too_large";
+    safeDetail: string;
+  };
+}
+
+export interface OnboardingAdapterState {
+  lifecycle: OnboardingLifecycle;
+  queue: Promise<void>;
+  responses: Record<string, BufferedOnboardingResponse>;
+  activeCallerTurnId?: string;
+  callerTurnSequence: number;
+  interrupted: boolean;
+  pendingHangupIntentKey?: string;
+  pendingResponseCommands: Record<string, RequestResponseCommand>;
+}
 
 export interface SessionLedger {
   callId: string;
@@ -29,40 +81,18 @@ export interface SessionLedger {
   continuationWanted?: boolean;
   /** Function calls still executing from the current batch; the continuation waits for all outputs. */
   pendingToolCalls?: number;
-  /** Rules were recorded and the owner has not heard a substantive spoken recap since:
-   *  end_session is refused until enough agent speech follows the last registration. */
-  pendingRecapAfterRecords?: boolean;
-  /** The response that carried the last registration: its own audio (the "vou registrar"
-   *  ack) must not count as the recap. */
-  recapBlockedResponseId?: string;
-  /** Agent speech accumulated after the last registration, in characters — within ONE
-   *  response only (short utterances across turns must never sum into a fake recap).
-   *  Test 4 proved a 66-char promise can precede a bare end_session. */
-  postRecordSpeechChars?: number;
-  /** The response currently being credited; switching responses resets the credit. */
-  recapCreditResponseId?: string;
-  /** How many times end_session was refused for a missing recap. The guard is
-   *  best-effort: a broken transcription pipeline must not hold the call hostage. */
-  recapRefusals?: number;
   /** The initial agent-speaks-first greeting was requested (once per call, ever). */
   greetingRequested?: boolean;
   /** Provider tool call_ids already executed — the coordinator's exactly-once dedup. */
   executedToolCallIds?: string[];
   /** Coarse lifecycle phase for telemetry (greeting/collecting/summarizing/closing/closed). */
   phase?: string;
-  /** Bounded pushes that force the promised recap when the model stalls on
-   *  meta-announcements ("vou recapitular") instead of speaking it (E2E test 6). */
-  recapPushes?: number;
-  recapPushTimer?: ReturnType<typeof setTimeout> | null;
-  /** Monotonic count of speech_started events: an async push attempt aborts if the
-   *  owner spoke after it began (the timer-clear alone cannot cancel mid-await). */
-  speechStartedCount?: number;
-  /** The model called end_session: close gracefully after its farewell response finishes. */
-  agentEndRequested?: boolean;
-  /** The graceful close is already scheduled for the current socket generation. */
-  agentEndScheduled?: boolean;
+  /** Stable application response intents already sent on this call. */
+  requestedResponseIntentKeys?: string[];
   /** The session was ended by the agent, so the provider call is still live and needs the audited hangup. */
   agentEnded?: boolean;
+  /** Onboarding-only reducer/transport state. It survives sideband socket reattachment. */
+  onboarding?: OnboardingAdapterState;
 }
 
 /** Plan v4 §8: reserving quota only gates FUTURE sessions — a live session that runs up the bill must be cut.
@@ -93,6 +123,824 @@ export function terminalStatusForReason(
   return reason === "caller_hung_up" ? "ended" : "error";
 }
 
+function createOnboardingAdapter(callId: string): OnboardingAdapterState {
+  return {
+    lifecycle: createOnboardingLifecycle(callId),
+    queue: Promise.resolve(),
+    responses: {},
+    callerTurnSequence: 0,
+    interrupted: false,
+    pendingResponseCommands: {},
+  };
+}
+
+function ensureOnboardingAdapter(ledger: SessionLedger): OnboardingAdapterState {
+  return ledger.onboarding ??
+    (ledger.onboarding = createOnboardingAdapter(ledger.callId));
+}
+
+function onboardingBatchHash(tools: BufferedOnboardingTool[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify(tools.map((tool) => ({
+      tool_call_id: tool.toolCallId,
+      name: tool.name,
+      args_hash: tool.argsHash,
+    }))), "utf8")
+    .digest("hex");
+}
+
+function exactString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function safeToolOutput(body: Record<string, unknown>): string {
+  return JSON.stringify(body);
+}
+
+function toolResultHash(output: string): string {
+  return hashOnboardingToolArgs({ output });
+}
+
+function telemetryFields(command: Extract<OnboardingCommand, { type: "telemetry" }>) {
+  return {
+    call: command.callIdPrefix,
+    socket_generation: command.socketGeneration,
+    lifecycle_revision: command.lifecycleRevision,
+    phase: command.phase,
+    elapsed_ms: command.elapsedMs,
+    ...(command.responseId ? { response_id: command.responseId } : {}),
+    ...(command.intentKey ? { intent_key: command.intentKey } : {}),
+    ...(command.toolCallId ? { tool_call_id: command.toolCallId } : {}),
+    ...(command.snapshotDigestPrefix
+      ? { snapshot_digest: command.snapshotDigestPrefix }
+      : {}),
+    ...(command.outcome ? { outcome: command.outcome } : {}),
+    ...(command.errorCode ? { error_code: command.errorCode } : {}),
+  };
+}
+
+interface OnboardingCommandContext {
+  cap: Capability;
+  ledger: SessionLedger;
+  ws: WebSocket;
+  isCurrent: () => boolean;
+}
+
+async function dispatchOnboardingEvent(
+  context: OnboardingCommandContext,
+  event: OnboardingEvent,
+): Promise<void> {
+  const adapter = ensureOnboardingAdapter(context.ledger);
+  const reduced = reduceOnboarding(adapter.lifecycle, event);
+  adapter.lifecycle = reduced.lifecycle;
+  context.ledger.phase = adapter.lifecycle.phase;
+  await executeOnboardingCommands(context, reduced.commands);
+}
+
+function nextQuestionFromRecorded(result: {
+  nextAction: Record<string, unknown>;
+}): { field: string; subject?: string; questionPt: string } | undefined {
+  const action = result.nextAction;
+  if (action?.type !== "ask") return undefined;
+  const field = exactString(action.field);
+  const questionPt = exactString(action.question_pt ?? action.questionPt);
+  if (!field || !questionPt) return undefined;
+  const subject = exactString(action.subject);
+  return { field, ...(subject ? { subject } : {}), questionPt };
+}
+
+function sameCoverageRef(
+  ref: { field: string; subject?: string },
+  candidate: { field: string; subject?: string },
+): boolean {
+  return ref.field === candidate.field && (ref.subject ?? "") === (candidate.subject ?? "");
+}
+
+async function executeOnboardingCommands(
+  context: OnboardingCommandContext,
+  commands: OnboardingCommand[],
+): Promise<void> {
+  const { cap, ledger, ws, isCurrent } = context;
+  const retainsCallAuthority = () =>
+    isCurrent() ||
+    (ledger.status === "active" && live.get(cap.callId) === ledger);
+  for (const command of commands) {
+    if (!retainsCallAuthority() && command.type !== "telemetry") return;
+    if (
+      !isCurrent() &&
+      (command.type === "request_response" ||
+        command.type === "resend_output" ||
+        command.type === "request_hangup")
+    )
+      continue;
+    const adapter = ensureOnboardingAdapter(ledger);
+    const generation = adapter.lifecycle.socketGeneration;
+    switch (command.type) {
+      case "telemetry":
+        evt(command.name, telemetryFields(command));
+        break;
+      case "ask_follow_up":
+      case "request_signoff":
+      case "refuse_end_session":
+        // Informational commands. The paired request_response/resend_output is
+        // the single transport action and must not be duplicated here.
+        break;
+      case "block":
+        ledger.phase = "blocked";
+        ledger.transcript.push({
+          role: "system",
+          text: `onboarding blocked: ${command.code}`,
+          at: new Date().toISOString(),
+        });
+        break;
+      case "prepare_summary": {
+        const result = await loadOnboardingSnapshot(cap);
+        if (!retainsCallAuthority()) return;
+        await dispatchOnboardingEvent(context, {
+          type: "snapshot.loaded",
+          result,
+          elapsedMs: result.durationMs,
+        });
+        break;
+      }
+      case "refresh_snapshot": {
+        const result = await loadOnboardingSnapshot(cap);
+        if (!retainsCallAuthority()) return;
+        await dispatchOnboardingEvent(context, {
+          type: "snapshot.refresh_loaded",
+          requestId: command.requestId,
+          result,
+          elapsedMs: result.durationMs,
+        });
+        break;
+      }
+      case "request_response": {
+        adapter.pendingResponseCommands[command.intentKey] =
+          structuredClone(command);
+        const sent = requestResponse(ledger, ws, {
+          intentKey: command.intentKey,
+          purpose: command.purpose,
+          ...(command.instructions ? { instructions: command.instructions } : {}),
+          ...(command.snapshotDigest
+            ? { snapshotDigest: command.snapshotDigest }
+            : {}),
+          ...(command.approvalReceiptId
+            ? { approvalReceiptId: command.approvalReceiptId }
+            : {}),
+        });
+        if (sent) {
+          delete adapter.pendingResponseCommands[command.intentKey];
+          await dispatchOnboardingEvent(context, {
+            type: "response.intent_sent",
+            socketGeneration: generation,
+            intentKey: command.intentKey,
+            elapsedMs: 0,
+          });
+        }
+        break;
+      }
+      case "persist_fact": {
+        ledger.pendingToolCalls = (ledger.pendingToolCalls ?? 0) + 1;
+        const result = await recordOnboardingAnswer(
+          cap,
+          command.toolCallId,
+          command.args as OnboardingAnswerArgs,
+        );
+        ledger.pendingToolCalls = Math.max(0, (ledger.pendingToolCalls ?? 1) - 1);
+        if (!retainsCallAuthority()) return;
+        const output = result.ok
+          ? safeToolOutput({
+              status: result.status,
+              rule_id: result.ruleId,
+              coverage_receipt_id: result.coverageReceiptId,
+              revision: result.revision,
+              complete: result.complete,
+              missing: result.missing,
+              ambiguous: result.ambiguous,
+              next_action: result.nextAction,
+              snapshot_hash: result.digest,
+            })
+          : safeToolOutput({
+              status: "unknown",
+              error: result.code,
+              detail: result.safeDetail,
+            });
+        ledger.toolLog.push({
+          name: "record_interview_answer",
+          ok: result.ok,
+          durationMs: result.durationMs,
+        });
+        if (!result.ok) {
+          await dispatchOnboardingEvent(context, {
+            type: "tool.execution_failed",
+            toolCallId: command.toolCallId,
+            code: result.code,
+            safeDetail: result.safeDetail,
+            elapsedMs: result.durationMs,
+          });
+          adapter.interrupted = true;
+          break;
+        }
+        await dispatchOnboardingEvent(context, {
+          type: "tool.executed",
+          toolCallId: command.toolCallId,
+          output,
+          resultHash: toolResultHash(output),
+          elapsedMs: result.durationMs,
+        });
+        const ref = {
+          field: String(command.args.field),
+          ...(exactString(command.args.subject)
+            ? { subject: String(command.args.subject) }
+            : {}),
+        };
+        await dispatchOnboardingEvent(context, {
+          type: "coverage.changed",
+          revision: result.revision,
+          digest: result.digest,
+          complete: result.complete,
+          missing: result.missing,
+          ambiguous: result.ambiguous,
+          answered: result.ambiguous.some((candidate) => sameCoverageRef(ref, candidate))
+            ? []
+            : [ref],
+          ...(nextQuestionFromRecorded(result)
+            ? { nextQuestion: nextQuestionFromRecorded(result)! }
+            : {}),
+          elapsedMs: result.durationMs,
+        });
+        break;
+      }
+      case "execute_tool": {
+        ledger.pendingToolCalls = (ledger.pendingToolCalls ?? 0) + 1;
+        const result = await runTool(
+          cap,
+          command.name,
+          command.args,
+          command.toolCallId,
+        );
+        ledger.pendingToolCalls = Math.max(0, (ledger.pendingToolCalls ?? 1) - 1);
+        if (!retainsCallAuthority()) return;
+        const output = safeToolOutput(result.body);
+        ledger.toolLog.push({
+          name: command.name,
+          ok: result.ok,
+          durationMs: result.durationMs,
+        });
+        await dispatchOnboardingEvent(context, {
+          type: "tool.executed",
+          toolCallId: command.toolCallId,
+          output,
+          resultHash: toolResultHash(output),
+          elapsedMs: result.durationMs,
+        });
+        break;
+      }
+      case "persist_approval": {
+        ledger.pendingToolCalls = (ledger.pendingToolCalls ?? 0) + 1;
+        const result = await recordOnboardingVoiceApproval(
+          cap,
+          command.toolCallId,
+          command.ownerWords,
+        );
+        ledger.pendingToolCalls = Math.max(0, (ledger.pendingToolCalls ?? 1) - 1);
+        if (!retainsCallAuthority()) return;
+        ledger.toolLog.push({
+          name: "approve_onboarding_summary",
+          ok: result.ok,
+          durationMs: result.durationMs,
+        });
+        if (!result.ok) {
+          await dispatchOnboardingEvent(context, {
+            type: "approval.persistence_failed",
+            toolCallId: command.toolCallId,
+            code: result.code,
+            safeDetail: result.safeDetail,
+            elapsedMs: result.durationMs,
+          });
+          break;
+        }
+        const output = safeToolOutput({
+          status: result.status,
+          approval_receipt_id: result.approvalReceiptId,
+          coverage_receipt_id: result.coverageReceiptId,
+          revision: result.revision,
+          snapshot_hash: result.digest,
+        });
+        await dispatchOnboardingEvent(context, {
+          type: "approval.persisted",
+          toolCallId: command.toolCallId,
+          approvalReceiptId: result.approvalReceiptId,
+          coverageReceiptId: result.coverageReceiptId,
+          revision: result.revision,
+          digest: result.digest,
+          output,
+          resultHash: toolResultHash(output),
+          elapsedMs: result.durationMs,
+        });
+        break;
+      }
+      case "resend_output": {
+        try {
+          ws.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              id: command.outputItemId,
+              type: "function_call_output",
+              call_id: command.toolCallId,
+              output: command.output,
+            },
+          }));
+        } catch {
+          // The reducer intentionally keeps the receipt in executed/pending.
+          // A later socket generation receives a deterministic resend command.
+          break;
+        }
+        if (!isCurrent()) return;
+        await dispatchOnboardingEvent(context, {
+          type: "tool.output_sent",
+          socketGeneration: generation,
+          toolCallId: command.toolCallId,
+          elapsedMs: 0,
+        });
+        break;
+      }
+      case "request_hangup": {
+        if (adapter.pendingHangupIntentKey) break;
+        await dispatchOnboardingEvent(context, {
+          type: "provider.termination_requested",
+          intentKey: command.intentKey,
+          elapsedMs: 0,
+        });
+        if (adapter.lifecycle.phase !== "provider_terminating") break;
+        adapter.pendingHangupIntentKey = command.intentKey;
+        ledger.agentEnded = true;
+        ledger.status = "ended";
+        ledger.transcript.push({
+          role: "system",
+          text: "session ended: approval-bound onboarding signoff completed",
+          at: new Date().toISOString(),
+        });
+        try { ws.close(); } catch {}
+        break;
+      }
+    }
+  }
+}
+
+async function attachOnboardingSocket(
+  context: OnboardingCommandContext,
+): Promise<void> {
+  const adapter = context.ledger.onboarding ??
+    (context.ledger.onboarding = createOnboardingAdapter(context.ledger.callId));
+  const pendingBeforeAttach = Object.values(adapter.pendingResponseCommands)
+    .map((command) => structuredClone(command));
+  const generation = adapter.lifecycle.socketGeneration + 1;
+  await dispatchOnboardingEvent(context, {
+    type: "socket.attached",
+    socketGeneration: generation,
+    elapsedMs: 0,
+  });
+  for (const command of pendingBeforeAttach)
+    await executeOnboardingCommands(context, [command]);
+}
+
+function enqueueOnboardingRawEvent(
+  context: OnboardingCommandContext,
+  msg: any,
+): Promise<void> {
+  const adapter = context.ledger.onboarding ??
+    (context.ledger.onboarding = createOnboardingAdapter(context.ledger.callId));
+  if (!context.isCurrent()) return Promise.resolve();
+  const admittedGeneration = adapter.lifecycle.socketGeneration;
+  const task = adapter.queue.then(async () => {
+    if (
+      admittedGeneration !== 0 &&
+      adapter.lifecycle.socketGeneration !== admittedGeneration
+    )
+      return;
+    if (adapter.lifecycle.socketGeneration === 0) {
+      const attached = reduceOnboarding(adapter.lifecycle, {
+        type: "socket.attached",
+        socketGeneration: 1,
+        elapsedMs: 0,
+      });
+      adapter.lifecycle = attached.lifecycle;
+    }
+    await handleOnboardingRawEvent(context, msg);
+  });
+  adapter.queue = task.catch((error) => {
+    adapter.interrupted = true;
+    context.ledger.status = "error";
+    context.ledger.transcript.push({
+      role: "system",
+      text: "onboarding adapter invariant failure",
+      at: new Date().toISOString(),
+    });
+    evt("invariant.violation", {
+      call: context.ledger.callId.slice(0, 8),
+      kind: "adapter_command_failed",
+      code: error instanceof Error ? error.name : "unknown",
+    });
+  });
+  return adapter.queue;
+}
+
+async function onboardingTerminationIsDurable(
+  cap: Capability,
+  ledger: SessionLedger,
+): Promise<boolean> {
+  const intentKey = ledger.onboarding?.pendingHangupIntentKey;
+  if (!intentKey) return false;
+  try {
+    const { data, error } = await supa()
+      .from("calls")
+      .select("id,status,provider_termination_state")
+      .eq("id", cap.callId)
+      .eq("tenant_id", cap.tenantId)
+      .maybeSingle();
+    return !error && data?.id === cap.callId && data?.status === "ended" &&
+      data?.provider_termination_state === "confirmed";
+  } catch {
+    return false;
+  }
+}
+
+function confirmOnboardingTermination(
+  ledger: SessionLedger,
+): void {
+  const adapter = ledger.onboarding;
+  const intentKey = adapter?.pendingHangupIntentKey;
+  if (!adapter || !intentKey) return;
+  const reduced = reduceOnboarding(adapter.lifecycle, {
+    type: "provider.termination_confirmed",
+    intentKey,
+    terminalPersisted: true,
+    elapsedMs: 0,
+  });
+  adapter.lifecycle = reduced.lifecycle;
+  ledger.phase = reduced.lifecycle.phase;
+  for (const command of reduced.commands)
+    if (command.type === "telemetry") evt(command.name, telemetryFields(command));
+}
+
+function enqueueOnboardingTransportInterruption(
+  ledger: SessionLedger,
+): void {
+  const adapter = ledger.onboarding;
+  if (!adapter || adapter.lifecycle.phase === "provider_terminating" ||
+    adapter.lifecycle.phase === "closed") return;
+  adapter.interrupted = true;
+  const responseId = adapter.lifecycle.activeResponseId;
+  if (!responseId) return;
+  const task = adapter.queue.then(() => {
+    const reduced = reduceOnboarding(adapter.lifecycle, {
+      type: "response.audio_interrupted",
+      socketGeneration: adapter.lifecycle.socketGeneration,
+      responseId,
+      elapsedMs: 0,
+    });
+    adapter.lifecycle = reduced.lifecycle;
+    ledger.phase = reduced.lifecycle.phase;
+    for (const command of reduced.commands)
+      if (command.type === "telemetry") evt(command.name, telemetryFields(command));
+  });
+  adapter.queue = task.catch(() => {
+    adapter.interrupted = true;
+    ledger.status = "error";
+  });
+}
+
+async function interruptOnboardingAudio(
+  context: OnboardingCommandContext,
+  responseId: string | null,
+): Promise<void> {
+  if (!responseId) return;
+  const adapter = ensureOnboardingAdapter(context.ledger);
+  adapter.interrupted = true;
+  await dispatchOnboardingEvent(context, {
+    type: "response.audio_interrupted",
+    socketGeneration: adapter.lifecycle.socketGeneration,
+    responseId,
+    elapsedMs: 0,
+  });
+}
+
+async function handleOnboardingRawEvent(
+  context: OnboardingCommandContext,
+  msg: any,
+): Promise<void> {
+  const { ledger, ws, isCurrent } = context;
+  const adapter = ensureOnboardingAdapter(ledger);
+  const generation = adapter.lifecycle.socketGeneration;
+  switch (msg?.type) {
+    case "response.created": {
+      const responseId = exactString(msg.response?.id);
+      if (!responseId) break;
+      ledger.responseActive = true;
+      const intentKey = exactString(msg.response?.metadata?.intent_key);
+      await dispatchOnboardingEvent(context, {
+        type: "response.created",
+        socketGeneration: generation,
+        responseId,
+        ...(intentKey ? { intentKey } : {}),
+        elapsedMs: 0,
+      });
+      break;
+    }
+    case "response.output_item.done": {
+      const item = msg.item;
+      if (item?.type !== "function_call") break;
+      const responseId = exactString(msg.response_id);
+      const toolCallId = exactString(item.call_id);
+      const name = exactString(item.name);
+      if (!responseId || !toolCallId || !name) {
+        adapter.interrupted = true;
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "function_item_identity_missing",
+          safeDetail: "provider function item identity was incomplete",
+          elapsedMs: 0,
+        });
+        break;
+      }
+      let args: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(typeof item.arguments === "string" ? item.arguments : "{}");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+          args = parsed as Record<string, unknown>;
+      } catch {
+        // Invalid JSON is kept as an empty object. The tool boundary validates
+        // the required shape and returns a deterministic safe result.
+      }
+      const buffered = adapter.responses[responseId] ??
+        (adapter.responses[responseId] = {
+          responseId,
+          tools: [],
+          terminal: false,
+        });
+      if (buffered.terminal) {
+        adapter.interrupted = true;
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "function_item_after_terminal_response",
+          safeDetail: "provider function item arrived after its terminal response",
+          elapsedMs: 0,
+        });
+        break;
+      }
+      const argsHash = hashOnboardingToolArgs(args);
+      const replay = buffered.tools.find((tool) => tool.toolCallId === toolCallId);
+      if (replay && replay.name === name && replay.argsHash === argsHash) break;
+      if (replay) {
+        buffered.invariant = {
+          code: "tool_args_mismatch",
+          safeDetail: "provider tool replay changed its payload",
+        };
+        break;
+      }
+      if (buffered.tools.length >= 100) {
+        buffered.invariant = {
+          code: "tool_batch_too_large",
+          safeDetail: "provider tool batch exceeded its bounded membership",
+        };
+        break;
+      }
+      buffered.tools.push({ toolCallId, name, args, argsHash });
+      break;
+    }
+    case "conversation.item.created": {
+      const outputItemId = exactString(msg.item?.id);
+      if (!outputItemId) break;
+      const receipt = Object.values(adapter.lifecycle.toolOutbox)
+        .find((candidate) => candidate.outputItemId === outputItemId);
+      if (!receipt) break;
+      await dispatchOnboardingEvent(context, {
+        type: "tool.output_acked",
+        socketGeneration: generation,
+        toolCallId: receipt.toolCallId,
+        outputItemId,
+        elapsedMs: 0,
+      });
+      break;
+    }
+    case "response.output_audio_transcript.delta": {
+      const responseId = exactString(msg.response_id);
+      if (!responseId || typeof msg.delta !== "string") break;
+      await dispatchOnboardingEvent(context, {
+        type: "response.transcript.delta",
+        socketGeneration: generation,
+        responseId,
+        delta: msg.delta,
+        elapsedMs: 0,
+      });
+      break;
+    }
+    case "response.output_audio_transcript.done": {
+      const responseId = exactString(msg.response_id);
+      if (!responseId || typeof msg.transcript !== "string") break;
+      ledger.transcript.push({
+        role: "agent",
+        text: msg.transcript,
+        at: new Date().toISOString(),
+      });
+      await dispatchOnboardingEvent(context, {
+        type: "response.transcript.done",
+        socketGeneration: generation,
+        responseId,
+        transcript: msg.transcript,
+        elapsedMs: 0,
+      });
+      break;
+    }
+    case "response.output_audio.done": {
+      const responseId = exactString(msg.response_id);
+      if (!responseId) break;
+      await dispatchOnboardingEvent(context, {
+        type: "response.output_audio.done",
+        socketGeneration: generation,
+        responseId,
+        elapsedMs: 0,
+      });
+      break;
+    }
+    case "output_audio_buffer.stopped": {
+      const responseId = exactString(msg.response_id);
+      if (!responseId) {
+        evt("invariant.violation", {
+          call: ledger.callId.slice(0, 8),
+          kind: "playback_stop_response_id_missing",
+        });
+        break;
+      }
+      await dispatchOnboardingEvent(context, {
+        type: "output_audio_buffer.stopped",
+        socketGeneration: generation,
+        responseId,
+        elapsedMs: 0,
+      });
+      break;
+    }
+    case "input_audio_buffer.speech_started": {
+      await interruptOnboardingAudio(context, adapter.lifecycle.activeResponseId ?? null);
+      const turnId = exactString(msg.item_id) ??
+        `caller-turn:${++adapter.callerTurnSequence}`;
+      adapter.activeCallerTurnId = turnId;
+      await dispatchOnboardingEvent(context, {
+        type: "caller.speech_started",
+        socketGeneration: generation,
+        turnId,
+        elapsedMs: 0,
+      });
+      break;
+    }
+    case "conversation.item.input_audio_transcription.completed": {
+      const transcript = typeof msg.transcript === "string" ? msg.transcript : "";
+      if (transcript)
+        ledger.transcript.push({
+          role: "caller",
+          text: transcript,
+          at: new Date().toISOString(),
+        });
+      const turnId = exactString(msg.item_id) ?? adapter.activeCallerTurnId;
+      if (!turnId) break;
+      await dispatchOnboardingEvent(context, {
+        type: "caller.transcript.completed",
+        socketGeneration: generation,
+        turnId,
+        transcript,
+        elapsedMs: 0,
+      });
+      if (adapter.activeCallerTurnId === turnId)
+        delete adapter.activeCallerTurnId;
+      break;
+    }
+    case "response.cancelled":
+    case "output_audio_buffer.cleared": {
+      const responseId = exactString(msg.response_id);
+      await interruptOnboardingAudio(context, responseId);
+      break;
+    }
+    case "response.done": {
+      const responseId = exactString(msg.response?.id);
+      if (!responseId) break;
+      const usage = validatedProviderUsage(msg.response?.usage);
+      if (usage) {
+        ledger.usage.textIn += usage.textIn;
+        ledger.usage.audioIn += usage.audioIn;
+        ledger.usage.textInCached += usage.textInCached;
+        ledger.usage.audioInCached += usage.audioInCached;
+        ledger.usage.textOut += usage.textOut;
+        ledger.usage.audioOut += usage.audioOut;
+        ledger.providerUsageEvidence.eventCount += 1;
+        ledger.providerUsageEvidence.lastResponseId = responseId;
+        ledger.providerUsageEvidence.lastReceivedAt = new Date().toISOString();
+      }
+      const cancelled = msg.response?.status === "cancelled" ||
+        msg.response?.status_details?.type === "cancelled";
+      if (cancelled) await interruptOnboardingAudio(context, responseId);
+      const buffered = adapter.responses[responseId] ??
+        (adapter.responses[responseId] = {
+          responseId,
+          tools: [],
+          terminal: false,
+        });
+      if (buffered.terminal) break;
+      buffered.terminal = true;
+      if (buffered.invariant) {
+        adapter.interrupted = true;
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          ...buffered.invariant,
+          elapsedMs: 0,
+        });
+      } else if (buffered.tools.length > 0) {
+        const batchHash = onboardingBatchHash(buffered.tools);
+        for (const tool of buffered.tools)
+          await dispatchOnboardingEvent(context, {
+            type: "tool.called",
+            socketGeneration: generation,
+            toolCallId: tool.toolCallId,
+            name: tool.name,
+            args: tool.args,
+            providerResponseId: responseId,
+            batchHash,
+            elapsedMs: 0,
+          });
+        await dispatchOnboardingEvent(context, {
+          type: "tool.batch_closed",
+          providerResponseId: responseId,
+          batchHash,
+          toolCallIds: buffered.tools.map((tool) => tool.toolCallId),
+          elapsedMs: 0,
+        });
+      }
+      ledger.responseActive = false;
+      await dispatchOnboardingEvent(context, {
+        type: "response.done",
+        socketGeneration: generation,
+        responseId,
+        elapsedMs: 0,
+      });
+      const spent = sessionCostUsd(ledger.model, ledger.usage);
+      const cap = sessionCostCapUsd(ledger.model);
+      if (spent >= cap && ledger.status === "active") {
+        ledger.status = "killed_budget";
+        ledger.transcript.push({
+          role: "system",
+          text: `session ended: cost cap reached ($${spent.toFixed(2)} >= $${cap.toFixed(2)})`,
+          at: new Date().toISOString(),
+        });
+        try { ws.close(); } catch {}
+      }
+      break;
+    }
+    case "session.ended": {
+      const usage = validatedProviderUsage(msg.usage);
+      if (usage) {
+        ledger.usage = usage;
+        ledger.providerUsageEvidence.terminal = true;
+        ledger.providerUsageEvidence.lastReceivedAt = new Date().toISOString();
+      }
+      if (adapter.lifecycle.phase === "provider_terminating" ||
+        adapter.lifecycle.phase === "closed") {
+        ledger.status = "ended";
+      } else {
+        adapter.interrupted = true;
+        await interruptOnboardingAudio(context, adapter.lifecycle.activeResponseId ?? null);
+        ledger.status = "error";
+        ledger.transcript.push({
+          role: "system",
+          text: "onboarding interrupted before approval-bound final playback",
+          at: new Date().toISOString(),
+        });
+      }
+      try { ws.close(); } catch {}
+      break;
+    }
+    case "error": {
+      const code = exactString(msg.error?.code) ?? "";
+      const message = typeof msg.error?.message === "string" ? msg.error.message : "";
+      if (code === "conversation_already_has_active_response" ||
+        /already has an active response/i.test(message)) {
+        ledger.responseActive = true;
+        break;
+      }
+      adapter.interrupted = true;
+      await interruptOnboardingAudio(context, adapter.lifecycle.activeResponseId ?? null);
+      ledger.transcript.push({
+        role: "system",
+        text: `openai error: ${code || "provider_error"}`,
+        at: new Date().toISOString(),
+      });
+      ledger.status = "error";
+      try { ws.close(); } catch {}
+      break;
+    }
+  }
+  if (!isCurrent()) return;
+}
+
 export function attachSideband(
   cap: Capability,
   openaiCallId: string,
@@ -115,6 +963,9 @@ export function attachSideband(
     transcript: [],
     toolLog: [],
     status: "active",
+    ...(cap.sessionType === "onboarding"
+      ? { onboarding: createOnboardingAdapter(cap.callId) }
+      : {}),
   };
   // Root-cause discipline (2026-08-19 incident): a WS close is NOT the end of the call — the WebRTC leg
   // lives independently. We finalize only on terminal states (deadline/budget kill, or retries exhausted);
@@ -187,7 +1038,7 @@ export function attachSideband(
     ws = null;
     try { socket?.close(); } catch {}
     console.log(`sideband finalize call=${cap.callId.slice(0, 8)} reason=${reason} status=${ledger.status} tools=${ledger.toolLog.length}`);
-    setPhase(ledger, "closed");
+    if (cap.sessionType !== "onboarding") setPhase(ledger, "closed");
     ledger.status = terminalStatusForReason(ledger.status, reason);
     let persisted = false;
     try {
@@ -195,6 +1046,14 @@ export function attachSideband(
     } catch (error) {
       console.error("persist failed", error);
     }
+    // Budget settlement may be deferred when terminal usage is unresolved. That
+    // does not authorize another provider request and must not hide already durable
+    // provider+call completion from the onboarding lifecycle.
+    if (
+      cap.sessionType === "onboarding" &&
+      await onboardingTerminationIsDurable(cap, ledger)
+    )
+      confirmOnboardingTermination(ledger);
     if (!persisted && options.phone) {
       await supa().rpc("defer_phone_sideband_finalization", {
         p_event_id: options.phone.eventId,
@@ -267,23 +1126,30 @@ export function attachSideband(
       },
     }));
     if (!ownsSocket(sock)) return;
-    // A fresh socket has no knowledge of a response that was streaming when the previous
-    // one dropped, and OpenAI does not replay missed events: a stale `responseActive`
-    // would wedge the continuation forever. Clear the streaming flags and re-request any
-    // turn the model still owes; an over-eager create is absorbed by the recoverable
-    // `conversation_already_has_active_response` path.
-    ledger.responseActive = false;
-    ledger.pendingToolCalls = 0;
-    ledger.agentEndScheduled = false;
-    if (ledger.recapPushTimer) { clearTimeout(ledger.recapPushTimer); ledger.recapPushTimer = null; }
-    maybeContinueResponse(ledger, sock);
-    maybeScheduleAgentEnd(ledger, sock, () => ownsSocket(sock));
-    if (!ownsSocket(sock)) return;
-    if (!options.phone && requestResponse(ledger, sock, "greeting")) {
-      // The agent speaks first. Without an initial response.create the realtime session
-      // sits in silence until the caller says something (E2E test 6, P0): the browser
-      // owner would answer a "connected" call and hear nothing.
-      setPhase(ledger, "greeting");
+    if (cap.sessionType === "onboarding") {
+      const adapter = ensureOnboardingAdapter(ledger);
+      const context: OnboardingCommandContext = {
+        cap,
+        ledger,
+        ws: sock,
+        isCurrent: () => ownsSocket(sock),
+      };
+      const attached = adapter.queue.then(() => attachOnboardingSocket(context));
+      adapter.queue = attached.catch(() => {
+        adapter.interrupted = true;
+        ledger.status = "error";
+      });
+      await attached;
+    } else {
+      // A fresh legacy socket has no knowledge of a response that was streaming
+      // when the prior transport dropped. Non-onboarding sessions retain the
+      // existing best-effort continuation behavior.
+      ledger.responseActive = false;
+      ledger.pendingToolCalls = 0;
+      maybeContinueResponse(ledger, sock);
+      if (!ownsSocket(sock)) return;
+      if (!options.phone && requestResponse(ledger, sock, "greeting"))
+        setPhase(ledger, "greeting");
     }
     if (!ownsSocket(sock)) return;
     if (!openedSettled) {
@@ -341,6 +1207,8 @@ export function attachSideband(
       const wasCurrent = ws === sock;
       if (wasCurrent) ws = null;
       if (cancelled || !wasCurrent || live.get(cap.callId) !== ledger) return;
+      if (cap.sessionType === "onboarding")
+        enqueueOnboardingTransportInterruption(ledger);
       console.log(`sideband CLOSE call=${cap.callId.slice(0, 8)} code=${ev?.code} attempt=${attempt} opened=${openedThisAttempt} terminal=${terminal}`);
       if (terminal || ledger.status !== "active") { clearTimeout(deadline); void finalize("terminal_close"); return; }
       ledger.providerUsageEvidence.continuous = false;
@@ -402,77 +1270,6 @@ function maybeContinueResponse(ledger: SessionLedger, ws: WebSocket) {
   requestResponse(ledger, ws, "tool_continuation");
 }
 
-/** The persisted snapshot of THIS call's registered suggestions: the deterministic
- *  source for the spoken final summary (never the model's memory of the transcript).
- *  Sanitized: category + operational text + structured values only. */
-async function fetchCallSnapshot(cap: Capability): Promise<Array<Record<string, unknown>> | null> {
-  // Best-effort grounding: a slow or unavailable read must never stall the voice
-  // lifecycle, so the query races a short deadline and failure degrades to null.
-  try {
-    const query = (async () => {
-      const { data, error } = await supa()
-        .from("rules")
-        .select("category,text,structured")
-        .eq("related_call_id", cap.callId)
-        .eq("status", "sugerido");
-      if (error || !Array.isArray(data) || data.length === 0) return null;
-      return data as Array<Record<string, unknown>>;
-    })();
-    const deadline = new Promise<null>((resolve) => {
-      const t = setTimeout(() => resolve(null), 1_500);
-      (t as any).unref?.();
-    });
-    return await Promise.race([query, deadline]);
-  } catch {
-    return null;
-  }
-}
-
-function snapshotMessage(rows: Array<Record<string, unknown>>): string {
-  const lines = rows.map((r) =>
-    `- [${r.category}] ${String(r.text ?? "").slice(0, 200)}${r.structured ? " " + JSON.stringify(r.structured) : ""}`);
-  return `DADOS REGISTRADOS NESTA ENTREVISTA (fonte oficial — fale o resumo a partir DESTES dados, não da sua memória):\n${lines.join("\n")}`;
-}
-
-/** Agent speech counts toward the recap only when it is substantive and belongs to a
- *  response AFTER the one that carried the last registration — the pre-registration ack
- *  and short promises ("vou recapitular…") never clear the gate. */
-function creditRecapSpeech(ledger: SessionLedger, responseId: unknown, text: string) {
-  if (!ledger.pendingRecapAfterRecords) return;
-  const rid = typeof responseId === "string" ? responseId : "unknown";
-  if (rid === (ledger.recapBlockedResponseId ?? "unknown")) return;
-  const raw = Number(process.env.LIGOU_RECAP_MIN_CHARS ?? 200);
-  const threshold = Number.isFinite(raw) && raw > 0 ? raw : 200;
-  // The credit is per response: a chain of short turns must never sum into a fake recap.
-  if (ledger.recapCreditResponseId !== rid) {
-    ledger.recapCreditResponseId = rid;
-    ledger.postRecordSpeechChars = 0;
-  }
-  ledger.postRecordSpeechChars = (ledger.postRecordSpeechChars ?? 0) + text.length;
-  if (ledger.postRecordSpeechChars >= threshold) ledger.pendingRecapAfterRecords = false;
-}
-
-/** Reattach-safe twin of maybeContinueResponse: once end_session was honored and the
- *  farewell response is no longer streaming (and no tool of its batch is pending),
- *  schedule the graceful close exactly once per socket generation. */
-function maybeScheduleAgentEnd(ledger: SessionLedger, ws: WebSocket, isCurrent: () => boolean = () => true) {
-  if (!ledger.agentEndRequested || ledger.agentEndScheduled) return;
-  if (ledger.status !== "active" || ledger.responseActive) return;
-  if ((ledger.pendingToolCalls ?? 0) > 0) return;
-  ledger.agentEndScheduled = true;
-  const raw = Number(process.env.LIGOU_AGENT_END_GRACE_MS ?? 5_000);
-  const grace = Number.isFinite(raw) && raw >= 0 ? raw : 5_000;
-  setTimeout(() => {
-    if (ledger.status !== "active" || !isCurrent()) return;
-    ledger.status = "ended";
-    ledger.agentEnded = true;
-    ledger.transcript.push({ role: "system", text: "session ended: interview completed by agent (end_session)", at: new Date().toISOString() });
-    setPhase(ledger, "closing");
-    evt("closing.started", { call: ledger.callId.slice(0, 8), reason: "end_session_honored" });
-    try { ws.close(); } catch {}
-  }, grace);
-}
-
 export async function handleEvent(
   cap: Capability,
   ledger: SessionLedger,
@@ -481,6 +1278,8 @@ export async function handleEvent(
   isCurrent: () => boolean = () => true,
 ) {
   if (!isCurrent()) return;
+  if (cap.sessionType === "onboarding")
+    return await enqueueOnboardingRawEvent({ cap, ledger, ws, isCurrent }, msg);
   switch (msg.type) {
     case "response.created":
       ledger.responseActive = true;
@@ -489,19 +1288,12 @@ export async function handleEvent(
       if (msg.transcript) ledger.transcript.push({ role: "caller", text: msg.transcript, at: new Date().toISOString() });
       break;
     case "input_audio_buffer.speech_started":
-      // The owner is talking: an owed-recap push must not talk over them.
-      ledger.speechStartedCount = (ledger.speechStartedCount ?? 0) + 1;
-      if (ledger.recapPushTimer) { clearTimeout(ledger.recapPushTimer); ledger.recapPushTimer = null; }
       break;
     case "response.output_audio_transcript.done":
-      if (msg.transcript) {
+      if (msg.transcript)
         ledger.transcript.push({ role: "agent", text: msg.transcript, at: new Date().toISOString() });
-        creditRecapSpeech(ledger, msg.response_id, msg.transcript);
-      }
       break;
     case "response.output_text.done":
-      // A text-modality turn also counts as the agent addressing the owner.
-      if (msg.text) creditRecapSpeech(ledger, msg.response_id, String(msg.text));
       break;
     case "response.output_item.done": {
       const item = msg.item;
@@ -515,34 +1307,8 @@ export async function handleEvent(
         try {
           let args: Record<string, unknown> = {};
           try { args = JSON.parse(item.arguments ?? "{}"); } catch {}
-          let result = await runTool(cap, item.name, args);
+          const result = await runTool(cap, item.name, args, item.call_id);
           if (!isCurrent()) return;
-          // Test-3 defect (call e9d10384): after registering the final rules the model called
-          // end_session in its next response without ever speaking the promised recap, and the
-          // call hung up in silence. State-machine invariant: registering and hanging up must
-          // have a spoken agent turn between them.
-          if (item.name === "end_session" && result.ok && ledger.pendingRecapAfterRecords
-            && (ledger.recapRefusals ?? 0) < 2) {
-            ledger.recapRefusals = (ledger.recapRefusals ?? 0) + 1;
-            // Ground the demanded summary in the persisted snapshot, not transcript memory.
-            const snapshotRows = await fetchCallSnapshot(cap);
-            if (!isCurrent()) return;
-            result = {
-              ok: false,
-              body: {
-                error: "recap_required",
-                message: "O dono ainda não ouviu o resumo depois dos últimos registros. Fale AGORA, em voz alta, o resumo completo do que registrou (todos os serviços com preços, mínimos e durações, cidades, horários, emergências e regras), oriente a aprovação na aba Memória, despeça-se e só então chame end_session de novo.",
-                ...(snapshotRows ? { registered_rules: snapshotRows } : {}),
-              },
-              durationMs: result.durationMs,
-            };
-            evt("close.refused", { call: ledger.callId.slice(0, 8), reason: "recap_required", refusals: ledger.recapRefusals });
-          }
-          if (item.name === "record_interview_answer" && result.ok) {
-            ledger.pendingRecapAfterRecords = true;
-            ledger.recapBlockedResponseId = typeof msg.response_id === "string" ? msg.response_id : "unknown";
-            ledger.postRecordSpeechChars = 0;
-          }
           ledger.toolLog.push({ name: item.name, ok: result.ok, durationMs: result.durationMs });
           if (!isCurrent()) return;
           ws.send(JSON.stringify({
@@ -554,12 +1320,7 @@ export async function handleEvent(
             call: ledger.callId.slice(0, 8), name: item.name, ok: result.ok,
             ms: result.durationMs, response_active: ledger.responseActive === true,
           });
-          if (item.name === "end_session" && result.ok) {
-            // The farewell is the last turn: no continuation, close after the response finishes.
-            ledger.agentEndRequested = true;
-          } else {
-            ledger.continuationWanted = true;
-          }
+          ledger.continuationWanted = true;
         } finally {
           // The counter belongs to the current socket generation: activateOpenedSocket
           // resets it on reattach, so a stale call from a superseded socket must not
@@ -568,7 +1329,6 @@ export async function handleEvent(
         }
         if (!isCurrent()) return;
         maybeContinueResponse(ledger, ws);
-        maybeScheduleAgentEnd(ledger, ws, isCurrent);
       }
       break;
     }
@@ -602,56 +1362,6 @@ export async function handleEvent(
       }
       ledger.responseActive = false;
       maybeContinueResponse(ledger, ws);
-      maybeScheduleAgentEnd(ledger, ws, isCurrent);
-      // E2E test 6: after the final registrations the model produced promise-turns
-      // ("vou recapitular…") and then waited for the owner, so the recap never came.
-      // While a recap is owed, an idle turn gets a bounded push; a real user utterance
-      // (speech_started) cancels the pending push so a clarification can be answered.
-      if (
-        ledger.pendingRecapAfterRecords
-        && ledger.status === "active"
-        && !ledger.agentEndRequested
-        && !ledger.continuationWanted
-        && !ledger.responseActive
-        && (ledger.pendingToolCalls ?? 0) === 0
-        && (ledger.recapPushes ?? 0) < 3
-      ) {
-        const rawDelay = Number(process.env.LIGOU_RECAP_PUSH_DELAY_MS ?? 1_200);
-        const delay = Number.isFinite(rawDelay) && rawDelay >= 0 ? rawDelay : 1_200;
-        if (ledger.recapPushTimer) clearTimeout(ledger.recapPushTimer);
-        // The bound counts SCHEDULED attempts, not successful fires: otherwise a caller
-        // whose brief remarks keep cancelling pushes would let this loop forever
-        // (review finding on 79b1169).
-        ledger.recapPushes = (ledger.recapPushes ?? 0) + 1;
-        ledger.recapPushTimer = setTimeout(() => {
-          ledger.recapPushTimer = null;
-          void (async () => {
-            // Low-eagerness VAD means responseActive lags real speech onset: the owner
-            // may already be talking with no auto-response yet. Any speech_started after
-            // this attempt began aborts it (review finding on 65de53a).
-            const speechGen = ledger.speechStartedCount ?? 0;
-            const eligible = () => isCurrent() && ledger.status === "active" && ledger.pendingRecapAfterRecords === true
-              && !ledger.responseActive && (ledger.pendingToolCalls ?? 0) === 0 && !ledger.agentEndRequested
-              && (ledger.speechStartedCount ?? 0) === speechGen;
-            if (!eligible()) return;
-            // Deterministic summary: inject the persisted snapshot so the forced turn
-            // reads from the database, then request the response via the coordinator.
-            const snapshotRows = await fetchCallSnapshot(cap);
-            if (!eligible()) return;
-            try {
-              if (snapshotRows) {
-                ws.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: { type: "message", role: "system", content: [{ type: "input_text", text: snapshotMessage(snapshotRows) }] },
-                }));
-              }
-            } catch { return; }
-            evt("summary.requested", { call: ledger.callId.slice(0, 8), push: ledger.recapPushes, snapshot: snapshotRows?.length ?? 0 });
-            setPhase(ledger, "summarizing");
-            requestResponse(ledger, ws, "recap_push");
-          })();
-        }, delay);
-      }
       break;
     }
     case "session.ended": {

@@ -362,6 +362,19 @@ function signoffSpeaking(lifecycle = approvalPersisting().lifecycle) {
     elapsedMs: 75,
   }));
   ({ lifecycle } = step(lifecycle, {
+    type: "tool.batch_closed",
+    providerResponseId: "response-approval-tool",
+    batchHash: "approval-batch-hash",
+    toolCallIds: ["approval-tool-1"],
+    elapsedMs: 75,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.done",
+    responseId: "response-approval-tool",
+    socketGeneration: 1,
+    elapsedMs: 75,
+  }));
+  ({ lifecycle } = step(lifecycle, {
     type: "tool.output_acked",
     toolCallId: "approval-tool-1",
     outputItemId: "tool-output:approval-tool-1",
@@ -724,6 +737,19 @@ describe("onboarding lifecycle forbidden transitions", () => {
     ({ lifecycle } = step(lifecycle, {
       type: "tool.output_sent",
       toolCallId: "approval-tool-1",
+      socketGeneration: 1,
+      elapsedMs: 75,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "tool.batch_closed",
+      providerResponseId: "response-approval-tool",
+      batchHash: "approval-batch-hash",
+      toolCallIds: ["approval-tool-1"],
+      elapsedMs: 75,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.done",
+      responseId: "response-approval-tool",
       socketGeneration: 1,
       elapsedMs: 75,
     }));
@@ -1594,18 +1620,20 @@ describe("Task 4 review fixes", () => {
     });
     lifecycle = result.lifecycle;
     expect(commandTypes(result.commands)).not.toContain("prepare_summary");
+    expect(lifecycle.toolOutbox["approval-tool-1"]?.state).toBe("executed");
+    expect(result.commands).toContainEqual(
+      expect.objectContaining({
+        type: "resend_output",
+        toolCallId: "approval-tool-1",
+        outputItemId: "tool-output:approval-tool-1",
+        replay: false,
+      }),
+    );
     const refresh = result.commands.find(
       (command) => (command as { type: string }).type === "refresh_snapshot",
     ) as unknown as { type: "refresh_snapshot"; requestId: string } | undefined;
     expect(refresh?.requestId).toBeString();
 
-    ({ lifecycle } = step(lifecycle, {
-      type: "tool.executed",
-      toolCallId: "approval-tool-1",
-      output: JSON.stringify({ status: "snapshot_changed" }),
-      resultHash: "approval-changed-result",
-      elapsedMs: 74,
-    }));
     ({ lifecycle } = step(lifecycle, {
       type: "tool.output_sent",
       toolCallId: "approval-tool-1",
@@ -1881,4 +1909,127 @@ test("response coordinator sends keyed metadata and retries an unsent key withou
       { intentKey: "tool-batch:response-1:hash-1", purpose: "tool_continuation" },
     ),
   ).toBe(true);
+});
+
+test("a failed admitted tool execution blocks inside the reducer with sanitized identity", () => {
+  let lifecycle = startCollecting();
+  ({ lifecycle } = step(lifecycle, {
+    type: "tool.called",
+    socketGeneration: 1,
+    toolCallId: "tool-failed-1",
+    name: "record_interview_answer",
+    args: {
+      topic: "area",
+      field: "area.coverage",
+      disposition: "answered",
+      rule_text: "Atende Irvine.",
+      owner_words: "Atendemos Irvine.",
+    },
+    providerResponseId: "response-failed-1",
+    batchHash: "batch-failed-1",
+    elapsedMs: 1,
+  }));
+
+  const failed = step(lifecycle, {
+    type: "tool.execution_failed",
+    toolCallId: "tool-failed-1",
+    code: "query_error",
+    safeDetail: "onboarding answer could not be persisted",
+    elapsedMs: 9,
+  } as OnboardingEvent);
+
+  expect(failed.lifecycle.phase).toBe("blocked");
+  expect(failed.lifecycle.toolOutbox["tool-failed-1"]?.state).toBe("running");
+  expect(failed.commands).toContainEqual({
+    type: "block",
+    code: "query_error",
+    safeDetail: "onboarding answer could not be persisted",
+    toolCallId: "tool-failed-1",
+    recoverable: true,
+  });
+  expect(JSON.stringify(failed.commands)).not.toContain("Atendemos Irvine");
+});
+
+test("a sanitized adapter invariant enters blocked through the reducer", () => {
+  const lifecycle = startCollecting();
+  const failed = step(lifecycle, {
+    type: "adapter.invariant_failed",
+    code: "tool_args_mismatch",
+    safeDetail: "provider tool replay changed its payload",
+    elapsedMs: 2,
+  } as OnboardingEvent);
+  expect(failed.lifecycle.phase).toBe("blocked");
+  expect(failed.commands).toContainEqual({
+    type: "block",
+    code: "tool_args_mismatch",
+    safeDetail: "provider tool replay changed its payload",
+    recoverable: true,
+  });
+});
+
+test("lifecycle telemetry precedes the side effect command it describes", () => {
+  const attached = step(createOnboardingLifecycle(callId), {
+    type: "socket.attached",
+    socketGeneration: 1,
+    elapsedMs: 0,
+  });
+  const greetingQueued = attached.commands.findIndex(
+    (command) => command.type === "telemetry" &&
+      command.name === "voice.response.intent_queued",
+  );
+  const greetingRequest = attached.commands.findIndex(
+    (command) => command.type === "request_response",
+  );
+  expect(greetingQueued).toBeLessThan(greetingRequest);
+
+  const coverage = coverageReady();
+  const prepareStarted = coverage.commands.findIndex(
+    (command) => command.type === "telemetry" &&
+      command.name === "onboarding.snapshot.prepare_started",
+  );
+  const prepare = coverage.commands.findIndex(
+    (command) => command.type === "prepare_summary",
+  );
+  expect(prepareStarted).toBeLessThan(prepare);
+
+  let lifecycle = signoffSpeaking();
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.intent_sent",
+    intentKey: "final-signoff:approval-receipt-1",
+    socketGeneration: 1,
+    elapsedMs: 77,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.created",
+    responseId: "response-signoff-1",
+    intentKey: "final-signoff:approval-receipt-1",
+    socketGeneration: 1,
+    elapsedMs: 78,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.output_audio.done",
+    responseId: "response-signoff-1",
+    socketGeneration: 1,
+    elapsedMs: 79,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.done",
+    responseId: "response-signoff-1",
+    socketGeneration: 1,
+    elapsedMs: 80,
+  }));
+  const playback = step(lifecycle, {
+    type: "output_audio_buffer.stopped",
+    responseId: "response-signoff-1",
+    socketGeneration: 1,
+    elapsedMs: 81,
+  });
+  const closingTelemetry = playback.commands.findIndex(
+    (command) => command.type === "telemetry" &&
+      command.name === "closing.provider_requested",
+  );
+  const hangup = playback.commands.findIndex(
+    (command) => command.type === "request_hangup",
+  );
+  expect(closingTelemetry).toBeLessThan(hangup);
 });
