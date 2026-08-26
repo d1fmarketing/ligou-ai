@@ -1729,6 +1729,9 @@ describe("physical socket attach and reconnect", () => {
         outputItemId: "tool-output:blocked-output",
         socketGeneration: 1,
       };
+      // Keep the transport genuinely idle. `responseActive=true` would hide a
+      // stale authority send behind an unrelated response-coordinator denial.
+      control.ledger.responseActive = false;
 
       first.emit("close", { code: 1006 });
       await new Promise((resolve) => setTimeout(resolve, 700));
