@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { evaluateCoverage, type CoverageRef } from "./onboarding-coverage.ts";
+import {
+  evaluateCoverage,
+  INITIAL_SERVICE_DISCOVERY_QUESTION_PT,
+  type CoverageRef,
+} from "./onboarding-coverage.ts";
 import type {
   OnboardingAnswerArgs,
   SnapshotResult,
@@ -178,6 +182,9 @@ const MAX_TOOL_OUTBOX_RECEIPTS = 512;
 const MAX_TOOL_BATCHES = 512;
 const MAX_RESPONSE_INTENTS = 512;
 const MAX_TERMINAL_RESPONSE_IDS = 512;
+const INITIAL_GREETING_RESPONSE_INSTRUCTIONS_PT =
+  "Diga exatamente uma vez e sem alteração a saudação de identidade brasileira definida na sessão. " +
+  `Em seguida, pergunte exatamente: "${INITIAL_SERVICE_DISCOVERY_QUESTION_PT}"`;
 
 interface TelemetryCommand {
   type: "telemetry";
@@ -1167,6 +1174,10 @@ export function createOnboardingLifecycle(callId: string): OnboardingLifecycle {
       complete: false,
       missing: [],
       ambiguous: [],
+      nextQuestion: {
+        field: "service.catalog_closure",
+        questionPt: INITIAL_SERVICE_DISCOVERY_QUESTION_PT,
+      },
     },
     toolOutbox: {},
     toolBatches: {},
@@ -1299,6 +1310,7 @@ export function reduceOnboarding(
         queueResponse(lifecycle, commands, event, {
           intentKey: `greeting:${lifecycle.callId}`,
           purpose: "greeting",
+          instructions: INITIAL_GREETING_RESPONSE_INSTRUCTIONS_PT,
         });
       break;
     }

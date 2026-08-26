@@ -99,6 +99,9 @@ export interface CoverageProgress {
   summaryInvalidated: boolean;
 }
 
+export const INITIAL_SERVICE_DISCOVERY_QUESTION_PT =
+  "Quais serviços sua empresa oferece?";
+
 const serviceFields: CoverageField[] = [
   "service.name_synonyms",
   "service.price_mode",
@@ -416,17 +419,21 @@ function validAnswer(
       ? null
       : "invalid_price_mode";
   if (field === "service.negotiation") {
-    if (["non_negotiable", "owner_review"].includes(String(value))) return null;
+    if (value === "owner_review") return null;
+    const target = subject
+      ? snapshot.cells[keyFor("service.price_target", subject)]
+      : undefined;
+    const price = target?.state === "answered" ? target.value : undefined;
+    if (value === "non_negotiable")
+      return typeof price === "number" && Number.isFinite(price) && price >= 0
+        ? null
+        : "non_negotiable_requires_public_target";
     const floor =
       typeof value === "number"
         ? value
         : value && typeof value === "object"
           ? (value as { floor?: unknown }).floor
           : undefined;
-    const target = subject
-      ? snapshot.cells[keyFor("service.price_target", subject)]
-      : undefined;
-    const price = target?.state === "answered" ? target.value : undefined;
     return typeof floor === "number" &&
       Number.isFinite(floor) &&
       typeof price === "number" &&
@@ -560,10 +567,18 @@ function applyOne(
       { ...snapshot, cells },
       subject,
     );
+    const publicTarget = subject
+      ? cells[keyFor("service.price_target", subject)]
+      : undefined;
+    const publicPrice = publicTarget?.state === "answered"
+      ? publicTarget.value
+      : undefined;
     const storedValue =
       fact.field === "service.negotiation" && error === null
-        ? typeof fact.value === "string"
-          ? { mode: "non_negotiable" }
+        ? fact.value === "non_negotiable" && typeof publicPrice === "number"
+          ? { mode: "non_negotiable", floor: publicPrice }
+          : typeof fact.value === "string"
+            ? { mode: "non_negotiable" }
           : {
               mode: "negotiable",
               floor:
@@ -617,12 +632,18 @@ export function applyCoverageFact(
     summaryInvalidated: ready(snapshot) || snapshot.summaryInvalidated,
   };
 }
-function questionFor(ref: CoverageRef): CoverageQuestion {
+function questionFor(
+  ref: CoverageRef,
+  snapshot: CoverageSnapshot,
+): CoverageQuestion {
   return {
     ...ref,
-    questionPt: ref.subject
-      ? `${templates[ref.field]} (${ref.subject.replace(/_/g, " ")})`
-      : templates[ref.field],
+    questionPt:
+      ref.field === "service.catalog_closure" && snapshot.services.length === 0
+        ? INITIAL_SERVICE_DISCOVERY_QUESTION_PT
+        : ref.subject
+          ? `${templates[ref.field]} (${ref.subject.replace(/_/g, " ")})`
+          : templates[ref.field],
   };
 }
 export function evaluateCoverage(snapshot: CoverageSnapshot): CoverageProgress {
@@ -692,7 +713,7 @@ export function evaluateCoverage(snapshot: CoverageSnapshot): CoverageProgress {
     notApplicable: Object.entries(snapshot.cells)
       .filter(([, cell]) => cell.state === "not_applicable")
       .map(([key]) => refForKey(key)),
-    nextQuestion: next ? questionFor(next) : null,
+    nextQuestion: next ? questionFor(next, snapshot) : null,
     catalogNormallyComplete: !snapshot.catalogOverflow,
     summaryInvalidated: snapshot.summaryInvalidated,
   };

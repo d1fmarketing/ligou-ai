@@ -446,18 +446,29 @@ function summaryCommands(commands: OnboardingCommand[]) {
 describe("onboarding lifecycle forbidden transitions", () => {
   test("queues one stable greeting and emits complete coverage-start telemetry", () => {
     const created = createOnboardingLifecycle(callId);
+    expect(created.coverage.nextQuestion).toEqual({
+      field: "service.catalog_closure",
+      questionPt: "Quais serviços sua empresa oferece?",
+    });
     const attached = step(created, {
       type: "socket.attached",
       socketGeneration: 1,
       elapsedMs: 8,
     });
-    expect(attached.commands).toContainEqual(
-      expect.objectContaining({
+    expect(
+      attached.commands.filter((command) =>
+        command.type === "request_response"
+      ),
+    ).toEqual([
+      {
         type: "request_response",
         purpose: "greeting",
         intentKey: `greeting:${callId}`,
-      }),
-    );
+        instructions:
+          "Diga exatamente uma vez e sem alteração a saudação de identidade brasileira definida na sessão. " +
+          'Em seguida, pergunte exatamente: "Quais serviços sua empresa oferece?"',
+      },
+    ]);
     expect(attached.commands).toContainEqual({
       type: "telemetry",
       name: "onboarding.coverage.started",
@@ -483,6 +494,67 @@ describe("onboarding lifecycle forbidden transitions", () => {
         (command) =>
           command.type === "telemetry" &&
           command.name === "onboarding.coverage.started",
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("complete greeting trace reaches collecting and cannot duplicate on reattach", () => {
+    let lifecycle = createOnboardingLifecycle(callId);
+    ({ lifecycle } = step(lifecycle, {
+      type: "socket.attached",
+      socketGeneration: 1,
+      elapsedMs: 0,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.intent_sent",
+      intentKey: `greeting:${callId}`,
+      socketGeneration: 1,
+      elapsedMs: 1,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.created",
+      responseId: "response-greeting",
+      intentKey: `greeting:${callId}`,
+      socketGeneration: 1,
+      elapsedMs: 2,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.output_audio.done",
+      responseId: "response-greeting",
+      socketGeneration: 1,
+      elapsedMs: 3,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.done",
+      responseId: "response-greeting",
+      socketGeneration: 1,
+      elapsedMs: 4,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "output_audio_buffer.stopped",
+      responseId: "response-greeting",
+      socketGeneration: 1,
+      elapsedMs: 5,
+    }));
+
+    expect(lifecycle.phase).toBe("collecting");
+    expect(lifecycle.responseIntents[`greeting:${callId}`]).toMatchObject({
+      purpose: "greeting",
+      state: "terminal",
+      responseId: "response-greeting",
+    });
+    expect(lifecycle.coverage.nextQuestion?.questionPt).toBe(
+      "Quais serviços sua empresa oferece?",
+    );
+
+    const reattached = step(lifecycle, {
+      type: "socket.attached",
+      socketGeneration: 2,
+      elapsedMs: 6,
+    });
+    expect(
+      reattached.commands.filter((command) =>
+        command.type === "request_response"
       ),
     ).toHaveLength(0);
   });

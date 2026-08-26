@@ -213,17 +213,17 @@ const allToolSchemas = [
   {
     type: "function",
     name: "record_interview_answer",
-    description: "ONBOARDING ONLY: records one answer from the owner interview as a suggested rule (topic + the rule in clear text + structured data when it is a price). Call once per fact learned; the owner approves the batch later in the dashboard.",
+    description: "ONBOARDING ONLY: records exactly one owner-provided fact as suggested evidence. One call maps one field; it does not approve rules, grant powers, or change operational mode.",
     parameters: {
       type: "object",
       additionalProperties: false,
       properties: {
         topic: { type: "string", enum: ["servicos", "area", "precos", "agenda", "emergencia", "outro"] },
         field: { type: "string", enum: ONBOARDING_COVERAGE_FIELDS },
-        subject: { type: "string", description: "normalized service subject for service.* fields" },
+        subject: { type: "string", description: "Top-level normalized service identifier required for every service.* field; omit for service.catalog_closure and non-service fields." },
         disposition: { type: "string", enum: ["answered", "not_applicable", "owner_review_required"] },
         rule_text: { type: "string", description: "the rule in clear operational language (English)" },
-        structured: { type: "object", description: "typed field value and structured service details captured during onboarding" },
+        structured: { type: "object", description: 'Use exactly {"value":...}: service.name_synonyms -> non-empty string array; service.price_mode -> fixed|starting_at|estimate|owner_review; service.price_target -> nonnegative number; service.negotiation -> {"floor":number} or "non_negotiable" when answered (or use owner_review_required disposition); service.duration -> positive minutes; service.catalog_closure -> true only after explicit no-more-services.' },
         owner_words: { type: "string", description: "the owner's exact words (Portuguese), as evidence" },
       },
       required: ["topic", "field", "disposition", "rule_text", "owner_words"],
@@ -245,7 +245,7 @@ const allToolSchemas = [
   {
     type: "function",
     name: "end_session",
-    description: "ONBOARDING ONLY: ends the current voice call. Call exactly once, after the final recap and a single goodbye, when the interview is complete. The call hangs up shortly after; do not keep exchanging farewells.",
+    description: "ONBOARDING ONLY: requests application-owned close after the current lifecycle signoff command. This tool never authorizes or performs hangup by itself.",
     parameters: { type: "object", properties: {}, required: [] },
   },
 ] as const;
@@ -309,7 +309,7 @@ export async function runTool(
   if (Date.now() > cap.expiresAt) return done({ error: "capability_expired" }, false);
 
   // Pure close signal: no tenant data is read or written, so it resolves before loadTenant.
-  // The sideband owns the actual hangup (grace period + audited provider termination).
+  // The sideband owns actual hangup after lifecycle proof and audited provider termination.
   if (name === "end_session")
     return done({ status: "application_owned_close", ending: false });
   if (

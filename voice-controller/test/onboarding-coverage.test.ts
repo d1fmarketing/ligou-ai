@@ -84,6 +84,108 @@ function completeService(
 }
 
 describe("onboarding coverage", () => {
+  test("application owns initial service discovery before normal catalog closure", () => {
+    const fresh = createCoverage(identity);
+    expect(evaluateCoverage(fresh).nextQuestion).toEqual({
+      field: "service.catalog_closure",
+      questionPt: "Quais serviços sua empresa oferece?",
+    });
+
+    const discovered = applyCoverageFact(
+      fresh,
+      answer(
+        "service.name_synonyms",
+        ["limpeza de ralo", "desentupimento"],
+        "Limpeza de ralo",
+      ),
+    );
+    expect(evaluateCoverage(discovered).nextQuestion).toEqual({
+      field: "service.catalog_closure",
+      questionPt:
+        "Há mais algum serviço que devemos cadastrar antes de encerrar o catálogo?",
+    });
+  });
+
+  test("documented one-fact service values answer pricing, duration, and negotiation without ambiguity", () => {
+    let snapshot = createCoverage(identity);
+    const subject = "limpeza_de_ralo";
+    for (const fact of [
+      answer(
+        "service.name_synonyms",
+        ["limpeza de ralo", "desentupimento"],
+        subject,
+      ),
+      answer("service.price_mode", "fixed", subject),
+      answer("service.price_target", 225, subject),
+      answer("service.negotiation", { floor: 175 }, subject),
+      answer("service.duration", 60, subject),
+    ]) snapshot = applyCoverageFact(snapshot, fact);
+
+    const progress = evaluateCoverage(snapshot);
+    for (const field of [
+      "service.name_synonyms",
+      "service.price_mode",
+      "service.price_target",
+      "service.negotiation",
+      "service.duration",
+    ] as const) {
+      expect(progress.answered).toContainEqual({ field, subject });
+      expect(progress.ambiguous).not.toContainEqual({ field, subject });
+    }
+
+    const nonNegotiable = applyCoverageFact(
+      snapshot,
+      {
+        ...answer("service.negotiation", null, subject),
+        disposition: "not_applicable",
+      },
+    );
+    expect(evaluateCoverage(nonNegotiable).answered).toContainEqual({
+      field: "service.negotiation",
+      subject,
+    });
+
+    const literalNonNegotiable = applyCoverageFact(
+      snapshot,
+      answer("service.negotiation", "non_negotiable", subject),
+    );
+    expect(evaluateCoverage(literalNonNegotiable).answered).toContainEqual({
+      field: "service.negotiation",
+      subject,
+    });
+    expect(evaluateCoverage(literalNonNegotiable).ambiguous).not.toContainEqual({
+      field: "service.negotiation",
+      subject,
+    });
+    expect(buildSummaryAnchors(literalNonNegotiable)).toContain(
+      "Mínimo: não negociável (225)",
+    );
+
+    const ownerReview = applyCoverageFact(snapshot, {
+      ...answer("service.negotiation", null, subject),
+      disposition: "owner_review_required",
+    });
+    expect(evaluateCoverage(ownerReview).ownerReviewRequired).toContainEqual({
+      field: "service.negotiation",
+      subject,
+    });
+
+    const prematureClosure = applyCoverageFact(
+      snapshot,
+      answer("service.catalog_closure", false),
+    );
+    expect(evaluateCoverage(prematureClosure).missingRequired).toContainEqual({
+      field: "service.catalog_closure",
+    });
+    const explicitClosure = applyCoverageFact(
+      snapshot,
+      answer("service.catalog_closure", true),
+    );
+    expect(evaluateCoverage(explicitClosure).answered).toContainEqual({
+      field: "service.catalog_closure",
+    });
+  });
+
   test("starts incomplete and five generic records cannot complete five topics", () => {
     const fresh = createCoverage(identity);
     expect(evaluateCoverage(fresh).readyForReview).toBe(false);

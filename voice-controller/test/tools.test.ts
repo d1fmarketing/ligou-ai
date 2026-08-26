@@ -680,4 +680,83 @@ describe("instructions builder", () => {
       /regras (?:estão|ficam|foram) (?:ativas|aprovadas)/i,
     );
   });
+
+  test("onboarding documents the exact one-fact coverage payload and never the legacy bundled price object", () => {
+    const instructions = buildInstructions(TENANT as any, RULES as any, "onboarding");
+    expect(instructions).toMatch(/um fato por chamada/i);
+    expect(instructions).toMatch(/subject=<serviço_normalizado>/i);
+    expect(instructions).toMatch(/structured=\{value:/i);
+    expect(instructions).toContain("non_negotiable");
+    for (const field of [
+      "service.name_synonyms",
+      "service.price_mode",
+      "service.price_target",
+      "service.negotiation",
+      "service.duration",
+      "service.catalog_closure",
+    ]) expect(instructions).toContain(field);
+    expect(instructions).not.toContain(
+      "{service_type, price_min, price_target, duration_min}",
+    );
+
+    const record = toolSchemasForSessionType("onboarding").find(
+      (schema) => schema.name === "record_interview_answer",
+    ) as any;
+    expect(record.description).toMatch(/exactly one owner-provided fact/i);
+    expect(record.description).toMatch(/suggested evidence/i);
+    expect(record.parameters.properties.subject.description).toMatch(
+      /top-level[^.]*required[^.]*service\.\*/i,
+    );
+    const structured = record.parameters.properties.structured.description;
+    expect(structured).toContain('{"value":...}');
+    expect(structured).toContain("service.name_synonyms");
+    expect(structured).toContain("service.price_mode");
+    expect(structured).toContain("service.price_target");
+    expect(structured).toContain("service.negotiation");
+    expect(structured).toContain("non_negotiable");
+    expect(structured).toContain("service.duration");
+    expect(structured).toContain("service.catalog_closure");
+    expect(structured).not.toContain("price_min");
+  });
+
+  test("onboarding instructions name only tools exposed to onboarding authority", () => {
+    const onboarding = buildInstructions(TENANT as any, RULES as any, "onboarding");
+    const allowed = toolSchemasForSessionType("onboarding").map(
+      (schema) => schema.name,
+    );
+    const known = [...new Set([
+      ...toolSchemas.map((schema) => schema.name),
+      ...allowed,
+    ])];
+    const mentioned = known.filter((name) => onboarding.includes(name));
+    expect(mentioned.every((name) => allowed.includes(name))).toBe(true);
+    expect(mentioned).toContain("record_interview_answer");
+    expect(mentioned).toContain("approve_onboarding_summary");
+    expect(mentioned).toContain("end_session");
+    expect(onboarding).toMatch(
+      /fatos do dono[^.]*evidências sugeridas[^.]*não ativam regras nem concedem poderes/i,
+    );
+
+    for (const unavailable of [
+      "quote_price",
+      "evaluate_offer",
+      "create_async_case",
+      "check_availability",
+      "propose_booking",
+      "close_deal",
+      "consult_ligou_brain",
+    ]) expect(onboarding).not.toContain(unavailable);
+
+    const customer = buildInstructions(TENANT as any, RULES as any, "customer");
+    const owner = buildInstructions(TENANT as any, RULES as any, "owner_browser");
+    for (const instructions of [customer, owner]) {
+      expect(instructions).toContain(
+        "quote_price -> check_availability -> agree on slot and price -> propose_booking",
+      );
+      expect(instructions).toContain(
+        "Emergencies involving gas smell or carbon monoxide",
+      );
+      expect(instructions).toContain("Use evaluate_offer for every caller counteroffer");
+    }
+  });
 });
