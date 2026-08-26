@@ -625,4 +625,59 @@ describe("instructions builder", () => {
     expect(onboarding).not.toContain("$149");
     expect(onboarding).not.toContain("149");
   });
+
+  test("a slow-operation bridge follows the active language and never hard-codes the Test 8 English phrase", () => {
+    for (const sessionType of ["customer", "owner_browser", "onboarding"] as const) {
+      const instructions = buildInstructions(TENANT as any, RULES as any, sessionType);
+      expect(instructions, sessionType).not.toMatch(/let me check that/i);
+      expect(instructions, sessionType).toMatch(
+        /genuinely slow operation[^.]*active language/i,
+      );
+    }
+  });
+
+  test("onboarding keeps exactly one speak-first Brazilian Portuguese AI-agent greeting", () => {
+    const instructions = buildInstructions(TENANT as any, RULES as any, "onboarding");
+    const greeting =
+      "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing LLC";
+    expect(instructions.split(greeting)).toHaveLength(2);
+    expect(instructions).toMatch(/fala PRIMEIRO[^.]*exatamente uma vez/i);
+  });
+
+  test("onboarding persists silently and takes every next interview question from durable application state", () => {
+    const instructions = buildInstructions(TENANT as any, RULES as any, "onboarding");
+    expect(instructions).toMatch(/persist[a-z]* cada fato em silêncio/i);
+    expect(instructions).toMatch(
+      /próxima pergunta[^.]*somente[^.]*next_action\.question_pt[^.]*aplicação/i,
+    );
+    expect(instructions).not.toMatch(
+      /\b(?:vou registrar|vou salvar|deixa eu salvar|deixa eu verificar|vou verificar)\b/i,
+    );
+    expect(instructions).not.toMatch(/para cada serviço[^.]*pergunte/i);
+    expect(instructions).not.toMatch(
+      /\b(?:5|cinco) tópicos\b|\búltimo tópico\b|\btópico\s+[1-5]\b/i,
+    );
+  });
+
+  test("onboarding summary, approval, signoff, and hangup remain application-owned", () => {
+    const instructions = buildInstructions(TENANT as any, RULES as any, "onboarding");
+    expect(instructions).toMatch(
+      /resumo ou despedida[^.]*somente[^.]*comando[^.]*ciclo de vida[^.]*aplicação/i,
+    );
+    expect(instructions).toMatch(
+      /resumo[^.]*comece diretamente pelos fatos fornecidos[^.]*correção[^.]*aprova/i,
+    );
+    expect(instructions).toMatch(
+      /regras sugeridas continuam aguardando revisão na Memória/i,
+    );
+    expect(instructions).toMatch(
+      /end_session[^.]*solicitação[^.]*aplicação[^.]*decide/i,
+    );
+    expect(instructions).not.toMatch(
+      /\b(?:vou|irei)\s+(?:recapitular|resumir)\b|\b(?:recap(?:_?|\s)(?:push|watchdog)|watchdog)\b/i,
+    );
+    expect(instructions).not.toMatch(
+      /regras (?:estão|ficam|foram) (?:ativas|aprovadas)/i,
+    );
+  });
 });
