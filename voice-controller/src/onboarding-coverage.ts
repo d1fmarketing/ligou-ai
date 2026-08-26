@@ -356,8 +356,11 @@ function activeFields(snapshot: CoverageSnapshot): {
   for (const subject of snapshot.services) {
     const mode = snapshot.cells[keyFor("service.price_mode", subject)];
     const noQuoteInputs =
-      mode?.state === "answered" &&
-      (mode.value === "owner_review" || mode.value === "estimate");
+      mode?.state === "owner_review_required" ||
+      (
+        mode?.state === "answered" &&
+        (mode.value === "owner_review" || mode.value === "estimate")
+      );
     for (const field of serviceFields)
       if (
         !noQuoteInputs ||
@@ -427,10 +430,44 @@ export function isExecutableBusinessHours(value: unknown): boolean {
   return opens !== null && closes !== null && opens < closes;
 }
 
-const NON_CITY_SCOPE = /\b(?:county|condado|region|regiao|região|state|estado|province|provincia|província|metropolitan|metro|area|área|zip|cep)\b/iu;
+const US_STATE_NAMES = new Set([
+  "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+  "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+  "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
+  "maine", "maryland", "massachusetts", "michigan", "minnesota",
+  "mississippi", "missouri", "montana", "nebraska", "nevada",
+  "new hampshire", "new jersey", "new mexico", "new york",
+  "north carolina", "north dakota", "ohio", "oklahoma", "oregon",
+  "pennsylvania", "rhode island", "south carolina", "south dakota",
+  "tennessee", "texas", "utah", "vermont", "virginia", "washington",
+  "west virginia", "wisconsin", "wyoming",
+  "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga", "hi",
+  "id", "il", "in", "ia", "ks", "ky", "la", "me", "md", "ma", "mi",
+  "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc",
+  "nd", "oh", "ok", "or", "pa", "ri", "sc", "sd", "tn", "tx", "ut",
+  "vt", "va", "wa", "wv", "wi", "wy",
+]);
+const COUNTRY_NAMES = new Set([
+  "unitedstates", "unitedstatesofamerica", "usa", "us", "america",
+]);
+const NON_CITY_FORM = /(?:^|[^\p{L}\p{M}])(?:county|condado|region|regiao|região|province|provincia|província|metropolitan|metro|area|área|zip|cep|postal)(?:$|[^\p{L}\p{M}])/iu;
+const DIRECTIONAL_STATE_FORM = /^(?:north(?:ern)?|south(?:ern)?|east(?:ern)?|west(?:ern)?|central)\s+(.+)$/u;
 export function isExactCityName(value: unknown): value is string {
   if (typeof value !== "string" || value !== value.trim()) return false;
-  if (value.length < 1 || value.length > 100 || NON_CITY_SCOPE.test(value))
+  const canonical = value.toLocaleLowerCase("en-US").replace(/\s+/g, " ");
+  const compactCountry = canonical.replace(/[^\p{L}\p{M}]/gu, "");
+  const directionalState = DIRECTIONAL_STATE_FORM.exec(canonical)?.[1];
+  const prefixedState = /^(?:state of|estado de) (.+)$/u.exec(canonical)?.[1];
+  const suffixedState = /^(.+) (?:state|estado)$/u.exec(canonical)?.[1];
+  if (
+    value.length < 1 || value.length > 100 || /\d/.test(value) ||
+    NON_CITY_FORM.test(value) || US_STATE_NAMES.has(canonical) ||
+    COUNTRY_NAMES.has(compactCountry) || canonical === "state" ||
+    canonical === "estado" ||
+    (directionalState !== undefined && US_STATE_NAMES.has(directionalState)) ||
+    (prefixedState !== undefined && US_STATE_NAMES.has(prefixedState)) ||
+    (suffixedState !== undefined && US_STATE_NAMES.has(suffixedState))
+  )
     return false;
   return /^[\p{L}\p{M}][\p{L}\p{M}.' -]*$/u.test(value);
 }
@@ -439,6 +476,16 @@ export function isExactCityList(value: unknown): value is string[] {
   if (!value.every(isExactCityName)) return false;
   const canonical = value.map((city) => city.toLocaleLowerCase("en-US"));
   return new Set(canonical).size === canonical.length;
+}
+export function isDeclaredCitiesValue(
+  value: unknown,
+): value is { cities: string[] } {
+  return Boolean(
+    value && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).length === 1 &&
+    Object.prototype.hasOwnProperty.call(value, "cities") &&
+    isExactCityList((value as { cities?: unknown }).cities),
+  );
 }
 function validAnswer(
   field: CoverageField,
@@ -463,7 +510,6 @@ function validAnswer(
       ? null
       : "invalid_price_mode";
   if (field === "service.negotiation") {
-    if (value === "owner_review") return null;
     const target = subject
       ? snapshot.cells[keyFor("service.price_target", subject)]
       : undefined;
@@ -473,11 +519,11 @@ function validAnswer(
         ? null
         : "non_negotiable_requires_public_target";
     const floor =
-      typeof value === "number"
-        ? value
-        : value && typeof value === "object"
-          ? (value as { floor?: unknown }).floor
-          : undefined;
+      value && typeof value === "object" && !Array.isArray(value) &&
+            Object.keys(value).length === 1 &&
+            Object.prototype.hasOwnProperty.call(value, "floor")
+        ? (value as { floor?: unknown }).floor
+        : undefined;
     return typeof floor === "number" &&
       Number.isFinite(floor) &&
       typeof price === "number" &&
@@ -498,7 +544,9 @@ function validAnswer(
       ? null
       : "must_be_known_customer_types";
   if (field === "area.coverage")
-    return isExactCityList(value) ? null : "must_be_exact_city_names";
+    return isDeclaredCitiesValue(value)
+      ? null
+      : "must_be_declared_exact_cities";
   if (["emergency.types", "service.name_synonyms"].includes(field))
     return nonEmptyStrings(value) ? null : "must_be_nonempty_string_list";
   if (textFields.has(field))
@@ -584,18 +632,6 @@ function applyOne(
       ? { state: "not_applicable", attempts }
       : missing(attempts);
   else if (fact.disposition !== "answered") cell = missing(attempts);
-  else if (
-    fact.field === "service.negotiation" &&
-    fact.value === "owner_review"
-  )
-    cell =
-      fact.ownerWords.trim().length > 0
-        ? {
-            state: "owner_review_required",
-            attempts,
-            safeRestriction: safeRestrictionFor(fact.field),
-          }
-        : missing(attempts);
   else if (
     fact.field === "service.negotiation" &&
     fact.value === "non_negotiable" &&
@@ -865,8 +901,11 @@ export function buildSummaryAnchors(snapshot: CoverageSnapshot): string[] {
       subject.replace(/_/g, " ");
     const mode = snapshot.cells[keyFor("service.price_mode", subject)];
     const quoteFieldsActive = !(
-      mode?.state === "answered" &&
-      (mode.value === "estimate" || mode.value === "owner_review")
+      mode?.state === "owner_review_required" ||
+      (
+        mode?.state === "answered" &&
+        (mode.value === "estimate" || mode.value === "owner_review")
+      )
     );
     const price = quoteFieldsActive
       ? valueFor(snapshot, "service.price_target", subject)

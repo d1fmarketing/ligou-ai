@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import {
   coverageKey,
+  isDeclaredCitiesValue,
+  isExecutableBusinessHours,
   type CoverageCell,
   type CoverageDisposition,
   type CoverageField,
@@ -501,7 +503,19 @@ function domainRule(
     .map((field) => ({ field }))
     .filter((ref) => active.has(coverageKey(ref.field)));
   const cells = refs.map((ref) => cellFor(snapshot, ref));
-  const status = stateForCells(cells);
+  const baseStatus = stateForCells(cells);
+  const area = definition.key === "domain:area"
+    ? cellFor(snapshot, { field: "area.coverage" })
+    : undefined;
+  const hours = definition.key === "domain:schedule"
+    ? cellFor(snapshot, { field: "schedule.business_hours" })
+    : undefined;
+  const invalidEnforcementValue =
+    (area?.state === "answered" && !isDeclaredCitiesValue(area.value)) ||
+    (hours?.state === "answered" && !isExecutableBusinessHours(hours.value));
+  const status = invalidEnforcementValue
+    ? { ...baseStatus, state: "incomplete" as const, reviewReady: false }
+    : baseStatus;
   const entries = refs.flatMap((ref) => {
     const entry = entryFor(snapshot, ref);
     return entry ? [entry] : [];
@@ -528,19 +542,14 @@ function domainRule(
     fields: fieldValues,
   };
   if (definition.key === "domain:area") {
-    const area = cellFor(snapshot, { field: "area.coverage" });
-    if (area?.state === "answered") {
-      structured.coverage_labels = scalarValues(area.value);
-      if (
-        Array.isArray(area.value) &&
-        area.value.every((value) => typeof value === "string")
-      )
-        structured.cities = area.value;
+    if (area?.state === "answered" && isDeclaredCitiesValue(area.value)) {
+      structured.coverage_labels = area.value.cities;
+      structured.cities = area.value.cities;
     }
   }
   if (definition.key === "domain:schedule") {
-    const hours = cellFor(snapshot, { field: "schedule.business_hours" });
-    if (hours?.state === "answered") structured.business_hours = canonicalValue(hours.value);
+    if (hours?.state === "answered" && isExecutableBusinessHours(hours.value))
+      structured.business_hours = canonicalValue(hours.value);
   }
   const text = entries.map((entry) => `${entry.labelPt}: ${entry.valuePt}.`).join(" ");
   return withHash({
@@ -565,8 +574,11 @@ export function materializeCoverage(
       domainRule(snapshot, progress, definition)
     ),
   ].sort((left, right) => left.key.localeCompare(right.key));
+  const summary = rules.every((rule) => rule.reviewReady)
+    ? summaryProjection(snapshot, progress)
+    : null;
   return {
     rules,
-    summary: summaryProjection(snapshot, progress),
+    summary,
   };
 }

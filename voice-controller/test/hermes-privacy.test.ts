@@ -110,6 +110,39 @@ describe("trusted structured Hermes context", () => {
     )).toThrow("hermes_service_unknown");
   });
 
+  test("a schedule V2 row masquerading as price cannot approve a Hermes service", () => {
+    const scheduleAsPrice = {
+      id: "schedule-as-price",
+      rule_group_id: "schedule-as-price-group",
+      version: 1,
+      category: "preco",
+      escopo: "servico",
+      text: "Cross-domain price must never be trusted.",
+      structured: {
+        schema: "ligou.rule.schedule.v2",
+        materialization_key: "domain:schedule",
+        materialization_hash: "b".repeat(64),
+        materialization_eligible: true,
+        review_ready: true,
+        operational_state: "active",
+        service_type: "drain_cleaning",
+        price_target: 1,
+        price_min: 1,
+        duration_min: 1,
+        business_hours: {
+          days: ["mon"],
+          hours: { opens: "08:00", closes: "18:00" },
+        },
+      },
+    };
+    expect(() => buildTrustedHermesContext(
+      "customer_upset",
+      "drain_cleaning",
+      TENANT as any,
+      [RULES[0]!, scheduleAsPrice] as any,
+    )).toThrow("hermes_service_unknown");
+  });
+
   test("marks hours configured only for strict legacy or active executable V2 schedules", () => {
     const service = RULES[0]!;
     const v2 = (structured: Record<string, unknown>) => ({

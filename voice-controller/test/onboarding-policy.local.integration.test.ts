@@ -135,6 +135,7 @@ test("real onboarding RPC approval reloads into servicePolicies and quote_price"
         field: "business.excluded_work",
         disposition: "answered",
         rule_text: hostileEvidence,
+        structured: { value: null },
         owner_words: "Não faço obra estrutural.",
       },
     );
@@ -173,7 +174,7 @@ test("real onboarding RPC approval reloads into servicePolicies and quote_price"
           subject,
           disposition,
           rule_text: `Evidence for ${field}`,
-          ...(disposition === "answered" ? { structured: { value } } : {}),
+          structured: { value },
           owner_words: ownerWords,
         },
       );

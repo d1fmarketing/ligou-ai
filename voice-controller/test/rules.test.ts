@@ -201,6 +201,38 @@ describe("V2 service policy projection", () => {
     expect(priceRules([estimate, ownerReview])).toEqual([]);
   });
 
+  test("a service V2 row with non-service scope shadows legacy but cannot become a policy", () => {
+    const legacy = rule("legacy-wrong-scope", {
+      service_type: "drain_cleaning",
+      price_target: 225,
+      price_min: 225,
+      duration_min: 60,
+    });
+    const wrongScope: Rule = {
+      ...rule("v2-wrong-scope", {
+        schema: "ligou.rule.service.v2",
+        materialization_key: "service:drain_cleaning",
+        materialization_hash: "c".repeat(64),
+        materialization_eligible: true,
+        review_ready: true,
+        operational_state: "active",
+        service_type: "drain_cleaning",
+        service_names: ["Drain cleaning"],
+        price_mode: "fixed",
+        quoteable: true,
+        negotiable: false,
+        price_target: 149,
+        price_min: 149,
+        duration_min: 60,
+        coverage_revision: 45,
+        source_call_id: "22222222-2222-4222-8222-222222222222",
+      }),
+      escopo: "geral",
+    };
+    expect(servicePolicies([legacy, wrongScope])).toEqual([]);
+    expect(priceRules([legacy, wrongScope])).toEqual([]);
+  });
+
   test("ignores V2 rows that are not explicitly eligible and preserves strict legacy rules", () => {
     const unsafe = rule("unsafe", {
       schema: "ligou.rule.service.v2",
@@ -265,6 +297,34 @@ describe("V2 service policy projection", () => {
       expect(priceRules([legacy, malformed])).toEqual([]);
     }
   });
+
+  test("a domain V2 row masquerading as pricing is never parsed as legacy and shadows its claimed service", () => {
+    const legacy = rule("legacy-drain", {
+      service_type: "drain_cleaning",
+      price_target: 225,
+      price_min: 149,
+      duration_min: 60,
+    });
+    const scheduleAsPrice = rule("schedule-as-price", {
+      schema: "ligou.rule.schedule.v2",
+      materialization_key: "domain:schedule",
+      materialization_hash: "f".repeat(64),
+      materialization_eligible: true,
+      review_ready: true,
+      operational_state: "active",
+      service_type: "drain_cleaning",
+      price_target: 1,
+      price_min: 1,
+      duration_min: 1,
+      business_hours: {
+        days: ["mon"],
+        hours: { opens: "08:00", closes: "18:00" },
+      },
+    });
+
+    expect(servicePolicies([legacy, scheduleAsPrice])).toEqual([]);
+    expect(priceRules([legacy, scheduleAsPrice])).toEqual([]);
+  });
 });
 
 describe("V2 domain policy projection", () => {
@@ -313,6 +373,60 @@ describe("V2 domain policy projection", () => {
       [legacyArea, keyOnly],
       "domain:area",
       "area",
+    )).toBeUndefined();
+  });
+
+  test("every ligou.rule.*.v2 namespace shape is V2-marked even with extra schema segments", () => {
+    for (const [index, schema] of [
+      "ligou.rule.schedule.experimental.v2",
+      "ligou.rule.schedule\nexperimental.v2",
+      "ligou.rule..v2",
+    ].entries()) {
+      const hostile: Rule = {
+        ...legacyArea,
+        id: `hostile-nested-v2-schema-${index}`,
+        rule_group_id: `hostile-nested-v2-schema-group-${index}`,
+        text: "Nested V2 schema must never become legacy area authority.",
+        structured: { schema, cities: ["Irvine"] },
+      };
+      expect(ruleByMaterializationKey(
+        [legacyArea, hostile],
+        "domain:area",
+        "area",
+      )).toBeUndefined();
+    }
+  });
+
+  test("a schedule V2 row categorized as area blocks both domain identities and never falls back", () => {
+    const scheduleAsArea: Rule = {
+      id: "schedule-as-area",
+      rule_group_id: "schedule-as-area-group",
+      version: 1,
+      category: "area",
+      escopo: "localizacao",
+      text: "Cross-domain text must not be trusted.",
+      structured: {
+        schema: "ligou.rule.schedule.v2",
+        materialization_key: "domain:schedule",
+        materialization_hash: "b".repeat(64),
+        materialization_eligible: true,
+        review_ready: true,
+        operational_state: "active",
+        business_hours: {
+          days: ["mon"],
+          hours: { opens: "08:00", closes: "18:00" },
+        },
+      },
+    };
+    expect(ruleByMaterializationKey(
+      [legacyArea, scheduleAsArea],
+      "domain:area",
+      "area",
+    )).toBeUndefined();
+    expect(ruleByMaterializationKey(
+      [legacyArea, scheduleAsArea],
+      "domain:schedule",
+      "agenda",
     )).toBeUndefined();
   });
 });

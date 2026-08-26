@@ -238,7 +238,7 @@ const AREA_FACT = {
   field: "area.coverage",
   disposition: "answered",
   rule_text: "Serve Anaheim and Irvine.",
-  structured: { value: ["Anaheim", "Irvine"] },
+  structured: { value: { cities: ["Anaheim", "Irvine"] } },
   owner_words: "Atendemos Anaheim e Irvine.",
 };
 
@@ -349,6 +349,7 @@ describe("recordOnboardingAnswer", () => {
       field: "business.excluded_work",
       disposition: "answered",
       rule_text: hostile,
+      structured: { value: null },
       owner_words: "Não faço obra estrutural",
     });
 
@@ -390,6 +391,54 @@ describe("recordOnboardingAnswer", () => {
       operational_mode: "live",
     }, approvedRules, "customer");
     expect(instructions).not.toContain(hostile);
+  });
+
+  test("requires exact structured.value for every disposition before any query or RPC", async () => {
+    const cases = [
+      { ...AREA_FACT, structured: undefined },
+      {
+        ...AREA_FACT,
+        structured: { value: ["Anaheim"], extra: "forbidden" },
+      },
+      {
+        topic: "outro",
+        field: "authority.book",
+        disposition: "owner_review_required",
+        rule_text: "Owner review evidence.",
+        owner_words: "Eu preciso revisar.",
+      },
+      {
+        topic: "outro",
+        field: "authority.book",
+        disposition: "owner_review_required",
+        rule_text: "Owner review evidence.",
+        structured: { value: "not-null" },
+        owner_words: "Eu preciso revisar.",
+      },
+      {
+        topic: "area",
+        field: "area.travel_fee",
+        disposition: "not_applicable",
+        rule_text: "Not applicable evidence.",
+        structured: { value: "not-null" },
+        owner_words: "Não se aplica.",
+      },
+    ];
+    for (const [index, args] of cases.entries()) {
+      const fake = new SupabaseBoundaryFake();
+      const store = createOnboardingStore({
+        client: fake.client() as any,
+        now: () => 20,
+        timeoutMs: 100,
+      });
+      expect(await store.recordOnboardingAnswer(
+        ownerCapability(),
+        `provider-structured-invalid-${index}`,
+        args as any,
+      )).toMatchObject({ ok: false, code: "invalid_fact" });
+      expect(fake.receiptSetReads).toBe(0);
+      expect(fake.rpcCalls).toHaveLength(0);
+    }
   });
 
   test("sends the exact first-revision RPC shape with controller-derived hashes and pure-engine coverage", async () => {
@@ -457,7 +506,7 @@ describe("recordOnboardingAnswer", () => {
       p_event_key:
         "a40d8aa6433a3670a0ed179cd1a279c79369fc5c3d62722406095c747fd70fca",
       p_answer_hash:
-        "80a3fab6a38ce442e5372ee37aa0aa7f4384723f42b72305730ecf766908a4a0",
+        "519e578d7575832d5168a4ac8046bcfb57320546b92b54bf1eb6df526dadb653",
       p_expected_revision: 0,
       p_rule_group_id: null,
       p_fact: AREA_FACT,
@@ -472,7 +521,7 @@ describe("recordOnboardingAnswer", () => {
       selected_rule_ids: [],
       current_answer_hashes: {
         "area.coverage":
-          "80a3fab6a38ce442e5372ee37aa0aa7f4384723f42b72305730ecf766908a4a0",
+          "519e578d7575832d5168a4ac8046bcfb57320546b92b54bf1eb6df526dadb653",
       },
       summary_projection: null,
       summary_hash: null,
@@ -485,7 +534,7 @@ describe("recordOnboardingAnswer", () => {
           "area.coverage": {
             state: "answered",
             attempts: 1,
-            value: ["Anaheim", "Irvine"],
+            value: { cities: ["Anaheim", "Irvine"] },
           },
         },
       },
@@ -598,7 +647,7 @@ describe("recordOnboardingAnswer", () => {
     await store.recordOnboardingAnswer(
       ownerCapability(),
       "provider-correction",
-      { ...AREA_FACT, structured: { value: ["Anaheim", "Irvine"] } },
+      AREA_FACT,
     );
 
     expect(fake.rpcCalls[0]?.args).toMatchObject({
@@ -673,7 +722,7 @@ describe("recordOnboardingAnswer", () => {
           cells: {
             "area.coverage": {
               state: "answered",
-              value: ["Anaheim", "Irvine"],
+              value: { cities: ["Anaheim", "Irvine"] },
             },
           },
         },

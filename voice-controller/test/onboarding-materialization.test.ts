@@ -140,7 +140,7 @@ function readySnapshot(
     "business.customer_types": ["residencial", "comercial"],
     "business.excluded_work": "Nao realiza obra estrutural.",
     "business.languages_tone": "Portugues e ingles, tom direto.",
-    "area.coverage": ["Anaheim", "Irvine"],
+    "area.coverage": { cities: ["Anaheim", "Irvine"] },
     "area.out_of_area_policy": "Fora da area exige revisao do dono.",
     "schedule.business_hours": {
       days: ["mon", "tue", "wed", "thu", "fri"],
@@ -338,7 +338,7 @@ describe("deterministic onboarding materialization", () => {
     snapshot = apply(snapshot, {
       field: "area.coverage",
       disposition: "answered",
-      value: ["Orange County"],
+      value: { cities: ["Orange County"] },
       ownerWords: "Atendemos Orange County.",
     });
     snapshot = apply(snapshot, {
@@ -368,6 +368,90 @@ describe("deterministic onboarding materialization", () => {
       reviewReady: false,
       structured: { materialization_eligible: false },
     });
+  });
+
+  test("materializes only explicitly declared cities without lexical reinterpretation", () => {
+    let snapshot = readySnapshot("fixed");
+    snapshot = apply(snapshot, {
+      field: "area.coverage",
+      disposition: "answered",
+      value: { cities: ["State College", "Irvine"] },
+      ownerWords: "Atendemos State College e Irvine.",
+    });
+    const area = materializeCoverage(snapshot, evaluateCoverage(snapshot)).rules
+      .find((rule) => rule.key === "domain:area")!;
+    expect(area).toMatchObject({
+      state: "active",
+      reviewReady: true,
+      structured: {
+        cities: ["State College", "Irvine"],
+        coverage_labels: ["State College", "Irvine"],
+      },
+    });
+  });
+
+  test("prevalidated-looking legacy area and schedule values cannot materialize as active V2 enforcement", () => {
+    const ready = readySnapshot("fixed");
+    const snapshot = {
+      ...ready,
+      cells: {
+        ...ready.cells,
+        "area.coverage": {
+          state: "answered" as const,
+          attempts: 1,
+          value: ["Irvine"],
+        },
+        "schedule.business_hours": {
+          state: "answered" as const,
+          attempts: 1,
+          value: "Monday through Friday, eight to five",
+        },
+      },
+    };
+    const result = materializeCoverage(snapshot, evaluateCoverage(snapshot));
+    const rules = result.rules;
+    const area = rules.find((rule) => rule.key === "domain:area")!;
+    const schedule = rules.find((rule) => rule.key === "domain:schedule")!;
+    expect(area).toMatchObject({
+      state: "incomplete",
+      reviewReady: false,
+      structured: { materialization_eligible: false },
+    });
+    expect(area.structured).not.toHaveProperty("cities");
+    expect(schedule).toMatchObject({
+      state: "incomplete",
+      reviewReady: false,
+      structured: { materialization_eligible: false },
+    });
+    expect(schedule.structured).not.toHaveProperty("business_hours");
+    expect(result.summary).toBeNull();
+  });
+
+  test("owner-review-required price mode is complete without quote target or negotiation", () => {
+    let snapshot = readySnapshot("owner_review");
+    snapshot = apply(snapshot, {
+      field: "service.price_mode",
+      subject: SERVICE,
+      disposition: "owner_review_required",
+      value: null,
+      ownerWords: "O dono precisa revisar o preço.",
+    });
+    const progress = evaluateCoverage(snapshot);
+    const service = materializeCoverage(snapshot, progress).rules.find(
+      (rule) => rule.key === `service:${SERVICE}`,
+    )!;
+    expect(progress.readyForReview).toBe(true);
+    expect(service).toMatchObject({
+      state: "owner_review_required",
+      reviewReady: true,
+      structured: {
+        price_mode: "owner_review",
+        quoteable: false,
+        materialization_eligible: true,
+      },
+    });
+    expect(service.structured).not.toHaveProperty("price_target");
+    expect(service.structured).not.toHaveProperty("price_min");
   });
 
   test("summary is a bijection with active refs and every required-field change changes its evidence", () => {

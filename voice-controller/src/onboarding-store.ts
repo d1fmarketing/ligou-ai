@@ -59,7 +59,7 @@ export interface OnboardingAnswerArgs extends Record<string, unknown> {
   subject?: string;
   disposition: string;
   rule_text: string;
-  structured?: Record<string, unknown>;
+  structured: Record<string, unknown>;
   owner_words: string;
 }
 
@@ -339,25 +339,24 @@ function cleanFact(
   )
     return null;
   if (
-    args.structured !== undefined &&
-    (!args.structured ||
-      typeof args.structured !== "object" ||
-      Array.isArray(args.structured))
-  )
-    return null;
-  if (
-    args.structured &&
+    !args.structured ||
+    typeof args.structured !== "object" ||
+    Array.isArray(args.structured) ||
+    Object.keys(args.structured).length !== 1 ||
+    !Object.prototype.hasOwnProperty.call(args.structured, "value") ||
+    args.structured.value === undefined ||
     (
-      Object.prototype.hasOwnProperty.call(args.structured, "fields") ||
-      (
-        args.structured.value &&
-        typeof args.structured.value === "object" &&
-        !Array.isArray(args.structured.value) &&
-        Object.prototype.hasOwnProperty.call(
-          args.structured.value as Record<string, unknown>,
-          "fields",
-        )
-      )
+      disposition !== "answered" &&
+      args.structured.value !== null
+    )
+  ) return null;
+  if (
+    args.structured.value &&
+    typeof args.structured.value === "object" &&
+    !Array.isArray(args.structured.value) &&
+    Object.prototype.hasOwnProperty.call(
+      args.structured.value as Record<string, unknown>,
+      "fields",
     )
   ) return null;
   let normalizedSubject: string | undefined;
@@ -380,8 +379,7 @@ function cleanFact(
     owner_words: ownerWords,
   };
   if (normalizedSubject) fact.subject = normalizedSubject;
-  if (args.structured !== undefined)
-    fact.structured = canonicalValue(args.structured);
+  fact.structured = canonicalValue(args.structured);
   return fact;
 }
 
@@ -634,17 +632,22 @@ function coverageProjectionV2({
   priorNextAction?: Record<string, unknown>;
 }) {
   const materialized = materializeCoverage(snapshot, progress);
+  const complete = progress.readyForReview && materialized.summary !== null;
   return {
     schema_version: 2,
     transition_kind: transitionKind,
     tenant_id: cap.tenantId,
     call_id: cap.callId,
     revision: snapshot.revision,
-    complete: progress.readyForReview,
+    complete,
     snapshot: jsonSafeSnapshot(snapshot),
     progress: canonicalValue(progress),
     selected_rule_ids: [...selectedRuleIds],
-    next_action: priorNextAction ?? nextAction(progress),
+    next_action: priorNextAction ?? (
+      progress.readyForReview && !complete
+        ? { type: "blocked", reason: "materialization_incomplete" }
+        : nextAction(progress)
+    ),
     current_answer_hashes: canonicalValue(currentHashes),
     materializations: materialized.rules.map(materializationProjection),
     summary_projection: materialized.summary

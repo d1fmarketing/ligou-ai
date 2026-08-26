@@ -34,7 +34,7 @@ function coveredUniversal(snapshot = createCoverage(identity)) {
     "business.customer_types": ["residencial"],
     "business.excluded_work": "nenhum",
     "business.languages_tone": "português cordial",
-    "area.coverage": ["Irvine"],
+    "area.coverage": { cities: ["Irvine"] },
     "area.out_of_area_policy": "owner_review",
     "area.travel_fee": "not_applicable",
     "schedule.business_hours": {
@@ -164,6 +164,32 @@ describe("onboarding coverage", () => {
     expect(buildSummaryAnchors(literalNonNegotiable)).toContain(
       "Mínimo: não negociável (225)",
     );
+
+    const bareFloor = applyCoverageFact(
+      snapshot,
+      answer("service.negotiation", 175, subject),
+    );
+    expect(bareFloor.cells[
+      `service:${subject}:service.negotiation`
+    ]).toMatchObject({
+      state: "ambiguous",
+      reason: "negotiation_floor_requires_public_price",
+    });
+
+    const extraNegotiationKey = applyCoverageFact(
+      snapshot,
+      answer(
+        "service.negotiation",
+        { floor: 175, extra: "model-authored" },
+        subject,
+      ),
+    );
+    expect(extraNegotiationKey.cells[
+      `service:${subject}:service.negotiation`
+    ]).toMatchObject({
+      state: "ambiguous",
+      reason: "negotiation_floor_requires_public_price",
+    });
 
     const ownerReview = applyCoverageFact(snapshot, {
       ...answer("service.negotiation", null, subject),
@@ -344,7 +370,7 @@ describe("onboarding coverage", () => {
 
     const first = applyCoverageFact(
       createCoverage(identity),
-      answer("area.coverage", ["Irvine"]),
+      answer("area.coverage", { cities: ["Irvine"] }),
     );
     const second = applyCoverageFact(
       createCoverage(identity),
@@ -352,7 +378,7 @@ describe("onboarding coverage", () => {
     );
     const reversed = applyCoverageFact(
       second,
-      answer("area.coverage", ["Irvine"]),
+      answer("area.coverage", { cities: ["Irvine"] }),
     );
     const normal = applyCoverageFact(
       first,
@@ -475,7 +501,7 @@ describe("onboarding coverage", () => {
 
     const left = applyCoverageFact(
       createCoverage(identity),
-      answer("area.coverage", ["Irvine"]),
+      answer("area.coverage", { cities: ["Irvine"] }),
     );
     const right = applyCoverageFact(
       createCoverage(identity),
@@ -488,7 +514,7 @@ describe("onboarding coverage", () => {
       ),
     );
     const canonicalB = canonicalCoverage(
-      applyCoverageFact(right, answer("area.coverage", ["Irvine"])),
+      applyCoverageFact(right, answer("area.coverage", { cities: ["Irvine"] })),
     );
     expect(canonicalA).toBe(canonicalB);
     expect(buildSummaryAnchors(ready).join("\n")).toContain(
@@ -697,7 +723,7 @@ describe("onboarding coverage", () => {
       "schedule.holidays",
     ] as CoverageField[]) {
       const value = field === "area.coverage"
-        ? ["Irvine"]
+        ? { cities: ["Irvine"] }
         : field === "schedule.business_hours"
           ? {
               days: ["mon", "tue", "wed", "thu", "fri"],
@@ -825,7 +851,10 @@ describe("onboarding coverage", () => {
       snapshot,
       answer("business.customer_types", ["residencial"]),
     );
-    snapshot = applyCoverageFact(snapshot, answer("area.coverage", ["Irvine"]));
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("area.coverage", { cities: ["Irvine"] }),
+    );
     expect(evaluateCoverage(snapshot).summaryInvalidated).toBe(false);
   });
 
@@ -1024,7 +1053,7 @@ describe("onboarding coverage", () => {
       negotiable,
       answer(
         "service.negotiation",
-        { mode: "negotiable", floor: 90 },
+        { floor: 90 },
         "consulta",
       ),
     );
@@ -1116,7 +1145,7 @@ describe("onboarding coverage", () => {
     expect(canonicalCoverage(first)).toBe(canonicalCoverage(reversed));
   });
 
-  test("routes an answered owner-review negotiation through the registry-owned restriction", () => {
+  test("rejects the answered owner-review negotiation alias in favor of explicit null disposition", () => {
     let snapshot = applyCoverageFact(
       createCoverage(identity),
       answer("service.name_synonyms", ["consulta"], "consulta"),
@@ -1131,21 +1160,18 @@ describe("onboarding coverage", () => {
     });
 
     expect(snapshot.cells["service:consulta:service.negotiation"]).toEqual({
-      state: "owner_review_required",
+      state: "ambiguous",
       attempts: 1,
-      safeRestriction:
-        "Não executar nem confirmar negociação do serviço autonomamente; encaminhar a decisão ao dono.",
+      reason: "negotiation_floor_requires_public_price",
     });
     expect(evaluateCoverage(snapshot).answered).not.toContainEqual({
       field: "service.negotiation",
       subject: "consulta",
     });
-    expect(buildSummaryAnchors(snapshot)).toContain(
-      "Negociação: Não executar nem confirmar negociação do serviço autonomamente; encaminhar a decisão ao dono.",
-    );
-    expect(buildSummaryAnchors(snapshot).join("\n")).not.toMatch(
-      /não negociável/i,
-    );
+    expect(evaluateCoverage(snapshot).ownerReviewRequired).not.toContainEqual({
+      field: "service.negotiation",
+      subject: "consulta",
+    });
   });
 
   test("does not cover an owner-review negotiation without explicit owner words", () => {
@@ -1156,8 +1182,8 @@ describe("onboarding coverage", () => {
     snapshot = applyCoverageFact(snapshot, {
       field: "service.negotiation",
       subject: "consulta",
-      disposition: "answered",
-      value: "owner_review",
+      disposition: "owner_review_required",
+      value: null,
       ownerWords: "   ",
     });
 
@@ -1249,23 +1275,68 @@ describe("onboarding coverage", () => {
   });
 
   test("restricts active area enforcement to exact city names", () => {
-    for (const value of [["Orange County"], ["92618"], ["Southern California region"]]) {
+    for (const value of [
+      { cities: ["Orange County"] },
+      { cities: ["92618"] },
+      { cities: ["Southern California region"] },
+    ]) {
       const snapshot = applyCoverageFact(
         createCoverage(identity),
         answer("area.coverage", value),
       );
       expect(snapshot.cells["area.coverage"]).toMatchObject({
         state: "ambiguous",
-        reason: "must_be_exact_city_names",
+        reason: "must_be_declared_exact_cities",
       });
     }
     const valid = applyCoverageFact(
       createCoverage(identity),
-      answer("area.coverage", ["Irvine", "Los Angeles"]),
+      answer("area.coverage", { cities: ["Irvine", "Los Angeles"] }),
     );
     expect(valid.cells["area.coverage"]).toMatchObject({
       state: "answered",
-      value: ["Irvine", "Los Angeles"],
+      value: { cities: ["Irvine", "Los Angeles"] },
+    });
+  });
+
+  test("requires a declared cities object and distinguishes city names from states, countries, counties, and postal forms", () => {
+    const invalidValues = [
+      ["Irvine"],
+      { cities: ["California"] },
+      { cities: ["United States"] },
+      { cities: ["U.S"] },
+      { cities: ["U.S.A"] },
+      { cities: ["U S A"] },
+      { cities: ["United-States"] },
+      { cities: ["State"] },
+      { cities: ["Estado"] },
+      { cities: ["State of California"] },
+      { cities: ["California State"] },
+      { cities: ["Orange County"] },
+      { cities: ["Bay Area"] },
+      { cities: ["Área de Los Angeles"] },
+      { cities: ["Southern California"] },
+      { cities: ["92618"] },
+      { cities: ["Irvine"], regions: ["Orange County"] },
+    ];
+    for (const value of invalidValues) {
+      const snapshot = applyCoverageFact(
+        createCoverage(identity),
+        answer("area.coverage", value),
+      );
+      expect(snapshot.cells["area.coverage"]).toMatchObject({
+        state: "ambiguous",
+        reason: "must_be_declared_exact_cities",
+      });
+    }
+    const valid = applyCoverageFact(
+      createCoverage(identity),
+      answer("area.coverage", { cities: ["State College", "Irvine"] }),
+    );
+    expect(valid.cells["area.coverage"]).toEqual({
+      state: "answered",
+      attempts: 1,
+      value: { cities: ["State College", "Irvine"] },
     });
   });
 
@@ -1303,6 +1374,34 @@ describe("onboarding coverage", () => {
       subject,
     });
     expect(buildSummaryAnchors(snapshot).join("\n")).not.toMatch(/preço público|mínimo/i);
+  });
+
+  test("an owner-review-required price-mode cell suppresses target and negotiation", () => {
+    const subject = "owner_review_visit";
+    let snapshot = completeService(createCoverage(identity), subject);
+    snapshot = applyCoverageFact(snapshot, {
+      field: "service.price_mode",
+      subject,
+      disposition: "owner_review_required",
+      value: null,
+      ownerWords: "O dono precisa revisar qualquer preço.",
+    });
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer("service.catalog_closure", true),
+    );
+    snapshot = coveredUniversal(snapshot);
+    const cells = { ...snapshot.cells };
+    delete cells[`service:${subject}:service.price_target`];
+    delete cells[`service:${subject}:service.negotiation`];
+    snapshot = { ...snapshot, cells };
+
+    const progress = evaluateCoverage(snapshot);
+    expect(progress.readyForReview).toBe(true);
+    expect([...progress.requiredFields, ...progress.conditionalFields]).not
+      .toContainEqual({ field: "service.price_target", subject });
+    expect([...progress.requiredFields, ...progress.conditionalFields]).not
+      .toContainEqual({ field: "service.negotiation", subject });
   });
 
   test("orders structured business-hour anchors by meaning and sorted fallback keys", () => {
@@ -1345,7 +1444,7 @@ describe("onboarding coverage", () => {
     const fresh = createCoverage(identity);
     expect(
       applyCoverageFact(fresh, {
-        ...answer("area.coverage", ["Anaheim"]),
+        ...answer("area.coverage", { cities: ["Anaheim"] }),
         subject: "global-copy",
       }),
     ).toBe(fresh);

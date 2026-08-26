@@ -96,7 +96,7 @@ function completeCoverage(revision = 41): CoverageSnapshot {
   for (const field of universalFields) {
     const values: Partial<Record<CoverageField, unknown>> = {
       "business.customer_types": ["residencial"],
-      "area.coverage": ["Irvine"],
+      "area.coverage": { cities: ["Irvine"] },
       "schedule.business_hours": {
         days: ["mon", "tue", "wed", "thu", "fri"],
         hours: { opens: "08:00", closes: "18:00" },

@@ -125,6 +125,15 @@ commit;
 `;
 }
 
+function serviceRollback(statement) {
+  return `begin;
+set local role service_role;
+select set_config('request.jwt.claim.role', 'service_role', true);
+${statement}
+rollback;
+`;
+}
+
 function sha256(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
@@ -1335,6 +1344,66 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       ('${tenant}', '${owner}', 'onboarding', 'offer-v2', 'ready', 'answer-v2', '${call}', now());
   `), "V2 onboarding fixture");
 
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      public.onboarding_answer_value_valid_v2(
+        'business.customer_types', '["residencial"]'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'business.customer_types', '"residencial"'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'area.coverage', '{"cities":["State College","Irvine"]}'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'area.coverage', '{"cities":["Bay Area"]}'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'schedule.business_hours',
+        '{"days":["mon","tue"],"hours":{"opens":"08:00","closes":"18:00"}}'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'schedule.business_hours', '"Monday to Friday"'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'emergency.types', '["vazamento"]'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'emergency.types', '[]'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'policy.payment_estimate', '"Orçamento exige aprovação."'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'policy.payment_estimate', '149'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'authority.book', '"Pode agendar com poder vigente."'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'authority.book', 'null'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'service.price_target', '149'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'service.price_target', '"149"'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'policy.payment_estimate', to_jsonb(E'\t'::text)
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'service.name_synonyms', jsonb_build_array(E'\tDrain cleaning\t')
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'area.coverage', '{"cities":["U S A"]}'::jsonb
+      )::text || ':' ||
+      public.onboarding_answer_value_valid_v2(
+        'area.coverage', '{"cities":["State of California"]}'::jsonb
+      )::text;
+  `), "V2 universal SQL structured truth table"),
+    "true:false:true:false:true:false:true:false:true:false:true:false:true:false:false:true:false:false");
+
   const fact = (target, ownerWords = `Preço ${target}.`) => ({
     topic: "precos",
     field: "service.price_target",
@@ -1377,12 +1446,350 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     }),
   ));
   assert.notEqual(hostileV2.code, 0);
-  assert.match(hostileV2.stderr, /onboarding_structured_value_required/);
+  assert.match(hostileV2.stderr, /onboarding_structured_contract_invalid/);
   assert.equal(scalar(await runSql(connection, home, `
     select
       (select count(*) from public.receipts where tenant_id = '${tenant}')::text || ':' ||
       (select count(*) from public.rules where tenant_id = '${tenant}')::text;
   `), "V2 hostile unstructured rollback"), "0:0");
+
+  for (const [index, invalidValue] of [null, "149"].entries()) {
+    const hostileTyped = fact(
+      invalidValue,
+      `Valor tipado hostil ${String(invalidValue)}.`,
+    );
+    const hostileTypedHash = sha256(JSON.stringify(hostileTyped));
+    const hostileTypedResult = await runSql(
+      connection,
+      home,
+      serviceTransaction(onboardingAnswerSql({
+        tenantId: tenant,
+        callId: call,
+        ownerId: owner,
+        providerToolCallId: `v2-hostile-typed-${index}`,
+        answerHash: hostileTypedHash,
+        expectedRevision: 0,
+        fact: hostileTyped,
+        coverage: v2CoverageSnapshot({
+          tenantId: tenant,
+          callId: call,
+          revision: 1,
+          target: invalidValue,
+          answerHash: hostileTypedHash,
+          hashCharacter: String(index + 7),
+        }),
+      })),
+    );
+    assert.notEqual(hostileTypedResult.code, 0);
+    assert.match(
+      hostileTypedResult.stderr,
+      /onboarding_structured_projection_invalid/,
+    );
+  }
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (select count(*) from public.receipts where tenant_id = '${tenant}')::text || ':' ||
+      (select count(*) from public.rules where tenant_id = '${tenant}')::text;
+  `), "V2 hostile typed rollback"), "0:0");
+
+  const ownerReviewDurationFact = {
+    topic: "precos",
+    field: "service.duration",
+    subject: "drain_cleaning",
+    disposition: "owner_review_required",
+    rule_text: "A duração depende do dono.",
+    structured: { value: null },
+    owner_words: "Preciso revisar a duração.",
+  };
+  const ownerReviewDurationHash = sha256(
+    JSON.stringify(ownerReviewDurationFact),
+  );
+  const ownerReviewDurationCoverage = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    target: 149,
+    answerHash: ownerReviewDurationHash,
+    hashCharacter: "5",
+  });
+  ownerReviewDurationCoverage.snapshot.cells[
+    "service:drain_cleaning:service.duration"
+  ] = {
+    state: "owner_review_required",
+    attempts: 1,
+    safeRestriction: "Revisão do dono.",
+  };
+  ownerReviewDurationCoverage.current_answer_hashes = {
+    "service:drain_cleaning:service.duration": ownerReviewDurationHash,
+  };
+  const ownerReviewDurationMaterialization =
+    ownerReviewDurationCoverage.materializations[0];
+  ownerReviewDurationMaterialization.state = "owner_review_required";
+  ownerReviewDurationMaterialization.structured.operational_state =
+    "owner_review_required";
+  ownerReviewDurationMaterialization.structured.quoteable = false;
+  ownerReviewDurationMaterialization.structured.owner_review_fields = [
+    "service.duration",
+  ];
+  delete ownerReviewDurationMaterialization.structured.duration_min;
+  delete ownerReviewDurationMaterialization.structured.price_target;
+  delete ownerReviewDurationMaterialization.structured.price_min;
+  const ownerReviewDurationResult = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-owner-review-duration-positive",
+      answerHash: ownerReviewDurationHash,
+      expectedRevision: 0,
+      fact: ownerReviewDurationFact,
+      coverage: ownerReviewDurationCoverage,
+    })),
+  );
+  requireSuccess(
+    ownerReviewDurationResult,
+    "V2 owner-review duration positive projection",
+  );
+  assert.match(ownerReviewDurationResult.stdout, /"status": "recorded"/);
+
+  const trimmedNamesFact = {
+    topic: "servicos",
+    field: "service.name_synonyms",
+    subject: "drain_cleaning",
+    disposition: "answered",
+    rule_text: "Nome do serviço.",
+    structured: { value: ["\tDrain cleaning\t"] },
+    owner_words: "Drain cleaning",
+  };
+  const trimmedNamesHash = sha256(JSON.stringify(trimmedNamesFact));
+  const trimmedNamesCoverage = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    target: 149,
+    answerHash: trimmedNamesHash,
+    hashCharacter: "4",
+  });
+  trimmedNamesCoverage.snapshot.cells[
+    "service:drain_cleaning:service.name_synonyms"
+  ] = { state: "answered", attempts: 1, value: ["\tDrain cleaning\t"] };
+  trimmedNamesCoverage.current_answer_hashes = {
+    "service:drain_cleaning:service.name_synonyms": trimmedNamesHash,
+  };
+  const trimmedNamesResult = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-trimmed-service-names-positive",
+      answerHash: trimmedNamesHash,
+      expectedRevision: 0,
+      fact: trimmedNamesFact,
+      coverage: trimmedNamesCoverage,
+    })),
+  );
+  requireSuccess(trimmedNamesResult, "V2 trimmed service names positive projection");
+  assert.match(trimmedNamesResult.stdout, /"status": "recorded"/);
+
+  const ambiguousPriceModeFact = {
+    topic: "precos",
+    field: "service.price_mode",
+    subject: "drain_cleaning",
+    disposition: "answered",
+    rule_text: "Modo de preço inválido como evidência apenas.",
+    structured: { value: "call_anything" },
+    owner_words: "Ainda não defini o modo de preço.",
+  };
+  const ambiguousPriceModeHash = sha256(
+    JSON.stringify(ambiguousPriceModeFact),
+  );
+  const ambiguousPriceModeCoverage = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    target: 149,
+    answerHash: ambiguousPriceModeHash,
+    hashCharacter: "3",
+  });
+  ambiguousPriceModeCoverage.snapshot.cells[
+    "service:drain_cleaning:service.price_mode"
+  ] = { state: "ambiguous", attempts: 1, reason: "invalid_price_mode" };
+  ambiguousPriceModeCoverage.current_answer_hashes = {
+    "service:drain_cleaning:service.price_mode": ambiguousPriceModeHash,
+  };
+  const ambiguousPriceModeMaterialization =
+    ambiguousPriceModeCoverage.materializations[0];
+  ambiguousPriceModeMaterialization.state = "incomplete";
+  ambiguousPriceModeMaterialization.review_ready = false;
+  ambiguousPriceModeMaterialization.structured.operational_state = "incomplete";
+  ambiguousPriceModeMaterialization.structured.materialization_eligible = false;
+  ambiguousPriceModeMaterialization.structured.review_ready = false;
+  ambiguousPriceModeMaterialization.structured.price_mode = "owner_review";
+  ambiguousPriceModeMaterialization.structured.quoteable = false;
+  delete ambiguousPriceModeMaterialization.structured.price_target;
+  delete ambiguousPriceModeMaterialization.structured.price_min;
+  const ambiguousPriceModeResult = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-ambiguous-price-mode-positive",
+      answerHash: ambiguousPriceModeHash,
+      expectedRevision: 0,
+      fact: ambiguousPriceModeFact,
+      coverage: ambiguousPriceModeCoverage,
+    })),
+  );
+  requireSuccess(
+    ambiguousPriceModeResult,
+    "V2 ambiguous invalid price mode positive projection",
+  );
+  assert.match(ambiguousPriceModeResult.stdout, /"status": "recorded"/);
+
+  const ownerReviewScheduleFact = {
+    topic: "agenda",
+    field: "schedule.business_hours",
+    disposition: "owner_review_required",
+    rule_text: "O horário exige revisão.",
+    structured: { value: null },
+    owner_words: "Preciso revisar o horário.",
+  };
+  const ownerReviewScheduleHash = sha256(
+    JSON.stringify(ownerReviewScheduleFact),
+  );
+  const ownerReviewScheduleCoverage = v2CoverageSnapshot({
+    tenantId: tenant,
+    callId: call,
+    revision: 1,
+    target: 149,
+    answerHash: ownerReviewScheduleHash,
+    hashCharacter: "2",
+  });
+  ownerReviewScheduleCoverage.snapshot.cells["schedule.business_hours"] = {
+    state: "owner_review_required",
+    attempts: 1,
+    safeRestriction: "Revisão do dono.",
+  };
+  ownerReviewScheduleCoverage.current_answer_hashes = {
+    "schedule.business_hours": ownerReviewScheduleHash,
+  };
+  ownerReviewScheduleCoverage.materializations = [{
+    key: "domain:schedule",
+    category: "agenda",
+    scope: "geral",
+    state: "owner_review_required",
+    review_ready: true,
+    text: "Horário comercial: revisão do dono.",
+    materialization_hash: "2".repeat(64),
+    source_refs: ["schedule.business_hours"],
+    structured: {
+      schema: "ligou.rule.schedule.v2",
+      materialization_key: "domain:schedule",
+      materialization_hash: "2".repeat(64),
+      operational_state: "owner_review_required",
+      materialization_eligible: true,
+      review_ready: true,
+      owner_review_fields: ["schedule.business_hours"],
+      coverage_revision: 1,
+      source_call_id: call,
+      source_refs: ["schedule.business_hours"],
+      fields: {},
+    },
+  }];
+  const ownerReviewScheduleResult = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-owner-review-schedule-positive",
+      answerHash: ownerReviewScheduleHash,
+      expectedRevision: 0,
+      fact: ownerReviewScheduleFact,
+      coverage: ownerReviewScheduleCoverage,
+    })),
+  );
+  requireSuccess(
+    ownerReviewScheduleResult,
+    "V2 owner-review schedule positive projection",
+  );
+  assert.match(ownerReviewScheduleResult.stdout, /"status": "recorded"/);
+
+  const hostilePriceModeCases = [
+    {
+      providerToolCallId: "v2-hostile-owner-review-disposition",
+      disposition: "owner_review_required",
+      value: null,
+      cell: {
+        state: "owner_review_required",
+        attempts: 1,
+        safeRestriction: "Revisão do dono.",
+      },
+    },
+    {
+      providerToolCallId: "v2-hostile-owner-review-value",
+      disposition: "answered",
+      value: "owner_review",
+      cell: { state: "answered", attempts: 1, value: "owner_review" },
+    },
+  ];
+  for (const hostileCase of hostilePriceModeCases) {
+    const hostilePriceModeFact = {
+      topic: "precos",
+      field: "service.price_mode",
+      subject: "drain_cleaning",
+      disposition: hostileCase.disposition,
+      rule_text: "HOSTILE: keep an autonomous fixed quote.",
+      structured: { value: hostileCase.value },
+      owner_words: "O dono precisa revisar o preço.",
+    };
+    const hostilePriceModeHash = sha256(JSON.stringify(hostilePriceModeFact));
+    const hostileCoverage = v2CoverageSnapshot({
+      tenantId: tenant,
+      callId: call,
+      revision: 1,
+      target: 149,
+      answerHash: hostilePriceModeHash,
+      hashCharacter: "6",
+    });
+    hostileCoverage.snapshot.cells[
+      "service:drain_cleaning:service.price_mode"
+    ] = hostileCase.cell;
+    hostileCoverage.current_answer_hashes = {
+      "service:drain_cleaning:service.price_mode": hostilePriceModeHash,
+    };
+    const hostilePriceModeResult = await runSql(
+      connection,
+      home,
+      serviceTransaction(onboardingAnswerSql({
+        tenantId: tenant,
+        callId: call,
+        ownerId: owner,
+        providerToolCallId: hostileCase.providerToolCallId,
+        answerHash: hostilePriceModeHash,
+        expectedRevision: 0,
+        fact: hostilePriceModeFact,
+        coverage: hostileCoverage,
+      })),
+    );
+    assert.notEqual(hostilePriceModeResult.code, 0);
+    assert.match(
+      hostilePriceModeResult.stderr,
+      /onboarding_structured_projection_invalid/,
+    );
+  }
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (select count(*) from public.receipts where tenant_id = '${tenant}')::text || ':' ||
+      (select count(*) from public.rules where tenant_id = '${tenant}')::text;
+  `), "V2 hostile price-mode materialization rollback"), "0:0");
 
   const answerA1 = {
     tenantId: tenant,
@@ -1569,10 +1976,11 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
   assert.equal(followOne.coverage.snapshot.followUps, 1);
   assert.equal(scalar(await runSql(connection, home, `
     select
+      (detail->'transition_schema' is not distinct from '2'::jsonb)::text || ':' ||
       (detail->>'source_digest' = '${a3.snapshot_digest}')::text || ':' ||
       (detail->>'question_pt' = 'O que este serviço inclui e exclui?')::text
     from public.receipts where id = '${followOne.coverage_receipt_id}';
-  `), "durable followup exact identity"), "true:true");
+  `), "durable followup exact identity"), "true:true:true");
 
   const followTwoCoverage = structuredClone(followOne.coverage);
   for (const key of [

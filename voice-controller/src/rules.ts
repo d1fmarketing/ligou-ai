@@ -105,10 +105,21 @@ function finitePositive(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
+function isV2MarkedRule(rule: Rule): boolean {
+  const schema = String(rule.structured?.schema ?? "");
+  const key = String(rule.structured?.materialization_key ?? "");
+  return (
+    schema.startsWith("ligou.rule.") &&
+    schema.endsWith(".v2")
+  ) ||
+    /^(?:domain|service):/.test(key);
+}
+
 function v2ServiceSubject(rule: Rule): string | null {
   const structured = rule.structured;
   if (
     rule.category !== "preco" ||
+    rule.escopo !== "servico" ||
     structured?.schema !== "ligou.rule.service.v2"
   ) return null;
   const serviceType = typeof structured.service_type === "string"
@@ -128,14 +139,13 @@ function normalizedServiceSubject(value: unknown): string | null {
 
 function v2ServicePresenceSubjects(rule: Rule): string[] {
   const structured = rule.structured;
-  if (!structured) return [];
+  if (!structured || !isV2MarkedRule(rule)) return [];
   const keyMatch = /^service:([a-z0-9][a-z0-9_]{0,199})$/.exec(
     String(structured.materialization_key ?? ""),
   );
-  if (
-    structured.schema !== "ligou.rule.service.v2" &&
-    !keyMatch
-  ) return [];
+  const claimsService = rule.category === "preco" ||
+    structured.schema === "ligou.rule.service.v2" || Boolean(keyMatch);
+  if (!claimsService) return [];
   return [...new Set([
     normalizedServiceSubject(structured.service_type),
     keyMatch?.[1] ?? null,
@@ -202,7 +212,7 @@ function parseLegacyService(rule: Rule): ServicePolicy | null {
   const serviceType = typeof structured.service_type === "string"
     ? structured.service_type.trim().toLowerCase()
     : "";
-  if (!serviceType || structured.schema === "ligou.rule.service.v2") return null;
+  if (!serviceType || isV2MarkedRule(rule)) return null;
   const target = structured.price_target;
   const floor = structured.price_min;
   const surcharge = structured.surcharge;
@@ -270,7 +280,9 @@ export function priceRules(rules: Rule[]) {
 }
 
 export function ruleByCategory(rules: Rule[], category: string): Rule | undefined {
-  return rules.find((r) => r.category === category);
+  return rules.find((rule) =>
+    rule.category === category && !isV2MarkedRule(rule)
+  );
 }
 
 const DOMAIN_SCHEMAS = {
@@ -295,10 +307,22 @@ export function hasV2DomainRule(
   rules: Rule[],
   key: keyof typeof DOMAIN_SCHEMAS,
 ): boolean {
+  return domainV2Candidates(rules, key).length > 0;
+}
+
+function domainV2Candidates(
+  rules: Rule[],
+  key: keyof typeof DOMAIN_SCHEMAS,
+): Rule[] {
   const schema = DOMAIN_SCHEMAS[key];
-  return rules.some((rule) =>
-    rule.structured?.schema === schema ||
-    rule.structured?.materialization_key === key
+  const category = DOMAIN_CATEGORIES[key];
+  return rules.filter((rule) =>
+    isV2MarkedRule(rule) &&
+    (
+      rule.structured?.schema === schema ||
+      rule.structured?.materialization_key === key ||
+      rule.category === category
+    )
   );
 }
 
@@ -334,10 +358,7 @@ export function ruleByMaterializationKey(
   key: keyof typeof DOMAIN_SCHEMAS,
   legacyCategory?: string,
 ): Rule | undefined {
-  const candidates = rules.filter((rule) =>
-    rule.structured?.schema === DOMAIN_SCHEMAS[key] ||
-    rule.structured?.materialization_key === key
-  );
+  const candidates = domainV2Candidates(rules, key);
   if (candidates.length > 0) {
     if (candidates.length !== 1) return undefined;
     const [rule] = candidates;

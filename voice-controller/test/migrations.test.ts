@@ -1001,14 +1001,37 @@ describe("onboarding V2 reconciliation migration contract", () => {
     expect(followupAt).toBeGreaterThan(answerAt);
     expect(approvalAt).toBeGreaterThan(followupAt);
     const shape = sql.slice(shapeAt, answerAt);
+    expect(shape).toContain("not (detail ? 'transition_schema')");
+    expect(shape).toContain(
+      "detail->'transition_schema' is not distinct from '2'::jsonb",
+    );
     expect(shape).toContain(
       "coalesce(detail->>'source_digest' ~ '^[0-9a-f]{64}$', false)",
     );
     expect(shape).toContain("coalesce(detail->>'question_pt', '') <> ''");
-    expect(sql).toContain("onboarding_structured_value_required");
+    expect(sql).not.toContain("onboarding_structured_value_required");
     expect(sql).toContain("p_fact->'structured' ? 'value'");
+    expect(sql).toContain("onboarding_structured_contract_invalid");
+    expect(sql).toContain("onboarding_structured_projection_invalid");
+    expect(sql).toContain(
+      "create or replace function public.onboarding_answer_value_valid_v2",
+    );
+    expect(sql).toContain(
+      "revoke all on function public.onboarding_answer_value_valid_v2(text,jsonb)",
+    );
+    expect(sql).toContain("elsif p_field = 'area.coverage'");
+    expect(sql).toContain("elsif p_field = 'schedule.business_hours'");
+    expect(sql).toContain(
+      "v_cell->'value' is distinct from v_value",
+    );
+    expect(sql).toContain(
+      "select count(*) from jsonb_object_keys(p_fact->'structured')",
+    );
+    expect(sql).toContain("'answered', 'owner_review_required', 'not_applicable'");
     expect(sql).toContain("'source_digest'");
     expect(sql).toContain("'question_pt'");
+    const followup = sql.slice(followupAt, approvalAt);
+    expect(followup).toContain("'transition_schema', 2");
     expect(sql).toContain("'target_kind', 'onboarding_voice_approval'");
     expect(sql).toContain("kind in ('onboarding_voice_approval', 'onboarding_event_alias')");
     expect(sql).toContain("readback->>'target_kind' = 'onboarding_voice_approval'");

@@ -160,8 +160,18 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
     name.endsWith("_onboarding_transition_safety.sql")
   );
   assert.ok(fixAFile, "Fix A migration must exist exactly once");
+  const reconciliationFile = allMigrations.find((name) =>
+    name.endsWith("_onboarding_v2_reconciliation.sql")
+  );
+  assert.ok(
+    reconciliationFile,
+    "V2 reconciliation migration must exist exactly once",
+  );
   const beforeFixA = allMigrations.filter((name) =>
     BigInt(migrationVersion(name)) < BigInt(migrationVersion(fixAFile))
+  );
+  const throughFixA = allMigrations.filter((name) =>
+    BigInt(migrationVersion(name)) <= BigInt(migrationVersion(fixAFile))
   );
   const tenantId = "60000000-0000-4000-8000-000000000001";
   let assertions = 0;
@@ -434,9 +444,147 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
     `), "pre-Fix-A V1 onboarding seed", connection.password);
     assertions += 1;
 
-    for (const fileName of allMigrations.slice(beforeFixA.length)) await stage(fileName);
-    await beforeDestructive("Fix A and remaining timestamp migrations");
-    await runSupabase(["migration", "up", "--local", "--include-all"], "Fix A and remaining timestamp migrations");
+    await stage(fixAFile);
+    await beforeDestructive("Fix A predecessor migration");
+    await runSupabase(
+      ["migration", "up", "--local", "--include-all"],
+      "Fix A predecessor migration",
+    );
+    assertHistory(throughFixA, await history(connection, home));
+    assertions += 1;
+
+    successful(await runPsql(connection, home, `
+      insert into public.receipts (
+        id, tenant_id, call_id, kind, outcome, external_id, readback,
+        payload_hash, detail
+      ) values (
+        '60000000-0000-4000-8000-000000000207',
+        '60000000-0000-4000-8000-000000000202',
+        '60000000-0000-4000-8000-000000000203',
+        'onboarding_coverage',
+        'accepted',
+        '${"8".repeat(64)}',
+        '${JSON.stringify({
+          schema_version: 2,
+          transition_kind: "directed_followup",
+          tenant_id: "60000000-0000-4000-8000-000000000202",
+          call_id: "60000000-0000-4000-8000-000000000203",
+          revision: 2,
+          complete: false,
+          snapshot: {
+            tenantId: "60000000-0000-4000-8000-000000000202",
+            callId: "60000000-0000-4000-8000-000000000203",
+            revision: 2,
+            services: [],
+            cells: {},
+            followUps: 1,
+            followUpGroups: { "area.coverage": 1 },
+            summaryInvalidated: false,
+          },
+          progress: {
+            missingRequired: [{ field: "area.coverage" }],
+            ambiguous: [],
+          },
+          selected_rule_ids: [],
+          next_action: {
+            type: "ask",
+            field: "area.coverage",
+            question_pt: "Qual é a área?",
+          },
+          current_answer_hashes: {},
+          materializations: [],
+          summary_projection: null,
+          summary_hash: null,
+          snapshot_digest: "7".repeat(64),
+          authority: {
+            rules_approved: false,
+            powers_granted: false,
+            operational_mode_changed: false,
+          },
+        }).replaceAll("'", "''")}'::jsonb,
+        '${"9".repeat(64)}',
+        '{
+          "transition_kind":"directed_followup",
+          "source_revision":1,
+          "field":"area.coverage",
+          "subject":null,
+          "coverage_key":"area.coverage",
+          "browser_request_id":"60000000-0000-4000-8000-000000000208"
+        }'::jsonb
+      );
+
+      insert into public.tenants
+        (id, slug, name, owner_user_id, status, operational_mode)
+      values (
+        '60000000-0000-4000-8000-000000000212',
+        'synthetic-v1-approval-upgrade',
+        'Synthetic V1 Approval Upgrade',
+        '60000000-0000-4000-8000-000000000201',
+        'onboarding',
+        'simulation_only'
+      );
+      insert into public.calls (id, tenant_id, channel, session_type, status)
+      values (
+        '60000000-0000-4000-8000-000000000213',
+        '60000000-0000-4000-8000-000000000212',
+        'browser', 'onboarding', 'active'
+      );
+      insert into public.browser_session_requests (
+        tenant_id, user_id, session_type, offer_sdp, status, answer_sdp,
+        call_id, handled_at
+      ) values (
+        '60000000-0000-4000-8000-000000000212',
+        '60000000-0000-4000-8000-000000000201',
+        'onboarding', 'v1-approval-offer', 'ready', 'v1-approval-answer',
+        '60000000-0000-4000-8000-000000000213', now()
+      );
+      insert into public.receipts (
+        id, tenant_id, call_id, kind, outcome, external_id, readback,
+        payload_hash, detail
+      ) values (
+        '60000000-0000-4000-8000-000000000214',
+        '60000000-0000-4000-8000-000000000212',
+        '60000000-0000-4000-8000-000000000213',
+        'onboarding_coverage', 'accepted', '${"3".repeat(64)}',
+        '${JSON.stringify({
+          schema_version: 1,
+          tenant_id: "60000000-0000-4000-8000-000000000212",
+          call_id: "60000000-0000-4000-8000-000000000213",
+          revision: 1,
+          complete: true,
+          snapshot: {
+            tenantId: "60000000-0000-4000-8000-000000000212",
+            callId: "60000000-0000-4000-8000-000000000213",
+            revision: 1,
+            services: [],
+            cells: {},
+            followUps: 0,
+            followUpGroups: {},
+            summaryInvalidated: false,
+          },
+          progress: { missingRequired: [], ambiguous: [] },
+          selected_rule_ids: [],
+          next_action: { type: "prepare_summary" },
+          snapshot_digest: "1".repeat(64),
+          authority: {
+            rules_approved: false,
+            powers_granted: false,
+            operational_mode_changed: false,
+          },
+        }).replaceAll("'", "''")}'::jsonb,
+        '${"4".repeat(64)}',
+        '{"answer_hash":"${"2".repeat(64)}"}'::jsonb
+      );
+    `), "migration57 predecessor rows", connection.password);
+    assertions += 1;
+
+    for (const fileName of allMigrations.slice(throughFixA.length))
+      await stage(fileName);
+    await beforeDestructive("reconciliation and remaining timestamp migrations");
+    await runSupabase(
+      ["migration", "up", "--local", "--include-all"],
+      "reconciliation and remaining timestamp migrations",
+    );
     assertHistory(allMigrations, await history(connection, home));
     assertions += 1;
 
@@ -456,6 +604,158 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
       begin;
       set local role service_role;
       select set_config('request.jwt.claim.role', 'service_role', true);
+      select public.record_onboarding_followup(
+        '60000000-0000-4000-8000-000000000202',
+        '60000000-0000-4000-8000-000000000203',
+        '60000000-0000-4000-8000-000000000201',
+        encode(extensions.digest(convert_to(
+          'ligou.v0_2.onboarding_followup:v1:60000000-0000-4000-8000-000000000202:60000000-0000-4000-8000-000000000203:2:area.coverage:',
+          'UTF8'
+        ), 'sha256'), 'hex'),
+        2,
+        'area.coverage',
+        null,
+        '${JSON.stringify({
+          schema_version: 2,
+          transition_kind: "directed_followup",
+          tenant_id: "60000000-0000-4000-8000-000000000202",
+          call_id: "60000000-0000-4000-8000-000000000203",
+          revision: 3,
+          complete: false,
+          snapshot: {
+            tenantId: "60000000-0000-4000-8000-000000000202",
+            callId: "60000000-0000-4000-8000-000000000203",
+            revision: 3,
+            services: [],
+            cells: {},
+            followUps: 2,
+            followUpGroups: { "area.coverage": 2 },
+            summaryInvalidated: false,
+          },
+          progress: {
+            missingRequired: [{ field: "area.coverage" }],
+            ambiguous: [],
+          },
+          selected_rule_ids: [],
+          next_action: {
+            type: "ask",
+            field: "area.coverage",
+            question_pt: "Qual é a área?",
+          },
+          current_answer_hashes: {},
+          materializations: [],
+          summary_projection: null,
+          summary_hash: null,
+          authority: {
+            rules_approved: false,
+            powers_granted: false,
+            operational_mode_changed: false,
+          },
+        }).replaceAll("'", "''")}'::jsonb
+      );
+      commit;
+      select
+        (select not (detail ? 'transition_schema')
+          and not (detail ? 'source_digest')
+          and not (detail ? 'question_pt')
+          from public.receipts
+          where id = '60000000-0000-4000-8000-000000000207')::text || ':' ||
+        (select detail->'transition_schema' is not distinct from '2'::jsonb
+          and detail->>'source_digest' = '${"7".repeat(64)}'
+          and detail->>'question_pt' = 'Qual é a área?'
+          from public.receipts
+          where call_id = '60000000-0000-4000-8000-000000000203'
+            and kind = 'onboarding_coverage'
+            and (readback->>'revision')::integer = 3)::text || ':' ||
+        (select convalidated from pg_constraint
+          where conrelid = 'public.receipts'::regclass
+            and conname = 'receipts_onboarding_shape_check')::text;
+    `), "predecessor and strict followup compatibility", connection.password)
+      .trim().split("\n").at(-1), "true:true:true");
+    assertions += 1;
+
+    const runV1Approval = async (providerToolCallId, ownerWords) => {
+      const output = successful(await runPsql(connection, home, `
+        begin;
+        set local role service_role;
+        select set_config('request.jwt.claim.role', 'service_role', true);
+        select public.record_onboarding_voice_approval(
+          '60000000-0000-4000-8000-000000000212',
+          '60000000-0000-4000-8000-000000000213',
+          '60000000-0000-4000-8000-000000000201',
+          '${providerToolCallId}',
+          encode(extensions.digest(convert_to(
+            'ligou.v0_2.onboarding_voice_approval:v1:60000000-0000-4000-8000-000000000212:60000000-0000-4000-8000-000000000213:${providerToolCallId}',
+            'UTF8'
+          ), 'sha256'), 'hex'),
+          1,
+          '${"1".repeat(64)}',
+          '${ownerWords.replaceAll("'", "''")}'
+        )::text;
+        commit;
+      `), `V1 approval ${providerToolCallId}`, connection.password);
+      const jsonLine = output.split("\n").find((line) => line.startsWith("{"));
+      assert.ok(jsonLine, `V1 approval ${providerToolCallId} returned JSON`);
+      return JSON.parse(jsonLine);
+    };
+    const v1ApprovalA = await runV1Approval(
+      "upgrade-v1-approval-a",
+      "Aprovo o resumo V1.",
+    );
+    const v1ApprovalAReplay = await runV1Approval(
+      "upgrade-v1-approval-a",
+      "Aprovo o resumo V1.",
+    );
+    const v1ApprovalB = await runV1Approval(
+      "upgrade-v1-approval-b",
+      "Confirmo o mesmo resumo V1.",
+    );
+    const v1ApprovalBReplay = await runV1Approval(
+      "upgrade-v1-approval-b",
+      "Confirmo o mesmo resumo V1.",
+    );
+    assert.deepEqual(
+      [v1ApprovalA, v1ApprovalAReplay, v1ApprovalB, v1ApprovalBReplay]
+        .map((result) => result.status),
+      ["recorded", "reused", "reused", "reused"],
+    );
+    assert.equal(new Set(
+      [v1ApprovalA, v1ApprovalAReplay, v1ApprovalB, v1ApprovalBReplay]
+        .map((result) => result.approval_receipt_id),
+    ).size, 1);
+    assert.equal(new Set(
+      [v1ApprovalA, v1ApprovalAReplay, v1ApprovalB, v1ApprovalBReplay]
+        .map((result) => [
+          result.coverage_receipt_id,
+          result.revision,
+          result.snapshot_digest,
+        ].join(":")),
+    ).size, 1);
+    assert.equal(successful(await runPsql(connection, home, `
+      select
+        (select count(*) from public.receipts
+          where call_id = '60000000-0000-4000-8000-000000000213'
+            and kind = 'onboarding_voice_approval')::text || ':' ||
+        (select count(*) from public.receipts
+          where call_id = '60000000-0000-4000-8000-000000000213'
+            and kind = 'onboarding_event_alias'
+            and readback->>'target_kind' = 'onboarding_voice_approval')::text || ':' ||
+        (select min((readback->>'schema_version')::integer)
+          from public.receipts
+          where call_id = '60000000-0000-4000-8000-000000000213'
+            and kind = 'onboarding_voice_approval')::text || ':' ||
+        (select min((readback->>'schema_version')::integer)
+          from public.receipts
+          where call_id = '60000000-0000-4000-8000-000000000213'
+            and kind = 'onboarding_event_alias');
+    `), "V1 approval duplicate/replay ledger", connection.password).trim(),
+      "1:1:1:2");
+    assertions += 1;
+
+    assert.equal(successful(await runPsql(connection, home, `
+      begin;
+      set local role service_role;
+      select set_config('request.jwt.claim.role', 'service_role', true);
       do $upgrade$
       declare v_result jsonb;
       begin
@@ -469,7 +769,7 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
             'UTF8'
           ), 'sha256'), 'hex'),
           '${"e".repeat(64)}',
-          1,
+          3,
           '{
             "topic":"area",
             "field":"area.coverage",
@@ -483,12 +783,12 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
             schema_version: 1,
             tenant_id: "60000000-0000-4000-8000-000000000202",
             call_id: "60000000-0000-4000-8000-000000000203",
-            revision: 2,
+            revision: 4,
             complete: false,
             snapshot: {
               tenantId: "60000000-0000-4000-8000-000000000202",
               callId: "60000000-0000-4000-8000-000000000203",
-              revision: 2,
+              revision: 4,
               services: [],
               cells: {},
               followUps: 0,
@@ -525,7 +825,7 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
           and kind = 'onboarding_coverage');
       commit;
     `), "rollback-callable V1 answer after Fix A", connection.password)
-      .trim().split("\n").at(-1), "2:2");
+      .trim().split("\n").at(-1), "2:4");
     assertions += 1;
 
     assert.equal(successful(await runPsql(connection, home, `

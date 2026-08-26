@@ -235,10 +235,23 @@ const allToolSchemas = [
         subject: { type: "string", description: "Top-level normalized service identifier required for every service.* field; omit for service.catalog_closure and non-service fields." },
         disposition: { type: "string", enum: ["answered", "not_applicable", "owner_review_required"] },
         rule_text: { type: "string", description: "short evidence paraphrase only; the server never uses this model-authored text as operational policy" },
-        structured: { type: "object", description: 'Use exactly {"value":...}: service.name_synonyms -> non-empty string array; service.price_mode -> fixed|starting_at|estimate|owner_review; service.price_target -> nonnegative number; service.negotiation -> {"floor":number} or "non_negotiable" when answered (or use owner_review_required disposition); service.duration -> positive minutes; service.catalog_closure -> true only after explicit no-more-services; area.coverage -> exact city-name array only; schedule.business_hours -> {"days":["sun"|"mon"|"tue"|"wed"|"thu"|"fri"|"sat"],"hours":{"opens":"HH:00","closes":"HH:00"}} with unique days and opens before closes.' },
+        structured: {
+          type: "object",
+          additionalProperties: false,
+          required: ["value"],
+          properties: {
+            value: {
+              type: ["string", "number", "boolean", "array", "object", "null"],
+            },
+          },
+          description: 'Use exactly {"value":...}; business.* -> allowed string or string array; area.coverage -> {"cities":["Irvine","State College"]}; schedule.business_hours -> {"days":["sun"|"mon"|"tue"|"wed"|"thu"|"fri"|"sat"],"hours":{"opens":"HH:00","closes":"HH:00"}} with unique days and opens before closes; emergency.* -> non-empty string or emergency.types string array; policy.* -> non-empty string; authority.* -> non-empty string; service.* -> typed value per field: service.name_synonyms non-empty string array, service.price_mode fixed|starting_at|estimate|owner_review, service.price_target nonnegative number, service.negotiation {"floor":number} or "non_negotiable", service.duration positive minutes, service.catalog_closure true after explicit no-more-services; owner_review_required|not_applicable -> {"value":null}.'
+        },
         owner_words: { type: "string", description: "the owner's exact words (Portuguese), as evidence" },
       },
-      required: ["topic", "field", "disposition", "rule_text", "owner_words"],
+      required: [
+        "topic", "field", "disposition", "rule_text", "structured",
+        "owner_words",
+      ],
     },
   },
   {

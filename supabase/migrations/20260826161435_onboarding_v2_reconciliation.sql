@@ -79,9 +79,18 @@ alter table public.receipts add constraint receipts_onboarding_shape_check check
                 readback->>'transition_kind' = 'directed_followup'
                 and detail->>'transition_kind' = 'directed_followup'
                 and coalesce(detail->>'source_revision' ~ '^[1-9][0-9]*$', false)
-                and coalesce(detail->>'source_digest' ~ '^[0-9a-f]{64}$', false)
                 and coalesce(detail->>'field', '') <> ''
-                and coalesce(detail->>'question_pt', '') <> ''
+                -- Rows emitted by migration 57 predate the strict transition
+                -- envelope.  Keep those immutable receipts valid while every
+                -- newly emitted follow-up is explicitly schema 2 and strict.
+                and (
+                  not (detail ? 'transition_schema')
+                  or (
+                    detail->'transition_schema' is not distinct from '2'::jsonb
+                    and coalesce(detail->>'source_digest' ~ '^[0-9a-f]{64}$', false)
+                    and coalesce(detail->>'question_pt', '') <> ''
+                  )
+                )
               )
             )
           )
@@ -153,6 +162,187 @@ alter table public.receipts add constraint receipts_onboarding_shape_check check
 alter table public.receipts
   validate constraint receipts_onboarding_shape_check;
 
+create or replace function public.onboarding_answer_value_valid_v2(
+  p_field text,
+  p_value jsonb
+) returns boolean
+language plpgsql
+immutable
+set search_path = ''
+as $$
+declare
+  v_text text;
+  v_canonical text;
+  v_opens text;
+  v_closes text;
+  v_state_names constant text[] := array[
+    'alabama','alaska','arizona','arkansas','california','colorado',
+    'connecticut','delaware','florida','georgia','hawaii','idaho',
+    'illinois','indiana','iowa','kansas','kentucky','louisiana','maine',
+    'maryland','massachusetts','michigan','minnesota','mississippi',
+    'missouri','montana','nebraska','nevada','new hampshire','new jersey',
+    'new mexico','new york','north carolina','north dakota','ohio',
+    'oklahoma','oregon','pennsylvania','rhode island','south carolina',
+    'south dakota','tennessee','texas','utah','vermont','virginia',
+    'washington','west virginia','wisconsin','wyoming',
+    'al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il',
+    'in','ia','ks','ky','la','me','md','ma','mi','mn','ms','mo','mt',
+    'ne','nv','nh','nj','nm','ny','nc','nd','oh','ok','or','pa','ri',
+    'sc','sd','tn','tx','ut','vt','va','wa','wv','wi','wy'
+  ];
+begin
+  if p_value is null or p_value = 'null'::jsonb then
+    return false;
+  end if;
+
+  if p_field = 'service.catalog_closure' then
+    return p_value is not distinct from 'true'::jsonb;
+  elsif p_field = 'service.price_target' then
+    if jsonb_typeof(p_value) <> 'number' then return false; end if;
+    return (p_value #>> '{}')::numeric >= 0;
+  elsif p_field = 'service.duration' then
+    if jsonb_typeof(p_value) <> 'number' then return false; end if;
+    return (p_value #>> '{}')::numeric > 0;
+  elsif p_field = 'service.price_mode' then
+    return jsonb_typeof(p_value) = 'string'
+      and p_value #>> '{}' in ('fixed','starting_at','estimate','owner_review');
+  elsif p_field = 'service.negotiation' then
+    if jsonb_typeof(p_value) = 'string' then
+      return p_value #>> '{}' = 'non_negotiable';
+    end if;
+    if jsonb_typeof(p_value) <> 'object' then return false; end if;
+    return (select count(*) from jsonb_object_keys(p_value)) = 1
+      and p_value ? 'floor'
+      and jsonb_typeof(p_value->'floor') = 'number'
+      and (p_value->>'floor')::numeric >= 0;
+  elsif p_field = 'service.emergency_eligibility' then
+    return jsonb_typeof(p_value) = 'boolean';
+  elsif p_field = 'schedule.business_hours' then
+    if jsonb_typeof(p_value) <> 'object' then return false; end if;
+    if (select count(*) from jsonb_object_keys(p_value)) <> 2
+       or not (p_value ? 'days' and p_value ? 'hours')
+       or jsonb_typeof(p_value->'days') <> 'array'
+       or jsonb_typeof(p_value->'hours') <> 'object' then
+      return false;
+    end if;
+    if jsonb_array_length(p_value->'days') = 0
+       or (select count(*) from jsonb_object_keys(p_value->'hours')) <> 2
+       or not (p_value->'hours' ? 'opens' and p_value->'hours' ? 'closes') then
+      return false;
+    end if;
+    if exists (
+         select 1 from jsonb_array_elements(p_value->'days') day
+         where jsonb_typeof(day) <> 'string'
+           or day #>> '{}' not in ('sun','mon','tue','wed','thu','fri','sat')
+       )
+       or (
+         select count(*) <> count(distinct day #>> '{}')
+         from jsonb_array_elements(p_value->'days') day
+       ) then
+      return false;
+    end if;
+    v_opens := p_value->'hours'->>'opens';
+    v_closes := p_value->'hours'->>'closes';
+    return coalesce(v_opens ~ '^(?:[01][0-9]|2[0-3]):00$', false)
+      and coalesce(v_closes ~ '^(?:[01][0-9]|2[0-3]):00$', false)
+      and v_opens < v_closes;
+  elsif p_field = 'business.customer_types' then
+    if jsonb_typeof(p_value) <> 'array' then return false; end if;
+    return jsonb_array_length(p_value) > 0
+      and not exists (
+        select 1 from jsonb_array_elements(p_value) item
+        where jsonb_typeof(item) <> 'string'
+          or lower(regexp_replace(
+            item #>> '{}', '^[[:space:]]+|[[:space:]]+$', '', 'g'
+          )) not in (
+            'residencial','comercial','ambos'
+          )
+      );
+  elsif p_field = 'area.coverage' then
+    if jsonb_typeof(p_value) <> 'object' then return false; end if;
+    if (select count(*) from jsonb_object_keys(p_value)) <> 1
+       or not (p_value ? 'cities')
+       or jsonb_typeof(p_value->'cities') <> 'array' then
+      return false;
+    end if;
+    if jsonb_array_length(p_value->'cities') = 0 then
+      return false;
+    end if;
+    for v_text in
+      select city #>> '{}' from jsonb_array_elements(p_value->'cities') city
+    loop
+      if v_text is null or v_text <> regexp_replace(
+           v_text, '^[[:space:]]+|[[:space:]]+$', '', 'g'
+         )
+         or length(v_text) > 100 or v_text ~ '[0-9]'
+         or v_text !~ '^[[:alpha:]][[:alpha:].'' -]*$' then
+        return false;
+      end if;
+      v_canonical := lower(regexp_replace(v_text, '[[:space:]]+', ' ', 'g'));
+      if v_canonical = any(v_state_names)
+         or regexp_replace(v_canonical, '[^[:alpha:]]', '', 'g') in (
+           'unitedstates','unitedstatesofamerica','usa','us','america'
+         )
+         or v_canonical in ('state','estado')
+         or v_canonical ~ '(^|[^[:alpha:]])(county|condado|region|regiao|região|province|provincia|província|metropolitan|metro|area|área|zip|cep|postal)([^[:alpha:]]|$)'
+         or (
+           v_canonical ~ '^(north(?:ern)?|south(?:ern)?|east(?:ern)?|west(?:ern)?|central) '
+           and regexp_replace(v_canonical, '^[^ ]+ ', '') = any(v_state_names)
+         )
+         or (
+           v_canonical ~ '^(state of|estado de) '
+           and regexp_replace(v_canonical, '^(state of|estado de) ', '') =
+             any(v_state_names)
+         )
+         or (
+           v_canonical ~ ' (state|estado)$'
+           and regexp_replace(v_canonical, ' (state|estado)$', '') =
+             any(v_state_names)
+         ) then
+        return false;
+      end if;
+    end loop;
+    return (
+      select count(*) = count(distinct lower(city #>> '{}'))
+      from jsonb_array_elements(p_value->'cities') city
+    );
+  elsif p_field in ('emergency.types','service.name_synonyms') then
+    if jsonb_typeof(p_value) <> 'array' then return false; end if;
+    return jsonb_array_length(p_value) > 0
+      and not exists (
+        select 1 from jsonb_array_elements(p_value) item
+        where jsonb_typeof(item) <> 'string'
+          or length(regexp_replace(
+            item #>> '{}', '^[[:space:]]+|[[:space:]]+$', '', 'g'
+          )) = 0
+      );
+  elsif p_field = any(array[
+    'business.excluded_work','business.languages_tone',
+    'area.out_of_area_policy','area.travel_fee',
+    'schedule.same_day_lead_time','schedule.capacity_buffer',
+    'schedule.reschedule_cancel','schedule.holidays',
+    'emergency.safety_escalation','emergency.after_hours',
+    'emergency.fee_authority','policy.payment_estimate',
+    'policy.warranty_materials','policy.access_cancellation',
+    'policy.complaints_returns','authority.quote_price',
+    'authority.negotiate_floor','authority.read_calendar','authority.book',
+    'authority.reschedule_cancel','authority.charge_fee',
+    'authority.emergency','authority.out_of_area',
+    'service.inclusions_exclusions','service.materials_parts',
+    'service.warranty','service.escalation'
+  ]) then
+    return jsonb_typeof(p_value) = 'string'
+      and length(regexp_replace(
+        p_value #>> '{}', '^[[:space:]]+|[[:space:]]+$', '', 'g'
+      )) > 0;
+  end if;
+  return false;
+end
+$$;
+
+revoke all on function public.onboarding_answer_value_valid_v2(text,jsonb)
+from public, anon, authenticated, service_role;
+
 alter function public.record_onboarding_answer(
   uuid,uuid,uuid,text,text,text,integer,jsonb,uuid,jsonb
 ) rename to record_onboarding_answer_v2_base;
@@ -177,6 +367,10 @@ declare
   v_request_role text;
   v_coverage_key text;
   v_materialization_key text;
+  v_cell jsonb;
+  v_value jsonb;
+  v_materialization jsonb;
+  v_value_valid boolean;
 begin
   v_request_role := coalesce(
     nullif(current_setting('request.jwt.claim.role', true), ''),
@@ -186,12 +380,31 @@ begin
     raise exception using errcode = '42501', message = 'service_role_required';
   end if;
   perform set_config('request.jwt.claim.role', v_request_role, true);
-  if p_coverage->'schema_version' is not distinct from '2'::jsonb
-     and p_fact->>'disposition' = 'answered'
-     and (
-       jsonb_typeof(p_fact->'structured') is distinct from 'object'
-       or not (p_fact->'structured' ? 'value')
-     ) then
+  if p_coverage->'schema_version' is not distinct from '2'::jsonb then
+    if not (
+         jsonb_typeof(p_fact->'structured') = 'object'
+         and p_fact->'structured' ? 'value'
+         and (
+           select count(*) from jsonb_object_keys(p_fact->'structured')
+         ) = 1
+         and p_fact->>'disposition' in (
+           'answered', 'owner_review_required', 'not_applicable'
+         )
+         and (
+           p_fact->>'disposition' = 'answered'
+           or p_fact->'structured'->'value' is not distinct from 'null'::jsonb
+         )
+         and jsonb_typeof(p_coverage->'snapshot') = 'object'
+         and jsonb_typeof(p_coverage->'snapshot'->'cells') = 'object'
+         and jsonb_typeof(p_coverage->'materializations') = 'array'
+         and length(regexp_replace(
+           coalesce(p_fact->>'owner_words', ''),
+           '^[[:space:]]+|[[:space:]]+$', '', 'g'
+         )) > 0
+       ) then
+      raise exception using errcode = '22023',
+        message = 'onboarding_structured_contract_invalid';
+    end if;
     v_coverage_key := case
       when p_fact->>'field' like 'service.%'
         and p_fact->>'field' <> 'service.catalog_closure'
@@ -211,14 +424,211 @@ begin
       when p_fact->>'field' like 'authority.%' then 'domain:authority'
       else null
     end;
-    if coalesce(
-         p_coverage->'snapshot'->'cells'->v_coverage_key->>'state', ''
-       ) not in ('ambiguous', 'missing')
-       or exists (
+    v_cell := p_coverage->'snapshot'->'cells'->v_coverage_key;
+    v_value := p_fact->'structured'->'value';
+    v_value_valid := false;
+
+    if p_fact->>'disposition' = 'answered' then
+      v_value_valid := public.onboarding_answer_value_valid_v2(
+        p_fact->>'field', v_value
+      );
+      if not v_value_valid then
+        if coalesce(v_cell->>'state', '') not in ('ambiguous', 'missing') then
+          raise exception using errcode = '22023',
+            message = 'onboarding_structured_projection_invalid';
+        end if;
+      elsif p_fact->>'field' = 'service.negotiation' then
+        if jsonb_typeof(v_value) = 'string' then
+          if v_cell->>'state' <> 'answered'
+             or v_cell->'value'->>'mode' <> 'non_negotiable'
+             or jsonb_typeof(v_cell->'value'->'floor') <> 'number' then
+            raise exception using errcode = '22023',
+              message = 'onboarding_structured_projection_invalid';
+          end if;
+        elsif v_cell->>'state' <> 'answered'
+              or v_cell->'value'->>'mode' <> 'negotiable'
+              or v_cell->'value'->'floor' is distinct from (
+                case
+                  when jsonb_typeof(v_value) = 'object' then v_value->'floor'
+                  else v_value
+                end
+              ) then
+          raise exception using errcode = '22023',
+            message = 'onboarding_structured_projection_invalid';
+        end if;
+      elsif v_cell->>'state' <> 'answered'
+            or v_cell->'value' is distinct from v_value then
+        raise exception using errcode = '22023',
+          message = 'onboarding_structured_projection_invalid';
+      end if;
+    elsif p_fact->>'disposition' = 'owner_review_required' then
+      if coalesce(v_cell->>'state', '') not in (
+        'owner_review_required', 'ambiguous', 'missing'
+      ) then
+        raise exception using errcode = '22023',
+          message = 'onboarding_structured_projection_invalid';
+      end if;
+    elsif p_fact->>'field' = 'service.negotiation' then
+      if v_cell->>'state' <> 'answered'
+         or v_cell->'value'->>'mode' <> 'non_negotiable'
+         or jsonb_typeof(v_cell->'value'->'floor') <> 'number' then
+        raise exception using errcode = '22023',
+          message = 'onboarding_structured_projection_invalid';
+      end if;
+    elsif coalesce(v_cell->>'state', '') not in (
+      'not_applicable', 'ambiguous', 'missing'
+    ) then
+      raise exception using errcode = '22023',
+        message = 'onboarding_structured_projection_invalid';
+    end if;
+
+    if v_materialization_key is not null then
+      select item into v_materialization
+      from jsonb_array_elements(p_coverage->'materializations') item
+      where item->>'key' = v_materialization_key;
+      if v_materialization is null
+         or not (
+           v_materialization->'source_refs' @> jsonb_build_array(v_coverage_key)
+         ) then
+        raise exception using errcode = '22023',
+          message = 'onboarding_structured_projection_invalid';
+      end if;
+    end if;
+
+    if v_materialization is not null
+       and (
+         p_fact->>'disposition' = 'owner_review_required'
+         or v_cell->>'state' = 'owner_review_required'
+       )
+       and coalesce(v_materialization->>'state', '') not in (
+         'owner_review_required', 'incomplete'
+       ) then
+      raise exception using errcode = '22023',
+        message = 'onboarding_structured_projection_invalid';
+    end if;
+
+    if v_materialization_key like 'service:%'
+       and p_fact->>'field' = 'service.price_mode'
+       and (
+         p_fact->>'disposition' <> 'answered'
+         or v_value_valid
+       ) then
+      if v_cell->>'state' = 'owner_review_required' then
+        if v_materialization->'structured'->>'price_mode' <> 'owner_review'
+           or v_materialization->'structured'->'quoteable'
+                is not distinct from 'true'::jsonb
+           or v_materialization->'structured' ? 'price_target'
+           or v_materialization->'structured' ? 'price_min' then
+          raise exception using errcode = '22023',
+            message = 'onboarding_structured_projection_invalid';
+        end if;
+      elsif v_value #>> '{}' in ('estimate', 'owner_review') then
+        if v_materialization->'structured'->>'price_mode' <> v_value #>> '{}'
+           or v_materialization->'structured'->'quoteable'
+                is not distinct from 'true'::jsonb
+           or v_materialization->'structured' ? 'price_target'
+           or v_materialization->'structured' ? 'price_min'
+           or (
+             v_value #>> '{}' = 'owner_review'
+             and coalesce(v_materialization->>'state', '') not in (
+               'owner_review_required', 'incomplete'
+             )
+           ) then
+          raise exception using errcode = '22023',
+            message = 'onboarding_structured_projection_invalid';
+        end if;
+      elsif v_materialization->'structured'->>'price_mode' <> v_value #>> '{}'
+      then
+        raise exception using errcode = '22023',
+          message = 'onboarding_structured_projection_invalid';
+      end if;
+    end if;
+    if v_materialization_key like 'service:%'
+       and p_fact->>'field' <> 'service.price_mode'
+       and v_cell->>'state' = 'owner_review_required'
+       and (
+         v_materialization->'structured'->'quoteable'
+           is not distinct from 'true'::jsonb
+         or v_materialization->'structured' ? 'price_target'
+         or v_materialization->'structured' ? 'price_min'
+         or (
+           p_fact->>'field' = 'service.duration'
+           and v_materialization->'structured' ? 'duration_min'
+         )
+       ) then
+      raise exception using errcode = '22023',
+        message = 'onboarding_structured_projection_invalid';
+    end if;
+
+    if v_materialization_key like 'service:%'
+       and p_fact->>'disposition' = 'answered'
+       and v_value_valid
+       and v_materialization->'structured'->'materialization_eligible'
+            is not distinct from 'true'::jsonb then
+      if p_fact->>'field' = 'service.price_target'
+         and v_materialization->'structured'->'quoteable'
+              is not distinct from 'true'::jsonb
+         and v_materialization->'structured'->'price_target'
+              is distinct from v_value then
+        raise exception using errcode = '22023',
+          message = 'onboarding_structured_projection_invalid';
+      elsif p_fact->>'field' = 'service.negotiation'
+            and v_materialization->'structured'->'quoteable'
+              is not distinct from 'true'::jsonb
+            and v_materialization->'structured'->'price_min'
+              is distinct from v_cell->'value'->'floor' then
+        raise exception using errcode = '22023',
+          message = 'onboarding_structured_projection_invalid';
+      elsif p_fact->>'field' = 'service.duration'
+            and v_materialization->'structured'->'duration_min'
+              is distinct from v_value then
+        raise exception using errcode = '22023',
+          message = 'onboarding_structured_projection_invalid';
+      elsif p_fact->>'field' = 'service.name_synonyms'
+            and v_materialization->'structured'->'service_names'
+              is distinct from (
+                select jsonb_agg(
+                  to_jsonb(regexp_replace(
+                    name #>> '{}', '^[[:space:]]+|[[:space:]]+$', '', 'g'
+                  )) order by ordinal
+                )
+                from jsonb_array_elements(v_value)
+                  with ordinality names(name, ordinal)
+              ) then
+        raise exception using errcode = '22023',
+          message = 'onboarding_structured_projection_invalid';
+      elsif p_fact->>'field' = 'service.emergency_eligibility'
+            and v_materialization->'structured'->'emergency_eligible'
+              is distinct from v_value then
+        raise exception using errcode = '22023',
+          message = 'onboarding_structured_projection_invalid';
+      end if;
+    end if;
+
+    if p_fact->>'disposition' = 'answered'
+       and v_value_valid
+       and v_materialization->'structured'->'materialization_eligible'
+         is not distinct from 'true'::jsonb
+       and p_fact->>'field' = 'area.coverage'
+       and v_materialization->'structured'->'cities'
+         is distinct from v_value->'cities' then
+      raise exception using errcode = '22023',
+        message = 'onboarding_structured_projection_invalid';
+    end if;
+    if p_fact->>'disposition' = 'answered'
+       and v_value_valid
+       and v_materialization->'structured'->'materialization_eligible'
+         is not distinct from 'true'::jsonb
+       and p_fact->>'field' = 'schedule.business_hours'
+       and v_materialization->'structured'->'business_hours'
+         is distinct from v_value then
+      raise exception using errcode = '22023',
+        message = 'onboarding_structured_projection_invalid';
+    end if;
+    if coalesce(v_cell->>'state', '') in ('ambiguous', 'missing')
+       and exists (
          select 1
-         from jsonb_array_elements(
-           coalesce(p_coverage->'materializations', '[]'::jsonb)
-         ) item
+         from jsonb_array_elements(p_coverage->'materializations') item
          where item->>'key' = v_materialization_key
            and (
              coalesce((item->>'review_ready')::boolean, false)
@@ -229,7 +639,7 @@ begin
            )
        ) then
       raise exception using errcode = '22023',
-        message = 'onboarding_structured_value_required';
+        message = 'onboarding_structured_projection_invalid';
     end if;
   end if;
   return public.record_onboarding_answer_v2_base(
@@ -475,6 +885,7 @@ begin
     v_readback, v_payload_hash,
     jsonb_build_object(
       'transition_kind', 'directed_followup',
+      'transition_schema', 2,
       'source_revision', p_expected_revision,
       'source_digest', v_latest.readback->>'snapshot_digest',
       'field', p_field,

@@ -545,6 +545,63 @@ describe("V2 domain policies", () => {
     });
   });
 
+  test("state and country labels cannot become active city enforcement", async () => {
+    for (const invalidCity of ["California", "United States"]) {
+      activeRules = [
+        ...RULES,
+        domainRule(
+          "v2e",
+          "domain:area",
+          "area",
+          "ligou.rule.area.v2",
+          { cities: [invalidCity], coverage_labels: [invalidCity] },
+          `${invalidCity}.`,
+        ),
+      ];
+      invalidateTenant(TENANT.slug);
+      const info = await runTool(cap(), "get_business_info", {});
+      expect(info.body.service_area, invalidCity).toBeNull();
+      const quote = await runTool(cap(), "quote_price", {
+        service_type: "drain_cleaning",
+      });
+      const availability = await runTool(cap(), "check_availability", {
+        service_type: "drain_cleaning",
+        service_city: "Irvine",
+        quote_id: quote.body.quote_id,
+      });
+      expect(availability.body, invalidCity).toMatchObject({
+        status: "needs_owner",
+        reason: "area_policy_requires_owner",
+      });
+    }
+  });
+
+  test("State College remains a legitimate declared city", async () => {
+    activeRules = [
+      ...RULES,
+      domainRule(
+        "v2e",
+        "domain:area",
+        "area",
+        "ligou.rule.area.v2",
+        { cities: ["State College"], coverage_labels: ["State College"] },
+        "State College.",
+      ),
+    ];
+    invalidateTenant(TENANT.slug);
+    const info = await runTool(cap(), "get_business_info", {});
+    expect(info.body.service_area).toEqual(["State College"]);
+    const quote = await runTool(cap(), "quote_price", {
+      service_type: "drain_cleaning",
+    });
+    const availability = await runTool(cap(), "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "State College",
+      quote_id: quote.body.quote_id,
+    });
+    expect(availability.body.status).toBe("ok");
+  });
+
   test("extra schedule keys are neither exposed as configured hours nor used for slots", async () => {
     activeRules = [
       ...RULES,
@@ -596,6 +653,46 @@ describe("V2 domain policies", () => {
       reason: "schedule_policy_requires_owner",
     });
   });
+
+  test("a schedule V2 row masquerading as price shadows legacy and cannot be quoted", async () => {
+    activeRules = [
+      ...RULES,
+      {
+        id: "schedule-as-price",
+        rule_group_id: "schedule-as-price-group",
+        version: 1,
+        category: "preco",
+        escopo: "servico",
+        text: "CROSS DOMAIN PRICE MUST NOT BE TRUSTED.",
+        structured: {
+          schema: "ligou.rule.schedule.v2",
+          materialization_key: "domain:schedule",
+          materialization_hash: "c".repeat(64),
+          materialization_eligible: true,
+          review_ready: true,
+          operational_state: "active",
+          service_type: "drain_cleaning",
+          price_target: 1,
+          price_min: 1,
+          duration_min: 1,
+          business_hours: {
+            days: ["mon"],
+            hours: { opens: "08:00", closes: "18:00" },
+          },
+        },
+      },
+    ];
+    invalidateTenant(TENANT.slug);
+    const info = await runTool(cap(), "get_business_info", {});
+    expect(info.body.services).not.toContain("drain_cleaning");
+    const quote = await runTool(cap(), "quote_price", {
+      service_type: "drain_cleaning",
+    });
+    expect(quote.body).toMatchObject({
+      status: "needs_owner",
+      reason: "service_not_in_approved_list",
+    });
+  });
 });
 
 describe("overlapsBusy", () => {
@@ -642,6 +739,54 @@ describe("create_async_case", () => {
 });
 
 describe("capability boundary", () => {
+  test("runTool preserves exact structured values across every onboarding group", async () => {
+    const onboarding = makeCapability(
+      TENANT.slug,
+      TENANT.id,
+      "call-structured-groups",
+      30,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1 },
+      "u-1",
+    );
+    const examples = [
+      ["outro", "business.customer_types", undefined, "answered", ["residencial"], "answered"],
+      ["area", "area.coverage", undefined, "answered", { cities: ["Irvine", "State College"] }, "answered"],
+      ["agenda", "schedule.business_hours", undefined, "answered", {
+        days: ["mon", "tue"], hours: { opens: "08:00", closes: "18:00" },
+      }, "answered"],
+      ["emergencia", "emergency.types", undefined, "answered", ["vazamento"], "answered"],
+      ["outro", "policy.payment_estimate", undefined, "answered", "Cartão aceito.", "answered"],
+      ["outro", "authority.book", undefined, "answered", "Somente com poder vigente.", "answered"],
+      ["servicos", "service.duration", "drain_cleaning", "answered", 60, "answered"],
+      ["area", "area.travel_fee", undefined, "not_applicable", null, "not_applicable"],
+      ["outro", "authority.charge_fee", undefined, "owner_review_required", null, "owner_review_required"],
+    ] as const;
+
+    for (const [topic, field, subject, disposition, value, expectedState] of examples) {
+      const result = await runTool(onboarding, "record_interview_answer", {
+        topic,
+        field,
+        ...(subject ? { subject } : {}),
+        disposition,
+        rule_text: `Evidence ${field}`,
+        structured: { value },
+        owner_words: `Resposta explícita para ${field}.`,
+      }, `provider-${field}`);
+      expect(result.body.status, field).toBe("recorded");
+      const call = rpcCalls.at(-1)!;
+      expect(call.args.p_fact, field).toMatchObject({
+        field,
+        structured: { value },
+      });
+      const coverage = call.args.p_coverage as any;
+      const key = subject ? `service:${subject}:${field}` : field;
+      expect(coverage.snapshot.cells[key], field).toMatchObject({
+        state: expectedState,
+      });
+    }
+  });
+
   test("an owner-bound onboarding capability records through the atomic RPC and a policy change invalidates it immediately", async () => {
     const onboarding = makeCapability(
       TENANT.slug,
@@ -904,6 +1049,7 @@ describe("session-scoped Realtime tools", () => {
       "field",
       "owner_words",
       "rule_text",
+      "structured",
       "topic",
     ]);
     expect(record.parameters.properties.field.enum).toContain(
@@ -1017,6 +1163,53 @@ describe("instructions builder", () => {
     expect(instructions).not.toContain("MALFORMED V2 SCHEDULE");
     expect(instructions).not.toContain("Orange County only:");
     expect(instructions).not.toContain("Mon–Sat 08:00–18:00 Pacific.");
+  });
+
+  test("cross-domain V2 rows block legacy category and pricing prompt fallback", () => {
+    const scheduleAsArea = {
+      id: "schedule-as-area",
+      rule_group_id: "schedule-as-area-group",
+      version: 1,
+      category: "area",
+      escopo: "localizacao",
+      text: "CROSS DOMAIN AREA MUST NOT BE TRUSTED.",
+      structured: {
+        schema: "ligou.rule.schedule.v2",
+        materialization_key: "domain:schedule",
+        materialization_hash: "d".repeat(64),
+        materialization_eligible: true,
+        review_ready: true,
+        operational_state: "active",
+        business_hours: {
+          days: ["mon"],
+          hours: { opens: "08:00", closes: "18:00" },
+        },
+      },
+    };
+    const scheduleAsPrice = {
+      ...scheduleAsArea,
+      id: "schedule-as-price",
+      rule_group_id: "schedule-as-price-group",
+      category: "preco",
+      escopo: "servico",
+      text: "CROSS DOMAIN PRICE MUST NOT BE TRUSTED.",
+      structured: {
+        ...scheduleAsArea.structured,
+        service_type: "drain_cleaning",
+        price_target: 1,
+        price_min: 1,
+        duration_min: 1,
+      },
+    };
+    const instructions = buildInstructions(
+      TENANT as any,
+      [...RULES, scheduleAsArea, scheduleAsPrice] as any,
+      "customer",
+    );
+    expect(instructions).not.toContain("CROSS DOMAIN AREA");
+    expect(instructions).not.toContain("CROSS DOMAIN PRICE");
+    expect(instructions).not.toContain("Orange County only:");
+    expect(instructions).not.toContain("- drain_cleaning:");
   });
 
   test("stable prefix is byte-identical across builds (cache hygiene)", () => {
@@ -1149,6 +1342,13 @@ describe("instructions builder", () => {
     expect(record.parameters.properties.subject.description).toMatch(
       /top-level[^.]*required[^.]*service\.\*/i,
     );
+    expect(record.parameters.required).toContain("structured");
+    expect(record.parameters.properties.structured).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["value"],
+      properties: { value: expect.any(Object) },
+    });
     const structured = record.parameters.properties.structured.description;
     expect(structured).toContain('{"value":...}');
     expect(structured).toContain("service.name_synonyms");
@@ -1158,15 +1358,33 @@ describe("instructions builder", () => {
     expect(structured).toContain("non_negotiable");
     expect(structured).toContain("service.duration");
     expect(structured).toContain("service.catalog_closure");
-    expect(structured).toContain("area.coverage -> exact city-name array only");
+    expect(structured).toContain('area.coverage -> {"cities":["Irvine","State College"]}');
     expect(structured).toContain(
       'schedule.business_hours -> {"days":["sun"|"mon"|"tue"|"wed"|"thu"|"fri"|"sat"],"hours":{"opens":"HH:00","closes":"HH:00"}}',
     );
     expect(structured).not.toMatch(/area\.coverage[^.]*regions|area\.coverage[^.]*ZIP/i);
+    for (const groupExample of [
+      "business.* ->",
+      "emergency.* ->",
+      "policy.* ->",
+      "authority.* ->",
+      "service.* ->",
+      'owner_review_required|not_applicable -> {"value":null}',
+    ]) expect(structured).toContain(groupExample);
     expect(instructions).toMatch(/area\.coverage[^.]*nomes exatos de cidades/i);
     expect(instructions).not.toMatch(/area\.coverage[^.]*regiões|area\.coverage[^.]*CEPs/i);
     expect(instructions).toContain(
       'schedule.business_hours com structured={value:{days:["sun","mon","tue","wed","thu","fri","sat"],hours:{opens:"08:00",closes:"18:00"}}}',
+    );
+    for (const promptExample of [
+      "business.* com structured={value:",
+      "emergency.* com structured={value:",
+      "policy.* com structured={value:",
+      "authority.* com structured={value:",
+      "owner_review_required ou not_applicable com structured={value:null}",
+    ]) expect(instructions).toContain(promptExample);
+    expect(instructions).toContain(
+      "field service.* exceto service.catalog_closure",
     );
     expect(structured).not.toContain("price_min");
   });
