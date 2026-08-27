@@ -2470,6 +2470,47 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
     expect(l.onboarding!.responses["response-B"]?.callerTurnId).toBe("turn-B");
   });
 
+  test("turn-detected cancellation retires the interrupted turn before binding the barge-in response", async () => {
+    const cap = onboardingCap("call-turn-detected-order");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "session.created" });
+
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-A",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-A",
+      transcript: "A",
+    });
+    await handleEvent(cap, l, ws as any, responseCreated("response-A"));
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-B",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-B",
+      transcript: "B",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "response.done",
+      response: {
+        id: "response-A",
+        status: "cancelled",
+        status_details: { type: "cancelled", reason: "turn_detected" },
+      },
+    });
+    await handleEvent(cap, l, ws as any, responseCreated("response-B"));
+
+    expect(l.onboarding!.responses["response-A"]?.callerTurnId).toBe("turn-A");
+    expect(l.onboarding!.responses["response-B"]?.callerTurnId).toBe("turn-B");
+    expect(l.onboarding!.pendingCallerTurns.map((turn) => turn.turnId))
+      .toEqual(["turn-B"]);
+  });
+
   test("speech-owned pending turn correlation fails closed at its deterministic bound", async () => {
     const cap = onboardingCap("call-pending-turn-capacity");
     const l = ledger(cap.callId);

@@ -1722,6 +1722,8 @@ async function handleOnboardingRawEvent(
       buffered.terminal = true;
       const ordinaryCancelled = responseStatus === "cancelled" &&
         buffered.tools.length === 0 && !buffered.invariant;
+      const turnDetectedCancellation = ordinaryCancelled &&
+        msg.response?.status_details?.reason === "turn_detected";
       if (responseStatus !== "completed" && !ordinaryCancelled) {
         buffered.invariant = {
           code: "response_not_completed",
@@ -1832,6 +1834,14 @@ async function handleOnboardingRawEvent(
         callerTurn.responseTerminal = true;
         if (callerTurn.transcriptCompleted)
           adapter.pendingCallerTurns.splice(callerTurnIndex, 1);
+        adapter.speechPending = adapter.pendingCallerTurns.some(
+          (turn) => turn.responseTerminal !== true,
+        );
+        if (!adapter.speechPending) await drainPendingResponseCommands(context);
+      } else if (callerTurnIndex >= 0 && turnDetectedCancellation) {
+        // This response belonged to the interrupted turn. The provider's next
+        // response belongs to the newer speech-start record, never to this one.
+        adapter.pendingCallerTurns.splice(callerTurnIndex, 1);
         adapter.speechPending = adapter.pendingCallerTurns.some(
           (turn) => turn.responseTerminal !== true,
         );
