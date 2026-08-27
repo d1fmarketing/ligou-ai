@@ -2,7 +2,11 @@
 // The browser only carries audio; it never executes tools and never holds credentials beyond its own mic.
 import { createHash } from "node:crypto";
 import { config, emptyUsage, sessionCostUsd, type UsageTotals } from "./config.ts";
-import { runTool, type Capability } from "./tools.ts";
+import {
+  runTool,
+  validateToolArgumentsForCapability,
+  type Capability,
+} from "./tools.ts";
 import { supa } from "./rules.ts";
 import { finalizeTerminalBudget, type BudgetOutcome } from "./budget.ts";
 import { requestProviderTermination, type FetchLike } from "./provider-termination.ts";
@@ -42,12 +46,34 @@ type PendingMutationCommand =
   | PersistFollowupCommand
   | PersistApprovalCommand;
 
+type OnboardingAdapterInvariantCode =
+  | "tool_args_mismatch"
+  | "function_item_identity_missing"
+  | "function_item_after_terminal_response"
+  | "tool_batch_too_large"
+  | "response_not_completed"
+  | "function_item_not_completed"
+  | "output_index_invalid"
+  | "output_index_duplicate"
+  | "adapter_capacity_exceeded"
+  | "reused_coverage_mismatch"
+  | "tool_args_json_invalid"
+  | "tool_schema_invalid"
+  | "tool_not_admitted"
+  | "tool_output_created_invalid"
+  | "tool_output_retrieved_invalid"
+  | "tool_output_retrieve_failed";
+
 interface BufferedOnboardingTool {
   toolCallId: string;
   name: string;
-  args: Record<string, unknown>;
+  args?: Record<string, unknown>;
   argsHash: string;
   outputIndex: number;
+  memberError?: {
+    code: OnboardingAdapterInvariantCode;
+    safeDetail: string;
+  };
 }
 
 interface BufferedOnboardingResponse {
@@ -55,17 +81,7 @@ interface BufferedOnboardingResponse {
   tools: BufferedOnboardingTool[];
   terminal: boolean;
   invariant?: {
-    code:
-      | "tool_args_mismatch"
-      | "function_item_identity_missing"
-      | "function_item_after_terminal_response"
-      | "tool_batch_too_large"
-      | "response_not_completed"
-      | "function_item_not_completed"
-      | "output_index_invalid"
-      | "output_index_duplicate"
-      | "adapter_capacity_exceeded"
-      | "reused_coverage_mismatch";
+    code: OnboardingAdapterInvariantCode;
     safeDetail: string;
   };
 }
@@ -74,6 +90,7 @@ export interface OnboardingAdapterState {
   lifecycle: OnboardingLifecycle;
   queue: Promise<void>;
   responses: Record<string, BufferedOnboardingResponse>;
+  terminalResponseBatchHashes: Record<string, string | null>;
   activeCallerTurnId?: string;
   callerTurnSequence: number;
   interrupted: boolean;
@@ -86,6 +103,7 @@ export interface OnboardingAdapterState {
 }
 
 const MAX_ADAPTER_RESPONSES = 512;
+const MAX_TERMINAL_RESPONSE_IDENTITIES = 1024;
 const MAX_PENDING_RESPONSE_COMMANDS = 512;
 const MAX_PENDING_MUTATION_COMMANDS = 512;
 const MAX_ADAPTER_TOOL_RECEIPTS = 512;
@@ -103,6 +121,11 @@ export interface SessionLedger {
     lastReceivedAt: string | null;
     continuous: boolean;
     terminal: boolean;
+  };
+  providerTerminalEvidence?: {
+    observed: true;
+    reason: "provider_session_ended";
+    receivedAt: string;
   };
   transcript: Array<{ role: "caller" | "agent" | "system"; text: string; at: string }>;
   toolLog: Array<{ name: string; ok: boolean; durationMs: number }>;
@@ -123,6 +146,10 @@ export interface SessionLedger {
   requestedResponseIntentKeys?: string[];
   /** The session was ended by the agent, so the provider call is still live and needs the audited hangup. */
   agentEnded?: boolean;
+  /** A successful terminal settlement is never submitted twice by one controller. */
+  budgetFinalized?: boolean;
+  /** Server-owned identity required to validate the exact onboarding greeting. */
+  expectedOnboardingBusinessName?: string;
   /** Onboarding-only reducer/transport state. It survives sideband socket reattachment. */
   onboarding?: OnboardingAdapterState;
 }
@@ -144,6 +171,7 @@ export interface SidebandControl {
 
 export interface SidebandOptions {
   phone?: { eventId: string; claimToken: string };
+  onboarding?: { expectedBusinessName: string };
   fetchImpl?: FetchLike;
 }
 
@@ -155,11 +183,15 @@ export function terminalStatusForReason(
   return reason === "caller_hung_up" ? "ended" : "error";
 }
 
-function createOnboardingAdapter(callId: string): OnboardingAdapterState {
+function createOnboardingAdapter(
+  callId: string,
+  expectedBusinessName: string,
+): OnboardingAdapterState {
   return {
-    lifecycle: createOnboardingLifecycle(callId),
+    lifecycle: createOnboardingLifecycle(callId, expectedBusinessName),
     queue: Promise.resolve(),
     responses: {},
+    terminalResponseBatchHashes: {},
     callerTurnSequence: 0,
     interrupted: false,
     pendingResponseCommands: {},
@@ -171,7 +203,10 @@ function createOnboardingAdapter(callId: string): OnboardingAdapterState {
 
 function ensureOnboardingAdapter(ledger: SessionLedger): OnboardingAdapterState {
   return ledger.onboarding ??
-    (ledger.onboarding = createOnboardingAdapter(ledger.callId));
+    (ledger.onboarding = createOnboardingAdapter(
+      ledger.callId,
+      ledger.expectedOnboardingBusinessName ?? "",
+    ));
 }
 
 function onboardingBatchHash(tools: BufferedOnboardingTool[]): string {
@@ -199,16 +234,32 @@ function ensureResponseCapacity(adapter: OnboardingAdapterState): boolean {
 }
 
 function preflightOnboardingBatch(
+  cap: Capability,
   adapter: OnboardingAdapterState,
   responseId: string,
   batchHash: string,
   tools: BufferedOnboardingTool[],
+  socketGeneration: number,
 ): BufferedOnboardingResponse["invariant"] | undefined {
   if (adapter.lifecycle.phase === "blocked")
     return {
       code: "tool_args_mismatch",
       safeDetail: "blocked lifecycle cannot admit another tool batch",
     };
+  for (const tool of tools) {
+    if (tool.memberError) return tool.memberError;
+    if (!tool.args)
+      return {
+        code: "tool_args_json_invalid",
+        safeDetail: "provider tool arguments were not a JSON object",
+      };
+    const validation = validateToolArgumentsForCapability(
+      cap,
+      tool.name,
+      tool.args,
+    );
+    if (!validation.ok) return validation;
+  }
   let newReceipts = 0;
   for (const tool of tools) {
     const existing = adapter.lifecycle.toolOutbox[tool.toolCallId];
@@ -244,6 +295,27 @@ function preflightOnboardingBatch(
       code: "adapter_capacity_exceeded",
       safeDetail: "tool batch replay registry reached its deterministic bound",
     };
+  let preview = adapter.lifecycle;
+  for (const tool of tools) {
+    const reduced = reduceOnboarding(preview, {
+      type: "tool.called",
+      socketGeneration,
+      toolCallId: tool.toolCallId,
+      name: tool.name,
+      args: tool.args!,
+      providerResponseId: responseId,
+      batchHash,
+      elapsedMs: 0,
+    });
+    if (
+      preview.phase !== "blocked" &&
+      reduced.lifecycle.phase === "blocked"
+    ) return {
+      code: "tool_not_admitted",
+      safeDetail: "provider tool batch was not admissible in the current lifecycle",
+    };
+    preview = reduced.lifecycle;
+  }
   return undefined;
 }
 
@@ -690,15 +762,22 @@ async function executeOnboardingCommands(
       }
       case "resend_output": {
         try {
-          ws.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              id: command.outputItemId,
-              type: "function_call_output",
-              call_id: command.toolCallId,
-              output: command.output,
-            },
-          }));
+          ws.send(JSON.stringify(command.delivery === "create"
+            ? {
+                type: "conversation.item.create",
+                event_id: command.eventId,
+                item: {
+                  id: command.outputItemId,
+                  type: "function_call_output",
+                  call_id: command.toolCallId,
+                  output: command.output,
+                },
+              }
+            : {
+                type: "conversation.item.retrieve",
+                event_id: command.eventId,
+                item_id: command.outputItemId,
+              }));
         } catch {
           // The reducer intentionally keeps the receipt in executed/pending.
           // A later socket generation receives a deterministic resend command.
@@ -709,6 +788,8 @@ async function executeOnboardingCommands(
           type: "tool.output_sent",
           socketGeneration: generation,
           toolCallId: command.toolCallId,
+          delivery: command.delivery,
+          eventId: command.eventId,
           elapsedMs: 0,
         });
         break;
@@ -764,8 +845,7 @@ async function drainPendingResponseCommands(
 async function attachOnboardingSocket(
   context: OnboardingCommandContext,
 ): Promise<void> {
-  const adapter = context.ledger.onboarding ??
-    (context.ledger.onboarding = createOnboardingAdapter(context.ledger.callId));
+  const adapter = ensureOnboardingAdapter(context.ledger);
   const pendingBeforeAttach = Object.values(adapter.pendingResponseCommands)
     .map((command) => structuredClone(command));
   const pendingMutationsBeforeAttach = Object.values(
@@ -792,8 +872,7 @@ function enqueueOnboardingRawEvent(
   context: OnboardingCommandContext,
   msg: any,
 ): Promise<void> {
-  const adapter = context.ledger.onboarding ??
-    (context.ledger.onboarding = createOnboardingAdapter(context.ledger.callId));
+  const adapter = ensureOnboardingAdapter(context.ledger);
   if (!context.isCurrent()) return Promise.resolve();
   if (msg?.type === "input_audio_buffer.speech_started") {
     adapter.speechGeneration += 1;
@@ -917,7 +996,7 @@ async function handleOnboardingRawEvent(
   context: OnboardingCommandContext,
   msg: any,
 ): Promise<void> {
-  const { ledger, ws, isCurrent } = context;
+  const { cap, ledger, ws, isCurrent } = context;
   const adapter = ensureOnboardingAdapter(ledger);
   const generation = adapter.lifecycle.socketGeneration;
   if (
@@ -967,14 +1046,27 @@ async function handleOnboardingRawEvent(
         });
         break;
       }
-      let args: Record<string, unknown> = {};
+      const rawArguments = typeof item.arguments === "string"
+        ? item.arguments
+        : null;
+      let args: Record<string, unknown> | undefined;
+      let memberError: BufferedOnboardingTool["memberError"];
       try {
-        const parsed = JSON.parse(typeof item.arguments === "string" ? item.arguments : "{}");
+        const parsed = rawArguments === null
+          ? undefined
+          : JSON.parse(rawArguments);
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
           args = parsed as Record<string, unknown>;
+        else
+          memberError = {
+            code: "tool_args_json_invalid",
+            safeDetail: "provider tool arguments were not a JSON object",
+          };
       } catch {
-        // Invalid JSON is kept as an empty object. The tool boundary validates
-        // the required shape and returns a deterministic safe result.
+        memberError = {
+          code: "tool_args_json_invalid",
+          safeDetail: "provider tool arguments were malformed JSON",
+        };
       }
       let buffered = adapter.responses[responseId];
       if (!buffered) {
@@ -1010,6 +1102,19 @@ async function handleOnboardingRawEvent(
         };
         break;
       }
+      if (
+        Object.prototype.hasOwnProperty.call(
+          adapter.terminalResponseBatchHashes,
+          responseId,
+        ) &&
+        adapter.terminalResponseBatchHashes[responseId] === null
+      ) {
+        buffered.invariant = {
+          code: "function_item_after_terminal_response",
+          safeDetail: "provider function item reopened a terminal response without tools",
+        };
+        break;
+      }
       const outputIndex = msg.output_index;
       if (!Number.isSafeInteger(outputIndex) || outputIndex < 0) {
         buffered.invariant = {
@@ -1018,7 +1123,11 @@ async function handleOnboardingRawEvent(
         };
         break;
       }
-      const argsHash = hashOnboardingToolArgs(args);
+      const argsHash = args
+        ? hashOnboardingToolArgs(args)
+        : createHash("sha256")
+          .update(`invalid-json\0${rawArguments ?? "<missing>"}`, "utf8")
+          .digest("hex");
       const replay = buffered.tools.find((tool) => tool.toolCallId === toolCallId);
       if (
         replay && replay.name === name && replay.argsHash === argsHash &&
@@ -1045,7 +1154,14 @@ async function handleOnboardingRawEvent(
         };
         break;
       }
-      buffered.tools.push({ toolCallId, name, args, argsHash, outputIndex });
+      buffered.tools.push({
+        toolCallId,
+        name,
+        ...(args ? { args } : {}),
+        argsHash,
+        outputIndex,
+        ...(memberError ? { memberError } : {}),
+      });
       break;
     }
     case "conversation.item.created": {
@@ -1054,11 +1170,68 @@ async function handleOnboardingRawEvent(
       const receipt = Object.values(adapter.lifecycle.toolOutbox)
         .find((candidate) => candidate.outputItemId === outputItemId);
       if (!receipt) break;
+      if (
+        receipt.state !== "output_pending" ||
+        receipt.outputRequest?.delivery !== "create" ||
+        receipt.outputRequest.socketGeneration !== generation
+      ) break;
+      if (
+        msg.item?.type !== "function_call_output" ||
+        msg.item?.call_id !== receipt.toolCallId ||
+        msg.item?.output !== receipt.output
+      ) {
+        adapter.interrupted = true;
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "tool_output_created_invalid",
+          safeDetail: "created provider output did not match the pending receipt",
+          elapsedMs: 0,
+        });
+        break;
+      }
       await dispatchOnboardingEvent(context, {
         type: "tool.output_acked",
         socketGeneration: generation,
         toolCallId: receipt.toolCallId,
         outputItemId,
+        elapsedMs: 0,
+      });
+      break;
+    }
+    case "conversation.item.retrieved": {
+      const pendingRetrievals = Object.values(adapter.lifecycle.toolOutbox)
+        .filter((candidate) =>
+          candidate.state === "output_pending" &&
+          candidate.outputRequest?.delivery === "retrieve" &&
+          candidate.outputRequest.socketGeneration === generation
+        );
+      if (pendingRetrievals.length === 0) break;
+      const itemId = exactString(msg.item?.id);
+      const receipt = itemId
+        ? pendingRetrievals.find((candidate) =>
+            candidate.outputItemId === itemId
+          )
+        : undefined;
+      if (
+        !receipt ||
+        msg.item?.type !== "function_call_output" ||
+        msg.item?.call_id !== receipt.toolCallId ||
+        msg.item?.output !== receipt.output
+      ) {
+        adapter.interrupted = true;
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "tool_output_retrieved_invalid",
+          safeDetail: "retrieved provider output did not match the pending receipt",
+          elapsedMs: 0,
+        });
+        break;
+      }
+      await dispatchOnboardingEvent(context, {
+        type: "tool.output_acked",
+        socketGeneration: generation,
+        toolCallId: receipt.toolCallId,
+        outputItemId: receipt.outputItemId,
         elapsedMs: 0,
       });
       break;
@@ -1207,6 +1380,32 @@ async function handleOnboardingRawEvent(
           safeDetail: "provider response was not completed",
         };
       }
+      const knownTerminalIdentity = Object.prototype.hasOwnProperty.call(
+        adapter.terminalResponseBatchHashes,
+        responseId,
+      );
+      const sortedTools = buffered.tools.length > 0
+        ? [...buffered.tools]
+          .sort((left, right) => left.outputIndex - right.outputIndex)
+        : [];
+      const batchHash = sortedTools.length > 0
+        ? onboardingBatchHash(sortedTools)
+        : null;
+      if (
+        knownTerminalIdentity &&
+        adapter.terminalResponseBatchHashes[responseId] !== batchHash
+      ) buffered.invariant = {
+        code: "tool_args_mismatch",
+        safeDetail: "terminal provider response replay changed its tool batch identity",
+      };
+      if (
+        !knownTerminalIdentity &&
+        Object.keys(adapter.terminalResponseBatchHashes).length >=
+          MAX_TERMINAL_RESPONSE_IDENTITIES
+      ) buffered.invariant = {
+        code: "adapter_capacity_exceeded",
+        safeDetail: "terminal response identity registry reached its deterministic bound",
+      };
       if (buffered.invariant) {
         adapter.interrupted = true;
         await dispatchOnboardingEvent(context, {
@@ -1214,15 +1413,14 @@ async function handleOnboardingRawEvent(
           ...buffered.invariant,
           elapsedMs: 0,
         });
-      } else if (buffered.tools.length > 0) {
-        const sortedTools = [...buffered.tools]
-          .sort((left, right) => left.outputIndex - right.outputIndex);
-        const batchHash = onboardingBatchHash(sortedTools);
+      } else if (sortedTools.length > 0 && batchHash) {
         const preflight = preflightOnboardingBatch(
+          cap,
           adapter,
           responseId,
           batchHash,
           sortedTools,
+          generation,
         );
         if (preflight) {
           adapter.interrupted = true;
@@ -1231,17 +1429,21 @@ async function handleOnboardingRawEvent(
             ...preflight,
             elapsedMs: 0,
           });
-        } else for (const tool of sortedTools)
-          await dispatchOnboardingEvent(context, {
+        } else {
+          if (!knownTerminalIdentity)
+            adapter.terminalResponseBatchHashes[responseId] = batchHash;
+          for (const tool of sortedTools)
+            await dispatchOnboardingEvent(context, {
             type: "tool.called",
             socketGeneration: generation,
             toolCallId: tool.toolCallId,
             name: tool.name,
-            args: tool.args,
+            args: tool.args!,
             providerResponseId: responseId,
             batchHash,
             elapsedMs: 0,
           });
+        }
         if (!preflight)
           await dispatchOnboardingEvent(context, {
             type: "tool.batch_closed",
@@ -1250,6 +1452,8 @@ async function handleOnboardingRawEvent(
             toolCallIds: sortedTools.map((tool) => tool.toolCallId),
             elapsedMs: 0,
           });
+      } else if (!knownTerminalIdentity) {
+        adapter.terminalResponseBatchHashes[responseId] = null;
       }
       ledger.responseActive = false;
       await dispatchOnboardingEvent(context, {
@@ -1259,12 +1463,12 @@ async function handleOnboardingRawEvent(
         elapsedMs: 0,
       });
       const spent = sessionCostUsd(ledger.model, ledger.usage);
-      const cap = sessionCostCapUsd(ledger.model);
-      if (spent >= cap && ledger.status === "active") {
+      const costCapUsd = sessionCostCapUsd(ledger.model);
+      if (spent >= costCapUsd && ledger.status === "active") {
         ledger.status = "killed_budget";
         ledger.transcript.push({
           role: "system",
-          text: `session ended: cost cap reached ($${spent.toFixed(2)} >= $${cap.toFixed(2)})`,
+          text: `session ended: cost cap reached ($${spent.toFixed(2)} >= $${costCapUsd.toFixed(2)})`,
           at: new Date().toISOString(),
         });
         try { ws.close(); } catch {}
@@ -1281,6 +1485,11 @@ async function handleOnboardingRawEvent(
       break;
     }
     case "session.ended": {
+      ledger.providerTerminalEvidence = {
+        observed: true,
+        reason: "provider_session_ended",
+        receivedAt: new Date().toISOString(),
+      };
       const usage = validatedProviderUsage(msg.usage);
       if (usage) {
         ledger.usage = usage;
@@ -1306,6 +1515,41 @@ async function handleOnboardingRawEvent(
     case "error": {
       const code = exactString(msg.error?.code) ?? "";
       const message = typeof msg.error?.message === "string" ? msg.error.message : "";
+      const causingEventId = exactString(msg.error?.event_id);
+      const outputReceipt = causingEventId
+        ? Object.values(adapter.lifecycle.toolOutbox).find((candidate) =>
+            candidate.state === "output_pending" &&
+            candidate.outputRequest?.eventId === causingEventId &&
+            candidate.outputRequest.socketGeneration === generation
+          )
+        : undefined;
+      if (outputReceipt?.outputRequest?.delivery === "retrieve") {
+        adapter.interrupted = true;
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "tool_output_retrieve_failed",
+          safeDetail: "provider could not retrieve the pending deterministic output",
+          elapsedMs: 0,
+        });
+        break;
+      }
+      const duplicateOutputCreate =
+        outputReceipt?.outputRequest?.delivery === "create" &&
+        (
+          code === "item_already_exists" ||
+          code === "conversation_item_already_exists" ||
+          /(?:item|conversation item).*(?:already exists|duplicate)/i.test(message)
+        );
+      if (duplicateOutputCreate) {
+        await dispatchOnboardingEvent(context, {
+          type: "tool.output_create_duplicate",
+          socketGeneration: generation,
+          toolCallId: outputReceipt.toolCallId,
+          eventId: causingEventId!,
+          elapsedMs: 0,
+        });
+        break;
+      }
       if (code === "conversation_already_has_active_response" ||
         /already has an active response/i.test(message)) {
         ledger.responseActive = true;
@@ -1332,6 +1576,13 @@ export function attachSideband(
   model: string,
   options: SidebandOptions = {},
 ): SidebandControl {
+  if (options.phone && cap.sessionType !== "customer")
+    throw new Error("onboarding_phone_sideband_forbidden");
+  const expectedOnboardingBusinessName = cap.sessionType === "onboarding"
+    ? exactString(options.onboarding?.expectedBusinessName)
+    : null;
+  if (cap.sessionType === "onboarding" && !expectedOnboardingBusinessName)
+    throw new Error("onboarding_expected_business_name_required");
   const ledger: SessionLedger = {
     callId: cap.callId,
     openaiCallId,
@@ -1348,8 +1599,16 @@ export function attachSideband(
     transcript: [],
     toolLog: [],
     status: "active",
+    ...(expectedOnboardingBusinessName
+      ? { expectedOnboardingBusinessName }
+      : {}),
     ...(cap.sessionType === "onboarding"
-      ? { onboarding: createOnboardingAdapter(cap.callId) }
+      ? {
+          onboarding: createOnboardingAdapter(
+            cap.callId,
+            expectedOnboardingBusinessName!,
+          ),
+        }
       : {}),
   };
   // Root-cause discipline (2026-08-19 incident): a WS close is NOT the end of the call — the WebRTC leg
@@ -1830,8 +2089,15 @@ export async function persistLedger(
   // "ended" normally means the provider already finished the call (session.ended /
   // caller hangup). An agent-initiated end is the exception: the status is "ended" but
   // the provider call is still live and must get the audited hangup.
-  const providerNeedsTermination = ledger.status !== "ended" || ledger.agentEnded === true;
-  const terminationReason = ledger.agentEnded === true ? "agent_ended_session" : `sideband_${ledger.status}`;
+  const providerTerminalObserved =
+    ledger.providerTerminalEvidence?.observed === true;
+  const providerNeedsTermination = !providerTerminalObserved &&
+    (ledger.status !== "ended" || ledger.agentEnded === true);
+  const terminationReason = ledger.agentEnded === true
+    ? "agent_ended_session"
+    : providerTerminalObserved
+      ? ledger.providerTerminalEvidence!.reason
+      : `sideband_${ledger.status}`;
   const outcome: BudgetOutcome = ledger.status === "ended"
     ? "ended"
     : ledger.status === "killed_deadline"
@@ -1840,7 +2106,9 @@ export async function persistLedger(
         ? "killed_budget"
         : "error";
   const providerUsageEvidence = usageResolved ? {
-    source: "response.done.usage",
+    source: providerTerminalObserved
+      ? "session.ended.usage"
+      : "response.done.usage",
     event_count: ledger.providerUsageEvidence.eventCount,
     last_response_id: ledger.providerUsageEvidence.lastResponseId,
     last_received_at: ledger.providerUsageEvidence.lastReceivedAt,
@@ -1892,14 +2160,21 @@ export async function persistLedger(
     usage_tokens: usageResolved ? ledger.usage as any : null,
     cost_estimate_usd: cost,
     summary_status: "pending_ingest",
-    provider_termination_state: providerNeedsTermination ? "active" : "confirmed",
-    provider_termination_mode: "hangup",
-    provider_termination_reason: providerNeedsTermination ? terminationReason : "caller_hung_up",
+    ...(providerNeedsTermination
+      ? {}
+      : {
+          provider_termination_state: "confirmed",
+          provider_termination_mode: "hangup",
+          provider_termination_reason: providerTerminalObserved
+            ? terminationReason
+            : "caller_hung_up",
+        }),
     provider_usage_state: usageResolved ? "resolved" : "unknown",
     provider_usage_evidence: providerUsageEvidence,
   }).eq("id", cap.callId);
   if (terminalWrite.error) return false;
-  return await finalizeTerminalBudget({
+  if (ledger.budgetFinalized === true) return true;
+  const finalized = await finalizeTerminalBudget({
     tenantId: cap.tenantId,
     callId: cap.callId,
     actualCostUsd: cost ?? 0,
@@ -1912,4 +2187,6 @@ export async function persistLedger(
     fetchImpl,
     usageResolved,
   });
+  if (finalized) ledger.budgetFinalized = true;
+  return finalized;
 }

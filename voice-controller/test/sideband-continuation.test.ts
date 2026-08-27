@@ -24,6 +24,9 @@ import {
 import { makeCapability, runTool, type Capability } from "../src/tools.ts";
 
 const ownerId = "owner-1";
+const onboardingOptions = {
+  onboarding: { expectedBusinessName: "Rocha Plumbing" },
+};
 
 function onboardingCap(callId = "call-1"): Capability {
   return makeCapability(
@@ -56,6 +59,7 @@ function ledger(callId = "call-1"): SessionLedger {
     transcript: [],
     toolLog: [],
     status: "active",
+    expectedOnboardingBusinessName: "Rocha Plumbing",
   };
 }
 
@@ -119,11 +123,82 @@ function functionCallDone(
   };
 }
 
-function outputAck(outputItemId: string) {
+function outputAck(l: SessionLedger, outputItemId: string) {
+  const receipt = Object.values(l.onboarding?.lifecycle.toolOutbox ?? {})
+    .find((candidate) => candidate.outputItemId === outputItemId);
+  if (!receipt?.output) throw new Error(`missing output receipt ${outputItemId}`);
+  return exactCreatedOutput(outputItemId, receipt.toolCallId, receipt.output);
+}
+
+function exactCreatedOutput(
+  outputItemId: string,
+  toolCallId: string,
+  output: string,
+) {
   return {
     type: "conversation.item.created",
-    item: { id: outputItemId, type: "function_call_output" },
+    item: {
+      id: outputItemId,
+      type: "function_call_output",
+      call_id: toolCallId,
+      output,
+    },
   };
+}
+
+function outputRetrieved(
+  outputItemId: string,
+  toolCallId: string,
+  output: string,
+) {
+  return {
+    type: "conversation.item.retrieved",
+    event_id: `server-event:${outputItemId}`,
+    item: {
+      id: outputItemId,
+      type: "function_call_output",
+      call_id: toolCallId,
+      output,
+    },
+  };
+}
+
+async function completeGreetingTrace(
+  cap: Capability,
+  l: SessionLedger,
+  ws: ReturnType<typeof socket>,
+  responseId = "resp-bootstrap",
+) {
+  await handleEvent(cap, l, ws as any, { type: "session.created" });
+  const lifecycle = l.onboarding!.lifecycle;
+  const intentKey = `greeting:${cap.callId}`;
+  lifecycle.responseIntents[intentKey] = {
+    intentKey,
+    purpose: "greeting",
+    state: "sent",
+  };
+  await handleEvent(
+    cap,
+    l,
+    ws as any,
+    responseCreated(responseId, intentKey),
+  );
+  await handleEvent(cap, l, ws as any, {
+    type: "response.output_audio_transcript.done",
+    response_id: responseId,
+    transcript:
+      "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Quais serviços sua empresa oferece?",
+  });
+  await handleEvent(cap, l, ws as any, {
+    type: "response.output_audio.done",
+    response_id: responseId,
+  });
+  await handleEvent(cap, l, ws as any, responseDone(responseId));
+  await handleEvent(cap, l, ws as any, {
+    type: "output_audio_buffer.stopped",
+    response_id: responseId,
+  });
+  expect(l.onboarding!.lifecycle.phase).toBe("collecting");
 }
 
 async function flushAsync() {
@@ -278,8 +353,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     const cap = onboardingCap("call-cancelled-vad-rebind");
     const l = ledger(cap.callId);
     const ws = socket();
-    await handleEvent(cap, l, ws as any, responseCreated("resp-bootstrap"));
-    await handleEvent(cap, l, ws as any, responseDone("resp-bootstrap"));
+    await completeGreetingTrace(cap, l, ws);
     const digest = "c".repeat(64);
     l.onboarding!.lifecycle.phase = "summary_speaking";
     l.onboarding!.lifecycle.coverage = {
@@ -360,7 +434,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       const ws = socket();
       await handleEvent(cap, l, ws as any, responseCreated("resp-item-status"));
       const item = functionCallDone(
-        "resp-item-status", "fc-item-status", "not_a_real_tool", "{}", 0,
+        "resp-item-status", "fc-item-status", "end_session", "{}", 0,
         status ?? "completed",
       );
       if (status === undefined) delete (item.item as any).status;
@@ -393,13 +467,191 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     const ws = socket();
     await handleEvent(cap, l, ws as any, responseCreated("resp-index-duplicate"));
     await handleEvent(cap, l, ws as any,
-      functionCallDone("resp-index-duplicate", "fc-index-a", "not_a_real_tool", "{}", 3));
+      functionCallDone("resp-index-duplicate", "fc-index-a", "end_session", "{}", 3));
     await handleEvent(cap, l, ws as any,
-      functionCallDone("resp-index-duplicate", "fc-index-b", "not_a_real_tool", "{}", 3));
+      functionCallDone("resp-index-duplicate", "fc-index-b", "end_session", "{}", 3));
     await handleEvent(cap, l, ws as any, responseDone("resp-index-duplicate"));
     expect(l.onboarding!.lifecycle.phase).toBe("blocked");
     expect(l.toolLog).toEqual([]);
     expect(functionOutputs(ws)).toEqual([]);
+  });
+
+  test("a malformed second member blocks the complete ordered batch before the valid first member has any effect", async () => {
+    const cap = onboardingCap("call-malformed-member-preflight");
+    const boundary = sequentialAnswerBoundary([
+      { status: "recorded", revision: 1, digest: "1".repeat(64) },
+    ]);
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+    const valid = {
+      topic: "area",
+      field: "area.coverage",
+      disposition: "answered",
+      rule_text: "Atende Irvine.",
+      structured: {
+        value: {
+          localities: [{
+            display_name: "Irvine",
+            country_code: "US",
+            region_code: "CA",
+          }],
+        },
+      },
+      owner_words: "Atendemos Irvine.",
+    };
+
+    await handleEvent(cap, l, ws as any, responseCreated("resp-atomic"));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-atomic",
+      "fc-valid-first",
+      "record_interview_answer",
+      JSON.stringify(valid),
+      0,
+    ));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-atomic",
+      "fc-malformed-second",
+      "record_interview_answer",
+      '{"topic":"area"',
+      1,
+    ));
+    await handleEvent(cap, l, ws as any, responseDone("resp-atomic"));
+
+    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expect(boundary.rpcFacts).toEqual([]);
+    expect(l.toolLog).toEqual([]);
+    expect(functionOutputs(ws)).toEqual([]);
+    expect(l.onboarding!.lifecycle.toolOutbox).toEqual({});
+    expect(l.onboarding!.lifecycle.toolBatches).toEqual({});
+  });
+
+  test("schema, capability, and JSON-object admission validate every member before the first effect", async () => {
+    const valid = {
+      topic: "area",
+      field: "area.coverage",
+      disposition: "answered",
+      rule_text: "Atende Irvine.",
+      structured: {
+        value: {
+          localities: [{
+            display_name: "Irvine",
+            country_code: "US",
+            region_code: "CA",
+          }],
+        },
+      },
+      owner_words: "Atendemos Irvine.",
+    };
+    const invalidMembers = [
+      {
+        name: "quote_price",
+        args: JSON.stringify({ service_type: "drain_cleaning" }),
+      },
+      {
+        name: "record_interview_answer",
+        args: JSON.stringify({
+          topic: "area",
+          field: "area.coverage",
+          disposition: "answered",
+          rule_text: "Atende Irvine.",
+          owner_words: "Atendemos Irvine.",
+        }),
+      },
+      { name: "record_interview_answer", args: "null" },
+    ];
+    for (const [index, invalid] of invalidMembers.entries()) {
+      const cap = onboardingCap(`call-complete-preflight-${index}`);
+      const boundary = sequentialAnswerBoundary([
+        { status: "recorded", revision: 1, digest: "1".repeat(64) },
+      ]);
+      _setClient(boundary.client);
+      const l = ledger(cap.callId);
+      const ws = socket();
+      await completeGreetingTrace(cap, l, ws);
+      const responseId = `resp-complete-preflight-${index}`;
+      await handleEvent(cap, l, ws as any, responseCreated(responseId));
+      await handleEvent(cap, l, ws as any, functionCallDone(
+        responseId,
+        `fc-valid-${index}`,
+        "record_interview_answer",
+        JSON.stringify(valid),
+        0,
+      ));
+      await handleEvent(cap, l, ws as any, functionCallDone(
+        responseId,
+        `fc-invalid-${index}`,
+        invalid.name,
+        invalid.args,
+        1,
+      ));
+      await handleEvent(cap, l, ws as any, responseDone(responseId));
+
+      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(boundary.rpcFacts).toEqual([]);
+      expect(l.toolLog).toEqual([]);
+      expect(functionOutputs(ws)).toEqual([]);
+      expect(l.onboarding!.lifecycle.toolOutbox).toEqual({});
+      expect(l.onboarding!.lifecycle.toolBatches).toEqual({});
+    }
+  });
+
+  test("expired or owner-unbound onboarding capability blocks the complete batch before its first effect", async () => {
+    const fact = {
+      topic: "area",
+      field: "area.coverage",
+      disposition: "answered",
+      rule_text: "Atende Irvine.",
+      structured: {
+        value: {
+          localities: [{
+            display_name: "Irvine",
+            country_code: "US",
+            region_code: "CA",
+          }],
+        },
+      },
+      owner_words: "Atendemos Irvine.",
+    };
+    for (const [index, invalidate] of [
+      (cap: Capability) => { cap.expiresAt = Date.now() - 1; },
+      (cap: Capability) => { delete cap.ownerUserId; },
+    ].entries()) {
+      const cap = onboardingCap(`call-capability-preflight-${index}`);
+      const boundary = sequentialAnswerBoundary([
+        { status: "recorded", revision: 1, digest: "1".repeat(64) },
+      ]);
+      _setClient(boundary.client);
+      const l = ledger(cap.callId);
+      const ws = socket();
+      await completeGreetingTrace(cap, l, ws);
+      invalidate(cap);
+      const responseId = `resp-capability-preflight-${index}`;
+      await handleEvent(cap, l, ws as any, responseCreated(responseId));
+      await handleEvent(cap, l, ws as any, functionCallDone(
+        responseId,
+        `fc-capability-fact-${index}`,
+        "record_interview_answer",
+        JSON.stringify(fact),
+        0,
+      ));
+      await handleEvent(cap, l, ws as any, functionCallDone(
+        responseId,
+        `fc-capability-close-${index}`,
+        "end_session",
+        "{}",
+        1,
+      ));
+      await handleEvent(cap, l, ws as any, responseDone(responseId));
+
+      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(boundary.rpcFacts).toEqual([]);
+      expect(l.toolLog).toEqual([]);
+      expect(functionOutputs(ws)).toEqual([]);
+      expect(l.onboarding!.lifecycle.toolOutbox).toEqual({});
+      expect(l.onboarding!.lifecycle.toolBatches).toEqual({});
+    }
   });
 
   test("metadata-less VAD never claims a queued application intent", async () => {
@@ -423,14 +675,15 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     const cap = onboardingCap();
     const l = ledger(cap.callId);
     const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
     await handleEvent(cap, l, ws as any, responseCreated("resp-tools"));
     const first = handleEvent(
       cap, l, ws as any,
-      functionCallDone("resp-tools", "fc-z", "not_a_real_tool", JSON.stringify({ z: 2, a: 1 }), 9),
+      functionCallDone("resp-tools", "fc-z", "end_session", JSON.stringify({ z: 2, a: 1 }), 9),
     );
     const second = handleEvent(
       cap, l, ws as any,
-      functionCallDone("resp-tools", "fc-a", "not_a_real_tool", JSON.stringify({ b: true }), 2),
+      functionCallDone("resp-tools", "fc-a", "end_session", JSON.stringify({ b: true }), 2),
     );
     const terminal = handleEvent(cap, l, ws as any, responseDone("resp-tools"));
     await Promise.all([first, second, terminal]);
@@ -446,9 +699,9 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       providerResponseId: "resp-tools", toolCallIds: ["fc-a", "fc-z"],
     });
     expect(batches[0]!.batchHash).toMatch(/^[a-f0-9]{64}$/);
-    await handleEvent(cap, l, ws as any, outputAck("tool-output:fc-z"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-z"));
     expect(framesOfType(ws, "response.create")).toHaveLength(0);
-    await handleEvent(cap, l, ws as any, outputAck("tool-output:fc-a"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-a"));
     expect(framesOfType(ws, "response.create")).toHaveLength(1);
     expect(framesOfType(ws, "response.create")[0].response.metadata).toMatchObject({
       purpose: "tool_continuation",
@@ -459,12 +712,89 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     const replaySocket = socket();
     await handleEvent(replayCap, replayLedger, replaySocket as any, responseCreated("resp-tools"));
     await handleEvent(replayCap, replayLedger, replaySocket as any,
-      functionCallDone("resp-tools", "fc-z", "not_a_real_tool", JSON.stringify({ a: 1, z: 2 }), 9));
+      functionCallDone("resp-tools", "fc-z", "end_session", JSON.stringify({ a: 1, z: 2 }), 9));
     await handleEvent(replayCap, replayLedger, replaySocket as any,
-      functionCallDone("resp-tools", "fc-a", "not_a_real_tool", JSON.stringify({ b: true }), 2));
+      functionCallDone("resp-tools", "fc-a", "end_session", JSON.stringify({ b: true }), 2));
     await handleEvent(replayCap, replayLedger, replaySocket as any, responseDone("resp-tools"));
     expect(Object.values(replayLedger.onboarding!.lifecycle.toolBatches)[0]!.batchHash)
       .toBe(batches[0]!.batchHash);
+  });
+
+  test("conversation.item.created acks only an exact current-generation create and never substitutes for retrieve", async () => {
+    const makePending = async (
+      callId: string,
+      delivery: "create" | "retrieve",
+    ) => {
+      const cap = onboardingCap(callId);
+      const l = ledger(cap.callId);
+      const ws = socket();
+      await handleEvent(cap, l, ws as any, { type: "session.created" });
+      const adapter = l.onboarding!;
+      adapter.lifecycle.phase = "collecting";
+      adapter.lifecycle.socketGeneration = 1;
+      adapter.lifecycle.toolOutbox["created-tool"] = {
+        toolCallId: "created-tool",
+        toolName: "end_session",
+        argsHash: "created-args",
+        state: "output_pending",
+        providerResponseId: "created-response",
+        batchHash: "created-batch",
+        output: "{\"status\":\"application_owned_close\"}",
+        resultHash: "created-result",
+        outputItemId: "tool-output:created-tool",
+        socketGeneration: 1,
+        outputRequest: {
+          delivery,
+          eventId: `created-${delivery}-event`,
+          socketGeneration: 1,
+        },
+      };
+      return { cap, l, ws, adapter };
+    };
+
+    const exact = await makePending("call-created-exact", "create");
+    await handleEvent(
+      exact.cap,
+      exact.l,
+      exact.ws as any,
+      exactCreatedOutput(
+        "tool-output:created-tool",
+        "created-tool",
+        "{\"status\":\"application_owned_close\"}",
+      ),
+    );
+    expect(exact.adapter.lifecycle.toolOutbox["created-tool"]?.state)
+      .toBe("output_acked");
+
+    const mismatch = await makePending("call-created-mismatch", "create");
+    await handleEvent(
+      mismatch.cap,
+      mismatch.l,
+      mismatch.ws as any,
+      exactCreatedOutput(
+        "tool-output:created-tool",
+        "created-tool",
+        "{\"status\":\"attacker_changed\"}",
+      ),
+    );
+    expect(mismatch.adapter.lifecycle.phase).toBe("blocked");
+    expect(mismatch.adapter.lifecycle.toolOutbox["created-tool"]?.state)
+      .toBe("output_pending");
+
+    const retrieving = await makePending("call-created-during-retrieve", "retrieve");
+    await handleEvent(
+      retrieving.cap,
+      retrieving.l,
+      retrieving.ws as any,
+      exactCreatedOutput(
+        "tool-output:created-tool",
+        "created-tool",
+        "{\"status\":\"application_owned_close\"}",
+      ),
+    );
+    expect(retrieving.adapter.lifecycle.phase).toBe("collecting");
+    expect(retrieving.adapter.lifecycle.toolOutbox["created-tool"]?.state)
+      .toBe("output_pending");
   });
 
   test("reversed arrival persists two interview answers in numeric output_index order", async () => {
@@ -476,6 +806,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     _setClient(boundary.client);
     const l = ledger(cap.callId);
     const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
     const firstArgs = {
       topic: "area", field: "area.coverage", disposition: "answered",
       rule_text: "FIRST authoritative correction.",
@@ -516,8 +847,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     _setClient(boundary.client);
     const l = ledger(cap.callId);
     const ws = socket();
-    await handleEvent(cap, l, ws as any, responseCreated("resp-bootstrap"));
-    await handleEvent(cap, l, ws as any, responseDone("resp-bootstrap"));
+    await completeGreetingTrace(cap, l, ws);
     const nextQuestion = {
       field: "service.catalog_closure",
       questionPt: "Esses são todos os serviços?",
@@ -548,7 +878,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     });
     expect(JSON.parse(functionOutputs(ws).at(-1)!.item.output).status).toBe("reused");
     await handleEvent(cap, l, ws as any,
-      outputAck("tool-output:fc-reused-new-provider-id"));
+      outputAck(l, "tool-output:fc-reused-new-provider-id"));
     expect(l.onboarding!.lifecycle.toolOutbox["fc-reused-new-provider-id"]?.state)
       .toBe("output_acked");
 
@@ -596,8 +926,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     boundary.seedSnapshot(cap, snapshot, "4".repeat(64), nextQuestion);
     const l = ledger(cap.callId);
     const ws = socket();
-    await handleEvent(cap, l, ws as any, responseCreated("resp-bootstrap"));
-    await handleEvent(cap, l, ws as any, responseDone("resp-bootstrap"));
+    await completeGreetingTrace(cap, l, ws);
     l.onboarding!.lifecycle.phase = "collecting";
     l.onboarding!.lifecycle.coverage = {
       revision: 4,
@@ -637,7 +966,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       cap,
       l,
       ws as any,
-      outputAck("tool-output:fc-neg-repair"),
+      outputAck(l, "tool-output:fc-neg-repair"),
     );
     expect(l.onboarding!.lifecycle.toolOutbox["fc-neg-repair"]?.state)
       .toBe("output_acked");
@@ -651,8 +980,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     _setClient(boundary.client);
     const l = ledger(cap.callId);
     const ws = socket();
-    await handleEvent(cap, l, ws as any, responseCreated("resp-bootstrap"));
-    await handleEvent(cap, l, ws as any, responseDone("resp-bootstrap"));
+    await completeGreetingTrace(cap, l, ws);
     const adapter = l.onboarding!;
     adapter.lifecycle.phase = "final_signoff_speaking";
     adapter.lifecycle.coverage = {
@@ -728,15 +1056,17 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     const cap = onboardingCap();
     const l = ledger(cap.callId);
     const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
     const item = functionCallDone(
-      "resp-dup", "fc-dup", "not_a_real_tool", JSON.stringify({ one: 1 }),
+      "resp-dup", "fc-dup", "end_session", JSON.stringify({ one: 1 }),
     );
     await handleEvent(cap, l, ws as any, responseCreated("resp-dup"));
     await handleEvent(cap, l, ws as any, item);
     await handleEvent(cap, l, ws as any, item);
     await handleEvent(cap, l, ws as any, responseDone("resp-dup"));
     expect(functionOutputs(ws)).toHaveLength(1);
-    expect(l.toolLog).toHaveLength(1);
+    expect(l.toolLog).toHaveLength(0);
+    expect(Object.keys(l.onboarding!.lifecycle.toolOutbox)).toEqual(["fc-dup"]);
     expect(Object.values(l.onboarding!.lifecycle.toolOutbox)).toHaveLength(1);
   });
 
@@ -746,9 +1076,9 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     const ws = socket();
     await handleEvent(cap, l, ws as any, responseCreated("resp-mismatch"));
     await handleEvent(cap, l, ws as any,
-      functionCallDone("resp-mismatch", "fc-mismatch", "not_a_real_tool", JSON.stringify({ value: 1 })));
+      functionCallDone("resp-mismatch", "fc-mismatch", "end_session", JSON.stringify({ value: 1 })));
     await handleEvent(cap, l, ws as any,
-      functionCallDone("resp-mismatch", "fc-mismatch", "not_a_real_tool", JSON.stringify({ value: 2 })));
+      functionCallDone("resp-mismatch", "fc-mismatch", "end_session", JSON.stringify({ value: 2 })));
     await handleEvent(cap, l, ws as any, responseDone("resp-mismatch"));
 
     expect(l.onboarding!.lifecycle.phase).toBe("blocked");
@@ -767,14 +1097,14 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     const ws = socket();
     await handleEvent(cap, l, ws as any, responseCreated("resp-original"));
     await handleEvent(cap, l, ws as any,
-      functionCallDone("resp-original", "fc-reused", "not_a_real_tool", JSON.stringify({ value: 1 }), 1));
+      functionCallDone("resp-original", "fc-reused", "end_session", JSON.stringify({ value: 1 }), 1));
     await handleEvent(cap, l, ws as any, responseDone("resp-original"));
     const outputsBefore = functionOutputs(ws).length;
     const toolsBefore = l.toolLog.length;
 
     await handleEvent(cap, l, ws as any, responseCreated("resp-changed"));
     await handleEvent(cap, l, ws as any,
-      functionCallDone("resp-changed", "fc-reused", "not_a_real_tool", JSON.stringify({ value: 2 }), 1));
+      functionCallDone("resp-changed", "fc-reused", "end_session", JSON.stringify({ value: 2 }), 1));
     await handleEvent(cap, l, ws as any,
       functionCallDone(
         "resp-changed",
@@ -821,6 +1151,69 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     expect(l.toolLog).toHaveLength(toolsBefore);
     expect(l.onboarding!.lifecycle.toolOutbox["fc-after-block"]).toBeUndefined();
     expect(boundary.rpcFacts).toEqual([]);
+  });
+
+  test("a pruned terminal response identity cannot reopen with a new tool batch", async () => {
+    const cap = onboardingCap("call-pruned-terminal-reopen");
+    const boundary = sequentialAnswerBoundary([
+      { status: "recorded", revision: 1, digest: "1".repeat(64) },
+    ]);
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+    const responseId = "resp-terminal-before-prune";
+    await handleEvent(cap, l, ws as any, responseCreated(responseId));
+    await handleEvent(cap, l, ws as any, responseDone(responseId));
+    expect(l.onboarding!.lifecycle.terminalResponseIds).toContain(responseId);
+
+    l.onboarding!.responses = Object.fromEntries(
+      Array.from({ length: 512 }, (_, index) => [
+        `terminal-buffer-${index}`,
+        {
+          responseId: `terminal-buffer-${index}`,
+          tools: [],
+          terminal: true,
+        },
+      ]),
+    );
+    await handleEvent(cap, l, ws as any, responseDone("resp-prune-trigger"));
+    expect(l.onboarding!.responses[responseId]).toBeUndefined();
+
+    const fact = {
+      topic: "area",
+      field: "area.coverage",
+      disposition: "answered",
+      rule_text: "Atende Irvine.",
+      structured: {
+        value: {
+          localities: [{
+            display_name: "Irvine",
+            country_code: "US",
+            region_code: "CA",
+          }],
+        },
+      },
+      owner_words: "Atendemos Irvine.",
+    };
+    await handleEvent(cap, l, ws as any, responseCreated(responseId));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      responseId,
+      "fc-reopened-terminal",
+      "record_interview_answer",
+      JSON.stringify(fact),
+      0,
+    ));
+    await handleEvent(cap, l, ws as any, responseDone(responseId));
+
+    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expect(boundary.rpcFacts).toEqual([]);
+    expect(l.toolLog).toEqual([]);
+    expect(functionOutputs(ws).filter((frame) =>
+      frame.item?.call_id === "fc-reopened-terminal"
+    )).toEqual([]);
+    expect(l.onboarding!.lifecycle.toolOutbox["fc-reopened-terminal"])
+      .toBeUndefined();
   });
 
   test("adapter response and pending-command maps stay bounded with deterministic overflow", async () => {
@@ -901,7 +1294,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
       responseDone("resp-pending-overflow"));
     await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
-      outputAck("tool-output:fc-pending-overflow"));
+      outputAck(pendingLedger, "tool-output:fc-pending-overflow"));
     expect(pendingLedger.onboarding!.lifecycle.phase).toBe("blocked");
     expect(Object.keys(pendingLedger.onboarding!.pendingResponseCommands))
       .toHaveLength(0);
@@ -919,7 +1312,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       await handleEvent(cap, l, ws as any,
         functionCallDone(responseId, toolCallId, "end_session"));
       await handleEvent(cap, l, ws as any, responseDone(responseId));
-      await handleEvent(cap, l, ws as any, outputAck(`tool-output:${toolCallId}`));
+      await handleEvent(cap, l, ws as any, outputAck(l, `tool-output:${toolCallId}`));
     }
     expect(l.status).toBe("active");
     expect(l.agentEnded).toBeUndefined();
@@ -944,7 +1337,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     await handleEvent(cap, l, ws as any,
       functionCallDone("resp-close", "fc-close", "end_session"));
     await handleEvent(cap, l, ws as any, responseDone("resp-close"));
-    await handleEvent(cap, l, ws as any, outputAck("tool-output:fc-close"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-close"));
 
     expect(l.status).toBe("active");
     expect(l.onboarding!.lifecycle.phase).toBe("awaiting_owner_approval");
@@ -1732,7 +2125,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
         .toBe("terminal");
 
       await handleEvent(cap, l, ws as any,
-        outputAck("tool-output:fc-vad-correction"));
+        outputAck(l, "tool-output:fc-vad-correction"));
       const newSummaries = framesOfType(ws, "response.create").filter(
         (frame) => frame.response?.metadata?.intent_key === `summary:${newDigest}`,
       );
@@ -1773,7 +2166,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       revision: 2, digest, complete: true,
     });
     expect(boundary.calls.ruleReads).toBe(1);
-    await handleEvent(cap, l, ws as any, outputAck("tool-output:fc-approval"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-approval"));
     expect(boundary.calls.ruleReads).toBe(2);
     expect(framesOfType(ws, "response.create").at(-1)!.response.metadata)
       .toMatchObject({ intent_key: `summary:${digest}`, purpose: "summary" });
@@ -1799,7 +2192,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
     await handleEvent(cap, l, ws as any, responseDone("resp-approval"));
     expect(l.onboarding!.lifecycle.phase).toBe("approval_persisting");
     expect(framesOfType(ws, "response.create")).toHaveLength(0);
-    await handleEvent(cap, l, ws as any, outputAck("tool-output:fc-approval"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-approval"));
     const creates = framesOfType(ws, "response.create");
     expect(creates).toHaveLength(1);
     expect(creates[0].response.metadata).toEqual({
@@ -1807,7 +2200,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       purpose: "final_signoff",
       approval_receipt_id: "approval-receipt-1",
     });
-    await handleEvent(cap, l, ws as any, outputAck("tool-output:fc-approval"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-approval"));
     expect(framesOfType(ws, "response.create")).toHaveLength(1);
     await handleEvent(cap, l, ws as any,
       responseCreated("resp-signoff", "final-signoff:approval-receipt-1"));
@@ -1853,10 +2246,10 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       functionCallDone("resp-approval-batch", "fc-close-sibling", "end_session", "{}", 1));
     await handleEvent(cap, l, ws as any, responseDone("resp-approval-batch"));
 
-    await handleEvent(cap, l, ws as any, outputAck("tool-output:fc-approval"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-approval"));
     expect(l.onboarding!.lifecycle.phase).toBe("approval_persisting");
     expect(framesOfType(ws, "response.create")).toHaveLength(0);
-    await handleEvent(cap, l, ws as any, outputAck("tool-output:fc-close-sibling"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-close-sibling"));
     expect(l.onboarding!.lifecycle.phase).toBe("final_signoff_speaking");
     expect(framesOfType(ws, "response.create")).toHaveLength(1);
     expect(framesOfType(ws, "response.create")[0].response.metadata.purpose)
@@ -1897,13 +2290,33 @@ describe("physical socket attach and reconnect", () => {
     }
   }
 
+  async function completePhysicalGreeting(
+    ws: SyntheticWebSocket,
+    cap: Capability,
+    responseId = "resp-greeting",
+  ) {
+    ws.message(responseCreated(responseId, `greeting:${cap.callId}`));
+    ws.message({
+      type: "response.output_audio_transcript.done",
+      response_id: responseId,
+      transcript:
+        "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Quais serviços sua empresa oferece?",
+    });
+    ws.message({ type: "response.output_audio.done", response_id: responseId });
+    ws.message(responseDone(responseId));
+    ws.message({ type: "output_audio_buffer.stopped", response_id: responseId });
+    await flushAsync();
+  }
+
   test("greeting is keyed once and is not replayed just because the socket reattached", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
     globalThis.WebSocket = SyntheticWebSocket as any;
     const cap = onboardingCap("call-greeting");
     try {
-      const control = attachSideband(cap, "rtc-greeting", "gpt-realtime-2.1");
+      const control = attachSideband(
+        cap, "rtc-greeting", "gpt-realtime-2.1", onboardingOptions,
+      );
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
       await control.opened;
@@ -1925,14 +2338,14 @@ describe("physical socket attach and reconnect", () => {
     }
   });
 
-  test("blocked reattach prunes queued authority speech and resends only exact pending output", async () => {
+  test("blocked reattach prunes queued authority speech and retrieves only the exact pending output", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
     globalThis.WebSocket = SyntheticWebSocket as any;
     const cap = onboardingCap("call-blocked-reattach");
     try {
       const control = attachSideband(
-        cap, "rtc-blocked-reattach", "gpt-realtime-2.1",
+        cap, "rtc-blocked-reattach", "gpt-realtime-2.1", onboardingOptions,
       );
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
@@ -1984,15 +2397,225 @@ describe("physical socket attach and reconnect", () => {
       expect(adapter.lifecycle.phase).toBe("blocked");
       expect(adapter.lifecycle.socketGeneration).toBe(2);
       expect(framesOfType(second, "response.create")).toHaveLength(0);
-      expect(functionOutputs(second)).toEqual([
+      expect(functionOutputs(second)).toEqual([]);
+      expect(framesOfType(second, "conversation.item.retrieve")).toEqual([
         expect.objectContaining({
-          item: expect.objectContaining({
-            id: "tool-output:blocked-output",
-            call_id: "blocked-output",
-          }),
+          item_id: "tool-output:blocked-output",
+          event_id: expect.any(String),
         }),
       ]);
+      second.message(outputRetrieved(
+        "tool-output:blocked-output",
+        "blocked-output",
+        "{\"status\":\"application_owned_close\"}",
+      ));
+      await flushAsync();
+      expect(adapter.lifecycle.toolOutbox["blocked-output"]?.state)
+        .toBe("output_acked");
       expect(adapter.pendingResponseCommands).toEqual({});
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("lost output acknowledgement reattaches by exact retrieval, never recreates or reruns, and continues once", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-output-retrieve");
+    try {
+      const control = attachSideband(
+        cap, "rtc-output-retrieve", "gpt-realtime-2.1", onboardingOptions,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      const adapter = control.ledger.onboarding!;
+      adapter.lifecycle.phase = "collecting";
+      adapter.lifecycle.toolOutbox["retrieve-tool"] = {
+        toolCallId: "retrieve-tool",
+        toolName: "record_interview_answer",
+        argsHash: "retrieve-args",
+        state: "output_pending",
+        providerResponseId: "retrieve-response",
+        batchHash: "retrieve-batch",
+        output: "{\"status\":\"recorded\"}",
+        resultHash: "retrieve-result",
+        outputItemId: "tool-output:retrieve-tool",
+        socketGeneration: 1,
+      };
+      adapter.lifecycle.toolBatches["retrieve-response:retrieve-batch"] = {
+        providerResponseId: "retrieve-response",
+        batchHash: "retrieve-batch",
+        toolCallIds: ["retrieve-tool"],
+        closed: true,
+        continuationRequested: false,
+      };
+      adapter.lifecycle.terminalResponseIds.push("retrieve-response");
+      control.ledger.responseActive = false;
+      const toolLogBefore = [...control.ledger.toolLog];
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      expect(functionOutputs(second)).toEqual([]);
+      expect(framesOfType(second, "conversation.item.retrieve")).toEqual([
+        expect.objectContaining({
+          type: "conversation.item.retrieve",
+          item_id: "tool-output:retrieve-tool",
+          event_id: expect.any(String),
+        }),
+      ]);
+      second.message(outputRetrieved(
+        "tool-output:retrieve-tool",
+        "retrieve-tool",
+        "{\"status\":\"recorded\"}",
+      ));
+      await flushAsync();
+
+      expect(adapter.lifecycle.toolOutbox["retrieve-tool"]?.state)
+        .toBe("output_acked");
+      expect(control.ledger.toolLog).toEqual(toolLogBefore);
+      expect(functionOutputs(second)).toEqual([]);
+      expect(framesOfType(second, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "tool_continuation",
+      )).toHaveLength(1);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("retrieved output mismatch or missing item blocks without recreating the mutation output", async () => {
+    for (const [index, retrieved] of [
+      {
+        type: "conversation.item.retrieved",
+        item: {
+          id: "tool-output:mismatch-tool",
+          type: "function_call_output",
+          call_id: "mismatch-tool",
+          output: "{\"status\":\"attacker_changed\"}",
+        },
+      },
+      { type: "conversation.item.retrieved" },
+    ].entries()) {
+      const cap = onboardingCap(`call-retrieve-mismatch-${index}`);
+      const l = ledger(cap.callId);
+      const ws = socket();
+      await handleEvent(cap, l, ws as any, { type: "session.created" });
+      const adapter = l.onboarding!;
+      adapter.lifecycle.phase = "collecting";
+      adapter.lifecycle.socketGeneration = 1;
+      adapter.lifecycle.toolOutbox["mismatch-tool"] = {
+        toolCallId: "mismatch-tool",
+        toolName: "record_interview_answer",
+        argsHash: "mismatch-args",
+        state: "output_pending",
+        providerResponseId: "mismatch-response",
+        batchHash: "mismatch-batch",
+        output: "{\"status\":\"recorded\"}",
+        resultHash: "mismatch-result",
+        outputItemId: "tool-output:mismatch-tool",
+        socketGeneration: 1,
+        outputRequest: {
+          delivery: "retrieve",
+          eventId: "ligou-retrieve-test",
+          socketGeneration: 1,
+        },
+      };
+
+      await handleEvent(cap, l, ws as any, retrieved);
+
+      expect(adapter.lifecycle.phase).toBe("blocked");
+      expect(adapter.lifecycle.toolOutbox["mismatch-tool"]?.state)
+        .toBe("output_pending");
+      expect(functionOutputs(ws)).toEqual([]);
+    }
+  });
+
+  test("correlated duplicate create retrieves the deterministic item while a correlated retrieve error blocks", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-duplicate-output-create");
+    try {
+      const control = attachSideband(
+        cap, "rtc-duplicate-output-create", "gpt-realtime-2.1", onboardingOptions,
+      );
+      const ws = SyntheticWebSocket.instances[0]!;
+      const adapter = control.ledger.onboarding!;
+      adapter.lifecycle.phase = "collecting";
+      adapter.lifecycle.toolOutbox["duplicate-tool"] = {
+        toolCallId: "duplicate-tool",
+        toolName: "record_interview_answer",
+        argsHash: "duplicate-args",
+        state: "executed",
+        providerResponseId: "duplicate-response",
+        batchHash: "duplicate-batch",
+        output: "{\"status\":\"recorded\"}",
+        resultHash: "duplicate-result",
+        outputItemId: "tool-output:duplicate-tool",
+        socketGeneration: 0,
+      };
+      ws.emit("open");
+      await control.opened;
+      await flushAsync();
+
+      const creates = functionOutputs(ws);
+      expect(creates).toHaveLength(1);
+      const createEventId = creates[0].event_id;
+      expect(typeof createEventId).toBe("string");
+      expect(creates[0]).toMatchObject({
+        event_id: createEventId,
+        item: {
+          id: "tool-output:duplicate-tool",
+          type: "function_call_output",
+          call_id: "duplicate-tool",
+          output: "{\"status\":\"recorded\"}",
+        },
+      });
+      expect(adapter.lifecycle.toolOutbox["duplicate-tool"]?.outputRequest)
+        .toMatchObject({
+          delivery: "create",
+          eventId: createEventId,
+          socketGeneration: 1,
+        });
+      ws.message({
+        type: "error",
+        error: {
+          code: "invalid_request_error",
+          event_id: createEventId,
+          message: "Item 'tool-output:duplicate-tool' already exists",
+        },
+      });
+      await flushAsync();
+
+      const retrieves = framesOfType(ws, "conversation.item.retrieve");
+      expect(retrieves).toHaveLength(1);
+      const retrieveEventId = retrieves[0].event_id;
+      expect(typeof retrieveEventId).toBe("string");
+      expect(retrieves[0]).toMatchObject({
+        item_id: "tool-output:duplicate-tool",
+        event_id: retrieveEventId,
+      });
+      expect(control.ledger.status).toBe("active");
+      ws.message({
+        type: "error",
+        error: {
+          code: "invalid_request_error",
+          event_id: retrieveEventId,
+          message: "Item could not be retrieved",
+        },
+      });
+      await flushAsync();
+      expect(adapter.lifecycle.phase).toBe("blocked");
+      expect(functionOutputs(ws)).toHaveLength(1);
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
@@ -2007,7 +2630,7 @@ describe("physical socket attach and reconnect", () => {
     const cap = onboardingCap("call-greeting-send-retry");
     try {
       const control = attachSideband(
-        cap, "rtc-greeting-send-retry", "gpt-realtime-2.1",
+        cap, "rtc-greeting-send-retry", "gpt-realtime-2.1", onboardingOptions,
       );
       const first = SyntheticWebSocket.instances[0]!;
       first.failResponseCreates = true;
@@ -2049,14 +2672,12 @@ describe("physical socket attach and reconnect", () => {
     _setClient(boundary.client);
     try {
       const control = attachSideband(
-        cap, "rtc-delayed-snapshot-reattach", "gpt-realtime-2.1",
+        cap, "rtc-delayed-snapshot-reattach", "gpt-realtime-2.1", onboardingOptions,
       );
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
       await control.opened;
-      first.message(responseCreated("resp-greeting", `greeting:${cap.callId}`));
-      first.message(responseDone("resp-greeting"));
-      await flushAsync();
+      await completePhysicalGreeting(first, cap);
       control.ledger.onboarding!.lifecycle.phase = "coverage_check";
       control.ledger.onboarding!.lifecycle.coverage = {
         revision: 1, digest, complete: true, missing: [], ambiguous: [],
@@ -2095,22 +2716,22 @@ describe("physical socket attach and reconnect", () => {
     const cap = onboardingCap("call-output-reattach");
     try {
       const control = attachSideband(
-        cap, "rtc-output-reattach", "gpt-realtime-2.1",
+        cap, "rtc-output-reattach", "gpt-realtime-2.1", onboardingOptions,
       );
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
       await control.opened;
-      first.message(responseCreated("resp-greeting", `greeting:${cap.callId}`));
-      first.message(responseDone("resp-greeting"));
-      await flushAsync();
+      await completePhysicalGreeting(first, cap);
       first.failFunctionOutputs = true;
       first.message(responseCreated("resp-tool"));
-      first.message(functionCallDone("resp-tool", "fc-reattach"));
+      first.message(functionCallDone(
+        "resp-tool", "fc-reattach", "end_session", "{}",
+      ));
       first.message(responseDone("resp-tool"));
       await flushAsync();
       expect(control.ledger.onboarding!.lifecycle.toolOutbox["fc-reattach"]?.state)
         .toBe("executed");
-      expect(control.ledger.toolLog).toHaveLength(1);
+      expect(control.ledger.toolLog).toHaveLength(0);
       first.emit("close", { code: 1006 });
       await new Promise((resolve) => setTimeout(resolve, 700));
       const second = SyntheticWebSocket.instances[1]!;
@@ -2123,7 +2744,7 @@ describe("physical socket attach and reconnect", () => {
       });
       expect(control.ledger.onboarding!.lifecycle.toolOutbox["fc-reattach"]?.state)
         .toBe("output_pending");
-      expect(control.ledger.toolLog).toHaveLength(1);
+      expect(control.ledger.toolLog).toHaveLength(0);
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
@@ -2162,14 +2783,12 @@ describe("physical socket attach and reconnect", () => {
     } as any);
     try {
       const control = attachSideband(
-        cap, "rtc-mid-persist-reattach", "gpt-realtime-2.1",
+        cap, "rtc-mid-persist-reattach", "gpt-realtime-2.1", onboardingOptions,
       );
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
       await control.opened;
-      first.message(responseCreated("resp-greeting", `greeting:${cap.callId}`));
-      first.message(responseDone("resp-greeting"));
-      await flushAsync();
+      await completePhysicalGreeting(first, cap);
       first.message(responseCreated("resp-persist"));
       first.message(functionCallDone(
         "resp-persist",
@@ -2290,13 +2909,12 @@ describe("physical socket attach and reconnect", () => {
         cap,
         "rtc-indeterminate-reattach",
         "gpt-realtime-2.1",
+        onboardingOptions,
       );
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
       await control.opened;
-      first.message(responseCreated("resp-greeting", `greeting:${cap.callId}`));
-      first.message(responseDone("resp-greeting"));
-      await flushAsync();
+      await completePhysicalGreeting(first, cap);
       first.message(responseCreated("resp-indeterminate"));
       first.message(functionCallDone(
         "resp-indeterminate",
@@ -2432,13 +3050,12 @@ describe("physical socket attach and reconnect", () => {
         cap,
         "rtc-late-followup-reattach",
         "gpt-realtime-2.1",
+        onboardingOptions,
       );
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
       await control.opened;
-      first.message(responseCreated("resp-greeting", `greeting:${cap.callId}`));
-      first.message(responseDone("resp-greeting"));
-      await flushAsync();
+      await completePhysicalGreeting(first, cap);
 
       const adapter = control.ledger.onboarding!;
       const intentKey = "tool-batch:resp-late-followup:batch-late-followup";
@@ -2502,7 +3119,7 @@ describe("physical socket attach and reconnect", () => {
     const cap = onboardingCap("call-final-close-reattach");
     try {
       const control = attachSideband(
-        cap, "rtc-final-close-reattach", "gpt-realtime-2.1",
+        cap, "rtc-final-close-reattach", "gpt-realtime-2.1", onboardingOptions,
       );
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
@@ -2571,31 +3188,59 @@ test("end_session is application-owned in onboarding and unavailable to customer
 
 test("agent-requested termination uses the audited provider path; caller end does not", async () => {
   const rows: any[] = [];
+  const rpcCalls: Array<{ name: string; args?: Record<string, unknown> }> = [];
+  let fetchCount = 0;
   _setClient({
     from(table: string) {
       const api: any = {
         update(row: any) { if (table === "calls") rows.push(row); return api; },
-        eq() { return api; }, insert() { return api; },
+        select() { return api; }, eq() { return api; }, insert() { return api; },
+        maybeSingle: async () => ({
+          data: { id: "call-1", provider_termination_state: "confirmed" },
+          error: null,
+        }),
         then(resolve: (value: unknown) => unknown) {
           return Promise.resolve({ data: null, error: null }).then(resolve);
         },
       };
       return api;
     },
-    rpc() { return Promise.resolve({ data: "reservation-1", error: null }); },
+    rpc(name: string, args?: Record<string, unknown>) {
+      rpcCalls.push({ name, args });
+      if (name === "begin_provider_termination_attempt")
+        return Promise.resolve({
+          data: {
+            should_attempt: true,
+            attempt_id: "attempt-agent-ended",
+            request_id: "request-agent-ended",
+            openai_call_id: "rtc-call-1",
+            provider_termination_mode: "hangup",
+          },
+          error: null,
+        });
+      if (name === "complete_provider_termination_attempt")
+        return Promise.resolve({ data: true, error: null });
+      return Promise.resolve({ data: "reservation-1", error: null });
+    },
   } as any);
   const cap = onboardingCap();
   const agentEnded = ledger(cap.callId);
   agentEnded.status = "ended";
   agentEnded.agentEnded = true;
-  await persistLedger(cap, agentEnded, async () => new Response(null, { status: 200 }));
+  agentEnded.openaiCallId = "rtc-call-1";
+  await persistLedger(cap, agentEnded, async () => {
+    fetchCount += 1;
+    return new Response(null, { status: 200 });
+  });
   const callerEnded = ledger(cap.callId);
   callerEnded.status = "ended";
   await persistLedger(cap, callerEnded, async () => new Response(null, { status: 200 }));
-  expect(rows[0]).toMatchObject({
-    provider_termination_state: "active",
-    provider_termination_reason: "agent_ended_session",
-  });
+  expect(rows[0].provider_termination_state).toBeUndefined();
+  expect(rows[0].provider_termination_reason).toBeUndefined();
+  expect(rpcCalls.find((call) =>
+    call.name === "begin_provider_termination_attempt"
+  )?.args?.p_reason).toBe("agent_ended_session");
+  expect(fetchCount).toBe(1);
   expect(rows[1]).toMatchObject({
     provider_termination_state: "confirmed",
     provider_termination_reason: "caller_hung_up",

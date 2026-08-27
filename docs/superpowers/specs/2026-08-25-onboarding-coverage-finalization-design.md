@@ -1,9 +1,9 @@
 # Ligou V0.2 Onboarding Coverage and Finalization Design
 
-**Date:** 2026-08-25  
-**Source baseline:** `codex/v0.2-browser-pilot@6f65667b428fa0f3f7e3df31534746e120553b10`  
-**User source:** Test 8 E2E report in `/Users/d1f/.codex/attachments/db697083-dd50-459f-9dee-5df44e615d9f/pasted-text.txt`  
-**Status:** approved behavior, implementation pending  
+**Date:** 2026-08-25
+**Source baseline:** `codex/v0.2-browser-pilot@6f65667b428fa0f3f7e3df31534746e120553b10`
+**User source:** Test 8 E2E report in `/Users/d1f/.codex/attachments/db697083-dd50-459f-9dee-5df44e615d9f/pasted-text.txt`
+**Status:** approved behavior, implementation pending
 
 ## 1. Problem statement
 

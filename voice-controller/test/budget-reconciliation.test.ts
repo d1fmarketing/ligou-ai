@@ -11,6 +11,8 @@ let terminationClaim: any;
 let callUpdates: any[] = [];
 let providerRpcCalls: Array<{ name: string; args?: Record<string, unknown> }> = [];
 let providerAttemptStarted = false;
+let providerTerminationReadbackState: string | null = null;
+let providerTerminationReadbackOpenaiCallId: string | null = null;
 let unresolvedSettlements: any[] = [];
 let reapCalls: any[] = [];
 let reapResult: any = 0;
@@ -22,6 +24,9 @@ function client() {
       if (name === "begin_provider_termination_attempt") {
         if (providerAttemptStarted) return Promise.resolve({ data: { should_attempt: false }, error: null });
         providerAttemptStarted = true;
+        providerTerminationReadbackOpenaiCallId = String(
+          args?.p_openai_call_id ?? "",
+        );
         return Promise.resolve({ data: {
           should_attempt: true,
           attempt_id: "90000000-0000-4000-8000-000000000001",
@@ -31,6 +36,8 @@ function client() {
         }, error: null });
       }
       if (name === "complete_provider_termination_attempt") {
+        if (args?.p_confirmed === true)
+          providerTerminationReadbackState = "confirmed";
         return Promise.resolve({ data: true, error: null });
       }
       if (name === "claim_provider_termination_reconciliation") {
@@ -58,13 +65,31 @@ function client() {
       return Promise.resolve({ data: null, error: null });
     },
     from(table: string) {
+      let selectedCallId: string | null = null;
       const api: any = {
         update(row: any) {
           if (table === "budget_reservations") deferred.push(row);
           if (table === "calls") callUpdates.push(row);
           return api;
         },
-        eq() { return api; },
+        select() { return api; },
+        eq(column: string, value: unknown) {
+          if (table === "calls" && column === "id")
+            selectedCallId = String(value);
+          return api;
+        },
+        maybeSingle: async () => table === "calls"
+          ? {
+              data: providerTerminationReadbackState
+                ? {
+                    id: selectedCallId,
+                    openai_call_id: providerTerminationReadbackOpenaiCallId,
+                    provider_termination_state: providerTerminationReadbackState,
+                  }
+                : null,
+              error: null,
+            }
+          : { data: null, error: null },
         then(resolve: (value: unknown) => unknown) {
           return Promise.resolve({ data: null, error: table === "budget_reservations" ? deferError : null }).then(resolve);
         },
@@ -82,6 +107,8 @@ beforeEach(() => {
   callUpdates = [];
   providerRpcCalls = [];
   providerAttemptStarted = false;
+  providerTerminationReadbackState = null;
+  providerTerminationReadbackOpenaiCallId = null;
   unresolvedSettlements = [];
   reapCalls = [];
   reapResult = 0;
@@ -124,7 +151,7 @@ describe("durable budget reconciliation", () => {
     expect(signal?.aborted).toBe(true);
   });
 
-  test("a persisted provider termination attempt permits at most one POST", async () => {
+  test("a persisted confirmed provider termination permits at most one POST and reuses exact readback", async () => {
     let posts = 0;
     const fetchImpl = async () => { posts += 1; return new Response(null, { status: 200 }); };
 
@@ -135,11 +162,41 @@ describe("durable budget reconciliation", () => {
     expect((await terminateProviderCall({
       callId: "call-at-most-once", openaiCallId: "rtc-at-most-once", mode: "hangup",
       reason: "synthetic_retry", fetchImpl,
+    })).confirmed).toBe(true);
+    expect((await terminateProviderCall({
+      callId: "call-at-most-once", openaiCallId: "rtc-different", mode: "hangup",
+      reason: "synthetic_wrong_provider", fetchImpl,
     })).confirmed).toBe(false);
 
     expect(posts).toBe(1);
-    expect(providerRpcCalls.filter((call) => call.name === "begin_provider_termination_attempt")).toHaveLength(2);
+    expect(providerRpcCalls.filter((call) => call.name === "begin_provider_termination_attempt")).toHaveLength(3);
     expect(providerRpcCalls.filter((call) => call.name === "complete_provider_termination_attempt")).toHaveLength(1);
+  });
+
+  test("a nonconfirmed provider termination readback fails closed without a second POST", async () => {
+    for (const state of [null, "active", "pending", "unknown", "external_evidence_required"]) {
+      providerRpcCalls = [];
+      providerAttemptStarted = true;
+      providerTerminationReadbackState = state;
+      providerTerminationReadbackOpenaiCallId = "rtc-readback-not-confirmed";
+      let posts = 0;
+      const result = await terminateProviderCall({
+        callId: "call-readback-not-confirmed",
+        openaiCallId: "rtc-readback-not-confirmed",
+        mode: "hangup",
+        reason: "synthetic_readback",
+        fetchImpl: async () => {
+          posts += 1;
+          return new Response(null, { status: 200 });
+        },
+      });
+
+      expect(result.confirmed).toBe(false);
+      expect(posts).toBe(0);
+      expect(providerRpcCalls.filter((call) =>
+        call.name === "complete_provider_termination_attempt"
+      )).toHaveLength(0);
+    }
   });
 
   test("omitting the runtime usage-resolution flag cannot settle", async () => {

@@ -13,6 +13,16 @@ function client() {
     from(table: string) {
       const api: any = {
         update(row: any) { if (table === "calls") callUpdates.push(row); return api; }, eq() { return api; },
+        select() { return api; },
+        maybeSingle: async () => table === "calls"
+          ? {
+              data: {
+                id: "call-1",
+                provider_termination_state: "active",
+              },
+              error: null,
+            }
+          : { data: null, error: null },
         insert() { if (table === "usage_ledger") directUsageInserts += 1; return api; },
         then(resolve: (value: unknown) => unknown) {
           return Promise.resolve({ data: null, error: null }).then(resolve);
@@ -174,6 +184,7 @@ function ledger(status: SessionLedger["status"]): SessionLedger {
     transcript: [],
     toolLog: [],
     status,
+    expectedOnboardingBusinessName: "Rocha Plumbing",
   };
 }
 
@@ -704,6 +715,7 @@ describe("sideband budget finalization", () => {
         "rtc-onboarding-close",
         "gpt-realtime-2.1",
         {
+          onboarding: { expectedBusinessName: "Rocha Plumbing" },
           fetchImpl: async () => {
             fetchCount += 1;
             return new Response(null, { status: 200 });
@@ -773,6 +785,43 @@ describe("sideband budget finalization", () => {
     }
   });
 
+  test("onboarding phone sideband options are rejected before any provider socket exists", () => {
+    const originalWebSocket = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const onboarding = makeCapability(
+      "rocha-plumbing",
+      "tenant-1",
+      "call-phone-provider-terminal",
+      15,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1, simulation: true },
+      "owner-1",
+    );
+    try {
+      expect(() => attachSideband(
+        onboarding,
+        "rtc-phone-provider-terminal",
+        "gpt-realtime-2.1",
+        {
+          phone: {
+            eventId: "event-phone-terminal",
+            claimToken: "claim-phone-terminal",
+          },
+        },
+      )).toThrow("onboarding_phone_sideband_forbidden");
+      expect(() => attachSideband(
+        onboarding,
+        "rtc-onboarding-missing-business",
+        "gpt-realtime-2.1",
+      )).toThrow("onboarding_expected_business_name_required");
+      expect(SyntheticWebSocket.instances).toHaveLength(0);
+      expect(liveSessions.has(onboarding.callId)).toBe(false);
+    } finally {
+      liveSessions.delete(onboarding.callId);
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
   test("reattach exhaustion and terminal OpenAI errors transition to error", async () => {
     expect(terminalStatusForReason("active", "reattach_exhausted")).toBe("error");
     const active = ledger("active");
@@ -853,6 +902,241 @@ describe("sideband budget finalization", () => {
       && row.provider_usage_evidence?.continuous === true)).toBe(true);
   });
 
+  test("premature onboarding session.ended stays interrupted while provider terminality settles once without hangup", async () => {
+    const onboarding = makeCapability(
+      "rocha-plumbing",
+      "tenant-1",
+      "call-1",
+      15,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1, simulation: true },
+      "owner-1",
+    );
+    const ended = ledger("active");
+    let fetchCount = 0;
+    const fetch404 = async () => {
+      fetchCount += 1;
+      return new Response(null, { status: 404 });
+    };
+
+    await handleEvent(onboarding, ended, { send() {}, close() {} } as any, {
+      type: "session.ended",
+      usage: {
+        input_tokens: 12,
+        output_tokens: 5,
+        total_tokens: 17,
+        input_token_details: {
+          text_tokens: 4,
+          audio_tokens: 8,
+          cached_tokens: 3,
+          cached_tokens_details: { text_tokens: 1, audio_tokens: 2 },
+        },
+        output_token_details: { text_tokens: 2, audio_tokens: 3 },
+      },
+    });
+
+    expect(ended.status).toBe("error");
+    expect(ended.onboarding?.lifecycle.phase).not.toBe("closed");
+    expect(ended.providerTerminalEvidence).toMatchObject({
+      observed: true,
+      reason: "provider_session_ended",
+    });
+
+    await persistLedger(onboarding, ended, fetch404);
+    await persistLedger(onboarding, ended, fetch404);
+
+    expect(fetchCount).toBe(0);
+    expect(callUpdates.at(-1)).toMatchObject({
+      status: "error",
+      provider_termination_state: "confirmed",
+      provider_termination_reason: "provider_session_ended",
+      provider_usage_state: "resolved",
+    });
+    expect(rpcCalls.filter((call) =>
+      call.name === "begin_provider_termination_attempt" ||
+      call.name === "complete_provider_termination_attempt"
+    )).toEqual([]);
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget"))
+      .toHaveLength(1);
+  });
+
+  test("session.ended after an authorized agent close preserves the approval-bound success reason", async () => {
+    const onboarding = makeCapability(
+      "rocha-plumbing",
+      "tenant-1",
+      "call-1",
+      15,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1, simulation: true },
+      "owner-1",
+    );
+    const ended = ledger("active");
+    await handleEvent(onboarding, ended, { send() {}, close() {} } as any, {
+      type: "session.created",
+    });
+    ended.agentEnded = true;
+    ended.onboarding!.lifecycle.phase = "provider_terminating";
+    await handleEvent(onboarding, ended, { send() {}, close() {} } as any, {
+      type: "session.ended",
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        input_token_details: {
+          text_tokens: 0,
+          audio_tokens: 0,
+          cached_tokens: 0,
+          cached_tokens_details: { text_tokens: 0, audio_tokens: 0 },
+        },
+        output_token_details: { text_tokens: 0, audio_tokens: 0 },
+      },
+    });
+    expect(ended.status).toBe("ended");
+
+    await persistLedger(onboarding, ended, async () =>
+      new Response(null, { status: 404 })
+    );
+
+    expect(callUpdates.at(-1)).toMatchObject({
+      status: "ended",
+      provider_termination_state: "confirmed",
+      provider_termination_reason: "agent_ended_session",
+    });
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget"))
+      .toHaveLength(1);
+  });
+
+  test("authorized provider termination persistence is monotonic across successful and settlement-failed retries", async () => {
+    const retryCap = makeCapability(
+      "rocha-plumbing",
+      "tenant-1",
+      "call-1",
+      15,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1, simulation: true },
+      "owner-1",
+    );
+    for (const scenario of [
+      "success",
+      "settlement_failure",
+      "usage_unresolved",
+      "provider_identity_mismatch",
+    ] as const) {
+      const settleFirstFails = scenario === "settlement_failure" ||
+        scenario === "provider_identity_mismatch";
+      let providerState = "active";
+      let beginCount = 0;
+      let completeCount = 0;
+      let settleCount = 0;
+      let fetchCount = 0;
+      const callWrites: Array<Record<string, unknown>> = [];
+      _setClient({
+        rpc(name: string, args: Record<string, unknown>) {
+          if (name === "begin_provider_termination_attempt") {
+            beginCount += 1;
+            if (providerState === "confirmed")
+              return Promise.resolve({
+                data: { should_attempt: false },
+                error: null,
+              });
+            providerState = "pending";
+            return Promise.resolve({
+              data: {
+                should_attempt: true,
+                attempt_id: "attempt-monotonic",
+                request_id: "request-monotonic",
+                openai_call_id: "rtc-monotonic",
+                provider_termination_mode: "hangup",
+              },
+              error: null,
+            });
+          }
+          if (name === "complete_provider_termination_attempt") {
+            completeCount += 1;
+            if (args.p_confirmed === true) providerState = "confirmed";
+            return Promise.resolve({ data: true, error: null });
+          }
+          if (name === "settle_call_budget") {
+            settleCount += 1;
+            return Promise.resolve(
+              settleFirstFails && settleCount === 1
+                ? { data: null, error: { message: "temporary settlement failure" } }
+                : { data: "reservation-monotonic", error: null },
+            );
+          }
+          return Promise.resolve({ data: true, error: null });
+        },
+        from(table: string) {
+          let selectedCallId: string | null = null;
+          const api: any = {
+            update(row: Record<string, unknown>) {
+              if (table === "calls") {
+                callWrites.push(row);
+                if (typeof row.provider_termination_state === "string")
+                  providerState = row.provider_termination_state;
+              }
+              return api;
+            },
+            select() { return api; },
+            eq(column: string, value: unknown) {
+              if (table === "calls" && column === "id")
+                selectedCallId = String(value);
+              return api;
+            },
+            maybeSingle: async () => table === "calls"
+              ? {
+                  data: {
+                    id: selectedCallId,
+                    openai_call_id: "rtc-monotonic",
+                    provider_termination_state: providerState,
+                  },
+                  error: null,
+                }
+              : { data: null, error: null },
+            then(resolve: (value: unknown) => unknown) {
+              return Promise.resolve({ data: null, error: null }).then(resolve);
+            },
+          };
+          return api;
+        },
+      } as any);
+      const ended = ledger("ended");
+      ended.agentEnded = true;
+      ended.openaiCallId = "rtc-monotonic";
+      ended.providerUsageEvidence.terminal = scenario !== "usage_unresolved";
+      const fetchImpl = async () => {
+        fetchCount += 1;
+        return new Response(null, { status: 200 });
+      };
+
+      const first = await persistLedger(retryCap, ended, fetchImpl);
+      if (scenario === "provider_identity_mismatch")
+        ended.openaiCallId = "rtc-different";
+      const second = await persistLedger(retryCap, ended, fetchImpl);
+
+      expect(first).toBe(scenario === "success");
+      expect(second).toBe(
+        scenario === "success" || scenario === "settlement_failure",
+      );
+      expect(providerState).toBe("confirmed");
+      expect(fetchCount).toBe(1);
+      expect(completeCount).toBe(1);
+      expect(settleCount).toBe(
+        scenario === "success"
+          ? 1
+          : scenario === "settlement_failure"
+            ? 2
+            : scenario === "provider_identity_mismatch"
+              ? 1
+              : 0,
+      );
+      expect(beginCount).toBe(scenario === "success" ? 1 : 2);
+      expect(callWrites.filter((row) =>
+        row.provider_termination_state === "active"
+      )).toHaveLength(0);
+    }
+  });
+
   test("a sideband continuity gap keeps even terminal usage unknown for reconciliation", async () => {
     const ended = ledger("active");
     ended.providerUsageEvidence.continuous = false;
@@ -898,7 +1182,7 @@ describe("sideband budget finalization", () => {
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
   });
 
-  test("a repeated persistence attempt relies on SQL idempotency instead of duplicating ledger inserts", async () => {
+  test("a repeated persistence attempt does not resubmit an already completed settlement", async () => {
     const ended = ledger("active");
     await handleEvent(cap, ended, { send() {}, close() {} } as any, {
       type: "session.ended",
@@ -919,7 +1203,7 @@ describe("sideband budget finalization", () => {
     await persistLedger(cap, ended, async () => new Response(null, { status: 200 }));
     await persistLedger(cap, ended, async () => new Response(null, { status: 200 }));
 
-    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(2);
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(1);
     expect(directUsageInserts).toBe(0);
   });
 });

@@ -10,6 +10,7 @@ import {
 import {
   createOnboardingLifecycle,
   hashOnboardingToolArgs,
+  onboardingOutputRequestEventId,
   reduceOnboarding,
   type OnboardingCommand,
   type OnboardingEvent,
@@ -18,6 +19,7 @@ import {
 import { requestResponse } from "../src/response-coordinator.ts";
 
 const callId = "7f58ee06-6a13-4d45-a2d5-c60244dc92a3";
+const businessName = "Rocha Plumbing";
 
 function step(
   lifecycle: OnboardingLifecycle,
@@ -26,8 +28,31 @@ function step(
   return reduceOnboarding(lifecycle, event);
 }
 
+function outputSentEvent(
+  lifecycle: OnboardingLifecycle,
+  toolCallId: string,
+  socketGeneration: number,
+  elapsedMs: number,
+  delivery: "create" | "retrieve" = "create",
+): OnboardingEvent {
+  const receipt = lifecycle.toolOutbox[toolCallId];
+  if (!receipt) throw new Error(`missing tool receipt ${toolCallId}`);
+  return {
+    type: "tool.output_sent",
+    toolCallId,
+    socketGeneration,
+    elapsedMs,
+    delivery,
+    eventId: onboardingOutputRequestEventId(
+      lifecycle,
+      receipt,
+      delivery,
+    ),
+  };
+}
+
 function startCollecting(): OnboardingLifecycle {
-  let lifecycle = createOnboardingLifecycle(callId);
+  let lifecycle = createOnboardingLifecycle(callId, businessName);
   ({ lifecycle } = step(lifecycle, {
     type: "socket.attached",
     socketGeneration: 1,
@@ -47,10 +72,30 @@ function startCollecting(): OnboardingLifecycle {
     elapsedMs: 2,
   }));
   ({ lifecycle } = step(lifecycle, {
+    type: "response.transcript.done",
+    responseId: "response-greeting",
+    transcript:
+      "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Quais serviços sua empresa oferece?",
+    socketGeneration: 1,
+    elapsedMs: 3,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.output_audio.done",
+    responseId: "response-greeting",
+    socketGeneration: 1,
+    elapsedMs: 4,
+  }));
+  ({ lifecycle } = step(lifecycle, {
     type: "response.done",
     responseId: "response-greeting",
     socketGeneration: 1,
-    elapsedMs: 3,
+    elapsedMs: 5,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "output_audio_buffer.stopped",
+    responseId: "response-greeting",
+    socketGeneration: 1,
+    elapsedMs: 6,
   }));
   expect(lifecycle.phase).toBe("collecting");
   return lifecycle;
@@ -362,12 +407,10 @@ function signoffSpeaking(lifecycle = approvalPersisting().lifecycle) {
     resultHash: "approval-result-hash",
     elapsedMs: 74,
   }));
-  ({ lifecycle } = step(lifecycle, {
-    type: "tool.output_sent",
-    toolCallId: "approval-tool-1",
-    socketGeneration: 1,
-    elapsedMs: 75,
-  }));
+  ({ lifecycle } = step(
+    lifecycle,
+    outputSentEvent(lifecycle, "approval-tool-1", 1, 75),
+  ));
   ({ lifecycle } = step(lifecycle, {
     type: "tool.batch_closed",
     providerResponseId: "response-approval-tool",
@@ -451,7 +494,7 @@ function summaryCommands(commands: OnboardingCommand[]) {
 
 describe("onboarding lifecycle forbidden transitions", () => {
   test("queues one stable greeting and emits complete coverage-start telemetry", () => {
-    const created = createOnboardingLifecycle(callId);
+    const created = createOnboardingLifecycle(callId, businessName);
     expect(created.coverage.nextQuestion).toEqual({
       field: "service.catalog_closure",
       questionPt: "Quais serviços sua empresa oferece?",
@@ -505,7 +548,7 @@ describe("onboarding lifecycle forbidden transitions", () => {
   });
 
   test("complete greeting trace reaches collecting and cannot duplicate on reattach", () => {
-    let lifecycle = createOnboardingLifecycle(callId);
+    let lifecycle = createOnboardingLifecycle(callId, businessName);
     ({ lifecycle } = step(lifecycle, {
       type: "socket.attached",
       socketGeneration: 1,
@@ -525,22 +568,30 @@ describe("onboarding lifecycle forbidden transitions", () => {
       elapsedMs: 2,
     }));
     ({ lifecycle } = step(lifecycle, {
-      type: "response.output_audio.done",
+      type: "response.transcript.done",
       responseId: "response-greeting",
+      transcript:
+        "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Quais serviços sua empresa oferece?",
       socketGeneration: 1,
       elapsedMs: 3,
     }));
     ({ lifecycle } = step(lifecycle, {
-      type: "response.done",
+      type: "response.output_audio.done",
       responseId: "response-greeting",
       socketGeneration: 1,
       elapsedMs: 4,
     }));
     ({ lifecycle } = step(lifecycle, {
-      type: "output_audio_buffer.stopped",
+      type: "response.done",
       responseId: "response-greeting",
       socketGeneration: 1,
       elapsedMs: 5,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "output_audio_buffer.stopped",
+      responseId: "response-greeting",
+      socketGeneration: 1,
+      elapsedMs: 6,
     }));
 
     expect(lifecycle.phase).toBe("collecting");
@@ -563,6 +614,285 @@ describe("onboarding lifecycle forbidden transitions", () => {
         command.type === "request_response"
       ),
     ).toHaveLength(0);
+  });
+
+  test("greeting proof fails closed for missing, duplicated, foreign, text-only, or interrupted evidence", () => {
+    const exact =
+      "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Quais serviços sua empresa oferece?";
+    const cases: Array<{
+      name: string;
+      transcript?: string;
+      transcriptDelta?: string;
+      transcriptResponseId?: string;
+      audioDone?: boolean;
+      playbackStopped?: boolean;
+      interrupted?: boolean;
+    }> = [
+      {
+        name: "missing question",
+        transcript:
+          "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing.",
+        audioDone: true,
+        playbackStopped: true,
+      },
+      {
+        name: "duplicated greeting",
+        transcript: `${exact} ${exact}`,
+        audioDone: true,
+        playbackStopped: true,
+      },
+      {
+        name: "question before greeting",
+        transcript:
+          "Quais serviços sua empresa oferece? Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing.",
+        audioDone: true,
+        playbackStopped: true,
+      },
+      {
+        name: "foreign transcript",
+        transcript: exact,
+        transcriptResponseId: "response-other",
+        audioDone: true,
+        playbackStopped: true,
+      },
+      { name: "text only", transcript: exact, playbackStopped: true },
+      {
+        name: "nonterminal transcript delta",
+        transcriptDelta: exact,
+        audioDone: true,
+        playbackStopped: true,
+      },
+      { name: "audio without playback", transcript: exact, audioDone: true },
+      {
+        name: "interrupted",
+        transcript: exact,
+        audioDone: true,
+        playbackStopped: true,
+        interrupted: true,
+      },
+    ];
+
+    for (const [index, testCase] of cases.entries()) {
+      let lifecycle = createOnboardingLifecycle(`${callId}-${index}`, businessName);
+      const intentKey = `greeting:${lifecycle.callId}`;
+      ({ lifecycle } = step(lifecycle, {
+        type: "socket.attached",
+        socketGeneration: 1,
+        elapsedMs: 0,
+      }));
+      ({ lifecycle } = step(lifecycle, {
+        type: "response.intent_sent",
+        intentKey,
+        socketGeneration: 1,
+        elapsedMs: 1,
+      }));
+      ({ lifecycle } = step(lifecycle, {
+        type: "response.created",
+        responseId: "response-greeting",
+        intentKey,
+        socketGeneration: 1,
+        elapsedMs: 2,
+      }));
+      if (testCase.transcript)
+        ({ lifecycle } = step(lifecycle, {
+          type: "response.transcript.done",
+          responseId: testCase.transcriptResponseId ?? "response-greeting",
+          transcript: testCase.transcript,
+          socketGeneration: 1,
+          elapsedMs: 3,
+        }));
+      if (testCase.transcriptDelta)
+        ({ lifecycle } = step(lifecycle, {
+          type: "response.transcript.delta",
+          responseId: "response-greeting",
+          delta: testCase.transcriptDelta,
+          socketGeneration: 1,
+          elapsedMs: 3,
+        }));
+      if (testCase.audioDone)
+        ({ lifecycle } = step(lifecycle, {
+          type: "response.output_audio.done",
+          responseId: "response-greeting",
+          socketGeneration: 1,
+          elapsedMs: 4,
+        }));
+      if (testCase.interrupted)
+        ({ lifecycle } = step(lifecycle, {
+          type: "response.audio_interrupted",
+          responseId: "response-greeting",
+          socketGeneration: 1,
+          elapsedMs: 5,
+        }));
+      ({ lifecycle } = step(lifecycle, {
+        type: "response.done",
+        responseId: "response-greeting",
+        socketGeneration: 1,
+        elapsedMs: 6,
+      }));
+      if (testCase.playbackStopped)
+        ({ lifecycle } = step(lifecycle, {
+          type: "output_audio_buffer.stopped",
+          responseId: "response-greeting",
+          socketGeneration: 1,
+          elapsedMs: 7,
+        }));
+
+      expect(lifecycle.phase, testCase.name).toBe("greeting");
+    }
+  });
+
+  test("greeting proof rejects a wrong business identity or extra prose inside the keyed opening", () => {
+    for (const transcript of [
+      "Oi! Aqui é o Ligou, agente de inteligência artificial da Empresa Errada. Quais serviços sua empresa oferece?",
+      "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing e vou explicar o processo. Quais serviços sua empresa oferece?",
+    ]) {
+      let lifecycle = createOnboardingLifecycle(callId, businessName);
+      const intentKey = `greeting:${callId}`;
+      for (const event of [
+        {
+          type: "socket.attached" as const,
+          socketGeneration: 1,
+          elapsedMs: 0,
+        },
+        {
+          type: "response.intent_sent" as const,
+          intentKey,
+          socketGeneration: 1,
+          elapsedMs: 1,
+        },
+        {
+          type: "response.created" as const,
+          responseId: "response-greeting-identity",
+          intentKey,
+          socketGeneration: 1,
+          elapsedMs: 2,
+        },
+        {
+          type: "response.transcript.done" as const,
+          responseId: "response-greeting-identity",
+          transcript,
+          socketGeneration: 1,
+          elapsedMs: 3,
+        },
+        {
+          type: "response.output_audio.done" as const,
+          responseId: "response-greeting-identity",
+          socketGeneration: 1,
+          elapsedMs: 4,
+        },
+        {
+          type: "response.done" as const,
+          responseId: "response-greeting-identity",
+          socketGeneration: 1,
+          elapsedMs: 5,
+        },
+        {
+          type: "output_audio_buffer.stopped" as const,
+          responseId: "response-greeting-identity",
+          socketGeneration: 1,
+          elapsedMs: 6,
+        },
+      ]) ({ lifecycle } = step(lifecycle, event));
+      expect(lifecycle.phase).toBe("greeting");
+    }
+  });
+
+  test("caller speech after response.done but before greeting playback stop invalidates the opening proof", () => {
+    let lifecycle = createOnboardingLifecycle(callId, businessName);
+    const intentKey = `greeting:${callId}`;
+    for (const event of [
+      {
+        type: "socket.attached" as const,
+        socketGeneration: 1,
+        elapsedMs: 0,
+      },
+      {
+        type: "response.intent_sent" as const,
+        intentKey,
+        socketGeneration: 1,
+        elapsedMs: 1,
+      },
+      {
+        type: "response.created" as const,
+        responseId: "response-greeting",
+        intentKey,
+        socketGeneration: 1,
+        elapsedMs: 2,
+      },
+      {
+        type: "response.transcript.done" as const,
+        responseId: "response-greeting",
+        transcript:
+          "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Quais serviços sua empresa oferece?",
+        socketGeneration: 1,
+        elapsedMs: 3,
+      },
+      {
+        type: "response.output_audio.done" as const,
+        responseId: "response-greeting",
+        socketGeneration: 1,
+        elapsedMs: 4,
+      },
+      {
+        type: "response.done" as const,
+        responseId: "response-greeting",
+        socketGeneration: 1,
+        elapsedMs: 5,
+      },
+      {
+        type: "caller.speech_started" as const,
+        turnId: "caller-barge-in",
+        socketGeneration: 1,
+        elapsedMs: 6,
+      },
+      {
+        type: "output_audio_buffer.stopped" as const,
+        responseId: "response-greeting",
+        socketGeneration: 1,
+        elapsedMs: 7,
+      },
+    ]) ({ lifecycle } = step(lifecycle, event));
+
+    expect(lifecycle.phase).toBe("greeting");
+  });
+
+  test("cannot admit an onboarding fact before the keyed greeting proof", () => {
+    let lifecycle = createOnboardingLifecycle(callId, businessName);
+    ({ lifecycle } = step(lifecycle, {
+      type: "socket.attached",
+      socketGeneration: 1,
+      elapsedMs: 0,
+    }));
+    const attempted = step(lifecycle, {
+      type: "tool.called",
+      toolCallId: "tool-before-greeting",
+      name: "record_interview_answer",
+      args: {
+        topic: "area",
+        field: "area.coverage",
+        disposition: "answered",
+        rule_text: "Atende Irvine.",
+        structured: {
+          value: {
+            localities: [{
+              display_name: "Irvine",
+              country_code: "US",
+              region_code: "CA",
+            }],
+          },
+        },
+        owner_words: "Atendemos Irvine.",
+      },
+      providerResponseId: "response-before-greeting",
+      batchHash: "batch-before-greeting",
+      socketGeneration: 1,
+      elapsedMs: 1,
+    });
+
+    expect(attempted.lifecycle.phase).toBe("blocked");
+    expect(attempted.lifecycle.toolOutbox).toEqual({});
+    expect(attempted.commands.some((command) => command.type === "persist_fact"))
+      .toBe(false);
   });
 
   test("does not prepare or request a summary before typed coverage is complete", () => {
@@ -858,12 +1188,10 @@ describe("onboarding lifecycle forbidden transitions", () => {
     );
     expect(commandTypes(result.commands)).not.toContain("request_signoff");
 
-    ({ lifecycle } = step(lifecycle, {
-      type: "tool.output_sent",
-      toolCallId: "approval-tool-1",
-      socketGeneration: 1,
-      elapsedMs: 75,
-    }));
+    ({ lifecycle } = step(
+      lifecycle,
+      outputSentEvent(lifecycle, "approval-tool-1", 1, 75),
+    ));
     ({ lifecycle } = step(lifecycle, {
       type: "tool.batch_closed",
       providerResponseId: "response-approval-tool",
@@ -961,7 +1289,7 @@ describe("onboarding lifecycle forbidden transitions", () => {
       "blocked",
     ];
     for (const phase of phases) {
-      const lifecycle = { ...createOnboardingLifecycle(callId), phase };
+      const lifecycle = { ...createOnboardingLifecycle(callId, businessName), phase };
       const refused = step(lifecycle, {
         type: "tool.called",
         toolCallId: `end-${phase}`,
@@ -1003,7 +1331,7 @@ describe("onboarding lifecycle forbidden transitions", () => {
 
   test("treats every event after closed as a state no-op plus invariant telemetry", () => {
     const closed = {
-      ...createOnboardingLifecycle(callId),
+      ...createOnboardingLifecycle(callId, businessName),
       phase: "closed" as const,
       providerTerminationConfirmed: true,
     };
@@ -1066,15 +1394,14 @@ describe("reconnect-safe onboarding tool outbox", () => {
         toolCallId: "tool-price-1",
         outputItemId: "tool-output:tool-price-1",
         replay: false,
+        delivery: "create",
       }),
     );
 
-    ({ lifecycle } = step(lifecycle, {
-      type: "tool.output_sent",
-      toolCallId: "tool-price-1",
-      socketGeneration: 1,
-      elapsedMs: 12,
-    }));
+    ({ lifecycle } = step(
+      lifecycle,
+      outputSentEvent(lifecycle, "tool-price-1", 1, 12),
+    ));
     expect(lifecycle.toolOutbox["tool-price-1"]?.state).toBe("output_pending");
 
     result = step(lifecycle, {
@@ -1088,6 +1415,7 @@ describe("reconnect-safe onboarding tool outbox", () => {
         type: "resend_output",
         toolCallId: "tool-price-1",
         replay: true,
+        delivery: "retrieve",
       }),
     );
     expect(commandTypes(result.commands)).not.toContain("persist_fact");
@@ -1214,12 +1542,10 @@ describe("reconnect-safe onboarding tool outbox", () => {
         resultHash: `result-${id}`,
         elapsedMs: 11,
       }));
-      ({ lifecycle } = step(lifecycle, {
-        type: "tool.output_sent",
-        toolCallId: id,
-        socketGeneration: 1,
-        elapsedMs: 12,
-      }));
+      ({ lifecycle } = step(
+        lifecycle,
+        outputSentEvent(lifecycle, id, 1, 12),
+      ));
     }
     ({ lifecycle } = step(lifecycle, {
       type: "tool.batch_closed",
@@ -1327,12 +1653,10 @@ describe("canonical 7f58ee06 cadence", () => {
       });
       lifecycle = result.lifecycle;
       beforeCoverage.push(...result.commands);
-      ({ lifecycle } = step(lifecycle, {
-        type: "tool.output_sent",
-        toolCallId: id,
-        socketGeneration: 1,
-        elapsedMs: 30 + index,
-      }));
+      ({ lifecycle } = step(
+        lifecycle,
+        outputSentEvent(lifecycle, id, 1, 30 + index),
+      ));
       ({ lifecycle } = step(lifecycle, {
         type: "tool.output_acked",
         toolCallId: id,
@@ -1483,12 +1807,10 @@ describe("Task 4 review fixes", () => {
       resultHash: "review-result",
       elapsedMs: 11,
     }));
-    ({ lifecycle } = step(lifecycle, {
-      type: "tool.output_sent",
-      toolCallId: "fact-review-1",
-      socketGeneration: 1,
-      elapsedMs: 12,
-    }));
+    ({ lifecycle } = step(
+      lifecycle,
+      outputSentEvent(lifecycle, "fact-review-1", 1, 12),
+    ));
     ({ lifecycle } = step(lifecycle, {
       type: "tool.output_acked",
       toolCallId: "fact-review-1",
@@ -1798,12 +2120,10 @@ describe("Task 4 review fixes", () => {
     ) as unknown as { type: "refresh_snapshot"; requestId: string } | undefined;
     expect(refresh?.requestId).toBeString();
 
-    ({ lifecycle } = step(lifecycle, {
-      type: "tool.output_sent",
-      toolCallId: "approval-tool-1",
-      socketGeneration: 1,
-      elapsedMs: 75,
-    }));
+    ({ lifecycle } = step(
+      lifecycle,
+      outputSentEvent(lifecycle, "approval-tool-1", 1, 75),
+    ));
     ({ lifecycle } = step(lifecycle, {
       type: "tool.output_acked",
       toolCallId: "approval-tool-1",
@@ -1999,7 +2319,7 @@ describe("Task 4 review fixes", () => {
 
   test("post-closed timer preserves exact state and emits only sanitized invariant telemetry", () => {
     const lifecycle = {
-      ...createOnboardingLifecycle(callId),
+      ...createOnboardingLifecycle(callId, businessName),
       phase: "closed" as const,
       lifecycleRevision: 88,
       socketGeneration: 4,
@@ -2132,7 +2452,7 @@ test("a sanitized adapter invariant enters blocked through the reducer", () => {
 });
 
 test("lifecycle telemetry precedes the side effect command it describes", () => {
-  const attached = step(createOnboardingLifecycle(callId), {
+  const attached = step(createOnboardingLifecycle(callId, businessName), {
     type: "socket.attached",
     socketGeneration: 1,
     elapsedMs: 0,
@@ -2303,7 +2623,7 @@ test("reducer maps fail closed at deterministic capacity without discarding repl
   expect(batchOverflow.lifecycle.phase).toBe("blocked");
   expect(Object.keys(batchOverflow.lifecycle.toolBatches)).toHaveLength(512);
 
-  const intentLifecycle = createOnboardingLifecycle(callId);
+  const intentLifecycle = createOnboardingLifecycle(callId, businessName);
   intentLifecycle.responseIntents = Object.fromEntries(
     Array.from({ length: 512 }, (_, index) => [
       `existing-intent-${index}`,
@@ -2327,7 +2647,7 @@ test("reducer maps fail closed at deterministic capacity without discarding repl
 });
 
 test("blocked is absorbing while terminal and output acknowledgements remain bookkeeping-only", () => {
-  const blocked = createOnboardingLifecycle(callId);
+  const blocked = createOnboardingLifecycle(callId, businessName);
   blocked.phase = "blocked";
   blocked.socketGeneration = 1;
   blocked.coverage = {
@@ -2518,7 +2838,7 @@ test("terminal response registry prunes only unreferenced identities and blocks 
 });
 
 test("blocked attach and durable tool completion preserve bookkeeping without response authority", () => {
-  const attachedLifecycle = createOnboardingLifecycle(callId);
+  const attachedLifecycle = createOnboardingLifecycle(callId, businessName);
   attachedLifecycle.phase = "blocked";
   attachedLifecycle.socketGeneration = 1;
   attachedLifecycle.toolOutbox["blocked-pending"] = {
@@ -2553,7 +2873,7 @@ test("blocked attach and durable tool completion preserve bookkeeping without re
   expect(attached.commands.some((command) => command.type === "request_response"))
     .toBe(false);
 
-  const executionLifecycle = createOnboardingLifecycle(callId);
+  const executionLifecycle = createOnboardingLifecycle(callId, businessName);
   executionLifecycle.phase = "blocked";
   executionLifecycle.socketGeneration = 2;
   executionLifecycle.toolOutbox["blocked-running"] = {
@@ -2583,8 +2903,53 @@ test("blocked attach and durable tool completion preserve bookkeeping without re
   )).toBe(false);
 });
 
+test("blocked correlated duplicate create still retrieves the exact pending output as bookkeeping", () => {
+  const lifecycle = createOnboardingLifecycle(callId, businessName);
+  lifecycle.phase = "blocked";
+  lifecycle.socketGeneration = 1;
+  lifecycle.toolOutbox["blocked-duplicate"] = {
+    toolCallId: "blocked-duplicate",
+    toolName: "end_session",
+    argsHash: hashOnboardingToolArgs({}),
+    state: "output_pending",
+    providerResponseId: "blocked-duplicate-response",
+    batchHash: "blocked-duplicate-batch",
+    output: "{\"status\":\"application_owned_close\"}",
+    resultHash: "blocked-duplicate-result",
+    outputItemId: "tool-output:blocked-duplicate",
+    socketGeneration: 1,
+  };
+  const createEventId = onboardingOutputRequestEventId(
+    lifecycle,
+    lifecycle.toolOutbox["blocked-duplicate"]!,
+    "create",
+  );
+  lifecycle.toolOutbox["blocked-duplicate"]!.outputRequest = {
+    delivery: "create",
+    eventId: createEventId,
+    socketGeneration: 1,
+  };
+
+  const duplicate = step(lifecycle, {
+    type: "tool.output_create_duplicate",
+    toolCallId: "blocked-duplicate",
+    eventId: createEventId,
+    socketGeneration: 1,
+    elapsedMs: 1,
+  });
+
+  expect(duplicate.lifecycle.phase).toBe("blocked");
+  expect(duplicate.commands).toContainEqual(expect.objectContaining({
+    type: "resend_output",
+    toolCallId: "blocked-duplicate",
+    outputItemId: "tool-output:blocked-duplicate",
+    delivery: "retrieve",
+    replay: true,
+  }));
+});
+
 test("blocked exact post-hangup durable confirmation may close; mismatch remains blocked", () => {
-  const lifecycle = createOnboardingLifecycle(callId);
+  const lifecycle = createOnboardingLifecycle(callId, businessName);
   lifecycle.phase = "blocked";
   lifecycle.approval = {
     toolCallId: "approval-tool-blocked",
@@ -2621,7 +2986,7 @@ test("blocked exact post-hangup durable confirmation may close; mismatch remains
 test("coverage correction invalidates queued or sent old signoff and corrected approval can produce signoff B", () => {
   let corrected!: OnboardingLifecycle;
   for (const state of ["queued", "sent"] as const) {
-    const lifecycle = createOnboardingLifecycle(callId);
+    const lifecycle = createOnboardingLifecycle(callId, businessName);
     lifecycle.phase = "final_signoff_speaking";
     lifecycle.socketGeneration = 1;
     lifecycle.coverage = {
@@ -2772,12 +3137,10 @@ test("coverage correction invalidates queued or sent old signoff and corrected a
     resultHash: "approval-result-B",
     elapsedMs: 13,
   }));
-  ({ lifecycle } = step(lifecycle, {
-    type: "tool.output_sent",
-    toolCallId: "approval-tool-B",
-    socketGeneration: 1,
-    elapsedMs: 14,
-  }));
+  ({ lifecycle } = step(
+    lifecycle,
+    outputSentEvent(lifecycle, "approval-tool-B", 1, 14),
+  ));
   ({ lifecycle } = step(lifecycle, {
     type: "tool.batch_closed",
     providerResponseId: "response-approval-B",

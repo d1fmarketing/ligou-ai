@@ -322,6 +322,140 @@ const CAP_NAME: Record<string, string> = {
   end_session: "end_session",
 };
 
+export type ToolArgumentValidation =
+  | { ok: true }
+  | {
+      ok: false;
+      code: "tool_not_admitted" | "tool_schema_invalid";
+      safeDetail: string;
+    };
+
+function jsonSchemaViolation(
+  schema: Record<string, unknown>,
+  value: unknown,
+  path: string,
+): string | null {
+  const declaredTypes = Array.isArray(schema.type)
+    ? schema.type
+    : schema.type === undefined
+      ? []
+      : [schema.type];
+  const matchesType = (type: unknown) => {
+    switch (type) {
+      case "null":
+        return value === null;
+      case "object":
+        return value !== null && typeof value === "object" &&
+          !Array.isArray(value);
+      case "array":
+        return Array.isArray(value);
+      case "string":
+        return typeof value === "string";
+      case "number":
+        return typeof value === "number" && Number.isFinite(value);
+      case "integer":
+        return typeof value === "number" && Number.isSafeInteger(value);
+      case "boolean":
+        return typeof value === "boolean";
+      default:
+        return false;
+    }
+  };
+  if (declaredTypes.length > 0 && !declaredTypes.some(matchesType))
+    return `${path} has the wrong JSON type`;
+
+  if (Array.isArray(schema.enum) &&
+    !schema.enum.some((candidate) => Object.is(candidate, value)))
+    return `${path} is outside the declared enum`;
+
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    const properties = schema.properties &&
+        typeof schema.properties === "object" &&
+        !Array.isArray(schema.properties)
+      ? schema.properties as Record<string, Record<string, unknown>>
+      : {};
+    const required = Array.isArray(schema.required)
+      ? schema.required.filter((key): key is string => typeof key === "string")
+      : [];
+    for (const key of required)
+      if (!Object.prototype.hasOwnProperty.call(record, key))
+        return `${path}.${key} is required`;
+    if (schema.additionalProperties === false)
+      for (const key of Object.keys(record))
+        if (!Object.prototype.hasOwnProperty.call(properties, key))
+          return `${path}.${key} is not declared`;
+    for (const [key, nested] of Object.entries(record)) {
+      const propertySchema = properties[key];
+      if (!propertySchema) continue;
+      const violation = jsonSchemaViolation(
+        propertySchema,
+        nested,
+        `${path}.${key}`,
+      );
+      if (violation) return violation;
+    }
+  }
+
+  if (Array.isArray(value) && schema.items &&
+    typeof schema.items === "object" && !Array.isArray(schema.items))
+    for (const [index, nested] of value.entries()) {
+      const violation = jsonSchemaViolation(
+        schema.items as Record<string, unknown>,
+        nested,
+        `${path}[${index}]`,
+      );
+      if (violation) return violation;
+    }
+  return null;
+}
+
+/**
+ * Pure transport admission. This validates the exact session-scoped function
+ * schema and capability before a complete provider batch is allowed to cause
+ * any store, tool-log, output, or receipt effect.
+ */
+export function validateToolArgumentsForCapability(
+  cap: Capability,
+  name: string,
+  args: unknown,
+): ToolArgumentValidation {
+  if (
+    cap.actor !== "CALLER" ||
+    !Number.isFinite(cap.expiresAt) ||
+    Date.now() > cap.expiresAt ||
+    (
+      cap.sessionType === "onboarding" &&
+      (typeof cap.ownerUserId !== "string" || !cap.ownerUserId.trim())
+    )
+  ) return {
+    ok: false,
+    code: "tool_not_admitted",
+    safeDetail: "session capability was expired or not owner-bound",
+  };
+  const capName = CAP_NAME[name];
+  const schema = toolSchemasForSessionType(cap.sessionType)
+    .find((candidate) => candidate.name === name);
+  if (!capName || !schema || !cap.allowedTools.includes(capName))
+    return {
+      ok: false,
+      code: "tool_not_admitted",
+      safeDetail: "provider tool was not admitted by the session capability",
+    };
+  const violation = jsonSchemaViolation(
+    schema.parameters as unknown as Record<string, unknown>,
+    args,
+    "arguments",
+  );
+  return violation
+    ? {
+        ok: false,
+        code: "tool_schema_invalid",
+        safeDetail: violation,
+      }
+    : { ok: true };
+}
+
 export interface ToolResult { ok: boolean; body: Record<string, unknown>; durationMs: number }
 
 function areaCities(rule: Rule | undefined): string[] | null {

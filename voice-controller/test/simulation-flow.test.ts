@@ -330,12 +330,41 @@ test("serialized sideband passes exact provider call_id and acknowledges simulat
     transcript: [],
     toolLog: [],
     status: "active",
+    expectedOnboardingBusinessName: TENANT.name,
   };
   const ws = {
     sent: [] as string[],
     send(frame: string) { this.sent.push(frame); },
     close() {},
   };
+  const greetingResponseId = "resp-sideband-greeting";
+  await handleEvent(cap, ledger, ws as any, { type: "session.created" });
+  await handleEvent(cap, ledger, ws as any, {
+    type: "response.created",
+    response: {
+      id: greetingResponseId,
+      metadata: { intent_key: `greeting:${cap.callId}` },
+    },
+  });
+  await handleEvent(cap, ledger, ws as any, {
+    type: "response.output_audio_transcript.done",
+    response_id: greetingResponseId,
+    transcript:
+      "Oi! Aqui é o Ligou, agente de inteligência artificial da D1f Marketing. Quais serviços sua empresa oferece?",
+  });
+  await handleEvent(cap, ledger, ws as any, {
+    type: "response.output_audio.done",
+    response_id: greetingResponseId,
+  });
+  await handleEvent(cap, ledger, ws as any, {
+    type: "response.done",
+    response: { id: greetingResponseId, status: "completed" },
+  });
+  await handleEvent(cap, ledger, ws as any, {
+    type: "output_audio_buffer.stopped",
+    response_id: greetingResponseId,
+  });
+  expect(ledger.onboarding!.lifecycle.phase).toBe("collecting");
   await handleEvent(cap, ledger, ws as any, {
     type: "response.created",
     response: { id: "resp-sideband-answer", metadata: {} },
@@ -382,10 +411,7 @@ test("serialized sideband passes exact provider call_id and acknowledges simulat
     .toBe("output_pending");
   await handleEvent(cap, ledger, ws as any, {
     type: "conversation.item.created",
-    item: {
-      id: "tool-output:provider-sideband-answer-1",
-      type: "function_call_output",
-    },
+    item: outputFrame.item,
   });
   expect(ledger.onboarding!.lifecycle.toolOutbox["provider-sideband-answer-1"]?.state)
     .toBe("output_acked");

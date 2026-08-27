@@ -69,7 +69,26 @@ export async function terminateProviderCall(args: {
   });
   if (beginError || !attempt) return { confirmed: false, error: `termination_state_write_failed: ${beginError?.message ?? "attempt_missing"}` };
   const claimed = attempt as any;
-  if (claimed.should_attempt !== true) return { confirmed: false, error: "provider_termination_already_attempted" };
+  if (claimed.should_attempt !== true) {
+    const { data: readback, error: readbackError } = await s
+      .from("calls")
+      .select("id,openai_call_id,provider_termination_state")
+      .eq("id", args.callId)
+      .maybeSingle();
+    if (
+      readbackError ||
+      readback?.id !== args.callId ||
+      !args.openaiCallId ||
+      readback.openai_call_id !== args.openaiCallId ||
+      readback.provider_termination_state !== "confirmed"
+    ) return {
+      confirmed: false,
+      error: `provider_termination_already_attempted:${String(
+        readback?.provider_termination_state ?? "missing",
+      )}`,
+    };
+    return { confirmed: true };
+  }
 
   const result = await requestProviderTermination({
     openaiCallId: claimed.openai_call_id ? String(claimed.openai_call_id) : args.openaiCallId,

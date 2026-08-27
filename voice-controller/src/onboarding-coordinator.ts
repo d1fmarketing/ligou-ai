@@ -30,6 +30,8 @@ export type ToolOutboxState =
   | "output_pending"
   | "output_acked";
 
+export type OutputDelivery = "create" | "retrieve";
+
 export interface ToolReceipt {
   toolCallId: string;
   toolName: string;
@@ -41,6 +43,11 @@ export interface ToolReceipt {
   output?: string;
   outputItemId: string;
   socketGeneration: number;
+  outputRequest?: {
+    delivery: OutputDelivery;
+    eventId: string;
+    socketGeneration: number;
+  };
 }
 
 export interface ToolBatch {
@@ -77,6 +84,17 @@ export interface SummaryProof {
   playbackStopped: boolean;
   validated?: boolean;
   interrupted: boolean;
+}
+
+export interface GreetingProof {
+  responseId: string;
+  transcript: string;
+  transcriptFinal: boolean;
+  audioDone: boolean;
+  responseDone: boolean;
+  playbackStopped: boolean;
+  interrupted: boolean;
+  validated?: boolean;
 }
 
 export interface SignoffProof {
@@ -126,6 +144,7 @@ export interface ResponseIntentReceipt {
 
 export interface OnboardingLifecycle {
   callId: string;
+  expectedBusinessName: string;
   phase: OnboardingPhase;
   lifecycleRevision: number;
   socketGeneration: number;
@@ -142,6 +161,7 @@ export interface OnboardingLifecycle {
   approval?: PersistedApproval;
   snapshotRefresh?: SnapshotRefreshRequest;
   pendingFollowup?: PendingFollowup;
+  greeting?: GreetingProof;
   summary?: SummaryProof;
   signoff?: SignoffProof;
   invalidatedSummaryRevision?: number;
@@ -174,6 +194,8 @@ export type TelemetryName =
   | "voice.response.intent_sent"
   | "voice.response.acknowledged"
   | "voice.response.terminal"
+  | "onboarding.greeting.validated"
+  | "onboarding.greeting.invalid"
   | "onboarding.summary.validated"
   | "onboarding.summary.invalid"
   | "onboarding.summary.audio_done"
@@ -256,6 +278,8 @@ export type OnboardingCommand =
       outputItemId: string;
       replay: boolean;
       socketGeneration: number;
+      delivery: OutputDelivery;
+      eventId: string;
     }
   | {
       type: "ask_follow_up";
@@ -325,7 +349,13 @@ export type OnboardingEvent =
         | "output_index_invalid"
         | "output_index_duplicate"
         | "adapter_capacity_exceeded"
-        | "reused_coverage_mismatch";
+        | "reused_coverage_mismatch"
+        | "tool_args_json_invalid"
+        | "tool_schema_invalid"
+        | "tool_not_admitted"
+        | "tool_output_created_invalid"
+        | "tool_output_retrieved_invalid"
+        | "tool_output_retrieve_failed";
       safeDetail: string;
     })
   | (SocketEvent & { type: "response.intent_sent"; intentKey: string })
@@ -439,7 +469,17 @@ export type OnboardingEvent =
         | "indeterminate";
       safeDetail: string;
     })
-  | (SocketEvent & { type: "tool.output_sent"; toolCallId: string })
+  | (SocketEvent & {
+      type: "tool.output_sent";
+      toolCallId: string;
+      delivery: OutputDelivery;
+      eventId: string;
+    })
+  | (SocketEvent & {
+      type: "tool.output_create_duplicate";
+      toolCallId: string;
+      eventId: string;
+    })
   | (SocketEvent & {
       type: "tool.output_acked";
       toolCallId: string;
@@ -499,6 +539,23 @@ export function hashOnboardingToolArgs(args: Record<string, unknown>): string {
 const batchKey = (providerResponseId: string, batchHash: string) =>
   `${providerResponseId}:${batchHash}`;
 const outputItemId = (toolCallId: string) => `tool-output:${toolCallId}`;
+export function onboardingOutputRequestEventId(
+  lifecycle: OnboardingLifecycle,
+  receipt: ToolReceipt,
+  delivery: OutputDelivery,
+): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify({
+      call_id: lifecycle.callId,
+      tool_call_id: receipt.toolCallId,
+      output_item_id: receipt.outputItemId,
+      socket_generation: lifecycle.socketGeneration,
+      delivery,
+    }), "utf8")
+    .digest("hex")
+    .slice(0, 32);
+  return `ligou-${delivery}-${digest}`;
+}
 const elapsed = (event: TimedEvent) =>
   Number.isFinite(event.elapsedMs) && (event.elapsedMs ?? 0) >= 0
     ? Math.floor(event.elapsedMs ?? 0)
@@ -815,6 +872,75 @@ function normalizedBoundaryTokens(value: string): string[] {
     .match(/[a-z0-9]+/g) ?? [];
 }
 
+function tokenSequenceStarts(
+  transcript: string[],
+  anchor: string[],
+): number[] {
+  if (anchor.length === 0 || anchor.length > transcript.length) return [];
+  const starts: number[] = [];
+  for (let start = 0; start <= transcript.length - anchor.length; start += 1)
+    if (anchor.every((token, offset) => transcript[start + offset] === token))
+      starts.push(start);
+  return starts;
+}
+
+function greetingTranscriptValid(
+  lifecycle: OnboardingLifecycle,
+  greeting: GreetingProof,
+): boolean {
+  const transcript = normalizedBoundaryTokens(greeting.transcript);
+  const identity = normalizedBoundaryTokens(
+    `Oi! Aqui é o Ligou, agente de inteligência artificial da ${lifecycle.expectedBusinessName}`,
+  );
+  const question = normalizedBoundaryTokens(
+    INITIAL_SERVICE_DISCOVERY_QUESTION_PT,
+  );
+  const identityStarts = tokenSequenceStarts(transcript, identity);
+  const questionStarts = tokenSequenceStarts(transcript, question);
+  if (identityStarts.length !== 1 || questionStarts.length !== 1) return false;
+  const identityStart = identityStarts[0]!;
+  const questionStart = questionStarts[0]!;
+  return identityStart === 0 &&
+    questionStart === identity.length &&
+    questionStart + question.length === transcript.length;
+}
+
+function maybeValidateGreeting(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+): void {
+  const greeting = lifecycle.greeting;
+  if (
+    !greeting ||
+    greeting.validated !== undefined ||
+    !greeting.transcriptFinal ||
+    !greeting.audioDone ||
+    !greeting.responseDone ||
+    !greeting.playbackStopped ||
+    greeting.interrupted
+  ) return;
+  greeting.validated = greetingTranscriptValid(lifecycle, greeting);
+  if (!greeting.validated) {
+    commands.push(
+      telemetry(lifecycle, "onboarding.greeting.invalid", event, {
+        responseId: greeting.responseId,
+        intentKey: `greeting:${lifecycle.callId}`,
+        outcome: "identity_or_question_proof_invalid",
+      }),
+    );
+    return;
+  }
+  lifecycle.phase = "collecting";
+  commands.push(
+    telemetry(lifecycle, "onboarding.greeting.validated", event, {
+      responseId: greeting.responseId,
+      intentKey: `greeting:${lifecycle.callId}`,
+      outcome: "spoken_opening_proven",
+    }),
+  );
+}
+
 function containsAnchorTokens(transcript: string[], anchor: string[]): boolean {
   if (anchor.length === 0 || anchor.length > transcript.length) return false;
   for (let start = 0; start <= transcript.length - anchor.length; start += 1)
@@ -979,6 +1105,9 @@ function resendOutput(
   replay: boolean,
 ): void {
   if (receipt.output === undefined) return;
+  const delivery: OutputDelivery = receipt.state === "output_pending"
+    ? "retrieve"
+    : "create";
   commands.push({
     type: "resend_output",
     toolCallId: receipt.toolCallId,
@@ -986,6 +1115,8 @@ function resendOutput(
     outputItemId: receipt.outputItemId,
     replay,
     socketGeneration: lifecycle.socketGeneration,
+    delivery,
+    eventId: onboardingOutputRequestEventId(lifecycle, receipt, delivery),
   });
   if (replay)
     commands.push(
@@ -1173,6 +1304,33 @@ function reduceBlockedBookkeeping(
     );
     return { lifecycle, commands };
   }
+  if (event.type === "tool.output_create_duplicate") {
+    const receipt = current.toolOutbox[event.toolCallId];
+    if (
+      !receipt ||
+      receipt.state !== "output_pending" ||
+      receipt.outputRequest?.delivery !== "create" ||
+      receipt.outputRequest.eventId !== event.eventId ||
+      receipt.outputRequest.socketGeneration !== event.socketGeneration
+    ) return {
+      lifecycle: current,
+      commands: [telemetry(current, "invariant.violation", event, {
+        toolCallId: event.toolCallId,
+        outcome: "blocked_output_duplicate_correlation_invalid",
+      })],
+    };
+    const lifecycle = cloneLifecycle(current);
+    lifecycle.lifecycleRevision += 1;
+    const commands: OnboardingCommand[] = [];
+    resendOutput(
+      lifecycle,
+      commands,
+      event,
+      lifecycle.toolOutbox[event.toolCallId]!,
+      true,
+    );
+    return { lifecycle, commands };
+  }
   if (event.type === "tool.output_sent") {
     const receipt = current.toolOutbox[event.toolCallId];
     if (!receipt ||
@@ -1184,11 +1342,34 @@ function reduceBlockedBookkeeping(
           outcome: "blocked_invalid_output_send",
         })],
       };
+    const expectedDelivery: OutputDelivery = receipt.state === "output_pending"
+      ? "retrieve"
+      : "create";
+    const expectedEventId = onboardingOutputRequestEventId(
+      current,
+      receipt,
+      expectedDelivery,
+    );
+    if (
+      event.delivery !== expectedDelivery ||
+      event.eventId !== expectedEventId
+    ) return {
+      lifecycle: current,
+      commands: [telemetry(current, "invariant.violation", event, {
+        toolCallId: event.toolCallId,
+        outcome: "blocked_output_request_correlation_invalid",
+      })],
+    };
     const lifecycle = cloneLifecycle(current);
     lifecycle.lifecycleRevision += 1;
     lifecycle.toolOutbox[event.toolCallId]!.state = "output_pending";
     lifecycle.toolOutbox[event.toolCallId]!.socketGeneration =
       event.socketGeneration;
+    lifecycle.toolOutbox[event.toolCallId]!.outputRequest = {
+      delivery: event.delivery,
+      eventId: event.eventId,
+      socketGeneration: event.socketGeneration,
+    };
     return {
       lifecycle,
       commands: [telemetry(lifecycle, "voice.tool.output_sent", event, {
@@ -1228,10 +1409,16 @@ function reduceBlockedBookkeeping(
   };
 }
 
-export function createOnboardingLifecycle(callId: string): OnboardingLifecycle {
+export function createOnboardingLifecycle(
+  callId: string,
+  expectedBusinessName: string,
+): OnboardingLifecycle {
   if (!callId.trim()) throw new Error("onboarding_call_id_required");
+  if (!expectedBusinessName.trim())
+    throw new Error("onboarding_expected_business_name_required");
   return {
     callId,
+    expectedBusinessName: expectedBusinessName.trim(),
     phase: "greeting",
     lifecycleRevision: 0,
     socketGeneration: 0,
@@ -1415,8 +1602,32 @@ export function reduceOnboarding(
           );
           break;
         }
+        if (
+          intent.purpose === "greeting" &&
+          lifecycle.greeting &&
+          lifecycle.greeting.responseId !== event.responseId
+        ) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "greeting_response_mismatch",
+            "greeting intent was acknowledged by more than one response",
+          );
+          break;
+        }
         intent.state = "acknowledged";
         intent.responseId = event.responseId;
+        if (intent.purpose === "greeting" && !lifecycle.greeting)
+          lifecycle.greeting = {
+            responseId: event.responseId,
+            transcript: "",
+            transcriptFinal: false,
+            audioDone: false,
+            responseDone: false,
+            playbackStopped: false,
+            interrupted: false,
+          };
         if (intent.purpose === "summary" && lifecycle.summary)
           lifecycle.summary.responseId = event.responseId;
         if (intent.purpose === "final_signoff" && lifecycle.signoff)
@@ -1433,6 +1644,10 @@ export function reduceOnboarding(
     }
     case "response.transcript.delta": {
       if (
+        lifecycle.greeting?.responseId === event.responseId &&
+        !lifecycle.greeting.transcriptFinal
+      ) lifecycle.greeting.transcript += event.delta;
+      if (
         lifecycle.summary?.responseId === event.responseId &&
         !lifecycle.summary.transcriptFinal
       )
@@ -1440,6 +1655,11 @@ export function reduceOnboarding(
       break;
     }
     case "response.transcript.done": {
+      if (lifecycle.greeting?.responseId === event.responseId) {
+        lifecycle.greeting.transcript = event.transcript;
+        lifecycle.greeting.transcriptFinal = true;
+        maybeValidateGreeting(lifecycle, commands, event);
+      }
       if (lifecycle.summary?.responseId === event.responseId) {
         lifecycle.summary.transcript = event.transcript;
         lifecycle.summary.transcriptFinal = true;
@@ -1448,6 +1668,10 @@ export function reduceOnboarding(
       break;
     }
     case "response.output_audio.done": {
+      if (lifecycle.greeting?.responseId === event.responseId) {
+        lifecycle.greeting.audioDone = true;
+        maybeValidateGreeting(lifecycle, commands, event);
+      }
       if (lifecycle.summary?.responseId === event.responseId) {
         lifecycle.summary.audioDone = true;
         commands.push(
@@ -1483,6 +1707,10 @@ export function reduceOnboarding(
         delete lifecycle.activeResponseId;
       for (const intent of Object.values(lifecycle.responseIntents))
         if (intent.responseId === event.responseId) intent.state = "terminal";
+      if (lifecycle.greeting?.responseId === event.responseId) {
+        lifecycle.greeting.responseDone = true;
+        maybeValidateGreeting(lifecycle, commands, event);
+      }
       if (lifecycle.summary?.responseId === event.responseId) {
         lifecycle.summary.responseDone = true;
         maybeValidateSummary(lifecycle, commands, event);
@@ -1491,8 +1719,7 @@ export function reduceOnboarding(
         lifecycle.signoff.responseDone = true;
         maybeFinishSignoff(lifecycle, commands, event);
       }
-      if (lifecycle.phase === "greeting") lifecycle.phase = "collecting";
-      else if (lifecycle.phase === "follow_up") lifecycle.phase = "collecting";
+      if (lifecycle.phase === "follow_up") lifecycle.phase = "collecting";
       commands.push(
         telemetry(lifecycle, "voice.response.terminal", event, {
           responseId: event.responseId,
@@ -1503,6 +1730,10 @@ export function reduceOnboarding(
       break;
     }
     case "output_audio_buffer.stopped": {
+      if (lifecycle.greeting?.responseId === event.responseId) {
+        lifecycle.greeting.playbackStopped = true;
+        maybeValidateGreeting(lifecycle, commands, event);
+      }
       if (lifecycle.summary?.responseId === event.responseId) {
         lifecycle.summary.playbackStopped = true;
         commands.push(
@@ -1528,6 +1759,23 @@ export function reduceOnboarding(
       break;
     }
     case "response.audio_interrupted": {
+      if (lifecycle.greeting?.responseId === event.responseId) {
+        if (lifecycle.greeting.validated === true) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "greeting_proof_retracted",
+            "provider interrupted an already validated greeting response",
+          );
+          break;
+        }
+        lifecycle.greeting.audioDone = false;
+        lifecycle.greeting.playbackStopped = false;
+        lifecycle.greeting.interrupted = true;
+        lifecycle.greeting.validated = false;
+        lifecycle.phase = "greeting";
+      }
       if (lifecycle.summary?.responseId === event.responseId) {
         lifecycle.summary.audioDone = false;
         lifecycle.summary.playbackStopped = false;
@@ -1842,6 +2090,15 @@ export function reduceOnboarding(
     }
     case "caller.speech_started": {
       if (
+        lifecycle.phase === "greeting" &&
+        lifecycle.greeting &&
+        !lifecycle.greeting.playbackStopped
+      ) {
+        lifecycle.greeting.audioDone = false;
+        lifecycle.greeting.interrupted = true;
+        lifecycle.greeting.validated = false;
+      }
+      if (
         lifecycle.phase === "awaiting_owner_approval" &&
         lifecycle.summary?.validated === true &&
         lifecycle.summary.playbackStopped &&
@@ -1902,6 +2159,20 @@ export function reduceOnboarding(
       break;
     }
     case "tool.called": {
+      if (
+        lifecycle.phase === "greeting" &&
+        event.name === "record_interview_answer"
+      ) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "greeting_proof_required",
+          "onboarding facts cannot be admitted before the spoken greeting proof",
+          event.toolCallId,
+        );
+        break;
+      }
       const argsHash = hashOnboardingToolArgs(event.args);
       const existing = lifecycle.toolOutbox[event.toolCallId];
       if (existing) {
@@ -2099,14 +2370,62 @@ export function reduceOnboarding(
         );
         break;
       }
+      const expectedDelivery: OutputDelivery =
+        receipt.state === "output_pending" ? "retrieve" : "create";
+      const expectedEventId = onboardingOutputRequestEventId(
+        lifecycle,
+        receipt,
+        expectedDelivery,
+      );
+      if (
+        event.delivery !== expectedDelivery ||
+        event.eventId !== expectedEventId
+      ) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "tool_output_request_invalid",
+          "tool output request did not match its deterministic delivery correlation",
+          event.toolCallId,
+        );
+        break;
+      }
       receipt.state = "output_pending";
       receipt.socketGeneration = event.socketGeneration;
+      receipt.outputRequest = {
+        delivery: event.delivery,
+        eventId: event.eventId,
+        socketGeneration: event.socketGeneration,
+      };
       commands.push(
         telemetry(lifecycle, "voice.tool.output_sent", event, {
           toolCallId: event.toolCallId,
           outcome: "awaiting_acknowledgement",
         }),
       );
+      break;
+    }
+    case "tool.output_create_duplicate": {
+      const receipt = lifecycle.toolOutbox[event.toolCallId];
+      if (
+        !receipt ||
+        receipt.state !== "output_pending" ||
+        receipt.outputRequest?.delivery !== "create" ||
+        receipt.outputRequest.eventId !== event.eventId ||
+        receipt.outputRequest.socketGeneration !== event.socketGeneration
+      ) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "tool_output_duplicate_invalid",
+          "duplicate output error did not match the active create request",
+          event.toolCallId,
+        );
+        break;
+      }
+      resendOutput(lifecycle, commands, event, receipt, true);
       break;
     }
     case "tool.output_acked": {

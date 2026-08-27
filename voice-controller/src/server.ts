@@ -334,7 +334,14 @@ export async function startSession(
     provider_usage_state: "unknown",
   }).eq("id", call.id);
   try {
-    const sidebandControl = attachSideband(cap, openaiCallId, usedModel);
+    const sidebandControl = attachSideband(
+      cap,
+      openaiCallId,
+      usedModel,
+      sessionType === "onboarding"
+        ? { onboarding: { expectedBusinessName: tenant.name } }
+        : {},
+    );
     let cleanupStarted = false;
     registerCleanup?.({
       callId: call.id,
