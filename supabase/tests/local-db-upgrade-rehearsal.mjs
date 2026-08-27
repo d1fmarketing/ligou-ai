@@ -569,15 +569,15 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
           transition_kind: "directed_followup",
           tenant_id: "60000000-0000-4000-8000-000000000202",
           call_id: "60000000-0000-4000-8000-000000000203",
-          revision: 2,
+          revision: 12,
           complete: false,
           snapshot: {
             tenantId: "60000000-0000-4000-8000-000000000202",
             callId: "60000000-0000-4000-8000-000000000203",
-            revision: 2,
+            revision: 12,
             services: [],
             cells: {},
-            followUps: 1,
+            followUps: 12,
             followUpGroups: { "area.coverage": 1 },
             summaryInvalidated: false,
           },
@@ -805,10 +805,10 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
         '60000000-0000-4000-8000-000000000203',
         '60000000-0000-4000-8000-000000000201',
         encode(extensions.digest(convert_to(
-          'ligou.v0_2.onboarding_followup:v1:60000000-0000-4000-8000-000000000202:60000000-0000-4000-8000-000000000203:2:area.coverage:',
+          'ligou.v0_2.onboarding_followup:v1:60000000-0000-4000-8000-000000000202:60000000-0000-4000-8000-000000000203:12:area.coverage:',
           'UTF8'
         ), 'sha256'), 'hex'),
-        2,
+        12,
         'area.coverage',
         null,
         '${JSON.stringify({
@@ -816,15 +816,15 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
           transition_kind: "directed_followup",
           tenant_id: "60000000-0000-4000-8000-000000000202",
           call_id: "60000000-0000-4000-8000-000000000203",
-          revision: 3,
+          revision: 13,
           complete: false,
           snapshot: {
             tenantId: "60000000-0000-4000-8000-000000000202",
             callId: "60000000-0000-4000-8000-000000000203",
-            revision: 3,
+            revision: 13,
             services: [],
             cells: {},
-            followUps: 2,
+            followUps: 13,
             followUpGroups: { "area.coverage": 2 },
             summaryInvalidated: false,
           },
@@ -862,7 +862,7 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
           from public.receipts
           where call_id = '60000000-0000-4000-8000-000000000203'
             and kind = 'onboarding_coverage'
-            and (readback->>'revision')::integer = 3)::text || ':' ||
+            and (readback->>'revision')::integer = 13)::text || ':' ||
         (select convalidated from pg_constraint
           where conrelid = 'public.receipts'::regclass
             and conname = 'receipts_onboarding_shape_check')::text;
@@ -965,7 +965,7 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
             'UTF8'
           ), 'sha256'), 'hex'),
           '${"e".repeat(64)}',
-          3,
+          13,
           '{
             "topic":"area",
             "field":"area.coverage",
@@ -979,12 +979,12 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
             schema_version: 1,
             tenant_id: "60000000-0000-4000-8000-000000000202",
             call_id: "60000000-0000-4000-8000-000000000203",
-            revision: 4,
+            revision: 14,
             complete: false,
             snapshot: {
               tenantId: "60000000-0000-4000-8000-000000000202",
               callId: "60000000-0000-4000-8000-000000000203",
-              revision: 4,
+              revision: 14,
               services: [],
               cells: {},
               followUps: 0,
@@ -1021,7 +1021,7 @@ export async function runUpgradeRehearsal(env = process.env, hooks = {}) {
           and kind = 'onboarding_coverage');
       commit;
     `), "rollback-callable V1 answer after Fix A", connection.password)
-      .trim().split("\n").at(-1), "2:4");
+      .trim().split("\n").at(-1), "2:14");
     assertions += 1;
 
     assert.equal(successful(await runPsql(connection, home, `

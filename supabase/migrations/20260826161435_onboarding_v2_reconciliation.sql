@@ -325,6 +325,260 @@ $$;
 revoke all on function public.onboarding_resolve_locality_v1(jsonb)
 from public, anon, authenticated, service_role;
 
+create or replace function public.onboarding_owner_evidence_normalize_v1(
+  p_value text
+) returns text
+language sql
+immutable
+set search_path = ''
+as $$
+  select btrim(regexp_replace(
+    translate(
+      lower(coalesce(p_value, '')),
+      'áàâãäåéèêëíìîïóòôõöúùûüçñ',
+      'aaaaaaeeeeiiiiooooouuuucn'
+    ),
+    '[^a-z0-9]+', ' ', 'g'
+  ));
+$$;
+
+revoke all on function public.onboarding_owner_evidence_normalize_v1(text)
+from public, anon, authenticated, service_role;
+
+create or replace function public.onboarding_resolve_locality_owner_v2(
+  p_value jsonb,
+  p_owner_words text,
+  p_prior_cell jsonb,
+  p_directed_question text
+) returns jsonb
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  v_item jsonb;
+  v_label text;
+  v_owner_label text;
+  v_owner text := public.onboarding_owner_evidence_normalize_v1(
+    p_owner_words
+  );
+  v_proposed jsonb := '[]'::jsonb;
+  v_resolved jsonb := '[]'::jsonb;
+  v_sorted_resolved jsonb := '[]'::jsonb;
+  v_unknown jsonb := '[]'::jsonb;
+  v_sorted_unknown jsonb := '[]'::jsonb;
+  v_matches jsonb;
+  v_selected jsonb;
+  v_ambiguity jsonb;
+  v_match_count integer;
+  v_selected_count integer;
+  v_duplicate_count integer;
+  v_prior_resolution jsonb;
+  v_same_pending boolean;
+  v_labels text[];
+  v_question text;
+begin
+  if jsonb_typeof(p_value) <> 'object'
+     or (select count(*) from jsonb_object_keys(p_value)) <> 1
+     or not (p_value ? 'localities')
+     or jsonb_typeof(p_value->'localities') <> 'array'
+     or jsonb_array_length(p_value->'localities') = 0 then
+    return jsonb_build_object('state', 'unknown', 'unknown', '[]'::jsonb);
+  end if;
+
+  for v_item in select value from jsonb_array_elements(p_value->'localities')
+  loop
+    if jsonb_typeof(v_item) <> 'object'
+       or (select count(*) from jsonb_object_keys(v_item)) <> 3
+       or not (v_item ? 'display_name' and v_item ? 'country_code'
+         and v_item ? 'region_code')
+       or jsonb_typeof(v_item->'display_name') <> 'string'
+       or jsonb_typeof(v_item->'country_code') <> 'string'
+       or jsonb_typeof(v_item->'region_code') <> 'string'
+       or btrim(v_item->>'display_name') = '' then
+      return jsonb_build_object('state', 'unknown', 'unknown', '[]'::jsonb);
+    end if;
+    v_proposed := v_proposed || jsonb_build_array(jsonb_build_object(
+      'display_name', v_item->>'display_name'
+    ));
+  end loop;
+
+  if jsonb_typeof(p_prior_cell) = 'object'
+     and p_prior_cell->>'state' = 'ambiguous'
+     and p_prior_cell->>'reason' =
+       'locality_region_owner_evidence_required'
+     and jsonb_typeof(p_prior_cell->'value'->'localities') = 'array'
+     and jsonb_typeof(p_prior_cell->'candidates') = 'array'
+     and jsonb_array_length(p_prior_cell->'candidates') > 1
+     and coalesce(p_prior_cell->>'questionPt', '') <> '' then
+    v_prior_resolution := jsonb_build_object(
+      'state', 'ambiguous',
+      'reason', 'locality_region_owner_evidence_required',
+      'value', jsonb_build_object(
+        'localities', p_prior_cell->'value'->'localities'
+      ),
+      'candidates', p_prior_cell->'candidates',
+      'questionPt', p_prior_cell->>'questionPt'
+    );
+    select exists (
+      select 1
+      from jsonb_array_elements(p_prior_cell->'candidates') prior_candidate
+      cross join jsonb_array_elements(v_proposed) proposed
+      where lower(regexp_replace(
+        btrim(prior_candidate->>'display_name'), '[[:space:]]+', ' ', 'g'
+      )) = lower(regexp_replace(
+        btrim(proposed->>'display_name'), '[[:space:]]+', ' ', 'g'
+      ))
+    ) into v_same_pending;
+    if not coalesce(v_same_pending, false) then
+      select coalesce(jsonb_agg(to_jsonb(display_name) order by display_name),
+        '[]'::jsonb) into v_sorted_unknown
+      from (
+        select distinct btrim(value->>'display_name') display_name
+        from jsonb_array_elements(v_proposed) proposed(value)
+      ) names;
+      return jsonb_build_object(
+        'state', 'unknown', 'unknown', v_sorted_unknown
+      );
+    end if;
+    if p_directed_question is distinct from p_prior_cell->>'questionPt' then
+      return v_prior_resolution;
+    end if;
+    select count(*), coalesce(jsonb_agg(candidate order by
+      candidate->>'display_name', candidate->>'region_code',
+      candidate->>'country_code', candidate->>'locality_id'), '[]'::jsonb)
+      into v_selected_count, v_selected
+    from jsonb_array_elements(p_prior_cell->'candidates') candidate
+    where case candidate->>'region_code'
+      when 'CA' then
+        position(' ca ' in ' ' || v_owner || ' ') > 0
+        or position(' california ' in ' ' || v_owner || ' ') > 0
+      when 'NH' then
+        position(' nh ' in ' ' || v_owner || ' ') > 0
+        or position(' new hampshire ' in ' ' || v_owner || ' ') > 0
+      else false
+    end;
+    if v_selected_count <> 1 then return v_prior_resolution; end if;
+    select coalesce(jsonb_agg(value order by
+      value->>'display_name', value->>'region_code', value->>'country_code',
+      value->>'locality_id'), '[]'::jsonb) into v_sorted_resolved
+    from jsonb_array_elements(
+      p_prior_cell->'value'->'localities' || v_selected
+    ) item(value);
+    return jsonb_build_object(
+      'state', 'resolved',
+      'value', jsonb_build_object('localities', v_sorted_resolved)
+    );
+  end if;
+
+  for v_item in select value from jsonb_array_elements(v_proposed)
+  loop
+    v_label := lower(regexp_replace(
+      btrim(v_item->>'display_name'), '[[:space:]]+', ' ', 'g'
+    ));
+    v_owner_label := public.onboarding_owner_evidence_normalize_v1(
+      v_item->>'display_name'
+    );
+    if v_owner_label = ''
+       or position(' ' || v_owner_label || ' ' in ' ' || v_owner || ' ') = 0
+    then
+      v_unknown := v_unknown || to_jsonb(btrim(v_item->>'display_name'));
+      continue;
+    end if;
+    select count(*), coalesce(jsonb_agg(jsonb_build_object(
+      'locality_id', registry.locality_id,
+      'display_name', registry.display_name,
+      'country_code', registry.country_code,
+      'region_code', registry.region_code
+    ) order by registry.display_name, registry.region_code,
+      registry.country_code, registry.locality_id), '[]'::jsonb)
+      into v_match_count, v_matches
+    from public.onboarding_locality_registry registry
+    where lower(regexp_replace(
+        btrim(registry.display_name), '[[:space:]]+', ' ', 'g'
+      )) = v_label
+      or exists (
+        select 1 from public.onboarding_locality_aliases alias
+        where alias.locality_id = registry.locality_id
+          and alias.alias_normalized = v_label
+      );
+    if v_match_count = 0 then
+      v_unknown := v_unknown || to_jsonb(btrim(v_item->>'display_name'));
+    elsif v_match_count = 1 then
+      v_resolved := v_resolved || v_matches;
+    else
+      select count(*), coalesce(jsonb_agg(candidate order by
+        candidate->>'display_name', candidate->>'region_code',
+        candidate->>'country_code', candidate->>'locality_id'), '[]'::jsonb)
+        into v_selected_count, v_selected
+      from jsonb_array_elements(v_matches) candidate
+      where case candidate->>'region_code'
+        when 'CA' then
+          position(' ca ' in ' ' || v_owner || ' ') > 0
+          or position(' california ' in ' ' || v_owner || ' ') > 0
+        when 'NH' then
+          position(' nh ' in ' ' || v_owner || ' ') > 0
+          or position(' new hampshire ' in ' ' || v_owner || ' ') > 0
+        else false
+      end;
+      if v_selected_count = 1 then v_resolved := v_resolved || v_selected;
+      elsif v_ambiguity is null then v_ambiguity := v_matches;
+      end if;
+    end if;
+  end loop;
+
+  if jsonb_array_length(v_unknown) > 0 then
+    select coalesce(jsonb_agg(to_jsonb(value) order by value), '[]'::jsonb)
+      into v_sorted_unknown
+    from (
+      select distinct item #>> '{}' value
+      from jsonb_array_elements(v_unknown) item
+    ) names;
+    return jsonb_build_object(
+      'state', 'unknown', 'unknown', v_sorted_unknown
+    );
+  end if;
+  select count(*) - count(distinct value->>'locality_id')
+    into v_duplicate_count from jsonb_array_elements(v_resolved) item(value);
+  if v_duplicate_count > 0 then
+    return jsonb_build_object('state', 'unknown', 'unknown', '[]'::jsonb);
+  end if;
+  select coalesce(jsonb_agg(value order by
+    value->>'display_name', value->>'region_code', value->>'country_code',
+    value->>'locality_id'), '[]'::jsonb) into v_sorted_resolved
+  from jsonb_array_elements(v_resolved) item(value);
+  if v_ambiguity is not null then
+    select array_agg(
+      (value->>'display_name') || ', ' || (value->>'region_code') || ', ' ||
+        (value->>'country_code')
+      order by value->>'display_name', value->>'region_code',
+        value->>'country_code', value->>'locality_id'
+    ) into v_labels from jsonb_array_elements(v_ambiguity) item(value);
+    v_question := 'Você quer dizer ' || case
+      when cardinality(v_labels) = 2
+        then v_labels[1] || ' ou ' || v_labels[2]
+      else array_to_string(v_labels[1:cardinality(v_labels) - 1], ', ') ||
+        ' ou ' || v_labels[cardinality(v_labels)]
+    end || '?';
+    return jsonb_build_object(
+      'state', 'ambiguous',
+      'reason', 'locality_region_owner_evidence_required',
+      'value', jsonb_build_object('localities', v_sorted_resolved),
+      'candidates', v_ambiguity,
+      'questionPt', v_question
+    );
+  end if;
+  return jsonb_build_object(
+    'state', 'resolved',
+    'value', jsonb_build_object('localities', v_sorted_resolved)
+  );
+end
+$$;
+
+revoke all on function public.onboarding_resolve_locality_owner_v2(
+  jsonb,text,jsonb,text
+) from public, anon, authenticated, service_role;
+
 create or replace function public.onboarding_locality_value_v1(
   p_value jsonb
 ) returns jsonb
@@ -1759,6 +2013,10 @@ declare
   v_materialization_key text;
   v_cell jsonb;
   v_value jsonb;
+  v_prior_cell jsonb;
+  v_locality_resolution jsonb;
+  v_locality_expected_cell jsonb;
+  v_locality_followup_question text;
   v_materialization jsonb;
   v_value_valid boolean;
   v_request_id uuid;
@@ -2022,10 +2280,71 @@ begin
     if v_catalog_overflow then
       v_value_valid := false;
     elsif p_fact->>'disposition' = 'answered' then
-      v_value_valid := public.onboarding_answer_value_valid_v2(
-        p_fact->>'field', v_value
-      );
-      if not v_value_valid then
+      if p_fact->>'field' = 'area.coverage' then
+        v_prior_cell := case
+          when v_latest.readback->'schema_version' = '2'::jsonb
+            then v_latest.readback->'snapshot'->'cells'->'area.coverage'
+          else null
+        end;
+        v_locality_followup_question := case
+          when v_latest.readback->'schema_version' = '2'::jsonb
+           and v_latest.readback->>'transition_kind' = 'directed_followup'
+           and v_latest.detail->>'transition_kind' = 'directed_followup'
+           and v_latest.detail->'transition_schema' is not distinct from
+             '2'::jsonb
+           and v_latest.detail->>'field' = 'area.coverage'
+           and coalesce(v_latest.detail->>'subject', '') = ''
+           and coalesce(v_latest.detail->>'source_revision' ~
+             '^[1-9][0-9]*$', false)
+           and (v_latest.detail->>'source_revision')::integer + 1 =
+             (v_latest.readback->>'revision')::integer
+           and coalesce(v_latest.detail->>'source_digest' ~
+             '^[0-9a-f]{64}$', false)
+           and coalesce(v_latest.detail->>'question_pt', '') =
+             coalesce(v_prior_cell->>'questionPt', '')
+           and coalesce(
+             (v_latest.readback->'snapshot'->'followUpGroups'
+               ->>'area.coverage')::integer,
+             0
+           ) > 0
+            then v_latest.detail->>'question_pt'
+          else null
+        end;
+        v_locality_resolution :=
+          public.onboarding_resolve_locality_owner_v2(
+            v_value,
+            p_fact->>'owner_words',
+            v_prior_cell,
+            v_locality_followup_question
+          );
+        v_value_valid := v_locality_resolution->>'state' = 'resolved';
+        v_locality_expected_cell := case v_locality_resolution->>'state'
+          when 'resolved' then jsonb_build_object(
+            'state', 'answered',
+            'attempts', coalesce((v_prior_cell->>'attempts')::integer, 0) + 1,
+            'value', v_locality_resolution->'value'
+          )
+          when 'ambiguous' then v_locality_resolution || jsonb_build_object(
+            'attempts', coalesce((v_prior_cell->>'attempts')::integer, 0) + 1
+          )
+          when 'unknown' then jsonb_build_object(
+            'state', 'owner_review_required',
+            'attempts', coalesce((v_prior_cell->>'attempts')::integer, 0) + 1,
+            'safeRestriction',
+              'Não executar nem confirmar área atendida autonomamente; encaminhar a decisão ao dono.'
+          )
+          else null
+        end;
+        if v_locality_expected_cell is null
+           or v_cell is distinct from v_locality_expected_cell then
+          raise exception using errcode = '22023',
+            message = 'onboarding_structured_projection_invalid';
+        end if;
+      else
+        v_value_valid := public.onboarding_answer_value_valid_v2(
+          p_fact->>'field', v_value
+        );
+        if not v_value_valid then
         if p_fact->>'field' = 'area.coverage'
            and public.onboarding_locality_value_v1(v_value) is null
            and v_cell->>'state' = 'owner_review_required'
@@ -2096,6 +2415,7 @@ begin
             or v_cell->'value' is distinct from v_value then
         raise exception using errcode = '22023',
           message = 'onboarding_structured_projection_invalid';
+        end if;
       end if;
     elsif p_fact->>'disposition' = 'owner_review_required' then
       if coalesce(v_cell->>'state', '') not in (
@@ -2808,7 +3128,7 @@ begin
     raise exception using errcode = '22023',
       message = 'onboarding_followup_group_exhausted';
   end if;
-  if v_global_count >= 12 then
+  if v_global_count >= 256 then
     raise exception using errcode = '22023',
       message = 'onboarding_followup_global_exhausted';
   end if;

@@ -1032,6 +1032,8 @@ describe("onboarding V2 reconciliation migration contract", () => {
     expect(sql).toContain("'question_pt'");
     const followup = sql.slice(followupAt, approvalAt);
     expect(followup).toContain("'transition_schema', 2");
+    expect(followup).toContain("if v_global_count >= 256 then");
+    expect(followup).not.toContain("if v_global_count >= 12 then");
     expect(sql).toContain("'target_kind', 'onboarding_voice_approval'");
     expect(sql).toContain("kind in ('onboarding_voice_approval', 'onboarding_event_alias')");
     expect(sql).toContain("readback->>'target_kind' = 'onboarding_voice_approval'");
@@ -1078,6 +1080,18 @@ describe("onboarding V2 reconciliation migration contract", () => {
     expect(sql).toContain(
       "create or replace function public.onboarding_resolve_locality_v1",
     );
+    expect(sql).toContain(
+      "create or replace function public.onboarding_resolve_locality_owner_v2",
+    );
+    expect(sql).toContain(
+      "revoke all on function public.onboarding_resolve_locality_owner_v2( jsonb,text,jsonb,text ) from public, anon, authenticated, service_role",
+    );
+    expect(sql).not.toContain(
+      "grant execute on function public.onboarding_resolve_locality_owner_v2",
+    );
+    expect(sql).toContain("locality_region_owner_evidence_required");
+    expect(sql).toContain("p_fact->>'owner_words'");
+    expect(sql).toContain("v_locality_followup_question");
     expect(sql).toContain(
       "create or replace function public.onboarding_cell_semantic_hash_v1",
     );

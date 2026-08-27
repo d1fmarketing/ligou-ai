@@ -1135,7 +1135,9 @@ describe("capability boundary", () => {
         disposition,
         rule_text: `Evidence ${field}`,
         structured: { value },
-        owner_words: `Resposta explícita para ${field}.`,
+        owner_words: field === "area.coverage"
+          ? "Atendemos Irvine e State College."
+          : `Resposta explícita para ${field}.`,
       }, `provider-${field}`);
       expect(result.body.status, field).toBe("recorded");
       const call = rpcCalls.at(-1)!;
@@ -1166,7 +1168,10 @@ describe("capability boundary", () => {
       field: "area.coverage",
       disposition: "answered",
       rule_text: "Serve Anaheim and Irvine.",
-      structured: { value: ["Anaheim", "Irvine"] },
+      structured: { value: { localities: [
+        { display_name: "Anaheim", country_code: "US", region_code: "CA" },
+        { display_name: "Irvine", country_code: "US", region_code: "CA" },
+      ] } },
       owner_words: "Atendemos Anaheim e Irvine.",
     }, "provider-tool-1");
     expect(result.body).toMatchObject({
@@ -1776,6 +1781,9 @@ describe("instructions builder", () => {
     expect(structured).toContain(
       'area.coverage -> {"localities":[{"display_name":"Irvine","country_code":"US","region_code":"CA"}]}',
     );
+    expect(structured).toMatch(
+      /country_code[^.]*region_code[^.]*non-authoritative hints/i,
+    );
     expect(structured).not.toContain('area.coverage -> {"cities"');
     expect(structured).toContain(
       'schedule.business_hours -> {"days":["sun"|"mon"|"tue"|"wed"|"thu"|"fri"|"sat"],"hours":{"opens":"HH:00","closes":"HH:00"}}',
@@ -1791,6 +1799,9 @@ describe("instructions builder", () => {
     ]) expect(structured).toContain(groupExample);
     expect(instructions).toMatch(
       /area\.coverage[^.]*display_name[^.]*country_code[^.]*region_code/i,
+    );
+    expect(instructions).toMatch(
+      /country_code[^.]*region_code[^.]*dicas não autoritativas[^.]*palavras do dono/i,
     );
     expect(instructions).toMatch(/locality_id[^.]*aplicação/i);
     expect(instructions).toContain(

@@ -50,6 +50,7 @@ export interface CoverageFact {
   value: unknown;
   ruleText?: string;
   ownerWords: string;
+  localityResolution?: LocalityResolution;
 }
 export interface LocalityInput {
   display_name: string;
@@ -62,10 +63,32 @@ export interface CanonicalLocality extends LocalityInput {
 export interface LocalityRegistryEntry extends CanonicalLocality {
   aliases: string[];
 }
+export type LocalityResolution =
+  | { state: "resolved"; value: { localities: CanonicalLocality[] } }
+  | {
+      state: "ambiguous";
+      reason: "locality_region_owner_evidence_required";
+      value: { localities: CanonicalLocality[] };
+      candidates: CanonicalLocality[];
+      questionPt: string;
+    }
+  | { state: "unknown"; unknown: string[] };
+export interface LocalityResolutionContext {
+  ownerWords: string;
+  priorCell?: CoverageCell;
+  directedFollowUpQuestionPt?: string;
+}
 export type CoverageCell =
   | { state: "missing"; attempts: number }
   | { state: "answered"; attempts: number; value: unknown }
-  | { state: "ambiguous"; attempts: number; reason: string }
+  | {
+      state: "ambiguous";
+      attempts: number;
+      reason: string;
+      value?: { localities: CanonicalLocality[] };
+      candidates?: CanonicalLocality[];
+      questionPt?: string;
+    }
   | { state: "not_applicable"; attempts: number }
   | {
       state: "owner_review_required";
@@ -114,6 +137,11 @@ export interface CoverageProgress {
 
 export const INITIAL_SERVICE_DISCOVERY_QUESTION_PT =
   "Quais serviços sua empresa oferece?";
+
+// Twenty services produce at most 228 active refs. Allowing every ref one
+// directed question plus 28 clarifications yields 256 question receipts; with
+// 228 answer receipts, the 484-row history remains below the 512-row scan cap.
+export const MAX_DIRECTED_FOLLOW_UPS = 256;
 
 const serviceFields: CoverageField[] = [
   "service.name_synonyms",
@@ -565,52 +593,193 @@ function normalizedLocalityLabel(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
 }
 
+function normalizedOwnerEvidence(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function ownerEvidenceContains(ownerEvidence: string, value: string): boolean {
+  const candidate = normalizedOwnerEvidence(value);
+  return candidate.length > 0 &&
+    ` ${ownerEvidence} `.includes(` ${candidate} `);
+}
+
+const REGION_OWNER_EVIDENCE: Readonly<Record<string, readonly string[]>> = {
+  CA: ["CA", "California", "Califórnia"],
+  NH: ["NH", "New Hampshire"],
+};
+
+function canonicalRegistryLocality(
+  entry: LocalityRegistryEntry,
+): CanonicalLocality {
+  return {
+    locality_id: entry.locality_id,
+    display_name: entry.display_name,
+    country_code: entry.country_code,
+    region_code: entry.region_code,
+  };
+}
+
+function compareCanonicalLocalities(
+  left: CanonicalLocality,
+  right: CanonicalLocality,
+): number {
+  return left.display_name.localeCompare(right.display_name, "en-US") ||
+    left.region_code.localeCompare(right.region_code, "en-US") ||
+    left.country_code.localeCompare(right.country_code, "en-US") ||
+    left.locality_id.localeCompare(right.locality_id, "en-US");
+}
+
+function regionMatchesOwnerEvidence(
+  ownerEvidence: string,
+  locality: CanonicalLocality,
+): boolean {
+  return (REGION_OWNER_EVIDENCE[locality.region_code] ?? []).some(
+    (evidence) => ownerEvidenceContains(ownerEvidence, evidence),
+  );
+}
+
+function localityQuestion(candidates: CanonicalLocality[]): string {
+  const labels = candidates.map((candidate) =>
+    `${candidate.display_name}, ${candidate.region_code}, ${candidate.country_code}`
+  );
+  const choices = labels.length === 2
+    ? `${labels[0]} ou ${labels[1]}`
+    : `${labels.slice(0, -1).join(", ")} ou ${labels.at(-1)}`;
+  return `Você quer dizer ${choices}?`;
+}
+
+function priorLocalityAmbiguity(
+  cell: CoverageCell | undefined,
+): Extract<LocalityResolution, { state: "ambiguous" }> | null {
+  if (
+    !cell || cell.state !== "ambiguous" ||
+    cell.reason !== "locality_region_owner_evidence_required" ||
+    !Array.isArray(cell.candidates) ||
+    !cell.candidates.every((candidate) =>
+      isCanonicalLocalityList([candidate])
+    ) ||
+    typeof cell.questionPt !== "string" || !cell.questionPt ||
+    !cell.value || typeof cell.value !== "object" ||
+    !Array.isArray(cell.value.localities) ||
+    !cell.value.localities.every((locality) =>
+      isCanonicalLocalityList([locality])
+    )
+  ) return null;
+  return {
+    state: "ambiguous",
+    reason: "locality_region_owner_evidence_required",
+    value: { localities: [...cell.value.localities] },
+    candidates: [...cell.candidates],
+    questionPt: cell.questionPt,
+  };
+}
+
 export function resolveLocalityValueFromRegistry(
   value: unknown,
   registry: LocalityRegistryEntry[],
-): { localities: CanonicalLocality[] } | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  context: LocalityResolutionContext = { ownerWords: "" },
+): LocalityResolution {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return { state: "unknown", unknown: [] };
   const row = value as Record<string, unknown>;
   if (
     Object.keys(row).length !== 1 ||
     !Array.isArray(row.localities) || row.localities.length === 0
-  ) return null;
-  const resolved: CanonicalLocality[] = [];
+  ) return { state: "unknown", unknown: [] };
+  const proposed: Array<{ display_name: string }> = [];
   for (const candidate of row.localities) {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
-      return null;
+      return { state: "unknown", unknown: [] };
     const input = candidate as Record<string, unknown>;
     if (
       Object.keys(input).sort().join(",") !==
         "country_code,display_name,region_code" ||
       typeof input.display_name !== "string" ||
       typeof input.country_code !== "string" ||
-      typeof input.region_code !== "string"
-    ) return null;
+      typeof input.region_code !== "string" ||
+      !normalizedLocalityLabel(input.display_name)
+    ) return { state: "unknown", unknown: [] };
+    proposed.push({ display_name: input.display_name });
+  }
+
+  const ownerEvidence = normalizedOwnerEvidence(context.ownerWords);
+  const prior = priorLocalityAmbiguity(context.priorCell);
+  if (prior) {
+    const proposedLabels = new Set(
+      proposed.map(({ display_name }) => normalizedLocalityLabel(display_name)),
+    );
+    const samePendingLocality = prior.candidates.some((candidate) =>
+      proposedLabels.has(normalizedLocalityLabel(candidate.display_name))
+    );
+    if (!samePendingLocality)
+      return {
+        state: "unknown",
+        unknown: proposed.map(({ display_name }) => display_name).sort(),
+      };
+    if (context.directedFollowUpQuestionPt !== prior.questionPt) return prior;
+    const selected = prior.candidates.filter((candidate) =>
+      regionMatchesOwnerEvidence(ownerEvidence, candidate)
+    );
+    if (selected.length !== 1) return prior;
+    return {
+      state: "resolved",
+      value: {
+        localities: [...prior.value.localities, selected[0]!]
+          .sort(compareCanonicalLocalities),
+      },
+    };
+  }
+
+  const resolved: CanonicalLocality[] = [];
+  const unknown: string[] = [];
+  let ambiguity: CanonicalLocality[] | null = null;
+  for (const input of proposed) {
     const label = normalizedLocalityLabel(input.display_name);
-    const country = input.country_code.trim().toUpperCase();
-    const region = input.region_code.trim().toUpperCase();
+    if (!ownerEvidenceContains(ownerEvidence, input.display_name)) {
+      unknown.push(input.display_name.trim());
+      continue;
+    }
     const matches = registry.filter((entry) =>
-      entry.country_code === country && entry.region_code === region &&
       [entry.display_name, ...entry.aliases].some(
         (alias) => normalizedLocalityLabel(alias) === label,
       )
+    ).map(canonicalRegistryLocality).sort(compareCanonicalLocalities);
+    if (matches.length === 0) {
+      unknown.push(input.display_name.trim());
+      continue;
+    }
+    if (matches.length === 1) {
+      resolved.push(matches[0]!);
+      continue;
+    }
+    const selected = matches.filter((candidate) =>
+      regionMatchesOwnerEvidence(ownerEvidence, candidate)
     );
-    if (matches.length !== 1) return null;
-    const match = matches[0]!;
-    const canonical = {
-      locality_id: match.locality_id,
-      display_name: match.display_name,
-      country_code: match.country_code,
-      region_code: match.region_code,
-    };
-    if (!isCanonicalLocalityList([canonical])) return null;
-    resolved.push(canonical);
+    if (selected.length === 1) resolved.push(selected[0]!);
+    else if (!ambiguity) ambiguity = matches;
   }
-  return new Set(resolved.map((locality) => locality.locality_id)).size ===
-      resolved.length
-    ? { localities: resolved }
-    : null;
+  if (unknown.length > 0)
+    return { state: "unknown", unknown: [...new Set(unknown)].sort() };
+  const uniqueResolved = [...new Map(
+    resolved.map((locality) => [locality.locality_id, locality]),
+  ).values()].sort(compareCanonicalLocalities);
+  if (uniqueResolved.length !== resolved.length)
+    return { state: "unknown", unknown: [] };
+  if (ambiguity)
+    return {
+      state: "ambiguous",
+      reason: "locality_region_owner_evidence_required",
+      value: { localities: uniqueResolved },
+      candidates: ambiguity,
+      questionPt: localityQuestion(ambiguity),
+    };
+  return { state: "resolved", value: { localities: uniqueResolved } };
 }
 export function isCanonicalLocalityList(
   value: unknown,
@@ -746,7 +915,36 @@ function applyOne(
   const key = keyFor(fact.field, subject);
   const attempts = (cells[key]?.attempts ?? 0) + 1;
   let cell: CoverageCell;
-  if (fact.disposition === "owner_review_required")
+  if (fact.field === "area.coverage" && fact.localityResolution?.state === "resolved")
+    cell = {
+      state: "answered",
+      attempts,
+      value: fact.localityResolution.value,
+    };
+  else if (
+    fact.field === "area.coverage" &&
+    fact.localityResolution?.state === "ambiguous"
+  )
+    cell = {
+      state: "ambiguous",
+      attempts,
+      reason: fact.localityResolution.reason,
+      value: fact.localityResolution.value,
+      candidates: fact.localityResolution.candidates,
+      questionPt: fact.localityResolution.questionPt,
+    };
+  else if (
+    fact.field === "area.coverage" &&
+    fact.localityResolution?.state === "unknown"
+  )
+    cell = fact.ownerWords.trim().length > 0
+      ? {
+          state: "owner_review_required",
+          attempts,
+          safeRestriction: safeRestrictionFor(fact.field),
+        }
+      : missing(attempts);
+  else if (fact.disposition === "owner_review_required")
     cell =
       fact.ownerWords.trim().length > 0 &&
       fact.field !== "service.catalog_closure"
@@ -906,7 +1104,11 @@ function questionFor(
   return {
     ...ref,
     questionPt:
-      ref.field === "service.catalog_closure" && snapshot.services.length === 0
+      ref.field === "area.coverage" &&
+          snapshot.cells["area.coverage"]?.state === "ambiguous" &&
+          snapshot.cells["area.coverage"].questionPt
+        ? snapshot.cells["area.coverage"].questionPt
+        : ref.field === "service.catalog_closure" && snapshot.services.length === 0
         ? INITIAL_SERVICE_DISCOVERY_QUESTION_PT
         : ref.subject
           ? `${templates[ref.field]} (${ref.subject.replace(/_/g, " ")})`
@@ -932,12 +1134,16 @@ export function evaluateCoverage(snapshot: CoverageSnapshot): CoverageProgress {
           state(ref).state === "ambiguous",
       )
     : [];
+  const localityAmbiguity = active.required.filter(
+    (ref) => ref.field === "area.coverage" && state(ref).state === "ambiguous",
+  );
   const catalog = unresolved([{ field: "service.catalog_closure" }]);
   const service = snapshot.services.flatMap((subject) =>
     active.required.filter((ref) => ref.subject === subject),
   );
   const ordered = [
     ...currentAmbiguity,
+    ...localityAmbiguity,
     ...catalog,
     ...unresolved(service),
     ...unresolved(safetyAuthorityFields.map((field) => ({ field }))),
@@ -946,7 +1152,7 @@ export function evaluateCoverage(snapshot: CoverageSnapshot): CoverageProgress {
     ...unresolved(businessFields.map((field) => ({ field }))),
   ] as CoverageRef[];
   const next =
-    snapshot.followUps >= 12
+    snapshot.followUps >= MAX_DIRECTED_FOLLOW_UPS
       ? undefined
       : ordered.find(
           (ref) =>
@@ -990,7 +1196,10 @@ export function recordDirectedFollowUp(
   ref: CoverageRef,
 ): CoverageSnapshot {
   const key = keyFor(ref.field, ref.subject);
-  if (snapshot.followUps >= 12 || (snapshot.followUpGroups[key] ?? 0) >= 2)
+  if (
+    snapshot.followUps >= MAX_DIRECTED_FOLLOW_UPS ||
+    (snapshot.followUpGroups[key] ?? 0) >= 2
+  )
     return snapshot;
   return {
     ...snapshot,

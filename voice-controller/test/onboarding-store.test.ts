@@ -73,6 +73,7 @@ class SupabaseBoundaryFake {
   receiptRows: ReceiptRow[] = [];
   receiptReadSequences: ReceiptRow[][] = [];
   receiptSetReads = 0;
+  receiptSetSelects: string[] = [];
   eventReceiptRows = new Map<string, ReceiptRow>();
   receiptError: QueryError | null = null;
   ruleRows: RuleRow[] = [];
@@ -114,6 +115,15 @@ class SupabaseBoundaryFake {
         const filters: Array<[string, unknown]> = [];
         let selected = "";
         let limitValue: number | undefined;
+        const projectSelectedReceipt = (row: ReceiptRow | undefined) => {
+          if (!row) return null;
+          const columns = selected.split(",").map((column) => column.trim());
+          return Object.fromEntries(
+            columns
+              .filter((column) => Object.prototype.hasOwnProperty.call(row, column))
+              .map((column) => [column, row[column as keyof ReceiptRow]]),
+          ) as ReceiptRow;
+        };
         const query: any = {
           select(columns: string) {
             selected = columns;
@@ -146,16 +156,18 @@ class SupabaseBoundaryFake {
               ([column]) => column === "external_id",
             )?.[1];
             return Promise.resolve({
-              data:
-                (typeof eventKey === "string"
+              data: projectSelectedReceipt(
+                typeof eventKey === "string"
                   ? boundary.eventReceiptRows.get(eventKey)
-                  : boundary.receiptRows[0]) ?? null,
+                  : boundary.receiptRows[0],
+              ),
               error: boundary.receiptError,
             });
           },
           then(resolve: (result: unknown) => unknown) {
             if (table === "receipts") {
               if (boundary.receiptNeverResolves) return new Promise(() => {});
+              boundary.receiptSetSelects.push(selected);
               const rows = boundary.receiptReadSequences.length > 0
                 ? boundary.receiptReadSequences[
                     Math.min(
@@ -166,7 +178,9 @@ class SupabaseBoundaryFake {
                 : boundary.receiptRows;
               boundary.receiptSetReads += 1;
               return Promise.resolve({
-                data: rows.slice(0, limitValue),
+                data: rows.slice(0, limitValue).map((row) =>
+                  projectSelectedReceipt(row)
+                ),
                 error: boundary.receiptError,
               }).then(resolve);
             }
@@ -746,6 +760,234 @@ describe("recordOnboardingAnswer", () => {
           }] },
         });
     }
+  });
+
+  test("persists Concord ambiguity with exact candidates and application question", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.localityRows = [
+      {
+        locality_id: "loc_06b5af1ac7ab0ac5ffaa565a",
+        display_name: "Concord",
+        country_code: "US",
+        region_code: "CA",
+      },
+      {
+        locality_id: "loc_d89792846ce09bcbb7667a0a",
+        display_name: "Concord",
+        country_code: "US",
+        region_code: "NH",
+      },
+    ];
+    fake.rpcResult = {
+      data: {
+        status: "recorded",
+        rule_id: null,
+        rule_group_id: null,
+        coverage_receipt_id: "concord-ambiguous",
+        revision: 1,
+        snapshot_digest: "d".repeat(64),
+        complete: false,
+        missing: [],
+        ambiguous: [{ field: "area.coverage" }],
+        next_action: { type: "ask", field: "area.coverage" },
+        coverage: {},
+      },
+      error: null,
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 12,
+      timeoutMs: 100,
+    });
+
+    await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-concord-ambiguous",
+      {
+        ...AREA_FACT,
+        structured: { value: { localities: [{
+          display_name: "Concord",
+          country_code: "US",
+          region_code: "CA",
+        }] } },
+        owner_words: "Atendemos Concord.",
+      },
+    );
+
+    const args = fake.rpcCalls[0]!.args;
+    expect((args.p_coverage as any).snapshot.cells["area.coverage"]).toEqual({
+      state: "ambiguous",
+      attempts: 1,
+      reason: "locality_region_owner_evidence_required",
+      value: { localities: [] },
+      candidates: [
+        {
+          locality_id: "loc_06b5af1ac7ab0ac5ffaa565a",
+          display_name: "Concord",
+          country_code: "US",
+          region_code: "CA",
+        },
+        {
+          locality_id: "loc_d89792846ce09bcbb7667a0a",
+          display_name: "Concord",
+          country_code: "US",
+          region_code: "NH",
+        },
+      ],
+      questionPt: "Você quer dizer Concord, CA, US ou Concord, NH, US?",
+    });
+    expect((args.p_coverage as any).next_action).toEqual({
+      type: "ask",
+      field: "area.coverage",
+      question_pt: "Você quer dizer Concord, CA, US ou Concord, NH, US?",
+    });
+    expect(JSON.stringify(args.p_fact)).not.toContain("locality_id");
+  });
+
+  test("uses an exact durable locality follow-up to resolve owner California over model NH", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.localityRows = [
+      {
+        locality_id: "loc_06b5af1ac7ab0ac5ffaa565a",
+        display_name: "Concord",
+        country_code: "US",
+        region_code: "CA",
+      },
+      {
+        locality_id: "loc_d89792846ce09bcbb7667a0a",
+        display_name: "Concord",
+        country_code: "US",
+        region_code: "NH",
+      },
+    ];
+    const questionPt = "Você quer dizer Concord, CA, US ou Concord, NH, US?";
+    const snapshot: CoverageSnapshot = {
+      ...emptySnapshot(2),
+      cells: {
+        "area.coverage": {
+          state: "ambiguous",
+          attempts: 1,
+          reason: "locality_region_owner_evidence_required",
+          value: { localities: [] },
+          candidates: [
+            {
+              locality_id: "loc_06b5af1ac7ab0ac5ffaa565a",
+              display_name: "Concord",
+              country_code: "US",
+              region_code: "CA",
+            },
+            {
+              locality_id: "loc_d89792846ce09bcbb7667a0a",
+              display_name: "Concord",
+              country_code: "US",
+              region_code: "NH",
+            },
+          ],
+          questionPt,
+        },
+      },
+      followUps: 1,
+      followUpGroups: { "area.coverage": 1 },
+    };
+    const progress = evaluateCoverage(snapshot);
+    fake.receiptRows = [{
+      id: "44444444-4444-4444-8444-444444444449",
+      detail: {
+        transition_kind: "directed_followup",
+        transition_schema: 2,
+        source_revision: 1,
+        source_digest: "9".repeat(64),
+        field: "area.coverage",
+        subject: null,
+        question_pt: questionPt,
+        coverage_key: "area.coverage",
+      },
+      readback: {
+        schema_version: 2,
+        transition_kind: "directed_followup",
+        tenant_id: TENANT_ID,
+        call_id: CALL_ID,
+        revision: 2,
+        complete: false,
+        snapshot,
+        progress,
+        selected_rule_ids: [],
+        next_action: {
+          type: "ask",
+          field: "area.coverage",
+          question_pt: questionPt,
+        },
+        current_answer_hashes: { "area.coverage": "8".repeat(64) },
+        materializations: materializeCoverage(snapshot, progress).rules,
+        summary_projection: null,
+        summary_hash: null,
+        snapshot_digest: "a".repeat(64),
+        authority: {
+          rules_approved: false,
+          powers_granted: false,
+          operational_mode_changed: false,
+        },
+      },
+    }];
+    fake.rpcResult = {
+      data: {
+        status: "recorded",
+        rule_id: null,
+        rule_group_id: null,
+        coverage_receipt_id: "concord-resolved",
+        revision: 3,
+        snapshot_digest: "e".repeat(64),
+        complete: false,
+        missing: [],
+        ambiguous: [],
+        next_action: { type: "ask", field: "service.catalog_closure" },
+        coverage: {},
+      },
+      error: null,
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 13,
+      timeoutMs: 100,
+    });
+
+    await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-concord-california",
+      {
+        ...AREA_FACT,
+        structured: { value: { localities: [{
+          display_name: "Concord",
+          country_code: "US",
+          region_code: "NH",
+        }] } },
+        owner_words: "A da Califórnia.",
+      },
+    );
+
+    expect(fake.rpcCalls[0]!.args).toMatchObject({
+      p_expected_revision: 2,
+      p_fact: {
+        structured: { value: { localities: [{ region_code: "NH" }] } },
+      },
+      p_coverage: {
+        snapshot: {
+          cells: {
+            "area.coverage": {
+              state: "answered",
+              attempts: 2,
+              value: { localities: [{
+                locality_id: "loc_06b5af1ac7ab0ac5ffaa565a",
+                display_name: "Concord",
+                country_code: "US",
+                region_code: "CA",
+              }] },
+            },
+          },
+        },
+      },
+    });
+    expect(fake.receiptSetSelects).toContain("id,readback,detail");
   });
 
   test("removes the affected composite from selected IDs without accepting caller-authored group authority", async () => {
@@ -1715,6 +1957,91 @@ describe("recordOnboardingFollowup", () => {
             revision: 2,
             followUps: 1,
             followUpGroups: { "area.coverage": 1 },
+          },
+        },
+      },
+    });
+  });
+
+  test("persists directed follow-up 13 from a durable snapshot at 12", async () => {
+    const fake = new SupabaseBoundaryFake();
+    const priorSnapshot = {
+      ...emptySnapshot(12),
+      followUps: 12,
+      followUpGroups: {
+        "business.customer_types": 1,
+        "business.excluded_work": 1,
+        "business.languages_tone": 1,
+        "area.coverage": 1,
+        "area.out_of_area_policy": 1,
+        "area.travel_fee": 1,
+        "schedule.business_hours": 1,
+        "schedule.same_day_lead_time": 1,
+        "schedule.capacity_buffer": 1,
+        "schedule.reschedule_cancel": 1,
+        "schedule.holidays": 1,
+        "emergency.types": 1,
+      },
+    };
+    const prior = receipt({
+      revision: 12,
+      complete: false,
+      selected_rule_ids: [],
+      snapshot: priorSnapshot,
+      progress: {
+        missingRequired: [{ field: "emergency.safety_escalation" }],
+        ambiguous: [],
+      },
+      next_action: {
+        type: "ask",
+        field: "emergency.safety_escalation",
+        question_pt: "Quais instruções de segurança devemos dar?",
+      },
+    });
+    fake.receiptRows = [prior];
+    fake.rpcResult = {
+      data: {
+        status: "recorded",
+        coverage_receipt_id: "followup-receipt-13",
+        revision: 13,
+        snapshot_digest: "e".repeat(64),
+        complete: false,
+        missing: [{ field: "emergency.safety_escalation" }],
+        ambiguous: [],
+        next_action: prior.readback.next_action,
+        coverage: {},
+      },
+      error: null,
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 30,
+      timeoutMs: 100,
+    });
+
+    const result = await store.recordOnboardingFollowup(ownerCapability(), {
+      revision: 12,
+      digest: "a".repeat(64),
+      field: "emergency.safety_escalation",
+      questionPt: "Quais instruções de segurança devemos dar?",
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      revision: 13,
+    });
+    expect(fake.rpcCalls[0]).toMatchObject({
+      name: "record_onboarding_followup",
+      args: {
+        p_expected_revision: 12,
+        p_coverage: {
+          revision: 13,
+          snapshot: {
+            revision: 13,
+            followUps: 13,
+            followUpGroups: {
+              "emergency.safety_escalation": 1,
+            },
           },
         },
       },

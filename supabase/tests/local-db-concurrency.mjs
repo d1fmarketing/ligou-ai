@@ -1452,6 +1452,92 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     assert.match(invalidRegistryScope.stderr, /check constraint/i);
   }
 
+  const concordCandidates = [
+    {
+      locality_id: "loc_06b5af1ac7ab0ac5ffaa565a",
+      display_name: "Concord",
+      country_code: "US",
+      region_code: "CA",
+    },
+    {
+      locality_id: "loc_d89792846ce09bcbb7667a0a",
+      display_name: "Concord",
+      country_code: "US",
+      region_code: "NH",
+    },
+  ];
+  const concordQuestion =
+    "Você quer dizer Concord, CA, US ou Concord, NH, US?";
+  const concordAmbiguity = {
+    state: "ambiguous",
+    reason: "locality_region_owner_evidence_required",
+    value: { localities: [] },
+    candidates: concordCandidates,
+    questionPt: concordQuestion,
+  };
+  const localityResolutionTruth = scalar(await runSql(connection, home, `
+    select
+      (public.onboarding_resolve_locality_owner_v2(
+        '{"localities":[{"display_name":"Concord","country_code":"US","region_code":"CA"}]}'::jsonb,
+        'Atendemos Concord.', null::jsonb, null::text
+      ) is not distinct from ${jsonb(concordAmbiguity)})::text || ':' ||
+      (public.onboarding_resolve_locality_owner_v2(
+        '{"localities":[{"display_name":"Concord","country_code":"US","region_code":"CA"}]}'::jsonb,
+        'A da Califórnia.', ${jsonb({ ...concordAmbiguity, attempts: 1 })}, null::text
+      ) is not distinct from ${jsonb(concordAmbiguity)})::text || ':' ||
+      (public.onboarding_resolve_locality_owner_v2(
+        '{"localities":[{"display_name":"Concord","country_code":"US","region_code":"NH"}]}'::jsonb,
+        'A da Califórnia.', ${jsonb({ ...concordAmbiguity, attempts: 1 })}, '${concordQuestion}'
+      ) is not distinct from ${jsonb({
+        state: "resolved",
+        value: { localities: [concordCandidates[0]] },
+      })})::text || ':' ||
+      (public.onboarding_resolve_locality_owner_v2(
+        '{"localities":[{"display_name":"Irvine","country_code":"US","region_code":"NH"}]}'::jsonb,
+        'Atendemos Irvine.', null::jsonb, null::text
+      ) is not distinct from ${jsonb({
+        state: "resolved",
+        value: { localities: [{
+          locality_id: "loc_9971eda617977d43d7df9fd5",
+          display_name: "Irvine",
+          country_code: "US",
+          region_code: "CA",
+        }] },
+      })})::text || ':' ||
+      (public.onboarding_resolve_locality_owner_v2(
+        '{"localities":[{"display_name":"Concord","country_code":"US","region_code":"CA"},{"display_name":"Walnut Creek","country_code":"US","region_code":"CA"},{"display_name":"Pleasant Hill","country_code":"US","region_code":"CA"},{"display_name":"Martinez","country_code":"US","region_code":"CA"}]}'::jsonb,
+        'Atendemos Concord, Walnut Creek, Pleasant Hill e Martinez.',
+        null::jsonb, null::text
+      ) is not distinct from ${jsonb({
+        ...concordAmbiguity,
+        value: { localities: [
+          {
+            locality_id: "loc_fcc2e7491cf2266b3cc824d5",
+            display_name: "Martinez",
+            country_code: "US",
+            region_code: "CA",
+          },
+          {
+            locality_id: "loc_49cae77e3299fdc874706952",
+            display_name: "Pleasant Hill",
+            country_code: "US",
+            region_code: "CA",
+          },
+          {
+            locality_id: "loc_103311f819190c5e34075124",
+            display_name: "Walnut Creek",
+            country_code: "US",
+            region_code: "CA",
+          },
+        ] },
+      })})::text || ':' ||
+      (public.onboarding_resolve_locality_owner_v2(
+        '{"localities":[{"display_name":"Berkeley","country_code":"US","region_code":"CA"}]}'::jsonb,
+        'Atendemos Berkeley.', null::jsonb, null::text
+      ) is not distinct from '{"state":"unknown","unknown":["Berkeley"]}'::jsonb)::text;
+  `), "owner-evidence locality resolver parity");
+  assert.equal(localityResolutionTruth, "true:true:true:true:true:true");
+
   const structuredTruth = scalar(await runSql(connection, home, `
     select
       public.onboarding_answer_value_valid_v2(
@@ -2132,6 +2218,68 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     ] } },
     owner_words: "Talvez Berkeley e Miami; preciso revisar.",
   };
+  const ambiguousAreaFact = {
+    topic: "area",
+    field: "area.coverage",
+    disposition: "answered",
+    rule_text: "Concord como evidência pendente de região.",
+    structured: { value: { localities: [
+      { display_name: "Concord", country_code: "US", region_code: "CA" },
+    ] } },
+    owner_words: "Atendemos Concord.",
+  };
+  const ambiguousAreaCoverage = v2CoverageSnapshot({
+    tenantId: tenant, callId: call, revision: 2, target: 149,
+    answerHash: hashA, hashCharacter: "0",
+  });
+  ambiguousAreaCoverage.snapshot.cells[priceTargetKey].attempts = 1;
+  ambiguousAreaCoverage.snapshot.cells["area.coverage"] = {
+    ...concordAmbiguity,
+    attempts: 1,
+  };
+  ambiguousAreaCoverage.progress.ambiguous = [{ field: "area.coverage" }];
+  ambiguousAreaCoverage.progress.nextQuestion = {
+    field: "area.coverage",
+    questionPt: concordQuestion,
+  };
+  ambiguousAreaCoverage.next_action = {
+    type: "ask",
+    field: "area.coverage",
+    question_pt: concordQuestion,
+  };
+  ambiguousAreaCoverage.materializations = [JSON.parse(scalar(
+    await runSql(connection, home, `
+      select public.onboarding_materialization_v3(
+        ${jsonb(ambiguousAreaCoverage.snapshot)},
+        'domain:area', 2, '${call}'
+      )::text;
+    `), "ambiguous area canonical materialization",
+  ))];
+  const ambiguousAreaHash = coverageCellHash(
+    "area.coverage",
+    ambiguousAreaCoverage.snapshot.cells["area.coverage"],
+  );
+  ambiguousAreaCoverage.current_answer_hashes = {
+    "area.coverage": ambiguousAreaHash,
+  };
+  const ambiguousAreaResult = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-concord-ambiguous",
+      answerHash: ambiguousAreaHash,
+      expectedRevision: 1,
+      fact: ambiguousAreaFact,
+      coverage: ambiguousAreaCoverage,
+    })),
+  );
+  requireSuccess(ambiguousAreaResult, "Concord ambiguity persistence");
+  assert.match(ambiguousAreaResult.stdout, /locality_region_owner_evidence_required/);
+  assert.match(ambiguousAreaResult.stdout, /Concord, CA, US ou Concord, NH, US/);
+
   const unknownAreaCoverage = v2CoverageSnapshot({
     tenantId: tenant, callId: call, revision: 2, target: 149,
     answerHash: hashA, hashCharacter: "1",
@@ -3294,6 +3442,94 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       (select count(*) from public.rules where tenant_id = '${tenant}')::text || ':' ||
       (select max((readback->>'revision')::integer) from public.receipts where tenant_id = '${tenant}' and kind = 'onboarding_coverage')::text;
   `), "followup inserts no rule and third rolls back"), "4:6");
+
+  const capSeed = structuredClone(followTwo.coverage);
+  capSeed.revision = 255;
+  capSeed.snapshot = {
+    ...capSeed.snapshot,
+    revision: 255,
+    followUps: 255,
+    followUpGroups: {},
+  };
+  capSeed.next_action = {
+    type: "ask",
+    field: "policy.payment_estimate",
+    question_pt: "Quais pagamentos e limites de orçamento são aceitos?",
+  };
+  capSeed.snapshot_digest = "c".repeat(64);
+  requireSuccess(await runSql(connection, home, `
+    insert into public.receipts (
+      tenant_id, call_id, kind, outcome, external_id, readback,
+      payload_hash, detail
+    ) values (
+      '${tenant}', '${call}', 'onboarding_coverage', 'accepted',
+      '${sha256("fix-c-followup-cap-seed")}', ${jsonb(capSeed)},
+      '${sha256("fix-c-followup-cap-payload")}',
+      ${jsonb({
+        transition_kind: "directed_followup",
+        transition_schema: 2,
+        source_revision: 254,
+        source_digest: "b".repeat(64),
+        field: "policy.payment_estimate",
+        subject: null,
+        question_pt: "Quais pagamentos e limites de orçamento são aceitos?",
+        coverage_key: "policy.payment_estimate",
+        browser_request_id: "82000000-0000-4000-8000-000000000030",
+      })}
+    );
+  `), "followup cap fixture");
+
+  const capAcceptedCoverage = withoutCoverageServerFields(capSeed);
+  capAcceptedCoverage.revision = 256;
+  capAcceptedCoverage.snapshot = {
+    ...capAcceptedCoverage.snapshot,
+    revision: 256,
+    followUps: 256,
+    followUpGroups: { "policy.payment_estimate": 1 },
+  };
+  const capAccepted = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingFollowupSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      expectedRevision: 255,
+      field: "policy.payment_estimate",
+      coverage: capAcceptedCoverage,
+    })),
+  ), "followup 256 accepted"));
+  assert.equal(capAccepted.revision, 256);
+  assert.equal(capAccepted.coverage.snapshot.followUps, 256);
+
+  const capRejectedCoverage = withoutCoverageServerFields(capAccepted.coverage);
+  capRejectedCoverage.revision = 257;
+  capRejectedCoverage.snapshot = {
+    ...capRejectedCoverage.snapshot,
+    revision: 257,
+    followUps: 257,
+    followUpGroups: { "policy.payment_estimate": 2 },
+  };
+  const capRejected = await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingFollowupSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      expectedRevision: 256,
+      field: "policy.payment_estimate",
+      coverage: capRejectedCoverage,
+    })),
+  );
+  assert.notEqual(capRejected.code, 0);
+  assert.match(capRejected.stderr, /onboarding_followup_global_exhausted/);
+  assert.equal(scalar(await runSql(connection, home, `
+    select max((readback->>'revision')::integer)::text
+    from public.receipts
+    where tenant_id = '${tenant}' and call_id = '${call}'
+      and kind = 'onboarding_coverage';
+  `), "followup 257 rollback"), "256");
 }
 
 async function concurrentOnboardingAnswerAndFollowup(connection, home) {
@@ -3495,6 +3731,257 @@ async function concurrentOnboardingAnswerAndFollowup(connection, home) {
   );
 }
 
+async function onboardingLocalityFollowupAuthority(connection, home) {
+  const owner = "85000000-0000-4000-8000-000000000001";
+  const tenant = "85000000-0000-4000-8000-000000000010";
+  const call = "85000000-0000-4000-8000-000000000020";
+  const questionPt = "Você quer dizer Concord, CA, US ou Concord, NH, US?";
+  const ca = {
+    locality_id: "loc_06b5af1ac7ab0ac5ffaa565a",
+    display_name: "Concord",
+    country_code: "US",
+    region_code: "CA",
+  };
+  const nh = {
+    locality_id: "loc_d89792846ce09bcbb7667a0a",
+    display_name: "Concord",
+    country_code: "US",
+    region_code: "NH",
+  };
+  const ambiguousCell = {
+    state: "ambiguous",
+    attempts: 1,
+    reason: "locality_region_owner_evidence_required",
+    value: { localities: [] },
+    candidates: [ca, nh],
+    questionPt,
+  };
+  const projection = ({
+    revision,
+    cell,
+    followUps = 0,
+    followUpGroups = {},
+    transitionKind = "answer",
+    nextAction,
+  }) => {
+    const snapshot = {
+      tenantId: tenant,
+      callId: call,
+      revision,
+      services: [],
+      cells: { "area.coverage": cell },
+      followUps,
+      followUpGroups,
+      summaryInvalidated: false,
+    };
+    return {
+      schema_version: 2,
+      transition_kind: transitionKind,
+      tenant_id: tenant,
+      call_id: call,
+      revision,
+      complete: false,
+      snapshot,
+      progress: {
+        requiredFields: [],
+        conditionalFields: [],
+        missingRequired: [],
+        ambiguous: cell.state === "ambiguous"
+          ? [{ field: "area.coverage" }]
+          : [],
+        answered: cell.state === "answered"
+          ? [{ field: "area.coverage" }]
+          : [],
+        ownerReviewRequired: [],
+        notApplicable: [],
+        nextQuestion: nextAction.type === "ask"
+          ? {
+              field: nextAction.field,
+              questionPt: nextAction.question_pt,
+            }
+          : null,
+        catalogNormallyComplete: true,
+        summaryInvalidated: false,
+      },
+      selected_rule_ids: [],
+      next_action: nextAction,
+      current_answer_hashes: {
+        "area.coverage": coverageCellHash("area.coverage", cell),
+      },
+      materializations: [],
+      summary_projection: null,
+      summary_hash: null,
+      authority: {
+        rules_approved: false,
+        powers_granted: false,
+        operational_mode_changed: false,
+      },
+    };
+  };
+  const attachAreaMaterialization = async (coverage, label) => {
+    coverage.materializations = [JSON.parse(scalar(await runSql(
+      connection,
+      home,
+      `select public.onboarding_materialization_v3(
+        ${jsonb(coverage.snapshot)}, 'domain:area', ${coverage.revision},
+        '${call}'
+      )::text;`,
+    ), label))];
+    return coverage;
+  };
+  const fact = (ownerWords) => ({
+    topic: "area",
+    field: "area.coverage",
+    disposition: "answered",
+    rule_text: "Concord como evidência de área.",
+    structured: { value: { localities: [{
+      display_name: "Concord",
+      country_code: "US",
+      region_code: ownerWords === "Atendemos Concord." ? "CA" : "NH",
+    }] } },
+    owner_words: ownerWords,
+  });
+
+  requireSuccess(await runSql(connection, home, `
+    insert into auth.users (id, email)
+    values ('${owner}', 'onboarding-locality-followup@example.invalid');
+    insert into public.tenants
+      (id, slug, name, owner_user_id, status, operational_mode)
+    values (
+      '${tenant}', 'synthetic-locality-followup',
+      'Synthetic Locality Followup', '${owner}',
+      'onboarding', 'simulation_only'
+    );
+    insert into public.calls (id, tenant_id, channel, session_type, status)
+    values ('${call}', '${tenant}', 'browser', 'onboarding', 'active');
+    insert into public.browser_session_requests
+      (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp,
+       call_id, handled_at)
+    values (
+      '${tenant}', '${owner}', 'onboarding', 'offer-locality-followup',
+      'ready', 'answer-locality-followup', '${call}', now()
+    );
+  `), "locality followup authority fixture");
+
+  const initialCoverage = await attachAreaMaterialization(projection({
+    revision: 1,
+    cell: ambiguousCell,
+    nextAction: {
+      type: "ask",
+      field: "area.coverage",
+      question_pt: questionPt,
+    },
+  }), "initial ambiguous area materialization");
+  const firstFact = fact("Atendemos Concord.");
+  const first = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "locality-initial-concord",
+      answerHash: initialCoverage.current_answer_hashes["area.coverage"],
+      expectedRevision: 0,
+      fact: firstFact,
+      coverage: initialCoverage,
+    })),
+  ), "initial ambiguous Concord answer"));
+  assert.equal(first.revision, 1);
+  assert.equal(first.coverage.snapshot.cells["area.coverage"].state, "ambiguous");
+
+  const hostileResolvedCoverage = await attachAreaMaterialization(projection({
+    revision: 2,
+    cell: { state: "answered", attempts: 2, value: { localities: [ca] } },
+    nextAction: {
+      type: "ask",
+      field: "service.catalog_closure",
+      question_pt: "Há mais algum serviço?",
+    },
+  }), "unprompted resolved area materialization");
+  const unpromptedFact = fact("A da Califórnia.");
+  const unprompted = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "locality-unprompted-california",
+      answerHash: hostileResolvedCoverage.current_answer_hashes["area.coverage"],
+      expectedRevision: 1,
+      fact: unpromptedFact,
+      coverage: hostileResolvedCoverage,
+    })),
+  );
+  assert.notEqual(unprompted.code, 0);
+  assert.match(unprompted.stderr, /onboarding_structured_projection_invalid/);
+
+  const followupCoverage = withoutCoverageServerFields(first.coverage);
+  followupCoverage.transition_kind = "directed_followup";
+  followupCoverage.revision = 2;
+  followupCoverage.snapshot = {
+    ...followupCoverage.snapshot,
+    revision: 2,
+    followUps: 1,
+    followUpGroups: { "area.coverage": 1 },
+  };
+  const followup = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingFollowupSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      expectedRevision: 1,
+      field: "area.coverage",
+      coverage: followupCoverage,
+    })),
+  ), "durable locality followup"));
+  assert.equal(followup.revision, 2);
+  assert.equal(scalar(await runSql(connection, home, `
+    select (detail->>'question_pt' = '${questionPt}')::text || ':' ||
+      (detail->>'source_revision' = '1')::text || ':' ||
+      (detail->'transition_schema' is not distinct from '2'::jsonb)::text
+    from public.receipts where id = '${followup.coverage_receipt_id}';
+  `), "durable locality followup identity"), "true:true:true");
+
+  const resolvedCoverage = await attachAreaMaterialization(projection({
+    revision: 3,
+    cell: { state: "answered", attempts: 2, value: { localities: [ca] } },
+    followUps: 1,
+    followUpGroups: { "area.coverage": 1 },
+    nextAction: {
+      type: "ask",
+      field: "service.catalog_closure",
+      question_pt: "Há mais algum serviço?",
+    },
+  }), "resolved area materialization after followup");
+  const resolved = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "locality-prompted-california",
+      answerHash: resolvedCoverage.current_answer_hashes["area.coverage"],
+      expectedRevision: 2,
+      fact: unpromptedFact,
+      coverage: resolvedCoverage,
+    })),
+  ), "prompted California locality resolution"));
+  assert.equal(resolved.revision, 3);
+  assert.deepEqual(
+    resolved.coverage.snapshot.cells["area.coverage"].value.localities,
+    [ca],
+  );
+  assert.doesNotMatch(
+    JSON.stringify(resolved.coverage.snapshot.cells["area.coverage"]),
+    /loc_d89792846ce09bcbb7667a0a|"region_code":"NH"/,
+  );
+}
+
 export async function runConcurrencySuite(env = process.env) {
   const connection = connectionFromEnvironment(env);
   const isolatedHome = await mkdtemp(path.join(os.tmpdir(), "ligou-rc1-psql-home-"));
@@ -3514,6 +4001,7 @@ export async function runConcurrencySuite(env = process.env) {
     ["concurrent onboarding answer revisions", concurrentOnboardingAnswerRevisions],
     ["V2 current-relative materialization and followups", onboardingV2CurrentRelativeMaterialization],
     ["concurrent onboarding answer and followup", concurrentOnboardingAnswerAndFollowup],
+    ["owner-evidence locality followup authority", onboardingLocalityFollowupAuthority],
   ];
   try {
     for (const [, test] of tests) await test(connection, isolatedHome);

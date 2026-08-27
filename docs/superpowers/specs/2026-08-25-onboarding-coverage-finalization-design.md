@@ -280,7 +280,7 @@ Conditional fields are required only when triggered. Example: a fixed diagnostic
 6. When one owner response answers multiple fields, record each fact and skip those follow-ups.
 7. When the owner says “não sei”, record `owner_review_required`, persist the conservative restriction, and continue.
 8. When the owner says “não se aplica”, record `not_applicable` and continue.
-9. Ask a maximum of two directed follow-ups for the same unresolved group and twelve directed follow-ups in the whole interview.
+9. Ask a maximum of two directed follow-ups for the same unresolved group and 256 directed follow-ups in the whole interview. Twenty services expose at most 228 active refs, so this permits one question per ref plus 28 clarifications; 228 answer receipts plus 256 question receipts total 484, below the store's 512-receipt scan bound.
 10. Accept at most twenty discovered services in one run; a larger catalog becomes `owner_review_required` and is completed later in Memória.
 11. Exhausting a follow-up limit never marks the field answered. The owner must explicitly defer it to `owner_review_required`, or the lifecycle remains `BLOCKED`/incomplete.
 

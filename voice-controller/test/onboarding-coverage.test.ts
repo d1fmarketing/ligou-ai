@@ -8,6 +8,7 @@ import {
   createCoverage,
   evaluateCoverage,
   recordDirectedFollowUp,
+  resolveLocalityValueFromRegistry,
 } from "../src/onboarding-coverage.ts";
 import type {
   CoverageFact,
@@ -15,6 +16,72 @@ import type {
 } from "../src/onboarding-coverage.ts";
 
 const identity = { tenantId: "tenant-1", callId: "call-1" };
+
+const OWNER_LOCALITY_REGISTRY = [
+  {
+    locality_id: "loc_06b5af1ac7ab0ac5ffaa565a",
+    display_name: "Concord",
+    country_code: "US",
+    region_code: "CA",
+    aliases: [],
+  },
+  {
+    locality_id: "loc_d89792846ce09bcbb7667a0a",
+    display_name: "Concord",
+    country_code: "US",
+    region_code: "NH",
+    aliases: [],
+  },
+  {
+    locality_id: "loc_9971eda617977d43d7df9fd5",
+    display_name: "Irvine",
+    country_code: "US",
+    region_code: "CA",
+    aliases: [],
+  },
+  {
+    locality_id: "loc_103311f819190c5e34075124",
+    display_name: "Walnut Creek",
+    country_code: "US",
+    region_code: "CA",
+    aliases: [],
+  },
+  {
+    locality_id: "loc_49cae77e3299fdc874706952",
+    display_name: "Pleasant Hill",
+    country_code: "US",
+    region_code: "CA",
+    aliases: [],
+  },
+  {
+    locality_id: "loc_fcc2e7491cf2266b3cc824d5",
+    display_name: "Martinez",
+    country_code: "US",
+    region_code: "CA",
+    aliases: [],
+  },
+] as const;
+
+const CONCORD_AMBIGUITY = {
+  state: "ambiguous" as const,
+  reason: "locality_region_owner_evidence_required",
+  value: { localities: [] },
+  candidates: [
+    {
+      locality_id: "loc_06b5af1ac7ab0ac5ffaa565a",
+      display_name: "Concord",
+      country_code: "US",
+      region_code: "CA",
+    },
+    {
+      locality_id: "loc_d89792846ce09bcbb7667a0a",
+      display_name: "Concord",
+      country_code: "US",
+      region_code: "NH",
+    },
+  ],
+  questionPt: "Você quer dizer Concord, CA, US ou Concord, NH, US?",
+};
 
 function answer(
   field: CoverageField,
@@ -919,7 +986,12 @@ describe("onboarding coverage", () => {
       global = recordDirectedFollowUp(global, { field });
     }
     expect(global.followUps).toBe(12);
-    expect(evaluateCoverage(global).nextQuestion).toBeNull();
+    expect(evaluateCoverage(global).nextQuestion).not.toBeNull();
+    expect(evaluateCoverage({
+      ...global,
+      revision: 256,
+      followUps: 256,
+    }).nextQuestion).toBeNull();
   });
 
   test("uses factual values for transcript anchors", () => {
@@ -1690,7 +1762,7 @@ describe("onboarding coverage", () => {
     ).toBe(fresh);
   });
 
-  test("a directed follow-up is its own revision and cannot exceed two per group or twelve globally", () => {
+  test("a directed follow-up is its own revision and cannot exceed two per group", () => {
     let snapshot = createCoverage(identity);
     const ref = { field: "area.coverage" as const };
     const first = recordDirectedFollowUp(snapshot, ref);
@@ -1726,8 +1798,243 @@ describe("onboarding coverage", () => {
     for (const field of fields.slice(0, 12))
       snapshot = recordDirectedFollowUp(snapshot, { field });
     expect(snapshot).toMatchObject({ revision: 12, followUps: 12 });
-    expect(recordDirectedFollowUp(snapshot, { field: fields[12]! })).toBe(
-      snapshot,
-    );
+    expect(recordDirectedFollowUp(snapshot, { field: fields[12]! }))
+      .toMatchObject({ revision: 13, followUps: 13 });
+  });
+
+  test("one fixed-price service can ask all thirty-two remaining coverage questions", () => {
+    let snapshot = createCoverage(identity);
+    const subject = "consulta";
+    for (const fact of [
+      answer("service.name_synonyms", ["consulta"], subject),
+      answer("service.price_mode", "fixed", subject),
+      answer("service.price_target", 120, subject),
+      answer("service.negotiation", "non_negotiable", subject),
+      answer("service.duration", 60, subject),
+      answer("service.catalog_closure", true),
+    ]) snapshot = applyCoverageFact(snapshot, fact);
+
+    expect(evaluateCoverage(snapshot).missingRequired).toHaveLength(32);
+    for (let index = 0; index < 12; index += 1) {
+      const question = evaluateCoverage(snapshot).nextQuestion;
+      expect(question).not.toBeNull();
+      snapshot = recordDirectedFollowUp(snapshot, question!);
+      snapshot = applyCoverageFact(snapshot, {
+        field: question!.field,
+        ...(question!.subject ? { subject: question!.subject } : {}),
+        disposition: "owner_review_required",
+        value: null,
+        ownerWords: `Revisar resposta ${index + 1} depois.`,
+      });
+    }
+
+    expect(snapshot.followUps).toBe(12);
+    expect(evaluateCoverage(snapshot).nextQuestion).not.toBeNull();
+
+    while (!evaluateCoverage(snapshot).readyForReview) {
+      const question = evaluateCoverage(snapshot).nextQuestion;
+      expect(question).not.toBeNull();
+      snapshot = recordDirectedFollowUp(snapshot, question!);
+      snapshot = applyCoverageFact(snapshot, {
+        field: question!.field,
+        ...(question!.subject ? { subject: question!.subject } : {}),
+        disposition: "owner_review_required",
+        value: null,
+        ownerWords: "Revisar depois.",
+      });
+    }
+
+    expect(snapshot.followUps).toBe(32);
+    expect(evaluateCoverage(snapshot)).toMatchObject({
+      readyForReview: true,
+      nextQuestion: null,
+    });
+  });
+
+  test("accepts directed follow-up 256 and refuses 257", () => {
+    const snapshot = {
+      ...createCoverage(identity),
+      revision: 255,
+      followUps: 255,
+    };
+    const accepted = recordDirectedFollowUp(snapshot, {
+      field: "area.coverage",
+    });
+    expect(accepted).toMatchObject({ revision: 256, followUps: 256 });
+    expect(recordDirectedFollowUp(accepted, {
+      field: "business.customer_types",
+    })).toBe(accepted);
+  });
+
+  test("Concord alone stays ambiguous even when the model proposes California", () => {
+    expect(resolveLocalityValueFromRegistry(
+      { localities: [{
+        display_name: "Concord",
+        country_code: "US",
+        region_code: "CA",
+      }] },
+      [...OWNER_LOCALITY_REGISTRY],
+      { ownerWords: "Atendemos Concord." },
+    )).toEqual(CONCORD_AMBIGUITY);
+  });
+
+  test("an unprompted California tuple cannot resolve prior Concord ambiguity", () => {
+    expect(resolveLocalityValueFromRegistry(
+      { localities: [{
+        display_name: "Concord",
+        country_code: "US",
+        region_code: "CA",
+      }] },
+      [...OWNER_LOCALITY_REGISTRY],
+      {
+        ownerWords: "A da Califórnia.",
+        priorCell: { ...CONCORD_AMBIGUITY, attempts: 1 },
+      },
+    )).toEqual(CONCORD_AMBIGUITY);
+  });
+
+  test("the exact directed question lets owner California evidence override a model NH hint", () => {
+    expect(resolveLocalityValueFromRegistry(
+      { localities: [{
+        display_name: "Concord",
+        country_code: "US",
+        region_code: "NH",
+      }] },
+      [...OWNER_LOCALITY_REGISTRY],
+      {
+        ownerWords: "A da Califórnia.",
+        priorCell: { ...CONCORD_AMBIGUITY, attempts: 1 },
+        directedFollowUpQuestionPt: CONCORD_AMBIGUITY.questionPt,
+      },
+    )).toEqual({
+      state: "resolved",
+      value: { localities: [{
+        locality_id: "loc_06b5af1ac7ab0ac5ffaa565a",
+        display_name: "Concord",
+        country_code: "US",
+        region_code: "CA",
+      }] },
+    });
+  });
+
+  test("a unique owner-spoken Irvine derives canonical California despite a model NH hint", () => {
+    expect(resolveLocalityValueFromRegistry(
+      { localities: [{
+        display_name: "Irvine",
+        country_code: "US",
+        region_code: "NH",
+      }] },
+      [...OWNER_LOCALITY_REGISTRY],
+      { ownerWords: "Atendemos Irvine." },
+    )).toEqual({
+      state: "resolved",
+      value: { localities: [{
+        locality_id: "loc_9971eda617977d43d7df9fd5",
+        display_name: "Irvine",
+        country_code: "US",
+        region_code: "CA",
+      }] },
+    });
+  });
+
+  test("a mixed Test-8 list preserves unique cities while only Concord stays pending", () => {
+    expect(resolveLocalityValueFromRegistry(
+      { localities: [
+        { display_name: "Concord", country_code: "US", region_code: "CA" },
+        { display_name: "Walnut Creek", country_code: "US", region_code: "CA" },
+        { display_name: "Pleasant Hill", country_code: "US", region_code: "CA" },
+        { display_name: "Martinez", country_code: "US", region_code: "CA" },
+      ] },
+      [...OWNER_LOCALITY_REGISTRY],
+      {
+        ownerWords:
+          "Atendemos Concord, Walnut Creek, Pleasant Hill e Martinez.",
+      },
+    )).toEqual({
+      ...CONCORD_AMBIGUITY,
+      value: { localities: [
+        {
+          locality_id: "loc_fcc2e7491cf2266b3cc824d5",
+          display_name: "Martinez",
+          country_code: "US",
+          region_code: "CA",
+        },
+        {
+          locality_id: "loc_49cae77e3299fdc874706952",
+          display_name: "Pleasant Hill",
+          country_code: "US",
+          region_code: "CA",
+        },
+        {
+          locality_id: "loc_103311f819190c5e34075124",
+          display_name: "Walnut Creek",
+          country_code: "US",
+          region_code: "CA",
+        },
+      ] },
+    });
+  });
+
+  test("an owner-spoken city missing from the registry is unknown", () => {
+    expect(resolveLocalityValueFromRegistry(
+      { localities: [{
+        display_name: "Berkeley",
+        country_code: "US",
+        region_code: "CA",
+      }] },
+      [...OWNER_LOCALITY_REGISTRY],
+      { ownerWords: "Atendemos Berkeley." },
+    )).toEqual({ state: "unknown", unknown: ["Berkeley"] });
+  });
+
+  test("the canonical locality input helper keeps its null failure contract", () => {
+    for (const value of [null, undefined, "Irvine", [], 7])
+      expect(canonicalizeLocalityInput(value)).toBeNull();
+  });
+
+  test("an ambiguous locality resolution becomes the exact next coverage question", () => {
+    const snapshot = applyCoverageFact(createCoverage(identity), {
+      field: "area.coverage",
+      disposition: "answered",
+      value: null,
+      ownerWords: "Atendemos Concord.",
+      localityResolution: CONCORD_AMBIGUITY,
+    } as CoverageFact & { localityResolution: typeof CONCORD_AMBIGUITY });
+
+    expect(snapshot.cells["area.coverage"]).toEqual({
+      ...CONCORD_AMBIGUITY,
+      attempts: 1,
+    });
+    expect(evaluateCoverage(snapshot).nextQuestion).toEqual({
+      field: "area.coverage",
+      questionPt: CONCORD_AMBIGUITY.questionPt,
+    });
+    expect(evaluateCoverage(snapshot).readyForReview).toBe(false);
+  });
+
+  test("a resolved locality correction replaces ambiguity without losing attempts", () => {
+    const ambiguous = applyCoverageFact(createCoverage(identity), {
+      field: "area.coverage",
+      disposition: "answered",
+      value: null,
+      ownerWords: "Atendemos Concord.",
+      localityResolution: CONCORD_AMBIGUITY,
+    } as CoverageFact & { localityResolution: typeof CONCORD_AMBIGUITY });
+    const corrected = applyCoverageFact(ambiguous, {
+      field: "area.coverage",
+      disposition: "answered",
+      value: null,
+      ownerWords: "A da Califórnia.",
+      localityResolution: {
+        state: "resolved",
+        value: { localities: [CONCORD_AMBIGUITY.candidates[0]] },
+      },
+    } as CoverageFact & { localityResolution: unknown });
+
+    expect(corrected.cells["area.coverage"]).toEqual({
+      state: "answered",
+      attempts: 2,
+      value: { localities: [CONCORD_AMBIGUITY.candidates[0]] },
+    });
   });
 });

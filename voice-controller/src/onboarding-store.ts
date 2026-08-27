@@ -800,7 +800,7 @@ export function createOnboardingStore(
   ): Promise<BoundaryResult<CoverageReceiptRow[]>> =>
     await abortable<BoundaryResult<CoverageReceiptRow[]>>(client
       .from("receipts")
-      .select("id,readback")
+      .select("id,readback,detail")
       .eq("tenant_id", cap.tenantId)
       .eq("call_id", cap.callId)
       .eq("kind", "onboarding_coverage")
@@ -1256,6 +1256,9 @@ export function createOnboardingStore(
       );
       let coverageDisposition =
         persistedFact.disposition as CoverageDisposition;
+      let localityResolution:
+        | ReturnType<typeof resolveLocalityValueFromRegistry>
+        | undefined;
       if (
         persistedFact.field === "area.coverage" &&
         persistedFact.disposition === "answered"
@@ -1291,12 +1294,40 @@ export function createOnboardingStore(
           ...entry,
           aliases: aliasesByLocality.get(entry.locality_id) ?? [],
         }));
-        const resolved = resolveLocalityValueFromRegistry(
+        const priorCell = base.cells["area.coverage"];
+        const detail = parsed?.row.detail ?? {};
+        const priorQuestion = priorCell?.state === "ambiguous"
+          ? priorCell.questionPt
+          : undefined;
+        const directedFollowUpQuestionPt =
+          parsed?.schemaVersion === 2 &&
+            parsed.row.readback.transition_kind === "directed_followup" &&
+            detail.transition_kind === "directed_followup" &&
+            detail.transition_schema === 2 &&
+            detail.field === "area.coverage" &&
+            (detail.subject === null || detail.subject === undefined) &&
+            Number(detail.source_revision) + 1 === parsed.revision &&
+            typeof detail.source_digest === "string" &&
+            /^[0-9a-f]{64}$/.test(detail.source_digest) &&
+            typeof detail.question_pt === "string" &&
+            detail.question_pt === priorQuestion &&
+            (parsed.snapshot.followUpGroups["area.coverage"] ?? 0) > 0
+          ? detail.question_pt
+          : undefined;
+        localityResolution = resolveLocalityValueFromRegistry(
           factValue,
           registry,
+          {
+            ownerWords: String(persistedFact.owner_words),
+            ...(priorCell ? { priorCell } : {}),
+            ...(directedFollowUpQuestionPt
+              ? { directedFollowUpQuestionPt }
+              : {}),
+          },
         );
-        if (resolved) factValue = resolved;
-        else {
+        if (localityResolution.state === "resolved")
+          factValue = localityResolution.value;
+        else if (localityResolution.state === "unknown") {
           factValue = null;
           coverageDisposition = "owner_review_required";
         }
@@ -1310,6 +1341,7 @@ export function createOnboardingStore(
         value: factValue,
         ruleText: String(persistedFact.rule_text),
         ownerWords: String(persistedFact.owner_words),
+        ...(localityResolution ? { localityResolution } : {}),
       };
       const next = applyCoverageFact(base, coverageFact);
       if (next.revision !== base.revision + 1)
