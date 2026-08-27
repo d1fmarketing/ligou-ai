@@ -46,6 +46,13 @@ type PendingMutationCommand =
   | PersistFollowupCommand
   | PersistApprovalCommand;
 
+interface PendingMutationEntry {
+  command: PendingMutationCommand;
+  reconciliationAttempts: number;
+  retryScheduled: boolean;
+  fingerprint: string;
+}
+
 type OnboardingAdapterInvariantCode =
   | "tool_args_mismatch"
   | "function_item_identity_missing"
@@ -60,6 +67,7 @@ type OnboardingAdapterInvariantCode =
   | "tool_args_json_invalid"
   | "tool_schema_invalid"
   | "tool_not_admitted"
+  | "caller_turn_correlation_mismatch"
   | "tool_output_created_invalid"
   | "tool_output_retrieved_invalid"
   | "tool_output_retrieve_failed";
@@ -70,6 +78,7 @@ interface BufferedOnboardingTool {
   args?: Record<string, unknown>;
   argsHash: string;
   outputIndex: number;
+  callerTurnId?: string;
   memberError?: {
     code: OnboardingAdapterInvariantCode;
     safeDetail: string;
@@ -80,6 +89,7 @@ interface BufferedOnboardingResponse {
   responseId: string;
   tools: BufferedOnboardingTool[];
   terminal: boolean;
+  callerTurnId?: string;
   invariant?: {
     code: OnboardingAdapterInvariantCode;
     safeDetail: string;
@@ -96,7 +106,11 @@ export interface OnboardingAdapterState {
   interrupted: boolean;
   pendingHangupIntentKey?: string;
   pendingResponseCommands: Record<string, RequestResponseCommand>;
-  pendingMutationCommands: Record<string, PendingMutationCommand>;
+  pendingMutationCommands: Record<string, PendingMutationEntry>;
+  pendingMutationRetryTimers: Record<
+    string,
+    ReturnType<typeof setTimeout>
+  >;
   speechGeneration: number;
   speechPending: boolean;
   speechResponseId?: string;
@@ -108,6 +122,7 @@ const MAX_PENDING_RESPONSE_COMMANDS = 512;
 const MAX_PENDING_MUTATION_COMMANDS = 512;
 const MAX_ADAPTER_TOOL_RECEIPTS = 512;
 const MAX_ADAPTER_TOOL_BATCHES = 512;
+const MUTATION_RECONCILIATION_DELAY_MS = 0;
 
 export interface SessionLedger {
   callId: string;
@@ -196,6 +211,7 @@ function createOnboardingAdapter(
     interrupted: false,
     pendingResponseCommands: {},
     pendingMutationCommands: {},
+    pendingMutationRetryTimers: {},
     speechGeneration: 0,
     speechPending: false,
   };
@@ -216,6 +232,7 @@ function onboardingBatchHash(tools: BufferedOnboardingTool[]): string {
       name: tool.name,
       args_hash: tool.argsHash,
       output_index: tool.outputIndex,
+      caller_turn_id: tool.callerTurnId ?? null,
     }))), "utf8")
     .digest("hex");
 }
@@ -306,6 +323,7 @@ function preflightOnboardingBatch(
       providerResponseId: responseId,
       batchHash,
       elapsedMs: 0,
+      ...(tool.callerTurnId ? { callerTurnId: tool.callerTurnId } : {}),
     });
     if (
       preview.phase !== "blocked" &&
@@ -430,6 +448,113 @@ function pendingMutationKey(command: PendingMutationCommand): string {
   return `followup:${command.revision}:${command.field}:${command.subject ?? ""}`;
 }
 
+function pendingMutationFingerprint(command: PendingMutationCommand): string {
+  return hashOnboardingToolArgs(
+    command as unknown as Record<string, unknown>,
+  );
+}
+
+function pendingMutationIsExpected(
+  adapter: OnboardingAdapterState,
+  command: PendingMutationCommand,
+): boolean {
+  if (command.type === "persist_followup") {
+    const pending = adapter.lifecycle.pendingFollowup;
+    return Boolean(
+      pending &&
+      pending.sourceRevision === command.revision &&
+      pending.sourceDigest === command.digest &&
+      pending.field === command.field &&
+      (pending.subject ?? "") === (command.subject ?? "") &&
+      pending.questionPt === command.questionPt &&
+      pending.intentKey === command.intentKey,
+    );
+  }
+  const receipt = adapter.lifecycle.toolOutbox[command.toolCallId];
+  if (
+    !receipt ||
+    receipt.state !== "running" ||
+    receipt.argsHash !== command.argsHash
+  ) return false;
+  if (command.type === "persist_fact")
+    return receipt.providerResponseId === command.providerResponseId &&
+      receipt.batchHash === command.batchHash;
+  return adapter.lifecycle.phase === "approval_persisting" &&
+    receipt.toolName === "approve_onboarding_summary";
+}
+
+function clearPendingMutationEntry(
+  adapter: OnboardingAdapterState,
+  key: string,
+): void {
+  const timer = adapter.pendingMutationRetryTimers[key];
+  if (timer) clearTimeout(timer);
+  delete adapter.pendingMutationRetryTimers[key];
+  delete adapter.pendingMutationCommands[key];
+}
+
+async function executePendingMutationReconciliation(
+  context: OnboardingCommandContext,
+  key: string,
+  expectedGeneration: number,
+): Promise<void> {
+  const adapter = ensureOnboardingAdapter(context.ledger);
+  const entry = adapter.pendingMutationCommands[key];
+  if (!entry) return;
+  if (
+    entry.fingerprint !== pendingMutationFingerprint(entry.command)
+  ) {
+    clearPendingMutationEntry(adapter, key);
+    await dispatchOnboardingEvent(context, {
+      type: "adapter.invariant_failed",
+      code: "tool_args_mismatch",
+      safeDetail: "pending mutation fingerprint changed before reconciliation",
+      elapsedMs: 0,
+    });
+    return;
+  }
+  if (
+    adapter.lifecycle.socketGeneration !== expectedGeneration ||
+    !context.isCurrent()
+  ) {
+    entry.retryScheduled = false;
+    return;
+  }
+  if (!pendingMutationIsExpected(adapter, entry.command)) {
+    clearPendingMutationEntry(adapter, key);
+    return;
+  }
+  if (entry.reconciliationAttempts >= 1) return;
+  entry.retryScheduled = false;
+  entry.reconciliationAttempts += 1;
+  await executeOnboardingCommands(
+    context,
+    [structuredClone(entry.command)],
+  );
+}
+
+function schedulePendingMutationReconciliation(
+  context: OnboardingCommandContext,
+  key: string,
+): void {
+  const adapter = ensureOnboardingAdapter(context.ledger);
+  const entry = adapter.pendingMutationCommands[key];
+  if (!entry || entry.retryScheduled || entry.reconciliationAttempts >= 1)
+    return;
+  entry.retryScheduled = true;
+  const generation = adapter.lifecycle.socketGeneration;
+  adapter.pendingMutationRetryTimers[key] = setTimeout(() => {
+    delete adapter.pendingMutationRetryTimers[key];
+    const task = adapter.queue.then(() =>
+      executePendingMutationReconciliation(context, key, generation)
+    );
+    adapter.queue = task.catch(() => {
+      adapter.interrupted = true;
+      context.ledger.status = "error";
+    });
+  }, MUTATION_RECONCILIATION_DELAY_MS);
+}
+
 async function executeOnboardingCommands(
   context: OnboardingCommandContext,
   commands: OnboardingCommand[],
@@ -447,8 +572,10 @@ async function executeOnboardingCommands(
       command.type === "persist_approval"
     ) {
       const key = pendingMutationKey(command);
+      const fingerprint = pendingMutationFingerprint(command);
+      const existing = adapter.pendingMutationCommands[key];
       if (
-        !adapter.pendingMutationCommands[key] &&
+        !existing &&
         Object.keys(adapter.pendingMutationCommands).length >=
           MAX_PENDING_MUTATION_COMMANDS
       ) {
@@ -460,7 +587,23 @@ async function executeOnboardingCommands(
         });
         continue;
       }
-      adapter.pendingMutationCommands[key] = structuredClone(command);
+      if (existing && existing.fingerprint !== fingerprint) {
+        clearPendingMutationEntry(adapter, key);
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "tool_args_mismatch",
+          safeDetail: "pending mutation key was reused with a different payload",
+          elapsedMs: 0,
+        });
+        continue;
+      }
+      if (!existing)
+        adapter.pendingMutationCommands[key] = {
+          command: structuredClone(command),
+          reconciliationAttempts: 0,
+          retryScheduled: false,
+          fingerprint,
+        };
     }
     if (command.type === "request_response") {
       if (!pendingResponseCommandIsCurrent(adapter, command)) {
@@ -588,8 +731,25 @@ async function executeOnboardingCommands(
           durationMs: result.durationMs,
         });
         if (!result.ok) {
-          if (result.code === "indeterminate") break;
-          delete adapter.pendingMutationCommands[mutationKey];
+          if (result.code === "indeterminate") {
+            const entry = adapter.pendingMutationCommands[mutationKey];
+            if ((entry?.reconciliationAttempts ?? 0) >= 1) {
+              clearPendingMutationEntry(adapter, mutationKey);
+              await dispatchOnboardingEvent(context, {
+                type: "tool.execution_failed",
+                toolCallId: command.toolCallId,
+                code: "indeterminate",
+                safeDetail: result.safeDetail,
+                elapsedMs: result.durationMs,
+              });
+              adapter.interrupted = true;
+            } else schedulePendingMutationReconciliation(
+              context,
+              mutationKey,
+            );
+            break;
+          }
+          clearPendingMutationEntry(adapter, mutationKey);
           await dispatchOnboardingEvent(context, {
             type: "tool.execution_failed",
             toolCallId: command.toolCallId,
@@ -600,7 +760,7 @@ async function executeOnboardingCommands(
           adapter.interrupted = true;
           break;
         }
-        delete adapter.pendingMutationCommands[mutationKey];
+        clearPendingMutationEntry(adapter, mutationKey);
         const currentCoverage = adapter.lifecycle.coverage;
         const nonAdvancingReuse = result.status === "reused" &&
           result.revision <= currentCoverage.revision;
@@ -660,8 +820,26 @@ async function executeOnboardingCommands(
         });
         if (!retainsCallAuthority()) return;
         if (!result.ok) {
-          if (result.code === "indeterminate") break;
-          delete adapter.pendingMutationCommands[mutationKey];
+          if (result.code === "indeterminate") {
+            const entry = adapter.pendingMutationCommands[mutationKey];
+            if ((entry?.reconciliationAttempts ?? 0) >= 1) {
+              clearPendingMutationEntry(adapter, mutationKey);
+              await dispatchOnboardingEvent(context, {
+                type: "followup.persistence_failed",
+                sourceRevision: command.revision,
+                field: command.field,
+                ...(command.subject ? { subject: command.subject } : {}),
+                code: "indeterminate",
+                safeDetail: result.safeDetail,
+                elapsedMs: result.durationMs,
+              });
+            } else schedulePendingMutationReconciliation(
+              context,
+              mutationKey,
+            );
+            break;
+          }
+          clearPendingMutationEntry(adapter, mutationKey);
           await dispatchOnboardingEvent(context, {
             type: "followup.persistence_failed",
             sourceRevision: command.revision,
@@ -673,7 +851,7 @@ async function executeOnboardingCommands(
           });
           break;
         }
-        delete adapter.pendingMutationCommands[mutationKey];
+        clearPendingMutationEntry(adapter, mutationKey);
         await dispatchOnboardingEvent(context, {
           type: "followup.persisted",
           sourceRevision: command.revision,
@@ -728,8 +906,24 @@ async function executeOnboardingCommands(
           durationMs: result.durationMs,
         });
         if (!result.ok) {
-          if (result.code === "indeterminate") break;
-          delete adapter.pendingMutationCommands[mutationKey];
+          if (result.code === "indeterminate") {
+            const entry = adapter.pendingMutationCommands[mutationKey];
+            if ((entry?.reconciliationAttempts ?? 0) >= 1) {
+              clearPendingMutationEntry(adapter, mutationKey);
+              await dispatchOnboardingEvent(context, {
+                type: "approval.persistence_failed",
+                toolCallId: command.toolCallId,
+                code: "indeterminate",
+                safeDetail: result.safeDetail,
+                elapsedMs: result.durationMs,
+              });
+            } else schedulePendingMutationReconciliation(
+              context,
+              mutationKey,
+            );
+            break;
+          }
+          clearPendingMutationEntry(adapter, mutationKey);
           await dispatchOnboardingEvent(context, {
             type: "approval.persistence_failed",
             toolCallId: command.toolCallId,
@@ -739,7 +933,7 @@ async function executeOnboardingCommands(
           });
           break;
         }
-        delete adapter.pendingMutationCommands[mutationKey];
+        clearPendingMutationEntry(adapter, mutationKey);
         const output = safeToolOutput({
           status: result.status,
           approval_receipt_id: result.approvalReceiptId,
@@ -848,9 +1042,9 @@ async function attachOnboardingSocket(
   const adapter = ensureOnboardingAdapter(context.ledger);
   const pendingBeforeAttach = Object.values(adapter.pendingResponseCommands)
     .map((command) => structuredClone(command));
-  const pendingMutationsBeforeAttach = Object.values(
+  const pendingMutationKeysBeforeAttach = Object.keys(
     adapter.pendingMutationCommands,
-  ).map((command) => structuredClone(command));
+  );
   const generation = adapter.lifecycle.socketGeneration + 1;
   await dispatchOnboardingEvent(context, {
     type: "socket.attached",
@@ -862,8 +1056,18 @@ async function attachOnboardingSocket(
     adapter.lifecycle.phase !== "closed" &&
     adapter.lifecycle.phase !== "provider_terminating"
   )
-    for (const command of pendingMutationsBeforeAttach)
-      await executeOnboardingCommands(context, [command]);
+    for (const key of pendingMutationKeysBeforeAttach) {
+      const timer = adapter.pendingMutationRetryTimers[key];
+      if (timer) clearTimeout(timer);
+      delete adapter.pendingMutationRetryTimers[key];
+      const entry = adapter.pendingMutationCommands[key];
+      if (entry) entry.retryScheduled = false;
+      await executePendingMutationReconciliation(
+        context,
+        key,
+        adapter.lifecycle.socketGeneration,
+      );
+    }
   for (const command of pendingBeforeAttach)
     await executeOnboardingCommands(context, [command]);
 }
@@ -950,6 +1154,22 @@ function confirmOnboardingTermination(
     if (command.type === "telemetry") evt(command.name, telemetryFields(command));
 }
 
+function authoritySpeechResponseAwaitingPlayback(
+  lifecycle: OnboardingLifecycle,
+): string | null {
+  for (const proof of [
+    lifecycle.signoff,
+    lifecycle.summary,
+    lifecycle.greeting,
+  ])
+    if (
+      proof?.responseId &&
+      !proof.playbackStopped &&
+      !proof.interrupted
+    ) return proof.responseId;
+  return lifecycle.activeResponseId ?? null;
+}
+
 function enqueueOnboardingTransportInterruption(
   ledger: SessionLedger,
 ): void {
@@ -957,7 +1177,9 @@ function enqueueOnboardingTransportInterruption(
   if (!adapter || adapter.lifecycle.phase === "provider_terminating" ||
     adapter.lifecycle.phase === "closed") return;
   adapter.interrupted = true;
-  const responseId = adapter.lifecycle.activeResponseId;
+  const responseId = authoritySpeechResponseAwaitingPlayback(
+    adapter.lifecycle,
+  );
   if (!responseId) return;
   const task = adapter.queue.then(() => {
     const reduced = reduceOnboarding(adapter.lifecycle, {
@@ -968,8 +1190,21 @@ function enqueueOnboardingTransportInterruption(
     });
     adapter.lifecycle = reduced.lifecycle;
     ledger.phase = reduced.lifecycle.phase;
-    for (const command of reduced.commands)
-      if (command.type === "telemetry") evt(command.name, telemetryFields(command));
+    for (const command of reduced.commands) {
+      if (command.type === "telemetry")
+        evt(command.name, telemetryFields(command));
+      if (command.type === "request_response")
+        adapter.pendingResponseCommands[command.intentKey] =
+          structuredClone(command);
+      if (command.type === "block") {
+        ledger.phase = "blocked";
+        ledger.transcript.push({
+          role: "system",
+          text: `onboarding blocked: ${command.code}`,
+          at: new Date().toISOString(),
+        });
+      }
+    }
   });
   adapter.queue = task.catch(() => {
     adapter.interrupted = true;
@@ -1021,6 +1256,41 @@ async function handleOnboardingRawEvent(
       const intentKey = exactString(msg.response?.metadata?.intent_key);
       if (!intentKey && adapter.speechPending && !adapter.speechResponseId)
         adapter.speechResponseId = responseId;
+      const callerTurnId = !intentKey && adapter.speechPending
+        ? adapter.activeCallerTurnId
+        : undefined;
+      if (callerTurnId) {
+        let buffered = adapter.responses[responseId];
+        if (!buffered) {
+          if (!ensureResponseCapacity(adapter)) {
+            await dispatchOnboardingEvent(context, {
+              type: "adapter.invariant_failed",
+              code: "adapter_capacity_exceeded",
+              safeDetail: "response correlation registry reached its deterministic bound",
+              elapsedMs: 0,
+            });
+            break;
+          }
+          buffered = adapter.responses[responseId] = {
+            responseId,
+            tools: [],
+            terminal: false,
+          };
+        }
+        if (
+          buffered.callerTurnId &&
+          buffered.callerTurnId !== callerTurnId
+        ) {
+          await dispatchOnboardingEvent(context, {
+            type: "adapter.invariant_failed",
+            code: "caller_turn_correlation_mismatch",
+            safeDetail: "provider response changed its caller turn identity",
+            elapsedMs: 0,
+          });
+          break;
+        }
+        buffered.callerTurnId = callerTurnId;
+      }
       await dispatchOnboardingEvent(context, {
         type: "response.created",
         socketGeneration: generation,
@@ -1131,7 +1401,8 @@ async function handleOnboardingRawEvent(
       const replay = buffered.tools.find((tool) => tool.toolCallId === toolCallId);
       if (
         replay && replay.name === name && replay.argsHash === argsHash &&
-        replay.outputIndex === outputIndex
+        replay.outputIndex === outputIndex &&
+        (replay.callerTurnId ?? "") === (buffered.callerTurnId ?? "")
       ) break;
       if (replay) {
         buffered.invariant = {
@@ -1160,6 +1431,9 @@ async function handleOnboardingRawEvent(
         ...(args ? { args } : {}),
         argsHash,
         outputIndex,
+        ...(buffered.callerTurnId
+          ? { callerTurnId: buffered.callerTurnId }
+          : {}),
         ...(memberError ? { memberError } : {}),
       });
       break;
@@ -1294,7 +1568,10 @@ async function handleOnboardingRawEvent(
       break;
     }
     case "input_audio_buffer.speech_started": {
-      await interruptOnboardingAudio(context, adapter.lifecycle.activeResponseId ?? null);
+      await interruptOnboardingAudio(
+        context,
+        authoritySpeechResponseAwaitingPlayback(adapter.lifecycle),
+      );
       const turnId = exactString(msg.item_id) ??
         `caller-turn:${++adapter.callerTurnSequence}`;
       adapter.activeCallerTurnId = turnId;
@@ -1442,6 +1719,9 @@ async function handleOnboardingRawEvent(
             providerResponseId: responseId,
             batchHash,
             elapsedMs: 0,
+            ...(tool.callerTurnId
+              ? { callerTurnId: tool.callerTurnId }
+              : {}),
           });
         }
         if (!preflight)
@@ -1650,6 +1930,13 @@ export function attachSideband(
     heartbeat = null;
     for (const timer of retryTimers) clearTimeout(timer);
     retryTimers.clear();
+    if (ledger.onboarding) {
+      for (const timer of Object.values(
+        ledger.onboarding.pendingMutationRetryTimers,
+      )) clearTimeout(timer);
+      ledger.onboarding.pendingMutationRetryTimers = {};
+      ledger.onboarding.pendingMutationCommands = {};
+    }
   };
 
   const cancel = (_reason = "cancelled") => {

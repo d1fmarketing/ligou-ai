@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { emptyUsage } from "../src/config.ts";
+import { FINAL_SIGNOFF_SENTENCE_PT } from "../src/onboarding-coordinator.ts";
 import { _setClient } from "../src/rules.ts";
 import { attachSideband, handleEvent, liveSessions, persistLedger, terminalStatusForReason, type SessionLedger } from "../src/sideband.ts";
 import { makeCapability } from "../src/tools.ts";
@@ -746,13 +747,21 @@ describe("sideband budget finalization", () => {
       lifecycle.signoff = {
         approvalReceiptId: "approval-receipt-7",
         responseId: "resp-final-7",
+        transcript: "",
+        transcriptFinal: false,
         audioDone: false,
         responseDone: false,
         playbackStopped: false,
         interrupted: false,
+        attempt: 0,
       };
       lifecycle.activeResponseId = "resp-final-7";
 
+      socket.emit("message", { data: JSON.stringify({
+        type: "response.output_audio_transcript.done",
+        response_id: "resp-final-7",
+        transcript: FINAL_SIGNOFF_SENTENCE_PT,
+      }) });
       socket.emit("message", { data: JSON.stringify({
         type: "response.output_audio.done",
         response_id: "resp-final-7",

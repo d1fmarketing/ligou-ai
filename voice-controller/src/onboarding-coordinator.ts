@@ -48,6 +48,7 @@ export interface ToolReceipt {
     eventId: string;
     socketGeneration: number;
   };
+  approvalTurnId?: string;
 }
 
 export interface ToolBatch {
@@ -84,10 +85,12 @@ export interface SummaryProof {
   playbackStopped: boolean;
   validated?: boolean;
   interrupted: boolean;
+  attempt: number;
+  interruptedResponseId?: string;
 }
 
 export interface GreetingProof {
-  responseId: string;
+  responseId?: string;
   transcript: string;
   transcriptFinal: boolean;
   audioDone: boolean;
@@ -95,15 +98,22 @@ export interface GreetingProof {
   playbackStopped: boolean;
   interrupted: boolean;
   validated?: boolean;
+  attempt: number;
+  interruptedResponseId?: string;
 }
 
 export interface SignoffProof {
   approvalReceiptId: string;
   responseId?: string;
+  transcript: string;
+  transcriptFinal: boolean;
+  validated?: boolean;
   audioDone: boolean;
   responseDone: boolean;
   playbackStopped: boolean;
   interrupted: boolean;
+  attempt: number;
+  interruptedResponseId?: string;
 }
 
 export interface ApprovalCandidate {
@@ -140,6 +150,7 @@ export interface ResponseIntentReceipt {
   purpose: ResponsePurpose;
   state: "queued" | "sent" | "acknowledged" | "terminal";
   responseId?: string;
+  sentSocketGeneration?: number;
 }
 
 export interface OnboardingLifecycle {
@@ -217,6 +228,8 @@ const MAX_TERMINAL_RESPONSE_IDS = 512;
 const INITIAL_GREETING_RESPONSE_INSTRUCTIONS_PT =
   "Diga exatamente uma vez e sem alteração a saudação de identidade brasileira definida na sessão. " +
   `Em seguida, pergunte exatamente: "${INITIAL_SERVICE_DISCOVERY_QUESTION_PT}"`;
+export const FINAL_SIGNOFF_SENTENCE_PT =
+  "A confirmação por voz foi salva e as regras sugeridas continuam aguardando revisão na Memória.";
 
 interface TelemetryCommand {
   type: "telemetry";
@@ -353,6 +366,7 @@ export type OnboardingEvent =
         | "tool_args_json_invalid"
         | "tool_schema_invalid"
         | "tool_not_admitted"
+        | "caller_turn_correlation_mismatch"
         | "tool_output_created_invalid"
         | "tool_output_retrieved_invalid"
         | "tool_output_retrieve_failed";
@@ -423,7 +437,8 @@ export type OnboardingEvent =
         | "coverage_incomplete"
         | "changed"
         | "not_owner_bound"
-        | "invalid_fact";
+        | "invalid_fact"
+        | "indeterminate";
       safeDetail: string;
     })
   | (TimedEvent & { type: "snapshot.loaded"; result: SnapshotResult })
@@ -448,6 +463,7 @@ export type OnboardingEvent =
       args: Record<string, unknown>;
       providerResponseId: string;
       batchHash: string;
+      callerTurnId?: string;
     })
   | (TimedEvent & {
       type: "tool.executed";
@@ -504,7 +520,7 @@ export type OnboardingEvent =
   | (TimedEvent & {
       type: "approval.persistence_failed";
       toolCallId: string;
-      code: "timeout" | "query_error" | "empty" | "coverage_incomplete" | "changed" | "not_owner_bound" | "invalid_fact";
+      code: "timeout" | "query_error" | "empty" | "coverage_incomplete" | "changed" | "not_owner_bound" | "invalid_fact" | "indeterminate";
       safeDetail: string;
     })
   | (TimedEvent & {
@@ -1014,6 +1030,90 @@ function maybeValidateSummary(
   );
 }
 
+function signoffTranscriptValid(transcript: string): boolean {
+  return JSON.stringify(normalizedBoundaryTokens(transcript)) ===
+    JSON.stringify(normalizedBoundaryTokens(FINAL_SIGNOFF_SENTENCE_PT));
+}
+
+function summaryResponseInstructions(summary: SummaryProof): string {
+  const facts = summary.requiredAnchors.join("\n");
+  return `Fale diretamente estes fatos, sem narrar o processo:\n${facts}\n` +
+    "Ao final, pergunte explicitamente se tudo está correto.";
+}
+
+function maybeQueueInterruptedSpeechRecovery(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+): boolean {
+  const kind = lifecycle.greeting?.interrupted
+    ? "greeting"
+    : lifecycle.summary?.interrupted
+      ? "summary"
+      : lifecycle.signoff?.interrupted
+        ? "signoff"
+        : null;
+  if (!kind) return false;
+  const proof = kind === "greeting"
+    ? lifecycle.greeting!
+    : kind === "summary"
+      ? lifecycle.summary!
+      : lifecycle.signoff!;
+  const interruptedResponseId = proof.interruptedResponseId;
+  if (
+    !interruptedResponseId ||
+    !lifecycle.terminalResponseIds.includes(interruptedResponseId)
+  ) return false;
+  if ((proof.attempt ?? 0) >= 1) {
+    block(
+      lifecycle,
+      commands,
+      event,
+      "authority_speech_retry_exhausted",
+      "application-owned authority speech exhausted its single retry",
+    );
+    return false;
+  }
+
+  proof.attempt = 1;
+  delete proof.responseId;
+  delete proof.interruptedResponseId;
+  delete proof.validated;
+  proof.transcript = "";
+  proof.transcriptFinal = false;
+  proof.audioDone = false;
+  proof.responseDone = false;
+  proof.playbackStopped = false;
+  proof.interrupted = false;
+
+  if (kind === "greeting") {
+    lifecycle.phase = "greeting";
+    return queueResponse(lifecycle, commands, event, {
+      intentKey: `greeting:${lifecycle.callId}:retry:1`,
+      purpose: "greeting",
+      instructions: INITIAL_GREETING_RESPONSE_INSTRUCTIONS_PT,
+    });
+  }
+  if (kind === "summary") {
+    const summary = lifecycle.summary!;
+    lifecycle.phase = "summary_speaking";
+    return queueResponse(lifecycle, commands, event, {
+      intentKey: `summary:${summary.digest}:retry:1`,
+      purpose: "summary",
+      snapshotDigest: summary.digest,
+      instructions: summaryResponseInstructions(summary),
+    });
+  }
+  const signoff = lifecycle.signoff!;
+  lifecycle.phase = "final_signoff_speaking";
+  return queueResponse(lifecycle, commands, event, {
+    intentKey: `final-signoff:${signoff.approvalReceiptId}:retry:1`,
+    purpose: "final_signoff",
+    instructions: `Diga exatamente: "${FINAL_SIGNOFF_SENTENCE_PT}"`,
+    approvalReceiptId: signoff.approvalReceiptId,
+  });
+}
+
 function maybeFinishSignoff(
   lifecycle: OnboardingLifecycle,
   commands: OnboardingCommand[],
@@ -1030,6 +1130,16 @@ function maybeFinishSignoff(
     !signoff.playbackStopped
   )
     return;
+  if (!signoff.transcriptFinal || signoff.validated !== true) {
+    block(
+      lifecycle,
+      commands,
+      event,
+      "signoff_content_invalid",
+      "final signoff did not match the application-owned sentence",
+    );
+    return;
+  }
   lifecycle.phase = "ready_to_terminate";
   const intentKey = `hangup:${approval.approvalReceiptId}`;
   if (lifecycle.requestedHangupKeys.includes(intentKey)) return;
@@ -1058,14 +1168,16 @@ function startSignoff(
   lifecycle.phase = "final_signoff_speaking";
   lifecycle.signoff = {
     approvalReceiptId: approval.approvalReceiptId,
+    transcript: "",
+    transcriptFinal: false,
     audioDone: false,
     responseDone: false,
     playbackStopped: false,
     interrupted: false,
+    attempt: 0,
   };
   const intentKey = `final-signoff:${approval.approvalReceiptId}`;
-  const instructions =
-    "Diga uma única frase curta em português: a confirmação por voz foi salva e as regras sugeridas continuam aguardando revisão na Memória.";
+  const instructions = `Diga exatamente: "${FINAL_SIGNOFF_SENTENCE_PT}"`;
   commands.push({
     type: "request_signoff",
     intentKey,
@@ -1094,6 +1206,50 @@ function maybeStartSignoffForReadyBatch(
   ];
   if (!batch || !batchIsReady(lifecycle, batch)) return false;
   startSignoff(lifecycle, commands, event);
+  return true;
+}
+
+function rejectApprovalReceipt(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+  receipt: ToolReceipt,
+  outcome: string,
+): void {
+  const output = JSON.stringify({
+    status: "approval_rejected",
+    reason: "fresh_explicit_owner_assent_required",
+  });
+  receipt.state = "executed";
+  receipt.output = output;
+  receipt.resultHash = hashOnboardingToolArgs({ output });
+  resendOutput(lifecycle, commands, event, receipt, false);
+  commands.push(
+    telemetry(lifecycle, "onboarding.approval.rejected", event, {
+      toolCallId: receipt.toolCallId,
+      outcome,
+    }),
+  );
+}
+
+function persistApprovalFromTranscript(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  receipt: ToolReceipt,
+  ownerWords: string,
+): boolean {
+  const summary = lifecycle.summary;
+  if (!summary?.validated || !summary.playbackStopped) return false;
+  lifecycle.phase = "approval_persisting";
+  commands.push({
+    type: "persist_approval",
+    toolCallId: receipt.toolCallId,
+    argsHash: receipt.argsHash,
+    ownerWords: ownerWords.trim(),
+    coverageReceiptId: summary.receiptId,
+    revision: summary.revision,
+    digest: summary.digest,
+  });
   return true;
 }
 
@@ -1548,6 +1704,51 @@ export function reduceOnboarding(
         break;
       }
       lifecycle.socketGeneration = event.socketGeneration;
+      const indeterminateIntent = Object.values(lifecycle.responseIntents)
+        .find((intent) =>
+          intent.state === "sent" &&
+          !intent.responseId &&
+          (
+            intent.sentSocketGeneration === undefined ||
+            intent.sentSocketGeneration < event.socketGeneration
+          )
+        );
+      if (indeterminateIntent) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "response_intent_ack_indeterminate",
+          "sent response intent has no provider acknowledgement after socket replacement",
+        );
+        break;
+      }
+      const interruptedProof = lifecycle.greeting?.interrupted
+        ? lifecycle.greeting
+        : lifecycle.summary?.interrupted
+          ? lifecycle.summary
+          : lifecycle.signoff?.interrupted
+            ? lifecycle.signoff
+            : null;
+      if (interruptedProof) {
+        if (
+          !interruptedProof.interruptedResponseId ||
+          !lifecycle.terminalResponseIds.includes(
+            interruptedProof.interruptedResponseId,
+          )
+        ) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "authority_speech_terminal_indeterminate",
+            "interrupted authority response was not terminal before socket replacement",
+          );
+          break;
+        }
+        maybeQueueInterruptedSpeechRecovery(lifecycle, commands, event);
+        if (lifecycle.phase === "blocked") break;
+      }
       if (firstAttach)
         commands.push(
           telemetry(lifecycle, "onboarding.coverage.started", event, {
@@ -1579,7 +1780,18 @@ export function reduceOnboarding(
         );
         break;
       }
+      if (intent.state !== "queued") {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "response_intent_send_transition_invalid",
+          "response intent send did not match a queued command",
+        );
+        break;
+      }
       intent.state = "sent";
+      intent.sentSocketGeneration = event.socketGeneration;
       commands.push(
         telemetry(lifecycle, "voice.response.intent_sent", event, {
           intentKey: event.intentKey,
@@ -1602,17 +1814,13 @@ export function reduceOnboarding(
           );
           break;
         }
-        if (
-          intent.purpose === "greeting" &&
-          lifecycle.greeting &&
-          lifecycle.greeting.responseId !== event.responseId
-        ) {
+        if (intent.responseId && intent.responseId !== event.responseId) {
           block(
             lifecycle,
             commands,
             event,
-            "greeting_response_mismatch",
-            "greeting intent was acknowledged by more than one response",
+            "response_intent_response_mismatch",
+            "response intent was acknowledged by more than one response",
           );
           break;
         }
@@ -1627,7 +1835,13 @@ export function reduceOnboarding(
             responseDone: false,
             playbackStopped: false,
             interrupted: false,
+            attempt: 0,
           };
+        else if (
+          intent.purpose === "greeting" &&
+          lifecycle.greeting &&
+          !lifecycle.greeting.responseId
+        ) lifecycle.greeting.responseId = event.responseId;
         if (intent.purpose === "summary" && lifecycle.summary)
           lifecycle.summary.responseId = event.responseId;
         if (intent.purpose === "final_signoff" && lifecycle.signoff)
@@ -1652,6 +1866,10 @@ export function reduceOnboarding(
         !lifecycle.summary.transcriptFinal
       )
         lifecycle.summary.transcript += event.delta;
+      if (
+        lifecycle.signoff?.responseId === event.responseId &&
+        !lifecycle.signoff.transcriptFinal
+      ) lifecycle.signoff.transcript += event.delta;
       break;
     }
     case "response.transcript.done": {
@@ -1664,6 +1882,12 @@ export function reduceOnboarding(
         lifecycle.summary.transcript = event.transcript;
         lifecycle.summary.transcriptFinal = true;
         maybeValidateSummary(lifecycle, commands, event);
+      }
+      if (lifecycle.signoff?.responseId === event.responseId) {
+        lifecycle.signoff.transcript = event.transcript;
+        lifecycle.signoff.transcriptFinal = true;
+        lifecycle.signoff.validated = signoffTranscriptValid(event.transcript);
+        maybeFinishSignoff(lifecycle, commands, event);
       }
       break;
     }
@@ -1726,6 +1950,7 @@ export function reduceOnboarding(
           outcome: "response_done",
         }),
       );
+      maybeQueueInterruptedSpeechRecovery(lifecycle, commands, event);
       maybeAdvanceCoverage(lifecycle, commands, event);
       break;
     }
@@ -1770,25 +1995,62 @@ export function reduceOnboarding(
           );
           break;
         }
+        if ((lifecycle.greeting.attempt ?? 0) >= 1) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "authority_speech_retry_exhausted",
+            "greeting exhausted its single speech retry",
+          );
+          break;
+        }
         lifecycle.greeting.audioDone = false;
         lifecycle.greeting.playbackStopped = false;
         lifecycle.greeting.interrupted = true;
-        lifecycle.greeting.validated = false;
+        lifecycle.greeting.interruptedResponseId = event.responseId;
+        delete lifecycle.greeting.validated;
         lifecycle.phase = "greeting";
       }
       if (lifecycle.summary?.responseId === event.responseId) {
+        if ((lifecycle.summary.attempt ?? 0) >= 1) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "authority_speech_retry_exhausted",
+            "summary exhausted its single speech retry",
+          );
+          break;
+        }
         lifecycle.summary.audioDone = false;
         lifecycle.summary.playbackStopped = false;
         lifecycle.summary.interrupted = true;
-        lifecycle.summary.validated = false;
+        lifecycle.summary.interruptedResponseId = event.responseId;
+        delete lifecycle.summary.validated;
+        delete lifecycle.approvalCandidate;
+        lifecycle.freshCallerTurnIds = [];
         lifecycle.phase = "summary_speaking";
       }
       if (lifecycle.signoff?.responseId === event.responseId) {
+        if ((lifecycle.signoff.attempt ?? 0) >= 1) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "authority_speech_retry_exhausted",
+            "final signoff exhausted its single speech retry",
+          );
+          break;
+        }
         lifecycle.signoff.audioDone = false;
         lifecycle.signoff.playbackStopped = false;
         lifecycle.signoff.interrupted = true;
+        lifecycle.signoff.interruptedResponseId = event.responseId;
+        delete lifecycle.signoff.validated;
         lifecycle.phase = "final_signoff_speaking";
       }
+      maybeQueueInterruptedSpeechRecovery(lifecycle, commands, event);
       break;
     }
     case "coverage.changed": {
@@ -2009,6 +2271,7 @@ export function reduceOnboarding(
         responseDone: false,
         playbackStopped: false,
         interrupted: false,
+        attempt: 0,
       };
       lifecycle.freshCallerTurnIds = [];
       commands.push(
@@ -2016,14 +2279,11 @@ export function reduceOnboarding(
           elapsedMs: event.result.durationMs,
         }, { outcome: "snapshot_ready" }),
       );
-      const facts = event.result.requiredAnchors.join("\n");
       queueResponse(lifecycle, commands, event, {
         intentKey: `summary:${event.result.digest}`,
         purpose: "summary",
         snapshotDigest: event.result.digest,
-        instructions:
-          `Fale diretamente estes fatos, sem narrar o processo:\n${facts}\n` +
-          "Ao final, pergunte explicitamente se tudo está correto.",
+        instructions: summaryResponseInstructions(lifecycle.summary),
       });
       break;
     }
@@ -2090,15 +2350,6 @@ export function reduceOnboarding(
     }
     case "caller.speech_started": {
       if (
-        lifecycle.phase === "greeting" &&
-        lifecycle.greeting &&
-        !lifecycle.greeting.playbackStopped
-      ) {
-        lifecycle.greeting.audioDone = false;
-        lifecycle.greeting.interrupted = true;
-        lifecycle.greeting.validated = false;
-      }
-      if (
         lifecycle.phase === "awaiting_owner_approval" &&
         lifecycle.summary?.validated === true &&
         lifecycle.summary.playbackStopped &&
@@ -2126,6 +2377,23 @@ export function reduceOnboarding(
       lifecycle.consumedCallerTurnIds.push(event.turnId);
       if (lifecycle.consumedCallerTurnIds.length > 500)
         lifecycle.consumedCallerTurnIds.shift();
+      const pendingApprovals = Object.values(lifecycle.toolOutbox).filter(
+        (receipt) =>
+          receipt.toolName === "approve_onboarding_summary" &&
+          receipt.state === "running" &&
+          receipt.approvalTurnId === event.turnId,
+      );
+      if (pendingApprovals.length > 1) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "approval_turn_duplicate",
+          "caller turn was correlated to more than one approval tool",
+        );
+        break;
+      }
+      const pendingApproval = pendingApprovals[0];
       const kind = ownerReplyKind(event.transcript);
       if (kind === "correction") {
         lifecycle.invalidatedSummaryRevision = lifecycle.summary?.revision;
@@ -2139,6 +2407,14 @@ export function reduceOnboarding(
             outcome: "owner_correction",
           }),
         );
+        if (pendingApproval)
+          rejectApprovalReceipt(
+            lifecycle,
+            commands,
+            event,
+            pendingApproval,
+            "owner_correction",
+          );
       } else if (kind === "approval") {
         lifecycle.approvalCandidate = {
           turnId: event.turnId,
@@ -2149,12 +2425,38 @@ export function reduceOnboarding(
             outcome: "explicit_assent",
           }),
         );
+        if (
+          pendingApproval &&
+          !persistApprovalFromTranscript(
+            lifecycle,
+            commands,
+            pendingApproval,
+            event.transcript,
+          )
+        ) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "approval_transcript_authority_invalid",
+            "approval transcript no longer matched the proven summary",
+            pendingApproval.toolCallId,
+          );
+        }
       } else {
         commands.push(
           telemetry(lifecycle, "onboarding.approval.rejected", event, {
             outcome: "ambiguous_owner_turn",
           }),
         );
+        if (pendingApproval)
+          rejectApprovalReceipt(
+            lifecycle,
+            commands,
+            event,
+            pendingApproval,
+            "ambiguous_owner_turn",
+          );
       }
       break;
     }
@@ -2180,7 +2482,11 @@ export function reduceOnboarding(
           existing.argsHash !== argsHash ||
           existing.toolName !== event.name ||
           existing.providerResponseId !== event.providerResponseId ||
-          existing.batchHash !== event.batchHash
+          existing.batchHash !== event.batchHash ||
+          (
+            existing.toolName === "approve_onboarding_summary" &&
+            existing.approvalTurnId !== event.callerTurnId
+          )
         ) {
           block(
             lifecycle,
@@ -2210,6 +2516,47 @@ export function reduceOnboarding(
         );
         break;
       }
+      let approvalTurnId: string | undefined;
+      if (event.name === "approve_onboarding_summary") {
+        approvalTurnId = event.callerTurnId;
+        const correlated = Boolean(
+          approvalTurnId &&
+          (
+            lifecycle.freshCallerTurnIds.includes(approvalTurnId) ||
+            lifecycle.approvalCandidate?.turnId === approvalTurnId
+          ),
+        );
+        if (
+          !correlated ||
+          lifecycle.phase !== "awaiting_owner_approval" ||
+          !lifecycle.summary?.validated ||
+          !lifecycle.summary.playbackStopped
+        ) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "approval_turn_uncorrelated",
+            "approval tool did not match one fresh caller turn after summary playback",
+            event.toolCallId,
+          );
+          break;
+        }
+        if (Object.values(lifecycle.toolOutbox).some((candidate) =>
+          candidate.toolName === "approve_onboarding_summary" &&
+          candidate.approvalTurnId === approvalTurnId
+        )) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "approval_turn_duplicate",
+            "caller turn produced more than one approval tool",
+            event.toolCallId,
+          );
+          break;
+        }
+      }
       const receipt: ToolReceipt = {
         toolCallId: event.toolCallId,
         toolName: event.name,
@@ -2219,6 +2566,7 @@ export function reduceOnboarding(
         batchHash: event.batchHash,
         outputItemId: outputItemId(event.toolCallId),
         socketGeneration: event.socketGeneration,
+        ...(approvalTurnId ? { approvalTurnId } : {}),
       };
       lifecycle.toolOutbox[event.toolCallId] = receipt;
       commands.push(
@@ -2249,39 +2597,33 @@ export function reduceOnboarding(
           typeof event.args.owner_words === "string"
             ? event.args.owner_words.trim()
             : "";
-        if (
-          lifecycle.phase !== "awaiting_owner_approval" ||
-          !lifecycle.summary?.validated ||
-          !lifecycle.approvalCandidate ||
-          normalizeText(ownerWords) !==
-            normalizeText(lifecycle.approvalCandidate.ownerWords)
-        ) {
-          const output = JSON.stringify({
-            status: "approval_rejected",
-            reason: "fresh_explicit_owner_assent_required",
-          });
-          receipt.state = "executed";
-          receipt.output = output;
-          receipt.resultHash = hashOnboardingToolArgs({ output });
-          resendOutput(lifecycle, commands, event, receipt, false);
-          commands.push(
-            telemetry(lifecycle, "onboarding.approval.rejected", event, {
-              toolCallId: event.toolCallId,
-              outcome: "approval_tool_not_eligible",
-            }),
+        if (ownerReplyKind(ownerWords) !== "approval") {
+          rejectApprovalReceipt(
+            lifecycle,
+            commands,
+            event,
+            receipt,
+            "approval_tool_not_assent",
           );
           break;
         }
-        lifecycle.phase = "approval_persisting";
-        commands.push({
-          type: "persist_approval",
-          toolCallId: event.toolCallId,
-          argsHash,
-          ownerWords,
-          coverageReceiptId: lifecycle.summary.receiptId,
-          revision: lifecycle.summary.revision,
-          digest: lifecycle.summary.digest,
-        });
+        if (
+          lifecycle.approvalCandidate?.turnId === approvalTurnId &&
+          !persistApprovalFromTranscript(
+            lifecycle,
+            commands,
+            receipt,
+            lifecycle.approvalCandidate.ownerWords,
+          )
+        )
+          block(
+            lifecycle,
+            commands,
+            event,
+            "approval_transcript_authority_invalid",
+            "approval transcript no longer matched the proven summary",
+            event.toolCallId,
+          );
         break;
       }
       if (event.name === "record_interview_answer") {
@@ -2344,6 +2686,8 @@ export function reduceOnboarding(
         );
         break;
       }
+      if (event.code === "indeterminate")
+        delete lifecycle.toolOutbox[event.toolCallId];
       block(
         lifecycle,
         commands,
@@ -2621,6 +2965,8 @@ export function reduceOnboarding(
         });
         break;
       } else {
+        if (event.code === "indeterminate")
+          delete lifecycle.toolOutbox[event.toolCallId];
         lifecycle.phase = "blocked";
         commands.push({
           type: "block",

@@ -21,6 +21,7 @@ import {
   persistLedger,
   type SessionLedger,
 } from "../src/sideband.ts";
+import { hashOnboardingToolArgs } from "../src/onboarding-coordinator.ts";
 import { makeCapability, runTool, type Capability } from "../src/tools.ts";
 
 const ownerId = "owner-1";
@@ -1453,6 +1454,65 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     }
   });
 
+  test("barge-in finds terminal authority speech still awaiting playback and queues its retry behind the caller VAD turn", async () => {
+    const cap = onboardingCap("call-summary-playback-barge-in");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "session.created" });
+    const adapter = l.onboarding!;
+    const digest = "e".repeat(64);
+    adapter.lifecycle.phase = "summary_speaking";
+    adapter.lifecycle.socketGeneration = 1;
+    adapter.lifecycle.coverage = {
+      revision: 4,
+      digest,
+      complete: true,
+      missing: [],
+      ambiguous: [],
+    };
+    adapter.lifecycle.preparedSnapshotDigests = [digest];
+    adapter.lifecycle.summary = {
+      receiptId: "coverage-summary-barge-in",
+      revision: 4,
+      digest,
+      requiredAnchors: ["Área: Irvine"],
+      responseId: "response-summary-awaiting-playback",
+      transcript: "Área: Irvine. Você confirma que tudo está correto?",
+      transcriptFinal: true,
+      audioDone: true,
+      responseDone: true,
+      playbackStopped: false,
+      interrupted: false,
+      validated: true,
+      attempt: 0,
+    };
+    adapter.lifecycle.responseIntents[`summary:${digest}`] = {
+      intentKey: `summary:${digest}`,
+      purpose: "summary",
+      state: "terminal",
+      responseId: "response-summary-awaiting-playback",
+      sentSocketGeneration: 1,
+    };
+    adapter.lifecycle.terminalResponseIds.push(
+      "response-summary-awaiting-playback",
+    );
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "caller-summary-barge-in",
+    });
+
+    expect(adapter.lifecycle.summary).toMatchObject({
+      attempt: 1,
+      interrupted: false,
+    });
+    expect(adapter.lifecycle.summary?.responseId).toBeUndefined();
+    expect(adapter.lifecycle.responseIntents[`summary:${digest}:retry:1`])
+      .toMatchObject({ state: "queued", purpose: "summary" });
+    expect(adapter.pendingResponseCommands[`summary:${digest}:retry:1`])
+      .toBeDefined();
+    expect(framesOfType(ws, "response.create")).toHaveLength(0);
+  });
+
   test("provider terminal before approval-bound signoff is interruption, not success", async () => {
     const cap = onboardingCap();
     const l = ledger(cap.callId);
@@ -1573,10 +1633,19 @@ function coverageReceipt(
 
 function snapshotBoundary(
   receipt: ReturnType<typeof coverageReceipt>,
-  options: { approvalChanged?: boolean; approvalSuccess?: boolean } = {},
+  options: {
+    approvalChanged?: boolean;
+    approvalSuccess?: boolean;
+    approvalAmbiguousAttempts?: number;
+  } = {},
 ) {
   const ruleId = receipt.readback.selected_rule_ids[0]!;
-  const calls = { receiptReads: 0, ruleReads: 0, rpc: [] as string[] };
+  const calls = {
+    receiptReads: 0,
+    ruleReads: 0,
+    rpc: [] as string[],
+    rpcArgs: [] as Array<{ name: string; args?: Record<string, unknown> }>,
+  };
   return {
     calls,
     client: {
@@ -1606,8 +1675,19 @@ function snapshotBoundary(
         };
         return query;
       },
-      rpc(name: string) {
+      rpc(name: string, args?: Record<string, unknown>) {
         calls.rpc.push(name);
+        calls.rpcArgs.push({ name, args });
+        const approvalAttempt = calls.rpc.filter((candidate) =>
+          candidate === "record_onboarding_voice_approval"
+        ).length;
+        if (
+          name === "record_onboarding_voice_approval" &&
+          approvalAttempt <= (options.approvalAmbiguousAttempts ?? 0)
+        )
+          return Promise.resolve({
+            data: null, error: { message: "network socket closed" },
+          });
         if (name === "record_onboarding_voice_approval" && options.approvalChanged)
           return Promise.resolve({
             data: null, error: { code: "40001", message: "snapshot changed" },
@@ -1677,14 +1757,19 @@ function sequentialAnswerBoundary(results: Array<{
   status: "recorded" | "reused";
   revision: number;
   digest: string;
-}>) {
+}>, options: {
+  followupAmbiguousAttempts?: number;
+  responseFromProjection?: boolean;
+} = {}) {
   const rpcFacts: Array<Record<string, unknown>> = [];
   const rpcCoverages: Array<Record<string, unknown>> = [];
+  let followupRpcCalls = 0;
   let receiptRows: Array<{ id: string; readback: Record<string, unknown> }> = [];
   let resultIndex = 0;
   return {
     rpcFacts,
     rpcCoverages,
+    get followupRpcCalls() { return followupRpcCalls; },
     seedCoverage(
       cap: Capability,
       revision: number,
@@ -1786,6 +1871,13 @@ function sequentialAnswerBoundary(results: Array<{
       },
       rpc(name: string, args: Record<string, unknown>) {
         if (name === "record_onboarding_followup") {
+          followupRpcCalls += 1;
+          if (
+            followupRpcCalls <= (options.followupAmbiguousAttempts ?? 0)
+          )
+            return Promise.resolve({
+              data: null, error: { message: "network socket closed" },
+            });
           const coverage = structuredClone(
             args.p_coverage as Record<string, unknown>,
           );
@@ -1820,6 +1912,10 @@ function sequentialAnswerBoundary(results: Array<{
         rpcCoverages.push(args.p_coverage as Record<string, unknown>);
         const next = results[Math.min(resultIndex, results.length - 1)]!;
         resultIndex += 1;
+        const projectedCoverage = args.p_coverage as Record<string, unknown>;
+        const projectedProgress = projectedCoverage.progress as
+          | Record<string, unknown>
+          | undefined;
         const response = {
             status: next.status,
             rule_id: `rule-${resultIndex}`,
@@ -1828,13 +1924,21 @@ function sequentialAnswerBoundary(results: Array<{
             revision: next.revision,
             snapshot_digest: next.digest,
             complete: false,
-            missing: [],
-            ambiguous: [],
-            next_action: {
-              type: "ask",
-              field: "service.catalog_closure",
-              question_pt: "Esses são todos os serviços?",
-            },
+            missing: options.responseFromProjection &&
+                Array.isArray(projectedProgress?.missingRequired)
+              ? projectedProgress.missingRequired
+              : [],
+            ambiguous: options.responseFromProjection &&
+                Array.isArray(projectedProgress?.ambiguous)
+              ? projectedProgress.ambiguous
+              : [],
+            next_action: options.responseFromProjection
+              ? projectedCoverage.next_action
+              : {
+                  type: "ask",
+                  field: "service.catalog_closure",
+                  question_pt: "Esses são todos os serviços?",
+                },
             coverage: {},
         };
         if (next.status === "recorded") {
@@ -1968,6 +2072,7 @@ function seedAwaitingApproval(
   receiptId: string,
   revision: number,
   digest: string,
+  withCandidate = true,
 ) {
   const lifecycle = l.onboarding!.lifecycle;
   lifecycle.phase = "awaiting_owner_approval";
@@ -1980,11 +2085,18 @@ function seedAwaitingApproval(
     responseId: "resp-summary", transcript:
       "Área: Irvine. Você confirma que está tudo correto?",
     transcriptFinal: true, audioDone: true, responseDone: true,
-    playbackStopped: true, validated: true, interrupted: false,
+    playbackStopped: true, validated: true, interrupted: false, attempt: 0,
   };
-  lifecycle.approvalCandidate = {
-    turnId: "turn-approval", ownerWords: "Aprovado.",
-  };
+  if (withCandidate)
+    lifecycle.approvalCandidate = {
+      turnId: "turn-approval", ownerWords: "Aprovado.",
+    };
+  else delete lifecycle.approvalCandidate;
+  if (withCandidate) {
+    l.onboarding!.activeCallerTurnId = "turn-approval";
+    l.onboarding!.speechPending = true;
+    l.onboarding!.speechGeneration += 1;
+  }
 }
 
 describe("snapshot, approval, signoff and hangup command execution", () => {
@@ -2172,6 +2284,154 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       .toMatchObject({ intent_key: `summary:${digest}`, purpose: "summary" });
   });
 
+  test("approval tool before caller transcription waits for the correlated fresh turn and persists the exact transcript", async () => {
+    const cap = onboardingCap("call-approval-before-transcript");
+    const snapshot = completeCoverage(cap, 1);
+    const digest = "6".repeat(64);
+    const receipt = coverageReceipt(cap, snapshot, digest, "rule-approval-race");
+    const boundary = snapshotBoundary(receipt, { approvalSuccess: true });
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "session.created" });
+    seedAwaitingApproval(l, receipt.id, 1, digest, false);
+
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-approval-race",
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("resp-approval-race"),
+    );
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-approval-race",
+      "fc-approval-race",
+      "approve_onboarding_summary",
+      JSON.stringify({ owner_words: "Aprovado" }),
+      0,
+    ));
+    await handleEvent(cap, l, ws as any, responseDone("resp-approval-race"));
+
+    expect(boundary.calls.rpc).not.toContain("record_onboarding_voice_approval");
+    expect(l.onboarding!.lifecycle.toolOutbox["fc-approval-race"])
+      .toMatchObject({
+        state: "running",
+        approvalTurnId: "turn-approval-race",
+      });
+    expect(functionOutputs(ws)).toHaveLength(0);
+
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-approval-race",
+      transcript: "Aprovado.",
+    });
+
+    const approvalRpc = boundary.calls.rpcArgs.find((call) =>
+      call.name === "record_onboarding_voice_approval"
+    );
+    expect(approvalRpc?.args?.p_owner_words).toBe("Aprovado.");
+    expect(boundary.calls.rpc.filter((name) =>
+      name === "record_onboarding_voice_approval"
+    )).toHaveLength(1);
+    expect(functionOutputs(ws)).toHaveLength(1);
+    expect(l.onboarding!.lifecycle.toolOutbox["fc-approval-race"]?.state)
+      .toBe("output_pending");
+    expect(l.onboarding!.lifecycle.phase).toBe("approval_persisting");
+  });
+
+  test("an indeterminate approval reconciles once on the same socket and emits one output", async () => {
+    const cap = onboardingCap("call-approval-indeterminate-same-socket");
+    const snapshot = completeCoverage(cap, 1);
+    const digest = "7".repeat(64);
+    const receipt = coverageReceipt(
+      cap,
+      snapshot,
+      digest,
+      "rule-approval-indeterminate",
+    );
+    const boundary = snapshotBoundary(receipt, {
+      approvalSuccess: true,
+      approvalAmbiguousAttempts: 2,
+    });
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "session.created" });
+    seedAwaitingApproval(l, receipt.id, 1, digest);
+    await handleEvent(cap, l, ws as any,
+      responseCreated("resp-approval-indeterminate"));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-approval-indeterminate",
+      "fc-approval-indeterminate",
+      "approve_onboarding_summary",
+      JSON.stringify({ owner_words: "Aprovado" }),
+    ));
+    await handleEvent(cap, l, ws as any,
+      responseDone("resp-approval-indeterminate"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const approvalArgs = boundary.calls.rpcArgs.filter((call) =>
+      call.name === "record_onboarding_voice_approval"
+    ).map((call) => call.args!);
+    expect(approvalArgs).toHaveLength(3);
+    expect(approvalArgs.map(hashOnboardingToolArgs)).toEqual(
+      Array(3).fill(hashOnboardingToolArgs(approvalArgs[0]!)),
+    );
+    expect(functionOutputs(ws)).toHaveLength(1);
+    expect(l.onboarding!.lifecycle.toolOutbox[
+      "fc-approval-indeterminate"
+    ]?.state).toBe("output_pending");
+    expect(l.onboarding!.pendingMutationCommands).toEqual({});
+    expect(l.onboarding!.pendingMutationRetryTimers).toEqual({});
+    expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
+  });
+
+  test("a twice-indeterminate approval blocks with zero output and no running receipt", async () => {
+    const cap = onboardingCap("call-approval-indeterminate-exhausted");
+    const snapshot = completeCoverage(cap, 1);
+    const digest = "8".repeat(64);
+    const receipt = coverageReceipt(
+      cap,
+      snapshot,
+      digest,
+      "rule-approval-indeterminate-exhausted",
+    );
+    const boundary = snapshotBoundary(receipt, {
+      approvalSuccess: true,
+      approvalAmbiguousAttempts: Number.POSITIVE_INFINITY,
+    });
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "session.created" });
+    seedAwaitingApproval(l, receipt.id, 1, digest);
+    await handleEvent(cap, l, ws as any,
+      responseCreated("resp-approval-indeterminate-exhausted"));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-approval-indeterminate-exhausted",
+      "fc-approval-indeterminate-exhausted",
+      "approve_onboarding_summary",
+      JSON.stringify({ owner_words: "Aprovado" }),
+    ));
+    await handleEvent(cap, l, ws as any,
+      responseDone("resp-approval-indeterminate-exhausted"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(boundary.calls.rpc.filter((name) =>
+      name === "record_onboarding_voice_approval"
+    )).toHaveLength(4);
+    expect(functionOutputs(ws)).toHaveLength(0);
+    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expect(l.onboarding!.lifecycle.toolOutbox[
+      "fc-approval-indeterminate-exhausted"
+    ]).toBeUndefined();
+    expect(l.onboarding!.pendingMutationCommands).toEqual({});
+    expect(l.onboarding!.pendingMutationRetryTimers).toEqual({});
+  });
+
   test("approval ack requests one signoff; exact final playback requests one hangup", async () => {
     const cap = onboardingCap("call-signoff");
     const snapshot = completeCoverage(cap, 1);
@@ -2204,6 +2464,12 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
     expect(framesOfType(ws, "response.create")).toHaveLength(1);
     await handleEvent(cap, l, ws as any,
       responseCreated("resp-signoff", "final-signoff:approval-receipt-1"));
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio_transcript.done",
+      response_id: "resp-signoff",
+      transcript:
+        "A confirmação por voz foi salva e as regras sugeridas continuam aguardando revisão na Memória.",
+    });
     await handleEvent(cap, l, ws as any, {
       type: "response.output_audio.done", response_id: "resp-signoff",
     });
@@ -2308,7 +2574,68 @@ describe("physical socket attach and reconnect", () => {
     await flushAsync();
   }
 
-  test("greeting is keyed once and is not replayed just because the socket reattached", async () => {
+  function ambiguousAnswerBoundary(succeedOnAttempt?: number) {
+    let answerAttempts = 0;
+    const answerRpcArgs: Record<string, unknown>[] = [];
+    return {
+      get answerAttempts() { return answerAttempts; },
+      answerRpcArgs,
+      client: {
+        from() {
+          const query: any = {
+            select() { return query; },
+            eq() { return query; },
+            in() { return query; },
+            order() { return query; },
+            limit() { return query; },
+            maybeSingle: async () => ({ data: null, error: null }),
+            then(resolve: (value: unknown) => unknown) {
+              return Promise.resolve({ data: [], error: null }).then(resolve);
+            },
+          };
+          return query;
+        },
+        rpc(name: string, args: Record<string, unknown>) {
+          if (name !== "record_onboarding_answer")
+            return Promise.resolve({
+              data: null,
+              error: { message: `unexpected rpc ${name}` },
+            });
+          answerAttempts += 1;
+          answerRpcArgs.push(structuredClone(args));
+          if (answerAttempts !== succeedOnAttempt)
+            return Promise.resolve({
+              data: null,
+              error: { message: answerAttempts % 2 === 1
+                ? "fetch failed"
+                : "network socket closed" },
+            });
+          return Promise.resolve({
+            data: {
+              status: "recorded",
+              rule_id: null,
+              rule_group_id: null,
+              coverage_receipt_id: "receipt-after-reconciliation",
+              revision: 1,
+              snapshot_digest: "9".repeat(64),
+              complete: false,
+              missing: [{ field: "service.catalog_closure" }],
+              ambiguous: [],
+              next_action: {
+                type: "ask",
+                field: "service.catalog_closure",
+                question_pt: "Há mais algum serviço?",
+              },
+              coverage: args.p_coverage,
+            },
+            error: null,
+          });
+        },
+      } as any,
+    };
+  }
+
+  test("a sent greeting without response.created blocks reattach instead of creating a duplicate response", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
     globalThis.WebSocket = SyntheticWebSocket as any;
@@ -2331,6 +2658,72 @@ describe("physical socket attach and reconnect", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(framesOfType(second, "response.create")).toHaveLength(0);
       expect(control.ledger.onboarding!.lifecycle.socketGeneration).toBe(2);
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(control.ledger.transcript).toContainEqual(expect.objectContaining({
+        role: "system",
+        text: "onboarding blocked: response_intent_ack_indeterminate",
+      }));
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("transport loss finds nonterminal authority speech awaiting playback and blocks its reattach", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-summary-transport-interruption");
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-summary-transport-interruption",
+        "gpt-realtime-2.1",
+        onboardingOptions,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      await completePhysicalGreeting(first, cap);
+      const adapter = control.ledger.onboarding!;
+      const digest = "d".repeat(64);
+      adapter.lifecycle.phase = "summary_speaking";
+      adapter.lifecycle.summary = {
+        receiptId: "coverage-transport-interruption",
+        revision: 5,
+        digest,
+        requiredAnchors: ["Área: Irvine"],
+        responseId: "response-summary-nonterminal",
+        transcript: "Área: Irvine.",
+        transcriptFinal: false,
+        audioDone: true,
+        responseDone: false,
+        playbackStopped: false,
+        interrupted: false,
+        attempt: 0,
+      };
+      adapter.lifecycle.responseIntents[`summary:${digest}`] = {
+        intentKey: `summary:${digest}`,
+        purpose: "summary",
+        state: "acknowledged",
+        responseId: "response-summary-nonterminal",
+        sentSocketGeneration: 1,
+      };
+      delete adapter.lifecycle.activeResponseId;
+      control.ledger.responseActive = false;
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(adapter.lifecycle.phase).toBe("blocked");
+      expect(control.ledger.transcript).toContainEqual(expect.objectContaining({
+        text: "onboarding blocked: authority_speech_terminal_indeterminate",
+      }));
+      expect(framesOfType(second, "response.create")).toHaveLength(0);
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
@@ -2350,6 +2743,7 @@ describe("physical socket attach and reconnect", () => {
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
       await control.opened;
+      await completePhysicalGreeting(first, cap);
       const adapter = control.ledger.onboarding!;
       adapter.lifecycle.phase = "blocked";
       adapter.lifecycle.responseIntents["summary:old"] = {
@@ -2432,6 +2826,7 @@ describe("physical socket attach and reconnect", () => {
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
       await control.opened;
+      await completePhysicalGreeting(first, cap);
       const adapter = control.ledger.onboarding!;
       adapter.lifecycle.phase = "collecting";
       adapter.lifecycle.toolOutbox["retrieve-tool"] = {
@@ -2847,67 +3242,17 @@ describe("physical socket attach and reconnect", () => {
     }
   });
 
-  test("indeterminate mutation retries the exact event on reattach and emits one output without blocking", async () => {
+  test("an indeterminate fact reconciles once on the same socket with the exact fingerprint and one output", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
     globalThis.WebSocket = SyntheticWebSocket as any;
-    const cap = onboardingCap("call-indeterminate-reattach");
-    let answerAttempts = 0;
-    _setClient({
-      from() {
-        const query: any = {
-          select() { return query; },
-          eq() { return query; },
-          in() { return query; },
-          order() { return query; },
-          limit() { return query; },
-          maybeSingle: async () => ({ data: null, error: null }),
-          then(resolve: (value: unknown) => unknown) {
-            return Promise.resolve({ data: [], error: null }).then(resolve);
-          },
-        };
-        return query;
-      },
-      rpc(name: string, args: Record<string, unknown>) {
-        if (name !== "record_onboarding_answer")
-          return Promise.resolve({
-            data: null,
-            error: { message: `unexpected rpc ${name}` },
-          });
-        answerAttempts += 1;
-        if (answerAttempts <= 2)
-          return Promise.resolve({
-            data: null,
-            error: { message: answerAttempts === 1
-              ? "fetch failed"
-              : "network socket closed" },
-          });
-        return Promise.resolve({
-          data: {
-            status: "recorded",
-            rule_id: null,
-            rule_group_id: null,
-            coverage_receipt_id: "receipt-after-reattach",
-            revision: 1,
-            snapshot_digest: "9".repeat(64),
-            complete: false,
-            missing: [{ field: "service.catalog_closure" }],
-            ambiguous: [],
-            next_action: {
-              type: "ask",
-              field: "service.catalog_closure",
-              question_pt: "Há mais algum serviço?",
-            },
-            coverage: args.p_coverage,
-          },
-          error: null,
-        });
-      },
-    } as any);
+    const cap = onboardingCap("call-indeterminate-same-socket");
+    const boundary = ambiguousAnswerBoundary(3);
+    _setClient(boundary.client);
     try {
       const control = attachSideband(
         cap,
-        "rtc-indeterminate-reattach",
+        "rtc-indeterminate-same-socket",
         "gpt-realtime-2.1",
         onboardingOptions,
       );
@@ -2930,25 +3275,17 @@ describe("physical socket attach and reconnect", () => {
         }),
       ));
       first.message(responseDone("resp-indeterminate"));
-      await flushAsync();
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
-      expect(answerAttempts).toBe(2);
-      expect(functionOutputs(first)).toHaveLength(0);
-      expect(control.ledger.onboarding!.lifecycle.phase).not.toBe("blocked");
-      expect(control.ledger.onboarding!.lifecycle.toolOutbox["fc-indeterminate"]?.state)
-        .toBe("running");
-      expect(Object.keys(control.ledger.onboarding!.pendingMutationCommands))
-        .toEqual(["fact:fc-indeterminate"]);
-
-      first.emit("close", { code: 1006 });
-      await new Promise((resolve) => setTimeout(resolve, 700));
-      const second = SyntheticWebSocket.instances[1]!;
-      second.emit("open");
-      await new Promise((resolve) => setTimeout(resolve, 60));
-
-      expect(answerAttempts).toBe(3);
-      expect(functionOutputs(second)).toHaveLength(1);
-      expect(functionOutputs(second)[0].item).toMatchObject({
+      expect(boundary.answerAttempts).toBe(3);
+      expect(boundary.answerRpcArgs.map((args) =>
+        hashOnboardingToolArgs(args)
+      )).toEqual(Array(3).fill(
+        hashOnboardingToolArgs(boundary.answerRpcArgs[0]!),
+      ));
+      expect(SyntheticWebSocket.instances).toHaveLength(1);
+      expect(functionOutputs(first)).toHaveLength(1);
+      expect(functionOutputs(first)[0].item).toMatchObject({
         id: "tool-output:fc-indeterminate",
         call_id: "fc-indeterminate",
       });
@@ -2956,6 +3293,187 @@ describe("physical socket attach and reconnect", () => {
         .toBe("output_pending");
       expect(control.ledger.onboarding!.pendingMutationCommands).toEqual({});
       expect(control.ledger.onboarding!.lifecycle.phase).not.toBe("blocked");
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+      _setClient(null);
+    }
+  });
+
+  test("a twice-indeterminate fact blocks with zero output and no running receipt", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-indeterminate-exhausted");
+    const boundary = ambiguousAnswerBoundary();
+    _setClient(boundary.client);
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-indeterminate-exhausted",
+        "gpt-realtime-2.1",
+        onboardingOptions,
+      );
+      const ws = SyntheticWebSocket.instances[0]!;
+      ws.emit("open");
+      await control.opened;
+      await completePhysicalGreeting(ws, cap);
+      ws.message(responseCreated("resp-indeterminate-exhausted"));
+      ws.message(functionCallDone(
+        "resp-indeterminate-exhausted",
+        "fc-indeterminate-exhausted",
+        "record_interview_answer",
+        JSON.stringify({
+          topic: "outro",
+          field: "business.customer_types",
+          disposition: "answered",
+          rule_text: "Atende clientes residenciais.",
+          structured: { value: ["residencial"] },
+          owner_words: "Atendemos clientes residenciais.",
+        }),
+      ));
+      ws.message(responseDone("resp-indeterminate-exhausted"));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(boundary.answerAttempts).toBe(4);
+      expect(SyntheticWebSocket.instances).toHaveLength(1);
+      expect(functionOutputs(ws)).toHaveLength(0);
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(control.ledger.onboarding!.lifecycle.toolOutbox[
+        "fc-indeterminate-exhausted"
+      ]).toBeUndefined();
+      expect(control.ledger.onboarding!.pendingMutationCommands).toEqual({});
+      expect(control.ledger.onboarding!.pendingMutationRetryTimers).toEqual({});
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+      _setClient(null);
+    }
+  });
+
+  test("an indeterminate directed follow-up reconciles on the same socket and asks once", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-followup-same-socket");
+    const boundary = sequentialAnswerBoundary([{
+      status: "recorded",
+      revision: 1,
+      digest: "1".repeat(64),
+    }], {
+      followupAmbiguousAttempts: 2,
+      responseFromProjection: true,
+    });
+    _setClient(boundary.client);
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-followup-same-socket",
+        "gpt-realtime-2.1",
+        onboardingOptions,
+      );
+      const ws = SyntheticWebSocket.instances[0]!;
+      ws.emit("open");
+      await control.opened;
+      await completePhysicalGreeting(ws, cap);
+      ws.message(responseCreated("resp-followup-same-socket"));
+      ws.message(functionCallDone(
+        "resp-followup-same-socket",
+        "fc-followup-same-socket",
+        "record_interview_answer",
+        JSON.stringify({
+          topic: "outro",
+          field: "business.customer_types",
+          disposition: "answered",
+          rule_text: "Atende clientes residenciais.",
+          structured: { value: ["residencial"] },
+          owner_words: "Atendemos clientes residenciais.",
+        }),
+      ));
+      ws.message(responseDone("resp-followup-same-socket"));
+      await flushAsync();
+      expect(functionOutputs(ws)).toHaveLength(1);
+
+      ws.message(outputAck(
+        control.ledger,
+        "tool-output:fc-followup-same-socket",
+      ));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(boundary.followupRpcCalls).toBe(3);
+      expect(SyntheticWebSocket.instances).toHaveLength(1);
+      expect(framesOfType(ws, "response.create").filter((frame) =>
+        frame.response?.metadata?.purpose === "tool_continuation"
+      )).toHaveLength(1);
+      expect(functionOutputs(ws)).toHaveLength(1);
+      expect(control.ledger.onboarding!.pendingMutationCommands).toEqual({});
+      expect(control.ledger.onboarding!.pendingMutationRetryTimers).toEqual({});
+      expect(control.ledger.onboarding!.lifecycle.phase).not.toBe("blocked");
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+      _setClient(null);
+    }
+  });
+
+  test("a twice-indeterminate directed follow-up blocks without another output or running receipt", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-followup-exhausted");
+    const boundary = sequentialAnswerBoundary([{
+      status: "recorded",
+      revision: 1,
+      digest: "1".repeat(64),
+    }], {
+      followupAmbiguousAttempts: Number.POSITIVE_INFINITY,
+      responseFromProjection: true,
+    });
+    _setClient(boundary.client);
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-followup-exhausted",
+        "gpt-realtime-2.1",
+        onboardingOptions,
+      );
+      const ws = SyntheticWebSocket.instances[0]!;
+      ws.emit("open");
+      await control.opened;
+      await completePhysicalGreeting(ws, cap);
+      ws.message(responseCreated("resp-followup-exhausted"));
+      ws.message(functionCallDone(
+        "resp-followup-exhausted",
+        "fc-followup-exhausted",
+        "record_interview_answer",
+        JSON.stringify({
+          topic: "outro",
+          field: "business.customer_types",
+          disposition: "answered",
+          rule_text: "Atende clientes residenciais.",
+          structured: { value: ["residencial"] },
+          owner_words: "Atendemos clientes residenciais.",
+        }),
+      ));
+      ws.message(responseDone("resp-followup-exhausted"));
+      await flushAsync();
+      ws.message(outputAck(
+        control.ledger,
+        "tool-output:fc-followup-exhausted",
+      ));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(boundary.followupRpcCalls).toBe(4);
+      expect(SyntheticWebSocket.instances).toHaveLength(1);
+      expect(functionOutputs(ws)).toHaveLength(1);
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(Object.values(control.ledger.onboarding!.lifecycle.toolOutbox)
+        .some((receipt) => receipt.state === "running")).toBe(false);
+      expect(control.ledger.onboarding!.pendingMutationCommands).toEqual({});
+      expect(control.ledger.onboarding!.pendingMutationRetryTimers).toEqual({});
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
@@ -3075,20 +3593,29 @@ describe("physical socket attach and reconnect", () => {
         questionPt,
         intentKey,
       };
-      adapter.pendingMutationCommands["followup:1:area.coverage:"] = {
+      const pendingFollowupCommand = {
         type: "persist_followup",
         revision: 1,
         digest: sourceDigest,
         field: "area.coverage",
         questionPt,
         intentKey,
+      } as const;
+      adapter.pendingMutationCommands["followup:1:area.coverage:"] = {
+        command: pendingFollowupCommand,
+        reconciliationAttempts: 0,
+        retryScheduled: true,
+        fingerprint: hashOnboardingToolArgs(pendingFollowupCommand),
       };
+      let staleTimerFired = 0;
+      adapter.pendingMutationRetryTimers["followup:1:area.coverage:"] =
+        setTimeout(() => { staleTimerFired += 1; }, 900);
 
       first.emit("close", { code: 1006 });
       await new Promise((resolve) => setTimeout(resolve, 700));
       const second = SyntheticWebSocket.instances[1]!;
       second.emit("open");
-      await new Promise((resolve) => setTimeout(resolve, 60));
+      await new Promise((resolve) => setTimeout(resolve, 250));
 
       const questions = framesOfType(second, "response.create").filter(
         (frame) => frame.response?.metadata?.intent_key === intentKey,
@@ -3103,6 +3630,8 @@ describe("physical socket attach and reconnect", () => {
         digest: committedDigest,
       });
       expect(adapter.pendingMutationCommands).toEqual({});
+      expect(adapter.pendingMutationRetryTimers).toEqual({});
+      expect(staleTimerFired).toBe(0);
       expect(adapter.lifecycle.phase).not.toBe("blocked");
       control.cancel("test_cleanup");
     } finally {
@@ -3124,6 +3653,7 @@ describe("physical socket attach and reconnect", () => {
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
       await control.opened;
+      await completePhysicalGreeting(first, cap);
       const lifecycle = control.ledger.onboarding!.lifecycle;
       const digest = "f".repeat(64);
       lifecycle.phase = "final_signoff_speaking";
@@ -3141,11 +3671,24 @@ describe("physical socket attach and reconnect", () => {
       lifecycle.signoff = {
         approvalReceiptId: "approval-receipt-final",
         responseId: "resp-final-reattach",
+        transcript:
+          "A confirmação por voz foi salva e as regras sugeridas continuam aguardando revisão na Memória.",
+        transcriptFinal: true,
+        validated: true,
         audioDone: true,
         responseDone: true,
         playbackStopped: false,
         interrupted: false,
+        attempt: 0,
       };
+      lifecycle.responseIntents["final-signoff:approval-receipt-final"] = {
+        intentKey: "final-signoff:approval-receipt-final",
+        purpose: "final_signoff",
+        state: "terminal",
+        responseId: "resp-final-reattach",
+        sentSocketGeneration: 1,
+      };
+      lifecycle.terminalResponseIds.push("resp-final-reattach");
       delete lifecycle.activeResponseId;
       control.ledger.responseActive = false;
 
@@ -3154,10 +3697,37 @@ describe("physical socket attach and reconnect", () => {
       const second = SyntheticWebSocket.instances[1]!;
       second.emit("open");
       await new Promise((resolve) => setTimeout(resolve, 30));
-      second.suppressCloseEvent = true;
+      const retries = framesOfType(second, "response.create").filter(
+        (frame) => frame.response?.metadata?.intent_key ===
+          "final-signoff:approval-receipt-final:retry:1",
+      );
+      expect(retries).toHaveLength(1);
       second.message({
         type: "output_audio_buffer.stopped",
         response_id: "resp-final-reattach",
+      });
+      await flushAsync();
+      expect(control.ledger.status).toBe("active");
+
+      second.message(responseCreated(
+        "resp-final-retry",
+        "final-signoff:approval-receipt-final:retry:1",
+      ));
+      second.message({
+        type: "response.output_audio_transcript.done",
+        response_id: "resp-final-retry",
+        transcript:
+          "A confirmação por voz foi salva e as regras sugeridas continuam aguardando revisão na Memória.",
+      });
+      second.message({
+        type: "response.output_audio.done",
+        response_id: "resp-final-retry",
+      });
+      second.message(responseDone("resp-final-retry"));
+      second.suppressCloseEvent = true;
+      second.message({
+        type: "output_audio_buffer.stopped",
+        response_id: "resp-final-retry",
       });
       await flushAsync();
 
