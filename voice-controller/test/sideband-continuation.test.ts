@@ -563,6 +563,86 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     });
   });
 
+  test("a same-semantic direct negotiation repair persists the corrected floor through the tool outbox", async () => {
+    const cap = onboardingCap("call-direct-negotiation-repair");
+    const boundary = sequentialAnswerBoundary([
+      { status: "recorded", revision: 5, digest: "5".repeat(64) },
+    ]);
+    _setClient(boundary.client);
+    const subject = "drain_cleaning";
+    const snapshot = {
+      ...createCoverage({ tenantId: cap.tenantId, callId: cap.callId }),
+      revision: 4,
+      services: [subject],
+      currentSubject: subject,
+      cells: {
+        [`service:${subject}:service.price_target`]: {
+          state: "answered" as const,
+          attempts: 2,
+          value: 149,
+        },
+        [`service:${subject}:service.negotiation`]: {
+          state: "answered" as const,
+          attempts: 1,
+          value: { mode: "non_negotiable", floor: 100 },
+        },
+      },
+    };
+    const nextQuestion = {
+      field: "service.negotiation",
+      subject,
+      questionPt: "O preço é negociável?",
+    };
+    boundary.seedSnapshot(cap, snapshot, "4".repeat(64), nextQuestion);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, responseCreated("resp-bootstrap"));
+    await handleEvent(cap, l, ws as any, responseDone("resp-bootstrap"));
+    l.onboarding!.lifecycle.phase = "collecting";
+    l.onboarding!.lifecycle.coverage = {
+      revision: 4,
+      digest: "4".repeat(64),
+      complete: false,
+      missing: [{ field: "service.negotiation", subject }],
+      ambiguous: [],
+      nextQuestion,
+    };
+    await handleEvent(cap, l, ws as any, responseCreated("resp-neg-repair"));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-neg-repair",
+      "fc-neg-repair",
+      "record_interview_answer",
+      JSON.stringify({
+        topic: "precos",
+        field: "service.negotiation",
+        subject,
+        disposition: "answered",
+        rule_text: "Preço não negociável.",
+        structured: { value: "non_negotiable" },
+        owner_words: "O preço não é negociável.",
+      }),
+      0,
+    ));
+    await handleEvent(cap, l, ws as any, responseDone("resp-neg-repair"));
+    expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
+    expect(JSON.parse(functionOutputs(ws).at(-1)!.item.output).status)
+      .toBe("recorded");
+    expect((boundary.rpcCoverages[0] as any).snapshot.cells[
+      `service:${subject}:service.negotiation`
+    ]).toMatchObject({
+      attempts: 2,
+      value: { mode: "non_negotiable", floor: 149 },
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      outputAck("tool-output:fc-neg-repair"),
+    );
+    expect(l.onboarding!.lifecycle.toolOutbox["fc-neg-repair"]?.state)
+      .toBe("output_acked");
+  });
+
   test("coverage correction drops queued old signoff command and ignores its late response", async () => {
     const cap = onboardingCap("call-stale-signoff-command");
     const boundary = sequentialAnswerBoundary([
@@ -1206,10 +1286,12 @@ function sequentialAnswerBoundary(results: Array<{
   digest: string;
 }>) {
   const rpcFacts: Array<Record<string, unknown>> = [];
+  const rpcCoverages: Array<Record<string, unknown>> = [];
   let receiptRows: Array<{ id: string; readback: Record<string, unknown> }> = [];
   let resultIndex = 0;
   return {
     rpcFacts,
+    rpcCoverages,
     seedCoverage(
       cap: Capability,
       revision: number,
@@ -1236,6 +1318,49 @@ function sequentialAnswerBoundary(results: Array<{
             ambiguous: [],
           },
           selected_rule_ids: [],
+          next_action: {
+            type: "ask",
+            field: nextQuestion.field,
+            ...(nextQuestion.subject ? { subject: nextQuestion.subject } : {}),
+            question_pt: nextQuestion.questionPt,
+          },
+          snapshot_digest: digest,
+          authority: {
+            rules_approved: false,
+            powers_granted: false,
+            operational_mode_changed: false,
+          },
+        },
+      }];
+    },
+    seedSnapshot(
+      cap: Capability,
+      snapshot: CoverageSnapshot,
+      digest: string,
+      nextQuestion: { field: string; subject?: string; questionPt: string },
+    ) {
+      receiptRows = [{
+        id: `seed-receipt-${snapshot.revision}`,
+        readback: {
+          schema_version: 2,
+          transition_kind: "answer",
+          tenant_id: cap.tenantId,
+          call_id: cap.callId,
+          revision: snapshot.revision,
+          complete: false,
+          snapshot,
+          progress: {
+            missingRequired: [{
+              field: nextQuestion.field,
+              ...(nextQuestion.subject ? { subject: nextQuestion.subject } : {}),
+            }],
+            ambiguous: [],
+          },
+          selected_rule_ids: [],
+          current_answer_hashes: {},
+          materializations: [],
+          summary_projection: null,
+          summary_hash: null,
           next_action: {
             type: "ask",
             field: nextQuestion.field,
@@ -1299,6 +1424,7 @@ function sequentialAnswerBoundary(results: Array<{
         if (name !== "record_onboarding_answer")
           return Promise.resolve({ data: null, error: { message: "unexpected rpc" } });
         rpcFacts.push(args.p_fact as Record<string, unknown>);
+        rpcCoverages.push(args.p_coverage as Record<string, unknown>);
         const next = results[Math.min(resultIndex, results.length - 1)]!;
         resultIndex += 1;
         const response = {
@@ -1406,6 +1532,8 @@ function staleSummaryCorrectionBoundary(
                 }],
                 error: null,
               });
+            if (table === "onboarding_locality_aliases")
+              return resolve({ data: [], error: null });
             return resolve({ data: null, error: null });
           },
         };

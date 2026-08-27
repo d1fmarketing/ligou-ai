@@ -448,7 +448,8 @@ select extensions.ok(
       ('oauth_states', 'select'), ('oauth_states', 'insert'), ('oauth_states', 'update'),
       ('phone_lifecycle_legacy_conflicts', 'select'), ('phone_lifecycle_legacy_conflicts', 'insert'), ('phone_lifecycle_legacy_conflicts', 'update'),
       ('receipts', 'select'),
-      ('onboarding_locality_registry', 'select')
+      ('onboarding_locality_registry', 'select'),
+      ('onboarding_locality_aliases', 'select')
     ) required(relation, privilege)
     where not has_table_privilege('service_role', format('public.%I', relation), privilege)
   ),
@@ -482,8 +483,24 @@ select extensions.ok(
     'authenticated', 'public.onboarding_locality_registry',
     'select,insert,update,delete'
   )
-  and (select count(*) from public.onboarding_locality_registry) = 13,
-  'locality registry is seeded and service-role read-only'
+  and has_table_privilege(
+    'service_role', 'public.onboarding_locality_aliases', 'select'
+  )
+  and not has_table_privilege(
+    'service_role', 'public.onboarding_locality_aliases',
+    'insert,update,delete,truncate,references,trigger'
+  )
+  and not has_table_privilege(
+    'anon', 'public.onboarding_locality_aliases',
+    'select,insert,update,delete'
+  )
+  and not has_table_privilege(
+    'authenticated', 'public.onboarding_locality_aliases',
+    'select,insert,update,delete'
+  )
+  and (select count(*) from public.onboarding_locality_registry) = 14
+  and (select count(*) from public.onboarding_locality_aliases) = 4,
+  'locality registry and unique aliases are seeded and service-role read-only'
 );
 
 select extensions.ok(

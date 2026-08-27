@@ -4,7 +4,12 @@ import { config } from "./config.ts";
 import {
   isCanonicalLocalityList,
   isExecutableBusinessHours,
+  type CanonicalLocality,
 } from "./onboarding-coverage.ts";
+
+export interface VerifiedLocality extends CanonicalLocality {
+  aliases: string[];
+}
 
 export interface Rule {
   id: string;
@@ -14,6 +19,7 @@ export interface Rule {
   escopo: string;
   text: string;
   structured: Record<string, unknown> | null;
+  verifiedLocalities?: VerifiedLocality[] | null;
 }
 
 export interface Tenant {
@@ -60,7 +66,32 @@ async function loadTenantRow(column: "slug" | "id", value: string): Promise<{ te
     .select("id,rule_group_id,version,category,escopo,text,structured")
     .eq("tenant_id", typedTenant.id);
   if (re) throw new Error(`rules_load_failed: ${re.message}`);
-  const effectiveRules = (rules ?? []) as Rule[];
+  const { data: localityRows, error: localityError } = await s
+    .from("onboarding_locality_registry")
+    .select("locality_id,display_name,country_code,region_code");
+  const { data: aliasRows, error: aliasError } = await s
+    .from("onboarding_locality_aliases")
+    .select("alias_normalized,locality_id");
+  if (localityError || aliasError)
+    throw new Error("locality_registry_load_failed");
+  const aliasesByLocality = new Map<string, string[]>();
+  for (const row of aliasRows ?? []) {
+    const localityId = String(row.locality_id ?? "");
+    const aliases = aliasesByLocality.get(localityId) ?? [];
+    aliases.push(String(row.alias_normalized ?? ""));
+    aliasesByLocality.set(localityId, aliases);
+  }
+  const registry = (localityRows ?? []).map((row) => ({
+    locality_id: String(row.locality_id ?? ""),
+    display_name: String(row.display_name ?? ""),
+    country_code: String(row.country_code ?? ""),
+    region_code: String(row.region_code ?? ""),
+    aliases: aliasesByLocality.get(String(row.locality_id ?? "")) ?? [],
+  }));
+  const effectiveRules = bindRuntimeLocalityMembership(
+    (rules ?? []) as Rule[],
+    registry,
+  );
   tenantCache.set(typedTenant.slug, {
     authEpoch: typedTenant.auth_epoch,
     policyEpoch: typedTenant.policy_epoch,
@@ -379,12 +410,43 @@ function canonicalV2DomainRule(
   ) return false;
   if (
     structured.operational_state === "active" && key === "domain:area"
-  ) return isCanonicalLocalityList(structured.localities);
+  ) return isCanonicalLocalityList(structured.localities) &&
+    Array.isArray(rule.verifiedLocalities) &&
+    rule.verifiedLocalities.length === structured.localities.length;
   if (
     structured.operational_state === "active" && key === "domain:schedule"
   )
     return isExecutableBusinessHours(structured.business_hours);
   return true;
+}
+
+export function bindRuntimeLocalityMembership(
+  rules: Rule[],
+  registry: VerifiedLocality[],
+): Rule[] {
+  return rules.map((rule) => {
+    const structured = rule.structured;
+    if (
+      structured?.schema !== "ligou.rule.area.v2" ||
+      structured.materialization_key !== "domain:area" ||
+      structured.operational_state !== "active"
+    ) return rule;
+    if (!isCanonicalLocalityList(structured.localities))
+      return { ...rule, verifiedLocalities: null };
+    const verified: VerifiedLocality[] = [];
+    for (const locality of structured.localities) {
+      const matches = registry.filter((entry) =>
+        entry.locality_id === locality.locality_id &&
+        entry.display_name === locality.display_name &&
+        entry.country_code === locality.country_code &&
+        entry.region_code === locality.region_code
+      );
+      if (matches.length !== 1)
+        return { ...rule, verifiedLocalities: null };
+      verified.push({ ...matches[0]!, aliases: [...matches[0]!.aliases] });
+    }
+    return { ...rule, verifiedLocalities: verified };
+  });
 }
 
 export function ruleByMaterializationKey(

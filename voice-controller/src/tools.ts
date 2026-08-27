@@ -9,6 +9,7 @@ import {
   servicePolicies,
   supa,
   type Rule,
+  type VerifiedLocality,
 } from "./rules.ts";
 import { calendarPort, overlapsBusy, zonedInstantIso, spokenLocal } from "./calendar.ts";
 import { checkPower, normalizeGeography } from "./powers.ts";
@@ -20,7 +21,6 @@ import {
   isCanonicalLocalityList,
   isExactCityList,
   isExecutableBusinessHours,
-  type CanonicalLocality,
 } from "./onboarding-coverage.ts";
 import {
   recordOnboardingAnswer,
@@ -336,10 +336,11 @@ function areaCities(rule: Rule | undefined): string[] | null {
 
 function areaLocalities(
   rule: Rule | undefined,
-): CanonicalLocality[] | null | undefined {
+): VerifiedLocality[] | null | undefined {
   if (rule?.structured?.schema !== "ligou.rule.area.v2") return undefined;
-  return isCanonicalLocalityList(rule.structured.localities)
-    ? rule.structured.localities
+  return isCanonicalLocalityList(rule.structured.localities) &&
+      Array.isArray(rule.verifiedLocalities)
+    ? rule.verifiedLocalities
     : null;
 }
 
@@ -432,7 +433,14 @@ export async function runTool(
                   `${locality.display_name}, ${locality.region_code}, ${locality.country_code}`
                 )
               : ((area.structured as any)?.cities ?? area.text),
-          service_localities: localities ?? null,
+          service_localities: localities
+            ? localities.map(({ display_name, country_code, region_code, aliases }) => ({
+                display_name,
+                country_code,
+                region_code,
+                aliases: [...aliases],
+              }))
+            : null,
           hours: agenda?.text ?? null,
           now_local: new Date().toLocaleString("en-US", { timeZone: tenant.timezone }),
         });
@@ -553,16 +561,42 @@ export async function runTool(
             ? args.service_country.trim().toUpperCase()
             : null;
           const matches = localities.filter((locality) =>
-            locality.display_name.trim().replace(/\s+/g, " ")
-                .toLocaleLowerCase("en-US") === label &&
+            [locality.display_name, ...locality.aliases].some((candidate) =>
+              candidate.trim().replace(/\s+/g, " ")
+                  .toLocaleLowerCase("en-US") === label
+            ) &&
             (region === null || locality.region_code === region) &&
             (country === null || locality.country_code === country)
           );
-          if (matches.length > 1)
+          if (matches.length > 1) {
+            const candidates = matches.map((locality) =>
+              `${locality.display_name}, ${locality.region_code}, ${locality.country_code}`
+            ).sort();
+            const choices = candidates.length === 2
+              ? `${candidates[0]} ou ${candidates[1]}`
+              : `${candidates.slice(0, -1).join(", ")} ou ${candidates.at(-1)}`;
+            const retryOptions = matches.map((item) => ({
+              service_type: svc,
+              quote_id: String(args.quote_id ?? ""),
+              service_city: item.display_name,
+              service_region: item.region_code,
+              service_country: item.country_code,
+            })).sort((left, right) =>
+              `${left.service_country}:${left.service_region}:${left.service_city}`
+                .localeCompare(
+                  `${right.service_country}:${right.service_region}:${right.service_city}`,
+                )
+            );
             return done({
               status: "needs_clarification",
               reason: "locality_ambiguous",
+              candidates,
+              clarification_question_pt: `Você quer dizer ${choices}?`,
+              clarification_instruction:
+                "Ask this question in the active call language, then retry check_availability with the selected codes.",
+              retry_options: retryOptions,
             });
+          }
           if (matches.length === 0)
             return done({
               status: "needs_owner",

@@ -77,6 +77,9 @@ export function mapRuleGroups(rules) {
           intent: materializationIntent(latest),
           coverageRevision: latest.structured?.coverage_revision ?? null,
           canonicalFields: canonicalFields(latest),
+          ...(latest.evidence_quote
+            ? { evidenceQuote: latest.evidence_quote }
+            : {}),
         }
       : null;
     entries.push({
@@ -112,6 +115,9 @@ export function mapRuleGroups(rules) {
               coverageRevision:
                 effective.structured?.coverage_revision ?? null,
               canonicalFields: canonicalFields(effective),
+              ...(effective.evidence_quote
+                ? { evidenceQuote: effective.evidence_quote }
+                : {}),
             },
           }
         : {}),

@@ -22,9 +22,13 @@ create table public.onboarding_locality_registry (
   display_name text not null check (
     display_name = btrim(display_name) and length(display_name) between 1 and 100
   ),
-  country_code text not null check (country_code ~ '^[A-Z]{2}$'),
-  region_code text not null check (region_code ~ '^[A-Z]{2}$'),
-  aliases text[] not null check (cardinality(aliases) > 0),
+  country_code text not null check (country_code = 'US'),
+  region_code text not null check (region_code in (
+    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN',
+    'IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV',
+    'NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN',
+    'TX','UT','VT','VA','WA','WV','WI','WY','DC'
+  )),
   created_at timestamptz not null default now()
 );
 
@@ -34,30 +38,54 @@ create unique index onboarding_locality_registry_identity_unique
   );
 
 insert into public.onboarding_locality_registry (
-  locality_id, display_name, country_code, region_code, aliases
+  locality_id, display_name, country_code, region_code
 ) values
-  ('loc_06b5af1ac7ab0ac5ffaa565a', 'Concord', 'US', 'CA', array['concord']),
-  ('loc_103311f819190c5e34075124', 'Walnut Creek', 'US', 'CA', array['walnut creek']),
-  ('loc_49cae77e3299fdc874706952', 'Pleasant Hill', 'US', 'CA', array['pleasant hill']),
-  ('loc_fcc2e7491cf2266b3cc824d5', 'Martinez', 'US', 'CA', array['martinez']),
-  ('loc_4bc5a435c3c9a7013a252ae4', 'Anaheim', 'US', 'CA', array['anaheim']),
-  ('loc_f523ab817485998b9f27a274', 'Santa Ana', 'US', 'CA', array['santa ana']),
-  ('loc_9971eda617977d43d7df9fd5', 'Irvine', 'US', 'CA', array['irvine']),
-  ('loc_1775cd185638a4eb34fa8b78', 'Orange', 'US', 'CA', array['orange']),
-  ('loc_62bcd7af7bfab0878130f238', 'Tustin', 'US', 'CA', array['tustin']),
-  ('loc_7a99602020a0ced6f4ceea63', 'Costa Mesa', 'US', 'CA', array['costa mesa']),
-  ('loc_c0f300f553807cd44f5f7ede', 'New York', 'US', 'NY',
-    array['new york','new york city','nyc']),
-  ('loc_e939e6896203b54b290f9224', 'Washington', 'US', 'DC',
-    array['washington','washington dc','washington, dc']),
-  ('loc_598cce799aeb20c5d2116b74', 'State College', 'US', 'PA',
-    array['state college']);
+  ('loc_06b5af1ac7ab0ac5ffaa565a', 'Concord', 'US', 'CA'),
+  ('loc_d89792846ce09bcbb7667a0a', 'Concord', 'US', 'NH'),
+  ('loc_103311f819190c5e34075124', 'Walnut Creek', 'US', 'CA'),
+  ('loc_49cae77e3299fdc874706952', 'Pleasant Hill', 'US', 'CA'),
+  ('loc_fcc2e7491cf2266b3cc824d5', 'Martinez', 'US', 'CA'),
+  ('loc_4bc5a435c3c9a7013a252ae4', 'Anaheim', 'US', 'CA'),
+  ('loc_f523ab817485998b9f27a274', 'Santa Ana', 'US', 'CA'),
+  ('loc_9971eda617977d43d7df9fd5', 'Irvine', 'US', 'CA'),
+  ('loc_1775cd185638a4eb34fa8b78', 'Orange', 'US', 'CA'),
+  ('loc_62bcd7af7bfab0878130f238', 'Tustin', 'US', 'CA'),
+  ('loc_7a99602020a0ced6f4ceea63', 'Costa Mesa', 'US', 'CA'),
+  ('loc_c0f300f553807cd44f5f7ede', 'New York', 'US', 'NY'),
+  ('loc_e939e6896203b54b290f9224', 'Washington', 'US', 'DC'),
+  ('loc_598cce799aeb20c5d2116b74', 'State College', 'US', 'PA');
+
+create table public.onboarding_locality_aliases (
+  alias_normalized text primary key check (
+    alias_normalized = lower(regexp_replace(
+      btrim(alias_normalized), '[[:space:]]+', ' ', 'g'
+    )) and length(alias_normalized) between 1 and 100
+  ),
+  locality_id text not null references public.onboarding_locality_registry(
+    locality_id
+  ) on delete restrict,
+  created_at timestamptz not null default now()
+);
+
+insert into public.onboarding_locality_aliases (
+  alias_normalized, locality_id
+) values
+  ('new york city', 'loc_c0f300f553807cd44f5f7ede'),
+  ('nyc', 'loc_c0f300f553807cd44f5f7ede'),
+  ('washington dc', 'loc_e939e6896203b54b290f9224'),
+  ('washington, dc', 'loc_e939e6896203b54b290f9224');
 
 alter table public.onboarding_locality_registry enable row level security;
 alter table public.onboarding_locality_registry force row level security;
 revoke all on table public.onboarding_locality_registry
   from public, anon, authenticated, service_role;
 grant select on table public.onboarding_locality_registry to service_role;
+
+alter table public.onboarding_locality_aliases enable row level security;
+alter table public.onboarding_locality_aliases force row level security;
+revoke all on table public.onboarding_locality_aliases
+  from public, anon, authenticated, service_role;
+grant select on table public.onboarding_locality_aliases to service_role;
 
 alter table public.receipts
   drop constraint if exists receipts_onboarding_shape_check;
@@ -260,10 +288,9 @@ begin
           btrim(registry.display_name), '[[:space:]]+', ' ', 'g'
         )) = v_display_key
         or exists (
-          select 1 from unnest(registry.aliases) alias
-          where lower(regexp_replace(
-            btrim(alias), '[[:space:]]+', ' ', 'g'
-          )) = v_display_key
+          select 1 from public.onboarding_locality_aliases alias
+          where alias.locality_id = registry.locality_id
+            and alias.alias_normalized = v_display_key
         )
       );
     if v_match_count <> 1 then return null; end if;
@@ -276,10 +303,9 @@ begin
           btrim(registry.display_name), '[[:space:]]+', ' ', 'g'
         )) = v_display_key
         or exists (
-          select 1 from unnest(registry.aliases) alias
-          where lower(regexp_replace(
-            btrim(alias), '[[:space:]]+', ' ', 'g'
-          )) = v_display_key
+          select 1 from public.onboarding_locality_aliases alias
+          where alias.locality_id = registry.locality_id
+            and alias.alias_normalized = v_display_key
         )
       )
     limit 1;
@@ -638,9 +664,16 @@ begin
            or v_candidate->'cells' is distinct from v_prior->'cells'
            or v_candidate->'catalogOverflow' is distinct from
              jsonb_build_object(
-               'services', coalesce(
-                 v_prior->'catalogOverflow'->'services', '[]'::jsonb
-               ) || jsonb_build_array(v_subject),
+               'services', case
+                 when coalesce(
+                   v_prior->'catalogOverflow'->'services', '[]'::jsonb
+                 ) ? v_subject then coalesce(
+                   v_prior->'catalogOverflow'->'services', '[]'::jsonb
+                 )
+                 else coalesce(
+                   v_prior->'catalogOverflow'->'services', '[]'::jsonb
+                 ) || jsonb_build_array(v_subject)
+               end,
                'safeRestriction',
                  'Não aceitar, precificar ou agendar serviços além dos vinte primeiros autonomamente; encaminhar o catálogo ao dono.',
                'ownerWords', p_fact->>'owner_words'
@@ -699,10 +732,7 @@ begin
       continue;
     end if;
     v_candidate_cell := v_candidate->'cells'->v_key;
-    if public.onboarding_cell_semantic_hash_v1(v_key, v_candidate_cell)
-         is distinct from public.onboarding_cell_semantic_hash_v1(v_key, v_value)
-       or v_candidate_cell->'attempts' is distinct from v_value->'attempts'
-    then return false; end if;
+    if v_candidate_cell is distinct from v_value then return false; end if;
   end loop;
 
   v_prior_cell := v_prior->'cells'->v_current_key;
@@ -1732,7 +1762,8 @@ declare
   v_materialization jsonb;
   v_value_valid boolean;
   v_request_id uuid;
-  v_existing_event uuid;
+  v_existing_event public.receipts;
+  v_existing_target public.receipts;
   v_expected_value jsonb;
   v_latest public.receipts;
   v_latest_rule public.rules;
@@ -1755,6 +1786,7 @@ declare
   v_current_hashes jsonb;
   v_materialization_action text := 'coverage_only';
   v_catalog_overflow boolean := false;
+  v_catalog_overflow_repeat boolean := false;
 begin
   v_request_role := coalesce(
     nullif(current_setting('request.jwt.claim.role', true), ''),
@@ -1797,14 +1829,78 @@ begin
     raise exception using errcode = '42501',
       message = 'onboarding_call_not_owner_bound';
   end if;
-  select r.id into v_existing_event
+  if p_coverage->'schema_version' is not distinct from '2'::jsonb then
+    v_payload := jsonb_build_object(
+      'schema_version', 2,
+      'tenant_id', p_tenant,
+      'call_id', p_call,
+      'owner_id', p_owner,
+      'provider_tool_call_id', p_provider_tool_call_id,
+      'event_key', p_event_key,
+      'answer_hash', p_answer_hash,
+      'expected_revision', p_expected_revision,
+      'fact', p_fact,
+      'rule_group_id', p_rule_group_id,
+      'coverage', p_coverage
+    );
+    v_payload_hash := encode(extensions.digest(
+      convert_to(v_payload::text, 'UTF8'), 'sha256'
+    ), 'hex');
+  end if;
+  select r.* into v_existing_event
   from public.receipts r
   where r.tenant_id = p_tenant
     and r.call_id = p_call
     and r.kind in ('onboarding_coverage', 'onboarding_event_alias')
     and r.external_id = p_event_key
   limit 1;
-  if v_existing_event is not null then
+  if v_existing_event.id is not null
+     and v_existing_event.detail->'transition_schema'
+       is not distinct from '2'::jsonb then
+    if v_existing_event.payload_hash is distinct from v_payload_hash then
+      raise exception using errcode = '23505',
+        message = 'onboarding_event_payload_mismatch';
+    end if;
+    if v_existing_event.kind = 'onboarding_event_alias' then
+      select r.* into v_existing_target
+      from public.receipts r
+      where r.id = (v_existing_event.readback->>'target_receipt_id')::uuid
+        and r.tenant_id = p_tenant
+        and r.call_id = p_call
+        and r.kind = 'onboarding_coverage'
+      limit 1;
+      if v_existing_target.id is null then
+        raise exception using errcode = 'P0002',
+          message = 'onboarding_alias_target_missing';
+      end if;
+      return jsonb_build_object(
+        'status', 'reused',
+        'rule_id', null,
+        'rule_group_id', null,
+        'coverage_receipt_id', v_existing_target.id,
+        'revision', (v_existing_target.readback->>'revision')::integer,
+        'snapshot_digest', v_existing_target.readback->>'snapshot_digest',
+        'complete', (v_existing_target.readback->>'complete')::boolean,
+        'missing', v_existing_target.readback->'progress'->'missingRequired',
+        'ambiguous', v_existing_target.readback->'progress'->'ambiguous',
+        'next_action', v_existing_target.readback->'next_action',
+        'coverage', v_existing_target.readback
+      );
+    end if;
+    return jsonb_build_object(
+      'status', 'reused',
+      'rule_id', nullif(v_existing_event.readback->>'rule_id', ''),
+      'rule_group_id', nullif(v_existing_event.readback->>'rule_group_id', ''),
+      'coverage_receipt_id', v_existing_event.id,
+      'revision', (v_existing_event.readback->>'revision')::integer,
+      'snapshot_digest', v_existing_event.readback->>'snapshot_digest',
+      'complete', (v_existing_event.readback->>'complete')::boolean,
+      'missing', v_existing_event.readback->'progress'->'missingRequired',
+      'ambiguous', v_existing_event.readback->'progress'->'ambiguous',
+      'next_action', v_existing_event.readback->'next_action',
+      'coverage', v_existing_event.readback
+    );
+  elsif v_existing_event.id is not null then
     return public.record_onboarding_answer_v2_base(
       p_tenant, p_call, p_owner, p_provider_tool_call_id, p_event_key,
       p_answer_hash, p_expected_revision, p_fact, p_rule_group_id, p_coverage
@@ -1914,6 +2010,10 @@ begin
       and jsonb_array_length(
         v_latest.readback->'snapshot'->'services'
       ) >= 20;
+    v_catalog_overflow_repeat := v_catalog_overflow and coalesce(
+      v_latest.readback->'snapshot'->'catalogOverflow'->'services',
+      '[]'::jsonb
+    ) ? (p_fact->>'subject');
     if v_catalog_overflow then v_materialization_key := null; end if;
     v_cell := p_coverage->'snapshot'->'cells'->v_coverage_key;
     v_value := p_fact->'structured'->'value';
@@ -1926,7 +2026,14 @@ begin
         p_fact->>'field', v_value
       );
       if not v_value_valid then
-        if coalesce(v_cell->>'state', '') not in ('ambiguous', 'missing') then
+        if p_fact->>'field' = 'area.coverage'
+           and public.onboarding_locality_value_v1(v_value) is null
+           and v_cell->>'state' = 'owner_review_required'
+           and v_cell->>'safeRestriction' =
+             'Não executar nem confirmar área atendida autonomamente; encaminhar a decisão ao dono.'
+        then
+          null;
+        elsif coalesce(v_cell->>'state', '') not in ('ambiguous', 'missing') then
           raise exception using errcode = '22023',
             message = 'onboarding_structured_projection_invalid';
         end if;
@@ -2287,6 +2394,48 @@ begin
         message = 'onboarding_current_answer_hashes_invalid';
     end if;
 
+    if v_catalog_overflow_repeat then
+      v_alias_readback := v_latest.readback || jsonb_build_object(
+        'schema_version', 2,
+        'target_kind', 'onboarding_coverage',
+        'target_receipt_id', v_latest.id,
+        'target_revision', (v_latest.readback->>'revision')::integer,
+        'target_digest', v_latest.readback->>'snapshot_digest',
+        'alias_target_receipt_id', v_latest.id,
+        'rule_id', null,
+        'rule_group_id', null
+      );
+      insert into public.receipts (
+        tenant_id, call_id, kind, outcome, external_id, readback,
+        payload_hash, detail
+      ) values (
+        p_tenant, p_call, 'onboarding_event_alias', 'accepted', p_event_key,
+        v_alias_readback, v_payload_hash,
+        jsonb_build_object(
+          'transition_schema', 2,
+          'answer_hash', p_answer_hash,
+          'provider_tool_call_id', p_provider_tool_call_id,
+          'fact', p_fact,
+          'coverage_key', v_coverage_key,
+          'target_receipt_id', v_latest.id,
+          'browser_request_id', v_request_id
+        )
+      );
+      return jsonb_build_object(
+        'status', 'reused',
+        'rule_id', null,
+        'rule_group_id', null,
+        'coverage_receipt_id', v_latest.id,
+        'revision', (v_latest.readback->>'revision')::integer,
+        'snapshot_digest', v_latest.readback->>'snapshot_digest',
+        'complete', (v_latest.readback->>'complete')::boolean,
+        'missing', v_latest.readback->'progress'->'missingRequired',
+        'ambiguous', v_latest.readback->'progress'->'ambiguous',
+        'next_action', v_latest.readback->'next_action',
+        'coverage', v_latest.readback
+      );
+    end if;
+
     -- Alias only when the durable cell itself is semantically identical.
     -- The predecessor hash map is evidence, never authority for this decision.
     if not v_catalog_overflow
@@ -2307,6 +2456,18 @@ begin
            v_latest.readback->'snapshot'->'cells',
            'service:' || (p_fact->>'subject') || ':service.negotiation'
          )
+       )
+       and (
+         p_fact->>'field' <> 'service.negotiation'
+         or (
+           jsonb_extract_path(
+             p_coverage->'snapshot'->'cells', v_coverage_key
+           ) - 'attempts'
+         ) is not distinct from (
+           jsonb_extract_path(
+             v_latest.readback->'snapshot'->'cells', v_coverage_key
+           ) - 'attempts'
+         )
        ) then
       v_alias_readback := v_latest.readback || jsonb_build_object(
         'schema_version', 2,
@@ -2325,6 +2486,7 @@ begin
         p_tenant, p_call, 'onboarding_event_alias', 'accepted', p_event_key,
         v_alias_readback, v_payload_hash,
         jsonb_build_object(
+          'transition_schema', 2,
           'answer_hash', p_answer_hash,
           'provider_tool_call_id', p_provider_tool_call_id,
           'fact', p_fact,

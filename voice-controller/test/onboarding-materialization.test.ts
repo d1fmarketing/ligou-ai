@@ -447,6 +447,31 @@ describe("deterministic onboarding materialization", () => {
     expect(area.structured).not.toHaveProperty("cities");
   });
 
+  test("an unresolved locality can complete coverage only as a nonoperational owner-review area", () => {
+    let snapshot = readySnapshot("fixed");
+    snapshot = apply(snapshot, {
+      field: "area.coverage",
+      disposition: "owner_review_required",
+      value: null,
+      ownerWords: "Berkeley e Miami precisam de revisão.",
+    });
+    const progress = evaluateCoverage(snapshot);
+    expect(progress.readyForReview).toBe(true);
+    const area = materializeCoverage(snapshot, progress).rules.find(
+      (rule) => rule.key === "domain:area",
+    )!;
+    expect(area).toMatchObject({
+      state: "owner_review_required",
+      reviewReady: true,
+      structured: {
+        operational_state: "owner_review_required",
+        materialization_eligible: true,
+        owner_review_fields: ["area.coverage"],
+      },
+    });
+    expect(area.structured).not.toHaveProperty("localities");
+  });
+
   test("a target correction keeps non-negotiable price policy target-bound", () => {
     let snapshot = readySnapshot("fixed");
     snapshot = apply(snapshot, {

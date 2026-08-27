@@ -61,8 +61,30 @@ test("MemoryView shows the effective policy and rejected correction with both ca
       }),
       created_at: "2026-08-25T21:00:00Z",
     },
+    {
+      id: "owner-review-area-v1",
+      rule_group_id: "owner-review-area-group",
+      version: 1,
+      status: "sugerido",
+      origem: "onboarding",
+      category: "area",
+      escopo: "localizacao",
+      text: "Área não operacional; revisão do dono necessária.",
+      evidence_quote: "Talvez Berkeley e Miami; preciso revisar.",
+      structured: areaStructured({
+        materialization_hash: "c".repeat(64),
+        operational_state: "owner_review_required",
+        coverage_revision: 43,
+        fields: {
+          coverage: "Revisão do dono",
+          out_of_area_policy: "Revisão do dono",
+          travel_fee: "Não se aplica",
+        },
+      }),
+      created_at: "2026-08-25T22:00:00Z",
+    },
   ]);
-  assert.equal(entries.length, 1);
+  assert.equal(entries.length, 2);
 
   const vite = await createServer({
     configFile: false,
@@ -93,6 +115,9 @@ test("MemoryView shows the effective policy and rejected correction with both ca
       "Revisão de cobertura da correção: 42",
       "coverage: Orange County",
       "travel_fee: $25",
+      "Evidência do dono",
+      "Talvez Berkeley e Miami; preciso revisar.",
+      "Evidência somente; não concede autoridade operacional.",
     ]) assert.match(html, new RegExp(visible.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     await vite.close();

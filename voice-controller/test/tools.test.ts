@@ -83,21 +83,61 @@ function mockSupabase() {
                         display_name: "Anaheim",
                         country_code: "US",
                         region_code: "CA",
-                        aliases: ["anaheim"],
                       },
                       {
                         locality_id: "loc_9971eda617977d43d7df9fd5",
                         display_name: "Irvine",
                         country_code: "US",
                         region_code: "CA",
-                        aliases: ["irvine"],
                       },
                       {
                         locality_id: "loc_598cce799aeb20c5d2116b74",
                         display_name: "State College",
                         country_code: "US",
                         region_code: "PA",
-                        aliases: ["state college"],
+                      },
+                      {
+                        locality_id: "loc_c0f300f553807cd44f5f7ede",
+                        display_name: "New York",
+                        country_code: "US",
+                        region_code: "NY",
+                      },
+                      {
+                        locality_id: "loc_e939e6896203b54b290f9224",
+                        display_name: "Washington",
+                        country_code: "US",
+                        region_code: "DC",
+                      },
+                      {
+                        locality_id: "loc_06b5af1ac7ab0ac5ffaa565a",
+                        display_name: "Concord",
+                        country_code: "US",
+                        region_code: "CA",
+                      },
+                      {
+                        locality_id: "loc_d89792846ce09bcbb7667a0a",
+                        display_name: "Concord",
+                        country_code: "US",
+                        region_code: "NH",
+                      },
+                    ]
+                : table === "onboarding_locality_aliases"
+                  ? [
+                      {
+                        alias_normalized: "new york city",
+                        locality_id: "loc_c0f300f553807cd44f5f7ede",
+                      },
+                      {
+                        alias_normalized: "nyc",
+                        locality_id: "loc_c0f300f553807cd44f5f7ede",
+                      },
+                      {
+                        alias_normalized: "washington dc",
+                        locality_id: "loc_e939e6896203b54b290f9224",
+                      },
+                      {
+                        alias_normalized: "washington, dc",
+                        locality_id: "loc_e939e6896203b54b290f9224",
                       },
                     ]
                 : table === "receipts" && coverageReceipt
@@ -656,6 +696,41 @@ describe("V2 domain policies", () => {
     }
   });
 
+  test("a self-hashed Berkeley locality absent from the runtime registry shadows area authority fail closed", async () => {
+    activeRules = [
+      ...RULES,
+      domainRule(
+        "v2d",
+        "domain:area",
+        "area",
+        "ligou.rule.area.v2",
+        { localities: [{
+          display_name: "Berkeley",
+          country_code: "US",
+          region_code: "CA",
+          locality_id: "loc_f6c6b198478b384c7149fdba",
+        }] },
+        "Berkeley.",
+      ),
+    ];
+    invalidateTenant(TENANT.slug);
+    const info = await runTool(cap(), "get_business_info", {});
+    expect(info.body.service_area).toBeNull();
+    expect(info.body.service_localities).toBeNull();
+    const quote = await runTool(cap(), "quote_price", {
+      service_type: "drain_cleaning",
+    });
+    const availability = await runTool(cap(), "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "Berkeley",
+      quote_id: quote.body.quote_id,
+    });
+    expect(availability.body).toMatchObject({
+      status: "needs_owner",
+      reason: "area_policy_requires_owner",
+    });
+  });
+
   test("State College remains a legitimate declared city", async () => {
     activeRules = [
       ...RULES,
@@ -719,7 +794,21 @@ describe("V2 domain policies", () => {
       "New York, NY, US",
       "Washington, DC, US",
     ]);
-    expect(info.body.service_localities).toEqual(localities);
+    expect(info.body.service_localities).toEqual([
+      {
+        display_name: "New York",
+        country_code: "US",
+        region_code: "NY",
+        aliases: ["new york city", "nyc"],
+      },
+      {
+        display_name: "Washington",
+        country_code: "US",
+        region_code: "DC",
+        aliases: ["washington dc", "washington, dc"],
+      },
+    ]);
+    expect(JSON.stringify(info.body)).not.toContain("locality_id");
     const schema = toolSchemas.find(
       (candidate) => candidate.name === "check_availability",
     ) as any;
@@ -757,6 +846,12 @@ describe("V2 domain policies", () => {
       quote_id: quote.body.quote_id,
     });
     expect(normalizedAlias.body.status).toBe("ok");
+    const approvedAlias = await runTool(cap(), "check_availability", {
+      service_type: "drain_cleaning",
+      service_city: "NYC",
+      quote_id: quote.body.quote_id,
+    });
+    expect(approvedAlias.body.status).toBe("ok");
     const denied = await runTool(cap(), "check_availability", {
       service_type: "drain_cleaning",
       service_city: "California",
@@ -831,14 +926,35 @@ describe("V2 domain policies", () => {
     expect(ambiguous.body).toMatchObject({
       status: "needs_clarification",
       reason: "locality_ambiguous",
+      candidates: ["Concord, CA, US", "Concord, NH, US"],
+      clarification_question_pt:
+        "Você quer dizer Concord, CA, US ou Concord, NH, US?",
     });
-    const disambiguated = await runTool(cap(), "check_availability", {
-      service_type: "drain_cleaning",
-      service_city: "concord",
-      service_region: " ca ",
-      service_country: " us ",
-      quote_id: quote.body.quote_id,
-    });
+    expect(ambiguous.body.retry_options).toEqual([
+      {
+        service_type: "drain_cleaning",
+        quote_id: quote.body.quote_id,
+        service_city: "Concord",
+        service_region: "CA",
+        service_country: "US",
+      },
+      {
+        service_type: "drain_cleaning",
+        quote_id: quote.body.quote_id,
+        service_city: "Concord",
+        service_region: "NH",
+        service_country: "US",
+      },
+    ]);
+    const selectedRetry = (ambiguous.body.retry_options as Array<
+      Record<string, string>
+    >)[0]!;
+    expect(selectedRetry.quote_id).toBe(quote.body.quote_id);
+    const disambiguated = await runTool(
+      cap(),
+      "check_availability",
+      selectedRetry,
+    );
     expect(disambiguated.body.status).toBe("ok");
   });
 
@@ -1324,6 +1440,20 @@ describe("session-scoped Realtime tools", () => {
 });
 
 describe("instructions builder", () => {
+  test("customer prompt asks locality clarification and retries availability with the selected codes", () => {
+    const instructions = buildInstructions(
+      TENANT as any,
+      RULES as any,
+      "customer",
+    );
+    expect(instructions).toMatch(
+      /needs_clarification[^.]*ask[^.]*active call language/i,
+    );
+    expect(instructions).toMatch(
+      /retry check_availability[^.]*service_region[^.]*service_country/i,
+    );
+  });
+
   test("approved owner-review business, policy, and authority restrictions remain in canonical prompt context", () => {
     const domains = [
       ["business", "negocio", "OWNER REVIEW BUSINESS RESTRICTION"],

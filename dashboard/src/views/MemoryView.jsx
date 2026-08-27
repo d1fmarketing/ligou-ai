@@ -42,6 +42,17 @@ function entryStatus(entry) {
   return entry?.status || 'sugerida';
 }
 
+function OwnerEvidence({ value }) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  return (
+    <aside className="memory-owner-evidence" aria-label="Evidência do dono">
+      <strong>Evidência do dono</strong>
+      <blockquote>{value}</blockquote>
+      <small>Evidência somente; não concede autoridade operacional.</small>
+    </aside>
+  );
+}
+
 function displayDate(value, fallback) {
   const raw = readable(value, fallback);
   return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw.split('-').reverse().join('/') : raw;
@@ -265,6 +276,7 @@ export function MemoryView({
                   </header>
 
                   <p className="memory-rule-text">{entryText(entry)}</p>
+                  <OwnerEvidence value={entry.evidenceQuote} />
 
                   {entry.effectivePolicy && entry.draft ? (
                     <section
@@ -276,6 +288,7 @@ export function MemoryView({
                         <p>{entry.effectivePolicy.text}</p>
                         <p>{`Intenção efetiva: ${readable(entry.effectivePolicy.intent)}`}</p>
                         <p>{`Revisão de cobertura efetiva: ${readable(entry.effectivePolicy.coverageRevision)}`}</p>
+                        <OwnerEvidence value={entry.effectivePolicy.evidenceQuote} />
                         {canonicalFieldRows(entry.effectivePolicy.canonicalFields).length > 0 ? (
                           <ul aria-label="Campos canônicos da política efetiva">
                             {canonicalFieldRows(entry.effectivePolicy.canonicalFields).map(([key, value]) => (
@@ -289,6 +302,7 @@ export function MemoryView({
                         <p>{entry.draft.text}</p>
                         <p>{`Intenção da correção: ${readable(entry.draft.intent)}`}</p>
                         <p>{`Revisão de cobertura da correção: ${readable(entry.draft.coverageRevision)}`}</p>
+                        <OwnerEvidence value={entry.draft.evidenceQuote} />
                         {canonicalFieldRows(entry.draft.canonicalFields).length > 0 ? (
                           <ul aria-label="Campos canônicos da correção">
                             {canonicalFieldRows(entry.draft.canonicalFields).map(([key, value]) => (

@@ -1422,9 +1422,35 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       has_table_privilege('service_role',
         'public.onboarding_locality_registry', 'select')::text || ':' ||
       has_table_privilege('authenticated',
-        'public.onboarding_locality_registry', 'select')::text
+        'public.onboarding_locality_registry', 'select')::text || ':' ||
+      (select count(*) from public.onboarding_locality_aliases)::text || ':' ||
+      has_table_privilege('service_role',
+        'public.onboarding_locality_aliases', 'select')::text || ':' ||
+      has_table_privilege('authenticated',
+        'public.onboarding_locality_aliases', 'select')::text
     from public.onboarding_locality_registry;
-  `), "authoritative locality registry seed and grants"), "13:13:true:false");
+  `), "authoritative locality registry seed and grants"),
+    "14:14:true:false:4:true:false");
+
+  const duplicateAlias = await runSql(connection, home, `
+    insert into public.onboarding_locality_aliases (
+      alias_normalized, locality_id
+    ) values ('nyc', 'loc_e939e6896203b54b290f9224');
+  `);
+  assert.notEqual(duplicateAlias.code, 0);
+  assert.match(duplicateAlias.stderr, /duplicate key|unique/i);
+  for (const [country, region] of [["CA", "ON"], ["US", "XX"]]) {
+    const invalidRegistryScope = await runSql(connection, home, `
+      insert into public.onboarding_locality_registry (
+        locality_id, display_name, country_code, region_code
+      ) values (
+        'loc_${sha256(`${country}:${region}`).slice(0, 24)}',
+        'Invalid Scope', '${country}', '${region}'
+      );
+    `);
+    assert.notEqual(invalidRegistryScope.code, 0);
+    assert.match(invalidRegistryScope.stderr, /check constraint/i);
+  }
 
   const structuredTruth = scalar(await runSql(connection, home, `
     select
@@ -1723,6 +1749,80 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
   assert.match(staleFloorResult.stdout, /"floor": 149/);
   assert.doesNotMatch(staleFloorResult.stdout, /"floor": 100/);
 
+  const negotiationKeyForAlias =
+    "service:drain_cleaning:service.negotiation";
+  const directNegotiationCandidate = structuredClone(
+    normalizedFloorCandidate,
+  );
+  directNegotiationCandidate.snapshot.cells[
+    "service:drain_cleaning:service.price_target"
+  ].attempts = 1;
+  directNegotiationCandidate.snapshot.cells[
+    negotiationKeyForAlias
+  ].attempts = 2;
+  const directNegotiationHash = coverageCellHash(
+    negotiationKeyForAlias,
+    directNegotiationCandidate.snapshot.cells[negotiationKeyForAlias],
+  );
+  directNegotiationCandidate.current_answer_hashes = {
+    ...directNegotiationCandidate.current_answer_hashes,
+    [negotiationKeyForAlias]: directNegotiationHash,
+  };
+  const directNegotiationAliasResult = await runSql(connection, home, `
+    begin;
+    insert into public.receipts (
+      tenant_id, call_id, kind, outcome, external_id, readback,
+      payload_hash, detail
+    ) values (
+      '${tenant}', '${call}', 'onboarding_coverage', 'accepted',
+      '${sha256("round5-stale-direct-negotiation-event")}',
+      ${jsonb({
+        ...staleFloorPrior,
+        rule_id: null,
+        rule_group_id: null,
+        materialization_action: "coverage_only",
+        snapshot_digest: "7".repeat(64),
+      })},
+      '${sha256("round5-stale-direct-negotiation-payload")}',
+      ${jsonb({
+        transition_kind: "answer",
+        answer_hash: directNegotiationHash,
+        coverage_key: negotiationKeyForAlias,
+      })}
+    );
+    set local role service_role;
+    select set_config('request.jwt.claim.role', 'service_role', true);
+    ${onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-normalize-stale-direct-negotiation",
+      answerHash: directNegotiationHash,
+      expectedRevision: 1,
+      fact: {
+        topic: "precos",
+        field: "service.negotiation",
+        subject: "drain_cleaning",
+        disposition: "answered",
+        rule_text: "Não negociável.",
+        structured: { value: "non_negotiable" },
+        owner_words: "O preço não é negociável.",
+      },
+      coverage: directNegotiationCandidate,
+    })}
+    rollback;
+  `);
+  requireSuccess(
+    directNegotiationAliasResult,
+    "same-semantic direct negotiation stale-floor repair",
+  );
+  assert.match(directNegotiationAliasResult.stdout, /"status": "recorded"/);
+  assert.match(directNegotiationAliasResult.stdout, /"floor": 149/);
+  assert.doesNotMatch(
+    directNegotiationAliasResult.stdout,
+    /"floor": 100/,
+  );
+
   const overflowServices = Array.from(
     { length: 20 }, (_unused, index) => `service_${index}`,
   );
@@ -1844,6 +1944,92 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
   assert.match(overflowResult.stdout, /"status": "recorded"/);
   assert.match(overflowResult.stdout, /"service_20"/);
 
+  const repeatedOverflowPriorSnapshot = {
+    ...overflowPriorSnapshot,
+    currentSubject: overflowSubject,
+    catalogOverflow: {
+      services: [overflowSubject],
+      safeRestriction:
+        "Não aceitar, precificar ou agendar serviços além dos vinte primeiros autonomamente; encaminhar o catálogo ao dono.",
+      ownerWords: "Também fazemos o serviço vinte e um.",
+    },
+  };
+  const repeatedOverflowCoverage = structuredClone(overflowCoverage);
+  repeatedOverflowCoverage.snapshot.catalogOverflow = {
+    ...repeatedOverflowPriorSnapshot.catalogOverflow,
+    ownerWords: "Repetindo: também fazemos o serviço vinte e um.",
+  };
+  const repeatedOverflowFact = {
+    ...overflowFact,
+    owner_words: "Repetindo: também fazemos o serviço vinte e um.",
+  };
+  const repeatedOverflowEvent = onboardingEventKey(
+    "onboarding_answer",
+    tenant,
+    call,
+    "v2-repeat-catalog-overflow",
+  );
+  const repeatedOverflowSql = onboardingAnswerSql({
+    tenantId: tenant,
+    callId: call,
+    ownerId: owner,
+    providerToolCallId: "v2-repeat-catalog-overflow",
+    eventKey: repeatedOverflowEvent,
+    answerHash: overflowHash,
+    expectedRevision: 1,
+    fact: repeatedOverflowFact,
+    coverage: repeatedOverflowCoverage,
+  });
+  const repeatedOverflowResult = await runSql(connection, home, `
+    begin;
+    insert into public.receipts (
+      tenant_id, call_id, kind, outcome, external_id, readback,
+      payload_hash, detail
+    ) values (
+      '${tenant}', '${call}', 'onboarding_coverage', 'accepted',
+      '${sha256("round5-repeat-overflow-baseline-event")}',
+      ${jsonb({
+        ...overflowCoverage,
+        revision: 1,
+        snapshot: repeatedOverflowPriorSnapshot,
+        current_answer_hashes: {},
+        snapshot_digest: "5".repeat(64),
+      })},
+      '${sha256("round5-repeat-overflow-baseline-payload")}',
+      ${jsonb({
+        transition_kind: "answer",
+        answer_hash: overflowHash,
+        coverage_key: overflowKey,
+      })}
+    );
+    set local role service_role;
+    select set_config('request.jwt.claim.role', 'service_role', true);
+    ${repeatedOverflowSql}
+    ${repeatedOverflowSql}
+    reset role;
+    select
+      (select count(*) from public.receipts
+        where tenant_id = '${tenant}' and call_id = '${call}'
+          and kind = 'onboarding_coverage')::text || ':' ||
+      (select count(*) from public.receipts
+        where tenant_id = '${tenant}' and call_id = '${call}'
+          and kind = 'onboarding_event_alias')::text;
+    rollback;
+  `);
+  requireSuccess(
+    repeatedOverflowResult,
+    "duplicate catalog overflow current-relative alias",
+  );
+  assert.equal(
+    (repeatedOverflowResult.stdout.match(/"status": "reused"/g) ?? []).length,
+    2,
+  );
+  assert.match(repeatedOverflowResult.stdout, /1:1/);
+  assert.doesNotMatch(
+    repeatedOverflowResult.stdout,
+    /"services": \["service_20", "service_20"\]/,
+  );
+
   // Rich projection tests start from an explicit durable V2 baseline. Every
   // RPC below must now prove a single-cell revision 1 -> 2 transition.
   const baselineCoverage = v2CoverageSnapshot({
@@ -1880,6 +2066,116 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
       })}
     );
   `), "durable rich V2 projection baseline");
+
+  const unrelatedDurationFact = {
+    topic: "servicos",
+    field: "service.duration",
+    subject: "drain_cleaning",
+    disposition: "answered",
+    rule_text: "Duração sessenta minutos.",
+    structured: { value: 60 },
+    owner_words: "Continua levando sessenta minutos.",
+  };
+  const unrelatedFloorTamper = v2CoverageSnapshot({
+    tenantId: tenant, callId: call, revision: 2, target: 149,
+    answerHash: hashA, hashCharacter: "0",
+  });
+  unrelatedFloorTamper.snapshot.cells[priceTargetKey].attempts = 1;
+  unrelatedFloorTamper.snapshot.cells[
+    "service:drain_cleaning:service.duration"
+  ].attempts = 2;
+  unrelatedFloorTamper.snapshot.cells[
+    "service:drain_cleaning:service.negotiation"
+  ].value.floor = 1;
+  unrelatedFloorTamper.materializations = [JSON.parse(scalar(
+    await runSql(connection, home, `
+      select public.onboarding_materialization_v3(
+        ${jsonb(unrelatedFloorTamper.snapshot)},
+        'service:drain_cleaning', 2, '${call}'
+      )::text;
+    `), "unrelated floor tamper canonical materialization",
+  ))];
+  const unrelatedDurationHash = coverageCellHash(
+    "service:drain_cleaning:service.duration",
+    unrelatedFloorTamper.snapshot.cells[
+      "service:drain_cleaning:service.duration"
+    ],
+  );
+  const unrelatedFloorResult = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-unrelated-floor-tamper",
+      answerHash: unrelatedDurationHash,
+      expectedRevision: 1,
+      fact: unrelatedDurationFact,
+      coverage: unrelatedFloorTamper,
+    })),
+  );
+  assert.notEqual(unrelatedFloorResult.code, 0);
+  assert.match(
+    unrelatedFloorResult.stderr,
+    /onboarding_snapshot_transition_invalid/,
+  );
+
+  const unknownAreaFact = {
+    topic: "area",
+    field: "area.coverage",
+    disposition: "answered",
+    rule_text: "Berkeley e Miami como evidência para revisão.",
+    structured: { value: { localities: [
+      { display_name: "Berkeley", country_code: "US", region_code: "CA" },
+      { display_name: "Miami", country_code: "US", region_code: "FL" },
+    ] } },
+    owner_words: "Talvez Berkeley e Miami; preciso revisar.",
+  };
+  const unknownAreaCoverage = v2CoverageSnapshot({
+    tenantId: tenant, callId: call, revision: 2, target: 149,
+    answerHash: hashA, hashCharacter: "1",
+  });
+  unknownAreaCoverage.snapshot.cells[priceTargetKey].attempts = 1;
+  unknownAreaCoverage.snapshot.cells["area.coverage"] = {
+    state: "owner_review_required",
+    attempts: 1,
+    safeRestriction:
+      "Não executar nem confirmar área atendida autonomamente; encaminhar a decisão ao dono.",
+  };
+  unknownAreaCoverage.materializations = [JSON.parse(scalar(
+    await runSql(connection, home, `
+      select public.onboarding_materialization_v3(
+        ${jsonb(unknownAreaCoverage.snapshot)},
+        'domain:area', 2, '${call}'
+      )::text;
+    `), "unknown area owner-review canonical materialization",
+  ))];
+  const unknownAreaHash = coverageCellHash(
+    "area.coverage",
+    unknownAreaCoverage.snapshot.cells["area.coverage"],
+  );
+  unknownAreaCoverage.current_answer_hashes = {
+    "area.coverage": unknownAreaHash,
+  };
+  const unknownAreaResult = await runSql(
+    connection,
+    home,
+    serviceRollback(onboardingAnswerSql({
+      tenantId: tenant,
+      callId: call,
+      ownerId: owner,
+      providerToolCallId: "v2-unknown-area-owner-review",
+      answerHash: unknownAreaHash,
+      expectedRevision: 1,
+      fact: unknownAreaFact,
+      coverage: unknownAreaCoverage,
+    })),
+  );
+  requireSuccess(unknownAreaResult, "unknown area owner-review persistence");
+  assert.match(unknownAreaResult.stdout, /"status": "recorded"/);
+  assert.match(unknownAreaResult.stdout, /"owner_review_required"/);
+  assert.doesNotMatch(unknownAreaResult.stdout, /locality_id/);
 
   const negotiationKey = "service:drain_cleaning:service.negotiation";
   const directNonNegotiableFact = {

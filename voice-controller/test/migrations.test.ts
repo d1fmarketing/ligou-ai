@@ -1058,8 +1058,11 @@ describe("onboarding V2 reconciliation migration contract", () => {
   test("owns locality membership and one-fact snapshot transitions inside the database boundary", () => {
     const sql = migrationSql("onboarding_v2_reconciliation");
     expect(sql).toContain("create table public.onboarding_locality_registry");
+    expect(sql).toContain("create table public.onboarding_locality_aliases");
     expect(sql).toContain("locality_id text primary key");
-    expect(sql).toContain("aliases text[]");
+    expect(sql).toContain("alias_normalized text primary key");
+    expect(sql).toContain("check (country_code = 'US')");
+    expect(sql).toContain("check (region_code in (");
     expect(sql).toContain(
       "alter table public.onboarding_locality_registry enable row level security",
     );
@@ -1068,6 +1071,9 @@ describe("onboarding V2 reconciliation migration contract", () => {
     );
     expect(sql).toContain(
       "grant select on table public.onboarding_locality_registry to service_role",
+    );
+    expect(sql).toContain(
+      "grant select on table public.onboarding_locality_aliases to service_role",
     );
     expect(sql).toContain(
       "create or replace function public.onboarding_resolve_locality_v1",

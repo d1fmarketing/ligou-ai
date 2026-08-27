@@ -994,6 +994,17 @@ describe("onboarding coverage", () => {
       applicationOwned: true,
     });
     expect(evaluateCoverage(snapshot).catalogNormallyComplete).toBe(false);
+    const beforeRepeatRevision = snapshot.revision;
+    snapshot = applyCoverageFact(
+      snapshot,
+      answer(
+        "service.name_synonyms",
+        ["serviço 20"],
+        "serviço 20",
+      ),
+    );
+    expect(snapshot.revision).toBe(beforeRepeatRevision + 1);
+    expect(snapshot.catalogOverflow?.services).toEqual(["servico_20"]);
   });
 
   test("rejects non-text noise for every schedule, safety, policy, and authority field", () => {

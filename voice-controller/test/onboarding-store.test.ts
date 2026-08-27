@@ -94,16 +94,18 @@ class SupabaseBoundaryFake {
       display_name: "Anaheim",
       country_code: "US",
       region_code: "CA",
-      aliases: ["anaheim"],
     },
     {
       locality_id: "loc_9971eda617977d43d7df9fd5",
       display_name: "Irvine",
       country_code: "US",
       region_code: "CA",
-      aliases: ["irvine"],
     },
   ];
+  localityAliasRows: Array<{
+    alias_normalized: string;
+    locality_id: string;
+  }> = [];
 
   client() {
     const boundary = this;
@@ -170,10 +172,17 @@ class SupabaseBoundaryFake {
             }
             if (table === "onboarding_locality_registry") {
               expect(selected).toBe(
-                "locality_id,display_name,country_code,region_code,aliases",
+                "locality_id,display_name,country_code,region_code",
               );
               return Promise.resolve({
                 data: boundary.localityRows,
+                error: null,
+              }).then(resolve);
+            }
+            if (table === "onboarding_locality_aliases") {
+              expect(selected).toBe("alias_normalized,locality_id");
+              return Promise.resolve({
+                data: boundary.localityAliasRows,
                 error: null,
               }).then(resolve);
             }
@@ -604,7 +613,7 @@ describe("recordOnboardingAnswer", () => {
     );
   });
 
-  test("keeps an unknown locality tuple ambiguous instead of minting operational locality authority", async () => {
+  test("normalizes unknown Berkeley and Miami locality intake to one safe owner-review cell", async () => {
     const fake = new SupabaseBoundaryFake();
     fake.rpcResult = {
       data: {
@@ -632,13 +641,19 @@ describe("recordOnboardingAnswer", () => {
       "provider-unknown-locality",
       {
         ...AREA_FACT,
-        structured: { value: { localities: [{
-          display_name: "All of California",
-          country_code: "US",
-          region_code: "CA",
-          locality_id: "loc_152270f3d478268fe520252b",
-        }] } },
-        owner_words: "Atendemos toda a Califórnia.",
+        structured: { value: { localities: [
+          {
+            display_name: "Berkeley",
+            country_code: "US",
+            region_code: "CA",
+          },
+          {
+            display_name: "Miami",
+            country_code: "US",
+            region_code: "FL",
+          },
+        ] } },
+        owner_words: "Talvez Berkeley e Miami; preciso revisar.",
       },
     );
     expect(result.ok).toBe(true);
@@ -648,7 +663,9 @@ describe("recordOnboardingAnswer", () => {
     expect(answerCall).toBeDefined();
     const projection = answerCall!.args.p_coverage as any;
     expect(projection.snapshot.cells["area.coverage"]).toMatchObject({
-      state: "ambiguous",
+      state: "owner_review_required",
+      safeRestriction:
+        "Não executar nem confirmar área atendida autonomamente; encaminhar a decisão ao dono.",
     });
     expect(projection.materializations).toContainEqual(
       expect.objectContaining({
@@ -659,6 +676,76 @@ describe("recordOnboardingAnswer", () => {
         }),
       }),
     );
+  });
+
+  test("resolves NYC and new york city aliases to the authoritative New York locality", async () => {
+    for (const alias of ["NYC", " new   york city "]) {
+      const fake = new SupabaseBoundaryFake();
+      fake.localityRows = [{
+        locality_id: "loc_c0f300f553807cd44f5f7ede",
+        display_name: "New York",
+        country_code: "US",
+        region_code: "NY",
+      }];
+      fake.localityAliasRows = [
+        {
+          alias_normalized: "new york city",
+          locality_id: "loc_c0f300f553807cd44f5f7ede",
+        },
+        {
+          alias_normalized: "nyc",
+          locality_id: "loc_c0f300f553807cd44f5f7ede",
+        },
+      ];
+      fake.rpcResult = {
+        data: {
+          status: "recorded",
+          rule_id: null,
+          rule_group_id: null,
+          coverage_receipt_id: `receipt-${alias.trim()}`,
+          revision: 1,
+          snapshot_digest: "c".repeat(64),
+          complete: false,
+          missing: [],
+          ambiguous: [],
+          next_action: { type: "ask", field: "service.catalog_closure" },
+          coverage: {},
+        },
+        error: null,
+      };
+      const store = createOnboardingStore({
+        client: fake.client() as any,
+        now: () => 11,
+        timeoutMs: 100,
+      });
+      const result = await store.recordOnboardingAnswer(
+        ownerCapability(),
+        `provider-${alias.trim().replaceAll(" ", "-")}`,
+        {
+          ...AREA_FACT,
+          structured: { value: { localities: [{
+            display_name: alias,
+            country_code: "us",
+            region_code: "ny",
+          }] } },
+          owner_words: `Atendemos ${alias}.`,
+        },
+      );
+      expect(result.ok).toBe(true);
+      const answerCall = fake.rpcCalls.find(
+        (call) => call.name === "record_onboarding_answer",
+      )!;
+      expect((answerCall.args.p_coverage as any).snapshot.cells["area.coverage"])
+        .toMatchObject({
+          state: "answered",
+          value: { localities: [{
+            display_name: "New York",
+            country_code: "US",
+            region_code: "NY",
+            locality_id: "loc_c0f300f553807cd44f5f7ede",
+          }] },
+        });
+    }
   });
 
   test("removes the affected composite from selected IDs without accepting caller-authored group authority", async () => {
@@ -904,6 +991,80 @@ describe("recordOnboardingAnswer", () => {
       [negotiationKey]:
         "ed986f002ebf3a0816afaa88b903ff626aa746717ebc07751ef6ac9aa5516041",
     });
+
+    const staleDirect = new SupabaseBoundaryFake();
+    staleDirect.receiptRows = [receipt({
+      schema_version: 2,
+      revision: 4,
+      complete: false,
+      snapshot: {
+        ...emptySnapshot(4),
+        services: [subject],
+        cells: {
+          ...baseCells,
+          [targetKey]: {
+            state: "answered",
+            attempts: 2,
+            value: 149,
+          },
+          [negotiationKey]: {
+            state: "answered",
+            attempts: 1,
+            value: { mode: "non_negotiable", floor: 100 },
+          },
+        },
+      },
+      selected_rule_ids: [],
+      current_answer_hashes: {
+        [targetKey]:
+          "9a85c1c3d621252a32fe1fa5a10d938af2593cb8ddb806eced4adf44b03c8b7a",
+        [negotiationKey]:
+          "ed986f002ebf3a0816afaa88b903ff626aa746717ebc07751ef6ac9aa5516041",
+      },
+      materializations: [],
+      summary_projection: null,
+      summary_hash: null,
+      snapshot_digest: "4".repeat(64),
+    })];
+    staleDirect.rpcResult = {
+      data: {
+        status: "recorded",
+        coverage_receipt_id: "direct-floor-repair",
+        revision: 5,
+        snapshot_digest: "5".repeat(64),
+        complete: false,
+        missing: [],
+        ambiguous: [],
+        coverage: {},
+      },
+      error: null,
+    };
+    const staleDirectStore = createOnboardingStore({
+      client: staleDirect.client() as any,
+      now: () => 20,
+      timeoutMs: 100,
+    });
+    expect(await staleDirectStore.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-direct-nonneg-repair",
+      {
+        topic: "precos",
+        field: "service.negotiation",
+        subject,
+        disposition: "answered",
+        rule_text: "Preço não negociável.",
+        structured: { value: "non_negotiable" },
+        owner_words: "O preço não é negociável.",
+      },
+    )).toMatchObject({ ok: true, status: "recorded", revision: 5 });
+    const directCoverage = staleDirect.rpcCalls[0]!.args.p_coverage as any;
+    expect(directCoverage.snapshot.cells[negotiationKey]).toMatchObject({
+      attempts: 2,
+      value: { mode: "non_negotiable", floor: 149 },
+    });
+    expect(directCoverage.current_answer_hashes[negotiationKey]).toBe(
+      "ed986f002ebf3a0816afaa88b903ff626aa746717ebc07751ef6ac9aa5516041",
+    );
   });
 
   test("rebases the first V2 answer after a V1 receipt without retaining raw facts or selected rule IDs", async () => {

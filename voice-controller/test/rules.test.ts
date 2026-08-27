@@ -45,6 +45,7 @@ function rulesClient() {
       const api: any = {
         select() { return api; },
         eq() { return api; },
+        order() { return api; },
         single: async () => ({ data: { ...BASE_TENANT, policy_epoch: policyEpoch }, error: null }),
         then(resolve: (value: unknown) => unknown) {
           return Promise.resolve({ data: table === "effective_rules" ? effectiveRules : [], error: null }).then(resolve);
@@ -422,6 +423,36 @@ describe("V2 domain policy projection", () => {
     text: "Legacy Irvine.",
     structured: { cities: ["Irvine"] },
   };
+
+  test("a self-hashed V2 locality without runtime registry membership shadows legacy but is not operational", () => {
+    const unverified: Rule = {
+      id: "unverified-area",
+      rule_group_id: "unverified-area-group",
+      version: 1,
+      category: "area",
+      escopo: "localizacao",
+      text: "Berkeley.",
+      structured: {
+        schema: "ligou.rule.area.v2",
+        materialization_key: "domain:area",
+        materialization_hash: "a".repeat(64),
+        materialization_eligible: true,
+        review_ready: true,
+        operational_state: "active",
+        localities: [{
+          display_name: "Berkeley",
+          country_code: "US",
+          region_code: "CA",
+          locality_id: "loc_f6c6b198478b384c7149fdba",
+        }],
+      },
+    };
+    expect(ruleByMaterializationKey(
+      [legacyArea, unverified],
+      "domain:area",
+      "area",
+    )).toBeUndefined();
+  });
 
   test("schema-only or key-only malformed V2 domains shadow legacy", () => {
     const base: Rule = {

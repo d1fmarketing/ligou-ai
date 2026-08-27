@@ -723,10 +723,13 @@ function applyOne(
   const services = [...snapshot.services];
   if (subject && !services.includes(subject)) {
     if (services.length >= 20) {
+      const overflowServices = snapshot.catalogOverflow?.services ?? [];
       return {
         ...snapshot,
         catalogOverflow: {
-          services: [...(snapshot.catalogOverflow?.services ?? []), subject],
+          services: overflowServices.includes(subject)
+            ? [...overflowServices]
+            : [...overflowServices, subject],
           safeRestriction: catalogOverflowRestriction,
           ownerWords: fact.ownerWords,
         },

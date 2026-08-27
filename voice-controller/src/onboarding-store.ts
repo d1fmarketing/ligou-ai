@@ -850,11 +850,21 @@ export function createOnboardingStore(
 
   const localityRegistry = async (
     signal: AbortSignal,
-  ): Promise<BoundaryResult<LocalityRegistryEntry[]>> =>
-    await abortable<BoundaryResult<LocalityRegistryEntry[]>>(client
+  ): Promise<BoundaryResult<Array<Omit<LocalityRegistryEntry, "aliases">>>> =>
+    await abortable<BoundaryResult<Array<Omit<LocalityRegistryEntry, "aliases">>>>(client
       .from("onboarding_locality_registry")
-      .select("locality_id,display_name,country_code,region_code,aliases")
+      .select("locality_id,display_name,country_code,region_code")
       .order("locality_id", { ascending: true }), signal);
+
+  const localityAliases = async (
+    signal: AbortSignal,
+  ): Promise<BoundaryResult<Array<{
+    alias_normalized: string;
+    locality_id: string;
+  }>>> => await abortable(client
+    .from("onboarding_locality_aliases")
+    .select("alias_normalized,locality_id")
+    .order("alias_normalized", { ascending: true }), signal);
 
   const selectedRulesForReceipt = async (
     cap: Capability,
@@ -1244,33 +1254,59 @@ export function createOnboardingStore(
         persistedFact.disposition as CoverageDisposition,
         persistedFact.structured as Record<string, unknown> | undefined,
       );
+      let coverageDisposition =
+        persistedFact.disposition as CoverageDisposition;
       if (
         persistedFact.field === "area.coverage" &&
         persistedFact.disposition === "answered"
       ) {
         const registryResult = await bounded(localityRegistry);
-        if (registryResult.error || !Array.isArray(registryResult.data))
+        const aliasesResult = await bounded(localityAliases);
+        if (
+          registryResult.error || aliasesResult.error ||
+          !Array.isArray(registryResult.data) ||
+          !Array.isArray(aliasesResult.data)
+        )
           return failure(
-            registryResult.error && ambiguousBoundaryFailure(registryResult.error)
+            [registryResult.error, aliasesResult.error].some(
+              (error) => error && ambiguousBoundaryFailure(error),
+            )
               ? "indeterminate"
               : "query_error",
-            registryResult.error && ambiguousBoundaryFailure(registryResult.error)
+            [registryResult.error, aliasesResult.error].some(
+              (error) => error && ambiguousBoundaryFailure(error),
+            )
               ? "onboarding answer persistence is indeterminate"
               : "locality registry query failed",
             now,
             started,
           );
-        factValue = resolveLocalityValueFromRegistry(
+        const aliasesByLocality = new Map<string, string[]>();
+        for (const alias of aliasesResult.data) {
+          const current = aliasesByLocality.get(alias.locality_id) ?? [];
+          current.push(alias.alias_normalized);
+          aliasesByLocality.set(alias.locality_id, current);
+        }
+        const registry = registryResult.data.map((entry) => ({
+          ...entry,
+          aliases: aliasesByLocality.get(entry.locality_id) ?? [],
+        }));
+        const resolved = resolveLocalityValueFromRegistry(
           factValue,
-          registryResult.data,
+          registry,
         );
+        if (resolved) factValue = resolved;
+        else {
+          factValue = null;
+          coverageDisposition = "owner_review_required";
+        }
       }
       const coverageFact: CoverageFact = {
         field: persistedFact.field as CoverageField,
         ...(persistedFact.subject
           ? { subject: String(persistedFact.subject) }
           : {}),
-        disposition: persistedFact.disposition as CoverageDisposition,
+        disposition: coverageDisposition,
         value: factValue,
         ruleText: String(persistedFact.rule_text),
         ownerWords: String(persistedFact.owner_words),
