@@ -9,6 +9,11 @@ import { makeCapability, toolSchemas } from "./tools.ts";
 import { attachSideband, liveSessions } from "./sideband.ts";
 import { requireTenantOwner } from "../../supabase/functions/_shared/tenant-ownership.ts";
 import { finalizeTerminalBudget, reserveCallBudget } from "./budget.ts";
+import {
+  assertSessionTypeAccepted,
+  ONBOARDING_ACCEPTANCE,
+  ROLLBACK_BRIDGE_BASE,
+} from "../../supabase/functions/_shared/session-acceptance.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -27,6 +32,7 @@ async function verifyOwner(authHeader: string | null): Promise<{ userId: string 
 }
 
 export async function startSession(userId: string, sessionType: SessionType, sdpOffer: string, modelOverride?: string, tenantId?: string) {
+  assertSessionTypeAccepted(sessionType);
   const { tenant, rules } = await resolveSessionTenant(userId, tenantId);
 
   const ALLOWED_MODELS = new Set(["gpt-realtime", "gpt-realtime-2.1", "gpt-realtime-2.1-mini"]);
@@ -180,6 +186,17 @@ export async function startSession(userId: string, sessionType: SessionType, sdp
   return { sdp: answerSdp, call_id: call.id, max_minutes: maxMinutes, model: usedModel, fell_back: usedModel !== primary };
 }
 
+export function controllerHealthPayload() {
+  return {
+    ok: true,
+    live_sessions: liveSessions.size,
+    model: config.model,
+    openai: Boolean(config.openaiKey),
+    onboarding_acceptance: ONBOARDING_ACCEPTANCE,
+    rollback_bridge_base: ROLLBACK_BRIDGE_BASE,
+  };
+}
+
 if (import.meta.main) {
   const { startWorkerLoop } = await import("./worker.ts");
   startWorkerLoop();
@@ -195,7 +212,7 @@ if (import.meta.main) {
       if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
 
       if (url.pathname === "/health") {
-        return Response.json({ ok: true, live_sessions: liveSessions.size, model: config.model, openai: Boolean(config.openaiKey) }, { headers: CORS });
+        return Response.json(controllerHealthPayload(), { headers: CORS });
       }
 
       // Compatibility endpoint: verifies the explicit binding. Provisioning is an operator-only SQL RPC.

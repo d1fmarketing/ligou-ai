@@ -7,6 +7,7 @@
 // Secrets: SERVICE_KEY=sb_secret_...  (SUPABASE_URL is injected by the platform)
 import { createClient } from "@supabase/supabase-js";
 import { resolveOwnedTenantForSession } from "../_shared/owned-tenant.ts";
+import { assertSessionTypeAccepted } from "../_shared/session-acceptance.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -32,6 +33,11 @@ Deno.serve(async (req) => {
 
   const body = await req.json().catch(() => ({}));
   if (!body.sdp) return Response.json({ error: "sdp_required" }, { status: 400, headers: CORS });
+  try {
+    assertSessionTypeAccepted(body.session_type ?? "owner_browser");
+  } catch (error: any) {
+    return Response.json({ error: error?.message ?? "session_type_rejected" }, { status: error?.status ?? 503, headers: CORS });
+  }
 
   // 2) read-only ownership resolution: the caller's OWN self-service tenant first,
   // the legacy env-slug tenant as fallback. Owner assignment still belongs solely

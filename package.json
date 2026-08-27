@@ -17,6 +17,7 @@
     "db:gate:local": "node scripts/local-db-gate.mjs"
   },
   "devDependencies": {
+    "@supabase/supabase-js": "2.112.3",
     "supabase": "2.115.0"
   }
 }

@@ -4,6 +4,7 @@ import { describe, expect, test, beforeEach } from "bun:test";
 import { _setClient, invalidateTenant } from "../src/rules.ts";
 import { resolveSessionTenant } from "../src/session-tenant.ts";
 import { _handleBrowserRequest } from "../src/browser-requests.ts";
+import { startSession } from "../src/server.ts";
 import { resolveOwnedTenantForSession } from "../../supabase/functions/_shared/owned-tenant.ts";
 
 const V02_TENANT = {
@@ -87,14 +88,51 @@ describe("browser request handling", () => {
     };
     _setClient(rowClient as any);
     await _handleBrowserRequest(
-      { id: "req-1", user_id: "owner-a", tenant_id: V02_TENANT.id, session_type: "onboarding", offer_sdp: "sdp", model_override: null },
+      { id: "req-1", user_id: "owner-a", tenant_id: V02_TENANT.id, session_type: "owner_browser", offer_sdp: "sdp", model_override: null },
       async (userId: string, sessionType: string, sdp: string, model?: string, tenantId?: string) => {
         seen.push({ userId, sessionType, sdp, model, tenantId });
         return { sdp: "answer", call_id: "call-1" };
       },
     );
-    expect(seen).toEqual([{ userId: "owner-a", sessionType: "onboarding", sdp: "sdp", model: undefined, tenantId: V02_TENANT.id }]);
+    expect(seen).toEqual([{ userId: "owner-a", sessionType: "owner_browser", sdp: "sdp", model: undefined, tenantId: V02_TENANT.id }]);
     expect(updates.some((u) => u.patch?.status === "ready")).toBe(true);
+  });
+
+  test("a pre-bridge pending onboarding row ends in error without becoming a ready call", async () => {
+    const updates: any[] = [];
+    const tables: string[] = [];
+    const rowClient = {
+      from(table: string) {
+        tables.push(table);
+        const api: any = {
+          update(patch: any) { updates.push({ table, patch }); return api; },
+          eq() { return api; },
+          select: async () => ({ data: [{ id: "req-old-onboarding" }], error: null }),
+        };
+        return api;
+      },
+    };
+    _setClient(rowClient as any);
+
+    await _handleBrowserRequest(
+      {
+        id: "req-old-onboarding",
+        user_id: "owner-a",
+        tenant_id: V02_TENANT.id,
+        session_type: "onboarding",
+        offer_sdp: "old-sdp",
+        model_override: null,
+      },
+      startSession,
+    );
+
+    expect(tables).toEqual(["browser_session_requests", "browser_session_requests"]);
+    expect(updates.map((entry) => entry.patch?.status)).toEqual(["processing", "error"]);
+    expect(updates.at(-1)?.patch).toEqual({
+      status: "error",
+      error: "onboarding_disabled_rollback_bridge",
+    });
+    expect(updates.some((entry) => entry.patch?.status === "ready" || entry.patch?.call_id)).toBe(false);
   });
 });
 
