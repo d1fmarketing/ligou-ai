@@ -102,6 +102,7 @@ export interface OnboardingAdapterState {
   responses: Record<string, BufferedOnboardingResponse>;
   terminalResponseBatchHashes: Record<string, string | null>;
   activeCallerTurnId?: string;
+  transcribedCallerTurnIds: string[];
   callerTurnSequence: number;
   interrupted: boolean;
   pendingHangupIntentKey?: string;
@@ -117,6 +118,7 @@ export interface OnboardingAdapterState {
 }
 
 const MAX_ADAPTER_RESPONSES = 512;
+const MAX_TRANSCRIBED_CALLER_TURNS = 512;
 const MAX_TERMINAL_RESPONSE_IDENTITIES = 1024;
 const MAX_PENDING_RESPONSE_COMMANDS = 512;
 const MAX_PENDING_MUTATION_COMMANDS = 512;
@@ -207,6 +209,7 @@ function createOnboardingAdapter(
     queue: Promise.resolve(),
     responses: {},
     terminalResponseBatchHashes: {},
+    transcribedCallerTurnIds: [],
     callerTurnSequence: 0,
     interrupted: false,
     pendingResponseCommands: {},
@@ -1257,7 +1260,8 @@ async function handleOnboardingRawEvent(
       if (!intentKey && adapter.speechPending && !adapter.speechResponseId)
         adapter.speechResponseId = responseId;
       const callerTurnId = !intentKey && adapter.speechPending
-        ? adapter.activeCallerTurnId
+        ? adapter.transcribedCallerTurnIds.shift() ??
+          adapter.activeCallerTurnId
         : undefined;
       if (callerTurnId) {
         let buffered = adapter.responses[responseId];
@@ -1600,6 +1604,28 @@ async function handleOnboardingRawEvent(
         transcript,
         elapsedMs: 0,
       });
+      const alreadyBound = Object.values(adapter.responses).some(
+        (response) => response.callerTurnId === turnId,
+      );
+      if (
+        !alreadyBound &&
+        !adapter.transcribedCallerTurnIds.includes(turnId)
+      ) {
+        if (
+          adapter.transcribedCallerTurnIds.length >=
+            MAX_TRANSCRIBED_CALLER_TURNS
+        ) {
+          await dispatchOnboardingEvent(context, {
+            type: "adapter.invariant_failed",
+            code: "adapter_capacity_exceeded",
+            safeDetail:
+              "transcribed caller turn registry reached its deterministic bound",
+            elapsedMs: 0,
+          });
+          break;
+        }
+        adapter.transcribedCallerTurnIds.push(turnId);
+      }
       if (adapter.activeCallerTurnId === turnId)
         delete adapter.activeCallerTurnId;
       break;

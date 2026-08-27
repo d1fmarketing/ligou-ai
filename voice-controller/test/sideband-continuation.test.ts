@@ -2342,6 +2342,68 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
     expect(l.onboarding!.lifecycle.phase).toBe("approval_persisting");
   });
 
+  test("caller transcription before the VAD response keeps the same approval turn authority", async () => {
+    const cap = onboardingCap("call-approval-transcript-first");
+    const snapshot = completeCoverage(cap, 1);
+    const digest = "9".repeat(64);
+    const receipt = coverageReceipt(
+      cap,
+      snapshot,
+      digest,
+      "rule-approval-transcript-first",
+    );
+    const boundary = snapshotBoundary(receipt, { approvalSuccess: true });
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "session.created" });
+    seedAwaitingApproval(l, receipt.id, 1, digest, false);
+
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-approval-transcript-first",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-approval-transcript-first",
+      transcript: "Aprovado.",
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("resp-approval-transcript-first"),
+    );
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-approval-transcript-first",
+      "fc-approval-transcript-first",
+      "approve_onboarding_summary",
+      JSON.stringify({ owner_words: "Aprovado" }),
+      0,
+    ));
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("resp-approval-transcript-first"),
+    );
+
+    const approvalRpc = boundary.calls.rpcArgs.find((call) =>
+      call.name === "record_onboarding_voice_approval"
+    );
+    expect(approvalRpc?.args?.p_owner_words).toBe("Aprovado.");
+    expect(boundary.calls.rpc.filter((name) =>
+      name === "record_onboarding_voice_approval"
+    )).toHaveLength(1);
+    expect(functionOutputs(ws)).toHaveLength(1);
+    expect(l.onboarding!.lifecycle.toolOutbox["fc-approval-transcript-first"])
+      .toMatchObject({
+        state: "output_pending",
+        approvalTurnId: "turn-approval-transcript-first",
+      });
+    expect(l.onboarding!.lifecycle.phase).toBe("approval_persisting");
+  });
+
   test("an indeterminate approval reconciles once on the same socket and emits one output", async () => {
     const cap = onboardingCap("call-approval-indeterminate-same-socket");
     const snapshot = completeCoverage(cap, 1);
