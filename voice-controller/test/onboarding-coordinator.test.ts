@@ -710,6 +710,7 @@ describe("onboarding lifecycle forbidden transitions", () => {
       ["summary", "summary:digest-sent", "summary_speaking"],
       ["final_signoff", "final-signoff:approval-sent", "final_signoff_speaking"],
       ["tool_continuation", "tool-batch:response-sent:batch-sent", "collecting"],
+      ["recovery", "recovery:owner_turn_completed_without_tool:sent", "follow_up"],
     ] as const) {
       let lifecycle = createOnboardingLifecycle(callId, businessName);
       ({ lifecycle } = step(lifecycle, {
@@ -3003,7 +3004,7 @@ test("response coordinator sends keyed metadata and retries an unsent key withou
   ).toBe(true);
 });
 
-test("a failed admitted tool execution blocks inside the reducer with sanitized identity", () => {
+test("a failed admitted tool execution queues one truthful recovery with sanitized identity", () => {
   let lifecycle = startCollecting();
   ({ lifecycle } = step(lifecycle, {
     type: "tool.called",
@@ -3030,16 +3031,214 @@ test("a failed admitted tool execution blocks inside the reducer with sanitized 
     elapsedMs: 9,
   } as OnboardingEvent);
 
-  expect(failed.lifecycle.phase).toBe("blocked");
-  expect(failed.lifecycle.toolOutbox["tool-failed-1"]?.state).toBe("running");
-  expect(failed.commands).toContainEqual({
-    type: "block",
+  expect(failed.lifecycle.phase).toBe("collecting");
+  expect(failed.lifecycle.toolOutbox["tool-failed-1"]?.state).toBe("executed");
+  expect(failed.commands).toContainEqual(expect.objectContaining({
+    type: "telemetry",
+    name: "invariant.violation",
+    outcome: "query_error",
+    toolCallId: "tool-failed-1",
+  }));
+  expect(failed.commands).toContainEqual(expect.objectContaining({
+    type: "resend_output",
+    toolCallId: "tool-failed-1",
+  }));
+  expect(failed.commands.some((command) => command.type === "request_response"))
+    .toBe(false);
+  expect(failed.commands.some((command) => command.type === "block")).toBe(false);
+  expect(JSON.stringify(failed.commands)).not.toContain("Atendemos Irvine");
+
+  const sent = step(
+    failed.lifecycle,
+    outputSentEvent(failed.lifecycle, "tool-failed-1", 1, 10),
+  );
+  const closed = step(sent.lifecycle, {
+    type: "tool.batch_closed",
+    providerResponseId: "response-failed-1",
+    batchHash: "batch-failed-1",
+    toolCallIds: ["tool-failed-1"],
+    elapsedMs: 11,
+  });
+  const terminal = step(closed.lifecycle, {
+    type: "response.done",
+    responseId: "response-failed-1",
+    socketGeneration: 1,
+    elapsedMs: 12,
+  });
+  const acked = step(terminal.lifecycle, {
+    type: "tool.output_acked",
+    toolCallId: "tool-failed-1",
+    outputItemId: "tool-output:tool-failed-1",
+    socketGeneration: 1,
+    elapsedMs: 13,
+  });
+  expect(acked.lifecycle.phase).toBe("follow_up");
+  expect(acked.commands).toContainEqual(expect.objectContaining({
+    type: "request_response",
+    purpose: "recovery",
+    intentKey: "recovery:tool_persistence_failed:tool-failed-1",
+  }));
+});
+
+test("failed persistence waits for every sibling output acknowledgement before recovery", () => {
+  let lifecycle = startCollecting();
+  for (const [index, toolCallId] of ["tool-failed-sibling", "tool-ok-sibling"].entries())
+    ({ lifecycle } = step(lifecycle, {
+      type: "tool.called",
+      socketGeneration: 1,
+      toolCallId,
+      name: "record_interview_answer",
+      args: {
+        topic: "servicos",
+        field: "service.name_synonyms",
+        subject: index === 0 ? "desentupimento" : "diagnostico_hidraulico",
+        disposition: "answered",
+        rule_text: "Serviço informado.",
+        structured: { value: [index === 0 ? "desentupimento" : "diagnóstico hidráulico"] },
+        owner_words: "Desentupimento e diagnóstico hidráulico.",
+      },
+      providerResponseId: "response-sibling-failure",
+      batchHash: "batch-sibling-failure",
+      elapsedMs: index + 1,
+    }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "tool.execution_failed",
+    toolCallId: "tool-failed-sibling",
     code: "query_error",
     safeDetail: "onboarding answer could not be persisted",
-    toolCallId: "tool-failed-1",
-    recoverable: true,
+    elapsedMs: 3,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "tool.executed",
+    toolCallId: "tool-ok-sibling",
+    output: '{"status":"recorded"}',
+    resultHash: "result-ok-sibling",
+    elapsedMs: 4,
+  }));
+  ({ lifecycle } = step(
+    lifecycle,
+    outputSentEvent(lifecycle, "tool-failed-sibling", 1, 5),
+  ));
+  ({ lifecycle } = step(
+    lifecycle,
+    outputSentEvent(lifecycle, "tool-ok-sibling", 1, 6),
+  ));
+  ({ lifecycle } = step(lifecycle, {
+    type: "tool.batch_closed",
+    providerResponseId: "response-sibling-failure",
+    batchHash: "batch-sibling-failure",
+    toolCallIds: ["tool-failed-sibling", "tool-ok-sibling"],
+    elapsedMs: 7,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.done",
+    responseId: "response-sibling-failure",
+    socketGeneration: 1,
+    elapsedMs: 8,
+  }));
+
+  const firstAck = step(lifecycle, {
+    type: "tool.output_acked",
+    toolCallId: "tool-failed-sibling",
+    outputItemId: "tool-output:tool-failed-sibling",
+    socketGeneration: 1,
+    elapsedMs: 9,
   });
-  expect(JSON.stringify(failed.commands)).not.toContain("Atendemos Irvine");
+  expect(firstAck.commands.some((command) => command.type === "request_response"))
+    .toBe(false);
+  const secondAck = step(firstAck.lifecycle, {
+    type: "tool.output_acked",
+    toolCallId: "tool-ok-sibling",
+    outputItemId: "tool-output:tool-ok-sibling",
+    socketGeneration: 1,
+    elapsedMs: 10,
+  });
+  expect(secondAck.commands.filter((command) =>
+    command.type === "request_response" && command.purpose === "recovery"
+  )).toHaveLength(1);
+  expect(secondAck.lifecycle.toolBatches[
+    "response-sibling-failure:batch-sibling-failure"
+  ]?.continuationRequested).toBe(true);
+});
+
+test("owner-turn recovery invariant is deduplicated by its causal key", () => {
+  const lifecycle = startCollecting();
+  const event = {
+    type: "recovery.required",
+    reason: "owner_turn_completed_without_tool",
+    recoveryKey: "response-owner-no-tool",
+    responseId: "response-owner-no-tool",
+    socketGeneration: 1,
+    elapsedMs: 8,
+  } as unknown as OnboardingEvent;
+  const first = step(lifecycle, event);
+  const recovery = first.commands.filter(
+    (command) => command.type === "request_response",
+  );
+
+  expect(first.lifecycle.phase).toBe("follow_up");
+  expect(first.commands).toContainEqual(expect.objectContaining({
+    type: "telemetry",
+    name: "invariant.violation",
+    outcome: "owner_turn_completed_without_tool",
+    responseId: "response-owner-no-tool",
+  }));
+  expect(recovery).toHaveLength(1);
+  expect(recovery[0]).toMatchObject({
+    type: "request_response",
+    intentKey:
+      "recovery:owner_turn_completed_without_tool:response-owner-no-tool",
+    purpose: "recovery",
+  });
+  expect((recovery[0] as { instructions?: string }).instructions)
+    .toContain("Não consegui confirmar");
+  expect((recovery[0] as { instructions?: string }).instructions)
+    .toContain("repita");
+
+  const replay = step(first.lifecycle, event);
+  expect(replay.lifecycle.phase).toBe("follow_up");
+  expect(replay.commands.some((command) => command.type === "request_response"))
+    .toBe(false);
+});
+
+test("metadata-less owner response during greeting emits invariant only and preserves its queued retry", () => {
+  let lifecycle = createOnboardingLifecycle(callId, businessName);
+  ({ lifecycle } = step(lifecycle, {
+    type: "socket.attached",
+    socketGeneration: 1,
+    elapsedMs: 0,
+  }));
+  lifecycle.responseIntents[`greeting:${callId}`]!.state = "terminal";
+  const retryKey = `greeting:${callId}:retry:1`;
+  lifecycle.responseIntents[retryKey] = {
+    intentKey: retryKey,
+    purpose: "greeting",
+    state: "queued",
+  };
+
+  const result = step(lifecycle, {
+    type: "recovery.required",
+    reason: "owner_turn_completed_without_tool",
+    recoveryKey: "response-opening-crosstalk",
+    responseId: "response-opening-crosstalk",
+    socketGeneration: 1,
+    elapsedMs: 4,
+  });
+
+  expect(result.lifecycle.phase).toBe("greeting");
+  expect(result.lifecycle.responseIntents[retryKey]).toMatchObject({
+    state: "queued",
+    purpose: "greeting",
+  });
+  expect(result.commands).toContainEqual(expect.objectContaining({
+    type: "telemetry",
+    name: "invariant.violation",
+    outcome: "owner_turn_completed_without_tool",
+    responseId: "response-opening-crosstalk",
+  }));
+  expect(result.commands.some((command) => command.type === "block")).toBe(false);
+  expect(result.commands.some((command) => command.type === "request_response"))
+    .toBe(false);
 });
 
 test("a sanitized adapter invariant enters blocked through the reducer", () => {

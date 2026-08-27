@@ -7,7 +7,8 @@
 // Legitimate reasons to create a response, per the orchestration contract:
 //   1. greeting        — once per call, first browser attach only;
 //   2. tool_continuation — exactly once per delivered tool-output batch;
-//   3. recap_push      — bounded lifecycle push while a recap is owed.
+//   3. recovery        — exactly once for one causal fail-closed invariant;
+//   4. recap_push      — bounded legacy lifecycle push while a recap is owed.
 // The provider's semantic VAD owns ordinary user turns; nothing else may speak.
 
 export interface CoordinatedLedger {
@@ -26,7 +27,12 @@ export interface CoordinatedLedger {
 export type LegacyResponseIntent = "greeting" | "tool_continuation" | "recap_push";
 export interface ApplicationResponseIntent {
   intentKey: string;
-  purpose: "greeting" | "tool_continuation" | "summary" | "final_signoff";
+  purpose:
+    | "greeting"
+    | "tool_continuation"
+    | "recovery"
+    | "summary"
+    | "final_signoff";
   instructions?: string;
   snapshotDigest?: string;
   approvalReceiptId?: string;
@@ -75,6 +81,9 @@ export function requestResponse(ledger: CoordinatedLedger, ws: WsLike, intent: R
     ? {
         type: "response.create",
         response: {
+          ...(applicationIntent.purpose === "recovery"
+            ? { tool_choice: "none" }
+            : {}),
           ...(applicationIntent.instructions
             ? { instructions: applicationIntent.instructions }
             : {}),

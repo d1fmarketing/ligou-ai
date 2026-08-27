@@ -124,6 +124,46 @@ function functionCallDone(
   };
 }
 
+function test9ServiceFacts(ownerWords: string) {
+  return [
+    {
+      topic: "servicos",
+      field: "service.name_synonyms",
+      subject: "desentupimento",
+      disposition: "answered",
+      rule_text: "Oferece desentupimento.",
+      structured: { value: ["desentupimento"] },
+      owner_words: ownerWords,
+    },
+    {
+      topic: "servicos",
+      field: "service.name_synonyms",
+      subject: "conserto_de_vazamento",
+      disposition: "answered",
+      rule_text: "Oferece conserto de vazamento.",
+      structured: { value: ["conserto de vazamento"] },
+      owner_words: ownerWords,
+    },
+    {
+      topic: "servicos",
+      field: "service.name_synonyms",
+      subject: "diagnostico_hidraulico",
+      disposition: "answered",
+      rule_text: "Oferece diagnóstico hidráulico.",
+      structured: { value: ["diagnóstico hidráulico"] },
+      owner_words: ownerWords,
+    },
+    {
+      topic: "servicos",
+      field: "service.catalog_closure",
+      disposition: "answered",
+      rule_text: "O catálogo tem somente os três serviços informados.",
+      structured: { value: true },
+      owner_words: ownerWords,
+    },
+  ];
+}
+
 function outputAck(l: SessionLedger, outputItemId: string) {
   const receipt = Object.values(l.onboarding?.lifecycle.toolOutbox ?? {})
     .find((candidate) => candidate.outputItemId === outputItemId);
@@ -2511,6 +2551,691 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       .toEqual(["turn-B"]);
   });
 
+  test("late transcript from a turn-detected approval turn has zero correction or approval authority", async () => {
+    for (const [index, transcript] of [
+      "Não está correto.",
+      "Confirmo.",
+    ].entries()) {
+      const cap = onboardingCap(`call-late-cancelled-approval-${index}`);
+      const snapshot = completeCoverage(cap, 1);
+      const digest = String(index + 7).repeat(64);
+      const receipt = coverageReceipt(
+        cap,
+        snapshot,
+        digest,
+        `rule-late-cancelled-approval-${index}`,
+      );
+      const boundary = snapshotBoundary(receipt, { approvalSuccess: true });
+      _setClient(boundary.client);
+      const l = ledger(cap.callId);
+      const ws = socket();
+      await handleEvent(cap, l, ws as any, { type: "session.created" });
+      seedAwaitingApproval(l, receipt.id, 1, digest, false);
+
+      await handleEvent(cap, l, ws as any, {
+        type: "input_audio_buffer.speech_started",
+        item_id: "turn-cancelled-approval-A",
+      });
+      await handleEvent(
+        cap,
+        l,
+        ws as any,
+        responseCreated("response-cancelled-approval-A"),
+      );
+      await handleEvent(cap, l, ws as any, {
+        type: "input_audio_buffer.speech_started",
+        item_id: "turn-live-approval-B",
+      });
+      await handleEvent(cap, l, ws as any, {
+        type: "response.done",
+        response: {
+          id: "response-cancelled-approval-A",
+          status: "cancelled",
+          status_details: { type: "cancelled", reason: "turn_detected" },
+        },
+      });
+      await handleEvent(cap, l, ws as any, {
+        type: "conversation.item.input_audio_transcription.completed",
+        item_id: "turn-cancelled-approval-A",
+        transcript,
+      });
+      await handleEvent(
+        cap,
+        l,
+        ws as any,
+        responseCreated("response-live-approval-B"),
+      );
+
+      expect(l.onboarding!.lifecycle.phase, transcript)
+        .toBe("awaiting_owner_approval");
+      expect(l.onboarding!.lifecycle.approvalCandidate, transcript)
+        .toBeUndefined();
+      expect(l.onboarding!.lifecycle.freshCallerTurnIds, transcript)
+        .toEqual(["turn-live-approval-B"]);
+      expect(l.onboarding!.lifecycle.consumedCallerTurnIds, transcript)
+        .not.toContain("turn-cancelled-approval-A");
+      expect(l.onboarding!.responses["response-live-approval-B"]?.callerTurnId)
+        .toBe("turn-live-approval-B");
+      expect(l.onboarding!.pendingCallerTurns.map((turn) => turn.turnId))
+        .toEqual(["turn-live-approval-B"]);
+      expect(boundary.calls.rpc).not.toContain(
+        "record_onboarding_voice_approval",
+      );
+      expect(framesOfType(ws, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "recovery",
+      )).toHaveLength(0);
+    }
+  });
+
+  test("Test 9 late transcript after turn-detected cannot strand the three-service persistence turn", async () => {
+    const cap = onboardingCap("call-test-9-late-transcript");
+    const boundary = sequentialAnswerBoundary([
+      { status: "recorded", revision: 1, digest: "1".repeat(64) },
+      { status: "recorded", revision: 2, digest: "2".repeat(64) },
+      { status: "recorded", revision: 3, digest: "3".repeat(64) },
+      { status: "recorded", revision: 4, digest: "4".repeat(64) },
+    ], { responseFromProjection: true });
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-test-9-crosstalk",
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-test-9-crosstalk"),
+    );
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-test-9-services",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "response.done",
+      response: {
+        id: "response-test-9-crosstalk",
+        status: "cancelled",
+        status_details: { type: "cancelled", reason: "turn_detected" },
+      },
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-test-9-crosstalk",
+      transcript: "Oi.",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-test-9-services",
+      transcript:
+        "A gente faz desentupimento, conserto de vazamento e diagnóstico hidráulico. Só esses três por enquanto.",
+    });
+
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-test-9-services"),
+    );
+    const ownerWords =
+      "A gente faz desentupimento, conserto de vazamento e diagnóstico hidráulico. Só esses três por enquanto.";
+    const extractedFacts = test9ServiceFacts(ownerWords);
+    for (const [outputIndex, fact] of extractedFacts.entries())
+      await handleEvent(cap, l, ws as any, functionCallDone(
+        "response-test-9-services",
+        `tool-test-9-${outputIndex + 1}`,
+        "record_interview_answer",
+        JSON.stringify(fact),
+        outputIndex,
+      ));
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-test-9-services"),
+    );
+
+    expect(boundary.rpcFacts).toHaveLength(4);
+    expect(boundary.rpcFacts.map((fact) => [fact.field, fact.subject ?? null]))
+      .toEqual([
+        ["service.name_synonyms", "desentupimento"],
+        ["service.name_synonyms", "conserto_de_vazamento"],
+        ["service.name_synonyms", "diagnostico_hidraulico"],
+        ["service.catalog_closure", null],
+      ]);
+    expect(functionOutputs(ws)).toHaveLength(4);
+    for (let index = 1; index <= 4; index += 1)
+      await handleEvent(
+        cap,
+        l,
+        ws as any,
+        outputAck(l, `tool-output:tool-test-9-${index}`),
+      );
+
+    const nextQuestions = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "tool_continuation",
+    );
+    expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
+    expect(boundary.followupRpcCalls).toBe(1);
+    expect(nextQuestions).toHaveLength(1);
+    expect(JSON.stringify(nextQuestions[0])).toContain("desentupimento");
+    expect(l.onboarding!.responses["response-test-9-services"]?.callerTurnId)
+      .toBe("turn-test-9-services");
+  });
+
+  test("real Test 9 greeting retry survives ambiguous crosstalk before the three-service turn", async () => {
+    const cap = onboardingCap("call-test-9-greeting-correlation");
+    const boundary = sequentialAnswerBoundary([
+      { status: "recorded", revision: 1, digest: "1".repeat(64) },
+      { status: "recorded", revision: 2, digest: "2".repeat(64) },
+      { status: "recorded", revision: 3, digest: "3".repeat(64) },
+      { status: "recorded", revision: 4, digest: "4".repeat(64) },
+    ], { responseFromProjection: true });
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "session.created" });
+    const greetingKey = `greeting:${cap.callId}`;
+    l.onboarding!.lifecycle.responseIntents[greetingKey] = {
+      intentKey: greetingKey,
+      purpose: "greeting",
+      state: "sent",
+    };
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-test-9-wrong-greeting", greetingKey),
+    );
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio_transcript.done",
+      response_id: "response-test-9-wrong-greeting",
+      transcript: "Olá, eu sou a ChatGPT, sua assistente virtual.",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio.done",
+      response_id: "response-test-9-wrong-greeting",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-test-9-opening-A",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "response.done",
+      response: {
+        id: "response-test-9-wrong-greeting",
+        status: "cancelled",
+        status_details: { type: "cancelled", reason: "turn_detected" },
+      },
+    });
+    const retryKey = `${greetingKey}:retry:1`;
+    expect(l.onboarding!.lifecycle.responseIntents[retryKey]).toMatchObject({
+      state: "queued",
+      purpose: "greeting",
+    });
+    expect(framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.intent_key === retryKey,
+    )).toHaveLength(0);
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-test-9-opening-crosstalk"),
+    );
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-test-9-opening-crosstalk"),
+    );
+    expect(l.onboarding!.lifecycle.phase).toBe("greeting");
+    expect(framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.intent_key === retryKey,
+    )).toHaveLength(1);
+    expect(framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "recovery",
+    )).toHaveLength(0);
+
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-test-9-opening-B",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      transcript: "Oi.",
+    });
+
+    const retries = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.intent_key === retryKey,
+    );
+    expect(l.onboarding!.lifecycle.phase).toBe("greeting");
+    expect(l.onboarding!.pendingCallerTurns).toEqual([]);
+    expect(retries).toHaveLength(1);
+    expect(framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "recovery",
+    )).toHaveLength(0);
+
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-test-9-correct-greeting", retryKey),
+    );
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio_transcript.done",
+      response_id: "response-test-9-correct-greeting",
+      transcript:
+        "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Quais serviços sua empresa oferece?",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio.done",
+      response_id: "response-test-9-correct-greeting",
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-test-9-correct-greeting"),
+    );
+    await handleEvent(cap, l, ws as any, {
+      type: "output_audio_buffer.stopped",
+      response_id: "response-test-9-correct-greeting",
+    });
+    expect(l.onboarding!.lifecycle.phase).toBe("collecting");
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-test-9-opening-A",
+      transcript: "Oi, replay tardio.",
+    });
+    expect(l.onboarding!.lifecycle.phase).toBe("collecting");
+    expect(framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "recovery",
+    )).toHaveLength(0);
+
+    const ownerWords =
+      "A gente faz desentupimento, conserto de vazamento e diagnóstico hidráulico. Só esses três por enquanto.";
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-test-9-real-services",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-test-9-real-services",
+      transcript: ownerWords,
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-test-9-real-services"),
+    );
+    for (const [outputIndex, fact] of test9ServiceFacts(ownerWords).entries())
+      await handleEvent(cap, l, ws as any, functionCallDone(
+        "response-test-9-real-services",
+        `tool-test-9-real-${outputIndex + 1}`,
+        "record_interview_answer",
+        JSON.stringify(fact),
+        outputIndex,
+      ));
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-test-9-real-services"),
+    );
+    for (let index = 1; index <= 4; index += 1)
+      await handleEvent(
+        cap,
+        l,
+        ws as any,
+        outputAck(l, `tool-output:tool-test-9-real-${index}`),
+      );
+
+    expect(boundary.rpcFacts).toHaveLength(4);
+    expect(boundary.followupRpcCalls).toBe(1);
+    expect(framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "tool_continuation",
+    )).toHaveLength(1);
+    expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
+  });
+
+  test("single-service incomplete first turn persists once and asks one directed follow-up", async () => {
+    const cap = onboardingCap("call-single-service-first-turn");
+    const boundary = sequentialAnswerBoundary([{
+      status: "recorded",
+      revision: 1,
+      digest: "1".repeat(64),
+    }], { responseFromProjection: true });
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-single-service",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-single-service",
+      transcript: "Desentupimento.",
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-single-service"),
+    );
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "response-single-service",
+      "tool-single-service",
+      "record_interview_answer",
+      JSON.stringify({
+        topic: "servicos",
+        field: "service.name_synonyms",
+        subject: "desentupimento",
+        disposition: "answered",
+        rule_text: "Oferece desentupimento.",
+        structured: { value: ["desentupimento"] },
+        owner_words: "Desentupimento.",
+      }),
+    ));
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-single-service"),
+    );
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      outputAck(l, "tool-output:tool-single-service"),
+    );
+
+    const questions = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "tool_continuation",
+    );
+    expect(boundary.rpcFacts).toHaveLength(1);
+    expect(boundary.rpcFacts[0]).toMatchObject({
+      field: "service.name_synonyms",
+      subject: "desentupimento",
+      owner_words: "Desentupimento.",
+    });
+    expect(boundary.followupRpcCalls).toBe(1);
+    expect(questions).toHaveLength(1);
+    expect(JSON.stringify(questions[0])).toContain("serviço");
+    expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
+  });
+
+  test("ambiguous transcript without item_id fails closed on authority and speaks one recovery", async () => {
+    const cap = onboardingCap("call-transcript-correlation-ambiguous");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+    for (const turnId of ["turn-ambiguous-A", "turn-ambiguous-B"])
+      await handleEvent(cap, l, ws as any, {
+        type: "input_audio_buffer.speech_started",
+        item_id: turnId,
+      });
+
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      transcript: "Resposta sem identidade causal.",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      transcript: "Replay sem identidade causal.",
+    });
+
+    const recoveries = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "recovery",
+    );
+    expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
+    expect(l.onboarding!.pendingCallerTurns).toEqual([]);
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0].response.tool_choice).toBe("none");
+    expect(recoveries[0].response.instructions).toContain("Não consegui confirmar");
+    expect(recoveries[0].response.instructions).toContain("repita");
+    expect(l.onboarding!.lifecycle.freshCallerTurnIds).toEqual([]);
+  });
+
+  test("unknown transcript item_id fails closed on authority and speaks one recovery", async () => {
+    const cap = onboardingCap("call-transcript-correlation-unknown");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-not-owned-by-this-session",
+      transcript: "Resposta com identidade desconhecida.",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-not-owned-by-this-session",
+      transcript: "Replay com identidade desconhecida.",
+    });
+
+    const recoveries = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "recovery",
+    );
+    expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0].response.instructions).toContain("Não consegui confirmar");
+    expect(l.onboarding!.lifecycle.freshCallerTurnIds).toEqual([]);
+  });
+
+  test("terminal response drains the recovery queued by an unmatched active caller turn", async () => {
+    const cap = onboardingCap("call-active-correlation-recovery-drain");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-active-correlation-owned",
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-active-correlation"),
+    );
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-active-correlation-unknown",
+      transcript: "Resposta sem correlação válida.",
+    });
+
+    expect(framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "recovery",
+    )).toHaveLength(0);
+    expect(Object.keys(l.onboarding!.pendingResponseCommands)).toHaveLength(1);
+
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-active-correlation"),
+    );
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-active-correlation"),
+    );
+
+    const recoveries = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "recovery",
+    );
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0].response.tool_choice).toBe("none");
+    expect(Object.keys(l.onboarding!.pendingResponseCommands)).toHaveLength(0);
+    expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
+    expect(l.status).toBe("active");
+  });
+
+  test("Test 9 speech-only process narration cannot leave collecting idle", async () => {
+    const cap = onboardingCap("call-test-9-speech-only");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-test-9-speech-only",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-test-9-speech-only",
+      transcript:
+        "A gente faz desentupimento, conserto de vazamento e diagnóstico hidráulico. Só esses três por enquanto.",
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-test-9-speech-only"),
+    );
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio_transcript.done",
+      response_id: "response-test-9-speech-only",
+      transcript:
+        "Beleza. Vou registrar isso direitinho e em seguida sigo com a próxima pergunta do fluxo.",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "response.output_audio.done",
+      response_id: "response-test-9-speech-only",
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-test-9-speech-only"),
+    );
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-test-9-speech-only"),
+    );
+
+    const recoveries = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "recovery",
+    );
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0].response.instructions).toContain("Não consegui confirmar");
+    expect(recoveries[0].response.instructions).toContain("repita");
+    expect(functionOutputs(ws)).toHaveLength(0);
+    expect(l.responseActive).toBe(true);
+    expect(l.status).toBe("active");
+  });
+
+  test("first-turn persistence failure speaks one truthful recovery instead of blocking silently", async () => {
+    const cap = onboardingCap("call-first-turn-persistence-failure");
+    let answerCalls = 0;
+    _setClient({
+      from() {
+        const query: any = {
+          select() { return query; },
+          eq() { return query; },
+          in() { return query; },
+          order() { return query; },
+          limit() { return query; },
+          maybeSingle: async () => ({ data: null, error: null }),
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({ data: [], error: null }).then(resolve);
+          },
+        };
+        return query;
+      },
+      rpc(name: string) {
+        if (name !== "record_onboarding_answer")
+          return Promise.resolve({
+            data: null,
+            error: { message: `unexpected rpc ${name}` },
+          });
+        answerCalls += 1;
+        return Promise.resolve({
+          data: null,
+          error: { code: "XX000", message: "synthetic persistence failure" },
+        });
+      },
+    } as any);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-persistence-failure",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-persistence-failure",
+      transcript: "Desentupimento.",
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-persistence-failure"),
+    );
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "response-persistence-failure",
+      "tool-persistence-failure",
+      "record_interview_answer",
+      JSON.stringify({
+        topic: "servicos",
+        field: "service.name_synonyms",
+        subject: "desentupimento",
+        disposition: "answered",
+        rule_text: "Oferece desentupimento.",
+        structured: { value: ["desentupimento"] },
+        owner_words: "Desentupimento.",
+      }),
+    ));
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-persistence-failure"),
+    );
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-persistence-failure"),
+    );
+
+    const recoveriesBeforeAck = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "recovery",
+    );
+    expect(answerCalls).toBe(1);
+    expect(functionOutputs(ws)).toHaveLength(1);
+    expect(l.onboarding!.lifecycle.toolOutbox["tool-persistence-failure"]?.state)
+      .toBe("output_pending");
+    expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
+    expect(recoveriesBeforeAck).toHaveLength(0);
+    const failureOutput = functionOutputs(ws)[0];
+    expect(JSON.parse(failureOutput.item.output)).toEqual({
+      status: "error",
+      error: "persistence_failed",
+      retry_safe: true,
+    });
+    const ack = outputAck(l, "tool-output:tool-persistence-failure");
+    await handleEvent(cap, l, ws as any, ack);
+    await handleEvent(cap, l, ws as any, ack);
+
+    const recoveries = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "recovery",
+    );
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0].response.tool_choice).toBe("none");
+    expect(recoveries[0].response.instructions).toContain("repita");
+    expect(l.responseActive).toBe(true);
+  });
+
   test("speech-owned pending turn correlation fails closed at its deterministic bound", async () => {
     const cap = onboardingCap("call-pending-turn-capacity");
     const l = ledger(cap.callId);
@@ -3074,6 +3799,109 @@ describe("physical socket attach and reconnect", () => {
     }
   });
 
+  test("failed persistence output reattaches by exact retrieval before one recovery", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-failed-output-retrieve");
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-failed-output-retrieve",
+        "gpt-realtime-2.1",
+        onboardingOptions,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      await completePhysicalGreeting(first, cap);
+      const adapter = control.ledger.onboarding!;
+      const output = JSON.stringify({
+        status: "error",
+        error: "persistence_failed",
+        retry_safe: true,
+      });
+      adapter.lifecycle.toolOutbox["failed-retrieve-tool"] = {
+        toolCallId: "failed-retrieve-tool",
+        toolName: "record_interview_answer",
+        argsHash: "failed-retrieve-args",
+        state: "output_pending",
+        providerResponseId: "failed-retrieve-response",
+        batchHash: "failed-retrieve-batch",
+        output,
+        resultHash: hashOnboardingToolArgs({ output }),
+        outputItemId: "tool-output:failed-retrieve-tool",
+        socketGeneration: 1,
+        outputRequest: {
+          delivery: "create",
+          eventId: "ligou-create-failed-retrieve",
+          socketGeneration: 1,
+        },
+        failureKind: "deterministic",
+      } as any;
+      adapter.lifecycle.toolBatches[
+        "failed-retrieve-response:failed-retrieve-batch"
+      ] = {
+        providerResponseId: "failed-retrieve-response",
+        batchHash: "failed-retrieve-batch",
+        toolCallIds: ["failed-retrieve-tool"],
+        closed: true,
+        continuationRequested: false,
+      };
+      adapter.lifecycle.terminalResponseIds.push("failed-retrieve-response");
+      control.ledger.responseActive = false;
+      const toolLogBefore = [...control.ledger.toolLog];
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      expect(functionOutputs(second)).toEqual([]);
+      expect(framesOfType(second, "conversation.item.retrieve")).toEqual([
+        expect.objectContaining({
+          item_id: "tool-output:failed-retrieve-tool",
+          event_id: expect.any(String),
+        }),
+      ]);
+      expect(framesOfType(second, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "recovery",
+      )).toHaveLength(0);
+
+      second.message(outputRetrieved(
+        "tool-output:failed-retrieve-tool",
+        "failed-retrieve-tool",
+        output,
+      ));
+      await flushAsync();
+      second.message(outputRetrieved(
+        "tool-output:failed-retrieve-tool",
+        "failed-retrieve-tool",
+        output,
+      ));
+      await flushAsync();
+
+      expect(adapter.lifecycle.toolOutbox["failed-retrieve-tool"]?.state)
+        .toBe("output_acked");
+      expect(adapter.lifecycle.toolBatches[
+        "failed-retrieve-response:failed-retrieve-batch"
+      ]?.continuationRequested).toBe(true);
+      expect(control.ledger.toolLog).toEqual(toolLogBefore);
+      expect(functionOutputs(second)).toEqual([]);
+      expect(framesOfType(second, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "recovery",
+      )).toHaveLength(1);
+      expect(framesOfType(second, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "tool_continuation",
+      )).toHaveLength(0);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
   test("retrieved output mismatch or missing item blocks without recreating the mutation output", async () => {
     for (const [index, retrieved] of [
       {
@@ -3488,7 +4316,7 @@ describe("physical socket attach and reconnect", () => {
     }
   });
 
-  test("a twice-indeterminate fact blocks with zero output and no running receipt", async () => {
+  test("a twice-indeterminate fact speaks one truthful recovery with zero output or rerun", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
     globalThis.WebSocket = SyntheticWebSocket as any;
@@ -3525,11 +4353,30 @@ describe("physical socket attach and reconnect", () => {
 
       expect(boundary.answerAttempts).toBe(4);
       expect(SyntheticWebSocket.instances).toHaveLength(1);
-      expect(functionOutputs(ws)).toHaveLength(0);
-      expect(control.ledger.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(functionOutputs(ws)).toHaveLength(1);
+      expect(JSON.parse(functionOutputs(ws)[0].item.output)).toEqual({
+        status: "unknown",
+        error: "persistence_indeterminate",
+        retry_safe: false,
+      });
+      expect(framesOfType(ws, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "recovery",
+      )).toHaveLength(0);
       expect(control.ledger.onboarding!.lifecycle.toolOutbox[
         "fc-indeterminate-exhausted"
-      ]).toBeUndefined();
+      ]?.state).toBe("output_pending");
+      ws.message(outputAck(
+        control.ledger,
+        "tool-output:fc-indeterminate-exhausted",
+      ));
+      await flushAsync();
+      const recoveries = framesOfType(ws, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "recovery",
+      );
+      expect(recoveries).toHaveLength(1);
+      expect(recoveries[0].response.instructions)
+        .toContain("Encerre este teste");
+      expect(recoveries[0].response.instructions).not.toContain("repita");
       expect(control.ledger.onboarding!.pendingMutationCommands).toEqual({});
       expect(control.ledger.onboarding!.pendingMutationRetryTimers).toEqual({});
       control.cancel("test_cleanup");

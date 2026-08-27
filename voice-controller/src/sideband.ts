@@ -110,6 +110,7 @@ export interface OnboardingAdapterState {
   terminalResponseBatchHashes: Record<string, string | null>;
   activeCallerTurnId?: string;
   pendingCallerTurns: PendingCallerTurn[];
+  retiredCallerTurnIds: string[];
   callerTurnSequence: number;
   interrupted: boolean;
   pendingHangupIntentKey?: string;
@@ -125,6 +126,7 @@ export interface OnboardingAdapterState {
 
 const MAX_ADAPTER_RESPONSES = 512;
 const MAX_PENDING_CALLER_TURNS = 512;
+const MAX_RETIRED_CALLER_TURNS = 1024;
 const MAX_TERMINAL_RESPONSE_IDENTITIES = 1024;
 const MAX_PENDING_RESPONSE_COMMANDS = 512;
 const MAX_PENDING_MUTATION_COMMANDS = 512;
@@ -216,6 +218,7 @@ function createOnboardingAdapter(
     responses: {},
     terminalResponseBatchHashes: {},
     pendingCallerTurns: [],
+    retiredCallerTurnIds: [],
     callerTurnSequence: 0,
     interrupted: false,
     pendingResponseCommands: {},
@@ -248,6 +251,30 @@ function onboardingBatchHash(tools: BufferedOnboardingTool[]): string {
 
 function exactString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function callerCorrelationRecoveryKey(
+  explicitTurnId: string | null,
+  retiredTurnIds: string[],
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify(explicitTurnId
+      ? { explicit_turn_id: explicitTurnId }
+      : { retired_turn_ids: [...retiredTurnIds].sort() }), "utf8")
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function rememberRetiredCallerTurns(
+  adapter: OnboardingAdapterState,
+  turnIds: string[],
+): void {
+  for (const turnId of turnIds)
+    if (!adapter.retiredCallerTurnIds.includes(turnId))
+      adapter.retiredCallerTurnIds.push(turnId);
+  const overflow = adapter.retiredCallerTurnIds.length -
+    MAX_RETIRED_CALLER_TURNS;
+  if (overflow > 0) adapter.retiredCallerTurnIds.splice(0, overflow);
 }
 
 function ensureResponseCapacity(adapter: OnboardingAdapterState): boolean {
@@ -404,6 +431,16 @@ function pendingResponseCommandIsCurrent(
     adapter.lifecycle.phase !== "provider_terminating";
 }
 
+function hasDrainablePendingResponseCommand(
+  adapter: OnboardingAdapterState,
+): boolean {
+  return Object.entries(adapter.pendingResponseCommands).some(
+    ([intentKey, command]) =>
+      adapter.lifecycle.responseIntents[intentKey]?.state === "queued" &&
+      pendingResponseCommandIsCurrent(adapter, command),
+  );
+}
+
 function pruneInvalidPendingResponseCommands(
   adapter: OnboardingAdapterState,
 ): void {
@@ -429,6 +466,50 @@ async function dispatchOnboardingEvent(
   pruneInvalidPendingResponseCommands(adapter);
   context.ledger.phase = adapter.lifecycle.phase;
   await executeOnboardingCommands(context, reduced.commands);
+}
+
+async function recoverUnmatchedCallerTranscript(
+  context: OnboardingCommandContext,
+  explicitTurnId: string | null,
+  safeDetail: string,
+): Promise<void> {
+  const adapter = ensureOnboardingAdapter(context.ledger);
+  const retiredTurnIds = [...new Set([
+    ...adapter.pendingCallerTurns
+      .filter((turn) => !turn.transcriptCompleted)
+      .map((turn) => turn.turnId),
+    ...(explicitTurnId ? [explicitTurnId] : []),
+  ])];
+  const retired = new Set(retiredTurnIds);
+  rememberRetiredCallerTurns(adapter, retiredTurnIds);
+  if (retired.size > 0) {
+    adapter.pendingCallerTurns = adapter.pendingCallerTurns.filter(
+      (turn) => !retired.has(turn.turnId),
+    );
+    if (
+      adapter.activeCallerTurnId && retired.has(adapter.activeCallerTurnId)
+    ) delete adapter.activeCallerTurnId;
+  }
+  adapter.speechPending = adapter.pendingCallerTurns.some(
+    (turn) => turn.responseTerminal !== true,
+  );
+  await dispatchOnboardingEvent(context, {
+    type: "recovery.required",
+    reason: "caller_turn_correlation_mismatch",
+    recoveryKey: callerCorrelationRecoveryKey(
+      explicitTurnId,
+      retiredTurnIds,
+    ),
+    socketGeneration: adapter.lifecycle.socketGeneration,
+    ...(retiredTurnIds.length > 0 ? { retiredTurnIds } : {}),
+    elapsedMs: 0,
+  });
+  context.ledger.transcript.push({
+    role: "system",
+    text: `onboarding recovery: caller_turn_correlation_mismatch (${safeDetail})`,
+    at: new Date().toISOString(),
+  });
+  if (!adapter.speechPending) await drainPendingResponseCommands(context);
 }
 
 function nextQuestionFromRecorded(result: {
@@ -1586,6 +1667,7 @@ async function handleOnboardingRawEvent(
       );
       const turnId = exactString(msg.item_id) ??
         `caller-turn:${++adapter.callerTurnSequence}`;
+      if (adapter.retiredCallerTurnIds.includes(turnId)) break;
       const existingTurn = adapter.pendingCallerTurns.find(
         (turn) => turn.turnId === turnId,
       );
@@ -1623,6 +1705,9 @@ async function handleOnboardingRawEvent(
           at: new Date().toISOString(),
         });
       const explicitTurnId = exactString(msg.item_id);
+      if (
+        explicitTurnId && adapter.retiredCallerTurnIds.includes(explicitTurnId)
+      ) break;
       const untranscribed = adapter.pendingCallerTurns.filter(
         (turn) => !turn.transcriptCompleted,
       );
@@ -1630,26 +1715,22 @@ async function handleOnboardingRawEvent(
         (untranscribed.length === 1 ? untranscribed[0]!.turnId : undefined);
       if (!turnId) {
         if (untranscribed.length > 1)
-          await dispatchOnboardingEvent(context, {
-            type: "adapter.invariant_failed",
-            code: "caller_turn_correlation_mismatch",
-            safeDetail:
-              "caller transcription did not identify one pending speech turn",
-            elapsedMs: 0,
-          });
+          await recoverUnmatchedCallerTranscript(
+            context,
+            null,
+            "caller transcription did not identify one pending speech turn",
+          );
         break;
       }
       const pendingTurn = adapter.pendingCallerTurns.find(
         (turn) => turn.turnId === turnId,
       );
       if (!pendingTurn) {
-        await dispatchOnboardingEvent(context, {
-          type: "adapter.invariant_failed",
-          code: "caller_turn_correlation_mismatch",
-          safeDetail:
-            "caller transcription did not match a speech-owned turn",
-          elapsedMs: 0,
-        });
+        await recoverUnmatchedCallerTranscript(
+          context,
+          turnId,
+          "caller transcription did not match a speech-owned turn",
+        );
         break;
       }
       pendingTurn.transcriptCompleted = true;
@@ -1664,8 +1745,10 @@ async function handleOnboardingRawEvent(
         const completedTurnIndex = adapter.pendingCallerTurns.findIndex(
           (turn) => turn.turnId === turnId,
         );
-        if (completedTurnIndex >= 0)
+        if (completedTurnIndex >= 0) {
+          rememberRetiredCallerTurns(adapter, [turnId]);
           adapter.pendingCallerTurns.splice(completedTurnIndex, 1);
+        }
       }
       adapter.speechPending = adapter.pendingCallerTurns.some(
         (turn) => turn.responseTerminal !== true,
@@ -1815,6 +1898,19 @@ async function handleOnboardingRawEvent(
         responseId,
         elapsedMs: 0,
       });
+      if (
+        responseStatus === "completed" &&
+        sortedTools.length === 0 &&
+        buffered.callerTurnId
+      )
+        await dispatchOnboardingEvent(context, {
+          type: "recovery.required",
+          reason: "owner_turn_completed_without_tool",
+          recoveryKey: responseId,
+          responseId,
+          socketGeneration: generation,
+          elapsedMs: 0,
+        });
       const spent = sessionCostUsd(ledger.model, ledger.usage);
       const costCapUsd = sessionCostCapUsd(ledger.model);
       if (spent >= costCapUsd && ledger.status === "active") {
@@ -1832,8 +1928,10 @@ async function handleOnboardingRawEvent(
       if (callerTurnIndex >= 0 && responseStatus === "completed") {
         const callerTurn = adapter.pendingCallerTurns[callerTurnIndex]!;
         callerTurn.responseTerminal = true;
-        if (callerTurn.transcriptCompleted)
+        if (callerTurn.transcriptCompleted) {
+          rememberRetiredCallerTurns(adapter, [callerTurn.turnId]);
           adapter.pendingCallerTurns.splice(callerTurnIndex, 1);
+        }
         adapter.speechPending = adapter.pendingCallerTurns.some(
           (turn) => turn.responseTerminal !== true,
         );
@@ -1841,7 +1939,17 @@ async function handleOnboardingRawEvent(
       } else if (callerTurnIndex >= 0 && turnDetectedCancellation) {
         // This response belonged to the interrupted turn. The provider's next
         // response belongs to the newer speech-start record, never to this one.
+        const callerTurn = adapter.pendingCallerTurns[callerTurnIndex]!;
+        const transcriptCompleted = callerTurn.transcriptCompleted;
+        rememberRetiredCallerTurns(adapter, [callerTurn.turnId]);
         adapter.pendingCallerTurns.splice(callerTurnIndex, 1);
+        if (!transcriptCompleted)
+          await dispatchOnboardingEvent(context, {
+            type: "caller.turn_retired",
+            socketGeneration: generation,
+            turnId: callerTurn.turnId,
+            elapsedMs: 0,
+          });
         adapter.speechPending = adapter.pendingCallerTurns.some(
           (turn) => turn.responseTerminal !== true,
         );
@@ -1853,6 +1961,9 @@ async function handleOnboardingRawEvent(
         adapter.pendingCallerTurns[callerTurnIndex]!.responseTerminal = false;
         adapter.speechPending = true;
       }
+      if (
+        !adapter.speechPending && hasDrainablePendingResponseCommand(adapter)
+      ) await drainPendingResponseCommands(context);
       break;
     }
     case "session.ended": {

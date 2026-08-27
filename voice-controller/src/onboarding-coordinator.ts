@@ -49,6 +49,7 @@ export interface ToolReceipt {
     socketGeneration: number;
   };
   approvalTurnId?: string;
+  failureKind?: "deterministic" | "indeterminate";
 }
 
 export interface ToolBatch {
@@ -183,6 +184,7 @@ export interface OnboardingLifecycle {
 export type ResponsePurpose =
   | "greeting"
   | "tool_continuation"
+  | "recovery"
   | "summary"
   | "final_signoff";
 
@@ -230,6 +232,10 @@ const INITIAL_GREETING_RESPONSE_INSTRUCTIONS_PT =
   `Em seguida, pergunte exatamente: "${INITIAL_SERVICE_DISCOVERY_QUESTION_PT}"`;
 export const FINAL_SIGNOFF_SENTENCE_PT =
   "A confirmação por voz foi salva e as regras sugeridas continuam aguardando revisão na Memória.";
+const TRUTHFUL_RECOVERY_RESPONSE_INSTRUCTIONS_PT =
+  'Diga exatamente uma vez: "Não consegui confirmar o salvamento da sua resposta. Por favor, repita as informações."';
+const INDETERMINATE_RECOVERY_RESPONSE_INSTRUCTIONS_PT =
+  'Diga exatamente uma vez: "Não consegui confirmar o salvamento com segurança. Encerre este teste e tente novamente."';
 
 interface TelemetryCommand {
   type: "telemetry";
@@ -457,6 +463,19 @@ export type OnboardingEvent =
       transcript: string;
     })
   | (SocketEvent & {
+      type: "caller.turn_retired";
+      turnId: string;
+    })
+  | (SocketEvent & {
+      type: "recovery.required";
+      reason:
+        | "caller_turn_correlation_mismatch"
+        | "owner_turn_completed_without_tool";
+      recoveryKey: string;
+      responseId?: string;
+      retiredTurnIds?: string[];
+    })
+  | (SocketEvent & {
       type: "tool.called";
       toolCallId: string;
       name: string;
@@ -674,6 +693,41 @@ function queueResponse(
   );
   commands.push({ type: "request_response", ...request });
   return true;
+}
+
+function queueTruthfulRecovery(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+  reason:
+    | "caller_turn_correlation_mismatch"
+    | "owner_turn_completed_without_tool"
+    | "tool_persistence_failed",
+  recoveryKey: string,
+  fields: { responseId?: string; toolCallId?: string; outcome?: string } = {},
+  instructions = TRUTHFUL_RECOVERY_RESPONSE_INSTRUCTIONS_PT,
+  emitInvariant = true,
+): void {
+  if (emitInvariant)
+    commands.push(
+      telemetry(lifecycle, "invariant.violation", event, {
+        outcome: fields.outcome ?? reason,
+        ...(fields.responseId ? { responseId: fields.responseId } : {}),
+        ...(fields.toolCallId ? { toolCallId: fields.toolCallId } : {}),
+      }),
+    );
+  const intentKey = `recovery:${reason}:${recoveryKey}`;
+  if (lifecycle.responseIntents[intentKey]) return;
+  const recoveryAlreadyOwed = Object.values(lifecycle.responseIntents).some(
+    (intent) => intent.purpose === "recovery" && intent.state !== "terminal",
+  );
+  if (recoveryAlreadyOwed) return;
+  lifecycle.phase = "follow_up";
+  queueResponse(lifecycle, commands, event, {
+    intentKey,
+    purpose: "recovery",
+    instructions,
+  });
 }
 
 function batchIsReady(
@@ -2359,6 +2413,75 @@ export function reduceOnboarding(
         lifecycle.freshCallerTurnIds.push(event.turnId);
       break;
     }
+    case "caller.turn_retired": {
+      lifecycle.freshCallerTurnIds = lifecycle.freshCallerTurnIds.filter(
+        (turnId) => turnId !== event.turnId,
+      );
+      break;
+    }
+    case "recovery.required": {
+      if (event.retiredTurnIds?.length) {
+        const retired = new Set(event.retiredTurnIds);
+        lifecycle.freshCallerTurnIds = lifecycle.freshCallerTurnIds.filter(
+          (turnId) => !retired.has(turnId),
+        );
+      }
+      if (
+        (
+          event.reason === "caller_turn_correlation_mismatch" ||
+          event.reason === "owner_turn_completed_without_tool"
+        ) &&
+        lifecycle.phase === "greeting"
+      ) {
+        commands.push(
+          telemetry(lifecycle, "invariant.violation", event, {
+            outcome: event.reason,
+            ...(event.responseId ? { responseId: event.responseId } : {}),
+          }),
+        );
+        break;
+      }
+      const hasResponseOwed = Object.values(lifecycle.responseIntents).some(
+        (intent) => intent.state !== "terminal",
+      );
+      const hasToolOwed = Object.values(lifecycle.toolOutbox).some(
+        (receipt) =>
+          receipt.state === "running" ||
+          receipt.state === "executed" ||
+          receipt.state === "output_pending",
+      );
+      const wouldBeIdle =
+        lifecycle.phase === "collecting" &&
+        !lifecycle.activeResponseId &&
+        !hasResponseOwed &&
+        !hasToolOwed &&
+        !lifecycle.pendingFollowup;
+      if (
+        event.reason === "owner_turn_completed_without_tool" &&
+        !wouldBeIdle
+      ) break;
+      if (
+        lifecycle.phase !== "collecting" && lifecycle.phase !== "follow_up"
+      ) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          event.reason,
+          "caller turn recovery was not admissible in the current lifecycle",
+        );
+        break;
+      }
+      queueTruthfulRecovery(
+        lifecycle,
+        commands,
+        event,
+        event.reason,
+        event.recoveryKey,
+        event.responseId ? { responseId: event.responseId } : {},
+      );
+      break;
+    }
     case "caller.transcript.completed": {
       if (
         lifecycle.phase !== "awaiting_owner_approval" ||
@@ -2686,16 +2809,30 @@ export function reduceOnboarding(
         );
         break;
       }
-      if (event.code === "indeterminate")
-        delete lifecycle.toolOutbox[event.toolCallId];
-      block(
-        lifecycle,
-        commands,
-        event,
-        event.code,
-        event.safeDetail,
-        event.toolCallId,
+      const indeterminate = event.code === "indeterminate";
+      const output = JSON.stringify(indeterminate
+        ? {
+            status: "unknown",
+            error: "persistence_indeterminate",
+            retry_safe: false,
+          }
+        : {
+            status: "error",
+            error: "persistence_failed",
+            retry_safe: true,
+          });
+      receipt.state = "executed";
+      receipt.failureKind = indeterminate ? "indeterminate" : "deterministic";
+      receipt.output = output;
+      receipt.resultHash = hashOnboardingToolArgs({ output });
+      delete receipt.outputRequest;
+      commands.push(
+        telemetry(lifecycle, "invariant.violation", event, {
+          toolCallId: event.toolCallId,
+          outcome: event.code,
+        }),
       );
+      resendOutput(lifecycle, commands, event, receipt, false);
       break;
     }
     case "tool.output_sent": {
@@ -2797,6 +2934,46 @@ export function reduceOnboarding(
           outcome: "acknowledged",
         }),
       );
+      const parentBatch = lifecycle.toolBatches[
+        batchKey(receipt.providerResponseId, receipt.batchHash)
+      ];
+      if (receipt.failureKind && !parentBatch) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "tool_failure_batch_missing",
+            "failed tool output acknowledgement had no closed parent batch",
+            event.toolCallId,
+          );
+          break;
+      }
+      const failedReceipts = (parentBatch?.toolCallIds ?? [])
+        .map((toolCallId) => lifecycle.toolOutbox[toolCallId])
+        .filter((candidate): candidate is ToolReceipt =>
+          candidate?.failureKind !== undefined
+        );
+      if (failedReceipts.length > 0) {
+        if (!parentBatch || !batchIsReady(lifecycle, parentBatch)) break;
+        parentBatch.continuationRequested = true;
+        const primaryFailure = failedReceipts[0]!;
+        const indeterminate = failedReceipts.some(
+          (candidate) => candidate.failureKind === "indeterminate",
+        );
+        queueTruthfulRecovery(
+          lifecycle,
+          commands,
+          event,
+          "tool_persistence_failed",
+          primaryFailure.toolCallId,
+          { toolCallId: primaryFailure.toolCallId },
+          indeterminate
+            ? INDETERMINATE_RECOVERY_RESPONSE_INSTRUCTIONS_PT
+            : TRUTHFUL_RECOVERY_RESPONSE_INSTRUCTIONS_PT,
+          false,
+        );
+        break;
+      }
       if (!maybeStartSignoffForReadyBatch(lifecycle, commands, event))
         maybeAdvanceCoverage(lifecycle, commands, event);
       break;
