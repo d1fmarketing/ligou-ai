@@ -53,6 +53,13 @@ interface PendingMutationEntry {
   fingerprint: string;
 }
 
+interface PendingCallerTurn {
+  turnId: string;
+  responseId?: string;
+  transcriptCompleted: boolean;
+  responseTerminal?: boolean;
+}
+
 type OnboardingAdapterInvariantCode =
   | "tool_args_mismatch"
   | "function_item_identity_missing"
@@ -102,7 +109,7 @@ export interface OnboardingAdapterState {
   responses: Record<string, BufferedOnboardingResponse>;
   terminalResponseBatchHashes: Record<string, string | null>;
   activeCallerTurnId?: string;
-  transcribedCallerTurnIds: string[];
+  pendingCallerTurns: PendingCallerTurn[];
   callerTurnSequence: number;
   interrupted: boolean;
   pendingHangupIntentKey?: string;
@@ -114,11 +121,10 @@ export interface OnboardingAdapterState {
   >;
   speechGeneration: number;
   speechPending: boolean;
-  speechResponseId?: string;
 }
 
 const MAX_ADAPTER_RESPONSES = 512;
-const MAX_TRANSCRIBED_CALLER_TURNS = 512;
+const MAX_PENDING_CALLER_TURNS = 512;
 const MAX_TERMINAL_RESPONSE_IDENTITIES = 1024;
 const MAX_PENDING_RESPONSE_COMMANDS = 512;
 const MAX_PENDING_MUTATION_COMMANDS = 512;
@@ -209,7 +215,7 @@ function createOnboardingAdapter(
     queue: Promise.resolve(),
     responses: {},
     terminalResponseBatchHashes: {},
-    transcribedCallerTurnIds: [],
+    pendingCallerTurns: [],
     callerTurnSequence: 0,
     interrupted: false,
     pendingResponseCommands: {},
@@ -1257,12 +1263,14 @@ async function handleOnboardingRawEvent(
       if (!responseId) break;
       ledger.responseActive = true;
       const intentKey = exactString(msg.response?.metadata?.intent_key);
-      if (!intentKey && adapter.speechPending && !adapter.speechResponseId)
-        adapter.speechResponseId = responseId;
-      const callerTurnId = !intentKey && adapter.speechPending
-        ? adapter.transcribedCallerTurnIds.shift() ??
-          adapter.activeCallerTurnId
+      const pendingCallerTurn = !intentKey && adapter.speechPending
+        ? adapter.pendingCallerTurns.find((turn) => !turn.responseId)
         : undefined;
+      const callerTurnId = pendingCallerTurn?.turnId;
+      if (pendingCallerTurn) {
+        pendingCallerTurn.responseId = responseId;
+        pendingCallerTurn.responseTerminal = false;
+      }
       if (callerTurnId) {
         let buffered = adapter.responses[responseId];
         if (!buffered) {
@@ -1578,6 +1586,25 @@ async function handleOnboardingRawEvent(
       );
       const turnId = exactString(msg.item_id) ??
         `caller-turn:${++adapter.callerTurnSequence}`;
+      const existingTurn = adapter.pendingCallerTurns.find(
+        (turn) => turn.turnId === turnId,
+      );
+      if (!existingTurn) {
+        if (adapter.pendingCallerTurns.length >= MAX_PENDING_CALLER_TURNS) {
+          await dispatchOnboardingEvent(context, {
+            type: "adapter.invariant_failed",
+            code: "adapter_capacity_exceeded",
+            safeDetail:
+              "pending caller turn registry reached its deterministic bound",
+            elapsedMs: 0,
+          });
+          break;
+        }
+        adapter.pendingCallerTurns.push({
+          turnId,
+          transcriptCompleted: false,
+        });
+      }
       adapter.activeCallerTurnId = turnId;
       await dispatchOnboardingEvent(context, {
         type: "caller.speech_started",
@@ -1595,8 +1622,37 @@ async function handleOnboardingRawEvent(
           text: transcript,
           at: new Date().toISOString(),
         });
-      const turnId = exactString(msg.item_id) ?? adapter.activeCallerTurnId;
-      if (!turnId) break;
+      const explicitTurnId = exactString(msg.item_id);
+      const untranscribed = adapter.pendingCallerTurns.filter(
+        (turn) => !turn.transcriptCompleted,
+      );
+      const turnId = explicitTurnId ??
+        (untranscribed.length === 1 ? untranscribed[0]!.turnId : undefined);
+      if (!turnId) {
+        if (untranscribed.length > 1)
+          await dispatchOnboardingEvent(context, {
+            type: "adapter.invariant_failed",
+            code: "caller_turn_correlation_mismatch",
+            safeDetail:
+              "caller transcription did not identify one pending speech turn",
+            elapsedMs: 0,
+          });
+        break;
+      }
+      const pendingTurn = adapter.pendingCallerTurns.find(
+        (turn) => turn.turnId === turnId,
+      );
+      if (!pendingTurn) {
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "caller_turn_correlation_mismatch",
+          safeDetail:
+            "caller transcription did not match a speech-owned turn",
+          elapsedMs: 0,
+        });
+        break;
+      }
+      pendingTurn.transcriptCompleted = true;
       await dispatchOnboardingEvent(context, {
         type: "caller.transcript.completed",
         socketGeneration: generation,
@@ -1604,28 +1660,17 @@ async function handleOnboardingRawEvent(
         transcript,
         elapsedMs: 0,
       });
-      const alreadyBound = Object.values(adapter.responses).some(
-        (response) => response.callerTurnId === turnId,
-      );
-      if (
-        !alreadyBound &&
-        !adapter.transcribedCallerTurnIds.includes(turnId)
-      ) {
-        if (
-          adapter.transcribedCallerTurnIds.length >=
-            MAX_TRANSCRIBED_CALLER_TURNS
-        ) {
-          await dispatchOnboardingEvent(context, {
-            type: "adapter.invariant_failed",
-            code: "adapter_capacity_exceeded",
-            safeDetail:
-              "transcribed caller turn registry reached its deterministic bound",
-            elapsedMs: 0,
-          });
-          break;
-        }
-        adapter.transcribedCallerTurnIds.push(turnId);
+      if (pendingTurn.responseTerminal === true) {
+        const completedTurnIndex = adapter.pendingCallerTurns.findIndex(
+          (turn) => turn.turnId === turnId,
+        );
+        if (completedTurnIndex >= 0)
+          adapter.pendingCallerTurns.splice(completedTurnIndex, 1);
       }
+      adapter.speechPending = adapter.pendingCallerTurns.some(
+        (turn) => turn.responseTerminal !== true,
+      );
+      if (!adapter.speechPending) await drainPendingResponseCommands(context);
       if (adapter.activeCallerTurnId === turnId)
         delete adapter.activeCallerTurnId;
       break;
@@ -1779,14 +1824,24 @@ async function handleOnboardingRawEvent(
         });
         try { ws.close(); } catch {}
       }
-      if (adapter.speechResponseId === responseId && responseStatus === "completed") {
-        adapter.speechPending = false;
-        delete adapter.speechResponseId;
-        await drainPendingResponseCommands(context);
-      } else if (adapter.speechResponseId === responseId && ordinaryCancelled) {
+      const callerTurnIndex = adapter.pendingCallerTurns.findIndex(
+        (turn) => turn.responseId === responseId,
+      );
+      if (callerTurnIndex >= 0 && responseStatus === "completed") {
+        const callerTurn = adapter.pendingCallerTurns[callerTurnIndex]!;
+        callerTurn.responseTerminal = true;
+        if (callerTurn.transcriptCompleted)
+          adapter.pendingCallerTurns.splice(callerTurnIndex, 1);
+        adapter.speechPending = adapter.pendingCallerTurns.some(
+          (turn) => turn.responseTerminal !== true,
+        );
+        if (!adapter.speechPending) await drainPendingResponseCommands(context);
+      } else if (callerTurnIndex >= 0 && ordinaryCancelled) {
         // Barge-in cancelled this ordinary VAD attempt. Keep the speech turn
         // pending so the next metadata-less provider response can bind it.
-        delete adapter.speechResponseId;
+        delete adapter.pendingCallerTurns[callerTurnIndex]!.responseId;
+        adapter.pendingCallerTurns[callerTurnIndex]!.responseTerminal = false;
+        adapter.speechPending = true;
       }
       break;
     }

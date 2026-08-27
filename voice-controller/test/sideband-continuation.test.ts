@@ -386,25 +386,31 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     };
     l.onboarding!.speechGeneration = 1;
     l.onboarding!.speechPending = true;
+    l.onboarding!.pendingCallerTurns = [{
+      turnId: "turn-vad-cancelled",
+      transcriptCompleted: true,
+    }];
 
     await handleEvent(cap, l, ws as any, responseCreated("resp-vad-cancelled"));
-    expect(l.onboarding!.speechResponseId).toBe("resp-vad-cancelled");
+    expect(l.onboarding!.pendingCallerTurns[0]?.responseId)
+      .toBe("resp-vad-cancelled");
     await handleEvent(cap, l, ws as any, {
       type: "response.done",
       response: { id: "resp-vad-cancelled", status: "cancelled" },
     });
     expect(l.onboarding!.lifecycle.phase).toBe("summary_speaking");
     expect(l.onboarding!.speechPending).toBe(true);
-    expect(l.onboarding!.speechResponseId).toBeUndefined();
+    expect(l.onboarding!.pendingCallerTurns[0]?.responseId).toBeUndefined();
     expect(l.onboarding!.lifecycle.terminalResponseIds)
       .toContain("resp-vad-cancelled");
     expect(framesOfType(ws, "response.create")).toHaveLength(0);
 
     await handleEvent(cap, l, ws as any, responseCreated("resp-vad-rebound"));
-    expect(l.onboarding!.speechResponseId).toBe("resp-vad-rebound");
+    expect(l.onboarding!.pendingCallerTurns[0]?.responseId)
+      .toBe("resp-vad-rebound");
     await handleEvent(cap, l, ws as any, responseDone("resp-vad-rebound"));
     expect(l.onboarding!.speechPending).toBe(false);
-    expect(l.onboarding!.speechResponseId).toBeUndefined();
+    expect(l.onboarding!.pendingCallerTurns).toEqual([]);
     const summaries = framesOfType(ws, "response.create").filter(
       (frame) => frame.response?.metadata?.purpose === "summary",
     );
@@ -2094,6 +2100,10 @@ function seedAwaitingApproval(
   else delete lifecycle.approvalCandidate;
   if (withCandidate) {
     l.onboarding!.activeCallerTurnId = "turn-approval";
+    l.onboarding!.pendingCallerTurns = [{
+      turnId: "turn-approval",
+      transcriptCompleted: true,
+    }];
     l.onboarding!.speechPending = true;
     l.onboarding!.speechGeneration += 1;
   }
@@ -2402,6 +2412,80 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
         approvalTurnId: "turn-approval-transcript-first",
       });
     expect(l.onboarding!.lifecycle.phase).toBe("approval_persisting");
+  });
+
+  test("multiple caller turns bind responses by speech order rather than transcription completion order", async () => {
+    const cap = onboardingCap("call-multiple-turn-order");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "session.created" });
+
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-A",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-B",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-B",
+      transcript: "B",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-A",
+      transcript: "A",
+    });
+    await handleEvent(cap, l, ws as any, responseCreated("response-A"));
+    await handleEvent(cap, l, ws as any, responseCreated("response-B"));
+
+    expect(l.onboarding!.responses["response-A"]?.callerTurnId).toBe("turn-A");
+    expect(l.onboarding!.responses["response-B"]?.callerTurnId).toBe("turn-B");
+  });
+
+  test("one VAD response completing cannot strand the next speech-owned caller turn", async () => {
+    const cap = onboardingCap("call-multiple-turn-pending");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "session.created" });
+
+    for (const turnId of ["turn-A", "turn-B"]) {
+      await handleEvent(cap, l, ws as any, {
+        type: "input_audio_buffer.speech_started",
+        item_id: turnId,
+      });
+      await handleEvent(cap, l, ws as any, {
+        type: "conversation.item.input_audio_transcription.completed",
+        item_id: turnId,
+        transcript: turnId,
+      });
+    }
+    await handleEvent(cap, l, ws as any, responseCreated("response-A"));
+    await handleEvent(cap, l, ws as any, responseDone("response-A"));
+    await handleEvent(cap, l, ws as any, responseCreated("response-B"));
+
+    expect(l.onboarding!.responses["response-A"]?.callerTurnId).toBe("turn-A");
+    expect(l.onboarding!.responses["response-B"]?.callerTurnId).toBe("turn-B");
+  });
+
+  test("speech-owned pending turn correlation fails closed at its deterministic bound", async () => {
+    const cap = onboardingCap("call-pending-turn-capacity");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "session.created" });
+
+    for (let index = 0; index < 513; index += 1)
+      await handleEvent(cap, l, ws as any, {
+        type: "input_audio_buffer.speech_started",
+        item_id: `turn-capacity-${index}`,
+      });
+
+    expect(l.onboarding!.pendingCallerTurns).toHaveLength(512);
+    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expect(l.transcript.at(-1)?.text)
+      .toBe("onboarding blocked: adapter_capacity_exceeded");
   });
 
   test("an indeterminate approval reconciles once on the same socket and emits one output", async () => {
