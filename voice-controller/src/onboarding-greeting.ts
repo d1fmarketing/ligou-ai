@@ -4,8 +4,7 @@ export type OnboardingOpeningMode =
   | "provider_model_v1"
   | "application_tts_v1";
 
-export interface OnboardingOpeningPayload {
-  version: 1;
+interface OnboardingOpeningPayloadBase {
   item_id: string;
   text: string;
   text_sha256: string;
@@ -13,9 +12,39 @@ export interface OnboardingOpeningPayload {
   audio_sha256: string;
   mime: "audio/mpeg";
   voice: "ash";
-  tts_model: "tts-1";
   cost_usd: number;
 }
+
+export interface OnboardingOpeningNextAction {
+  type: "ask";
+  field: string;
+  subject?: string;
+  question_pt: string;
+}
+
+export interface OnboardingOpeningResumeContext {
+  coverage_receipt_id: string;
+  revision: 1;
+  snapshot_digest: string;
+  next_action: OnboardingOpeningNextAction;
+}
+
+export interface OnboardingOpeningPayloadV1
+  extends OnboardingOpeningPayloadBase {
+  version: 1;
+  tts_model: "tts-1";
+}
+
+export interface OnboardingOpeningPayloadV2
+  extends OnboardingOpeningPayloadBase {
+  version: 2;
+  tts_model: "tts-1-hd";
+  resume_context: OnboardingOpeningResumeContext | null;
+}
+
+export type OnboardingOpeningPayload =
+  | OnboardingOpeningPayloadV1
+  | OnboardingOpeningPayloadV2;
 
 export interface OnboardingOpeningFailure extends Error {
   usageResolved: boolean;
@@ -27,10 +56,12 @@ type FetchLike = (
   init?: RequestInit,
 ) => Promise<Response>;
 
-const TTS_MODEL = "tts-1" as const;
+const TTS_MODEL = "tts-1-hd" as const;
+const LEGACY_TTS_MODEL = "tts-1" as const;
 const TTS_VOICE = "ash" as const;
 const TTS_MIME = "audio/mpeg" as const;
-const TTS_COST_PER_MILLION_CHARACTERS_USD = 15;
+const TTS_COST_PER_MILLION_CHARACTERS_USD = 30;
+const LEGACY_TTS_COST_PER_MILLION_CHARACTERS_USD = 15;
 const DEFAULT_TTS_TIMEOUT_MS = 8_000;
 const MAX_TTS_TIMEOUT_MS = 15_000;
 // The DB/Edge contract bounds base64 at 2,000,000 characters. A decoded body
@@ -55,16 +86,82 @@ export function isOnboardingOpeningMode(
   return value === "provider_model_v1" || value === "application_tts_v1";
 }
 
-export function onboardingOpeningText(tenantName: string): string {
+function exactObjectKeys(
+  value: Record<string, unknown>,
+  keys: string[],
+): boolean {
+  return JSON.stringify(Object.keys(value).sort()) ===
+    JSON.stringify([...keys].sort());
+}
+
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value && typeof value === "object")
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => [key, canonicalValue(nested)]));
+  return value;
+}
+
+export function openingResumeContextIsInternallyValid(
+  value: unknown,
+): value is OnboardingOpeningResumeContext {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const context = value as Record<string, unknown>;
+  if (!exactObjectKeys(context, [
+    "coverage_receipt_id",
+    "revision",
+    "snapshot_digest",
+    "next_action",
+  ]) ||
+    typeof context.coverage_receipt_id !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      context.coverage_receipt_id,
+    ) ||
+    context.revision !== 1 ||
+    typeof context.snapshot_digest !== "string" ||
+    !/^[0-9a-f]{64}$/.test(context.snapshot_digest) ||
+    !context.next_action || typeof context.next_action !== "object" ||
+    Array.isArray(context.next_action)) return false;
+  const action = context.next_action as Record<string, unknown>;
+  const actionKeys = ["type", "field", "question_pt"];
+  if (action.subject !== undefined) actionKeys.push("subject");
+  return exactObjectKeys(action, actionKeys) &&
+    action.type === "ask" &&
+    typeof action.field === "string" && Boolean(action.field.trim()) &&
+    typeof action.question_pt === "string" &&
+    Boolean(action.question_pt.trim()) &&
+    (action.subject === undefined ||
+      (typeof action.subject === "string" && Boolean(action.subject.trim())));
+}
+
+export function onboardingOpeningText(
+  tenantName: string,
+  resumeContext: OnboardingOpeningResumeContext | null = null,
+): string {
   if (typeof tenantName !== "string" || !tenantName.trim())
     throw new Error("onboarding_opening_tenant_name_required");
-  return `Oi! Aqui é o Ligou, agente de inteligência artificial da ${tenantName}. Quais serviços sua empresa oferece?`;
+  const identity =
+    `Oi! Aqui é o Ligou, agente de inteligência artificial da ${tenantName}.`;
+  if (resumeContext === null)
+    return `${identity} Quais serviços sua empresa oferece?`;
+  if (!openingResumeContextIsInternallyValid(resumeContext))
+    throw new Error("onboarding_opening_resume_context_invalid");
+  return `${identity} Vamos continuar de onde paramos. ${resumeContext.next_action.question_pt}`;
 }
 
 export function onboardingTtsCostUsd(text: string): number {
   const characters = [...text].length;
   return Number((
     characters * TTS_COST_PER_MILLION_CHARACTERS_USD / 1_000_000
+  ).toFixed(8));
+}
+
+function legacyOnboardingTtsCostUsd(text: string): number {
+  const characters = [...text].length;
+  return Number((
+    characters * LEGACY_TTS_COST_PER_MILLION_CHARACTERS_USD / 1_000_000
   ).toFixed(8));
 }
 
@@ -129,6 +226,7 @@ export async function synthesizeOnboardingOpening(
     tenantName: string;
     browserRequestId: string;
     callId: string;
+    resumeContext?: OnboardingOpeningResumeContext | null;
   },
   dependencies: {
     openaiKey: string;
@@ -136,8 +234,9 @@ export async function synthesizeOnboardingOpening(
     timeoutMs?: number;
     signal?: AbortSignal;
   },
-): Promise<OnboardingOpeningPayload> {
-  const text = onboardingOpeningText(args.tenantName);
+): Promise<OnboardingOpeningPayloadV2> {
+  const resumeContext = args.resumeContext ?? null;
+  const text = onboardingOpeningText(args.tenantName, resumeContext);
   const costUsd = onboardingTtsCostUsd(text);
   const timeoutMs = dependencies.timeoutMs ?? DEFAULT_TTS_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
@@ -189,7 +288,7 @@ export async function synthesizeOnboardingOpening(
     const textSha256 = sha256(text);
     const audioSha256 = sha256(audio);
     return {
-      version: 1,
+      version: 2,
       item_id: onboardingOpeningItemId({
         browserRequestId: args.browserRequestId,
         callId: args.callId,
@@ -204,6 +303,9 @@ export async function synthesizeOnboardingOpening(
       voice: TTS_VOICE,
       tts_model: TTS_MODEL,
       cost_usd: costUsd,
+      resume_context: resumeContext === null
+        ? null
+        : structuredClone(resumeContext),
     };
   } catch (error) {
     if (
@@ -223,12 +325,13 @@ export async function synthesizeOnboardingOpening(
 export function openingPayloadIsInternallyValid(
   payload: unknown,
   expectedText: string,
+  expectedResumeContext?: OnboardingOpeningResumeContext | null,
 ): payload is OnboardingOpeningPayload {
   if (!payload || typeof payload !== "object" || Array.isArray(payload))
     return false;
   const value = payload as Record<string, unknown>;
   const keys = Object.keys(value).sort();
-  const expectedKeys = [
+  const baseKeys = [
     "audio_base64",
     "audio_sha256",
     "cost_usd",
@@ -239,11 +342,29 @@ export function openingPayloadIsInternallyValid(
     "tts_model",
     "version",
     "voice",
-  ].sort();
+  ];
+  const version = value.version;
+  const expectedKeys = version === 2
+    ? [...baseKeys, "resume_context"].sort()
+    : baseKeys.sort();
+  const currentV2 = version === 2;
+  const legacyV1 = version === 1;
   if (JSON.stringify(keys) !== JSON.stringify(expectedKeys) ||
-    value.version !== 1 || value.text !== expectedText ||
+    (!currentV2 && !legacyV1) || value.text !== expectedText ||
     value.mime !== TTS_MIME || value.voice !== TTS_VOICE ||
-    value.tts_model !== TTS_MODEL ||
+    (currentV2 ? value.tts_model !== TTS_MODEL :
+      value.tts_model !== LEGACY_TTS_MODEL) ||
+    (legacyV1 && expectedResumeContext !== undefined &&
+      expectedResumeContext !== null) ||
+    (currentV2 && !(
+      (value.resume_context === null && expectedResumeContext === null) ||
+      (
+        openingResumeContextIsInternallyValid(value.resume_context) &&
+        openingResumeContextIsInternallyValid(expectedResumeContext) &&
+        JSON.stringify(canonicalValue(value.resume_context)) ===
+          JSON.stringify(canonicalValue(expectedResumeContext))
+      )
+    )) ||
     typeof value.item_id !== "string" ||
     !/^lgo-[0-9a-f]{28}$/.test(value.item_id) ||
     typeof value.text_sha256 !== "string" ||
@@ -251,7 +372,9 @@ export function openingPayloadIsInternallyValid(
     typeof value.audio_base64 !== "string" ||
     typeof value.audio_sha256 !== "string" ||
     typeof value.cost_usd !== "number" ||
-    value.cost_usd !== onboardingTtsCostUsd(expectedText)) return false;
+    value.cost_usd !== (currentV2
+      ? onboardingTtsCostUsd(expectedText)
+      : legacyOnboardingTtsCostUsd(expectedText))) return false;
   let audio: Buffer;
   try {
     audio = Buffer.from(value.audio_base64, "base64");

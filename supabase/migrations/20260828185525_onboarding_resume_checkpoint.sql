@@ -847,3 +847,190 @@ revoke all on function public.initialize_onboarding_resume(uuid,uuid,uuid)
   from public, anon, authenticated, service_role;
 grant execute on function public.initialize_onboarding_resume(uuid,uuid,uuid)
   to service_role;
+
+-- This migration has not shipped yet, so it also carries the backward-
+-- compatible opening payload cutover consumed by the resumed runtime. V1
+-- remains readable while every new application-owned opening is exact V2.
+alter table public.browser_session_requests
+  drop constraint if exists browser_session_requests_opening_state_check;
+alter table public.browser_session_requests
+  add constraint browser_session_requests_opening_state_check check (
+    coalesce((
+      (
+        status in ('pending', 'processing', 'error', 'expired')
+        and opening_mode_applied is null
+        and opening_payload is null
+        and (status <> 'pending' or call_id is null)
+        and (
+          status <> 'processing'
+          or call_id is null
+          or (
+            session_type = 'onboarding'
+            and opening_mode_requested = 'application_tts_v1'
+            and answer_sdp is null
+          )
+        )
+      )
+      or
+      (
+        status = 'cancel_requested'
+        and session_type = 'onboarding'
+        and opening_mode_requested = 'application_tts_v1'
+        and call_id is not null
+        and answer_sdp is null
+        and opening_mode_applied is null
+        and opening_payload is null
+      )
+      or
+      (
+        status in ('ready', 'cancel_requested')
+        and opening_mode_applied = opening_mode_requested
+        and (
+          status <> 'cancel_requested'
+          or (
+            session_type = 'onboarding'
+            and opening_mode_requested = 'application_tts_v1'
+            and opening_mode_applied = 'application_tts_v1'
+            and call_id is not null
+            and coalesce(answer_sdp, '') <> ''
+          )
+        )
+        and (
+          (
+            opening_mode_applied = 'provider_model_v1'
+            and opening_payload is null
+          )
+          or (
+            session_type = 'onboarding'
+            and opening_mode_applied = 'application_tts_v1'
+            and coalesce((
+              jsonb_typeof(opening_payload) = 'object'
+              and opening_payload ? 'version'
+              and opening_payload ? 'item_id'
+              and opening_payload ? 'text'
+              and opening_payload ? 'text_sha256'
+              and opening_payload ? 'audio_base64'
+              and opening_payload ? 'audio_sha256'
+              and opening_payload ? 'mime'
+              and opening_payload ? 'voice'
+              and opening_payload ? 'tts_model'
+              and opening_payload ? 'cost_usd'
+              and length(opening_payload->>'item_id') = 32
+              and opening_payload->>'item_id' ~ '^lgo-[0-9a-f]{28}$'
+              and length(opening_payload->>'text') between 1 and 1000
+              and btrim(opening_payload->>'text') <> ''
+              and opening_payload->>'text_sha256' ~ '^[0-9a-f]{64}$'
+              and length(opening_payload->>'audio_base64')
+                between 4 and 2000000
+              and length(opening_payload->>'audio_base64') % 4 = 0
+              and opening_payload->>'audio_base64' ~
+                '^[A-Za-z0-9+/]+={0,2}$'
+              and opening_payload->>'audio_sha256' ~ '^[0-9a-f]{64}$'
+              and opening_payload->>'mime' = 'audio/mpeg'
+              and opening_payload->>'voice' = 'ash'
+              and case
+                when jsonb_typeof(opening_payload->'cost_usd') = 'number'
+                  then (opening_payload->>'cost_usd')::numeric between 0 and 1
+                else false
+              end
+              and (
+                (
+                  opening_payload->'version' = '1'::jsonb
+                  and opening_payload->>'tts_model' = 'tts-1'
+                  and opening_payload - array[
+                    'version',
+                    'item_id',
+                    'text',
+                    'text_sha256',
+                    'audio_base64',
+                    'audio_sha256',
+                    'mime',
+                    'voice',
+                    'tts_model',
+                    'cost_usd'
+                  ]::text[] = '{}'::jsonb
+                )
+                or
+                (
+                  opening_payload->'version' = '2'::jsonb
+                  and opening_payload->>'tts_model' = 'tts-1-hd'
+                  and opening_payload - array[
+                    'version',
+                    'item_id',
+                    'text',
+                    'text_sha256',
+                    'audio_base64',
+                    'audio_sha256',
+                    'mime',
+                    'voice',
+                    'tts_model',
+                    'cost_usd',
+                    'resume_context'
+                  ]::text[] = '{}'::jsonb
+                  and (
+                    opening_payload @>
+                      '{"resume_context":null}'::jsonb
+                    or (
+                      jsonb_typeof(opening_payload->'resume_context') =
+                        'object'
+                      and (opening_payload->'resume_context') - array[
+                        'coverage_receipt_id',
+                        'revision',
+                        'snapshot_digest',
+                        'next_action'
+                      ]::text[] = '{}'::jsonb
+                      and coalesce(
+                        opening_payload->'resume_context'
+                          ->>'coverage_receipt_id' ~
+                            '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+                        false
+                      )
+                      and opening_payload->'resume_context'->'revision' =
+                        '1'::jsonb
+                      and coalesce(
+                        opening_payload->'resume_context'
+                          ->>'snapshot_digest' ~ '^[0-9a-f]{64}$',
+                        false
+                      )
+                      and jsonb_typeof(
+                        opening_payload->'resume_context'->'next_action'
+                      ) = 'object'
+                      and (opening_payload->'resume_context'->'next_action')
+                        - array[
+                          'type', 'field', 'subject', 'question_pt'
+                        ]::text[] = '{}'::jsonb
+                      and opening_payload->'resume_context'->'next_action'->>'type' = 'ask'
+                      and coalesce(btrim(
+                        opening_payload->'resume_context'->'next_action'
+                          ->>'field'
+                      ), '') <> ''
+                      and coalesce(btrim(
+                        opening_payload->'resume_context'->'next_action'
+                          ->>'question_pt'
+                      ), '') <> ''
+                      and (
+                        opening_payload->'resume_context'->'next_action'
+                          ->'subject' is null
+                        or coalesce(btrim(
+                          opening_payload->'resume_context'->'next_action'
+                            ->>'subject'
+                        ), '') <> ''
+                      )
+                      and position(
+                        'Vamos continuar de onde paramos.' in
+                          opening_payload->>'text'
+                      ) > 0
+                      and position(
+                        opening_payload->'resume_context'->'next_action'
+                          ->>'question_pt' in opening_payload->>'text'
+                      ) > 0
+                    )
+                  )
+                )
+              )
+            ), false)
+          )
+        )
+      )
+    ), false)
+  );

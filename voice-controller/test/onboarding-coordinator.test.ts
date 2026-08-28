@@ -851,6 +851,77 @@ describe("onboarding lifecycle forbidden transitions", () => {
     ).toHaveLength(0);
   });
 
+  test("hydrates a resumed application lifecycle at revision one without persisting or asking its question twice", () => {
+    const resumed = createOnboardingLifecycle(
+      callId,
+      businessName,
+      "application_tts_v1",
+      {
+        revision: 1,
+        digest: "c".repeat(64),
+        complete: false,
+        missing: [{ field: "area.coverage" }],
+        ambiguous: [],
+        nextQuestion: {
+          field: "area.coverage",
+          questionPt: "Quais cidades e regiões sua empresa atende?",
+        },
+      },
+    );
+    const attached = step(resumed, {
+      type: "socket.attached",
+      socketGeneration: 1,
+      elapsedMs: 1,
+    });
+    expect(attached.lifecycle.coverage).toEqual({
+      revision: 1,
+      digest: "c".repeat(64),
+      complete: false,
+      missing: [{ field: "area.coverage" }],
+      ambiguous: [],
+      nextQuestion: {
+        field: "area.coverage",
+        questionPt: "Quais cidades e regiões sua empresa atende?",
+      },
+    });
+    expect(attached.commands).toContainEqual(expect.objectContaining({
+      type: "telemetry",
+      name: "onboarding.coverage.started",
+      outcome: "coverage_revision_1",
+    }));
+    expect(attached.commands.some((command) =>
+      command.type === "persist_followup" ||
+      command.type === "ask_follow_up" ||
+      command.type === "request_response"
+    )).toBe(false);
+
+    const activated = step(attached.lifecycle, {
+      type: "application.greeting_activated",
+      socketGeneration: 1,
+      elapsedMs: 2,
+    });
+    expect(activated.lifecycle.phase).toBe("collecting");
+    expect(activated.commands.some((command) =>
+      command.type === "persist_followup" || command.type === "ask_follow_up"
+    )).toBe(false);
+
+    const answered = step(activated.lifecycle, {
+      type: "coverage.changed",
+      revision: 2,
+      digest: "d".repeat(64),
+      complete: false,
+      missing: [{ field: "area.out_of_area_policy" }],
+      ambiguous: [],
+      nextQuestion: {
+        field: "area.out_of_area_policy",
+        questionPt: "Como devemos tratar pedidos fora da área?",
+      },
+      elapsedMs: 3,
+    });
+    expect(answered.lifecycle.phase).not.toBe("blocked");
+    expect(answered.lifecycle.coverage.revision).toBe(2);
+  });
+
   test("complete greeting trace reaches collecting and cannot duplicate on reattach", () => {
     let lifecycle = createOnboardingLifecycle(callId, businessName);
     ({ lifecycle } = step(lifecycle, {

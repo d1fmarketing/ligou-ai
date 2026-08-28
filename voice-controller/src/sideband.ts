@@ -24,6 +24,7 @@ import {
   reduceOnboarding,
   type OnboardingCommand,
   type OnboardingEvent,
+  type CoverageLifecycleState,
   type OnboardingLifecycle,
 } from "./onboarding-coordinator.ts";
 import {
@@ -32,13 +33,16 @@ import {
   recordOnboardingFollowup,
   recordOnboardingVoiceApproval,
   type OnboardingAnswerArgs,
+  type OnboardingResumeSuccess,
 } from "./onboarding-store.ts";
 import type { CoverageField } from "./onboarding-coverage.ts";
 import {
   onboardingOpeningText,
   openingPayloadIsInternallyValid,
+  openingResumeContextIsInternallyValid,
   type OnboardingOpeningMode,
   type OnboardingOpeningPayload,
+  type OnboardingOpeningResumeContext,
 } from "./onboarding-greeting.ts";
 
 type RequestResponseCommand = Extract<
@@ -239,6 +243,7 @@ export interface SidebandOptions {
     expectedBusinessName: string;
     openingMode?: OnboardingOpeningMode;
     openingPayload?: OnboardingOpeningPayload;
+    resume?: OnboardingResumeSuccess;
   };
   externalCostUsd?: number;
   fetchImpl?: FetchLike;
@@ -264,12 +269,14 @@ function createOnboardingAdapter(
   callId: string,
   expectedBusinessName: string,
   openingMode: OnboardingOpeningMode = "provider_model_v1",
+  initialCoverage?: CoverageLifecycleState,
 ): OnboardingAdapterState {
   return {
     lifecycle: createOnboardingLifecycle(
       callId,
       expectedBusinessName,
       openingMode,
+      initialCoverage,
     ),
     queue: Promise.resolve(),
     responses: {},
@@ -283,6 +290,75 @@ function createOnboardingAdapter(
     pendingMutationRetryTimers: {},
     speechGeneration: 0,
     speechPending: false,
+  };
+}
+
+function resumeRuntimeState(
+  cap: Capability,
+  resume: OnboardingResumeSuccess | undefined,
+): {
+  openingContext: OnboardingOpeningResumeContext | null;
+  coverage?: CoverageLifecycleState;
+} {
+  if (!resume) return { openingContext: null };
+  const coverage = resume.coverage;
+  const progress = coverage.progress && typeof coverage.progress === "object" &&
+      !Array.isArray(coverage.progress)
+    ? coverage.progress as Record<string, unknown>
+    : null;
+  const missing = progress?.missingRequired;
+  const ambiguous = progress?.ambiguous;
+  const nextQuestion = nextQuestionFromRecorded(resume);
+  const validRefs = (value: unknown): value is Array<{
+    field: string;
+    subject?: string;
+  }> => Array.isArray(value) && value.every((ref) =>
+    ref && typeof ref === "object" && !Array.isArray(ref) &&
+    typeof (ref as Record<string, unknown>).field === "string" &&
+    Boolean(String((ref as Record<string, unknown>).field).trim()) &&
+    (
+      (ref as Record<string, unknown>).subject === undefined ||
+      (
+        typeof (ref as Record<string, unknown>).subject === "string" &&
+        Boolean(String((ref as Record<string, unknown>).subject).trim())
+      )
+    )
+  );
+  const openingContext: OnboardingOpeningResumeContext = {
+    coverage_receipt_id: resume.coverageReceiptId,
+    revision: 1,
+    snapshot_digest: resume.digest,
+    next_action: {
+      type: "ask",
+      field: nextQuestion?.field ?? "",
+      ...(nextQuestion?.subject ? { subject: nextQuestion.subject } : {}),
+      question_pt: nextQuestion?.questionPt ?? "",
+    },
+  };
+  if (
+    cap.sessionType !== "onboarding" ||
+    (resume.status !== "initialized" && resume.status !== "reused") ||
+    resume.revision !== 1 ||
+    coverage.schema_version !== 2 ||
+    coverage.transition_kind !== "resume_checkpoint" ||
+    coverage.tenant_id !== cap.tenantId ||
+    coverage.call_id !== cap.callId ||
+    coverage.revision !== 1 ||
+    coverage.complete !== false ||
+    coverage.snapshot_digest !== resume.digest ||
+    !validRefs(missing) || !validRefs(ambiguous) || !nextQuestion ||
+    !openingResumeContextIsInternallyValid(openingContext)
+  ) throw new Error("onboarding_resume_runtime_invalid");
+  return {
+    openingContext,
+    coverage: {
+      revision: 1,
+      digest: resume.digest,
+      complete: false,
+      missing: structuredClone(missing),
+      ambiguous: structuredClone(ambiguous),
+      nextQuestion: structuredClone(nextQuestion),
+    },
   };
 }
 
@@ -2427,14 +2503,25 @@ export function attachSideband(
     ? options.onboarding?.openingMode ?? "provider_model_v1"
     : "provider_model_v1";
   const openingPayload = options.onboarding?.openingPayload;
+  const resumeState = resumeRuntimeState(
+    cap,
+    options.onboarding?.resume,
+  );
+  if (options.onboarding?.resume && openingMode !== "application_tts_v1")
+    throw new Error("onboarding_resume_application_opening_required");
   const externalCostUsd = options.externalCostUsd ?? 0;
   if (!Number.isFinite(externalCostUsd) || externalCostUsd < 0)
     throw new Error("external_cost_invalid");
   if (openingMode === "application_tts_v1") {
     const expectedText = onboardingOpeningText(
       expectedOnboardingBusinessName!,
+      resumeState.openingContext,
     );
-    if (!openingPayloadIsInternallyValid(openingPayload, expectedText))
+    if (!openingPayloadIsInternallyValid(
+      openingPayload,
+      expectedText,
+      resumeState.openingContext,
+    ))
       throw new Error("application_opening_payload_invalid");
     if (externalCostUsd !== openingPayload.cost_usd)
       throw new Error("application_opening_cost_mismatch");
@@ -2469,6 +2556,7 @@ export function attachSideband(
             cap.callId,
             expectedOnboardingBusinessName!,
             openingMode,
+            resumeState.coverage,
           ),
         }
       : {}),

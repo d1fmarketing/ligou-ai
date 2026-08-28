@@ -245,6 +245,72 @@ test("real onboarding RPC approval reloads into servicePolicies and quote_price"
       opening_payload: cancellablePayload,
     }).eq("id", cancellableApplicationRequest)).error).toBeNull();
 
+    const resumedV2Request = randomUUID();
+    const resumedV2Call = randomUUID();
+    const resumedV2Payload = {
+      version: 2,
+      item_id: `lgo-${"d".repeat(28)}`,
+      text:
+        "Oi! Aqui é o Ligou, agente de inteligência artificial da Runtime Onboarding Integration. Vamos continuar de onde paramos. Qual é a área atendida?",
+      text_sha256: "c".repeat(64),
+      audio_base64: "SUQzBA==",
+      audio_sha256: "d".repeat(64),
+      mime: "audio/mpeg",
+      voice: "ash",
+      tts_model: "tts-1-hd",
+      cost_usd: 0.004,
+      resume_context: {
+        coverage_receipt_id: randomUUID(),
+        revision: 1,
+        snapshot_digest: "e".repeat(64),
+        next_action: {
+          type: "ask",
+          field: "area.coverage",
+          question_pt: "Qual é a área atendida?",
+        },
+      },
+    };
+    expect((await service.from("calls").insert({
+      id: resumedV2Call,
+      tenant_id: tenantId,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").insert({
+      id: resumedV2Request,
+      tenant_id: tenantId,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `resumed-v2-offer-${resumedV2Request}`,
+      status: "ready",
+      answer_sdp: `resumed-v2-answer-${resumedV2Request}`,
+      call_id: resumedV2Call,
+      opening_mode_requested: "application_tts_v1",
+      opening_mode_applied: "application_tts_v1",
+      opening_payload: resumedV2Payload,
+    })).error).toBeNull();
+    const malformedV2Request = randomUUID();
+    const malformedV2 = structuredClone(resumedV2Payload) as any;
+    delete malformedV2.resume_context;
+    const malformedV2Write = await service.from("browser_session_requests")
+      .insert({
+        id: malformedV2Request,
+        tenant_id: tenantId,
+        user_id: ownerId,
+        session_type: "onboarding",
+        offer_sdp: `malformed-v2-offer-${malformedV2Request}`,
+        status: "ready",
+        answer_sdp: `malformed-v2-answer-${malformedV2Request}`,
+        call_id: randomUUID(),
+        opening_mode_requested: "application_tts_v1",
+        opening_mode_applied: "application_tts_v1",
+        opening_payload: malformedV2,
+      });
+    expect(malformedV2Write.error?.message).toContain(
+      "browser_session_requests_opening_state_check",
+    );
+
     const directReadyExpire = await service.from("browser_session_requests")
       .update({ status: "expired" })
       .eq("id", cancellableApplicationRequest);

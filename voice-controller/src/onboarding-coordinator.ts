@@ -1794,10 +1794,27 @@ export function createOnboardingLifecycle(
   callId: string,
   expectedBusinessName: string,
   openingMode: OnboardingOpeningMode = "provider_model_v1",
+  initialCoverage?: CoverageLifecycleState,
 ): OnboardingLifecycle {
   if (!callId.trim()) throw new Error("onboarding_call_id_required");
   if (!expectedBusinessName.trim())
     throw new Error("onboarding_expected_business_name_required");
+  if (initialCoverage && (
+    initialCoverage.revision !== 1 ||
+    !initialCoverage.digest ||
+    !/^[0-9a-f]{64}$/.test(initialCoverage.digest) ||
+    initialCoverage.complete !== false ||
+    !Array.isArray(initialCoverage.missing) ||
+    !Array.isArray(initialCoverage.ambiguous) ||
+    !initialCoverage.nextQuestion ||
+    typeof initialCoverage.nextQuestion.field !== "string" ||
+    !initialCoverage.nextQuestion.field.trim() ||
+    typeof initialCoverage.nextQuestion.questionPt !== "string" ||
+    !initialCoverage.nextQuestion.questionPt.trim() ||
+    (initialCoverage.nextQuestion.subject !== undefined &&
+      (typeof initialCoverage.nextQuestion.subject !== "string" ||
+        !initialCoverage.nextQuestion.subject.trim()))
+  )) throw new Error("onboarding_resume_coverage_invalid");
   return {
     callId,
     expectedBusinessName: expectedBusinessName.trim(),
@@ -1805,16 +1822,18 @@ export function createOnboardingLifecycle(
     phase: "greeting",
     lifecycleRevision: 0,
     socketGeneration: 0,
-    coverage: {
-      revision: 0,
-      complete: false,
-      missing: [],
-      ambiguous: [],
-      nextQuestion: {
-        field: "service.catalog_closure",
-        questionPt: INITIAL_SERVICE_DISCOVERY_QUESTION_PT,
-      },
-    },
+    coverage: initialCoverage
+      ? structuredClone(initialCoverage)
+      : {
+          revision: 0,
+          complete: false,
+          missing: [],
+          ambiguous: [],
+          nextQuestion: {
+            field: "service.catalog_closure",
+            questionPt: INITIAL_SERVICE_DISCOVERY_QUESTION_PT,
+          },
+        },
     toolOutbox: {},
     toolBatches: {},
     responseIntents: {},

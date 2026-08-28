@@ -1693,6 +1693,26 @@ describe("instructions builder", () => {
     expect(instructions).toMatch(/fala PRIMEIRO[^.]*exatamente uma vez/i);
   });
 
+  test("only onboarding receives one Brazilian Portuguese Ash vocal-style layer", () => {
+    const vocalStyle =
+      "VOZ ONBOARDING: fale em português brasileiro natural, com sotaque brasileiro neutro, ritmo moderado, dicção clara e entonação calorosa.";
+    const onboarding = buildInstructions(
+      TENANT as any,
+      RULES as any,
+      "onboarding",
+    );
+    expect(onboarding.split(vocalStyle)).toHaveLength(2);
+    for (const sessionType of ["customer", "owner_browser"] as const) {
+      const instructions = buildInstructions(
+        TENANT as any,
+        RULES as any,
+        sessionType,
+      );
+      expect(instructions).not.toContain("VOZ ONBOARDING:");
+      expect(instructions).not.toContain("sotaque brasileiro neutro");
+    }
+  });
+
   test("onboarding persists silently and takes every next interview question from durable application state", () => {
     const instructions = buildInstructions(TENANT as any, RULES as any, "onboarding");
     expect(instructions).toMatch(/persist[a-z]* cada fato em silêncio/i);

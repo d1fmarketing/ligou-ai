@@ -8,6 +8,10 @@ import * as browserRequestsModule from "../src/browser-requests.ts";
 import { resolveOwnedTenantForSession } from "../../supabase/functions/_shared/owned-tenant.ts";
 import { makeBrowserSessionCapability } from "../src/server.ts";
 import * as serverModule from "../src/server.ts";
+import {
+  onboardingOpeningText,
+  openingPayloadIsInternallyValid,
+} from "../src/onboarding-greeting.ts";
 
 const V02_TENANT = {
   id: "22222222-2222-4222-8222-222222222222", slug: "ligou-22222222", name: "D1f Marketing", vertical: null,
@@ -30,6 +34,31 @@ const APPLICATION_OPENING_PAYLOAD = {
   voice: "ash",
   tts_model: "tts-1",
   cost_usd: 0.001605,
+};
+const APPLICATION_OPENING_PAYLOAD_V2 = {
+  version: 2,
+  item_id: "lgo-b00cbaf9911210b676ace0d7dda5",
+  text:
+    "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Vamos continuar de onde paramos. Quais cidades e regiões sua empresa atende?",
+  text_sha256:
+    "643ca15a2dbc57364f4eca5ae9e846674df997f7837b42873c9998ed2ff5bbf3",
+  audio_base64: "SUQzBAAAAAAAAP/7kGQ=",
+  audio_sha256:
+    "b15db04aea85ebd3f59185796229df945e67f42931c7e9da411e97b83c856ce8",
+  mime: "audio/mpeg",
+  voice: "ash",
+  tts_model: "tts-1-hd",
+  cost_usd: 0.00444,
+  resume_context: {
+    coverage_receipt_id: "44444444-4444-4444-8444-444444444444",
+    revision: 1,
+    snapshot_digest: "c".repeat(64),
+    next_action: {
+      type: "ask",
+      field: "area.coverage",
+      question_pt: "Quais cidades e regiões sua empresa atende?",
+    },
+  },
 };
 
 function tenantClient() {
@@ -789,6 +818,45 @@ describe("browser request handling", () => {
 });
 
 describe("durable browser cancel_requested handshake", () => {
+  test("ready cancellation classification accepts exact v1 and v2 payloads but rejects corrupt resume context", () => {
+    const classify = (browserRequestsModule as any)
+      ._cancellationRequestKindForTests;
+    expect(classify).toBeFunction();
+    const row = (opening_payload: Record<string, unknown>) => ({
+      session_type: "onboarding",
+      opening_mode_requested: "application_tts_v1",
+      answer_sdp: "answer",
+      opening_mode_applied: "application_tts_v1",
+      opening_payload,
+    });
+    expect(classify(row(APPLICATION_OPENING_PAYLOAD))).toBe("ready");
+    expect(classify(row(APPLICATION_OPENING_PAYLOAD_V2))).toBe("ready");
+    expect(classify(row({
+      ...APPLICATION_OPENING_PAYLOAD_V2,
+      resume_context: {
+        ...APPLICATION_OPENING_PAYLOAD_V2.resume_context,
+        snapshot_digest: "invalid",
+      },
+    }))).toBeNull();
+  });
+
+  test("ready reconciliation deep-compares v2 resume context instead of object identity", () => {
+    const matches = (browserRequestsModule as any)
+      ._exactOpeningPayloadMatchesForTests;
+    expect(matches).toBeFunction();
+    expect(matches(
+      structuredClone(APPLICATION_OPENING_PAYLOAD_V2),
+      APPLICATION_OPENING_PAYLOAD_V2,
+    )).toBe(true);
+    expect(matches({
+      ...structuredClone(APPLICATION_OPENING_PAYLOAD_V2),
+      resume_context: {
+        ...APPLICATION_OPENING_PAYLOAD_V2.resume_context,
+        revision: 2,
+      },
+    }, APPLICATION_OPENING_PAYLOAD_V2)).toBe(false);
+  });
+
   function boundary(options: { transitionRows?: number } = {}) {
     const patches: Array<{
       patch: Record<string, unknown>;
@@ -1599,7 +1667,7 @@ describe("durable browser cancel_requested handshake", () => {
 });
 
 describe("application-owned Test 10 opening", () => {
-  test("one bounded tts-1 request produces the exact tenant-bound payload without free-form instructions", async () => {
+  test("one bounded fresh tts-1-hd request emits payload v2 with null resume context and exact USD 30/M cost", async () => {
     const synthesize = (serverModule as any).synthesizeOnboardingOpening;
     expect(synthesize).toBeFunction();
     const calls: Array<{ url: string; init: RequestInit }> = [];
@@ -1633,7 +1701,7 @@ describe("application-owned Test 10 opening", () => {
     expect(calls[0]!.url).toBe("https://api.openai.com/v1/audio/speech");
     expect(calls[0]!.init.method).toBe("POST");
     expect(JSON.parse(String(calls[0]!.init.body))).toEqual({
-      model: "tts-1",
+      model: "tts-1-hd",
       voice: "ash",
       input: "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Quais serviços sua empresa oferece?",
       response_format: "mp3",
@@ -1649,9 +1717,10 @@ describe("application-owned Test 10 opening", () => {
       "voice",
       "tts_model",
       "cost_usd",
+      "resume_context",
     ]);
     expect(payload).toEqual({
-      version: 1,
+      version: 2,
       item_id: "lgo-a89f1f9391ab7a82b4f27f198407",
       text: "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Quais serviços sua empresa oferece?",
       text_sha256: "413f79d3d184ea3985fdb593f99ac331c612c157e871034df0135f06a7817e06",
@@ -1659,10 +1728,95 @@ describe("application-owned Test 10 opening", () => {
       audio_sha256: "b15db04aea85ebd3f59185796229df945e67f42931c7e9da411e97b83c856ce8",
       mime: "audio/mpeg",
       voice: "ash",
-      tts_model: "tts-1",
-      cost_usd: 0.001605,
+      tts_model: "tts-1-hd",
+      cost_usd: 0.00321,
+      resume_context: null,
     });
     expect(payload.item_id).toHaveLength(32);
+    expect(openingPayloadIsInternallyValid(
+      payload,
+      onboardingOpeningText("D1F Marketing", null),
+      null,
+    )).toBe(true);
+  });
+
+  test("resumed payload v2 says identity, continuation phrase, and exact persisted question once", async () => {
+    const synthesize = (serverModule as any).synthesizeOnboardingOpening;
+    const audio = new Uint8Array([
+      0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0xff, 0xfb, 0x90, 0x64,
+    ]);
+    const resumeContext = {
+      coverage_receipt_id: "44444444-4444-4444-8444-444444444444",
+      revision: 1,
+      snapshot_digest: "c".repeat(64),
+      next_action: {
+        type: "ask",
+        field: "area.coverage",
+        question_pt: "Quais cidades e regiões sua empresa atende?",
+      },
+    };
+    let body: Record<string, unknown> | null = null;
+    const payload = await synthesize(
+      {
+        tenantName: "D1F Marketing",
+        browserRequestId: "request-resume-task3",
+        callId: "call-resume-task3",
+        resumeContext,
+      },
+      {
+        openaiKey: "synthetic-unit-test-key",
+        timeoutMs: 50,
+        fetchImpl: async (_url: string, init: RequestInit) => {
+          body = JSON.parse(String(init.body));
+          return new Response(audio, {
+            status: 200,
+            headers: {
+              "content-type": "audio/mpeg",
+              "content-length": String(audio.byteLength),
+            },
+          });
+        },
+      },
+    );
+    const exactText =
+      "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Vamos continuar de onde paramos. Quais cidades e regiões sua empresa atende?";
+    expect(body).toEqual({
+      model: "tts-1-hd",
+      voice: "ash",
+      input: exactText,
+      response_format: "mp3",
+    });
+    expect(payload).toEqual({
+      version: 2,
+      item_id: "lgo-b00cbaf9911210b676ace0d7dda5",
+      text: exactText,
+      text_sha256: "643ca15a2dbc57364f4eca5ae9e846674df997f7837b42873c9998ed2ff5bbf3",
+      audio_base64: "SUQzBAAAAAAAAP/7kGQ=",
+      audio_sha256: "b15db04aea85ebd3f59185796229df945e67f42931c7e9da411e97b83c856ce8",
+      mime: "audio/mpeg",
+      voice: "ash",
+      tts_model: "tts-1-hd",
+      cost_usd: 0.00444,
+      resume_context: resumeContext,
+    });
+    expect(payload.text.split("Vamos continuar de onde paramos.")).toHaveLength(2);
+    expect(payload.text.split(resumeContext.next_action.question_pt)).toHaveLength(2);
+    expect(openingPayloadIsInternallyValid(
+      payload,
+      exactText,
+      resumeContext,
+    )).toBe(true);
+    expect(openingPayloadIsInternallyValid(
+      payload,
+      exactText,
+      { ...resumeContext, snapshot_digest: "d".repeat(64) },
+    )).toBe(false);
+    expect(openingPayloadIsInternallyValid(
+      APPLICATION_OPENING_PAYLOAD,
+      APPLICATION_OPENING_PAYLOAD.text,
+      null,
+    )).toBe(true);
   });
 
   test("tts failures distinguish definitive rejection, malformed success, and indeterminate delivery", async () => {
@@ -1698,7 +1852,7 @@ describe("application-owned Test 10 opening", () => {
     } catch (error: any) {
       expect(error.message).toBe("onboarding_tts_invalid_response");
       expect(error.usageResolved).toBe(true);
-      expect(error.costUsd).toBe(0.001605);
+      expect(error.costUsd).toBe(0.00321);
     }
 
     try {
@@ -1726,7 +1880,7 @@ describe("application-owned Test 10 opening", () => {
     } catch (error: any) {
       expect(error.message).toBe("onboarding_tts_invalid_response");
       expect(error.usageResolved).toBe(true);
-      expect(error.costUsd).toBe(0.001605);
+      expect(error.costUsd).toBe(0.00321);
     }
 
     const timeoutDependency = {
@@ -1777,7 +1931,7 @@ describe("application-owned Test 10 opening", () => {
     } catch (error: any) {
       expect(error.message).toBe("onboarding_tts_invalid_response");
       expect(error.usageResolved).toBe(true);
-      expect(error.costUsd).toBe(0.001605);
+      expect(error.costUsd).toBe(0.00321);
     }
   });
 

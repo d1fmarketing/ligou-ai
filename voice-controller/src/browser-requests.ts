@@ -223,12 +223,18 @@ function exactOpeningPayloadMatches(
   if (expected === null) return actual === null;
   if (!actual || typeof actual !== "object" || Array.isArray(actual))
     return false;
-  const value = actual as Record<string, unknown>;
-  const expectedValue = expected as unknown as Record<string, unknown>;
-  const keys = Object.keys(value).sort();
-  const expectedKeys = Object.keys(expectedValue).sort();
-  return JSON.stringify(keys) === JSON.stringify(expectedKeys) &&
-    expectedKeys.every((key) => Object.is(value[key], expectedValue[key]));
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object")
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, nested]) => [key, canonical(nested)]),
+      );
+    return value;
+  };
+  return JSON.stringify(canonical(actual)) ===
+    JSON.stringify(canonical(expected));
 }
 
 function exactReadyReceiptMatches(
@@ -309,10 +315,17 @@ function cancellationRequestKind(row: any): CancellationRequestKind | null {
   if (row.answer_sdp == null && row.opening_mode_applied == null &&
     row.opening_payload == null) return "processing";
   const payload = row.opening_payload;
+  const expectedResumeContext = payload?.version === 2
+    ? payload.resume_context
+    : undefined;
   if (typeof row.answer_sdp === "string" && row.answer_sdp.trim() &&
     row.opening_mode_applied === "application_tts_v1" && payload &&
     typeof payload.text === "string" &&
-    openingPayloadIsInternallyValid(payload, payload.text)) return "ready";
+    openingPayloadIsInternallyValid(
+      payload,
+      payload.text,
+      expectedResumeContext,
+    )) return "ready";
   return null;
 }
 
@@ -755,6 +768,8 @@ async function handle(
 // test seam: exercised directly by the tenancy suite
 export const _handleBrowserRequest = handle;
 export const _handleBrowserCancellation = handleBrowserCancellation;
+export const _cancellationRequestKindForTests = cancellationRequestKind;
+export const _exactOpeningPayloadMatchesForTests = exactOpeningPayloadMatches;
 export const _browserLiveControlCount = () => browserLiveControls.size;
 export const _pruneBrowserLiveControlsForTests = pruneTerminalBrowserControls;
 export const _pollBrowserCancellations = pollBrowserCancellations;

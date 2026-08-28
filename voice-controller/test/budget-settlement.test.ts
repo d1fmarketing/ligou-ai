@@ -2,11 +2,12 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import * as configModule from "../src/config.ts";
 import { _setClient, invalidateTenant } from "../src/rules.ts";
 import { startSession } from "../src/server.ts";
+import { liveSessions } from "../src/sideband.ts";
 
 const TENANT = {
-  id: "tenant-1", slug: "rocha-plumbing", name: "Rocha Plumbing", vertical: "plumbing",
+  id: "11111111-1111-4111-8111-111111111111", slug: "rocha-plumbing", name: "Rocha Plumbing", vertical: "plumbing",
   languages: ["en", "es"], timezone: "America/Los_Angeles", session_max_minutes: 15,
-  owner_user_id: "owner-1", auth_epoch: 2, policy_epoch: 3,
+  owner_user_id: "22222222-2222-4222-8222-222222222222", auth_epoch: 2, policy_epoch: 3,
 };
 
 const { config } = configModule;
@@ -18,6 +19,7 @@ const originalCeiling = config.sessionCostCeilingUsd;
 const originalProviderCreateTimeoutMs =
   (config as any).realtimeCreateTimeoutMs;
 const originalSidebandOpenTimeoutMs = (config as any).sidebandOpenTimeoutMs;
+const originalVoice = config.voice;
 const originalFetch = globalThis.fetch;
 const originalWebSocket = globalThis.WebSocket;
 let fetchUrls: string[] = [];
@@ -32,6 +34,76 @@ let providerIdentityMode: "success" | "error" | "zero" = "success";
 let durableProviderIdentity: Record<string, unknown> | null = null;
 let reserveGate: Promise<void> | null = null;
 let providerMarkerGate: Promise<void> | null = null;
+let resumeGate: Promise<void> | null = null;
+let resumeRpcResult: { data: unknown; error: { code?: string; message: string } | null } = {
+  data: null,
+  error: { code: "P0002", message: "onboarding_resume_source_missing" },
+};
+
+function resumedCheckpoint(callId: string) {
+  const nextAction = {
+    type: "ask",
+    field: "area.coverage",
+    question_pt: "Quais cidades e regiões sua empresa atende?",
+  };
+  const snapshot = {
+    tenantId: TENANT.id,
+    callId,
+    revision: 1,
+    services: ["desentupimento"],
+    cells: {
+      "service:desentupimento:service.name_synonyms": {
+        state: "answered",
+        attempts: 1,
+        value: ["desentupimento"],
+      },
+    },
+    followUps: 11,
+    followUpGroups: {},
+    summaryInvalidated: false,
+  };
+  const coverage = {
+    schema_version: 2,
+    transition_kind: "resume_checkpoint",
+    tenant_id: TENANT.id,
+    call_id: callId,
+    revision: 1,
+    complete: false,
+    snapshot,
+    progress: {
+      missingRequired: [{ field: "area.coverage" }],
+      ambiguous: [],
+    },
+    selected_rule_ids: [],
+    next_action: nextAction,
+    current_answer_hashes: { "service:desentupimento:service.name_synonyms": "f".repeat(64) },
+    materializations: [],
+    summary_projection: null,
+    summary_hash: null,
+    resume_context: {
+      source_call_id: "33333333-3333-4333-8333-333333333333",
+      source_receipt_id: "44444444-4444-4444-8444-444444444444",
+      source_revision: 33,
+      source_snapshot_digest: "e".repeat(64),
+    },
+    authority: {
+      rules_approved: false,
+      powers_granted: false,
+      operational_mode_changed: false,
+    },
+    snapshot_digest: "c".repeat(64),
+  };
+  return {
+    status: "initialized",
+    source_call_id: "33333333-3333-4333-8333-333333333333",
+    source_receipt_id: "44444444-4444-4444-8444-444444444444",
+    coverage_receipt_id: "55555555-5555-4555-8555-555555555555",
+    revision: 1,
+    snapshot_digest: "c".repeat(64),
+    next_action: nextAction,
+    coverage,
+  };
+}
 
 class AutoOpenWebSocket {
   listeners = new Map<string, Array<(event: any) => void>>();
@@ -151,6 +223,10 @@ function client() {
       if (name === "settle_call_budget") {
         return Promise.resolve({ data: "reservation-1", error: null });
       }
+      if (name === "initialize_onboarding_resume") {
+        if (resumeGate) await resumeGate;
+        return structuredClone(resumeRpcResult);
+      }
       if (name === "begin_provider_termination_attempt") {
         const callId = String(args.p_call_id);
         if (providerAttempts.has(callId)) return Promise.resolve({ data: { should_attempt: false }, error: null });
@@ -178,6 +254,7 @@ beforeEach(() => {
   config.sessionCostCeilingUsd = originalCeiling;
   (config as any).realtimeCreateTimeoutMs = originalProviderCreateTimeoutMs;
   (config as any).sidebandOpenTimeoutMs = originalSidebandOpenTimeoutMs;
+  (config as any).voice = originalVoice;
   globalThis.fetch = originalFetch;
   globalThis.WebSocket = originalWebSocket;
   fetchUrls = [];
@@ -192,6 +269,11 @@ beforeEach(() => {
   durableProviderIdentity = null;
   reserveGate = null;
   providerMarkerGate = null;
+  resumeGate = null;
+  resumeRpcResult = {
+    data: null,
+    error: { code: "P0002", message: "onboarding_resume_source_missing" },
+  };
   invalidateTenant("rocha-plumbing");
   _setClient(client());
 });
@@ -201,6 +283,7 @@ afterEach(() => {
   config.sessionCostCeilingUsd = originalCeiling;
   (config as any).realtimeCreateTimeoutMs = originalProviderCreateTimeoutMs;
   (config as any).sidebandOpenTimeoutMs = originalSidebandOpenTimeoutMs;
+  (config as any).voice = originalVoice;
   globalThis.fetch = originalFetch;
   globalThis.WebSocket = originalWebSocket;
 });
@@ -223,7 +306,7 @@ describe("session budget lifecycle", () => {
     ]) {
       invalidateTenant("rocha-plumbing");
       await expect(startSession(
-        "owner-1",
+        "22222222-2222-4222-8222-222222222222",
         "onboarding",
         "test-sdp",
         undefined,
@@ -262,7 +345,7 @@ describe("session budget lifecycle", () => {
     config.sessionCostCeilingUsd = 2.75;
     reserveError = { message: "budget cap" };
 
-    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+    await expect(startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp")).rejects.toMatchObject({
       message: "budget_exceeded",
       status: 402,
     });
@@ -276,7 +359,7 @@ describe("session budget lifecycle", () => {
     reserveError = { message: "stop after reservation" };
 
     await expect(startSession(
-      "owner-1",
+      "22222222-2222-4222-8222-222222222222",
       "onboarding",
       "test-sdp",
       undefined,
@@ -295,7 +378,7 @@ describe("session budget lifecycle", () => {
     rpcCalls = [];
     invalidateTenant("rocha-plumbing");
     await expect(startSession(
-      "owner-1",
+      "22222222-2222-4222-8222-222222222222",
       "owner_browser",
       "test-sdp",
     )).rejects.toMatchObject({ message: "budget_exceeded", status: 402 });
@@ -306,7 +389,7 @@ describe("session budget lifecycle", () => {
   test("settles a reservation when startup cannot obtain an OpenAI session", async () => {
     config.openaiKey = "";
 
-    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+    await expect(startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp")).rejects.toMatchObject({
       message: "openai_key_missing",
       status: 503,
     });
@@ -329,7 +412,7 @@ describe("session budget lifecycle", () => {
       return new Response("model rejected", { status: 400 });
     };
 
-    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+    await expect(startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp")).rejects.toMatchObject({
       message: "realtime_unavailable",
       status: 502,
     });
@@ -358,10 +441,12 @@ describe("session budget lifecycle", () => {
       const url = String(input);
       fetchUrls.push(url);
       if (url.endsWith("/v1/audio/speech")) {
-        expect(rpcCalls.some((call) => call.name === "reserve_call_budget"))
-          .toBe(true);
+        expect(rpcCalls.map((call) => call.name).slice(0, 2)).toEqual([
+          "reserve_call_budget",
+          "initialize_onboarding_resume",
+        ]);
         expect(JSON.parse(String(init?.body))).toEqual({
-          model: "tts-1",
+          model: "tts-1-hd",
           voice: "ash",
           input: "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Quais serviços sua empresa oferece?",
           response_format: "mp3",
@@ -373,11 +458,11 @@ describe("session budget lifecycle", () => {
       }
       expect(fetchUrls[0]).toBe("https://api.openai.com/v1/audio/speech");
       expect(callUpdates).toContainEqual(expect.objectContaining({
-        cost_estimate_usd: 0.00162,
+        cost_estimate_usd: 0.00324,
         provider_termination_reason: "tts_resolved",
         provider_usage_state: "resolved",
       }));
-      expect(durableFloor).toBe(0.00162);
+      expect(durableFloor).toBe(0.00324);
       expect(callUpdates).toContainEqual(expect.objectContaining({
         provider_termination_state: "unknown",
         provider_termination_mode: "hangup",
@@ -387,7 +472,7 @@ describe("session budget lifecycle", () => {
     };
 
     await expect(startSession(
-      "owner-1",
+      "22222222-2222-4222-8222-222222222222",
       "onboarding",
       "test-sdp",
       undefined,
@@ -413,11 +498,198 @@ describe("session budget lifecycle", () => {
       session_type: "onboarding",
     });
     expect(rpcCalls.find((call) => call.name === "settle_call_budget")?.args)
-      .toMatchObject({ p_actual_cost: 0.00162, p_outcome: "startup_error" });
+      .toMatchObject({ p_actual_cost: 0.00324, p_outcome: "startup_error" });
     expect(callUpdates).toContainEqual(expect.objectContaining({
       provider_usage_state: "not_applicable",
-      cost_estimate_usd: 0.00162,
+      cost_estimate_usd: 0.00324,
     }));
+  });
+
+  test("a blocked latest resume state settles before TTS or provider work and never falls through fresh", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    resumeRpcResult = {
+      data: null,
+      error: {
+        code: "55000",
+        message: "onboarding_resume_latest_ineligible",
+      },
+    };
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      throw new Error("blocked resume must not reach a provider");
+    };
+
+    await expect(startSession(
+      "22222222-2222-4222-8222-222222222222",
+      "onboarding",
+      "test-sdp",
+      undefined,
+      TENANT.id,
+      undefined,
+      {
+        browserRequestId: "request-blocked-resume",
+        openingModeRequested: "application_tts_v1",
+        requestedCallId: "11111111-1111-4111-8111-111111111119",
+      },
+    )).rejects.toMatchObject({
+      message: "onboarding_resume_changed",
+      status: 503,
+    });
+    expect(rpcCalls.map((call) => call.name).slice(0, 2)).toEqual([
+      "reserve_call_budget",
+      "initialize_onboarding_resume",
+    ]);
+    expect(fetchUrls).toEqual([]);
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget"))
+      .toHaveLength(1);
+  });
+
+  test("resume initialization selects the exact persisted question before tts-1-hd", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    (config as any).voice = "cedar";
+    const callId = "11111111-1111-4111-8111-111111111119";
+    resumeRpcResult = { data: resumedCheckpoint(callId), error: null };
+    let ttsBody: Record<string, unknown> | null = null;
+    let realtimeSession: Record<string, any> | null = null;
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      fetchUrls.push(url);
+      if (url.endsWith("/v1/audio/speech")) {
+        ttsBody = JSON.parse(String(init?.body));
+        return new Response(new Uint8Array([0x49, 0x44, 0x33, 0xff]), {
+          status: 200,
+          headers: { "content-type": "audio/mpeg" },
+        });
+      }
+      const form = init?.body as FormData;
+      realtimeSession = JSON.parse(String(form.get("session")));
+      return new Response("model rejected", { status: 400 });
+    };
+
+    await expect(startSession(
+      "22222222-2222-4222-8222-222222222222",
+      "onboarding",
+      "test-sdp",
+      undefined,
+      TENANT.id,
+      undefined,
+      {
+        browserRequestId: "request-resumed-startup",
+        openingModeRequested: "application_tts_v1",
+        requestedCallId: callId,
+      },
+    )).rejects.toMatchObject({ message: "realtime_unavailable" });
+    expect(ttsBody).toEqual({
+      model: "tts-1-hd",
+      voice: "ash",
+      input:
+        "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Vamos continuar de onde paramos. Quais cidades e regiões sua empresa atende?",
+      response_format: "mp3",
+    });
+    expect(rpcCalls.map((call) => call.name).slice(0, 2)).toEqual([
+      "reserve_call_budget",
+      "initialize_onboarding_resume",
+    ]);
+    expect(realtimeSession?.audio?.output?.voice).toBe("ash");
+    expect(String(realtimeSession?.instructions).split(
+      "VOZ ONBOARDING: fale em português brasileiro natural, com sotaque brasileiro neutro, ritmo moderado, dicção clara e entonação calorosa.",
+    )).toHaveLength(2);
+  });
+
+  test("successful resumed startup passes the target checkpoint into sideband lifecycle custody", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    const callId = "11111111-1111-4111-8111-111111111119";
+    resumeRpcResult = { data: resumedCheckpoint(callId), error: null };
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      fetchUrls.push(url);
+      if (url.endsWith("/v1/audio/speech"))
+        return new Response(new Uint8Array([0x49, 0x44, 0x33, 0xff]), {
+          status: 200,
+          headers: { "content-type": "audio/mpeg" },
+        });
+      return new Response("answer-sdp", {
+        status: 200,
+        headers: { Location: "/v1/realtime/calls/rtc-resumed-startup" },
+      });
+    };
+    globalThis.WebSocket = AutoOpenWebSocket as any;
+    let cleanup: { cancel(reason: string): Promise<void> } | null = null;
+    const result = await startSession(
+      "22222222-2222-4222-8222-222222222222",
+      "onboarding",
+      "test-sdp",
+      undefined,
+      TENANT.id,
+      (control) => { cleanup = control; },
+      {
+        browserRequestId: "request-resumed-success",
+        openingModeRequested: "application_tts_v1",
+        requestedCallId: callId,
+      },
+    );
+    expect(result.opening_payload).toMatchObject({
+      version: 2,
+      tts_model: "tts-1-hd",
+      resume_context: {
+        coverage_receipt_id: "55555555-5555-4555-8555-555555555555",
+        revision: 1,
+        snapshot_digest: "c".repeat(64),
+        next_action: {
+          type: "ask",
+          field: "area.coverage",
+          question_pt: "Quais cidades e regiões sua empresa atende?",
+        },
+      },
+    });
+    expect(liveSessions.get(callId)?.onboarding?.lifecycle.coverage)
+      .toMatchObject({
+        revision: 1,
+        digest: "c".repeat(64),
+        nextQuestion: {
+          field: "area.coverage",
+          questionPt: "Quais cidades e regiões sua empresa atende?",
+        },
+      });
+    await cleanup!.cancel("test_cleanup");
+    liveSessions.delete(callId);
+  });
+
+  test("cancellation while resume initialization is pending reaches neither TTS nor Realtime", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    let releaseResume!: () => void;
+    resumeGate = new Promise<void>((resolve) => { releaseResume = resolve; });
+    let cleanup: { cancel(reason: string): Promise<void> } | null = null;
+    globalThis.fetch = async (input) => {
+      fetchUrls.push(String(input));
+      return new Response("must-not-run", { status: 400 });
+    };
+    const pending = startSession(
+      "22222222-2222-4222-8222-222222222222",
+      "onboarding",
+      "test-sdp",
+      undefined,
+      TENANT.id,
+      (control) => { cleanup = control; },
+      {
+        browserRequestId: "request-cancel-resume",
+        openingModeRequested: "application_tts_v1",
+        requestedCallId: "11111111-1111-4111-8111-111111111119",
+      },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(cleanup).not.toBeNull();
+    const cancelled = cleanup!.cancel("edge_cancel_resume_pending");
+    releaseResume();
+    await cancelled;
+    await expect(pending).rejects.toMatchObject({
+      message: "browser_request_cancelled",
+      status: 499,
+    });
+    expect(rpcCalls.filter((call) =>
+      call.name === "initialize_onboarding_resume"
+    )).toHaveLength(1);
+    expect(fetchUrls).toEqual([]);
   });
 
   test("cancellation during held budget reservation prevents every TTS/provider step and releases the reservation", async () => {
@@ -426,7 +698,7 @@ describe("session budget lifecycle", () => {
     reserveGate = new Promise<void>((resolve) => { releaseReserve = resolve; });
     let cleanup: { cancel(reason: string): Promise<void> } | null = null;
     const pending = startSession(
-      "owner-1", "onboarding", "test-sdp", undefined, TENANT.id,
+      "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
       (control) => { cleanup = control; },
       {
         browserRequestId: "request-held-reserve",
@@ -438,6 +710,9 @@ describe("session budget lifecycle", () => {
     expect(cleanup).not.toBeNull();
     const cancelled = cleanup!.cancel("edge_cancel_held_reserve");
     expect(fetchUrls).toEqual([]);
+    expect(rpcCalls.filter((call) =>
+      call.name === "initialize_onboarding_resume"
+    )).toHaveLength(0);
     releaseReserve();
     await cancelled;
     await expect(pending).rejects.toMatchObject({
@@ -461,7 +736,7 @@ describe("session budget lifecycle", () => {
     };
     let cleanup: { cancel(reason: string): Promise<void> } | null = null;
     const pending = startSession(
-      "owner-1", "onboarding", "test-sdp", undefined, TENANT.id,
+      "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
       (control) => { cleanup = control; },
       {
         browserRequestId: "request-held-tts",
@@ -483,7 +758,7 @@ describe("session budget lifecycle", () => {
     expect(fetchUrls).toEqual(["https://api.openai.com/v1/audio/speech"]);
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
-      cost_estimate_usd: 0.00162,
+      cost_estimate_usd: 0.00324,
       provider_usage_state: "resolved",
       provider_termination_state: "not_required",
     }));
@@ -509,7 +784,7 @@ describe("session budget lifecycle", () => {
     };
     let cleanup: { cancel(reason: string): Promise<void> } | null = null;
     const pending = startSession(
-      "owner-1", "onboarding", "test-sdp", undefined, TENANT.id,
+      "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
       (control) => { cleanup = control; },
       {
         browserRequestId: "request-tts-body-abort",
@@ -525,7 +800,7 @@ describe("session budget lifecycle", () => {
     expect(fetchUrls).toEqual(["https://api.openai.com/v1/audio/speech"]);
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
-      cost_estimate_usd: 0.00162,
+      cost_estimate_usd: 0.00324,
       provider_usage_state: "resolved",
       provider_termination_state: "not_required",
     }));
@@ -546,7 +821,7 @@ describe("session budget lifecycle", () => {
     };
     let cleanup: { cancel(reason: string): Promise<void> } | null = null;
     const pending = startSession(
-      "owner-1", "onboarding", "test-sdp", undefined, TENANT.id,
+      "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
       (control) => { cleanup = control; },
       {
         browserRequestId: "request-held-marker",
@@ -565,7 +840,7 @@ describe("session budget lifecycle", () => {
     expect(fetchUrls).toEqual(["https://api.openai.com/v1/audio/speech"]);
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
-      cost_estimate_usd: 0.00162,
+      cost_estimate_usd: 0.00324,
       provider_usage_state: "resolved",
       provider_termination_state: "not_required",
     }));
@@ -591,7 +866,7 @@ describe("session budget lifecycle", () => {
     };
     let cleanup: { cancel(reason: string): Promise<void> } | null = null;
     const pending = startSession(
-      "owner-1", "onboarding", "test-sdp", undefined, TENANT.id,
+      "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
       (control) => { cleanup = control; },
       {
         browserRequestId: "request-held-provider",
@@ -608,7 +883,7 @@ describe("session budget lifecycle", () => {
     expect(providerCreationRequests()).toHaveLength(1);
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
-      cost_estimate_usd: 0.00162,
+      cost_estimate_usd: 0.00324,
       provider_usage_state: "unknown",
       provider_termination_state: "unknown",
     }));
@@ -627,7 +902,7 @@ describe("session budget lifecycle", () => {
     };
 
     await expect(startSession(
-      "owner-1",
+      "22222222-2222-4222-8222-222222222222",
       "onboarding",
       "test-sdp",
       undefined,
@@ -645,7 +920,7 @@ describe("session budget lifecycle", () => {
     expect(fetchUrls).toEqual(["https://api.openai.com/v1/audio/speech"]);
     expect(providerCreationRequests()).toHaveLength(0);
     expect(rpcCalls.find((call) => call.name === "settle_call_budget")?.args)
-      .toMatchObject({ p_actual_cost: 0.00162, p_outcome: "startup_error" });
+      .toMatchObject({ p_actual_cost: 0.00324, p_outcome: "startup_error" });
   });
 
   test("definitive TTS rejection settles zero without opening Realtime", async () => {
@@ -656,7 +931,7 @@ describe("session budget lifecycle", () => {
     };
 
     await expect(startSession(
-      "owner-1",
+      "22222222-2222-4222-8222-222222222222",
       "onboarding",
       "test-sdp",
       undefined,
@@ -686,7 +961,7 @@ describe("session budget lifecycle", () => {
     };
 
     await expect(startSession(
-      "owner-1",
+      "22222222-2222-4222-8222-222222222222",
       "onboarding",
       "test-sdp",
       undefined,
@@ -721,7 +996,7 @@ describe("session budget lifecycle", () => {
       throw new TypeError("synthetic Realtime transport loss");
     };
     await expect(startSession(
-      "owner-1", "onboarding", "test-sdp", undefined, TENANT.id,
+      "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
       undefined,
       {
         browserRequestId: "request-realtime-unknown-floor",
@@ -732,7 +1007,7 @@ describe("session budget lifecycle", () => {
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
       provider_usage_state: "unknown",
-      cost_estimate_usd: 0.00162,
+      cost_estimate_usd: 0.00324,
     }));
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget"))
       .toHaveLength(0);
@@ -759,7 +1034,7 @@ describe("session budget lifecycle", () => {
     globalThis.WebSocket = AutoOpenWebSocket as any;
     let cleanup: { cancel(reason: string): Promise<void> } | null = null;
     await startSession(
-      "owner-1", "onboarding", "test-sdp", undefined, TENANT.id,
+      "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
       (control) => { cleanup = control; },
       {
         browserRequestId: "request-cleanup-floor",
@@ -771,7 +1046,7 @@ describe("session budget lifecycle", () => {
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
       provider_usage_state: "unknown",
-      cost_estimate_usd: 0.00162,
+      cost_estimate_usd: 0.00324,
     }));
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget"))
       .toHaveLength(0);
@@ -784,7 +1059,7 @@ describe("session budget lifecycle", () => {
       throw new Error("provider transport unknown");
     };
 
-    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+    await expect(startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp")).rejects.toMatchObject({
       message: "provider_outcome_unknown",
       status: 502,
     });
@@ -809,7 +1084,7 @@ describe("session budget lifecycle", () => {
     };
     const started = performance.now();
     await expect(startSession(
-      "owner-1", "owner_browser", "test-sdp",
+      "22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp",
     )).rejects.toMatchObject({
       message: "provider_outcome_unknown",
       status: 502,
@@ -845,7 +1120,7 @@ describe("session budget lifecycle", () => {
     };
     const started = performance.now();
     await expect(startSession(
-      "owner-1", "owner_browser", "test-sdp",
+      "22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp",
     )).rejects.toMatchObject({ message: "provider_outcome_unknown" });
     expect(performance.now() - started).toBeLessThan(80);
     expect(fetchUrls).toEqual([
@@ -864,7 +1139,7 @@ describe("session budget lifecycle", () => {
         : new Response("definitive fallback rejection", { status: 400 });
     };
 
-    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+    await expect(startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp")).rejects.toMatchObject({
       message: "provider_outcome_unknown",
       status: 502,
     });
@@ -882,7 +1157,7 @@ describe("session budget lifecycle", () => {
         : new Response("definitive fallback rejection", { status: 400 });
     };
 
-    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+    await expect(startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp")).rejects.toMatchObject({
       message: "provider_outcome_unknown",
       status: 502,
     });
@@ -900,7 +1175,7 @@ describe("session budget lifecycle", () => {
         : new Response(null, { status: 200 });
     };
 
-    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+    await expect(startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp")).rejects.toMatchObject({
       message: "provider_outcome_unknown",
       status: 502,
     });
@@ -927,7 +1202,7 @@ describe("session budget lifecycle", () => {
       return new Response(null, { status: 200 });
     };
 
-    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+    await expect(startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp")).rejects.toMatchObject({
       message: "provider_outcome_unknown",
       status: 502,
     });
@@ -946,7 +1221,7 @@ describe("session budget lifecycle", () => {
         : new Response(null, { status: 200 });
     };
 
-    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toMatchObject({
+    await expect(startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp")).rejects.toMatchObject({
       message: "provider_outcome_unknown",
       status: 502,
     });
@@ -966,7 +1241,7 @@ describe("session budget lifecycle", () => {
     };
     globalThis.WebSocket = AutoOpenWebSocket as any;
 
-    const result = await startSession("owner-1", "owner_browser", "test-sdp");
+    const result = await startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp");
 
     expect(fetchUrls).toHaveLength(2);
     expect(result.fell_back).toBe(true);
@@ -1010,7 +1285,7 @@ describe("session budget lifecycle", () => {
         constructor() { sockets += 1; }
       } as any;
       await expect(startSession(
-        "owner-1", "owner_browser", "test-sdp",
+        "22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp",
       )).rejects.toMatchObject({
         message: "provider_identity_unproven",
         status: 503,
@@ -1060,7 +1335,7 @@ describe("session budget lifecycle", () => {
     let settled = false;
     let cleanup: { cancel(reason: string): Promise<void> } | null = null;
     const pending = startSession(
-      "owner-1", "onboarding", "test-sdp", undefined, TENANT.id,
+      "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
       (control) => { cleanup = control; },
       {
         browserRequestId: "request-await-sideband-open",
@@ -1094,7 +1369,7 @@ describe("session budget lifecycle", () => {
     } as any;
     let cleanup: { cancel(reason: string): Promise<void> } | null = null;
     const result = await startSession(
-      "owner-1", "owner_browser", "test-sdp", undefined, undefined,
+      "22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp", undefined, undefined,
       (control) => { cleanup = control; },
     );
     expect(result.sdp).toBe("answer-sdp");
@@ -1124,7 +1399,7 @@ describe("session budget lifecycle", () => {
       close() {}
     } as any;
     await expect(startSession(
-      "owner-1", "onboarding", "test-sdp", undefined, TENANT.id,
+      "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
       undefined,
       {
         browserRequestId: "request-sideband-open-timeout",
@@ -1141,7 +1416,7 @@ describe("session budget lifecycle", () => {
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
       provider_usage_state: "unknown",
-      cost_estimate_usd: 0.00162,
+      cost_estimate_usd: 0.00324,
     }));
   });
 
@@ -1156,7 +1431,7 @@ describe("session budget lifecycle", () => {
     };
     globalThis.WebSocket = class { constructor() { throw new Error("sideband attach failed"); } } as any;
 
-    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toThrow("sideband attach failed");
+    await expect(startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp")).rejects.toThrow("sideband attach failed");
 
     expect(fetchUrls.some((url) => url.endsWith("/rtc-1/hangup"))).toBe(true);
     assertUnknownProviderRemainsDiscoverable();
@@ -1173,7 +1448,7 @@ describe("session budget lifecycle", () => {
     };
     globalThis.WebSocket = class { constructor() { throw new Error("sideband attach failed"); } } as any;
 
-    await expect(startSession("owner-1", "owner_browser", "test-sdp")).rejects.toThrow("sideband attach failed");
+    await expect(startSession("22222222-2222-4222-8222-222222222222", "owner_browser", "test-sdp")).rejects.toThrow("sideband attach failed");
 
     expect(fetchUrls.some((url) => url.endsWith("/rtc-1/hangup"))).toBe(true);
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);

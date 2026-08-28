@@ -16,10 +16,16 @@ import { finalizeTerminalBudget, reserveCallBudget } from "./budget.ts";
 import { randomUUID } from "node:crypto";
 import {
   isOnboardingOpeningMode,
+  openingResumeContextIsInternallyValid,
   synthesizeOnboardingOpening,
   type OnboardingOpeningMode,
   type OnboardingOpeningPayload,
+  type OnboardingOpeningResumeContext,
 } from "./onboarding-greeting.ts";
+import {
+  initializeOnboardingResume,
+  type OnboardingResumeSuccess,
+} from "./onboarding-store.ts";
 
 export { synthesizeOnboardingOpening } from "./onboarding-greeting.ts";
 
@@ -103,6 +109,29 @@ export function resolvedOnboardingTtsFailureCost(error: unknown): number | null 
   return Number.isFinite(failure.costUsd) && failure.costUsd >= 0
     ? failure.costUsd
     : null;
+}
+
+function openingResumeContext(
+  resume: OnboardingResumeSuccess | undefined,
+): OnboardingOpeningResumeContext | null {
+  if (!resume) return null;
+  const action = resume.nextAction;
+  const context: OnboardingOpeningResumeContext = {
+    coverage_receipt_id: resume.coverageReceiptId,
+    revision: 1,
+    snapshot_digest: resume.digest,
+    next_action: {
+      type: "ask",
+      field: String(action.field ?? ""),
+      ...(typeof action.subject === "string"
+        ? { subject: action.subject }
+        : {}),
+      question_pt: String(action.question_pt ?? ""),
+    },
+  };
+  if (!openingResumeContextIsInternallyValid(context))
+    throw new Error("onboarding_resume_opening_context_invalid");
+  return context;
 }
 
 const UUID_PATTERN =
@@ -612,6 +641,18 @@ export async function startSession(
     sessionType,
     maxMinutes,
   });
+  let onboardingResume: OnboardingResumeSuccess | undefined;
+  if (sessionType === "onboarding") {
+    const resumeResult = await initializeOnboardingResume(cap);
+    await stopIfCancelled();
+    if (!resumeResult.ok) {
+      const reason = `onboarding_resume_${resumeResult.code}`;
+      await settleStartupFailure(reason, "not_applicable");
+      throw Object.assign(new Error(reason), { status: 503 });
+    }
+    if (resumeResult.status !== "none") onboardingResume = resumeResult;
+  }
+  const resumeContext = openingResumeContext(onboardingResume);
 
   if (openingMode === "application_tts_v1") {
     if (!options.browserRequestId?.trim()) {
@@ -650,6 +691,7 @@ export async function startSession(
           tenantName: tenant.name,
           browserRequestId: options.browserRequestId,
           callId: call.id,
+          resumeContext,
         },
         {
           openaiKey: config.openaiKey,
@@ -748,7 +790,7 @@ export async function startSession(
         model,
         instructions,
         tools: toolSchemasForSessionType(sessionType),
-        voice: config.voice,
+        voice: sessionType === "onboarding" ? "ash" : config.voice,
         openingMode,
       })));
       const callRes = await fetch("https://api.openai.com/v1/realtime/calls", {
@@ -849,6 +891,7 @@ export async function startSession(
               expectedBusinessName: tenant.name,
               openingMode,
               ...(openingPayload ? { openingPayload } : {}),
+              ...(onboardingResume ? { resume: onboardingResume } : {}),
             },
             externalCostUsd,
           }

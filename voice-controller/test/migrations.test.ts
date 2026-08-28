@@ -75,6 +75,22 @@ describe("durable onboarding resume migration contract", () => {
     expect(sql).toContain("alter table public.onboarding_resume_consumptions force row level security");
     expect(sql).toContain("revoke all on table public.onboarding_resume_consumptions from public, anon, authenticated, service_role");
   });
+
+  test("accepts exact legacy v1 reads and exact v2 Ash HD payloads with explicit resume context", () => {
+    const sql = migrationSql("onboarding_resume_checkpoint");
+    expect(sql).toContain("drop constraint if exists browser_session_requests_opening_state_check");
+    expect(sql).toContain("add constraint browser_session_requests_opening_state_check check");
+    expect(sql).toContain("opening_payload->'version' = '1'::jsonb");
+    expect(sql).toContain("opening_payload->>'tts_model' = 'tts-1'");
+    expect(sql).toContain("opening_payload->'version' = '2'::jsonb");
+    expect(sql).toContain("opening_payload->>'tts_model' = 'tts-1-hd'");
+    expect(sql).toContain("opening_payload @> '{\"resume_context\":null}'::jsonb");
+    expect(sql).toContain("jsonb_typeof(opening_payload->'resume_context') = 'object'");
+    expect(sql).toContain(
+      "(opening_payload->'resume_context') - array[ 'coverage_receipt_id', 'revision', 'snapshot_digest', 'next_action' ]::text[] = '{}'::jsonb",
+    );
+    expect(sql).toContain("opening_payload->'resume_context'->'next_action'->>'type' = 'ask'");
+  });
 });
 
 describe("OAuth connector hardening migration contract", () => {

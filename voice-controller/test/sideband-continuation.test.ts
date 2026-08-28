@@ -3556,6 +3556,95 @@ describe("physical socket attach and reconnect", () => {
     externalCostUsd: 0.001605,
   } as any;
 
+  function resumedApplicationOptions(callId: string) {
+    const nextAction = {
+      type: "ask",
+      field: "area.coverage",
+      question_pt: "Quais cidades e regiões sua empresa atende?",
+    };
+    const resumeContext = {
+      coverage_receipt_id: "44444444-4444-4444-8444-444444444444",
+      revision: 1,
+      snapshot_digest: "c".repeat(64),
+      next_action: nextAction,
+    };
+    const text =
+      "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Vamos continuar de onde paramos. Quais cidades e regiões sua empresa atende?";
+    return {
+      onboarding: {
+        expectedBusinessName: "D1F Marketing",
+        openingMode: "application_tts_v1",
+        openingPayload: {
+          version: 2,
+          item_id: "lgo-b00cbaf9911210b676ace0d7dda5",
+          text,
+          text_sha256:
+            "643ca15a2dbc57364f4eca5ae9e846674df997f7837b42873c9998ed2ff5bbf3",
+          audio_base64: "SUQzBAAAAAAAAP/7kGQ=",
+          audio_sha256:
+            "b15db04aea85ebd3f59185796229df945e67f42931c7e9da411e97b83c856ce8",
+          mime: "audio/mpeg",
+          voice: "ash",
+          tts_model: "tts-1-hd",
+          cost_usd: 0.00444,
+          resume_context: resumeContext,
+        },
+        resume: {
+          ok: true,
+          status: "initialized",
+          sourceCallId: "55555555-5555-4555-8555-555555555555",
+          sourceReceiptId: "66666666-6666-4666-8666-666666666666",
+          coverageReceiptId: resumeContext.coverage_receipt_id,
+          revision: 1,
+          digest: resumeContext.snapshot_digest,
+          nextAction,
+          coverage: {
+            schema_version: 2,
+            transition_kind: "resume_checkpoint",
+            tenant_id: "tenant-1",
+            call_id: callId,
+            revision: 1,
+            complete: false,
+            snapshot: {
+              tenantId: "tenant-1",
+              callId,
+              revision: 1,
+              services: ["desentupimento"],
+              cells: {},
+              followUps: 11,
+              followUpGroups: {},
+              summaryInvalidated: false,
+            },
+            progress: {
+              missingRequired: [{ field: "area.coverage" }],
+              ambiguous: [],
+            },
+            selected_rule_ids: [],
+            next_action: nextAction,
+            current_answer_hashes: {},
+            materializations: [],
+            summary_projection: null,
+            summary_hash: null,
+            resume_context: {
+              source_call_id: "55555555-5555-4555-8555-555555555555",
+              source_receipt_id: "66666666-6666-4666-8666-666666666666",
+              source_revision: 33,
+              source_snapshot_digest: "e".repeat(64),
+            },
+            authority: {
+              rules_approved: false,
+              powers_granted: false,
+              operational_mode_changed: false,
+            },
+            snapshot_digest: "c".repeat(64),
+          },
+          durationMs: 1,
+        },
+      },
+      externalCostUsd: 0.00444,
+    } as any;
+  }
+
   function applicationOpeningCreated(
     overrides: Record<string, unknown> = {},
   ) {
@@ -3844,6 +3933,87 @@ describe("physical socket attach and reconnect", () => {
       await flushAsync();
       expect(control.ledger.onboarding!.lifecycle.phase).toBe("collecting");
       expect(framesOfType(second, "response.create")).toHaveLength(0);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("resumed opening hydrates revision one and reattach never repeats its persisted question", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-task3-resumed-opening");
+    const options = resumedApplicationOptions(cap.callId);
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-task3-resumed-opening",
+        "gpt-realtime-2.1",
+        options,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      expect(control.ledger.onboarding!.lifecycle.coverage).toMatchObject({
+        revision: 1,
+        digest: "c".repeat(64),
+        complete: false,
+        nextQuestion: {
+          field: "area.coverage",
+          questionPt: "Quais cidades e regiões sua empresa atende?",
+        },
+      });
+      expect(framesOfType(first, "response.create")).toEqual([]);
+
+      const payload = options.onboarding.openingPayload;
+      first.message({
+        type: "conversation.item.created",
+        item: {
+          id: payload.item_id,
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: payload.text }],
+        },
+      });
+      await flushAsync();
+      first.message(activeSessionUpdated);
+      await flushAsync();
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("collecting");
+      expect(control.ledger.transcript.filter((entry) =>
+        entry.role === "agent" && entry.text === payload.text
+      )).toHaveLength(1);
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(framesOfType(second, "response.create")).toEqual([]);
+      expect(framesOfType(second, "conversation.item.retrieve")).toEqual([
+        expect.objectContaining({ item_id: payload.item_id }),
+      ]);
+      second.message({
+        type: "conversation.item.retrieved",
+        item: {
+          id: payload.item_id,
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: payload.text }],
+        },
+      });
+      await flushAsync();
+      second.message(activeSessionUpdated);
+      await flushAsync();
+      expect(control.ledger.onboarding!.lifecycle.coverage.revision).toBe(1);
+      expect(control.ledger.transcript.filter((entry) =>
+        entry.role === "agent" && entry.text === payload.text
+      )).toHaveLength(1);
+      expect(payload.text.split(payload.resume_context.next_action.question_pt))
+        .toHaveLength(2);
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
