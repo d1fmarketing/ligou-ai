@@ -27,6 +27,66 @@ const {
 
 const CALL_ID = "7f58ee06-6a13-4d45-a2d5-c60244dc92a3";
 const APPROVAL_ID = "11111111-1111-4111-8111-111111111111";
+const OPENING_ITEM_ID = "lgo-0123456789abcdef0123456789ab";
+const OPENING_TEXT = "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Quais serviços sua empresa oferece?";
+const OPENING_AUDIO_BASE64 = "SUQzZmFrZS1tcDM=";
+const OPENING_TEXT_SHA256 = "413f79d3d184ea3985fdb593f99ac331c612c157e871034df0135f06a7817e06";
+const OPENING_AUDIO_SHA256 = "5adfb17f8a9c1829a1e83bd24bb4133262fd8f45027bb35a7124c5dbd3690e9a";
+
+function openingResponse(overrides = {}) {
+  const payload = {
+    version: 1,
+    item_id: OPENING_ITEM_ID,
+    text: OPENING_TEXT,
+    text_sha256: OPENING_TEXT_SHA256,
+    audio_base64: OPENING_AUDIO_BASE64,
+    audio_sha256: OPENING_AUDIO_SHA256,
+    mime: "audio/mpeg",
+    voice: "ash",
+    tts_model: "tts-1",
+    cost_usd: 0.000021,
+    ...(overrides.opening_payload ?? {}),
+  };
+  return {
+    sdp: "answer-sdp",
+    call_id: CALL_ID,
+    max_minutes: 1,
+    model: "gpt-realtime-2.1",
+    opening_mode_applied: "application_tts_v1",
+    business_name: "D1F Marketing",
+    opening_payload: payload,
+    ...overrides,
+    ...(overrides.opening_payload ? { opening_payload: payload } : {}),
+  };
+}
+
+const LIVE_VAD_EVENT = {
+  type: "session.updated",
+  session: {
+    audio: {
+      input: {
+        turn_detection: {
+          type: "semantic_vad",
+          eagerness: "low",
+          create_response: true,
+          interrupt_response: true,
+        },
+      },
+    },
+  },
+};
+
+async function nextTurn() {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function waitUntil(predicate, label) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await nextTurn();
+  }
+  assert.fail(`timed out waiting for ${label}`);
+}
 
 function approvalRow(overrides = {}) {
   return {
@@ -78,16 +138,110 @@ function queryClient({ receipt = { data: null, error: null }, call = { data: nul
   };
 }
 
-function installVoiceBrowser({ fetchImpl, remoteDescriptionError } = {}) {
+function installVoiceBrowser({
+  fetchImpl,
+  remoteDescriptionError,
+  response = openingResponse(),
+  channelInitiallyOpen = true,
+  autoPlayback = "ended",
+  autoOpeningEvents = true,
+  providerGreetingTranscript,
+} = {}) {
   const originals = {
     navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
     RTCPeerConnection: Object.getOwnPropertyDescriptor(globalThis, "RTCPeerConnection"),
     document: Object.getOwnPropertyDescriptor(globalThis, "document"),
     fetch: Object.getOwnPropertyDescriptor(globalThis, "fetch"),
+    createObjectURL: Object.getOwnPropertyDescriptor(globalThis.URL, "createObjectURL"),
+    revokeObjectURL: Object.getOwnPropertyDescriptor(globalThis.URL, "revokeObjectURL"),
   };
-  const tracks = [{ stopped: false, stopCalls: 0, stop() { this.stopped = true; this.stopCalls += 1; } }];
-  const channel = { onmessage: null, onclose: null };
+  const actions = [];
+  const tracks = [{
+    kind: "audio",
+    enabled: true,
+    stopped: false,
+    stopCalls: 0,
+    stop() { this.stopped = true; this.stopCalls += 1; actions.push("track:stop"); },
+  }];
+  const listeners = new Map();
+  const channel = {
+    readyState: channelInitiallyOpen ? "open" : "connecting",
+    onmessage: null,
+    onclose: null,
+    onopen: null,
+    onerror: null,
+    sent: [],
+    addEventListener(type, listener) {
+      const current = listeners.get(type) ?? [];
+      current.push(listener);
+      listeners.set(type, current);
+    },
+    removeEventListener(type, listener) {
+      listeners.set(type, (listeners.get(type) ?? []).filter((entry) => entry !== listener));
+    },
+    dispatch(type, event = {}) {
+      this[`on${type}`]?.(event);
+      for (const listener of listeners.get(type) ?? []) listener(event);
+    },
+    emit(event) { this.dispatch("message", { data: JSON.stringify(event) }); },
+    open() { this.readyState = "open"; this.dispatch("open"); },
+    close() { this.readyState = "closed"; this.dispatch("close"); },
+    send(data) {
+      const event = JSON.parse(data);
+      this.sent.push(event);
+      actions.push(`channel:send:${event.type}`);
+      if (!autoOpeningEvents || event.type !== "conversation.item.create") return;
+      queueMicrotask(() => {
+        if (providerGreetingTranscript) this.emit({
+          type: "response.output_audio_transcript.done",
+          transcript: providerGreetingTranscript,
+        });
+        this.emit({ type: "conversation.item.added", item: event.item });
+        this.emit({ type: "conversation.item.done", item: event.item });
+        this.emit(LIVE_VAD_EVENT);
+      });
+    },
+  };
   const peers = [];
+  const audios = [];
+  const objectUrls = [];
+  const revokedObjectUrls = [];
+  const requestBodies = [];
+
+  class FakeAudio {
+    constructor() {
+      this.index = audios.length;
+      this.autoplay = false;
+      this.muted = false;
+      this.srcObject = null;
+      this.src = "";
+      this.currentTime = 0;
+      this.pauseCalls = 0;
+      this.playCalls = 0;
+      this.listeners = new Map();
+      audios.push(this);
+    }
+    addEventListener(type, listener) {
+      const current = this.listeners.get(type) ?? [];
+      current.push(listener);
+      this.listeners.set(type, current);
+    }
+    removeEventListener(type, listener) {
+      this.listeners.set(type, (this.listeners.get(type) ?? []).filter((entry) => entry !== listener));
+    }
+    dispatch(type, event = {}) {
+      this[`on${type}`]?.(event);
+      for (const listener of this.listeners.get(type) ?? []) listener(event);
+    }
+    async play() {
+      this.playCalls += 1;
+      actions.push(`audio:${this.index}:play:remote-muted=${audios[0]?.muted}:mic=${tracks[0].enabled}`);
+      if (autoPlayback === "reject") throw new Error("play_rejected");
+      if (autoPlayback === "ended") queueMicrotask(() => this.dispatch("ended"));
+      if (autoPlayback === "error") queueMicrotask(() => this.dispatch("error", new Error("audio_error")));
+    }
+    pause() { this.pauseCalls += 1; actions.push(`audio:${this.index}:pause`); }
+  }
 
   class Peer {
     constructor() { peers.push(this); }
@@ -96,10 +250,13 @@ function installVoiceBrowser({ fetchImpl, remoteDescriptionError } = {}) {
     ontrack = null;
     onconnectionstatechange = null;
     createDataChannel() { return channel; }
-    addTrack() {}
+    addTrack(track) { actions.push(`peer:addTrack:enabled=${track.enabled}`); }
     async createOffer() { return { type: "offer", sdp: "offer-sdp" }; }
     async setLocalDescription() {}
-    async setRemoteDescription() { if (remoteDescriptionError) throw remoteDescriptionError; }
+    async setRemoteDescription() {
+      actions.push("peer:setRemoteDescription");
+      if (remoteDescriptionError) throw remoteDescriptionError;
+    }
     close() { this.closeCalls += 1; this.connectionState = "closed"; }
   }
 
@@ -110,27 +267,384 @@ function installVoiceBrowser({ fetchImpl, remoteDescriptionError } = {}) {
   Object.defineProperty(globalThis, "RTCPeerConnection", { configurable: true, value: Peer });
   Object.defineProperty(globalThis, "document", {
     configurable: true,
-    value: { createElement: () => ({ autoplay: false, srcObject: null }) },
+    value: { createElement: () => new FakeAudio() },
   });
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
-    value: fetchImpl ?? (async () => ({
-      ok: true,
-      json: async () => ({ sdp: "answer-sdp", call_id: CALL_ID, max_minutes: 1 }),
-    })),
+    value: async (...args) => {
+      const options = args[1] ?? {};
+      if (options.body) requestBodies.push(JSON.parse(options.body));
+      if (fetchImpl) return fetchImpl(...args);
+      return { ok: true, json: async () => response };
+    },
+  });
+  Object.defineProperty(globalThis.URL, "createObjectURL", {
+    configurable: true,
+    value: (blob) => {
+      const url = `blob:opening-${objectUrls.length + 1}`;
+      objectUrls.push({ url, blob });
+      return url;
+    },
+  });
+  Object.defineProperty(globalThis.URL, "revokeObjectURL", {
+    configurable: true,
+    value: (url) => { revokedObjectUrls.push(url); },
   });
 
   return {
+    actions,
+    audios,
+    channel,
+    objectUrls,
     tracks,
     peers,
+    requestBodies,
+    revokedObjectUrls,
     restore() {
+      if (channel.readyState !== "closed") channel.close();
       for (const [name, descriptor] of Object.entries(originals)) {
+        if (name === "createObjectURL" || name === "revokeObjectURL") continue;
         if (descriptor) Object.defineProperty(globalThis, name, descriptor);
         else delete globalThis[name];
+      }
+      for (const name of ["createObjectURL", "revokeObjectURL"]) {
+        const descriptor = originals[name];
+        if (descriptor) Object.defineProperty(globalThis.URL, name, descriptor);
+        else delete globalThis.URL[name];
       }
     },
   };
 }
+
+test("Test 10 invariant: verified application MP3 is the only audible onboarding opening", async () => {
+  const browser = installVoiceBrowser({
+    providerGreetingTranscript: "Oi, eu sou uma assistente virtual brasileira.",
+  });
+  const events = [];
+  try {
+    const session = await startVoiceSession({
+      accessToken: "owner-token",
+      sessionType: "onboarding",
+      onEvent: (event) => { events.push(event); },
+    });
+
+    assert.deepEqual(browser.requestBodies, [{
+      sdp: "offer-sdp",
+      session_type: "onboarding",
+      opening_mode_requested: "application_tts_v1",
+    }]);
+    assert.equal(browser.actions.includes("peer:addTrack:enabled=false"), true);
+    assert.equal(browser.actions.includes("audio:1:play:remote-muted=true:mic=false"), true);
+    assert.equal(browser.audios[0].playCalls, 0, "provider audio is autoplay-only and must remain muted during opening");
+    assert.equal(browser.audios[1].playCalls, 1, "application owns exactly one opening playback");
+    assert.equal(browser.objectUrls.length, 1);
+    assert.equal(browser.objectUrls[0].blob.type, "audio/mpeg");
+    assert.deepEqual([...new Uint8Array(await browser.objectUrls[0].blob.arrayBuffer())], [...Buffer.from("ID3fake-mp3")]);
+    assert.deepEqual(browser.channel.sent, [{
+      type: "conversation.item.create",
+      item: {
+        id: OPENING_ITEM_ID,
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: OPENING_TEXT }],
+      },
+    }]);
+    assert.deepEqual(events, [{ kind: "agent", text: OPENING_TEXT }]);
+    assert.equal(browser.tracks[0].enabled, true);
+    assert.equal(browser.audios[0].muted, false);
+    assert.deepEqual(browser.revokedObjectUrls, ["blob:opening-1"]);
+    session.end();
+  } finally {
+    browser.restore();
+  }
+});
+
+test("onboarding rejects every provider or missing opening mode before accepting remote speech", async () => {
+  for (const opening_mode_applied of [null, "provider", "application_tts_v2", 1]) {
+    const browser = installVoiceBrowser({ response: openingResponse({ opening_mode_applied }) });
+    try {
+      await assert.rejects(
+        () => startVoiceSession({ accessToken: "owner-token", sessionType: "onboarding" }),
+        /abertura|opening|modo/i,
+      );
+      assert.equal(browser.peers[0].closeCalls, 1);
+      assert.equal(browser.tracks[0].stopCalls, 1);
+      assert.equal(browser.audios[0].muted, true);
+      assert.equal(browser.actions.includes("peer:setRemoteDescription"), false);
+      assert.equal(browser.audios.slice(1).every((audio) => audio.playCalls === 0), true);
+    } finally {
+      browser.restore();
+    }
+  }
+});
+
+test("onboarding validates exact server-owned opening text, payload shape, hashes, and cost before playback", async () => {
+  const invalidResponses = [
+    openingResponse({ business_name: " D1F Marketing " }),
+    openingResponse({ opening_payload: { text: "Oi, eu sou uma assistente virtual brasileira." } }),
+    openingResponse({ opening_payload: { text_sha256: "0".repeat(64) } }),
+    openingResponse({ opening_payload: { audio_sha256: "0".repeat(64) } }),
+    openingResponse({ opening_payload: { mime: "audio/wav" } }),
+    openingResponse({ opening_payload: { voice: "alloy" } }),
+    openingResponse({ opening_payload: { tts_model: "other" } }),
+    openingResponse({ opening_payload: { cost_usd: -1 } }),
+    openingResponse({ opening_payload: { item_id: `lgo-${"f".repeat(29)}` } }),
+    (() => {
+      const candidate = openingResponse();
+      candidate.opening_payload.unexpected = true;
+      return candidate;
+    })(),
+  ];
+
+  for (const response of invalidResponses) {
+    const browser = installVoiceBrowser({ response });
+    try {
+      await assert.rejects(
+        () => startVoiceSession({ accessToken: "owner-token", sessionType: "onboarding" }),
+        /abertura|opening|payload|áudio|audio|hash|custo|empresa/i,
+      );
+      assert.equal(browser.audios.slice(1).every((audio) => audio.playCalls === 0), true);
+      assert.equal(browser.tracks[0].stopCalls, 1);
+    } finally {
+      browser.restore();
+    }
+  }
+});
+
+test("onboarding stays gated through mismatched and duplicate ACKs until exact item and VAD echoes", async () => {
+  const browser = installVoiceBrowser({ autoOpeningEvents: false });
+  const events = [];
+  try {
+    let settled = false;
+    const starting = startVoiceSession({
+      accessToken: "owner-token",
+      sessionType: "onboarding",
+      onEvent: (event) => { events.push(event); },
+    }).then((session) => { settled = true; return session; });
+    await waitUntil(() => browser.channel.sent.length === 1, "opening conversation item");
+
+    browser.channel.emit({
+      type: "conversation.item.created",
+      item: { ...browser.channel.sent[0].item, id: "msg_wrong" },
+    });
+    browser.channel.emit(LIVE_VAD_EVENT);
+    await nextTurn();
+    assert.equal(settled, false);
+    assert.equal(browser.tracks[0].enabled, false);
+    assert.equal(browser.audios[0].muted, true);
+
+    browser.channel.emit({ type: "conversation.item.created", item: browser.channel.sent[0].item });
+    browser.channel.emit({ type: "conversation.item.created", item: browser.channel.sent[0].item });
+    browser.channel.emit({
+      ...LIVE_VAD_EVENT,
+      session: { audio: { input: { turn_detection: { type: "semantic_vad", create_response: true, interrupt_response: false } } } },
+    });
+    await nextTurn();
+    assert.equal(settled, false);
+    assert.deepEqual(events, []);
+
+    browser.channel.emit(LIVE_VAD_EVENT);
+    const session = await starting;
+    assert.equal(browser.channel.sent.length, 1);
+    assert.equal(browser.tracks[0].enabled, true);
+    assert.equal(browser.audios[0].muted, false);
+    assert.deepEqual(events, [{ kind: "agent", text: OPENING_TEXT }]);
+    session.end();
+  } finally {
+    browser.restore();
+  }
+});
+
+test("GA item added is non-authoritative and exact duplicate done ACKs release only with fresh VAD", async () => {
+  const browser = installVoiceBrowser({ autoOpeningEvents: false });
+  const events = [];
+  let settled = false;
+  let session = null;
+  const starting = startVoiceSession({
+    accessToken: "owner-token",
+    sessionType: "onboarding",
+    openingTimeoutMs: 1_000,
+    onEvent: (event) => { events.push(event); },
+  }).then((value) => {
+    settled = true;
+    session = value;
+    return value;
+  });
+  try {
+    await waitUntil(() => browser.channel.sent.length === 1, "opening conversation item");
+    const item = browser.channel.sent[0].item;
+
+    browser.channel.emit({ type: "conversation.item.added", item });
+    browser.channel.emit(LIVE_VAD_EVENT);
+    await nextTurn();
+    assert.equal(settled, false);
+    assert.equal(browser.tracks[0].enabled, false);
+    assert.equal(browser.audios[0].muted, true);
+
+    browser.channel.emit({
+      type: "conversation.item.done",
+      item: { ...item, id: "lgo-0000000000000000000000000000" },
+    });
+    browser.channel.emit({ type: "conversation.item.added", item });
+    browser.channel.emit({ type: "conversation.item.done", item });
+    browser.channel.emit({ type: "conversation.item.done", item });
+    browser.channel.emit({
+      ...LIVE_VAD_EVENT,
+      session: { audio: { input: { turn_detection: {
+        type: "semantic_vad",
+        eagerness: "low",
+        create_response: true,
+        interrupt_response: false,
+      } } } },
+    });
+    await nextTurn();
+    assert.equal(settled, false);
+
+    browser.channel.emit(LIVE_VAD_EVENT);
+    await waitUntil(() => settled, "GA conversation.item.done opening ACK");
+    assert.equal(browser.channel.sent.length, 1);
+    assert.deepEqual(events, [{ kind: "agent", text: OPENING_TEXT }]);
+  } finally {
+    if (!settled && browser.channel.sent[0]?.item) {
+      browser.channel.emit({ type: "conversation.item.created", item: browser.channel.sent[0].item });
+      browser.channel.emit(LIVE_VAD_EVENT);
+    }
+    await starting.catch(() => null);
+    session?.end();
+    browser.restore();
+  }
+});
+
+test("later sideband session updates revoke and restore browser speech custody", async () => {
+  const browser = installVoiceBrowser();
+  try {
+    const session = await startVoiceSession({ accessToken: "owner-token", sessionType: "onboarding" });
+    browser.channel.emit({
+      type: "session.updated",
+      session: { audio: { input: { turn_detection: { type: "semantic_vad", eagerness: "low", create_response: false, interrupt_response: false } } } },
+    });
+    assert.equal(browser.tracks[0].enabled, false);
+    assert.equal(browser.audios[0].muted, true);
+
+    browser.channel.emit(LIVE_VAD_EVENT);
+    assert.equal(browser.tracks[0].enabled, true);
+    assert.equal(browser.audios[0].muted, false);
+    session.end();
+  } finally {
+    browser.restore();
+  }
+});
+
+test("opening playback rejection and timeout fail closed with complete cleanup", async () => {
+  for (const [autoPlayback, openingTimeoutMs] of [["reject", 100], ["pending", 5]]) {
+    const browser = installVoiceBrowser({ autoPlayback });
+    try {
+      await assert.rejects(
+        () => startVoiceSession({
+          accessToken: "owner-token",
+          sessionType: "onboarding",
+          openingTimeoutMs,
+        }),
+        /abertura|opening|reprodu|play|tempo|timeout/i,
+      );
+      assert.equal(browser.tracks[0].stopCalls, 1);
+      assert.equal(browser.peers[0].closeCalls, 1);
+      assert.equal(browser.audios[0].muted, true);
+      assert.equal(browser.audios[1].pauseCalls >= 1, true);
+      assert.deepEqual(browser.revokedObjectUrls, ["blob:opening-1"]);
+    } finally {
+      browser.restore();
+    }
+  }
+});
+
+test("aborting a stale onboarding setup stops TTS, microphone, peer, and pending timers", async () => {
+  const browser = installVoiceBrowser({ autoPlayback: "pending" });
+  const abort = new AbortController();
+  try {
+    const starting = startVoiceSession({
+      accessToken: "owner-token",
+      sessionType: "onboarding",
+      openingTimeoutMs: 10_000,
+      signal: abort.signal,
+    });
+    await waitUntil(() => browser.audios[1]?.playCalls === 1, "application opening playback");
+    abort.abort("stale_run");
+
+    await assert.rejects(() => starting, /cancel|abort|interromp/i);
+    assert.equal(browser.tracks[0].stopCalls, 1);
+    assert.equal(browser.peers[0].closeCalls, 1);
+    assert.equal(browser.audios[1].pauseCalls >= 1, true);
+    assert.deepEqual(browser.revokedObjectUrls, ["blob:opening-1"]);
+  } finally {
+    browser.restore();
+  }
+});
+
+test("hangup aborts the paid onboarding bootstrap before remote description or playback", async () => {
+  let fetchInit = null;
+  let releaseFetch = null;
+  const browser = installVoiceBrowser({
+    fetchImpl: async (_url, init) => await new Promise((resolve, reject) => {
+      fetchInit = init;
+      releaseFetch = () => reject(new Error("test_fetch_release"));
+      init.signal?.addEventListener("abort", () => {
+        reject(new DOMException("bootstrap aborted", "AbortError"));
+      }, { once: true });
+    }),
+  });
+  const hangup = new AbortController();
+  const starting = startVoiceSession({
+    accessToken: "owner-token",
+    sessionType: "onboarding",
+    signal: hangup.signal,
+  });
+  try {
+    await waitUntil(() => fetchInit !== null, "browser session bootstrap fetch");
+    assert.ok(fetchInit.signal instanceof AbortSignal, "bootstrap fetch must receive an AbortSignal");
+    assert.notEqual(fetchInit.signal, hangup.signal, "network uses the internal setup custody signal");
+
+    hangup.abort("manual_hangup");
+    await assert.rejects(() => starting, /cancel|abort|interromp/i);
+
+    assert.equal(fetchInit.signal.aborted, true);
+    assert.equal(browser.actions.includes("peer:setRemoteDescription"), false);
+    assert.equal(browser.audios.length, 1);
+    assert.equal(browser.channel.sent.length, 0);
+    assert.equal(browser.tracks[0].enabled, false);
+    assert.equal(browser.tracks[0].stopCalls, 1);
+    assert.equal(browser.peers[0].closeCalls, 1);
+  } finally {
+    hangup.abort("test_cleanup");
+    releaseFetch?.();
+    await starting.catch(() => {});
+    browser.restore();
+  }
+});
+
+test("owner browser sessions keep the existing request and immediate duplex media path", async () => {
+  const browser = installVoiceBrowser();
+  try {
+    const session = await startVoiceSession({
+      accessToken: "owner-token",
+      sessionType: "owner_browser",
+      model: "gpt-realtime-2.1",
+    });
+    assert.deepEqual(browser.requestBodies, [{
+      sdp: "offer-sdp",
+      session_type: "owner_browser",
+      model: "gpt-realtime-2.1",
+    }]);
+    assert.equal(browser.actions.includes("peer:addTrack:enabled=true"), true);
+    assert.equal(browser.audios[0].muted, false);
+    assert.equal(browser.audios.length, 1);
+    assert.equal(browser.channel.sent.length, 0);
+    session.end();
+  } finally {
+    browser.restore();
+  }
+});
 
 test("session end reports explicit reason and exact call identity", async () => {
   const browser = installVoiceBrowser();

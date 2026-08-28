@@ -63,6 +63,17 @@ test("canonical unit runner starts onboarding lifecycle once in an isolated proc
   expect(coordinatorRuns[0]!.options.cwd).toMatch(/^\/tmp\/ligou-unit-test-/);
 });
 
+test("canonical unit runner starts the browser-session Edge contract once in an isolated process", () => {
+  const runs: Array<{ args: string[]; options: { cwd: string } }> = [];
+  runUnitTests((_command, args, options) => runs.push({ args, options }));
+
+  const edgeRuns = runs.filter((run) =>
+    run.args[1].endsWith("/test/browser-session-edge.test.ts")
+  );
+  expect(edgeRuns).toHaveLength(1);
+  expect(edgeRuns[0]!.options.cwd).toMatch(/^\/tmp\/ligou-unit-test-/);
+});
+
 test("unit runner keeps an invoker dotenv sentinel out of the actual Bun test process", () => {
   const invoker = mkdtempSync("/tmp/ligou-unit-dotenv-");
   const probe = path.join(invoker, "dotenv-probe.test.ts");

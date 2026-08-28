@@ -15,6 +15,24 @@ export function parseSessionCostCeilingUsd(raw: string | undefined): number {
   return value;
 }
 
+export function parseRealtimeCreateTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return 6_000;
+  if (!/^[0-9]+$/.test(raw)) throw new Error("realtime_create_timeout_invalid");
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1_000 || value > 10_000)
+    throw new Error("realtime_create_timeout_invalid");
+  return value;
+}
+
+export function parseSidebandOpenTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return 5_000;
+  if (!/^[0-9]+$/.test(raw)) throw new Error("sideband_open_timeout_invalid");
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 250 || value > 6_000)
+    throw new Error("sideband_open_timeout_invalid");
+  return value;
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 8790),
   supabaseUrl: need("SUPABASE_URL"),
@@ -25,6 +43,12 @@ export const config = {
   fallbackModel: process.env.LIGOU_FALLBACK_MODEL ?? "gpt-realtime-2.1-mini",
   sessionMaxMinutes: Number(process.env.SESSION_MAX_MINUTES ?? 15),
   sessionCostCeilingUsd: parseSessionCostCeilingUsd(process.env.SESSION_COST_CEILING_USD),
+  realtimeCreateTimeoutMs: parseRealtimeCreateTimeoutMs(
+    process.env.REALTIME_CREATE_TIMEOUT_MS,
+  ),
+  sidebandOpenTimeoutMs: parseSidebandOpenTimeoutMs(
+    process.env.SIDEBAND_OPEN_TIMEOUT_MS,
+  ),
   hermesKey: process.env.HERMES_API_KEY ?? "",
   defaultTenantSlug: process.env.LIGOU_TENANT ?? "rocha-plumbing",
   // Male brand voice: RJ listened to cedar/ash/echo/verse/ballad on a real Ligou script and picked ASH.

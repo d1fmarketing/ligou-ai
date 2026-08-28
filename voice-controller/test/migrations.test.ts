@@ -1101,3 +1101,131 @@ describe("onboarding V2 reconciliation migration contract", () => {
     expect(sql).toContain("onboarding_snapshot_transition_invalid");
   });
 });
+
+describe("application-owned onboarding greeting migration contract", () => {
+  test("separates requested and applied opening modes without weakening existing access control", () => {
+    const sql = migrationSql("onboarding_application_greeting");
+
+    expect(sql).toContain("add column if not exists opening_mode_requested text not null default 'provider_model_v1'");
+    expect(sql).toContain("add column if not exists opening_mode_applied text");
+    expect(sql).toContain("add column if not exists opening_payload jsonb");
+    expect(sql).toContain("opening_mode_requested in ('provider_model_v1', 'application_tts_v1')");
+    expect(sql).toContain("opening_mode_requested <> 'application_tts_v1' or session_type = 'onboarding'");
+    expect(sql).toContain("opening_mode_applied = opening_mode_requested");
+    expect(sql).toContain("status in ('pending','processing','ready','cancel_requested','error','expired')");
+    expect(sql).toContain("status in ('ready', 'cancel_requested')");
+    expect(sql).toContain("browser_session_requests_opening_state_check check ( coalesce(( (");
+    expect(sql).not.toContain("disable row level security");
+    expect(sql).not.toContain("no force row level security");
+    expect(sql).not.toContain("grant select on table public.browser_session_requests");
+    expect(sql).not.toContain("grant update on table public.browser_session_requests");
+  });
+
+  test("makes every ready application opening one exact bounded server payload", () => {
+    const sql = migrationSql("onboarding_application_greeting");
+
+    expect(sql).toContain("status in ('pending', 'processing', 'error', 'expired')");
+    expect(sql).toContain("status = 'ready'");
+    expect(sql).toContain("opening_mode_applied = 'provider_model_v1'");
+    expect(sql).toContain("opening_payload is null");
+    expect(sql).toContain("opening_mode_applied = 'application_tts_v1'");
+    expect(sql).toContain("and coalesce(( jsonb_typeof(opening_payload) = 'object'");
+    expect(sql).toContain("end ), false)");
+    expect(sql).toContain("opening_payload - array[");
+    expect(sql).toContain("]::text[] = '{}'::jsonb");
+    for (const key of [
+      "version",
+      "item_id",
+      "text",
+      "text_sha256",
+      "audio_base64",
+      "audio_sha256",
+      "mime",
+      "voice",
+      "tts_model",
+      "cost_usd",
+    ]) expect(sql).toContain(`opening_payload ? '${key}'`);
+    expect(sql).toContain("opening_payload->'version' = '1'::jsonb");
+    expect(sql).toContain("length(opening_payload->>'item_id') = 32");
+    expect(sql).toContain("opening_payload->>'item_id' ~ '^lgo-[0-9a-f]{28}$'");
+    expect(sql).not.toContain("^ligou-opening-[0-9a-f]{40}$");
+    expect(sql).toContain("opening_payload->>'text_sha256' ~ '^[0-9a-f]{64}$'");
+    expect(sql).toContain("opening_payload->>'audio_sha256' ~ '^[0-9a-f]{64}$'");
+    expect(sql).toContain("opening_payload->>'mime' = 'audio/mpeg'");
+    expect(sql).toContain("opening_payload->>'voice' = 'ash'");
+    expect(sql).toContain("opening_payload->>'tts_model' = 'tts-1'");
+    expect(sql).toContain("jsonb_typeof(opening_payload->'cost_usd') = 'number'");
+    expect(sql).toContain("(opening_payload->>'cost_usd')::numeric between 0 and 1");
+    expect(sql).toContain("length(opening_payload->>'audio_base64') between 4 and 2000000");
+    expect(sql).toContain("length(opening_payload->>'audio_base64') % 4 = 0");
+    expect(sql).toContain("length(opening_payload->>'text') between 1 and 1000");
+  });
+
+  test("normalizes only legacy provider-owned ready writes before the strict state check", () => {
+    const sql = migrationSql("onboarding_application_greeting");
+
+    expect(sql).toContain("function public.normalize_legacy_provider_opening_v1()");
+    expect(sql).toContain("returns trigger");
+    expect(sql).toContain("security invoker set search_path = ''");
+    expect(sql).toContain("before insert or update on public.browser_session_requests");
+    expect(sql).toContain("new.status = 'ready'");
+    expect(sql).toContain("new.opening_mode_requested = 'provider_model_v1'");
+    expect(sql).toContain("new.opening_mode_applied is null");
+    expect(sql).toContain("new.opening_payload is null");
+    expect(sql).toContain("new.opening_mode_applied := 'provider_model_v1'");
+    expect(sql).toContain("revoke all on function public.normalize_legacy_provider_opening_v1() from public, anon, authenticated, service_role");
+    const normalizer = sql.slice(
+      sql.indexOf("function public.normalize_legacy_provider_opening_v1()"),
+      sql.indexOf("revoke all on function public.normalize_legacy_provider_opening_v1()"),
+    );
+    expect(normalizer).not.toContain("new.opening_mode_requested = 'application_tts_v1'");
+    expect(normalizer).not.toContain("new.opening_payload := null");
+  });
+
+  test("fences ready cancellation and retains call identity through the controller ACK", () => {
+    const sql = migrationSql("onboarding_application_greeting");
+
+    expect(sql).toContain("function public.enforce_browser_session_cancel_transition_v1()");
+    expect(sql).toContain("old.status = 'ready'");
+    expect(sql).toContain("new is not distinct from old");
+    expect(sql).toContain("elsif new.status = 'cancel_requested' then");
+    expect(sql).toContain("old.session_type <> 'onboarding'");
+    expect(sql).toContain("old.opening_mode_requested <> 'application_tts_v1'");
+    expect(sql).toContain("old.opening_mode_applied <> 'application_tts_v1'");
+    expect(sql).toContain("new.call_id is distinct from old.call_id");
+    expect(sql).toContain("new.answer_sdp is distinct from old.answer_sdp");
+    expect(sql).toContain("new.opening_mode_applied is distinct from old.opening_mode_applied");
+    expect(sql).toContain("new.opening_payload is distinct from old.opening_payload");
+    expect(sql).toContain("old.status = 'cancel_requested'");
+    expect(sql).toContain("new.status <> 'expired'");
+    expect(sql).toContain("new.call_id is distinct from old.call_id");
+    expect(sql).toContain("new.answer_sdp is not null");
+    expect(sql).toContain("new.opening_mode_applied is not null");
+    expect(sql).toContain("new.opening_payload is not null");
+    expect(sql).toContain("browser_session_cancel_transition_invalid");
+    expect(sql).toContain("status <> 'cancel_requested' or ( session_type = 'onboarding'");
+    expect(sql).toContain("revoke all on function public.enforce_browser_session_cancel_transition_v1() from public, anon, authenticated, service_role");
+    expect(sql.indexOf("update public.browser_session_requests set opening_mode_applied = 'provider_model_v1'")).toBeLessThan(
+      sql.indexOf("create trigger browser_session_requests_cancel_transition"),
+    );
+  });
+
+  test("serializes application early call binding against processing cancellation", () => {
+    const sql = migrationSql("onboarding_application_greeting");
+
+    expect(sql).toContain("create unique index browser_session_requests_call_id_unique");
+    expect(sql).toContain("where call_id is not null");
+    expect(sql).toContain("function public.enforce_browser_session_call_binding_v1()");
+    expect(sql).toContain("from public.browser_session_requests br");
+    expect(sql).toContain("where br.call_id = new.id for update");
+    expect(sql).toContain("v_request.status <> 'processing'");
+    expect(sql).toContain("v_request.tenant_id is distinct from new.tenant_id");
+    expect(sql).toContain("v_request.session_type is distinct from new.session_type");
+    expect(sql).toContain("v_request.opening_mode_requested <> 'application_tts_v1'");
+    expect(sql).toContain("browser_session_call_binding_invalid");
+    expect(sql).toContain("before insert on public.calls");
+    expect(sql).toContain("revoke all on function public.enforce_browser_session_call_binding_v1() from public, anon, authenticated, service_role");
+    expect(sql).toContain("status <> 'processing' or call_id is null");
+    expect(sql).toContain("status = 'cancel_requested'");
+  });
+});

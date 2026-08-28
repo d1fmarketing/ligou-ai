@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   applyCoverageFact,
   canonicalizeLocalityInput,
@@ -26,6 +27,13 @@ function step(
   event: OnboardingEvent,
 ): { lifecycle: OnboardingLifecycle; commands: OnboardingCommand[] } {
   return reduceOnboarding(lifecycle, event);
+}
+
+function providerOutputItemId(toolCallId: string): string {
+  return `tlo-${createHash("sha256")
+    .update(`tool-output\0${toolCallId}`, "utf8")
+    .digest("hex")
+    .slice(0, 28)}`;
 }
 
 function outputSentEvent(
@@ -428,7 +436,7 @@ function signoffSpeaking(lifecycle = approvalPersisting().lifecycle) {
   ({ lifecycle } = step(lifecycle, {
     type: "tool.output_acked",
     toolCallId: "approval-tool-1",
-    outputItemId: "tool-output:approval-tool-1",
+    outputItemId: providerOutputItemId("approval-tool-1"),
     socketGeneration: 1,
     elapsedMs: 76,
   }));
@@ -1544,7 +1552,7 @@ describe("onboarding lifecycle forbidden transitions", () => {
     result = step(lifecycle, {
       type: "tool.output_acked",
       toolCallId: "approval-tool-1",
-      outputItemId: "tool-output:approval-tool-1",
+      outputItemId: providerOutputItemId("approval-tool-1"),
       socketGeneration: 1,
       elapsedMs: 76,
     });
@@ -2001,7 +2009,7 @@ describe("reconnect-safe onboarding tool outbox", () => {
       expect.objectContaining({
         type: "resend_output",
         toolCallId: "tool-price-1",
-        outputItemId: "tool-output:tool-price-1",
+        outputItemId: lifecycle.toolOutbox["tool-price-1"]?.outputItemId,
         replay: false,
         delivery: "create",
       }),
@@ -2048,7 +2056,7 @@ describe("reconnect-safe onboarding tool outbox", () => {
     result = step(lifecycle, {
       type: "tool.output_acked",
       toolCallId: "tool-price-1",
-      outputItemId: "tool-output:tool-price-1",
+      outputItemId: providerOutputItemId("tool-price-1"),
       socketGeneration: 2,
       elapsedMs: 15,
     });
@@ -2122,7 +2130,7 @@ describe("reconnect-safe onboarding tool outbox", () => {
     const prematureAck = step(lifecycle, {
       type: "tool.output_acked",
       toolCallId: "tool-strict-transition",
-      outputItemId: "tool-output:tool-strict-transition",
+      outputItemId: providerOutputItemId("tool-strict-transition"),
       socketGeneration: 1,
       elapsedMs: 12,
     });
@@ -2186,7 +2194,7 @@ describe("reconnect-safe onboarding tool outbox", () => {
       const partial = step(lifecycle, {
         type: "tool.output_acked",
         toolCallId: id,
-        outputItemId: `tool-output:${id}`,
+        outputItemId: providerOutputItemId(id),
         socketGeneration: 1,
         elapsedMs: 16,
       });
@@ -2198,7 +2206,7 @@ describe("reconnect-safe onboarding tool outbox", () => {
     const complete = step(lifecycle, {
       type: "tool.output_acked",
       toolCallId: "tool-3",
-      outputItemId: "tool-output:tool-3",
+      outputItemId: providerOutputItemId("tool-3"),
       socketGeneration: 1,
       elapsedMs: 17,
     });
@@ -2269,7 +2277,7 @@ describe("canonical 7f58ee06 cadence", () => {
       ({ lifecycle } = step(lifecycle, {
         type: "tool.output_acked",
         toolCallId: id,
-        outputItemId: `tool-output:${id}`,
+        outputItemId: providerOutputItemId(id),
         socketGeneration: 1,
         elapsedMs: 40 + index,
       }));
@@ -2423,7 +2431,7 @@ describe("Task 4 review fixes", () => {
     ({ lifecycle } = step(lifecycle, {
       type: "tool.output_acked",
       toolCallId: "fact-review-1",
-      outputItemId: "tool-output:fact-review-1",
+      outputItemId: providerOutputItemId("fact-review-1"),
       socketGeneration: 1,
       elapsedMs: 13,
     }));
@@ -2720,7 +2728,7 @@ describe("Task 4 review fixes", () => {
       expect.objectContaining({
         type: "resend_output",
         toolCallId: "approval-tool-1",
-        outputItemId: "tool-output:approval-tool-1",
+        outputItemId: lifecycle.toolOutbox["approval-tool-1"]?.outputItemId,
         replay: false,
       }),
     );
@@ -2736,7 +2744,7 @@ describe("Task 4 review fixes", () => {
     ({ lifecycle } = step(lifecycle, {
       type: "tool.output_acked",
       toolCallId: "approval-tool-1",
-      outputItemId: "tool-output:approval-tool-1",
+      outputItemId: providerOutputItemId("approval-tool-1"),
       socketGeneration: 1,
       elapsedMs: 76,
     }));
@@ -3068,7 +3076,7 @@ test("a failed admitted tool execution queues one truthful recovery with sanitiz
   const acked = step(terminal.lifecycle, {
     type: "tool.output_acked",
     toolCallId: "tool-failed-1",
-    outputItemId: "tool-output:tool-failed-1",
+    outputItemId: providerOutputItemId("tool-failed-1"),
     socketGeneration: 1,
     elapsedMs: 13,
   });
@@ -3140,7 +3148,7 @@ test("failed persistence waits for every sibling output acknowledgement before r
   const firstAck = step(lifecycle, {
     type: "tool.output_acked",
     toolCallId: "tool-failed-sibling",
-    outputItemId: "tool-output:tool-failed-sibling",
+    outputItemId: providerOutputItemId("tool-failed-sibling"),
     socketGeneration: 1,
     elapsedMs: 9,
   });
@@ -3149,7 +3157,7 @@ test("failed persistence waits for every sibling output acknowledgement before r
   const secondAck = step(firstAck.lifecycle, {
     type: "tool.output_acked",
     toolCallId: "tool-ok-sibling",
-    outputItemId: "tool-output:tool-ok-sibling",
+    outputItemId: providerOutputItemId("tool-ok-sibling"),
     socketGeneration: 1,
     elapsedMs: 10,
   });
@@ -3384,7 +3392,7 @@ test("reducer maps fail closed at deterministic capacity without discarding repl
         state: "output_acked" as const,
         providerResponseId: `response-${index}`,
         batchHash: `batch-${index}`,
-        outputItemId: `tool-output:existing-tool-${index}`,
+        outputItemId: providerOutputItemId(`existing-tool-${index}`),
         socketGeneration: 1,
       },
     ]),
@@ -3413,7 +3421,7 @@ test("reducer maps fail closed at deterministic capacity without discarding repl
     batchHash: "new-batch-hash",
     output: "{}",
     resultHash: "result",
-    outputItemId: "tool-output:new-batch-tool",
+    outputItemId: providerOutputItemId("new-batch-tool"),
     socketGeneration: 1,
   };
   batchLifecycle.toolBatches = Object.fromEntries(
@@ -3481,7 +3489,7 @@ test("blocked is absorbing while terminal and output acknowledgements remain boo
     batchHash: "blocked-batch",
     output: "{}",
     resultHash: "blocked-result",
-    outputItemId: "tool-output:blocked-tool",
+    outputItemId: providerOutputItemId("blocked-tool"),
     socketGeneration: 1,
   };
   const advancingEvents: OnboardingEvent[] = [
@@ -3552,7 +3560,7 @@ test("blocked is absorbing while terminal and output acknowledgements remain boo
   const acknowledged = step(blocked, {
     type: "tool.output_acked",
     toolCallId: "blocked-tool",
-    outputItemId: "tool-output:blocked-tool",
+    outputItemId: providerOutputItemId("blocked-tool"),
     socketGeneration: 1,
     elapsedMs: 8,
   });
@@ -3665,7 +3673,7 @@ test("blocked attach and durable tool completion preserve bookkeeping without re
     batchHash: "blocked-batch",
     output: "{\"status\":\"application_owned_close\"}",
     resultHash: "blocked-result",
-    outputItemId: "tool-output:blocked-pending",
+    outputItemId: providerOutputItemId("blocked-pending"),
     socketGeneration: 1,
   };
   const attached = step(attachedLifecycle, {
@@ -3680,7 +3688,7 @@ test("blocked attach and durable tool completion preserve bookkeeping without re
       expect.objectContaining({
         type: "resend_output",
         toolCallId: "blocked-pending",
-        outputItemId: "tool-output:blocked-pending",
+        outputItemId: providerOutputItemId("blocked-pending"),
         replay: true,
         socketGeneration: 2,
       }),
@@ -3698,7 +3706,7 @@ test("blocked attach and durable tool completion preserve bookkeeping without re
     state: "running",
     providerResponseId: "blocked-running-response",
     batchHash: "blocked-running-batch",
-    outputItemId: "tool-output:blocked-running",
+    outputItemId: providerOutputItemId("blocked-running"),
     socketGeneration: 1,
   };
   const executed = step(executionLifecycle, {
@@ -3731,7 +3739,7 @@ test("blocked correlated duplicate create still retrieves the exact pending outp
     batchHash: "blocked-duplicate-batch",
     output: "{\"status\":\"application_owned_close\"}",
     resultHash: "blocked-duplicate-result",
-    outputItemId: "tool-output:blocked-duplicate",
+    outputItemId: providerOutputItemId("blocked-duplicate"),
     socketGeneration: 1,
   };
   const createEventId = onboardingOutputRequestEventId(
@@ -3757,7 +3765,7 @@ test("blocked correlated duplicate create still retrieves the exact pending outp
   expect(duplicate.commands).toContainEqual(expect.objectContaining({
     type: "resend_output",
     toolCallId: "blocked-duplicate",
-    outputItemId: "tool-output:blocked-duplicate",
+    outputItemId: providerOutputItemId("blocked-duplicate"),
     delivery: "retrieve",
     replay: true,
   }));
@@ -3796,6 +3804,26 @@ test("blocked exact post-hangup durable confirmation may close; mismatch remains
     expect.objectContaining({ type: "telemetry", name: "closing.provider_confirmed" }),
     expect.objectContaining({ type: "telemetry", name: "onboarding.closed" }),
   ]));
+});
+
+test("provider function output item IDs are opaque, stable, and bounded for a real 21-character call_id", () => {
+  const toolCallId = "call_0123456789abcdef";
+  expect(toolCallId).toHaveLength(21);
+  let lifecycle = startCollecting();
+  ({ lifecycle } = step(lifecycle, {
+    type: "tool.called",
+    socketGeneration: 1,
+    toolCallId,
+    name: "end_session",
+    args: {},
+    providerResponseId: "resp-real-provider-id",
+    batchHash: "batch-real-provider-id",
+    elapsedMs: 0,
+  }));
+  const outputItemId = lifecycle.toolOutbox[toolCallId]?.outputItemId;
+  expect(outputItemId).toBe("tlo-f04070b5629817764d00825d4e17");
+  expect(outputItemId).toHaveLength(32);
+  expect(outputItemId).not.toContain(toolCallId);
 });
 
 test("coverage correction invalidates queued or sent old signoff and corrected approval can produce signoff B", () => {
@@ -3973,7 +4001,7 @@ test("coverage correction invalidates queued or sent old signoff and corrected a
   result = step(lifecycle, {
     type: "tool.output_acked",
     toolCallId: "approval-tool-B",
-    outputItemId: "tool-output:approval-tool-B",
+    outputItemId: providerOutputItemId("approval-tool-B"),
     socketGeneration: 1,
     elapsedMs: 17,
   });
@@ -3994,7 +4022,7 @@ describe("durable directed follow-up ownership", () => {
       state: "output_acked",
       providerResponseId: "response-followup",
       batchHash: "batch-followup",
-      outputItemId: "tool-output:answer-followup",
+      outputItemId: providerOutputItemId("answer-followup"),
       socketGeneration: 1,
     };
     lifecycle.toolBatches["response-followup:batch-followup"] = {

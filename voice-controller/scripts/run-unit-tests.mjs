@@ -9,6 +9,7 @@ const syntheticPath = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin";
 export const unitTestFiles = [
   "test/ownership.test.ts",
   "test/migrations.test.ts",
+  "test/browser-session-edge.test.ts",
   "test/rules.test.ts",
   "test/booking-offers.test.ts",
   "test/booking-authority.test.ts",

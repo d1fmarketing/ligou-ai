@@ -45,6 +45,305 @@ test("real onboarding RPC approval reloads into servicePolicies and quote_price"
       status: "onboarding",
       operational_mode: "simulation_only",
     })).error).toBeNull();
+    const legacyCustomerRequest = randomUUID();
+    const legacyOnboardingRequest = randomUUID();
+    const legacyOnboardingCall = randomUUID();
+    const legacyOwnerRequest = randomUUID();
+    for (const [id, sessionType] of [
+      [legacyCustomerRequest, "customer"],
+      [legacyOwnerRequest, "owner_browser"],
+    ] as const) {
+      expect((await service.from("browser_session_requests").insert({
+        id,
+        tenant_id: tenantId,
+        user_id: ownerId,
+        session_type: sessionType,
+        offer_sdp: `legacy-offer-${id}`,
+      })).error).toBeNull();
+      expect((await service.from("browser_session_requests").update({
+        status: "ready",
+        answer_sdp: `legacy-answer-${id}`,
+      }).eq("id", id)).error).toBeNull();
+    }
+    expect((await service.from("calls").insert({
+      id: legacyOnboardingCall,
+      tenant_id: tenantId,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").insert({
+      id: legacyOnboardingRequest,
+      tenant_id: tenantId,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `legacy-onboarding-offer-${legacyOnboardingRequest}`,
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "ready",
+      answer_sdp: `legacy-onboarding-answer-${legacyOnboardingRequest}`,
+      call_id: legacyOnboardingCall,
+      handled_at: new Date().toISOString(),
+    }).eq("id", legacyOnboardingRequest)).error).toBeNull();
+    const legacyRows = await service.from("browser_session_requests")
+      .select("id,session_type,status,call_id,opening_mode_requested,opening_mode_applied,opening_payload")
+      .in("id", [legacyCustomerRequest, legacyOnboardingRequest, legacyOwnerRequest])
+      .order("session_type", { ascending: true });
+    expect(legacyRows.error).toBeNull();
+    expect(legacyRows.data).toEqual([
+      {
+        id: legacyCustomerRequest,
+        session_type: "customer",
+        status: "ready",
+        call_id: null,
+        opening_mode_requested: "provider_model_v1",
+        opening_mode_applied: "provider_model_v1",
+        opening_payload: null,
+      },
+      {
+        id: legacyOnboardingRequest,
+        session_type: "onboarding",
+        status: "ready",
+        call_id: legacyOnboardingCall,
+        opening_mode_requested: "provider_model_v1",
+        opening_mode_applied: "provider_model_v1",
+        opening_payload: null,
+      },
+      {
+        id: legacyOwnerRequest,
+        session_type: "owner_browser",
+        status: "ready",
+        call_id: null,
+        opening_mode_requested: "provider_model_v1",
+        opening_mode_applied: "provider_model_v1",
+        opening_payload: null,
+      },
+    ]);
+
+    const earlyBoundRequest = randomUUID();
+    const earlyBoundCall = randomUUID();
+    expect((await service.from("browser_session_requests").insert({
+      id: earlyBoundRequest,
+      tenant_id: tenantId,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `early-bound-offer-${earlyBoundRequest}`,
+      opening_mode_requested: "application_tts_v1",
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "processing",
+      call_id: earlyBoundCall,
+    }).eq("id", earlyBoundRequest)).error).toBeNull();
+    expect((await service.from("calls").insert({
+      id: earlyBoundCall,
+      tenant_id: tenantId,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    })).error).toBeNull();
+
+    const cancelWinsRequest = randomUUID();
+    const cancelWinsCall = randomUUID();
+    expect((await service.from("browser_session_requests").insert({
+      id: cancelWinsRequest,
+      tenant_id: tenantId,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `cancel-wins-offer-${cancelWinsRequest}`,
+      opening_mode_requested: "application_tts_v1",
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "processing",
+      call_id: cancelWinsCall,
+    }).eq("id", cancelWinsRequest)).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "cancel_requested",
+      error: "request_aborted",
+    }).eq("id", cancelWinsRequest)).error).toBeNull();
+    const lateCall = await service.from("calls").insert({
+      id: cancelWinsCall,
+      tenant_id: tenantId,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    });
+    expect(lateCall.error?.message).toContain("browser_session_call_binding_invalid");
+    expect((await service.from("browser_session_requests").update({
+      status: "expired",
+      answer_sdp: null,
+      opening_mode_applied: null,
+      opening_payload: null,
+    }).eq("id", cancelWinsRequest)).error).toBeNull();
+    const cancelWinsExpired = await service.from("browser_session_requests")
+      .select("status,call_id,answer_sdp,opening_mode_applied,opening_payload")
+      .eq("id", cancelWinsRequest)
+      .single();
+    expect(cancelWinsExpired.data).toEqual({
+      status: "expired",
+      call_id: cancelWinsCall,
+      answer_sdp: null,
+      opening_mode_applied: null,
+      opening_payload: null,
+    });
+
+    const malformedEarlyProvider = randomUUID();
+    expect((await service.from("browser_session_requests").insert({
+      id: malformedEarlyProvider,
+      tenant_id: tenantId,
+      user_id: ownerId,
+      session_type: "customer",
+      offer_sdp: `malformed-early-provider-${malformedEarlyProvider}`,
+    })).error).toBeNull();
+    const providerEarlyBind = await service.from("browser_session_requests")
+      .update({ status: "processing", call_id: randomUUID() })
+      .eq("id", malformedEarlyProvider);
+    expect(providerEarlyBind.error?.message).toContain(
+      "browser_session_requests_opening_state_check",
+    );
+
+    const providerCancel = await service.from("browser_session_requests")
+      .update({ status: "cancel_requested", error: "request_aborted" })
+      .eq("id", legacyOnboardingRequest);
+    expect(providerCancel.error?.message).toContain(
+      "browser_session_cancel_transition_invalid",
+    );
+
+    const cancellableApplicationRequest = randomUUID();
+    const cancellableApplicationCall = randomUUID();
+    const cancellablePayload = {
+      version: 1,
+      item_id: `lgo-${"c".repeat(28)}`,
+      text: "Abertura application sintética.",
+      text_sha256: "a".repeat(64),
+      audio_base64: "SUQzBA==",
+      audio_sha256: "b".repeat(64),
+      mime: "audio/mpeg",
+      voice: "ash",
+      tts_model: "tts-1",
+      cost_usd: 0.001,
+    };
+    expect((await service.from("calls").insert({
+      id: cancellableApplicationCall,
+      tenant_id: tenantId,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").insert({
+      id: cancellableApplicationRequest,
+      tenant_id: tenantId,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `application-cancel-offer-${cancellableApplicationRequest}`,
+      opening_mode_requested: "application_tts_v1",
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "ready",
+      answer_sdp: `application-cancel-answer-${cancellableApplicationRequest}`,
+      call_id: cancellableApplicationCall,
+      opening_mode_applied: "application_tts_v1",
+      opening_payload: cancellablePayload,
+    }).eq("id", cancellableApplicationRequest)).error).toBeNull();
+
+    const directReadyExpire = await service.from("browser_session_requests")
+      .update({ status: "expired" })
+      .eq("id", cancellableApplicationRequest);
+    expect(directReadyExpire.error?.message).toContain(
+      "browser_session_cancel_transition_invalid",
+    );
+    const mutatedReady = await service.from("browser_session_requests")
+      .update({ answer_sdp: "mutated-ready-proof" })
+      .eq("id", cancellableApplicationRequest);
+    expect(mutatedReady.error?.message).toContain(
+      "browser_session_cancel_transition_invalid",
+    );
+
+    const illegalCancel = await service.from("browser_session_requests")
+      .update({ status: "cancel_requested", call_id: randomUUID() })
+      .eq("id", cancellableApplicationRequest);
+    expect(illegalCancel.error?.message).toContain(
+      "browser_session_cancel_transition_invalid",
+    );
+    expect((await service.from("browser_session_requests")
+      .update({ status: "cancel_requested", error: "request_aborted" })
+      .eq("id", cancellableApplicationRequest)).error).toBeNull();
+    const cancelRow = await service.from("browser_session_requests")
+      .select("status,call_id,answer_sdp,opening_mode_applied,opening_payload")
+      .eq("id", cancellableApplicationRequest)
+      .single();
+    expect(cancelRow.data).toEqual({
+      status: "cancel_requested",
+      call_id: cancellableApplicationCall,
+      answer_sdp: `application-cancel-answer-${cancellableApplicationRequest}`,
+      opening_mode_applied: "application_tts_v1",
+      opening_payload: cancellablePayload,
+    });
+    const illegalAck = await service.from("browser_session_requests")
+      .update({
+        status: "expired",
+        call_id: null,
+        answer_sdp: null,
+        opening_mode_applied: null,
+        opening_payload: null,
+      })
+      .eq("id", cancellableApplicationRequest);
+    expect(illegalAck.error?.message).toContain(
+      "browser_session_cancel_transition_invalid",
+    );
+    expect((await service.from("browser_session_requests")
+      .update({
+        status: "expired",
+        answer_sdp: null,
+        opening_mode_applied: null,
+        opening_payload: null,
+      })
+      .eq("id", cancellableApplicationRequest)).error).toBeNull();
+    const expiredCancel = await service.from("browser_session_requests")
+      .select("status,call_id,answer_sdp,opening_mode_applied,opening_payload")
+      .eq("id", cancellableApplicationRequest)
+      .single();
+    expect(expiredCancel.data).toEqual({
+      status: "expired",
+      call_id: cancellableApplicationCall,
+      answer_sdp: null,
+      opening_mode_applied: null,
+      opening_payload: null,
+    });
+
+    const applicationRequest = randomUUID();
+    expect((await service.from("browser_session_requests").insert({
+      id: applicationRequest,
+      tenant_id: tenantId,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `application-offer-${applicationRequest}`,
+      opening_mode_requested: "application_tts_v1",
+    })).error).toBeNull();
+    const applicationWithoutPayload = await service.from("browser_session_requests")
+      .update({ status: "ready", answer_sdp: "must-not-commit" })
+      .eq("id", applicationRequest);
+    expect(applicationWithoutPayload.error?.message).toContain(
+      "browser_session_requests_opening_state_check",
+    );
+
+    const malformedProviderRequest = randomUUID();
+    expect((await service.from("browser_session_requests").insert({
+      id: malformedProviderRequest,
+      tenant_id: tenantId,
+      user_id: ownerId,
+      session_type: "owner_browser",
+      offer_sdp: `malformed-offer-${malformedProviderRequest}`,
+    })).error).toBeNull();
+    const malformedProvider = await service.from("browser_session_requests")
+      .update({
+        status: "ready",
+        answer_sdp: "must-not-commit",
+        opening_payload: { unexpected: true },
+      })
+      .eq("id", malformedProviderRequest);
+    expect(malformedProvider.error?.message).toContain(
+      "browser_session_requests_opening_state_check",
+    );
     expect((await service.from("calls").insert({
       id: callId,
       tenant_id: tenantId,
@@ -61,6 +360,8 @@ test("real onboarding RPC approval reloads into servicePolicies and quote_price"
       status: "ready",
       call_id: callId,
       handled_at: new Date().toISOString(),
+      opening_mode_applied: "provider_model_v1",
+      opening_payload: null,
     })).error).toBeNull();
 
     const onboardingCapability = {

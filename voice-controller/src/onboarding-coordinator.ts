@@ -8,6 +8,7 @@ import type {
   OnboardingAnswerArgs,
   SnapshotResult,
 } from "./onboarding-store.ts";
+import type { OnboardingOpeningMode } from "./onboarding-greeting.ts";
 
 export type OnboardingPhase =
   | "greeting"
@@ -157,6 +158,7 @@ export interface ResponseIntentReceipt {
 export interface OnboardingLifecycle {
   callId: string;
   expectedBusinessName: string;
+  openingMode: OnboardingOpeningMode;
   phase: OnboardingPhase;
   lifecycleRevision: number;
   socketGeneration: number;
@@ -356,6 +358,8 @@ type SocketEvent = TimedEvent & { socketGeneration: number };
 
 export type OnboardingEvent =
   | (TimedEvent & { type: "socket.attached"; socketGeneration: number })
+  | (SocketEvent & { type: "application.greeting_activated" })
+  | (SocketEvent & { type: "application.transport_activated" })
   | (TimedEvent & {
       type: "adapter.invariant_failed";
       code:
@@ -375,7 +379,11 @@ export type OnboardingEvent =
         | "caller_turn_correlation_mismatch"
         | "tool_output_created_invalid"
         | "tool_output_retrieved_invalid"
-        | "tool_output_retrieve_failed";
+        | "tool_output_retrieve_failed"
+        | "application_opening_item_invalid"
+        | "application_opening_response_forbidden"
+        | "application_opening_tool_forbidden"
+        | "application_opening_session_update_invalid";
       safeDetail: string;
     })
   | (SocketEvent & { type: "response.intent_sent"; intentKey: string })
@@ -573,7 +581,10 @@ export function hashOnboardingToolArgs(args: Record<string, unknown>): string {
 
 const batchKey = (providerResponseId: string, batchHash: string) =>
   `${providerResponseId}:${batchHash}`;
-const outputItemId = (toolCallId: string) => `tool-output:${toolCallId}`;
+const outputItemId = (toolCallId: string) => `tlo-${createHash("sha256")
+  .update(`tool-output\0${toolCallId}`, "utf8")
+  .digest("hex")
+  .slice(0, 28)}`;
 export function onboardingOutputRequestEventId(
   lifecycle: OnboardingLifecycle,
   receipt: ToolReceipt,
@@ -1622,6 +1633,7 @@ function reduceBlockedBookkeeping(
 export function createOnboardingLifecycle(
   callId: string,
   expectedBusinessName: string,
+  openingMode: OnboardingOpeningMode = "provider_model_v1",
 ): OnboardingLifecycle {
   if (!callId.trim()) throw new Error("onboarding_call_id_required");
   if (!expectedBusinessName.trim())
@@ -1629,6 +1641,7 @@ export function createOnboardingLifecycle(
   return {
     callId,
     expectedBusinessName: expectedBusinessName.trim(),
+    openingMode,
     phase: "greeting",
     lifecycleRevision: 0,
     socketGeneration: 0,
@@ -1809,17 +1822,61 @@ export function reduceOnboarding(
             outcome: `coverage_revision_${lifecycle.coverage.revision}`,
           }),
         );
-      for (const receipt of Object.values(lifecycle.toolOutbox))
-        if (
-          receipt.state === "executed" || receipt.state === "output_pending"
-        )
-          resendOutput(lifecycle, commands, event, receipt, true);
-      if (lifecycle.phase === "greeting")
+      if (lifecycle.openingMode === "provider_model_v1")
+        for (const receipt of Object.values(lifecycle.toolOutbox))
+          if (
+            receipt.state === "executed" || receipt.state === "output_pending"
+          )
+            resendOutput(lifecycle, commands, event, receipt, true);
+      if (
+        lifecycle.phase === "greeting" &&
+        lifecycle.openingMode === "provider_model_v1"
+      )
         queueResponse(lifecycle, commands, event, {
           intentKey: `greeting:${lifecycle.callId}`,
           purpose: "greeting",
           instructions: INITIAL_GREETING_RESPONSE_INSTRUCTIONS_PT,
         });
+      break;
+    }
+    case "application.transport_activated": {
+      if (lifecycle.openingMode !== "application_tts_v1") {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "application_opening_session_update_invalid",
+          "application transport activation used the provider opening mode",
+        );
+        break;
+      }
+      for (const receipt of Object.values(lifecycle.toolOutbox))
+        if (
+          receipt.state === "executed" || receipt.state === "output_pending"
+        )
+          resendOutput(lifecycle, commands, event, receipt, true);
+      break;
+    }
+    case "application.greeting_activated": {
+      if (
+        lifecycle.openingMode !== "application_tts_v1" ||
+        lifecycle.phase !== "greeting"
+      ) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "application_opening_session_update_invalid",
+          "application opening activation did not match the greeting phase",
+        );
+        break;
+      }
+      lifecycle.phase = "collecting";
+      commands.push(
+        telemetry(lifecycle, "onboarding.greeting.validated", event, {
+          outcome: "application_playback_and_session_update_proven",
+        }),
+      );
       break;
     }
     case "response.intent_sent": {

@@ -27,6 +27,12 @@ import {
   type OnboardingAnswerArgs,
 } from "./onboarding-store.ts";
 import type { CoverageField } from "./onboarding-coverage.ts";
+import {
+  onboardingOpeningText,
+  openingPayloadIsInternallyValid,
+  type OnboardingOpeningMode,
+  type OnboardingOpeningPayload,
+} from "./onboarding-greeting.ts";
 
 type RequestResponseCommand = Extract<
   OnboardingCommand,
@@ -77,7 +83,20 @@ type OnboardingAdapterInvariantCode =
   | "caller_turn_correlation_mismatch"
   | "tool_output_created_invalid"
   | "tool_output_retrieved_invalid"
-  | "tool_output_retrieve_failed";
+  | "tool_output_retrieve_failed"
+  | "application_opening_item_invalid"
+  | "application_opening_response_forbidden"
+  | "application_opening_tool_forbidden"
+  | "application_opening_session_update_invalid";
+
+interface ApplicationOpeningHandshake {
+  payload: OnboardingOpeningPayload;
+  itemObserved: boolean;
+  transcriptRecorded: boolean;
+  activationUpdateSentGeneration?: number;
+  activatedGeneration?: number;
+  retrieveEventId?: string;
+}
 
 interface BufferedOnboardingTool {
   toolCallId: string;
@@ -175,6 +194,12 @@ export interface SessionLedger {
   budgetFinalized?: boolean;
   /** Server-owned identity required to validate the exact onboarding greeting. */
   expectedOnboardingBusinessName?: string;
+  /** Provider compatibility or deterministic application-owned opening. */
+  openingMode?: OnboardingOpeningMode;
+  /** Application TTS cost is outside Realtime usage but inside the call budget. */
+  externalCostUsd?: number;
+  /** Exact playback-to-conversation activation handshake for application TTS. */
+  applicationOpening?: ApplicationOpeningHandshake;
   /** Onboarding-only reducer/transport state. It survives sideband socket reattachment. */
   onboarding?: OnboardingAdapterState;
 }
@@ -183,6 +208,11 @@ export interface SessionLedger {
  *  Returns the ceiling in USD for one session (reservation-based, overridable per deploy). */
 export function sessionCostCapUsd(_model: string): number {
   return config.sessionCostCeilingUsd;
+}
+
+export function totalSessionCostUsd(ledger: SessionLedger): number {
+  return sessionCostUsd(ledger.model, ledger.usage) +
+    (ledger.externalCostUsd ?? 0);
 }
 
 const live = new Map<string, SessionLedger>();
@@ -196,7 +226,12 @@ export interface SidebandControl {
 
 export interface SidebandOptions {
   phone?: { eventId: string; claimToken: string };
-  onboarding?: { expectedBusinessName: string };
+  onboarding?: {
+    expectedBusinessName: string;
+    openingMode?: OnboardingOpeningMode;
+    openingPayload?: OnboardingOpeningPayload;
+  };
+  externalCostUsd?: number;
   fetchImpl?: FetchLike;
 }
 
@@ -211,9 +246,14 @@ export function terminalStatusForReason(
 function createOnboardingAdapter(
   callId: string,
   expectedBusinessName: string,
+  openingMode: OnboardingOpeningMode = "provider_model_v1",
 ): OnboardingAdapterState {
   return {
-    lifecycle: createOnboardingLifecycle(callId, expectedBusinessName),
+    lifecycle: createOnboardingLifecycle(
+      callId,
+      expectedBusinessName,
+      openingMode,
+    ),
     queue: Promise.resolve(),
     responses: {},
     terminalResponseBatchHashes: {},
@@ -234,6 +274,7 @@ function ensureOnboardingAdapter(ledger: SessionLedger): OnboardingAdapterState 
     (ledger.onboarding = createOnboardingAdapter(
       ledger.callId,
       ledger.expectedOnboardingBusinessName ?? "",
+      ledger.openingMode ?? "provider_model_v1",
     ));
 }
 
@@ -251,6 +292,80 @@ function onboardingBatchHash(tools: BufferedOnboardingTool[]): string {
 
 function exactString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function applicationOpeningItemMatches(
+  ledger: SessionLedger,
+  item: any,
+): boolean {
+  const payload = ledger.applicationOpening?.payload;
+  if (!payload) return false;
+  return item?.id === payload.item_id &&
+    item?.type === "message" &&
+    item?.role === "assistant" &&
+    item?.status === "completed" &&
+    Array.isArray(item?.content) &&
+    item.content.length === 1 &&
+    item.content[0]?.type === "output_text" &&
+    item.content[0]?.text === payload.text;
+}
+
+function applicationOpeningRetrieveEventId(
+  ledger: SessionLedger,
+  socketGeneration: number,
+): string {
+  const itemId = ledger.applicationOpening?.payload.item_id ?? "";
+  const digest = createHash("sha256")
+    .update(JSON.stringify({
+      call_id: ledger.callId,
+      item_id: itemId,
+      socket_generation: socketGeneration,
+    }), "utf8")
+    .digest("hex")
+    .slice(0, 32);
+  return `ligou-opening-retrieve-${digest}`;
+}
+
+function openingTurnDetection(active: boolean) {
+  return {
+    type: "semantic_vad",
+    eagerness: "low",
+    create_response: active,
+    interrupt_response: active,
+  };
+}
+
+function sendApplicationOpeningActivation(
+  ledger: SessionLedger,
+  ws: WebSocket,
+): void {
+  const opening = ledger.applicationOpening;
+  const generation = ledger.onboarding?.lifecycle.socketGeneration ?? 0;
+  if (!opening || generation < 1 ||
+    opening.activationUpdateSentGeneration === generation) return;
+  ws.send(JSON.stringify({
+    type: "session.update",
+    event_id: `ligou-opening-activate-${generation}-${ledger.callId}`,
+    session: {
+      type: "realtime",
+      audio: {
+        input: {
+          transcription: { model: "gpt-live-transcribe" },
+          turn_detection: openingTurnDetection(true),
+        },
+      },
+    },
+  }));
+  opening.activationUpdateSentGeneration = generation;
+}
+
+function exactOpeningSessionUpdate(value: unknown, active: boolean): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const detection = (value as any)?.audio?.input?.turn_detection;
+  return detection?.type === "semantic_vad" &&
+    detection?.eagerness === "low" &&
+    detection?.create_response === active &&
+    detection?.interrupt_response === active;
 }
 
 function callerCorrelationRecoveryKey(
@@ -1126,6 +1241,28 @@ async function drainPendingResponseCommands(
   }
 }
 
+async function resumeApplicationOnboardingTransport(
+  context: OnboardingCommandContext,
+): Promise<void> {
+  const adapter = ensureOnboardingAdapter(context.ledger);
+  const generation = adapter.lifecycle.socketGeneration;
+  await dispatchOnboardingEvent(context, {
+    type: "application.transport_activated",
+    socketGeneration: generation,
+    elapsedMs: 0,
+  });
+  if (adapter.lifecycle.phase === "blocked") return;
+  for (const key of Object.keys(adapter.pendingMutationCommands)) {
+    const timer = adapter.pendingMutationRetryTimers[key];
+    if (timer) clearTimeout(timer);
+    delete adapter.pendingMutationRetryTimers[key];
+    const entry = adapter.pendingMutationCommands[key];
+    if (entry) entry.retryScheduled = false;
+    await executePendingMutationReconciliation(context, key, generation);
+  }
+  await drainPendingResponseCommands(context);
+}
+
 async function attachOnboardingSocket(
   context: OnboardingCommandContext,
 ): Promise<void> {
@@ -1141,6 +1278,25 @@ async function attachOnboardingSocket(
     socketGeneration: generation,
     elapsedMs: 0,
   });
+  const applicationOpening = context.ledger.applicationOpening;
+  if (
+    applicationOpening && generation > 1 &&
+    adapter.lifecycle.phase !== "blocked" &&
+    adapter.lifecycle.phase !== "closed" &&
+    adapter.lifecycle.phase !== "provider_terminating"
+  ) {
+    const eventId = applicationOpeningRetrieveEventId(
+      context.ledger,
+      generation,
+    );
+    applicationOpening.retrieveEventId = eventId;
+    context.ws.send(JSON.stringify({
+      type: "conversation.item.retrieve",
+      event_id: eventId,
+      item_id: applicationOpening.payload.item_id,
+    }));
+  }
+  if (applicationOpening) return;
   if (
     adapter.lifecycle.phase !== "blocked" &&
     adapter.lifecycle.phase !== "closed" &&
@@ -1324,6 +1480,33 @@ async function handleOnboardingRawEvent(
   const { cap, ledger, ws, isCurrent } = context;
   const adapter = ensureOnboardingAdapter(ledger);
   const generation = adapter.lifecycle.socketGeneration;
+  const applicationOpening = ledger.applicationOpening;
+  const applicationOpeningActive = !applicationOpening ||
+    applicationOpening.activatedGeneration === generation;
+  if (!applicationOpeningActive && msg?.type === "response.created") {
+    await dispatchOnboardingEvent(context, {
+      type: "adapter.invariant_failed",
+      code: "application_opening_response_forbidden",
+      safeDetail:
+        "provider response existed before the application opening was activated",
+      elapsedMs: 0,
+    });
+    return;
+  }
+  if (
+    !applicationOpeningActive &&
+    msg?.type === "response.output_item.done" &&
+    msg.item?.type === "function_call"
+  ) {
+    await dispatchOnboardingEvent(context, {
+      type: "adapter.invariant_failed",
+      code: "application_opening_tool_forbidden",
+      safeDetail:
+        "provider tool call existed before the application opening was activated",
+      elapsedMs: 0,
+    });
+    return;
+  }
   if (
     adapter.lifecycle.phase === "provider_terminating" &&
     adapter.pendingHangupIntentKey &&
@@ -1531,7 +1714,31 @@ async function handleOnboardingRawEvent(
       });
       break;
     }
-    case "conversation.item.created": {
+    case "conversation.item.created":
+    case "conversation.item.done": {
+      if (applicationOpening && !applicationOpeningActive) {
+        if (!applicationOpeningItemMatches(ledger, msg.item)) {
+          await dispatchOnboardingEvent(context, {
+            type: "adapter.invariant_failed",
+            code: "application_opening_item_invalid",
+            safeDetail:
+              "created application opening item did not match the exact payload",
+            elapsedMs: 0,
+          });
+          break;
+        }
+        applicationOpening.itemObserved = true;
+        if (!applicationOpening.transcriptRecorded) {
+          applicationOpening.transcriptRecorded = true;
+          ledger.transcript.push({
+            role: "agent",
+            text: applicationOpening.payload.text,
+            at: new Date().toISOString(),
+          });
+        }
+        sendApplicationOpeningActivation(ledger, ws);
+        break;
+      }
       const outputItemId = exactString(msg.item?.id);
       if (!outputItemId) break;
       const receipt = Object.values(adapter.lifecycle.toolOutbox)
@@ -1566,6 +1773,29 @@ async function handleOnboardingRawEvent(
       break;
     }
     case "conversation.item.retrieved": {
+      if (applicationOpening && !applicationOpeningActive) {
+        if (!applicationOpeningItemMatches(ledger, msg.item)) {
+          await dispatchOnboardingEvent(context, {
+            type: "adapter.invariant_failed",
+            code: "application_opening_item_invalid",
+            safeDetail:
+              "retrieved application opening item did not match the exact payload",
+            elapsedMs: 0,
+          });
+          break;
+        }
+        applicationOpening.itemObserved = true;
+        if (!applicationOpening.transcriptRecorded) {
+          applicationOpening.transcriptRecorded = true;
+          ledger.transcript.push({
+            role: "agent",
+            text: applicationOpening.payload.text,
+            at: new Date().toISOString(),
+          });
+        }
+        sendApplicationOpeningActivation(ledger, ws);
+        break;
+      }
       const pendingRetrievals = Object.values(adapter.lifecycle.toolOutbox)
         .filter((candidate) =>
           candidate.state === "output_pending" &&
@@ -1601,6 +1831,37 @@ async function handleOnboardingRawEvent(
         outputItemId: receipt.outputItemId,
         elapsedMs: 0,
       });
+      break;
+    }
+    case "session.updated": {
+      if (!applicationOpening || applicationOpeningActive) break;
+      if (exactOpeningSessionUpdate(msg.session, false)) break;
+      if (
+        applicationOpening.activationUpdateSentGeneration === generation &&
+        exactOpeningSessionUpdate(msg.session, true)
+      ) {
+        if (adapter.lifecycle.phase === "greeting")
+          await dispatchOnboardingEvent(context, {
+            type: "application.greeting_activated",
+            socketGeneration: generation,
+            elapsedMs: 0,
+          });
+        if (adapter.lifecycle.phase === "collecting")
+          applicationOpening.activatedGeneration = generation;
+        if (applicationOpening.activatedGeneration === generation)
+          await resumeApplicationOnboardingTransport(context);
+        break;
+      }
+      const detection = msg.session?.audio?.input?.turn_detection;
+      if (detection) {
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "application_opening_session_update_invalid",
+          safeDetail:
+            "provider session update did not match the requested opening activation",
+          elapsedMs: 0,
+        });
+      }
       break;
     }
     case "response.output_audio_transcript.delta": {
@@ -1911,7 +2172,7 @@ async function handleOnboardingRawEvent(
           socketGeneration: generation,
           elapsedMs: 0,
         });
-      const spent = sessionCostUsd(ledger.model, ledger.usage);
+      const spent = totalSessionCostUsd(ledger);
       const costCapUsd = sessionCostCapUsd(ledger.model);
       if (spent >= costCapUsd && ledger.status === "active") {
         ledger.status = "killed_budget";
@@ -1998,6 +2259,16 @@ async function handleOnboardingRawEvent(
       const code = exactString(msg.error?.code) ?? "";
       const message = typeof msg.error?.message === "string" ? msg.error.message : "";
       const causingEventId = exactString(msg.error?.event_id);
+      if (
+        applicationOpening &&
+        causingEventId === applicationOpening.retrieveEventId
+      ) {
+        evt("voice.application_opening.retrieve_unconfirmed", {
+          call: ledger.callId.slice(0, 8),
+          socket_generation: generation,
+        });
+        break;
+      }
       const outputReceipt = causingEventId
         ? Object.values(adapter.lifecycle.toolOutbox).find((candidate) =>
             candidate.state === "output_pending" &&
@@ -2065,6 +2336,24 @@ export function attachSideband(
     : null;
   if (cap.sessionType === "onboarding" && !expectedOnboardingBusinessName)
     throw new Error("onboarding_expected_business_name_required");
+  const openingMode: OnboardingOpeningMode = cap.sessionType === "onboarding"
+    ? options.onboarding?.openingMode ?? "provider_model_v1"
+    : "provider_model_v1";
+  const openingPayload = options.onboarding?.openingPayload;
+  const externalCostUsd = options.externalCostUsd ?? 0;
+  if (!Number.isFinite(externalCostUsd) || externalCostUsd < 0)
+    throw new Error("external_cost_invalid");
+  if (openingMode === "application_tts_v1") {
+    const expectedText = onboardingOpeningText(
+      expectedOnboardingBusinessName!,
+    );
+    if (!openingPayloadIsInternallyValid(openingPayload, expectedText))
+      throw new Error("application_opening_payload_invalid");
+    if (externalCostUsd !== openingPayload.cost_usd)
+      throw new Error("application_opening_cost_mismatch");
+  } else if (openingPayload) {
+    throw new Error("provider_opening_payload_forbidden");
+  }
   const ledger: SessionLedger = {
     callId: cap.callId,
     openaiCallId,
@@ -2081,6 +2370,8 @@ export function attachSideband(
     transcript: [],
     toolLog: [],
     status: "active",
+    openingMode,
+    externalCostUsd,
     ...(expectedOnboardingBusinessName
       ? { expectedOnboardingBusinessName }
       : {}),
@@ -2089,7 +2380,17 @@ export function attachSideband(
           onboarding: createOnboardingAdapter(
             cap.callId,
             expectedOnboardingBusinessName!,
+            openingMode,
           ),
+        }
+      : {}),
+    ...(openingMode === "application_tts_v1"
+      ? {
+          applicationOpening: {
+            payload: structuredClone(openingPayload!),
+            itemObserved: false,
+            transcriptRecorded: false,
+          },
         }
       : {}),
   };
@@ -2253,7 +2554,9 @@ export function attachSideband(
         audio: {
           input: {
             transcription: { model: "gpt-live-transcribe" },
-            turn_detection: { type: "semantic_vad", eagerness: "low", create_response: true, interrupt_response: true },
+            turn_detection: openingTurnDetection(
+              ledger.applicationOpening ? false : true,
+            ),
           },
         },
       },
@@ -2481,7 +2784,7 @@ export async function handleEvent(
         ledger.providerUsageEvidence.lastReceivedAt = new Date().toISOString();
       }
       // COST KILL-SWITCH: measured after every turn, because a long/rich session grows super-linearly.
-      const spent = sessionCostUsd(ledger.model, ledger.usage);
+      const spent = totalSessionCostUsd(ledger);
       const cap = sessionCostCapUsd(ledger.model);
       if (spent >= cap && ledger.status === "active") {
         ledger.status = "killed_budget";
@@ -2573,7 +2876,12 @@ export async function persistLedger(
   const durationS = Math.round((Date.now() - ledger.startedAt) / 1000);
   const usageResolved = ledger.providerUsageEvidence.continuous === true
     && ledger.providerUsageEvidence.terminal === true;
-  const cost = usageResolved ? Number(sessionCostUsd(ledger.model, ledger.usage).toFixed(4)) : null;
+  const externalCostFloor = Number((ledger.externalCostUsd ?? 0).toFixed(8));
+  const cost = usageResolved
+    ? Number(totalSessionCostUsd(ledger).toFixed(8))
+    : externalCostFloor > 0
+      ? externalCostFloor
+      : null;
   const s = supa();
   // "ended" normally means the provider already finished the call (session.ended /
   // caller hangup). An agent-initiated end is the exception: the status is "ended" but
@@ -2618,7 +2926,11 @@ export async function persistLedger(
         provider_usage_state: usageResolved ? "resolved" : "unknown",
         provider_usage_evidence: providerUsageEvidence,
         outcome,
-        detail: { tools: ledger.toolLog, model: ledger.model },
+        detail: {
+          tools: ledger.toolLog,
+          model: ledger.model,
+          external_cost_usd: ledger.externalCostUsd ?? 0,
+        },
       },
     });
     if (error || !data) return false;
@@ -2669,7 +2981,11 @@ export async function persistLedger(
     actualCostUsd: cost ?? 0,
     minutes: Number((durationS / 60).toFixed(2)),
     outcome,
-    detail: { tools: ledger.toolLog, model: ledger.model },
+    detail: {
+      tools: ledger.toolLog,
+      model: ledger.model,
+      external_cost_usd: ledger.externalCostUsd ?? 0,
+    },
     provider: providerNeedsTermination
       ? { openaiCallId: ledger.openaiCallId, mode: "hangup", reason: terminationReason }
       : undefined,

@@ -164,11 +164,19 @@ function test9ServiceFacts(ownerWords: string) {
   ];
 }
 
-function outputAck(l: SessionLedger, outputItemId: string) {
-  const receipt = Object.values(l.onboarding?.lifecycle.toolOutbox ?? {})
-    .find((candidate) => candidate.outputItemId === outputItemId);
-  if (!receipt?.output) throw new Error(`missing output receipt ${outputItemId}`);
-  return exactCreatedOutput(outputItemId, receipt.toolCallId, receipt.output);
+function outputAck(l: SessionLedger, toolCallIdOrOutputItemId: string) {
+  const receipts = l.onboarding?.lifecycle.toolOutbox ?? {};
+  const receipt = receipts[toolCallIdOrOutputItemId] ??
+    Object.values(receipts).find(
+      (candidate) => candidate.outputItemId === toolCallIdOrOutputItemId,
+    );
+  if (!receipt?.output)
+    throw new Error(`missing output receipt ${toolCallIdOrOutputItemId}`);
+  return exactCreatedOutput(
+    receipt.outputItemId,
+    receipt.toolCallId,
+    receipt.output,
+  );
 }
 
 function exactCreatedOutput(
@@ -735,8 +743,14 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     const terminal = handleEvent(cap, l, ws as any, responseDone("resp-tools"));
     await Promise.all([first, second, terminal]);
     expect(functionOutputs(ws).map((frame) => frame.item)).toEqual([
-      expect.objectContaining({ id: "tool-output:fc-a", call_id: "fc-a" }),
-      expect.objectContaining({ id: "tool-output:fc-z", call_id: "fc-z" }),
+      expect.objectContaining({
+        id: l.onboarding!.lifecycle.toolOutbox["fc-a"]?.outputItemId,
+        call_id: "fc-a",
+      }),
+      expect.objectContaining({
+        id: l.onboarding!.lifecycle.toolOutbox["fc-z"]?.outputItemId,
+        call_id: "fc-z",
+      }),
     ]);
     expect(l.onboarding!.lifecycle.toolOutbox["fc-z"]?.state).toBe("output_pending");
     expect(l.onboarding!.lifecycle.toolOutbox["fc-a"]?.state).toBe("output_pending");
@@ -746,9 +760,9 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       providerResponseId: "resp-tools", toolCallIds: ["fc-a", "fc-z"],
     });
     expect(batches[0]!.batchHash).toMatch(/^[a-f0-9]{64}$/);
-    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-z"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "fc-z"));
     expect(framesOfType(ws, "response.create")).toHaveLength(0);
-    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-a"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "fc-a"));
     expect(framesOfType(ws, "response.create")).toHaveLength(1);
     expect(framesOfType(ws, "response.create")[0].response.metadata).toMatchObject({
       purpose: "tool_continuation",
@@ -767,7 +781,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       .toBe(batches[0]!.batchHash);
   });
 
-  test("conversation.item.created acks only an exact current-generation create and never substitutes for retrieve", async () => {
+  test("GA added→done acknowledges exact function output once while legacy created remains compatible", async () => {
     const makePending = async (
       callId: string,
       delivery: "create" | "retrieve",
@@ -779,8 +793,8 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       const adapter = l.onboarding!;
       adapter.lifecycle.phase = "collecting";
       adapter.lifecycle.socketGeneration = 1;
-      adapter.lifecycle.toolOutbox["created-tool"] = {
-        toolCallId: "created-tool",
+      adapter.lifecycle.toolOutbox["call_0123456789abcdef"] = {
+        toolCallId: "call_0123456789abcdef",
         toolName: "end_session",
         argsHash: "created-args",
         state: "output_pending",
@@ -788,7 +802,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
         batchHash: "created-batch",
         output: "{\"status\":\"application_owned_close\"}",
         resultHash: "created-result",
-        outputItemId: "tool-output:created-tool",
+        outputItemId: "tlo-f04070b5629817764d00825d4e17",
         socketGeneration: 1,
         outputRequest: {
           delivery,
@@ -799,18 +813,47 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       return { cap, l, ws, adapter };
     };
 
-    const exact = await makePending("call-created-exact", "create");
+    const ga = await makePending("call-done-exact", "create");
     await handleEvent(
-      exact.cap,
-      exact.l,
-      exact.ws as any,
+      ga.cap,
+      ga.l,
+      ga.ws as any,
+      {
+        ...exactCreatedOutput(
+          "tlo-f04070b5629817764d00825d4e17",
+          "call_0123456789abcdef",
+          "{\"status\":\"application_owned_close\"}",
+        ),
+        type: "conversation.item.added",
+      },
+    );
+    expect(ga.adapter.lifecycle.toolOutbox["call_0123456789abcdef"]?.state)
+      .toBe("output_pending");
+    const done = {
+      ...exactCreatedOutput(
+        "tlo-f04070b5629817764d00825d4e17",
+        "call_0123456789abcdef",
+        "{\"status\":\"application_owned_close\"}",
+      ),
+      type: "conversation.item.done",
+    };
+    await handleEvent(ga.cap, ga.l, ga.ws as any, done);
+    await handleEvent(ga.cap, ga.l, ga.ws as any, done);
+    expect(ga.adapter.lifecycle.toolOutbox["call_0123456789abcdef"]?.state)
+      .toBe("output_acked");
+
+    const legacy = await makePending("call-created-legacy", "create");
+    await handleEvent(
+      legacy.cap,
+      legacy.l,
+      legacy.ws as any,
       exactCreatedOutput(
-        "tool-output:created-tool",
-        "created-tool",
+        "tlo-f04070b5629817764d00825d4e17",
+        "call_0123456789abcdef",
         "{\"status\":\"application_owned_close\"}",
       ),
     );
-    expect(exact.adapter.lifecycle.toolOutbox["created-tool"]?.state)
+    expect(legacy.adapter.lifecycle.toolOutbox["call_0123456789abcdef"]?.state)
       .toBe("output_acked");
 
     const mismatch = await makePending("call-created-mismatch", "create");
@@ -818,14 +861,17 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       mismatch.cap,
       mismatch.l,
       mismatch.ws as any,
-      exactCreatedOutput(
-        "tool-output:created-tool",
-        "created-tool",
-        "{\"status\":\"attacker_changed\"}",
-      ),
+      {
+        ...exactCreatedOutput(
+          "tlo-f04070b5629817764d00825d4e17",
+          "call_0123456789abcdef",
+          "{\"status\":\"attacker_changed\"}",
+        ),
+        type: "conversation.item.done",
+      },
     );
     expect(mismatch.adapter.lifecycle.phase).toBe("blocked");
-    expect(mismatch.adapter.lifecycle.toolOutbox["created-tool"]?.state)
+    expect(mismatch.adapter.lifecycle.toolOutbox["call_0123456789abcdef"]?.state)
       .toBe("output_pending");
 
     const retrieving = await makePending("call-created-during-retrieve", "retrieve");
@@ -833,14 +879,17 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       retrieving.cap,
       retrieving.l,
       retrieving.ws as any,
-      exactCreatedOutput(
-        "tool-output:created-tool",
-        "created-tool",
-        "{\"status\":\"application_owned_close\"}",
-      ),
+      {
+        ...exactCreatedOutput(
+          "tlo-f04070b5629817764d00825d4e17",
+          "call_0123456789abcdef",
+          "{\"status\":\"application_owned_close\"}",
+        ),
+        type: "conversation.item.done",
+      },
     );
     expect(retrieving.adapter.lifecycle.phase).toBe("collecting");
-    expect(retrieving.adapter.lifecycle.toolOutbox["created-tool"]?.state)
+    expect(retrieving.adapter.lifecycle.toolOutbox["call_0123456789abcdef"]?.state)
       .toBe("output_pending");
   });
 
@@ -925,7 +974,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     });
     expect(JSON.parse(functionOutputs(ws).at(-1)!.item.output).status).toBe("reused");
     await handleEvent(cap, l, ws as any,
-      outputAck(l, "tool-output:fc-reused-new-provider-id"));
+      outputAck(l, "fc-reused-new-provider-id"));
     expect(l.onboarding!.lifecycle.toolOutbox["fc-reused-new-provider-id"]?.state)
       .toBe("output_acked");
 
@@ -1013,7 +1062,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       cap,
       l,
       ws as any,
-      outputAck(l, "tool-output:fc-neg-repair"),
+      outputAck(l, "fc-neg-repair"),
     );
     expect(l.onboarding!.lifecycle.toolOutbox["fc-neg-repair"]?.state)
       .toBe("output_acked");
@@ -1341,7 +1390,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
       responseDone("resp-pending-overflow"));
     await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
-      outputAck(pendingLedger, "tool-output:fc-pending-overflow"));
+      outputAck(pendingLedger, "fc-pending-overflow"));
     expect(pendingLedger.onboarding!.lifecycle.phase).toBe("blocked");
     expect(Object.keys(pendingLedger.onboarding!.pendingResponseCommands))
       .toHaveLength(0);
@@ -1359,7 +1408,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       await handleEvent(cap, l, ws as any,
         functionCallDone(responseId, toolCallId, "end_session"));
       await handleEvent(cap, l, ws as any, responseDone(responseId));
-      await handleEvent(cap, l, ws as any, outputAck(l, `tool-output:${toolCallId}`));
+      await handleEvent(cap, l, ws as any, outputAck(l, String(toolCallId)));
     }
     expect(l.status).toBe("active");
     expect(l.agentEnded).toBeUndefined();
@@ -1384,7 +1433,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     await handleEvent(cap, l, ws as any,
       functionCallDone("resp-close", "fc-close", "end_session"));
     await handleEvent(cap, l, ws as any, responseDone("resp-close"));
-    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-close"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "fc-close"));
 
     expect(l.status).toBe("active");
     expect(l.onboarding!.lifecycle.phase).toBe("awaiting_owner_approval");
@@ -2287,7 +2336,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
         .toBe("terminal");
 
       await handleEvent(cap, l, ws as any,
-        outputAck(l, "tool-output:fc-vad-correction"));
+        outputAck(l, "fc-vad-correction"));
       const newSummaries = framesOfType(ws, "response.create").filter(
         (frame) => frame.response?.metadata?.intent_key === `summary:${newDigest}`,
       );
@@ -2318,7 +2367,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
     ));
     await handleEvent(cap, l, ws as any, responseDone("resp-approval"));
     const changedOutput = functionOutputs(ws).find(
-      (frame) => frame.item.id === "tool-output:fc-approval",
+      (frame) => frame.item.call_id === "fc-approval",
     );
     expect(JSON.parse(changedOutput.item.output)).toEqual({
       status: "snapshot_changed", retrying_summary: true,
@@ -2328,7 +2377,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       revision: 2, digest, complete: true,
     });
     expect(boundary.calls.ruleReads).toBe(1);
-    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-approval"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "fc-approval"));
     expect(boundary.calls.ruleReads).toBe(2);
     expect(framesOfType(ws, "response.create").at(-1)!.response.metadata)
       .toMatchObject({ intent_key: `summary:${digest}`, purpose: "summary" });
@@ -2712,7 +2761,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
         cap,
         l,
         ws as any,
-        outputAck(l, `tool-output:tool-test-9-${index}`),
+        outputAck(l, `tool-test-9-${index}`),
       );
 
     const nextQuestions = framesOfType(ws, "response.create").filter(
@@ -2891,7 +2940,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
         cap,
         l,
         ws as any,
-        outputAck(l, `tool-output:tool-test-9-real-${index}`),
+        outputAck(l, `tool-test-9-real-${index}`),
       );
 
     expect(boundary.rpcFacts).toHaveLength(4);
@@ -2952,7 +3001,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       cap,
       l,
       ws as any,
-      outputAck(l, "tool-output:tool-single-service"),
+      outputAck(l, "tool-single-service"),
     );
 
     const questions = framesOfType(ws, "response.create").filter(
@@ -3223,7 +3272,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       error: "persistence_failed",
       retry_safe: true,
     });
-    const ack = outputAck(l, "tool-output:tool-persistence-failure");
+    const ack = outputAck(l, "tool-persistence-failure");
     await handleEvent(cap, l, ws as any, ack);
     await handleEvent(cap, l, ws as any, ack);
 
@@ -3364,7 +3413,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
     await handleEvent(cap, l, ws as any, responseDone("resp-approval"));
     expect(l.onboarding!.lifecycle.phase).toBe("approval_persisting");
     expect(framesOfType(ws, "response.create")).toHaveLength(0);
-    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-approval"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "fc-approval"));
     const creates = framesOfType(ws, "response.create");
     expect(creates).toHaveLength(1);
     expect(creates[0].response.metadata).toEqual({
@@ -3372,7 +3421,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       purpose: "final_signoff",
       approval_receipt_id: "approval-receipt-1",
     });
-    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-approval"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "fc-approval"));
     expect(framesOfType(ws, "response.create")).toHaveLength(1);
     await handleEvent(cap, l, ws as any,
       responseCreated("resp-signoff", "final-signoff:approval-receipt-1"));
@@ -3424,10 +3473,10 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       functionCallDone("resp-approval-batch", "fc-close-sibling", "end_session", "{}", 1));
     await handleEvent(cap, l, ws as any, responseDone("resp-approval-batch"));
 
-    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-approval"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "fc-approval"));
     expect(l.onboarding!.lifecycle.phase).toBe("approval_persisting");
     expect(framesOfType(ws, "response.create")).toHaveLength(0);
-    await handleEvent(cap, l, ws as any, outputAck(l, "tool-output:fc-close-sibling"));
+    await handleEvent(cap, l, ws as any, outputAck(l, "fc-close-sibling"));
     expect(l.onboarding!.lifecycle.phase).toBe("final_signoff_speaking");
     expect(framesOfType(ws, "response.create")).toHaveLength(1);
     expect(framesOfType(ws, "response.create")[0].response.metadata.purpose)
@@ -3485,6 +3534,443 @@ describe("physical socket attach and reconnect", () => {
     ws.message({ type: "output_audio_buffer.stopped", response_id: responseId });
     await flushAsync();
   }
+
+  const applicationOpeningPayload = {
+    version: 1,
+    item_id: "lgo-a89f1f9391ab7a82b4f27f198407",
+    text: "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Quais serviços sua empresa oferece?",
+    text_sha256: "413f79d3d184ea3985fdb593f99ac331c612c157e871034df0135f06a7817e06",
+    audio_base64: "SUQzBAAAAAAAAP/7kGQ=",
+    audio_sha256: "b15db04aea85ebd3f59185796229df945e67f42931c7e9da411e97b83c856ce8",
+    mime: "audio/mpeg",
+    voice: "ash",
+    tts_model: "tts-1",
+    cost_usd: 0.001605,
+  };
+  const applicationOptions = {
+    onboarding: {
+      expectedBusinessName: "D1F Marketing",
+      openingMode: "application_tts_v1",
+      openingPayload: applicationOpeningPayload,
+    },
+    externalCostUsd: 0.001605,
+  } as any;
+
+  function applicationOpeningCreated(
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      type: "conversation.item.created",
+      item: {
+        id: applicationOpeningPayload.item_id,
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{
+          type: "output_text",
+          text: applicationOpeningPayload.text,
+        }],
+        ...overrides,
+      },
+    };
+  }
+
+  function applicationOpeningRetrieved(
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      type: "conversation.item.retrieved",
+      item: {
+        id: applicationOpeningPayload.item_id,
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{
+          type: "output_text",
+          text: applicationOpeningPayload.text,
+        }],
+        ...overrides,
+      },
+    };
+  }
+
+  const activeSessionUpdated = {
+    type: "session.updated",
+    session: {
+      audio: {
+        input: {
+          turn_detection: {
+            type: "semantic_vad",
+            eagerness: "low",
+            create_response: true,
+            interrupt_response: true,
+          },
+        },
+      },
+    },
+  };
+
+  test("Test 10 application opening has zero response.create and activates only after exact item plus session.updated", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-test-10-application-opening");
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-test-10-application-opening",
+        "gpt-realtime-2.1",
+        applicationOptions,
+      );
+      const ws = SyntheticWebSocket.instances[0]!;
+      ws.emit("open");
+      await control.opened;
+
+      expect(framesOfType(ws, "response.create")).toHaveLength(0);
+      expect(framesOfType(ws, "session.update")[0]?.session.audio.input.turn_detection)
+        .toEqual({
+          type: "semantic_vad",
+          eagerness: "low",
+          create_response: false,
+          interrupt_response: false,
+        });
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("greeting");
+
+      const gaOpeningDone = {
+        ...applicationOpeningCreated(),
+        type: "conversation.item.done",
+      };
+      ws.message({
+        ...applicationOpeningCreated(),
+        type: "conversation.item.added",
+      });
+      await flushAsync();
+      expect(framesOfType(ws, "session.update")).toHaveLength(1);
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("greeting");
+      ws.message(gaOpeningDone);
+      ws.message(gaOpeningDone);
+      await flushAsync();
+      const updates = framesOfType(ws, "session.update");
+      expect(updates).toHaveLength(2);
+      expect(updates[1]?.session.audio.input.turn_detection).toEqual({
+        type: "semantic_vad",
+        eagerness: "low",
+        create_response: true,
+        interrupt_response: true,
+      });
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("greeting");
+
+      ws.message(activeSessionUpdated);
+      await flushAsync();
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("collecting");
+      expect(framesOfType(ws, "response.create")).toHaveLength(0);
+      expect(control.ledger.transcript).toContainEqual(expect.objectContaining({
+        role: "agent",
+        text: applicationOpeningPayload.text,
+      }));
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("first sideband open listens before publication without a speculative opening retrieve", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-test-10-delayed-first-open");
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-test-10-delayed-first-open",
+        "gpt-realtime-2.1",
+        applicationOptions,
+      );
+      const ws = SyntheticWebSocket.instances[0]!;
+      ws.emit("open");
+      await control.opened;
+      expect(framesOfType(ws, "conversation.item.retrieve")).toEqual([]);
+      expect(framesOfType(ws, "response.create")).toEqual([]);
+
+      ws.message(applicationOpeningCreated());
+      await flushAsync();
+      expect(framesOfType(ws, "session.update")).toHaveLength(2);
+      ws.message(activeSessionUpdated);
+      await flushAsync();
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("collecting");
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("wrong application opening or any model response before activation blocks instead of speaking a model greeting", async () => {
+    const original = globalThis.WebSocket;
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    try {
+      for (const [suffix, event] of [
+        ["wrong-text", applicationOpeningCreated({
+          content: [{ type: "output_text", text: "Sou uma assistente virtual brasileira." }],
+        })],
+        ["wrong-id", applicationOpeningCreated({ id: "item-from-wrong-opening" })],
+        ["model-response", responseCreated("resp-forbidden-model-greeting")],
+      ] as const) {
+        SyntheticWebSocket.instances = [];
+        const cap = onboardingCap(`call-test-10-${suffix}`);
+        const control = attachSideband(
+          cap,
+          `rtc-test-10-${suffix}`,
+          "gpt-realtime-2.1",
+          applicationOptions,
+        );
+        const ws = SyntheticWebSocket.instances[0]!;
+        ws.emit("open");
+        await control.opened;
+        ws.message(event);
+        await flushAsync();
+        expect(control.ledger.onboarding!.lifecycle.phase).toBe("blocked");
+        expect(framesOfType(ws, "response.create")).toHaveLength(0);
+        expect(framesOfType(ws, "session.update")).toHaveLength(1);
+        control.cancel("test_cleanup");
+        liveSessions.delete(cap.callId);
+      }
+    } finally {
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("duplicate exact application item enables once, and tool output before activation is fail-closed", async () => {
+    const original = globalThis.WebSocket;
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    try {
+      SyntheticWebSocket.instances = [];
+      const duplicateCap = onboardingCap("call-test-10-duplicate-opening");
+      const duplicate = attachSideband(
+        duplicateCap,
+        "rtc-test-10-duplicate-opening",
+        "gpt-realtime-2.1",
+        applicationOptions,
+      );
+      const duplicateSocket = SyntheticWebSocket.instances[0]!;
+      duplicateSocket.emit("open");
+      await duplicate.opened;
+      duplicateSocket.message(applicationOpeningCreated());
+      duplicateSocket.message(applicationOpeningCreated());
+      await flushAsync();
+      expect(framesOfType(duplicateSocket, "session.update")).toHaveLength(2);
+      expect(duplicate.ledger.onboarding!.lifecycle.phase).toBe("greeting");
+      duplicate.cancel("test_cleanup");
+      liveSessions.delete(duplicateCap.callId);
+
+      SyntheticWebSocket.instances = [];
+      const toolCap = onboardingCap("call-test-10-tool-before-opening");
+      const tool = attachSideband(
+        toolCap,
+        "rtc-test-10-tool-before-opening",
+        "gpt-realtime-2.1",
+        applicationOptions,
+      );
+      const toolSocket = SyntheticWebSocket.instances[0]!;
+      toolSocket.emit("open");
+      await tool.opened;
+      toolSocket.message(functionCallDone(
+        "resp-forbidden-tool",
+        "fc-forbidden-tool",
+        "record_interview_answer",
+        JSON.stringify({
+          topic: "servicos",
+          field: "service.catalog_closure",
+          disposition: "answered",
+          rule_text: "Só desentupimento.",
+          structured: { value: true },
+          owner_words: "Desentupimento.",
+        }),
+      ));
+      toolSocket.message(responseDone("resp-forbidden-tool"));
+      await flushAsync();
+      expect(tool.ledger.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(functionOutputs(toolSocket)).toHaveLength(0);
+      expect(tool.ledger.toolLog).toHaveLength(0);
+      tool.cancel("test_cleanup");
+      liveSessions.delete(toolCap.callId);
+    } finally {
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("application opening reattach reasserts disabled VAD and retrieves the exact item without a provider greeting", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-test-10-opening-reattach");
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-test-10-opening-reattach",
+        "gpt-realtime-2.1",
+        applicationOptions,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      first.message(applicationOpeningCreated());
+      await flushAsync();
+      expect(framesOfType(first, "session.update")).toHaveLength(2);
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(framesOfType(second, "response.create")).toHaveLength(0);
+      expect(framesOfType(second, "session.update")[0]?.session.audio.input.turn_detection)
+        .toEqual(expect.objectContaining({
+          create_response: false,
+          interrupt_response: false,
+        }));
+      expect(framesOfType(second, "conversation.item.retrieve")).toEqual([
+        expect.objectContaining({
+          item_id: applicationOpeningPayload.item_id,
+          event_id: expect.any(String),
+        }),
+      ]);
+      second.message(applicationOpeningRetrieved());
+      await flushAsync();
+      expect(framesOfType(second, "session.update")).toHaveLength(2);
+      second.message(activeSessionUpdated);
+      await flushAsync();
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("collecting");
+      expect(framesOfType(second, "response.create")).toHaveLength(0);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("reattach retrieve errors stay unactivated without depending on provider error codes, then later item.created can activate", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-test-10-opening-not-created-yet");
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-test-10-opening-not-created-yet",
+        "gpt-realtime-2.1",
+        applicationOptions,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("greeting");
+      expect(framesOfType(first, "response.create")).toEqual([]);
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const retrieve = framesOfType(second, "conversation.item.retrieve")[0];
+      expect(retrieve.item_id).toBe(applicationOpeningPayload.item_id);
+      expect(typeof retrieve.event_id).toBe("string");
+      const retrieveEventId = String(retrieve.event_id);
+      expect(control.ledger.applicationOpening?.retrieveEventId)
+        .toBe(retrieveEventId);
+
+      second.message({
+        type: "error",
+        error: {
+          code: "synthetic_provider_error",
+          message: "Retrieve outcome unavailable",
+          event_id: retrieveEventId,
+        },
+      });
+      await flushAsync();
+      expect(control.ledger.status).toBe("active");
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("greeting");
+      expect(second.closed).toBe(0);
+      expect(framesOfType(second, "response.create")).toEqual([]);
+
+      second.message(applicationOpeningCreated());
+      await flushAsync();
+      expect(framesOfType(second, "session.update")).toHaveLength(2);
+      second.message(activeSessionUpdated);
+      await flushAsync();
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("collecting");
+      expect(framesOfType(second, "response.create")).toEqual([]);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("reattach releases no pending tool output or response until the exact opening handshake is active again", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-test-10-opening-gates-pending");
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-test-10-opening-gates-pending",
+        "gpt-realtime-2.1",
+        applicationOptions,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      first.message(applicationOpeningCreated());
+      await flushAsync();
+      first.message(activeSessionUpdated);
+      await flushAsync();
+
+      const adapter = control.ledger.onboarding!;
+      adapter.lifecycle.toolOutbox["pending-opening-tool"] = {
+        toolCallId: "pending-opening-tool",
+        toolName: "record_interview_answer",
+        argsHash: "pending-opening-args",
+        state: "executed",
+        providerResponseId: "pending-opening-response",
+        batchHash: "pending-opening-batch",
+        resultHash: "pending-opening-result",
+        output: "{\"status\":\"recorded\"}",
+        outputItemId: "tlo-0a22764d83123f17dec9a8f4f754",
+        socketGeneration: 1,
+      };
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(functionOutputs(second)).toEqual([]);
+      expect(framesOfType(second, "response.create")).toEqual([]);
+      expect(framesOfType(second, "conversation.item.retrieve")).toEqual([
+        expect.objectContaining({ item_id: applicationOpeningPayload.item_id }),
+      ]);
+      second.message(applicationOpeningRetrieved());
+      await flushAsync();
+      expect(functionOutputs(second)).toEqual([]);
+      second.message(activeSessionUpdated);
+      await flushAsync();
+      expect(functionOutputs(second)).toHaveLength(1);
+      expect(functionOutputs(second)[0].item).toMatchObject({
+        id: "tlo-0a22764d83123f17dec9a8f4f754",
+        call_id: "pending-opening-tool",
+        output: "{\"status\":\"recorded\"}",
+      });
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
 
   function ambiguousAnswerBoundary(succeedOnAttempt?: number) {
     let answerAttempts = 0;
@@ -3687,7 +4173,7 @@ describe("physical socket attach and reconnect", () => {
         batchHash: "blocked-batch",
         output: "{\"status\":\"application_owned_close\"}",
         resultHash: "blocked-result",
-        outputItemId: "tool-output:blocked-output",
+        outputItemId: "tlo-5c6ed66e497e8824a3ec139a93fc",
         socketGeneration: 1,
       };
       // Keep the transport genuinely idle. `responseActive=true` would hide a
@@ -3706,12 +4192,12 @@ describe("physical socket attach and reconnect", () => {
       expect(functionOutputs(second)).toEqual([]);
       expect(framesOfType(second, "conversation.item.retrieve")).toEqual([
         expect.objectContaining({
-          item_id: "tool-output:blocked-output",
+          item_id: "tlo-5c6ed66e497e8824a3ec139a93fc",
           event_id: expect.any(String),
         }),
       ]);
       second.message(outputRetrieved(
-        "tool-output:blocked-output",
+        "tlo-5c6ed66e497e8824a3ec139a93fc",
         "blocked-output",
         "{\"status\":\"application_owned_close\"}",
       ));
@@ -3750,7 +4236,7 @@ describe("physical socket attach and reconnect", () => {
         batchHash: "retrieve-batch",
         output: "{\"status\":\"recorded\"}",
         resultHash: "retrieve-result",
-        outputItemId: "tool-output:retrieve-tool",
+        outputItemId: "tlo-c7a5772dbcd9da39fffdcce950fa",
         socketGeneration: 1,
       };
       adapter.lifecycle.toolBatches["retrieve-response:retrieve-batch"] = {
@@ -3774,12 +4260,12 @@ describe("physical socket attach and reconnect", () => {
       expect(framesOfType(second, "conversation.item.retrieve")).toEqual([
         expect.objectContaining({
           type: "conversation.item.retrieve",
-          item_id: "tool-output:retrieve-tool",
+          item_id: "tlo-c7a5772dbcd9da39fffdcce950fa",
           event_id: expect.any(String),
         }),
       ]);
       second.message(outputRetrieved(
-        "tool-output:retrieve-tool",
+        "tlo-c7a5772dbcd9da39fffdcce950fa",
         "retrieve-tool",
         "{\"status\":\"recorded\"}",
       ));
@@ -3830,7 +4316,7 @@ describe("physical socket attach and reconnect", () => {
         batchHash: "failed-retrieve-batch",
         output,
         resultHash: hashOnboardingToolArgs({ output }),
-        outputItemId: "tool-output:failed-retrieve-tool",
+        outputItemId: "tlo-717e8433b4a1d07a4225663c68a1",
         socketGeneration: 1,
         outputRequest: {
           delivery: "create",
@@ -3861,7 +4347,7 @@ describe("physical socket attach and reconnect", () => {
       expect(functionOutputs(second)).toEqual([]);
       expect(framesOfType(second, "conversation.item.retrieve")).toEqual([
         expect.objectContaining({
-          item_id: "tool-output:failed-retrieve-tool",
+          item_id: "tlo-717e8433b4a1d07a4225663c68a1",
           event_id: expect.any(String),
         }),
       ]);
@@ -3870,13 +4356,13 @@ describe("physical socket attach and reconnect", () => {
       )).toHaveLength(0);
 
       second.message(outputRetrieved(
-        "tool-output:failed-retrieve-tool",
+        "tlo-717e8433b4a1d07a4225663c68a1",
         "failed-retrieve-tool",
         output,
       ));
       await flushAsync();
       second.message(outputRetrieved(
-        "tool-output:failed-retrieve-tool",
+        "tlo-717e8433b4a1d07a4225663c68a1",
         "failed-retrieve-tool",
         output,
       ));
@@ -3907,7 +4393,7 @@ describe("physical socket attach and reconnect", () => {
       {
         type: "conversation.item.retrieved",
         item: {
-          id: "tool-output:mismatch-tool",
+          id: "tlo-f52489dbf6259346e63e343762c3",
           type: "function_call_output",
           call_id: "mismatch-tool",
           output: "{\"status\":\"attacker_changed\"}",
@@ -3931,7 +4417,7 @@ describe("physical socket attach and reconnect", () => {
         batchHash: "mismatch-batch",
         output: "{\"status\":\"recorded\"}",
         resultHash: "mismatch-result",
-        outputItemId: "tool-output:mismatch-tool",
+        outputItemId: "tlo-f52489dbf6259346e63e343762c3",
         socketGeneration: 1,
         outputRequest: {
           delivery: "retrieve",
@@ -3970,7 +4456,7 @@ describe("physical socket attach and reconnect", () => {
         batchHash: "duplicate-batch",
         output: "{\"status\":\"recorded\"}",
         resultHash: "duplicate-result",
-        outputItemId: "tool-output:duplicate-tool",
+        outputItemId: "tlo-eca9d56ddb0ac2205aeac36bc064",
         socketGeneration: 0,
       };
       ws.emit("open");
@@ -3984,7 +4470,7 @@ describe("physical socket attach and reconnect", () => {
       expect(creates[0]).toMatchObject({
         event_id: createEventId,
         item: {
-          id: "tool-output:duplicate-tool",
+          id: "tlo-eca9d56ddb0ac2205aeac36bc064",
           type: "function_call_output",
           call_id: "duplicate-tool",
           output: "{\"status\":\"recorded\"}",
@@ -4001,7 +4487,7 @@ describe("physical socket attach and reconnect", () => {
         error: {
           code: "invalid_request_error",
           event_id: createEventId,
-          message: "Item 'tool-output:duplicate-tool' already exists",
+          message: "Item 'tlo-eca9d56ddb0ac2205aeac36bc064' already exists",
         },
       });
       await flushAsync();
@@ -4011,7 +4497,7 @@ describe("physical socket attach and reconnect", () => {
       const retrieveEventId = retrieves[0].event_id;
       expect(typeof retrieveEventId).toBe("string");
       expect(retrieves[0]).toMatchObject({
-        item_id: "tool-output:duplicate-tool",
+        item_id: "tlo-eca9d56ddb0ac2205aeac36bc064",
         event_id: retrieveEventId,
       });
       expect(control.ledger.status).toBe("active");
@@ -4150,7 +4636,9 @@ describe("physical socket attach and reconnect", () => {
       const resent = functionOutputs(second);
       expect(resent).toHaveLength(1);
       expect(resent[0].item).toMatchObject({
-        id: "tool-output:fc-reattach", call_id: "fc-reattach",
+        id: control.ledger.onboarding!.lifecycle.toolOutbox["fc-reattach"]
+          ?.outputItemId,
+        call_id: "fc-reattach",
       });
       expect(control.ledger.onboarding!.lifecycle.toolOutbox["fc-reattach"]?.state)
         .toBe("output_pending");
@@ -4248,7 +4736,12 @@ describe("physical socket attach and reconnect", () => {
         .toBe("output_pending");
       expect(functionOutputs(second)).toHaveLength(1);
       expect(functionOutputs(second)[0].item.id)
-        .toBe("tool-output:fc-mid-persist");
+        .toBe(control.ledger.onboarding!.lifecycle
+          .toolOutbox["fc-mid-persist"]?.outputItemId);
+      expect(functionOutputs(second)[0].item.id)
+        .toMatch(/^tlo-[0-9a-f]{28}$/);
+      expect(functionOutputs(second)[0].item.id)
+        .not.toContain("fc-mid-persist");
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
@@ -4301,7 +4794,8 @@ describe("physical socket attach and reconnect", () => {
       expect(SyntheticWebSocket.instances).toHaveLength(1);
       expect(functionOutputs(first)).toHaveLength(1);
       expect(functionOutputs(first)[0].item).toMatchObject({
-        id: "tool-output:fc-indeterminate",
+        id: control.ledger.onboarding!.lifecycle
+          .toolOutbox["fc-indeterminate"]?.outputItemId,
         call_id: "fc-indeterminate",
       });
       expect(control.ledger.onboarding!.lifecycle.toolOutbox["fc-indeterminate"]?.state)
@@ -4367,7 +4861,7 @@ describe("physical socket attach and reconnect", () => {
       ]?.state).toBe("output_pending");
       ws.message(outputAck(
         control.ledger,
-        "tool-output:fc-indeterminate-exhausted",
+        "fc-indeterminate-exhausted",
       ));
       await flushAsync();
       const recoveries = framesOfType(ws, "response.create").filter(
@@ -4432,7 +4926,7 @@ describe("physical socket attach and reconnect", () => {
 
       ws.message(outputAck(
         control.ledger,
-        "tool-output:fc-followup-same-socket",
+        "fc-followup-same-socket",
       ));
       await new Promise((resolve) => setTimeout(resolve, 20));
 
@@ -4496,7 +4990,7 @@ describe("physical socket attach and reconnect", () => {
       await flushAsync();
       ws.message(outputAck(
         control.ledger,
-        "tool-output:fc-followup-exhausted",
+        "fc-followup-exhausted",
       ));
       await new Promise((resolve) => setTimeout(resolve, 20));
 
@@ -4849,6 +5343,50 @@ test("agent-requested termination uses the audited provider path; caller end doe
     provider_termination_state: "confirmed",
     provider_termination_reason: "caller_hung_up",
   });
+});
+
+test("application TTS cost participates in both the live kill switch and terminal settlement", async () => {
+  const cap = customerCap("call-external-tts-cost");
+  const overCap = ledger(cap.callId);
+  (overCap as any).externalCostUsd = 2;
+  const overCapSocket = socket();
+  await handleEvent(cap, overCap, overCapSocket as any, responseDone("resp-cost"));
+  expect(overCap.status).toBe("killed_budget");
+  expect(overCapSocket.closed).toBe(1);
+
+  const rows: Record<string, unknown>[] = [];
+  const settlements: Record<string, unknown>[] = [];
+  _setClient({
+    from(table: string) {
+      const api: any = {
+        update(row: Record<string, unknown>) {
+          if (table === "calls") rows.push(structuredClone(row));
+          return api;
+        },
+        eq() { return api; },
+        then(resolve: (value: unknown) => unknown) {
+          return Promise.resolve({ data: null, error: null }).then(resolve);
+        },
+      };
+      return api;
+    },
+    rpc(name: string, args: Record<string, unknown>) {
+      if (name === "settle_call_budget") settlements.push(structuredClone(args));
+      return Promise.resolve({ data: "settled", error: null });
+    },
+  } as any);
+  const settled = ledger(cap.callId);
+  settled.status = "ended";
+  settled.providerTerminalEvidence = {
+    observed: true,
+    reason: "provider_session_ended",
+    receivedAt: "2026-08-27T21:00:00.000Z",
+  };
+  settled.providerUsageEvidence.terminal = true;
+  (settled as any).externalCostUsd = 0.001605;
+  expect(await persistLedger(cap, settled)).toBe(true);
+  expect(rows[0]?.cost_estimate_usd).toBe(0.001605);
+  expect((settlements[0] as any)?.p_actual_cost).toBe(0.001605);
 });
 
 afterAll(() => _setClient(null));

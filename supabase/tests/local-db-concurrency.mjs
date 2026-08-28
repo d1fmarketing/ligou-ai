@@ -1038,12 +1038,12 @@ async function onboardingReceiptSecurityAndIdempotency(connection, home) {
       ('${ids.terminalCall}', '${ids.tenant}', 'browser', 'onboarding', 'ended'),
       ('${ids.liveCall}', '${ids.liveTenant}', 'browser', 'onboarding', 'active');
     insert into public.browser_session_requests
-      (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp, call_id, handled_at)
+      (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp, call_id, handled_at, opening_mode_applied)
     values
-      ('${ids.tenant}', '${ids.owner}', 'onboarding', 'offer-valid', 'ready', 'answer-valid', '${ids.call}', now()),
-      ('${ids.tenant}', '${ids.owner}', 'owner_browser', 'offer-owner', 'ready', 'answer-owner', '${ids.nonOnboardingCall}', now()),
-      ('${ids.tenant}', '${ids.owner}', 'onboarding', 'offer-terminal', 'ready', 'answer-terminal', '${ids.terminalCall}', now()),
-      ('${ids.liveTenant}', '${ids.owner}', 'onboarding', 'offer-live', 'ready', 'answer-live', '${ids.liveCall}', now());
+      ('${ids.tenant}', '${ids.owner}', 'onboarding', 'offer-valid', 'ready', 'answer-valid', '${ids.call}', now(), 'provider_model_v1'),
+      ('${ids.tenant}', '${ids.owner}', 'owner_browser', 'offer-owner', 'ready', 'answer-owner', '${ids.nonOnboardingCall}', now(), 'provider_model_v1'),
+      ('${ids.tenant}', '${ids.owner}', 'onboarding', 'offer-terminal', 'ready', 'answer-terminal', '${ids.terminalCall}', now(), 'provider_model_v1'),
+      ('${ids.liveTenant}', '${ids.owner}', 'onboarding', 'offer-live', 'ready', 'answer-live', '${ids.liveCall}', now(), 'provider_model_v1');
   `), "onboarding receipt fixture");
 
   const factOne = onboardingFact("business.customer_types", "Atender clientes residenciais.", "Atendemos residenciais.");
@@ -1361,8 +1361,8 @@ async function concurrentOnboardingAnswerRevisions(connection, home) {
     insert into public.calls (id, tenant_id, channel, session_type, status)
     values ('${call}', '${tenant}', 'browser', 'onboarding', 'active');
     insert into public.browser_session_requests
-      (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp, call_id, handled_at)
-    values ('${tenant}', '${owner}', 'onboarding', 'offer-race', 'ready', 'answer-race', '${call}', now());
+      (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp, call_id, handled_at, opening_mode_applied)
+    values ('${tenant}', '${owner}', 'onboarding', 'offer-race', 'ready', 'answer-race', '${call}', now(), 'provider_model_v1');
   `), "concurrent onboarding fixture");
   const firstFact = onboardingFact("business.customer_types", "Atender residenciais.", "Residenciais.");
   const secondFact = onboardingFact("area.coverage", "Atender Irvine.", "Irvine.");
@@ -1406,9 +1406,9 @@ async function onboardingV2CurrentRelativeMaterialization(connection, home) {
     insert into public.calls (id, tenant_id, channel, session_type, status)
     values ('${call}', '${tenant}', 'browser', 'onboarding', 'active');
     insert into public.browser_session_requests
-      (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp, call_id, handled_at)
+      (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp, call_id, handled_at, opening_mode_applied)
     values
-      ('${tenant}', '${owner}', 'onboarding', 'offer-v2', 'ready', 'answer-v2', '${call}', now());
+      ('${tenant}', '${owner}', 'onboarding', 'offer-v2', 'ready', 'answer-v2', '${call}', now(), 'provider_model_v1');
   `), "V2 onboarding fixture");
 
   assert.equal(scalar(await runSql(connection, home, `
@@ -3549,10 +3549,10 @@ async function concurrentOnboardingAnswerAndFollowup(connection, home) {
     insert into public.calls (id, tenant_id, channel, session_type, status)
     values ('${call}', '${tenant}', 'browser', 'onboarding', 'active');
     insert into public.browser_session_requests
-      (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp, call_id, handled_at)
+      (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp, call_id, handled_at, opening_mode_applied)
     values (
       '${tenant}', '${owner}', 'onboarding', 'offer-followup-race',
-      'ready', 'answer-followup-race', '${call}', now()
+      'ready', 'answer-followup-race', '${call}', now(), 'provider_model_v1'
     );
   `), "concurrent followup fixture");
   const targetKey = "service:drain_cleaning:service.price_target";
@@ -3856,10 +3856,11 @@ async function onboardingLocalityFollowupAuthority(connection, home) {
     values ('${call}', '${tenant}', 'browser', 'onboarding', 'active');
     insert into public.browser_session_requests
       (tenant_id, user_id, session_type, offer_sdp, status, answer_sdp,
-       call_id, handled_at)
+       call_id, handled_at, opening_mode_applied)
     values (
       '${tenant}', '${owner}', 'onboarding', 'offer-locality-followup',
-      'ready', 'answer-locality-followup', '${call}', now()
+      'ready', 'answer-locality-followup', '${call}', now(),
+      'provider_model_v1'
     );
   `), "locality followup authority fixture");
 

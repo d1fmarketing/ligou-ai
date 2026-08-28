@@ -850,6 +850,25 @@ describe("sideband budget finalization", () => {
     expect(directUsageInserts).toBe(0);
   });
 
+  test("unknown Realtime usage preserves the known application TTS cost floor", async () => {
+    rpcCalls = [];
+    callUpdates = [];
+    const terminal = ledger("error");
+    terminal.externalCostUsd = 0.001605;
+    await persistLedger(
+      cap,
+      terminal,
+      async () => new Response(null, { status: 200 }),
+    );
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget"))
+      .toHaveLength(0);
+    expect(callUpdates).toContainEqual(expect.objectContaining({
+      provider_usage_state: "unknown",
+      usage_tokens: null,
+      cost_estimate_usd: 0.001605,
+    }));
+  });
+
   test("turn usage alone remains unresolved until a validated terminal usage receipt arrives", async () => {
     const ended = ledger("active");
     await handleEvent(cap, ended, { send() {}, close() {} } as any, {

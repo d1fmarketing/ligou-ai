@@ -234,25 +234,271 @@ export function endedVoiceSessionCopy({ endedSessionType, onboardingOutcome }) {
     : "Chamada encerrada. Resumo e custo aparecem no histórico.";
 }
 
-export async function startVoiceSession({ accessToken, sessionType = "owner_browser", model, onEvent, onEnd }) {
+const APPLICATION_OPENING_MODE = "application_tts_v1";
+const APPLICATION_OPENING_PAYLOAD_KEYS = [
+  "version",
+  "item_id",
+  "text",
+  "text_sha256",
+  "audio_base64",
+  "audio_sha256",
+  "mime",
+  "voice",
+  "tts_model",
+  "cost_usd",
+];
+const MAX_OPENING_BUSINESS_NAME_LENGTH = 256;
+const MAX_OPENING_TEXT_LENGTH = 1_000;
+const MAX_OPENING_BASE64_LENGTH = 2_000_000;
+const DEFAULT_OPENING_TIMEOUT_MS = 15_000;
+
+function safeOpeningError(detail) {
+  return new Error(`Abertura segura indisponível — sessão encerrada (${detail}).`);
+}
+
+function safeOpeningTimeout(timeoutMs) {
+  return Number.isFinite(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60_000
+    ? timeoutMs
+    : DEFAULT_OPENING_TIMEOUT_MS;
+}
+
+function exactKeys(value, keys) {
+  if (!isObject(value)) return false;
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function decodeBoundedBase64(value) {
+  if (typeof value !== "string"
+    || value.length < 4
+    || value.length > MAX_OPENING_BASE64_LENGTH
+    || value.length % 4 !== 0
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    throw safeOpeningError("payload de áudio inválido");
+  }
+  try {
+    const binary = atob(value);
+    if (!binary.length || binary.length > Math.floor(MAX_OPENING_BASE64_LENGTH * 3 / 4)) {
+      throw safeOpeningError("payload de áudio fora do limite");
+    }
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  } catch (error) {
+    if (error?.message?.startsWith("Abertura segura")) throw error;
+    throw safeOpeningError("payload de áudio inválido");
+  }
+}
+
+async function sha256Hex(bytes) {
+  if (!globalThis.crypto?.subtle || typeof globalThis.crypto.subtle.digest !== "function") {
+    throw safeOpeningError("verificação criptográfica indisponível");
+  }
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function validateApplicationOpening(response) {
+  if (!isObject(response) || response.opening_mode_applied !== APPLICATION_OPENING_MODE) {
+    throw safeOpeningError("modo de abertura não aplicado");
+  }
+  const businessName = response.business_name;
+  if (typeof businessName !== "string"
+    || !businessName
+    || businessName !== businessName.trim()
+    || businessName.length > MAX_OPENING_BUSINESS_NAME_LENGTH) {
+    throw safeOpeningError("nome da empresa inválido");
+  }
+  const payload = response.opening_payload;
+  if (!exactKeys(payload, APPLICATION_OPENING_PAYLOAD_KEYS)
+    || payload.version !== 1
+    || typeof payload.item_id !== "string"
+    || payload.item_id.length !== 32
+    || !/^lgo-[0-9a-f]{28}$/.test(payload.item_id)
+    || typeof payload.text !== "string"
+    || !payload.text
+    || payload.text.length > MAX_OPENING_TEXT_LENGTH
+    || !/^[0-9a-f]{64}$/.test(payload.text_sha256 ?? "")
+    || !/^[0-9a-f]{64}$/.test(payload.audio_sha256 ?? "")
+    || payload.mime !== "audio/mpeg"
+    || payload.voice !== "ash"
+    || payload.tts_model !== "tts-1"
+    || typeof payload.cost_usd !== "number"
+    || !Number.isFinite(payload.cost_usd)
+    || payload.cost_usd < 0
+    || payload.cost_usd > 1) {
+    throw safeOpeningError("contrato do payload inválido");
+  }
+  const expectedText = `Oi! Aqui é o Ligou, agente de inteligência artificial da ${businessName}. Quais serviços sua empresa oferece?`;
+  if (payload.text !== expectedText) throw safeOpeningError("texto de abertura divergente");
+  const audioBytes = decodeBoundedBase64(payload.audio_base64);
+  const [textHash, audioHash] = await Promise.all([
+    sha256Hex(new TextEncoder().encode(payload.text)),
+    sha256Hex(audioBytes),
+  ]);
+  if (textHash !== payload.text_sha256 || audioHash !== payload.audio_sha256) {
+    throw safeOpeningError("hash da abertura divergente");
+  }
+  return { payload, audioBytes };
+}
+
+function openingItemMatches(item, payload) {
+  return isObject(item)
+    && item.id === payload.item_id
+    && item.type === "message"
+    && item.role === "assistant"
+    && item.status === "completed"
+    && Array.isArray(item.content)
+    && item.content.length === 1
+    && isObject(item.content[0])
+    && item.content[0].type === "output_text"
+    && item.content[0].text === payload.text;
+}
+
+function hasLiveTurnDetection(event) {
+  const turnDetection = event?.session?.audio?.input?.turn_detection;
+  return isObject(turnDetection)
+    && turnDetection.type === "semantic_vad"
+    && turnDetection.eagerness === "low"
+    && turnDetection.create_response === true
+    && turnDetection.interrupt_response === true;
+}
+
+function waitForDataChannelOpen(channel, timeoutMs, signal) {
+  if (channel.readyState === "open") return Promise.resolve();
+  if (channel.readyState === "closed" || signal?.aborted) {
+    return Promise.reject(safeOpeningError("canal de eventos fechado"));
+  }
+  return new Promise((resolve, reject) => {
+    const finish = (error) => {
+      clearTimeout(timer);
+      channel.removeEventListener("open", onOpen);
+      channel.removeEventListener("close", onClose);
+      channel.removeEventListener("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onOpen = () => finish();
+    const onClose = () => finish(safeOpeningError("canal de eventos fechado"));
+    const onError = () => finish(safeOpeningError("canal de eventos indisponível"));
+    const onAbort = () => finish(safeOpeningError("abertura cancelada"));
+    const timer = setTimeout(() => finish(safeOpeningError("tempo do canal de eventos excedido")), timeoutMs);
+    channel.addEventListener("open", onOpen, { once: true });
+    channel.addEventListener("close", onClose, { once: true });
+    channel.addEventListener("error", onError, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function playApplicationOpening(audioBytes, timeoutMs, signal, onOwnedResource) {
+  const blob = new Blob([audioBytes], { type: "audio/mpeg" });
+  const objectUrl = URL.createObjectURL(blob);
+  const audio = document.createElement("audio");
+  audio.preload = "auto";
+  audio.src = objectUrl;
+  onOwnedResource(audio, objectUrl);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      audio.removeEventListener("ended", onEnded);
+      audio.removeEventListener("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onEnded = () => finish();
+    const onError = () => finish(safeOpeningError("reprodução da abertura falhou"));
+    const onAbort = () => finish(safeOpeningError("abertura cancelada"));
+    const timer = setTimeout(() => finish(safeOpeningError("tempo da reprodução excedido")), timeoutMs);
+    audio.addEventListener("ended", onEnded, { once: true });
+    audio.addEventListener("error", onError, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(audio.play()).catch(() => finish(safeOpeningError("reprodução da abertura bloqueada")));
+  });
+}
+
+export async function startVoiceSession({
+  accessToken,
+  sessionType = "owner_browser",
+  model,
+  onEvent,
+  onEnd,
+  signal,
+  openingTimeoutMs = DEFAULT_OPENING_TIMEOUT_MS,
+}) {
+  if (signal?.aborted) throw safeOpeningError("abertura cancelada");
   const media = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const onboarding = sessionType === "onboarding";
+  const boundedOpeningTimeout = safeOpeningTimeout(openingTimeoutMs);
   let pc = null;
   let channel = null;
+  let remoteAudio = null;
+  let openingAudio = null;
+  let openingObjectUrl = null;
+  let externalAbort = null;
+  const setupAbort = new AbortController();
   let disconnectGrace = null;
   let deadline = null;
   let endedOnce = false;
   let stopped = false;
   let callId = null;
+  let openingPayload = null;
+  let openingItemAcked = false;
+  let openingVadActive = false;
+  let openingActivated = !onboarding;
+  let openingGateResolve = null;
+  let openingGateReject = null;
+  let openingGateTimer = null;
+
+  function setSpeechCustody(active) {
+    if (!onboarding) return;
+    for (const track of media.getTracks()) track.enabled = active;
+    if (remoteAudio) remoteAudio.muted = !active;
+  }
+
+  function releaseOpeningObjectUrl() {
+    if (!openingObjectUrl) return;
+    URL.revokeObjectURL(openingObjectUrl);
+    openingObjectUrl = null;
+  }
+
+  function rejectOpeningGate(error) {
+    if (!openingGateReject) return;
+    const reject = openingGateReject;
+    openingGateResolve = null;
+    openingGateReject = null;
+    if (openingGateTimer) clearTimeout(openingGateTimer);
+    openingGateTimer = null;
+    reject(error);
+  }
 
   function stop() {
     if (stopped) return;
     stopped = true;
+    setupAbort.abort("voice_session_stopped");
+    if (externalAbort) signal?.removeEventListener("abort", externalAbort);
+    externalAbort = null;
     if (deadline) clearTimeout(deadline);
     if (disconnectGrace) clearTimeout(disconnectGrace);
+    if (openingGateTimer) clearTimeout(openingGateTimer);
     deadline = null;
     disconnectGrace = null;
+    openingGateTimer = null;
+    rejectOpeningGate(safeOpeningError("abertura cancelada"));
     if (channel) channel.onclose = null;
+    if (channel) channel.onmessage = null;
     if (pc) pc.onconnectionstatechange = null;
+    setSpeechCustody(false);
+    if (openingAudio) {
+      try { openingAudio.pause(); } catch { /* noop */ }
+      openingAudio.removeAttribute?.("src");
+      try { openingAudio.load?.(); } catch { /* noop */ }
+    }
+    releaseOpeningObjectUrl();
     for (const track of media.getTracks()) track.stop();
     try { pc?.close(); } catch { /* noop */ }
   }
@@ -264,18 +510,52 @@ export async function startVoiceSession({ accessToken, sessionType = "owner_brow
   }
 
   try {
+    if (signal) {
+      externalAbort = () => stop();
+      signal.addEventListener("abort", externalAbort, { once: true });
+      if (signal.aborted) throw safeOpeningError("abertura cancelada");
+    }
     pc = new RTCPeerConnection();
-    const audioEl = document.createElement("audio");
-    audioEl.autoplay = true;
-    pc.ontrack = (event) => { audioEl.srcObject = event.streams[0]; };
-    for (const track of media.getTracks()) pc.addTrack(track, media);
+    remoteAudio = document.createElement("audio");
+    remoteAudio.autoplay = true;
+    remoteAudio.muted = onboarding;
+    pc.ontrack = (event) => { remoteAudio.srcObject = event.streams[0]; };
+    for (const track of media.getTracks()) {
+      if (onboarding) track.enabled = false;
+      pc.addTrack(track, media);
+    }
 
     // data channel: local visibility only (captions); nothing authoritative happens here
     channel = pc.createDataChannel("oai-events");
     channel.onmessage = (msg) => {
       try {
         const ev = JSON.parse(msg.data);
-        if (ev.type === "response.output_audio_transcript.done" && ev.transcript) onEvent?.({ kind: "agent", text: ev.transcript });
+        const openingAckEvent = ev.type === "conversation.item.done"
+          || ev.type === "conversation.item.created";
+        if (onboarding && openingAckEvent && openingPayload
+          && !openingItemAcked && openingItemMatches(ev.item, openingPayload)) {
+          openingItemAcked = true;
+        }
+        if (onboarding && ev.type === "session.updated") {
+          // A VAD echo observed before the exact opening item ACK cannot
+          // authorize live speech. Sideband/provider events may be reordered,
+          // so require a fresh session.updated after item custody is proven.
+          openingVadActive = openingActivated || openingItemAcked
+            ? hasLiveTurnDetection(ev)
+            : false;
+          if (!openingActivated) setSpeechCustody(false);
+          else setSpeechCustody(openingVadActive);
+        }
+        if (onboarding && openingItemAcked && openingVadActive && openingGateResolve) {
+          const resolve = openingGateResolve;
+          openingGateResolve = null;
+          openingGateReject = null;
+          if (openingGateTimer) clearTimeout(openingGateTimer);
+          openingGateTimer = null;
+          resolve();
+        }
+        if (ev.type === "response.output_audio_transcript.done" && ev.transcript
+          && (!onboarding || openingActivated)) onEvent?.({ kind: "agent", text: ev.transcript });
         if (ev.type === "conversation.item.input_audio_transcription.completed" && ev.transcript) onEvent?.({ kind: "caller", text: ev.transcript });
       } catch { /* ignore */ }
     };
@@ -298,18 +578,63 @@ export async function startVoiceSession({ accessToken, sessionType = "owner_brow
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    const requestBody = { sdp: offer.sdp, session_type: sessionType, model };
+    if (onboarding) requestBody.opening_mode_requested = APPLICATION_OPENING_MODE;
     const res = await fetch(SESSION_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ sdp: offer.sdp, session_type: sessionType, model }),
+      body: JSON.stringify(requestBody),
+      signal: setupAbort.signal,
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.error === "budget_exceeded" ? "Orçamento diário de voz atingido — sessão bloqueada." : body.error || `Falha ao iniciar sessão (${res.status})`);
     }
-    const { sdp, call_id, max_minutes } = await res.json();
+    const response = await res.json();
+    const { sdp, call_id, max_minutes } = response;
     callId = call_id;
+    let opening = null;
+    if (onboarding) opening = await validateApplicationOpening(response);
+    if (stopped || signal?.aborted) throw safeOpeningError("abertura cancelada");
     await pc.setRemoteDescription({ type: "answer", sdp });
+    if (onboarding) {
+      openingPayload = opening.payload;
+      await waitForDataChannelOpen(channel, boundedOpeningTimeout, setupAbort.signal);
+      await playApplicationOpening(
+        opening.audioBytes,
+        boundedOpeningTimeout,
+        setupAbort.signal,
+        (audio, objectUrl) => {
+          openingAudio = audio;
+          openingObjectUrl = objectUrl;
+        },
+      );
+      releaseOpeningObjectUrl();
+      if (stopped || signal?.aborted) throw safeOpeningError("abertura cancelada");
+      const openingGate = new Promise((resolve, reject) => {
+        openingGateResolve = resolve;
+        openingGateReject = reject;
+        openingGateTimer = setTimeout(
+          () => rejectOpeningGate(safeOpeningError("confirmação da abertura excedeu o tempo")),
+          boundedOpeningTimeout,
+        );
+      });
+      channel.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          id: openingPayload.item_id,
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: openingPayload.text }],
+        },
+      }));
+      await openingGate;
+      if (stopped || signal?.aborted || !openingVadActive) throw safeOpeningError("custódia de voz não confirmada");
+      openingActivated = true;
+      setSpeechCustody(true);
+      onEvent?.({ kind: "agent", text: openingPayload.text });
+    }
     if (!endedOnce) deadline = setTimeout(() => end("deadline"), max_minutes * 60_000);
     return { end, callId, maxMinutes: max_minutes };
   } catch (error) {

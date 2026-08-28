@@ -404,13 +404,19 @@ test("serialized sideband passes exact provider call_id and acknowledges simulat
     (frame) => frame.item?.type === "function_call_output",
   );
   expect(outputFrame.item).toMatchObject({
-    id: "tool-output:provider-sideband-answer-1",
+    id: "tlo-25f29b2ecfe6efcb769e1683eeb4",
     call_id: "provider-sideband-answer-1",
   });
   expect(ledger.onboarding!.lifecycle.toolOutbox["provider-sideband-answer-1"]?.state)
     .toBe("output_pending");
   await handleEvent(cap, ledger, ws as any, {
-    type: "conversation.item.created",
+    type: "conversation.item.added",
+    item: outputFrame.item,
+  });
+  expect(ledger.onboarding!.lifecycle.toolOutbox["provider-sideband-answer-1"]?.state)
+    .toBe("output_pending");
+  await handleEvent(cap, ledger, ws as any, {
+    type: "conversation.item.done",
     item: outputFrame.item,
   });
   expect(ledger.onboarding!.lifecycle.toolOutbox["provider-sideband-answer-1"]?.state)

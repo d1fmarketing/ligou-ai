@@ -163,7 +163,18 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
     // divided by the session length it was sized for.
     const reservedMinutes = Number(row.reserved_minutes ?? config.sessionMaxMinutes ?? 0);
     const rate = reservedMinutes > 0 ? reservedCost / reservedMinutes : 0;
-    const estimated = Math.min(reservedCost, Number((Number(row.minutes ?? 0) * rate).toFixed(4)));
+    const durationEstimate = Number((
+      Number(row.minutes ?? 0) * rate
+    ).toFixed(4));
+    const durableFloorCandidate = Number(row.actual_cost_usd ?? 0);
+    const durableFloor = Number.isFinite(durableFloorCandidate) &&
+        durableFloorCandidate >= 0
+      ? durableFloorCandidate
+      : 0;
+    const estimated = Math.min(
+      reservedCost,
+      Math.max(durableFloor, durationEstimate),
+    );
     const { error: settleError } = await supa().rpc("settle_unresolved_call_budget", {
       p_tenant: String(row.tenant_id),
       p_call: String(row.call_id),

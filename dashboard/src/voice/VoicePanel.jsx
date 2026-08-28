@@ -52,9 +52,11 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
   // nunca podem observar os valores que a próxima execução resetou.
   const sessionRunRef = useRef(0);
   const outcomeAbortRef = useRef(null);
+  const startAbortRef = useRef(null);
 
   useEffect(() => () => {
     outcomeAbortRef.current?.abort();
+    startAbortRef.current?.abort("dialog_close");
     sessionRunRef.current += 1;
     cancelledRef.current = true;
     sessionRef.current?.end?.("dialog_close");
@@ -92,6 +94,9 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
   async function begin() {
     outcomeAbortRef.current?.abort();
     outcomeAbortRef.current = null;
+    startAbortRef.current?.abort("superseded_run");
+    const startAbort = new AbortController();
+    startAbortRef.current = startAbort;
     const runId = sessionRunRef.current + 1;
     sessionRunRef.current = runId;
     const startedSessionType = sessionType;
@@ -113,6 +118,7 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
         accessToken: token,
         model,
         sessionType: startedSessionType,
+        signal: startAbort.signal,
         onEvent: (ev) => applyCurrentSessionRun({
           runId,
           currentRunId: sessionRunRef.current,
@@ -139,12 +145,16 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
       if (sessionRunRef.current !== runId || cancelledRef.current || endedRef.current) return;
       setError(e.message);
       setStatus("error");
+    } finally {
+      if (startAbortRef.current === startAbort) startAbortRef.current = null;
     }
   }
 
   function hangup() {
     const runId = sessionRunRef.current;
     cancelledRef.current = true;
+    startAbortRef.current?.abort("manual_hangup");
+    startAbortRef.current = null;
     const session = sessionRef.current;
     sessionRef.current = null;
     if (session?.end) session.end("manual_hangup");

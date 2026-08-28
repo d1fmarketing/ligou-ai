@@ -343,6 +343,21 @@ describe("durable budget reconciliation", () => {
     expect(deferred).toHaveLength(0);
   });
 
+  test("bounded unresolved settlement never drops the durable external cost floor", async () => {
+    claimRow = {
+      reservation_id: "reservation-floor", tenant_id: "tenant-1",
+      call_id: "call-floor", actual_cost_usd: 0.2, minutes: 37 / 60,
+      outcome: "ended", provider_termination_state: "confirmed",
+      provider_termination_mode: "hangup", provider_usage_state: "unknown",
+      openai_call_id: "rtc-floor", reconcile_attempts: 24,
+      reserved_cost_usd: 1.5, reserved_minutes: 15,
+    };
+
+    expect(await reconcileBudgetReservations()).toBe(1);
+    expect(unresolvedSettlements).toHaveLength(1);
+    expect(unresolvedSettlements[0].p_estimated_cost).toBe(0.2);
+  });
+
   test("unresolved usage keeps deferring while attempts remain under the bound or termination is unconfirmed", async () => {
     claimRow = {
       reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
