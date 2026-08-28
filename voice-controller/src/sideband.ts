@@ -1,7 +1,14 @@
 // Authoritative sideband: the controller owns tools, transcripts, usage, deadline and finalization.
 // The browser only carries audio; it never executes tools and never holds credentials beyond its own mic.
 import { createHash } from "node:crypto";
-import { config, emptyUsage, sessionCostUsd, type UsageTotals } from "./config.ts";
+import {
+  config,
+  emptyUsage,
+  sessionBudgetEnvelope,
+  sessionCostUsd,
+  type SessionBudgetEnvelope,
+  type UsageTotals,
+} from "./config.ts";
 import {
   runTool,
   validateToolArgumentsForCapability,
@@ -198,6 +205,8 @@ export interface SessionLedger {
   openingMode?: OnboardingOpeningMode;
   /** Application TTS cost is outside Realtime usage but inside the call budget. */
   externalCostUsd?: number;
+  /** Session-scoped reservation and soft/hard budget policy. */
+  budgetEnvelope?: SessionBudgetEnvelope;
   /** Exact playback-to-conversation activation handshake for application TTS. */
   applicationOpening?: ApplicationOpeningHandshake;
   /** Onboarding-only reducer/transport state. It survives sideband socket reattachment. */
@@ -835,7 +844,8 @@ async function executeOnboardingCommands(
       !isCurrent() &&
       (command.type === "request_response" ||
         command.type === "resend_output" ||
-        command.type === "request_hangup")
+        command.type === "request_hangup" ||
+        command.type === "request_budget_hangup")
     )
       continue;
     if (command.type === "request_response" && adapter.speechPending)
@@ -1212,6 +1222,21 @@ async function executeOnboardingCommands(
         try { ws.close(); } catch {}
         break;
       }
+      case "request_budget_hangup": {
+        if (adapter.pendingHangupIntentKey) break;
+        if (adapter.lifecycle.phase !== "budget_pause_ready_to_terminate")
+          break;
+        adapter.pendingHangupIntentKey = command.intentKey;
+        ledger.status = "killed_budget";
+        ledger.transcript.push({
+          role: "system",
+          text:
+            `session paused: cost soft limit reached after truthful playback ($${command.costUsd.toFixed(2)} >= $${command.softLimitUsd.toFixed(2)})`,
+          at: new Date().toISOString(),
+        });
+        try { ws.close(); } catch {}
+        break;
+      }
     }
   }
 }
@@ -1404,6 +1429,7 @@ function authoritySpeechResponseAwaitingPlayback(
   lifecycle: OnboardingLifecycle,
 ): string | null {
   for (const proof of [
+    lifecycle.budgetPause,
     lifecycle.signoff,
     lifecycle.summary,
     lifecycle.greeting,
@@ -2028,6 +2054,7 @@ async function handleOnboardingRawEvent(
     case "response.done": {
       const responseId = exactString(msg.response?.id);
       if (!responseId) break;
+      if (adapter.responses[responseId]?.terminal) break;
       const usage = validatedProviderUsage(msg.response?.usage);
       if (usage) {
         ledger.usage.textIn += usage.textIn;
@@ -2152,6 +2179,30 @@ async function handleOnboardingRawEvent(
       } else if (!knownTerminalIdentity) {
         adapter.terminalResponseBatchHashes[responseId] = null;
       }
+      const envelope = ledger.budgetEnvelope ??
+        sessionBudgetEnvelope(cap.sessionType);
+      const spent = totalSessionCostUsd(ledger);
+      const hardBudgetReached = spent >= envelope.hardLimitUsd;
+      if (!hardBudgetReached && spent >= envelope.softLimitUsd &&
+        !adapter.lifecycle.budgetPause)
+        await dispatchOnboardingEvent(context, {
+          type: "budget.soft_limit_reached",
+          socketGeneration: generation,
+          responseId,
+          costUsd: Number(spent.toFixed(8)),
+          softLimitUsd: envelope.softLimitUsd,
+          hardLimitUsd: envelope.hardLimitUsd,
+          elapsedMs: 0,
+        });
+      if (hardBudgetReached && ledger.status === "active") {
+        ledger.status = "killed_budget";
+        ledger.transcript.push({
+          role: "system",
+          text:
+            `session ended: hard cost cap reached ($${spent.toFixed(2)} >= $${envelope.hardLimitUsd.toFixed(2)})`,
+          at: new Date().toISOString(),
+        });
+      }
       ledger.responseActive = false;
       await dispatchOnboardingEvent(context, {
         type: "response.done",
@@ -2159,7 +2210,7 @@ async function handleOnboardingRawEvent(
         responseId,
         elapsedMs: 0,
       });
-      if (
+      if (!hardBudgetReached &&
         responseStatus === "completed" &&
         sortedTools.length === 0 &&
         buffered.callerTurnId
@@ -2172,15 +2223,7 @@ async function handleOnboardingRawEvent(
           socketGeneration: generation,
           elapsedMs: 0,
         });
-      const spent = totalSessionCostUsd(ledger);
-      const costCapUsd = sessionCostCapUsd(ledger.model);
-      if (spent >= costCapUsd && ledger.status === "active") {
-        ledger.status = "killed_budget";
-        ledger.transcript.push({
-          role: "system",
-          text: `session ended: cost cap reached ($${spent.toFixed(2)} >= $${costCapUsd.toFixed(2)})`,
-          at: new Date().toISOString(),
-        });
+      if (hardBudgetReached) {
         try { ws.close(); } catch {}
       }
       const callerTurnIndex = adapter.pendingCallerTurns.findIndex(
@@ -2372,6 +2415,7 @@ export function attachSideband(
     status: "active",
     openingMode,
     externalCostUsd,
+    budgetEnvelope: sessionBudgetEnvelope(cap.sessionType),
     ...(expectedOnboardingBusinessName
       ? { expectedOnboardingBusinessName }
       : {}),
@@ -2877,11 +2921,13 @@ export async function persistLedger(
   const usageResolved = ledger.providerUsageEvidence.continuous === true
     && ledger.providerUsageEvidence.terminal === true;
   const externalCostFloor = Number((ledger.externalCostUsd ?? 0).toFixed(8));
+  const observedCostFloor = ledger.providerUsageEvidence.eventCount > 0 ||
+      externalCostFloor > 0
+    ? Number(totalSessionCostUsd(ledger).toFixed(8))
+    : null;
   const cost = usageResolved
     ? Number(totalSessionCostUsd(ledger).toFixed(8))
-    : externalCostFloor > 0
-      ? externalCostFloor
-      : null;
+    : observedCostFloor;
   const s = supa();
   // "ended" normally means the provider already finished the call (session.ended /
   // caller hangup). An agent-initiated end is the exception: the status is "ended" but

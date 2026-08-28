@@ -358,6 +358,23 @@ describe("durable budget reconciliation", () => {
     expect(unresolvedSettlements[0].p_estimated_cost).toBe(0.2);
   });
 
+  test("a hard-overrun lower bound above the reservation stays explicit instead of being truncated into settlement", async () => {
+    claimRow = {
+      reservation_id: "reservation-hard-overrun", tenant_id: "tenant-1",
+      call_id: "call-hard-overrun", actual_cost_usd: 7.75, minutes: 30,
+      outcome: "killed_budget", provider_termination_state: "confirmed",
+      provider_termination_mode: "hangup", provider_usage_state: "unknown",
+      openai_call_id: "rtc-hard-overrun", reconcile_attempts: 24,
+      reserved_cost_usd: 7.5, reserved_minutes: 30,
+    };
+
+    expect(await reconcileBudgetReservations()).toBe(0);
+    expect(unresolvedSettlements).toHaveLength(0);
+    expect(deferred).toContainEqual(expect.objectContaining({
+      reconcile_last_error: "unresolved_cost_floor_exceeds_reservation",
+    }));
+  });
+
   test("unresolved usage keeps deferring while attempts remain under the bound or termination is unconfirmed", async () => {
     claimRow = {
       reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",

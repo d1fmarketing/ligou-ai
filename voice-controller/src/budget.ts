@@ -171,6 +171,13 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
         durableFloorCandidate >= 0
       ? durableFloorCandidate
       : 0;
+    if (durableFloor > reservedCost) {
+      await deferBudgetReconciliation(
+        String(row.call_id),
+        "unresolved_cost_floor_exceeds_reservation",
+      );
+      return 0;
+    }
     const estimated = Math.min(
       reservedCost,
       Math.max(durableFloor, durationEstimate),

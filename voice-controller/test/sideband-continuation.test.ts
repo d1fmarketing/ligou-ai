@@ -4129,6 +4129,68 @@ describe("physical socket attach and reconnect", () => {
     }
   });
 
+  test("transport loss after budget-pause response.done cannot lose playback proof or duplicate the warning", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-budget-pause-transport");
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-budget-pause-transport",
+        "gpt-realtime-2.1",
+        onboardingOptions,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      await completePhysicalGreeting(first, cap);
+      const adapter = control.ledger.onboarding!;
+      adapter.lifecycle.phase = "budget_pause_speaking" as any;
+      adapter.lifecycle.budgetPause = {
+        costUsd: 6.5,
+        softLimitUsd: 6.5,
+        hardLimitUsd: 7.5,
+        responseId: "response-budget-pause-playback-pending",
+        transcript:
+          "Estamos chegando ao limite desta sessão. Suas informações foram salvas e podemos continuar imediatamente.",
+        transcriptFinal: true,
+        audioDone: true,
+        responseDone: true,
+        playbackStopped: false,
+        interrupted: false,
+        attempt: 0,
+      };
+      adapter.lifecycle.responseIntents[`budget-pause:${cap.callId}`] = {
+        intentKey: `budget-pause:${cap.callId}`,
+        purpose: "budget_pause" as any,
+        state: "terminal",
+        responseId: "response-budget-pause-playback-pending",
+        sentSocketGeneration: 1,
+      };
+      delete adapter.lifecycle.activeResponseId;
+      control.ledger.responseActive = false;
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(adapter.lifecycle.phase).toBe("blocked");
+      expect(control.ledger.transcript).toContainEqual(expect.objectContaining({
+        text: "onboarding blocked: authority_speech_terminal_indeterminate",
+      }));
+      expect(framesOfType(second, "response.create").filter((frame) =>
+        frame.response?.metadata?.purpose === "budget_pause"
+      )).toHaveLength(0);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
   test("blocked reattach prunes queued authority speech and retrieves only the exact pending output", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
@@ -5387,6 +5449,179 @@ test("application TTS cost participates in both the live kill switch and termina
   expect(await persistLedger(cap, settled)).toBe(true);
   expect(rows[0]?.cost_estimate_usd).toBe(0.001605);
   expect((settlements[0] as any)?.p_actual_cost).toBe(0.001605);
+});
+
+test("the real Test 10 USD 1.52 shape remains active for onboarding while customer calls retain the USD 1.50 kill", async () => {
+  const onboarding = onboardingCap("call-test-10-budget");
+  const onboardingLedger = ledger(onboarding.callId);
+  onboardingLedger.externalCostUsd = 1.52;
+  onboardingLedger.startedAt = Date.now() - 432_000;
+  const onboardingSocket = socket();
+  await handleEvent(
+    onboarding,
+    onboardingLedger,
+    onboardingSocket as any,
+    responseDone("resp-test-10-budget"),
+  );
+  expect(onboardingLedger.status).toBe("active");
+  expect(onboardingSocket.closed).toBe(0);
+
+  const customer = customerCap("call-customer-budget");
+  const customerLedger = ledger(customer.callId);
+  customerLedger.externalCostUsd = 1.52;
+  const customerSocket = socket();
+  await handleEvent(
+    customer,
+    customerLedger,
+    customerSocket as any,
+    responseDone("resp-customer-budget"),
+  );
+  expect(customerLedger.status).toBe("killed_budget");
+  expect(customerSocket.closed).toBe(1);
+});
+
+test("onboarding soft limit speaks once and closes only after the truthful pause playback is confirmed", async () => {
+  const cap = onboardingCap("call-budget-pause");
+  const l = ledger(cap.callId);
+  const ws = socket();
+  await completeGreetingTrace(cap, l, ws, "resp-budget-greeting");
+  ws.sent = [];
+  l.externalCostUsd = 6.5;
+  await handleEvent(cap, l, ws as any, responseCreated("resp-before-budget-pause"));
+  await handleEvent(cap, l, ws as any, responseDone("resp-before-budget-pause"));
+  const pauseCreates = framesOfType(ws, "response.create").filter((frame) =>
+    frame.response?.metadata?.purpose === "budget_pause"
+  );
+  expect(pauseCreates).toHaveLength(1);
+  expect(pauseCreates[0]?.response?.tool_choice).toBe("none");
+  expect(l.status).toBe("active");
+  expect(ws.closed).toBe(0);
+
+  const intentKey = `budget-pause:${cap.callId}`;
+  await handleEvent(cap, l, ws as any, responseCreated("resp-budget-pause", intentKey));
+  await handleEvent(cap, l, ws as any, {
+    type: "response.output_audio_transcript.done",
+    response_id: "resp-budget-pause",
+    transcript:
+      "Estamos chegando ao limite desta sessão. Suas informações foram salvas e podemos continuar imediatamente.",
+  });
+  await handleEvent(cap, l, ws as any, {
+    type: "response.output_audio.done",
+    response_id: "resp-budget-pause",
+  });
+  await handleEvent(cap, l, ws as any, responseDone("resp-budget-pause", {
+    usage: {
+      input_tokens: 0,
+      output_tokens: 100,
+      total_tokens: 100,
+      input_token_details: {
+        text_tokens: 0,
+        audio_tokens: 0,
+        cached_tokens: 0,
+        cached_tokens_details: { text_tokens: 0, audio_tokens: 0 },
+      },
+      output_token_details: { text_tokens: 0, audio_tokens: 100 },
+    },
+  }));
+  expect(l.status).toBe("active");
+  expect(ws.closed).toBe(0);
+  await handleEvent(cap, l, ws as any, {
+    type: "output_audio_buffer.stopped",
+    response_id: "resp-budget-pause",
+  });
+  expect(l.status).toBe("killed_budget");
+  expect(ws.closed).toBe(1);
+
+  await handleEvent(cap, l, ws as any, {
+    type: "output_audio_buffer.stopped",
+    response_id: "resp-budget-pause",
+  });
+  expect(ws.closed).toBe(1);
+  expect(framesOfType(ws, "response.create").filter((frame) =>
+    frame.response?.metadata?.purpose === "budget_pause"
+  )).toHaveLength(1);
+});
+
+test("duplicate response.done usage cannot manufacture a soft pause and USD 7.50 remains a hard fail-closed bound", async () => {
+  const validUsage = {
+    input_tokens: 0,
+    output_tokens: 52_000,
+    total_tokens: 52_000,
+    input_token_details: {
+      text_tokens: 0,
+      audio_tokens: 0,
+      cached_tokens: 0,
+      cached_tokens_details: { text_tokens: 0, audio_tokens: 0 },
+    },
+    output_token_details: { text_tokens: 0, audio_tokens: 52_000 },
+  };
+  const cap = onboardingCap("call-duplicate-usage");
+  const l = ledger(cap.callId);
+  const ws = socket();
+  await completeGreetingTrace(cap, l, ws, "resp-duplicate-greeting");
+  ws.sent = [];
+  const done = responseDone("resp-duplicate-usage", { usage: validUsage });
+  await handleEvent(cap, l, ws as any, done);
+  await handleEvent(cap, l, ws as any, done);
+  expect(l.usage.audioOut).toBe(52_000);
+  expect(framesOfType(ws, "response.create").filter((frame) =>
+    frame.response?.metadata?.purpose === "budget_pause"
+  )).toHaveLength(0);
+  expect(l.status).toBe("active");
+
+  const hard = onboardingCap("call-hard-budget");
+  const hardLedger = ledger(hard.callId);
+  hardLedger.externalCostUsd = 7.5;
+  const hardSocket = socket();
+  await handleEvent(
+    hard,
+    hardLedger,
+    hardSocket as any,
+    responseDone("resp-hard-budget"),
+  );
+  expect(hardLedger.status).toBe("killed_budget");
+  expect(hardSocket.closed).toBe(1);
+  expect(framesOfType(hardSocket, "response.create").filter((frame) =>
+    frame.response?.metadata?.purpose === "budget_pause"
+  )).toHaveLength(0);
+});
+
+test("partial response.done spend is retained as an unresolved durable lower bound", async () => {
+  const cap = onboardingCap("call-partial-usage-floor");
+  const l = ledger(cap.callId);
+  l.status = "killed_budget";
+  l.externalCostUsd = 0.001605;
+  l.usage.audioOut = 23_725;
+  l.providerUsageEvidence.eventCount = 1;
+  l.providerUsageEvidence.lastResponseId = "resp-partial-floor";
+  l.providerUsageEvidence.lastReceivedAt = "2026-08-28T16:33:22.297Z";
+  l.providerUsageEvidence.terminal = false;
+  const rows: Record<string, unknown>[] = [];
+  _setClient({
+    from(table: string) {
+      const api: any = {
+        update(row: Record<string, unknown>) {
+          if (table === "calls") rows.push(structuredClone(row));
+          return api;
+        },
+        select() { return api; },
+        eq() { return api; },
+        then(resolve: (value: unknown) => unknown) {
+          return Promise.resolve({ data: null, error: null }).then(resolve);
+        },
+      };
+      return api;
+    },
+    rpc() { return Promise.resolve({ data: null, error: null }); },
+  } as any);
+
+  await persistLedger(cap, l);
+  expect(rows[0]).toMatchObject({
+    status: "killed_budget",
+    provider_usage_state: "unknown",
+    usage_tokens: null,
+    cost_estimate_usd: 1.520005,
+  });
 });
 
 afterAll(() => _setClient(null));

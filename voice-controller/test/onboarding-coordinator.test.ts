@@ -21,6 +21,8 @@ import { requestResponse } from "../src/response-coordinator.ts";
 
 const callId = "7f58ee06-6a13-4d45-a2d5-c60244dc92a3";
 const businessName = "Rocha Plumbing";
+const budgetPauseSentence =
+  "Estamos chegando ao limite desta sessão. Suas informações foram salvas e podemos continuar imediatamente.";
 
 function step(
   lifecycle: OnboardingLifecycle,
@@ -448,6 +450,55 @@ function commandTypes(commands: OnboardingCommand[]) {
   return commands.map((command) => command.type);
 }
 
+function budgetPauseQueued() {
+  let lifecycle = startCollecting();
+  lifecycle.activeResponseId = "response-before-budget-pause";
+  const observed = step(lifecycle, {
+    type: "budget.soft_limit_reached",
+    responseId: "response-before-budget-pause",
+    costUsd: 6.5,
+    softLimitUsd: 6.5,
+    hardLimitUsd: 7.5,
+    socketGeneration: 1,
+    elapsedMs: 432_000,
+  } as OnboardingEvent);
+  expect(observed.commands.filter((command) => command.type === "request_response"))
+    .toHaveLength(0);
+  const duplicate = step(observed.lifecycle, {
+    type: "budget.soft_limit_reached",
+    responseId: "response-before-budget-pause",
+    costUsd: 6.5,
+    softLimitUsd: 6.5,
+    hardLimitUsd: 7.5,
+    socketGeneration: 1,
+    elapsedMs: 432_001,
+  } as OnboardingEvent);
+  expect((duplicate.lifecycle as any).budgetPause)
+    .toEqual((observed.lifecycle as any).budgetPause);
+  expect(duplicate.commands.some((command) =>
+    command.type === "request_response" ||
+    command.type === "request_budget_hangup"
+  )).toBe(false);
+  const terminal = step(duplicate.lifecycle, {
+    type: "response.done",
+    responseId: "response-before-budget-pause",
+    socketGeneration: 1,
+    elapsedMs: 432_002,
+  });
+  expect(terminal.lifecycle.phase).toBe("budget_pause_speaking" as any);
+  expect(terminal.commands.filter((command) =>
+    command.type === "request_response" &&
+    command.intentKey === `budget-pause:${callId}`
+  )).toEqual([
+    expect.objectContaining({
+      type: "request_response",
+      purpose: "budget_pause",
+      instructions: `Diga exatamente uma vez: "${budgetPauseSentence}"`,
+    }),
+  ]);
+  return terminal.lifecycle;
+}
+
 function providerTerminatingLifecycle() {
   let lifecycle = signoffSpeaking();
   ({ lifecycle } = step(lifecycle, {
@@ -589,6 +640,137 @@ function summaryCommands(commands: OnboardingCommand[]) {
 }
 
 describe("onboarding lifecycle forbidden transitions", () => {
+  test("one truthful budget pause requires exact transcript, generated audio, terminal response, and playback before hangup", () => {
+    let lifecycle = budgetPauseQueued();
+    const intentKey = `budget-pause:${callId}`;
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.intent_sent",
+      intentKey,
+      socketGeneration: 1,
+      elapsedMs: 432_003,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.created",
+      responseId: "response-budget-pause",
+      intentKey,
+      socketGeneration: 1,
+      elapsedMs: 432_004,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.transcript.done",
+      responseId: "response-budget-pause",
+      transcript: budgetPauseSentence,
+      socketGeneration: 1,
+      elapsedMs: 432_005,
+    }));
+    for (const event of [
+      {
+        type: "response.output_audio.done",
+        responseId: "response-budget-pause",
+        socketGeneration: 1,
+        elapsedMs: 432_006,
+      },
+      {
+        type: "response.done",
+        responseId: "response-budget-pause",
+        socketGeneration: 1,
+        elapsedMs: 432_007,
+      },
+    ] as OnboardingEvent[]) {
+      const result = step(lifecycle, event);
+      lifecycle = result.lifecycle;
+      expect(result.commands.some((command) =>
+        command.type === "request_budget_hangup"
+      )).toBe(false);
+    }
+
+    const playback = step(lifecycle, {
+      type: "output_audio_buffer.stopped",
+      responseId: "response-budget-pause",
+      socketGeneration: 1,
+      elapsedMs: 432_008,
+    });
+    expect(playback.lifecycle.phase).toBe("budget_pause_ready_to_terminate" as any);
+    expect(playback.commands.filter((command) =>
+      command.type === "request_budget_hangup"
+    )).toEqual([
+      expect.objectContaining({
+        type: "request_budget_hangup",
+        intentKey: `budget-hangup:${callId}`,
+        costUsd: 6.5,
+      }),
+    ]);
+
+    const duplicatePlayback = step(playback.lifecycle, {
+      type: "output_audio_buffer.stopped",
+      responseId: "response-budget-pause",
+      socketGeneration: 1,
+      elapsedMs: 432_009,
+    });
+    expect(duplicatePlayback.commands.some((command) =>
+      command.type === "request_budget_hangup"
+    )).toBe(false);
+  });
+
+  test("budget pause barge-in retries once while a lost response ACK blocks without duplicate speech or fake hangup", () => {
+    let lifecycle = budgetPauseQueued();
+    const intentKey = `budget-pause:${callId}`;
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.intent_sent",
+      intentKey,
+      socketGeneration: 1,
+      elapsedMs: 1,
+    }));
+    const lostAck = step(lifecycle, {
+      type: "socket.attached",
+      socketGeneration: 2,
+      elapsedMs: 2,
+    });
+    expect(lostAck.lifecycle.phase).toBe("blocked");
+    expect(lostAck.commands).toContainEqual(expect.objectContaining({
+      type: "block",
+      code: "response_intent_ack_indeterminate",
+    }));
+    expect(lostAck.commands.some((command) =>
+      command.type === "request_response" ||
+      command.type === "request_budget_hangup"
+    )).toBe(false);
+
+    lifecycle = budgetPauseQueued();
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.intent_sent",
+      intentKey,
+      socketGeneration: 1,
+      elapsedMs: 3,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.created",
+      responseId: "response-budget-pause-interrupted",
+      intentKey,
+      socketGeneration: 1,
+      elapsedMs: 4,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.audio_interrupted",
+      responseId: "response-budget-pause-interrupted",
+      socketGeneration: 1,
+      elapsedMs: 5,
+    }));
+    const terminal = step(lifecycle, {
+      type: "response.done",
+      responseId: "response-budget-pause-interrupted",
+      socketGeneration: 1,
+      elapsedMs: 6,
+    });
+    expect(terminal.commands.filter((command) =>
+      command.type === "request_response" &&
+      command.intentKey === `budget-pause:${callId}:retry:1`
+    )).toHaveLength(1);
+    expect(terminal.commands.some((command) =>
+      command.type === "request_budget_hangup"
+    )).toBe(false);
+  });
+
   test("queues one stable greeting and emits complete coverage-start telemetry", () => {
     const created = createOnboardingLifecycle(callId, businessName);
     expect(created.coverage.nextQuestion).toEqual({

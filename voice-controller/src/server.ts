@@ -1,7 +1,7 @@
 // Voice controller HTTP surface.
 // POST /session: owner-authenticated bootstrap — budget reservation, call row, ephemeral client secret (ek_) with the
 // full per-tenant session config, SDP exchange proxied to OpenAI, sideband attach. The browser never sees any key.
-import { config } from "./config.ts";
+import { config, sessionBudgetEnvelope } from "./config.ts";
 import { buildInstructions, type SessionType } from "./instructions.ts";
 import { supa } from "./rules.ts";
 import { resolveSessionTenant } from "./session-tenant.ts";
@@ -451,7 +451,7 @@ export async function startSession(
   // Primary model, then automatic fallback (RJ 2026-08-19: 2.1 primary, mini as fallback).
   const primary = modelOverride && ALLOWED_MODELS.has(modelOverride) ? modelOverride : config.model;
   const chain = primary === config.fallbackModel ? [primary] : [primary, config.fallbackModel];
-  const sessionCeiling = config.sessionCostCeilingUsd;
+  const budgetEnvelope = sessionBudgetEnvelope(sessionType);
 
   // call row first (budget RPC references it)
   const { data: call, error: ce } = await supa()
@@ -581,7 +581,11 @@ export async function startSession(
   // Atomic budget reservation remains a hard gate, but the app-opening cleanup
   // control is already registered and waits for this outcome before settlement.
   try {
-    await reserveCallBudget(tenant.id, call.id, sessionCeiling);
+    await reserveCallBudget(
+      tenant.id,
+      call.id,
+      budgetEnvelope.reservationUsd,
+    );
   } catch (error: any) {
     resolveReservationFinished();
     if (startupCancelled) await stopIfCancelled();

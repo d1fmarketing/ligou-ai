@@ -271,6 +271,38 @@ describe("session budget lifecycle", () => {
     expect(reservation?.args.p_est_cost).toBe(2.75);
   });
 
+  test("onboarding reserves its isolated USD 7.50 envelope without changing the customer ceiling", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    reserveError = { message: "stop after reservation" };
+
+    await expect(startSession(
+      "owner-1",
+      "onboarding",
+      "test-sdp",
+      undefined,
+      TENANT.id,
+      undefined,
+      {
+        browserRequestId: "request-budget-envelope",
+        openingModeRequested: "application_tts_v1",
+        requestedCallId: "11111111-1111-4111-8111-111111111119",
+      },
+    )).rejects.toMatchObject({ message: "budget_exceeded", status: 402 });
+
+    expect(rpcCalls.find((call) => call.name === "reserve_call_budget")?.args)
+      .toMatchObject({ p_est_cost: 7.5 });
+
+    rpcCalls = [];
+    invalidateTenant("rocha-plumbing");
+    await expect(startSession(
+      "owner-1",
+      "owner_browser",
+      "test-sdp",
+    )).rejects.toMatchObject({ message: "budget_exceeded", status: 402 });
+    expect(rpcCalls.find((call) => call.name === "reserve_call_budget")?.args)
+      .toMatchObject({ p_est_cost: 1.5 });
+  });
+
   test("settles a reservation when startup cannot obtain an OpenAI session", async () => {
     config.openaiKey = "";
 

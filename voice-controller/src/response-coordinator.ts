@@ -32,7 +32,8 @@ export interface ApplicationResponseIntent {
     | "tool_continuation"
     | "recovery"
     | "summary"
-    | "final_signoff";
+    | "final_signoff"
+    | "budget_pause";
   instructions?: string;
   snapshotDigest?: string;
   approvalReceiptId?: string;
@@ -81,7 +82,7 @@ export function requestResponse(ledger: CoordinatedLedger, ws: WsLike, intent: R
     ? {
         type: "response.create",
         response: {
-          ...(applicationIntent.purpose === "recovery"
+          ...(["recovery", "budget_pause"].includes(applicationIntent.purpose)
             ? { tool_choice: "none" }
             : {}),
           ...(applicationIntent.instructions

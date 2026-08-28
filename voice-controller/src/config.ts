@@ -33,6 +33,15 @@ export function parseSidebandOpenTimeoutMs(raw: string | undefined): number {
   return value;
 }
 
+export const ONBOARDING_BUDGET_SOFT_LIMIT_USD = 6.5;
+export const ONBOARDING_BUDGET_RESERVATION_USD = 7.5;
+
+export interface SessionBudgetEnvelope {
+  softLimitUsd: number;
+  hardLimitUsd: number;
+  reservationUsd: number;
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 8790),
   supabaseUrl: need("SUPABASE_URL"),
@@ -54,6 +63,22 @@ export const config = {
   // Male brand voice: RJ listened to cedar/ash/echo/verse/ballad on a real Ligou script and picked ASH.
   voice: process.env.LIGOU_VOICE ?? "ash",
 };
+
+export function sessionBudgetEnvelope(
+  sessionType: "customer" | "owner_browser" | "onboarding",
+): SessionBudgetEnvelope {
+  if (sessionType === "onboarding")
+    return {
+      softLimitUsd: ONBOARDING_BUDGET_SOFT_LIMIT_USD,
+      hardLimitUsd: ONBOARDING_BUDGET_RESERVATION_USD,
+      reservationUsd: ONBOARDING_BUDGET_RESERVATION_USD,
+    };
+  return {
+    softLimitUsd: config.sessionCostCeilingUsd,
+    hardLimitUsd: config.sessionCostCeilingUsd,
+    reservationUsd: config.sessionCostCeilingUsd,
+  };
+}
 
 // $ per 1M tokens — official pricing 2026-08 (developers.openai.com/api/docs/pricing)
 export const PRICING: Record<string, { audioIn: number; audioInCached: number; audioOut: number; textIn: number; textInCached: number; textOut: number }> = {

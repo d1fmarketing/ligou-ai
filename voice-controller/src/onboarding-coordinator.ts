@@ -20,6 +20,9 @@ export type OnboardingPhase =
   | "awaiting_owner_approval"
   | "approval_persisting"
   | "final_signoff_speaking"
+  | "budget_pause_pending"
+  | "budget_pause_speaking"
+  | "budget_pause_ready_to_terminate"
   | "ready_to_terminate"
   | "provider_terminating"
   | "closed"
@@ -118,6 +121,22 @@ export interface SignoffProof {
   interruptedResponseId?: string;
 }
 
+export interface BudgetPauseProof {
+  costUsd: number;
+  softLimitUsd: number;
+  hardLimitUsd: number;
+  responseId?: string;
+  transcript: string;
+  transcriptFinal: boolean;
+  validated?: boolean;
+  audioDone: boolean;
+  responseDone: boolean;
+  playbackStopped: boolean;
+  interrupted: boolean;
+  attempt: number;
+  interruptedResponseId?: string;
+}
+
 export interface ApprovalCandidate {
   turnId: string;
   ownerWords: string;
@@ -178,8 +197,10 @@ export interface OnboardingLifecycle {
   greeting?: GreetingProof;
   summary?: SummaryProof;
   signoff?: SignoffProof;
+  budgetPause?: BudgetPauseProof;
   invalidatedSummaryRevision?: number;
   requestedHangupKeys: string[];
+  requestedBudgetHangupKeys: string[];
   providerTerminationConfirmed: boolean;
 }
 
@@ -188,7 +209,8 @@ export type ResponsePurpose =
   | "tool_continuation"
   | "recovery"
   | "summary"
-  | "final_signoff";
+  | "final_signoff"
+  | "budget_pause";
 
 export type TelemetryName =
   | "onboarding.coverage.started"
@@ -220,6 +242,10 @@ export type TelemetryName =
   | "onboarding.approval.rejected"
   | "onboarding.final_audio.done"
   | "onboarding.final_audio.playback_done"
+  | "onboarding.budget_pause.requested"
+  | "onboarding.budget_pause.audio_done"
+  | "onboarding.budget_pause.playback_done"
+  | "closing.budget_requested"
   | "closing.provider_requested"
   | "closing.provider_confirmed"
   | "onboarding.closed"
@@ -234,6 +260,8 @@ const INITIAL_GREETING_RESPONSE_INSTRUCTIONS_PT =
   `Em seguida, pergunte exatamente: "${INITIAL_SERVICE_DISCOVERY_QUESTION_PT}"`;
 export const FINAL_SIGNOFF_SENTENCE_PT =
   "A confirmação por voz foi salva e as regras sugeridas continuam aguardando revisão na Memória.";
+export const BUDGET_PAUSE_SENTENCE_PT =
+  "Estamos chegando ao limite desta sessão. Suas informações foram salvas e podemos continuar imediatamente.";
 const TRUTHFUL_RECOVERY_RESPONSE_INSTRUCTIONS_PT =
   'Diga exatamente uma vez: "Não consegui confirmar o salvamento da sua resposta. Por favor, repita as informações."';
 const INDETERMINATE_RECOVERY_RESPONSE_INSTRUCTIONS_PT =
@@ -340,6 +368,13 @@ export type OnboardingCommand =
       approvalReceiptId: string;
     }
   | {
+      type: "request_budget_hangup";
+      intentKey: string;
+      costUsd: number;
+      softLimitUsd: number;
+      hardLimitUsd: number;
+    }
+  | {
       type: "refuse_end_session";
       toolCallId: string;
       output: string;
@@ -360,6 +395,13 @@ export type OnboardingEvent =
   | (TimedEvent & { type: "socket.attached"; socketGeneration: number })
   | (SocketEvent & { type: "application.greeting_activated" })
   | (SocketEvent & { type: "application.transport_activated" })
+  | (SocketEvent & {
+      type: "budget.soft_limit_reached";
+      responseId: string;
+      costUsd: number;
+      softLimitUsd: number;
+      hardLimitUsd: number;
+    })
   | (TimedEvent & {
       type: "adapter.invariant_failed";
       code:
@@ -770,11 +812,33 @@ function everyAdmittedCallIsInAReadyBatch(
   });
 }
 
+function maybeStartBudgetPause(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+): boolean {
+  const pause = lifecycle.budgetPause;
+  if (!pause || pause.responseId || pause.interrupted ||
+    lifecycle.activeResponseId || lifecycle.pendingFollowup ||
+    lifecycle.snapshotRefresh || !everyAdmittedCallIsInAReadyBatch(lifecycle))
+    return false;
+  lifecycle.phase = "budget_pause_speaking";
+  return queueResponse(lifecycle, commands, event, {
+    intentKey: `budget-pause:${lifecycle.callId}${pause.attempt > 0 ? `:retry:${pause.attempt}` : ""}`,
+    purpose: "budget_pause",
+    instructions: `Diga exatamente uma vez: "${BUDGET_PAUSE_SENTENCE_PT}"`,
+  });
+}
+
 function maybeAdvanceCoverage(
   lifecycle: OnboardingLifecycle,
   commands: OnboardingCommand[],
   event: TimedEvent,
 ): void {
+  if (lifecycle.budgetPause) {
+    maybeStartBudgetPause(lifecycle, commands, event);
+    return;
+  }
   if (lifecycle.snapshotRefresh || lifecycle.pendingFollowup) return;
   const readyBatches = Object.values(lifecycle.toolBatches).filter(
     (batch) => batchIsReady(lifecycle, batch) && !batch.continuationRequested,
@@ -1100,6 +1164,51 @@ function signoffTranscriptValid(transcript: string): boolean {
     JSON.stringify(normalizedBoundaryTokens(FINAL_SIGNOFF_SENTENCE_PT));
 }
 
+function budgetPauseTranscriptValid(transcript: string): boolean {
+  return JSON.stringify(normalizedBoundaryTokens(transcript)) ===
+    JSON.stringify(normalizedBoundaryTokens(BUDGET_PAUSE_SENTENCE_PT));
+}
+
+function maybeFinishBudgetPause(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+): void {
+  const pause = lifecycle.budgetPause;
+  if (!pause || pause.interrupted || !pause.transcriptFinal ||
+    !pause.audioDone || !pause.responseDone || !pause.playbackStopped)
+    return;
+  pause.validated = budgetPauseTranscriptValid(pause.transcript);
+  if (!pause.validated) {
+    block(
+      lifecycle,
+      commands,
+      event,
+      "budget_pause_content_invalid",
+      "budget pause did not match the application-owned sentence",
+    );
+    return;
+  }
+  lifecycle.phase = "budget_pause_ready_to_terminate";
+  const intentKey = `budget-hangup:${lifecycle.callId}`;
+  if (lifecycle.requestedBudgetHangupKeys.includes(intentKey)) return;
+  lifecycle.requestedBudgetHangupKeys.push(intentKey);
+  commands.push(
+    telemetry(lifecycle, "closing.budget_requested", event, {
+      intentKey,
+      responseId: pause.responseId,
+      outcome: "budget_pause_playback_proven",
+    }),
+  );
+  commands.push({
+    type: "request_budget_hangup",
+    intentKey,
+    costUsd: pause.costUsd,
+    softLimitUsd: pause.softLimitUsd,
+    hardLimitUsd: pause.hardLimitUsd,
+  });
+}
+
 function summaryResponseInstructions(summary: SummaryProof): string {
   const facts = summary.requiredAnchors.join("\n");
   return `Fale diretamente estes fatos, sem narrar o processo:\n${facts}\n` +
@@ -1117,13 +1226,17 @@ function maybeQueueInterruptedSpeechRecovery(
       ? "summary"
       : lifecycle.signoff?.interrupted
         ? "signoff"
-        : null;
+        : lifecycle.budgetPause?.interrupted
+          ? "budget_pause"
+          : null;
   if (!kind) return false;
   const proof = kind === "greeting"
     ? lifecycle.greeting!
     : kind === "summary"
       ? lifecycle.summary!
-      : lifecycle.signoff!;
+      : kind === "signoff"
+        ? lifecycle.signoff!
+        : lifecycle.budgetPause!;
   const interruptedResponseId = proof.interruptedResponseId;
   if (
     !interruptedResponseId ||
@@ -1167,6 +1280,15 @@ function maybeQueueInterruptedSpeechRecovery(
       purpose: "summary",
       snapshotDigest: summary.digest,
       instructions: summaryResponseInstructions(summary),
+    });
+  }
+  if (kind === "budget_pause") {
+    const pause = lifecycle.budgetPause!;
+    lifecycle.phase = "budget_pause_speaking";
+    return queueResponse(lifecycle, commands, event, {
+      intentKey: `budget-pause:${lifecycle.callId}:retry:1`,
+      purpose: "budget_pause",
+      instructions: `Diga exatamente uma vez: "${BUDGET_PAUSE_SENTENCE_PT}"`,
     });
   }
   const signoff = lifecycle.signoff!;
@@ -1663,6 +1785,7 @@ export function createOnboardingLifecycle(
     freshCallerTurnIds: [],
     consumedCallerTurnIds: [],
     requestedHangupKeys: [],
+    requestedBudgetHangupKeys: [],
     providerTerminationConfirmed: false,
   };
 }
@@ -1671,6 +1794,11 @@ export function reduceOnboarding(
   current: OnboardingLifecycle,
   event: OnboardingEvent,
 ): { lifecycle: OnboardingLifecycle; commands: OnboardingCommand[] } {
+  if (event.type === "budget.soft_limit_reached" && current.budgetPause &&
+    current.budgetPause.costUsd === event.costUsd &&
+    current.budgetPause.softLimitUsd === event.softLimitUsd &&
+    current.budgetPause.hardLimitUsd === event.hardLimitUsd)
+    return { lifecycle: current, commands: [] };
   if (isRepeatedLateSignoffProof(current, event))
     return { lifecycle: current, commands: [] };
 
@@ -1796,7 +1924,9 @@ export function reduceOnboarding(
           ? lifecycle.summary
           : lifecycle.signoff?.interrupted
             ? lifecycle.signoff
-            : null;
+            : lifecycle.budgetPause?.interrupted
+              ? lifecycle.budgetPause
+              : null;
       if (interruptedProof) {
         if (
           !interruptedProof.interruptedResponseId ||
@@ -1837,6 +1967,57 @@ export function reduceOnboarding(
           purpose: "greeting",
           instructions: INITIAL_GREETING_RESPONSE_INSTRUCTIONS_PT,
         });
+      break;
+    }
+    case "budget.soft_limit_reached": {
+      if (!Number.isFinite(event.costUsd) ||
+        event.costUsd < event.softLimitUsd ||
+        !Number.isFinite(event.softLimitUsd) || event.softLimitUsd <= 0 ||
+        !Number.isFinite(event.hardLimitUsd) ||
+        event.hardLimitUsd <= event.softLimitUsd) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "budget_pause_envelope_invalid",
+          "budget pause did not match a bounded onboarding envelope",
+        );
+        break;
+      }
+      if (lifecycle.budgetPause) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "budget_pause_identity_mismatch",
+          "budget pause threshold changed after it was observed",
+        );
+        break;
+      }
+      lifecycle.budgetPause = {
+        costUsd: event.costUsd,
+        softLimitUsd: event.softLimitUsd,
+        hardLimitUsd: event.hardLimitUsd,
+        transcript: "",
+        transcriptFinal: false,
+        audioDone: false,
+        responseDone: false,
+        playbackStopped: false,
+        interrupted: false,
+        attempt: 0,
+      };
+      terminalizeAuthorityResponseIntents(
+        lifecycle,
+        (intent) => intent.responseId !== event.responseId,
+      );
+      lifecycle.phase = "budget_pause_pending";
+      commands.push(
+        telemetry(lifecycle, "onboarding.budget_pause.requested", event, {
+          responseId: event.responseId,
+          outcome: "soft_limit_reached",
+        }),
+      );
+      maybeStartBudgetPause(lifecycle, commands, event);
       break;
     }
     case "application.transport_activated": {
@@ -1957,6 +2138,8 @@ export function reduceOnboarding(
           lifecycle.summary.responseId = event.responseId;
         if (intent.purpose === "final_signoff" && lifecycle.signoff)
           lifecycle.signoff.responseId = event.responseId;
+        if (intent.purpose === "budget_pause" && lifecycle.budgetPause)
+          lifecycle.budgetPause.responseId = event.responseId;
         commands.push(
           telemetry(lifecycle, "voice.response.acknowledged", event, {
             responseId: event.responseId,
@@ -1981,6 +2164,10 @@ export function reduceOnboarding(
         lifecycle.signoff?.responseId === event.responseId &&
         !lifecycle.signoff.transcriptFinal
       ) lifecycle.signoff.transcript += event.delta;
+      if (
+        lifecycle.budgetPause?.responseId === event.responseId &&
+        !lifecycle.budgetPause.transcriptFinal
+      ) lifecycle.budgetPause.transcript += event.delta;
       break;
     }
     case "response.transcript.done": {
@@ -1999,6 +2186,11 @@ export function reduceOnboarding(
         lifecycle.signoff.transcriptFinal = true;
         lifecycle.signoff.validated = signoffTranscriptValid(event.transcript);
         maybeFinishSignoff(lifecycle, commands, event);
+      }
+      if (lifecycle.budgetPause?.responseId === event.responseId) {
+        lifecycle.budgetPause.transcript = event.transcript;
+        lifecycle.budgetPause.transcriptFinal = true;
+        maybeFinishBudgetPause(lifecycle, commands, event);
       }
       break;
     }
@@ -2029,6 +2221,17 @@ export function reduceOnboarding(
         );
         maybeFinishSignoff(lifecycle, commands, event);
       }
+      if (lifecycle.budgetPause?.responseId === event.responseId) {
+        lifecycle.budgetPause.audioDone = true;
+        commands.push(
+          telemetry(lifecycle, "onboarding.budget_pause.audio_done", event, {
+            responseId: event.responseId,
+            intentKey: `budget-pause:${lifecycle.callId}`,
+            outcome: "audio_generated",
+          }),
+        );
+        maybeFinishBudgetPause(lifecycle, commands, event);
+      }
       break;
     }
     case "response.done": {
@@ -2053,6 +2256,10 @@ export function reduceOnboarding(
       if (lifecycle.signoff?.responseId === event.responseId) {
         lifecycle.signoff.responseDone = true;
         maybeFinishSignoff(lifecycle, commands, event);
+      }
+      if (lifecycle.budgetPause?.responseId === event.responseId) {
+        lifecycle.budgetPause.responseDone = true;
+        maybeFinishBudgetPause(lifecycle, commands, event);
       }
       if (lifecycle.phase === "follow_up") lifecycle.phase = "collecting";
       commands.push(
@@ -2091,6 +2298,17 @@ export function reduceOnboarding(
           }),
         );
         maybeFinishSignoff(lifecycle, commands, event);
+      }
+      if (lifecycle.budgetPause?.responseId === event.responseId) {
+        lifecycle.budgetPause.playbackStopped = true;
+        commands.push(
+          telemetry(lifecycle, "onboarding.budget_pause.playback_done", event, {
+            responseId: event.responseId,
+            intentKey: `budget-pause:${lifecycle.callId}`,
+            outcome: "playback_stopped",
+          }),
+        );
+        maybeFinishBudgetPause(lifecycle, commands, event);
       }
       break;
     }
@@ -2160,6 +2378,24 @@ export function reduceOnboarding(
         lifecycle.signoff.interruptedResponseId = event.responseId;
         delete lifecycle.signoff.validated;
         lifecycle.phase = "final_signoff_speaking";
+      }
+      if (lifecycle.budgetPause?.responseId === event.responseId) {
+        if ((lifecycle.budgetPause.attempt ?? 0) >= 1) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "authority_speech_retry_exhausted",
+            "budget pause exhausted its single speech retry",
+          );
+          break;
+        }
+        lifecycle.budgetPause.audioDone = false;
+        lifecycle.budgetPause.playbackStopped = false;
+        lifecycle.budgetPause.interrupted = true;
+        lifecycle.budgetPause.interruptedResponseId = event.responseId;
+        delete lifecycle.budgetPause.validated;
+        lifecycle.phase = "budget_pause_speaking";
       }
       maybeQueueInterruptedSpeechRecovery(lifecycle, commands, event);
       break;
