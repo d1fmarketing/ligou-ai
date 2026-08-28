@@ -4088,9 +4088,11 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     sourceCall: "86000000-0000-4000-8000-000000000020",
     targetCall: "86000000-0000-4000-8000-000000000021",
     laterTargetCall: "86000000-0000-4000-8000-000000000022",
+    recoveredTargetCall: "86000000-0000-4000-8000-000000000023",
     sourceRequest: "86000000-0000-4000-8000-000000000030",
     targetRequest: "86000000-0000-4000-8000-000000000031",
     laterTargetRequest: "86000000-0000-4000-8000-000000000032",
+    recoveredTargetRequest: "86000000-0000-4000-8000-000000000033",
     sourceReceipt: "86000000-0000-4000-8000-000000000040",
   };
 
@@ -4244,6 +4246,80 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
 
   requireSuccess(await runSql(connection, home, `
     update public.browser_session_requests
+    set status = 'error', error = 'synthetic_pre_provider_cancel'
+    where id = '${ids.targetRequest}' and status = 'processing';
+    update public.calls
+    set status = 'error',
+        ended_at = clock_timestamp(),
+        duration_seconds = 0,
+        provider_termination_state = 'not_required',
+        provider_termination_mode = null,
+        provider_termination_reason = 'synthetic_pre_provider_cancel',
+        provider_usage_state = 'not_applicable'
+    where id = '${ids.targetCall}' and status = 'active';
+    update public.budget_reservations
+    set status = 'settled',
+        outcome = 'startup_error',
+        final_cost_usd = 0,
+        final_minutes = 0,
+        settled_at = clock_timestamp()
+    where call_id = '${ids.targetCall}' and status = 'active';
+    insert into public.browser_session_requests (
+      id, tenant_id, user_id, session_type, offer_sdp, status,
+      call_id, opening_mode_requested
+    ) values (
+      '${ids.recoveredTargetRequest}', '${ids.tenant}', '${ids.owner}',
+      'onboarding', 'resume-recovered-offer', 'processing',
+      '${ids.recoveredTargetCall}', 'application_tts_v1'
+    );
+    insert into public.calls (
+      id, tenant_id, channel, session_type, status, started_at
+    ) values (
+      '${ids.recoveredTargetCall}', '${ids.tenant}', 'browser', 'onboarding',
+      'active', clock_timestamp() + interval '1 second'
+    );
+    select public.reserve_call_budget(
+      '${ids.tenant}', '${ids.recoveredTargetCall}', 7.5
+    );
+  `), "abandoned resume checkpoint transfer fixture");
+  const chainedResume = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(`
+      select public.initialize_onboarding_resume(
+        '${ids.tenant}', '${ids.recoveredTargetCall}', '${ids.owner}'
+      )::text;
+    `),
+  ), "abandoned resume checkpoint transfer"));
+  assert.equal(chainedResume.status, "initialized");
+  assert.equal(
+    chainedResume.coverage.resume_context.source_call_id,
+    ids.targetCall,
+  );
+  assert.equal(
+    chainedResume.coverage.snapshot.callId,
+    ids.recoveredTargetCall,
+  );
+  assert.deepEqual(
+    chainedResume.coverage.next_action,
+    firstResume.coverage.next_action,
+  );
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (select count(*) from public.onboarding_resume_consumptions
+        where tenant_id = '${ids.tenant}')::text || ':' ||
+      (select count(*) from public.receipts
+        where tenant_id = '${ids.tenant}'
+          and call_id = '${ids.recoveredTargetCall}'
+          and kind = 'onboarding_coverage')::text || ':' ||
+      (select count(*) from public.receipts
+        where tenant_id = '${ids.tenant}'
+          and call_id = '${ids.targetCall}'
+          and kind = 'onboarding_coverage')::text;
+  `), "abandoned resume immutable chain invariant"), "2:1:1");
+
+  requireSuccess(await runSql(connection, home, `
+    update public.browser_session_requests
     set status = 'ready',
         answer_sdp = 'resume-target-answer',
         handled_at = clock_timestamp(),
@@ -4260,7 +4336,7 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
           tts_model: "tts-1",
           cost_usd: 0.001,
         })}
-    where id = '${ids.targetRequest}'
+    where id = '${ids.recoveredTargetRequest}'
       and status = 'processing';
   `), "onboarding resume simulated ready handoff");
 
@@ -4275,7 +4351,7 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     }] },
   };
   const snapshot = {
-    ...firstResume.coverage.snapshot,
+    ...chainedResume.coverage.snapshot,
     revision: 2,
     cells: { "area.coverage": cell },
   };
@@ -4284,7 +4360,7 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     connection,
     home,
     `select public.onboarding_materialization_v3(
-      ${jsonb(snapshot)}, 'domain:area', 2, '${ids.targetCall}'
+      ${jsonb(snapshot)}, 'domain:area', 2, '${ids.recoveredTargetCall}'
     )::text;`,
   ), "resumed first-answer materialization"));
   const nextAction = {
@@ -4296,7 +4372,7 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     schema_version: 2,
     transition_kind: "answer",
     tenant_id: ids.tenant,
-    call_id: ids.targetCall,
+    call_id: ids.recoveredTargetCall,
     revision: 2,
     complete: false,
     snapshot,
@@ -4332,7 +4408,7 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     home,
     serviceTransaction(onboardingAnswerSql({
       tenantId: ids.tenant,
-      callId: ids.targetCall,
+      callId: ids.recoveredTargetCall,
       ownerId: ids.owner,
       providerToolCallId: "resume-first-answer",
       answerHash,
@@ -4353,9 +4429,28 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     })),
   ), "resumed first answer"));
   assert.equal(firstAnswer.revision, 2);
-  assert.equal(firstAnswer.coverage.snapshot.callId, ids.targetCall);
+  assert.equal(
+    firstAnswer.coverage.snapshot.callId,
+    ids.recoveredTargetCall,
+  );
 
   requireSuccess(await runSql(connection, home, `
+    update public.calls
+    set status = 'error',
+        ended_at = clock_timestamp(),
+        duration_seconds = 0,
+        provider_termination_state = 'not_required',
+        provider_termination_mode = null,
+        provider_termination_reason = 'synthetic_error_after_answer',
+        provider_usage_state = 'not_applicable'
+    where id = '${ids.recoveredTargetCall}' and status = 'active';
+    update public.budget_reservations
+    set status = 'settled',
+        outcome = 'startup_error',
+        final_cost_usd = 0,
+        final_minutes = 0,
+        settled_at = clock_timestamp()
+    where call_id = '${ids.recoveredTargetCall}' and status = 'active';
     insert into public.browser_session_requests (
       id, tenant_id, user_id, session_type, offer_sdp, status,
       call_id, opening_mode_requested
@@ -4381,7 +4476,7 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
   assert.equal(scalar(await runSql(connection, home, `
     select count(*)::text from public.onboarding_resume_consumptions
     where tenant_id = '${ids.tenant}';
-  `), "resume source single-consumption invariant"), "1");
+  `), "resume source single-consumption invariant"), "2");
 }
 
 export async function runConcurrencySuite(env = process.env) {

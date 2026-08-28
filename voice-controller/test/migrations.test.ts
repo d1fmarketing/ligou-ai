@@ -35,7 +35,7 @@ describe("durable onboarding resume migration contract", () => {
     expect(sql).toContain("p_tenant uuid, p_target_call uuid, p_owner uuid");
     expect(sql).toContain("pg_advisory_xact_lock(hashtextextended( 'ligou.v0_2.onboarding_resume:' || p_tenant::text");
     expect(sql).toContain("order by c.started_at desc, c.id desc");
-    expect(sql).toContain("v_source.status not in ('killed_budget','killed_deadline')");
+    expect(sql).toContain("v_source.status not in ('killed_budget','killed_deadline','error')");
     expect(sql).toContain("v_source.provider_termination_state is distinct from 'confirmed'");
     expect(sql).toContain("v_reservation.status is distinct from 'settled'");
     expect(sql).toContain("v_source_receipt.readback->'schema_version' is distinct from '2'::jsonb");
@@ -90,6 +90,18 @@ describe("durable onboarding resume migration contract", () => {
       "(opening_payload->'resume_context') - array[ 'coverage_receipt_id', 'revision', 'snapshot_digest', 'next_action' ]::text[] = '{}'::jsonb",
     );
     expect(sql).toContain("opening_payload->'resume_context'->'next_action'->>'type' = 'ask'");
+  });
+
+  test("chains only an abandoned revision-one resume checkpoint and blocks every arbitrary error", () => {
+    const sql = migrationSql("onboarding_resume_checkpoint");
+    expect(sql).toContain("v_source.status = 'error'");
+    expect(sql).toContain("v_source.provider_termination_state not in ('confirmed','not_required')");
+    expect(sql).toContain("v_reservation.outcome not in ('startup_error','error')");
+    expect(sql).toContain("v_source_receipt.readback->>'transition_kind' <> 'resume_checkpoint'");
+    expect(sql).toContain("v_source_receipt.readback->>'revision' <> '1'");
+    expect(sql).toContain("and r.kind = 'onboarding_coverage' ) <> 1");
+    expect(sql).toContain("r.kind = 'onboarding_event_alias'");
+    expect(sql).toContain("message = 'onboarding_resume_latest_ineligible'");
   });
 });
 

@@ -692,6 +692,98 @@ describe("session budget lifecycle", () => {
     expect(fetchUrls).toEqual([]);
   });
 
+  test("a checkpoint abandoned during TTS can chain once into the next startup with the same question", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    const abandonedCall = "11111111-1111-4111-8111-111111111118";
+    const recoveredCall = "11111111-1111-4111-8111-111111111117";
+    resumeRpcResult = { data: resumedCheckpoint(abandonedCall), error: null };
+    let cleanup: { cancel(reason: string): Promise<void> } | null = null;
+    let ttsStarted!: () => void;
+    const observedTts = new Promise<void>((resolve) => { ttsStarted = resolve; });
+    globalThis.fetch = async (input, init) => {
+      fetchUrls.push(String(input));
+      ttsStarted();
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("aborted", "AbortError"))
+        );
+      });
+    };
+    const abandoned = startSession(
+      "22222222-2222-4222-8222-222222222222",
+      "onboarding",
+      "test-sdp",
+      undefined,
+      TENANT.id,
+      (control) => { cleanup = control; },
+      {
+        browserRequestId: "request-abandoned-resume",
+        openingModeRequested: "application_tts_v1",
+        requestedCallId: abandonedCall,
+      },
+    );
+    await observedTts;
+    await cleanup!.cancel("edge_cancel_after_resume_checkpoint");
+    await expect(abandoned).rejects.toMatchObject({
+      message: "browser_request_cancelled",
+      status: 499,
+    });
+
+    const chained = resumedCheckpoint(recoveredCall) as any;
+    chained.source_call_id = abandonedCall;
+    chained.source_receipt_id =
+      "55555555-5555-4555-8555-555555555555";
+    chained.coverage_receipt_id =
+      "77777777-7777-4777-8777-777777777777";
+    chained.coverage.resume_context = {
+      source_call_id: abandonedCall,
+      source_receipt_id: "55555555-5555-4555-8555-555555555555",
+      source_revision: 1,
+      source_snapshot_digest: "c".repeat(64),
+    };
+    resumeRpcResult = { data: chained, error: null };
+    fetchUrls = [];
+    let recoveredTtsBody: Record<string, unknown> | null = null;
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      fetchUrls.push(url);
+      if (url.endsWith("/v1/audio/speech")) {
+        recoveredTtsBody = JSON.parse(String(init?.body));
+        return new Response(new Uint8Array([0x49, 0x44, 0x33, 0xff]), {
+          status: 200,
+          headers: { "content-type": "audio/mpeg" },
+        });
+      }
+      return new Response("model rejected", { status: 400 });
+    };
+    await expect(startSession(
+      "22222222-2222-4222-8222-222222222222",
+      "onboarding",
+      "test-sdp",
+      undefined,
+      TENANT.id,
+      undefined,
+      {
+        browserRequestId: "request-recovered-resume",
+        openingModeRequested: "application_tts_v1",
+        requestedCallId: recoveredCall,
+      },
+    )).rejects.toMatchObject({ message: "realtime_unavailable" });
+    expect(recoveredTtsBody).toMatchObject({
+      model: "tts-1-hd",
+      input:
+        "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Vamos continuar de onde paramos. Quais cidades e regiões sua empresa atende?",
+    });
+    const resumeCalls = rpcCalls.filter((call) =>
+      call.name === "initialize_onboarding_resume"
+    );
+    expect(resumeCalls).toHaveLength(2);
+    expect(resumeCalls.map((call) => call.args.p_target_call)).toEqual([
+      abandonedCall,
+      recoveredCall,
+    ]);
+  });
+
   test("cancellation during held budget reservation prevents every TTS/provider step and releases the reservation", async () => {
     config.openaiKey = "synthetic-openai-key";
     let releaseReserve!: () => void;

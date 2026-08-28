@@ -617,11 +617,64 @@ begin
     r.created_at desc, r.id desc
   limit 1;
 
-  if v_source.status not in ('killed_budget','killed_deadline')
-     or v_source.provider_termination_state is distinct from 'confirmed'
+  -- A pre-provider target may have consumed an earlier source and then ended
+  -- before its application opening became usable. Chain only that exact
+  -- immutable revision-one checkpoint; every arbitrary/later error remains the
+  -- latest call and fails closed without searching backward.
+  if v_source.status = 'error' and (
+       v_source.provider_termination_state not in ('confirmed','not_required')
+       or v_reservation.id is null
+       or v_reservation.status is distinct from 'settled'
+       or v_reservation.outcome not in ('startup_error','error')
+       or v_source_receipt.id is null
+       or v_source_receipt.readback->>'transition_kind' <>
+         'resume_checkpoint'
+       or v_source_receipt.readback->>'revision' <> '1'
+       or v_source_receipt.detail->>'transition_kind' <>
+         'resume_checkpoint'
+       or v_source_receipt.detail->'transition_schema' is distinct from
+         '2'::jsonb
+       or (
+         select count(*) from public.receipts r
+         where r.tenant_id = p_tenant
+           and r.call_id = v_source.id
+           and r.kind = 'onboarding_coverage'
+       ) <> 1
+       or exists (
+         select 1 from public.receipts r
+         where r.tenant_id = p_tenant
+           and r.call_id = v_source.id
+           and r.kind = 'onboarding_event_alias'
+       )
+       or jsonb_array_length(
+         v_source_receipt.readback->'materializations'
+       ) <> 0
+     ) then
+    raise exception using errcode = '55000',
+      message = 'onboarding_resume_latest_ineligible';
+  end if;
+
+  if v_source.status not in ('killed_budget','killed_deadline','error')
+     or (
+       v_source.status in ('killed_budget','killed_deadline')
+       and v_source.provider_termination_state is distinct from 'confirmed'
+     )
+     or (
+       v_source.status = 'error'
+       and v_source.provider_termination_state not in (
+         'confirmed','not_required'
+       )
+     )
      or v_reservation.id is null
      or v_reservation.status is distinct from 'settled'
-     or v_reservation.outcome is distinct from v_source.status
+     or (
+       v_source.status in ('killed_budget','killed_deadline')
+       and v_reservation.outcome is distinct from v_source.status
+     )
+     or (
+       v_source.status = 'error'
+       and v_reservation.outcome not in ('startup_error','error')
+     )
      or v_reservation.reserved_minutes <= 0
      or v_source_receipt.id is null
      or exists (
