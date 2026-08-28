@@ -1015,6 +1015,81 @@ test("budget or deadline termination is resumable only when the owner-safe RPC s
   }
 });
 
+test("a safe revision-one error checkpoint becomes Continue only when the owner-safe RPC says eligible", async () => {
+  const client = queryClient({
+    resumeStatus: {
+      data: { status: "eligible", revision: 1, snapshot_digest: "d".repeat(64) },
+      error: null,
+    },
+    call: { data: callRow({
+      status: "error",
+      provider_termination_state: "not_required",
+      provider_termination_reason: "startup_error_after_resume_checkpoint",
+    }), error: null },
+  });
+
+  const outcome = await resolveOnboardingOutcome({
+    client, reason: "remote_hangup", callId: CALL_ID, timeoutMs: 50,
+  });
+
+  assert.deepEqual(outcome, {
+    status: "resumable",
+    revision: 1,
+    snapshotDigest: "d".repeat(64),
+  });
+  assert.equal(voiceSessionRestartLabel({
+    endedSessionType: "onboarding",
+    onboardingOutcome: outcome,
+  }), "Continuar entrevista");
+});
+
+test("a reconciling revision-one error checkpoint stays finalizing", async () => {
+  const client = queryClient({
+    resumeStatus: {
+      data: { status: "pending", revision: 1, snapshot_digest: "d".repeat(64) },
+      error: null,
+    },
+    call: { data: callRow({
+      status: "error",
+      provider_termination_state: "pending",
+      provider_termination_reason: "startup_error_after_resume_checkpoint",
+    }), error: null },
+  });
+
+  const outcome = await resolveOnboardingOutcome({
+    client, reason: "remote_hangup", callId: CALL_ID, timeoutMs: 50,
+  });
+
+  assert.deepEqual(outcome, { status: "finalizing", revision: 1 });
+});
+
+test("an arbitrary error remains nonresumable when the owner-safe RPC says blocked", async () => {
+  const client = queryClient({
+    resumeStatus: {
+      data: { status: "blocked", revision: 2, snapshot_digest: "e".repeat(64) },
+      error: null,
+    },
+    call: { data: callRow({
+      status: "error",
+      provider_termination_state: "not_required",
+      provider_termination_reason: "unsafe_error_after_answer",
+    }), error: null },
+  });
+
+  const outcome = await resolveOnboardingOutcome({
+    client, reason: "remote_hangup", callId: CALL_ID, timeoutMs: 50,
+  });
+
+  assert.deepEqual(outcome, { status: "interrupted" });
+  assert.equal(client.queries.filter((query) =>
+    query.table === "rpc" && query.name === "get_onboarding_resume_status"
+  ).length, 1);
+  assert.equal(voiceSessionRestartLabel({
+    endedSessionType: "onboarding",
+    onboardingOutcome: outcome,
+  }), "Ligar de novo");
+});
+
 test("provider reconciliation, unsettled budget, and ambiguous status stay finalizing", async () => {
   for (const candidate of [
     {

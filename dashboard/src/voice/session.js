@@ -188,7 +188,7 @@ export async function resolveOnboardingOutcome({
       && callResult.data.id === callId && callResult.data.session_type === "onboarding"
       ? callResult.data
       : null;
-    if (call && ["killed_budget", "killed_deadline"].includes(call.status)) {
+    if (call && ["error", "killed_budget", "killed_deadline"].includes(call.status)) {
       const finalizing = () => revision === null
         ? { status: "finalizing" }
         : { status: "finalizing", revision };

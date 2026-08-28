@@ -219,6 +219,22 @@ function exactCancellableProcessing(
     && row.opening_payload === null;
 }
 
+function exactInvalidApplicationReadyCleanupIdentity(
+  row: Record<string, unknown>,
+  requestId: string,
+  protocolVersion: number,
+  status: "ready" | "cancel_requested",
+  expectedCallId: string,
+): boolean {
+  return row.id === requestId
+    && row.status === status
+    && row.session_type === "onboarding"
+    && row.opening_mode_requested === APPLICATION_MODE
+    && row.onboarding_protocol_version === protocolVersion
+    && row.call_id === expectedCallId
+    && boundedString(row.answer_sdp, 1, 1_000_000);
+}
+
 async function readCleanupRow(client: any, requestId: string) {
   const { data, error } = await client.from("browser_session_requests")
     .select(CLEANUP_COLUMNS)
@@ -340,6 +356,67 @@ async function expireOpenRequest(
   return false;
 }
 
+async function cancelInvalidApplicationReady(
+  dependencies: BrowserSessionDependencies,
+  client: any,
+  observedRow: Record<string, unknown>,
+  requestId: string,
+  protocolVersion: number,
+): Promise<boolean> {
+  const expectedCallId = typeof observedRow.call_id === "string"
+    ? observedRow.call_id
+    : "";
+  if (!boundedString(expectedCallId, 1, 128)) return false;
+  if (!exactInvalidApplicationReadyCleanupIdentity(
+    observedRow,
+    requestId,
+    protocolVersion,
+    "ready",
+    expectedCallId,
+  )) return false;
+
+  const reason = "invalid_application_opening_contract";
+  const { data: cancelRows, error: cancelError } = await client
+    .from("browser_session_requests")
+    .update({ status: "cancel_requested", error: reason })
+    .eq("id", requestId)
+    .eq("status", "ready")
+    .eq("call_id", expectedCallId)
+    .select(CLEANUP_COLUMNS);
+  if (cancelError || !Array.isArray(cancelRows) || cancelRows.length > 1)
+    return false;
+
+  let row: Record<string, unknown> | null = cancelRows.length === 1
+    ? cancelRows[0]
+    : await readCleanupRow(client, requestId);
+  if (!row) return false;
+  if (exactExpiredCleanup(row, requestId, expectedCallId) &&
+    row.onboarding_protocol_version === protocolVersion) return true;
+  if (!exactInvalidApplicationReadyCleanupIdentity(
+    row,
+    requestId,
+    protocolVersion,
+    "cancel_requested",
+    expectedCallId,
+  )) return false;
+
+  for (let attempt = 0; attempt < CANCEL_ACK_MAX_POLLS; attempt += 1) {
+    await dependencies.sleep(CANCEL_ACK_POLL_MS);
+    row = await readCleanupRow(client, requestId);
+    if (!row) return false;
+    if (exactExpiredCleanup(row, requestId, expectedCallId) &&
+      row.onboarding_protocol_version === protocolVersion) return true;
+    if (!exactInvalidApplicationReadyCleanupIdentity(
+      row,
+      requestId,
+      protocolVersion,
+      "cancel_requested",
+      expectedCallId,
+    )) return false;
+  }
+  return false;
+}
+
 export function createBrowserSessionHandler(dependencies: BrowserSessionDependencies) {
   return async (request: Request): Promise<Response> => {
     if (request.method === "OPTIONS") return new Response(null, { headers: BROWSER_SESSION_CORS });
@@ -440,7 +517,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
       if (request.signal.aborted) return stopOpenRequest("request_aborted", 499);
       if (dependencies.now() >= deadline) break;
       const { data: row } = await client.from("browser_session_requests")
-        .select("status,answer_sdp,call_id,error,opening_mode_applied,opening_payload,onboarding_protocol_version")
+        .select(CLEANUP_COLUMNS)
         .eq("id", requestRow.id)
         .single();
       if (request.signal.aborted) return stopOpenRequest("request_aborted", 499);
@@ -455,6 +532,17 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
           const error = openingModeRequested === APPLICATION_MODE
             ? "invalid_application_opening_contract"
             : "invalid_provider_opening_contract";
+          if (openingModeRequested === APPLICATION_MODE) {
+            const cleaned = await cancelInvalidApplicationReady(
+              dependencies,
+              client,
+              row as Record<string, unknown>,
+              String(requestRow.id),
+              protocolVersion as number,
+            );
+            if (!cleaned)
+              return json({ error: "request_cleanup_failed" }, 502);
+          }
           return json({ error }, 502);
         }
         const { data: call } = await client.from("calls").select("model").eq("id", row.call_id).single();

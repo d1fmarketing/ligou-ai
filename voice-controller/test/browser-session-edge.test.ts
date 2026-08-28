@@ -184,6 +184,45 @@ function buildHandler(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function invalidApplicationReady(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "request-1",
+    status: "ready",
+    session_type: "onboarding",
+    call_id: "33333333-3333-4333-8333-333333333333",
+    answer_sdp: "invalid-ready-answer-sdp",
+    error: null,
+    opening_mode_requested: "application_tts_v1",
+    opening_mode_applied: "application_tts_v1",
+    opening_payload: { ...PAYLOAD, text: `${PAYLOAD.text} extra` },
+    onboarding_protocol_version: 2,
+    ...overrides,
+  };
+}
+
+function invalidReadyAckScenario(ready: Record<string, unknown>) {
+  const cancelRequested = {
+    ...ready,
+    status: "cancel_requested",
+    error: "invalid_application_opening_contract",
+  };
+  const expired = {
+    ...cancelRequested,
+    status: "expired",
+    answer_sdp: null,
+    opening_mode_applied: null,
+    opening_payload: null,
+  };
+  return {
+    client: edgeClient({
+      readyRows: [ready, expired],
+      updateResults: [{ data: [cancelRequested], error: null }],
+    }),
+    cancelRequested,
+    expired,
+  };
+}
+
 beforeEach(() => {
   currentClient = edgeClient();
   handler = buildHandler();
@@ -261,15 +300,11 @@ describe("browser-session opening contract", () => {
   });
 
   test("protocol 2 rejects a legacy v1 ready row", async () => {
-    currentClient = edgeClient({ readyRow: {
-      status: "ready",
+    const ready = invalidApplicationReady({
       answer_sdp: "legacy-answer-sdp",
-      call_id: "33333333-3333-4333-8333-333333333333",
-      error: null,
-      opening_mode_applied: "application_tts_v1",
       opening_payload: LEGACY_PAYLOAD,
-      onboarding_protocol_version: 2,
-    } });
+    });
+    currentClient = invalidReadyAckScenario(ready).client;
     const response = await handler!(request({
       session_type: "onboarding",
       opening_mode_requested: "application_tts_v1",
@@ -321,25 +356,15 @@ describe("browser-session opening contract", () => {
   test("fails closed when ready onboarding state is partial or malformed", async () => {
     expect(createBrowserSessionHandler).toBeFunction();
     for (const readyRow of [
-      {
-        status: "ready", answer_sdp: "answer-sdp", call_id: "call-1", error: null,
-        opening_mode_applied: null, opening_payload: null,
-      },
-      {
-        status: "ready", answer_sdp: "answer-sdp", call_id: "call-1", error: null,
-        opening_mode_applied: "application_tts_v1", opening_payload: { ...PAYLOAD, extra: true },
-      },
-      {
-        status: "ready", answer_sdp: "answer-sdp", call_id: "call-1", error: null,
-        opening_mode_applied: "application_tts_v1",
+      invalidApplicationReady({ opening_payload: { ...PAYLOAD, extra: true } }),
+      invalidApplicationReady({
         opening_payload: { ...PAYLOAD, item_id: `lgo-${"d".repeat(29)}` },
-      },
-      {
-        status: "ready", answer_sdp: "answer-sdp", call_id: "call-1", error: null,
-        opening_mode_applied: "provider_model_v1", opening_payload: null,
-      },
+      }),
+      invalidApplicationReady({
+        opening_payload: { ...PAYLOAD, text: `${PAYLOAD.text} extra` },
+      }),
     ]) {
-      currentClient = edgeClient({ readyRow });
+      currentClient = invalidReadyAckScenario(readyRow).client;
       const response = await handler!(request({
         session_type: "onboarding",
         opening_mode_requested: "application_tts_v1",
@@ -347,7 +372,66 @@ describe("browser-session opening contract", () => {
       }));
       expect(response.status).toBe(502);
       expect(await response.json()).toEqual({ error: "invalid_application_opening_contract" });
+      expect(currentClient.updates).toHaveLength(1);
     }
+  });
+
+  test("invalid application-ready contract requests one exact cancel and waits for expired ACK", async () => {
+    const ready = invalidApplicationReady();
+    const scenario = invalidReadyAckScenario(ready);
+    currentClient = scenario.client;
+
+    const response = await handler!(request({
+      session_type: "onboarding",
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
+    }));
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: "invalid_application_opening_contract",
+    });
+    expect(currentClient.updates).toEqual([{
+      table: "browser_session_requests",
+      patch: {
+        status: "cancel_requested",
+        error: "invalid_application_opening_contract",
+      },
+      filters: {
+        id: "request-1",
+        status: "ready",
+        call_id: ready.call_id,
+      },
+    }]);
+    expect(currentClient.selections.some((selection) =>
+      selection.table === "calls"
+    )).toBe(false);
+  });
+
+  test("invalid application-ready cleanup failure returns request_cleanup_failed", async () => {
+    const ready = invalidApplicationReady();
+    const cancelRequested = {
+      ...ready,
+      status: "cancel_requested",
+      error: "invalid_application_opening_contract",
+    };
+    currentClient = edgeClient({
+      readyRows: [ready, ...Array(60).fill(cancelRequested)],
+      updateResults: [{ data: [cancelRequested], error: null }],
+    });
+    let sleepCalls = 0;
+    handler = buildHandler({ sleep: async () => { sleepCalls += 1; } });
+
+    const response = await handler!(request({
+      session_type: "onboarding",
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
+    }));
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: "request_cleanup_failed" });
+    expect(currentClient.updates).toHaveLength(1);
+    expect(sleepCalls).toBe(61);
   });
 
   test("keeps non-onboarding customer sessions on the provider-owned opening path", async () => {
