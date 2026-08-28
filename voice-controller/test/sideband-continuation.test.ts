@@ -4153,7 +4153,7 @@ describe("physical socket attach and reconnect", () => {
         hardLimitUsd: 7.5,
         responseId: "response-budget-pause-playback-pending",
         transcript:
-          "Estamos chegando ao limite desta sessão. Suas informações foram salvas e podemos continuar imediatamente.",
+          "Estamos chegando ao limite desta sessão. Suas informações foram salvas. Vou encerrar esta sessão agora.",
         transcriptFinal: true,
         audioDone: true,
         responseDone: true,
@@ -4177,10 +4177,11 @@ describe("physical socket attach and reconnect", () => {
       second.emit("open");
       await new Promise((resolve) => setTimeout(resolve, 30));
 
-      expect(adapter.lifecycle.phase).toBe("blocked");
+      expect(control.ledger.status).toBe("error");
       expect(control.ledger.transcript).toContainEqual(expect.objectContaining({
-        text: "onboarding blocked: authority_speech_terminal_indeterminate",
+        text: "session ended: budget pause delivery indeterminate (budget_pause_playback_indeterminate)",
       }));
+      expect(second.closed).toBe(1);
       expect(framesOfType(second, "response.create").filter((frame) =>
         frame.response?.metadata?.purpose === "budget_pause"
       )).toHaveLength(0);
@@ -5503,7 +5504,7 @@ test("onboarding soft limit speaks once and closes only after the truthful pause
     type: "response.output_audio_transcript.done",
     response_id: "resp-budget-pause",
     transcript:
-      "Estamos chegando ao limite desta sessão. Suas informações foram salvas e podemos continuar imediatamente.",
+      "Estamos chegando ao limite desta sessão. Suas informações foram salvas. Vou encerrar esta sessão agora.",
   });
   await handleEvent(cap, l, ws as any, {
     type: "response.output_audio.done",
@@ -5531,6 +5532,8 @@ test("onboarding soft limit speaks once and closes only after the truthful pause
   });
   expect(l.status).toBe("killed_budget");
   expect(ws.closed).toBe(1);
+  expect(l.onboarding?.lifecycle.phase)
+    .toBe("budget_pause_provider_terminating" as any);
 
   await handleEvent(cap, l, ws as any, {
     type: "output_audio_buffer.stopped",

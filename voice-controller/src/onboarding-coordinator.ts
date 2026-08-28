@@ -23,6 +23,9 @@ export type OnboardingPhase =
   | "budget_pause_pending"
   | "budget_pause_speaking"
   | "budget_pause_ready_to_terminate"
+  | "budget_pause_provider_terminating"
+  | "budget_pause_error_ready_to_terminate"
+  | "budget_error_provider_terminating"
   | "ready_to_terminate"
   | "provider_terminating"
   | "closed"
@@ -261,7 +264,7 @@ const INITIAL_GREETING_RESPONSE_INSTRUCTIONS_PT =
 export const FINAL_SIGNOFF_SENTENCE_PT =
   "A confirmação por voz foi salva e as regras sugeridas continuam aguardando revisão na Memória.";
 export const BUDGET_PAUSE_SENTENCE_PT =
-  "Estamos chegando ao limite desta sessão. Suas informações foram salvas e podemos continuar imediatamente.";
+  "Estamos chegando ao limite desta sessão. Suas informações foram salvas. Vou encerrar esta sessão agora.";
 const TRUTHFUL_RECOVERY_RESPONSE_INSTRUCTIONS_PT =
   'Diga exatamente uma vez: "Não consegui confirmar o salvamento da sua resposta. Por favor, repita as informações."';
 const INDETERMINATE_RECOVERY_RESPONSE_INSTRUCTIONS_PT =
@@ -373,6 +376,11 @@ export type OnboardingCommand =
       costUsd: number;
       softLimitUsd: number;
       hardLimitUsd: number;
+    }
+  | {
+      type: "request_budget_error_hangup";
+      intentKey: string;
+      reason: string;
     }
   | {
       type: "refuse_end_session";
@@ -714,6 +722,36 @@ function block(
       ...(toolCallId ? { toolCallId } : {}),
     }),
   );
+}
+
+function terminateIndeterminateBudgetPause(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+  code: string,
+  safeDetail: string,
+  reason: string,
+): void {
+  terminalizeAuthorityResponseIntents(lifecycle);
+  delete lifecycle.activeResponseId;
+  lifecycle.phase = "budget_pause_error_ready_to_terminate";
+  commands.push({
+    type: "block",
+    code,
+    safeDetail,
+    recoverable: false,
+  });
+  commands.push(
+    telemetry(lifecycle, "invariant.violation", event, { outcome: code }),
+  );
+  const intentKey = `budget-error-hangup:${lifecycle.callId}`;
+  if (lifecycle.requestedBudgetHangupKeys.includes(intentKey)) return;
+  lifecycle.requestedBudgetHangupKeys.push(intentKey);
+  commands.push({
+    type: "request_budget_error_hangup",
+    intentKey,
+    reason,
+  });
 }
 
 function queueResponse(
@@ -1909,13 +1947,23 @@ export function reduceOnboarding(
           )
         );
       if (indeterminateIntent) {
-        block(
-          lifecycle,
-          commands,
-          event,
-          "response_intent_ack_indeterminate",
-          "sent response intent has no provider acknowledgement after socket replacement",
-        );
+        if (indeterminateIntent.purpose === "budget_pause")
+          terminateIndeterminateBudgetPause(
+            lifecycle,
+            commands,
+            event,
+            "response_intent_ack_indeterminate",
+            "sent budget pause has no provider acknowledgement after socket replacement",
+            "budget_pause_response_ack_indeterminate",
+          );
+        else
+          block(
+            lifecycle,
+            commands,
+            event,
+            "response_intent_ack_indeterminate",
+            "sent response intent has no provider acknowledgement after socket replacement",
+          );
         break;
       }
       const interruptedProof = lifecycle.greeting?.interrupted
@@ -1928,6 +1976,17 @@ export function reduceOnboarding(
               ? lifecycle.budgetPause
               : null;
       if (interruptedProof) {
+        if (interruptedProof === lifecycle.budgetPause) {
+          terminateIndeterminateBudgetPause(
+            lifecycle,
+            commands,
+            event,
+            "authority_speech_terminal_indeterminate",
+            "budget pause playback is indeterminate after socket replacement",
+            "budget_pause_playback_indeterminate",
+          );
+          break;
+        }
         if (
           !interruptedProof.interruptedResponseId ||
           !lifecycle.terminalResponseIds.includes(
@@ -3456,35 +3515,54 @@ export function reduceOnboarding(
       break;
     }
     case "provider.termination_requested": {
-      const expected = lifecycle.approval
+      const approvalExpected = lifecycle.approval
         ? `hangup:${lifecycle.approval.approvalReceiptId}`
         : "";
-      if (
-        lifecycle.phase !== "ready_to_terminate" ||
-        event.intentKey !== expected ||
-        !lifecycle.requestedHangupKeys.includes(expected)
-      ) {
-        block(
-          lifecycle,
-          commands,
-          event,
-          "provider_termination_not_authorized",
-          "provider termination was requested before final playback proof",
-        );
+      const budgetExpected = `budget-hangup:${lifecycle.callId}`;
+      const budgetErrorExpected = `budget-error-hangup:${lifecycle.callId}`;
+      if (lifecycle.phase === "ready_to_terminate" &&
+        event.intentKey === approvalExpected &&
+        lifecycle.requestedHangupKeys.includes(approvalExpected)) {
+        lifecycle.phase = "provider_terminating";
         break;
       }
-      lifecycle.phase = "provider_terminating";
+      if (lifecycle.phase === "budget_pause_ready_to_terminate" &&
+        event.intentKey === budgetExpected &&
+        lifecycle.requestedBudgetHangupKeys.includes(budgetExpected)) {
+        lifecycle.phase = "budget_pause_provider_terminating";
+        break;
+      }
+      if (lifecycle.phase === "budget_pause_error_ready_to_terminate" &&
+        event.intentKey === budgetErrorExpected &&
+        lifecycle.requestedBudgetHangupKeys.includes(budgetErrorExpected)) {
+        lifecycle.phase = "budget_error_provider_terminating";
+        break;
+      }
+      block(
+        lifecycle,
+        commands,
+        event,
+        "provider_termination_not_authorized",
+        "provider termination was requested before final playback proof",
+      );
       break;
     }
     case "provider.termination_confirmed": {
-      const expected = lifecycle.approval
+      const approvalExpected = lifecycle.approval
         ? `hangup:${lifecycle.approval.approvalReceiptId}`
         : "";
-      if (
-        lifecycle.phase !== "provider_terminating" ||
-        event.intentKey !== expected ||
-        !event.terminalPersisted
-      ) {
+      const budgetExpected = `budget-hangup:${lifecycle.callId}`;
+      const budgetErrorExpected = `budget-error-hangup:${lifecycle.callId}`;
+      const approvalClose = lifecycle.phase === "provider_terminating" &&
+        event.intentKey === approvalExpected;
+      const budgetClose = lifecycle.phase ===
+          "budget_pause_provider_terminating" &&
+        event.intentKey === budgetExpected;
+      const budgetErrorClose = lifecycle.phase ===
+          "budget_error_provider_terminating" &&
+        event.intentKey === budgetErrorExpected;
+      if ((!approvalClose && !budgetClose && !budgetErrorClose) ||
+        !event.terminalPersisted) {
         block(
           lifecycle,
           commands,
@@ -3505,7 +3583,11 @@ export function reduceOnboarding(
       commands.push(
         telemetry(lifecycle, "onboarding.closed", event, {
           intentKey: event.intentKey,
-          outcome: "durable_completion",
+          outcome: approvalClose
+            ? "durable_completion"
+            : budgetClose
+              ? "durable_budget_pause"
+              : "durable_budget_pause_error",
         }),
       );
       break;

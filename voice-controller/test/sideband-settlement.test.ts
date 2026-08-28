@@ -1,6 +1,9 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { emptyUsage } from "../src/config.ts";
-import { FINAL_SIGNOFF_SENTENCE_PT } from "../src/onboarding-coordinator.ts";
+import {
+  BUDGET_PAUSE_SENTENCE_PT,
+  FINAL_SIGNOFF_SENTENCE_PT,
+} from "../src/onboarding-coordinator.ts";
 import { _setClient } from "../src/rules.ts";
 import { attachSideband, handleEvent, liveSessions, persistLedger, terminalStatusForReason, type SessionLedger } from "../src/sideband.ts";
 import { makeCapability } from "../src/tools.ts";
@@ -787,6 +790,265 @@ describe("sideband budget finalization", () => {
         .toHaveLength(1);
       expect(providerCalls.filter((name) => name === "settle_call_budget"))
         .toHaveLength(0);
+      expect(liveSessions.has(onboardingCap.callId)).toBe(false);
+    } finally {
+      liveSessions.delete(onboardingCap.callId);
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+
+  test("playback-proven budget pause reaches reducer closed only after killed_budget and provider confirmation are durable", async () => {
+    const originalWebSocket = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const onboardingCap = makeCapability(
+      "rocha-plumbing",
+      "tenant-1",
+      "call-onboarding-budget-close",
+      30,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1, simulation: true },
+      "owner-1",
+    );
+    const providerCalls: Array<{
+      name: string;
+      args?: Record<string, unknown>;
+    }> = [];
+    let providerConfirmed = false;
+    _setClient({
+      from(table: string) {
+        const api: any = {
+          update() { return api; },
+          select() { return api; },
+          eq() { return api; },
+          maybeSingle: async () => table === "calls" && providerConfirmed
+            ? {
+                data: {
+                  id: onboardingCap.callId,
+                  status: "killed_budget",
+                  provider_termination_state: "confirmed",
+                },
+                error: null,
+              }
+            : { data: null, error: null },
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({ data: null, error: null }).then(resolve);
+          },
+        };
+        return api;
+      },
+      rpc(name: string, args?: Record<string, unknown>) {
+        providerCalls.push({ name, args });
+        if (name === "begin_provider_termination_attempt")
+          return Promise.resolve({
+            data: {
+              should_attempt: true,
+              attempt_id: "attempt-budget-close",
+              request_id: "request-budget-close",
+              openai_call_id: "rtc-onboarding-budget-close",
+              provider_termination_mode: "hangup",
+            },
+            error: null,
+          });
+        if (name === "complete_provider_termination_attempt") {
+          providerConfirmed = true;
+          return Promise.resolve({ data: true, error: null });
+        }
+        return Promise.resolve({ data: true, error: null });
+      },
+    } as any);
+    try {
+      const control = attachSideband(
+        onboardingCap,
+        "rtc-onboarding-budget-close",
+        "gpt-realtime-2.1",
+        {
+          onboarding: { expectedBusinessName: "Rocha Plumbing" },
+          fetchImpl: async () => new Response(null, { status: 200 }),
+        },
+      );
+      const socket = SyntheticWebSocket.instances[0]!;
+      socket.emit("open");
+      await control.opened;
+      control.ledger.responseActive = true;
+      const lifecycle = control.ledger.onboarding!.lifecycle;
+      lifecycle.phase = "budget_pause_speaking" as any;
+      lifecycle.budgetPause = {
+        costUsd: 6.5,
+        softLimitUsd: 6.5,
+        hardLimitUsd: 7.5,
+        responseId: "resp-budget-close",
+        transcript: "",
+        transcriptFinal: false,
+        audioDone: false,
+        responseDone: false,
+        playbackStopped: false,
+        interrupted: false,
+        attempt: 0,
+      };
+      lifecycle.responseIntents[`budget-pause:${onboardingCap.callId}`] = {
+        intentKey: `budget-pause:${onboardingCap.callId}`,
+        purpose: "budget_pause" as any,
+        state: "acknowledged",
+        responseId: "resp-budget-close",
+        sentSocketGeneration: 1,
+      };
+      lifecycle.activeResponseId = "resp-budget-close";
+
+      socket.emit("message", { data: JSON.stringify({
+        type: "response.output_audio_transcript.done",
+        response_id: "resp-budget-close",
+        transcript: BUDGET_PAUSE_SENTENCE_PT,
+      }) });
+      socket.emit("message", { data: JSON.stringify({
+        type: "response.output_audio.done",
+        response_id: "resp-budget-close",
+      }) });
+      socket.emit("message", { data: JSON.stringify({
+        type: "response.done",
+        response: { id: "resp-budget-close", status: "completed" },
+      }) });
+      socket.emit("message", { data: JSON.stringify({
+        type: "output_audio_buffer.stopped",
+        response_id: "resp-budget-close",
+      }) });
+      await flushAsync();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(control.ledger.status).toBe("killed_budget");
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("closed");
+      expect(control.ledger.onboarding!.lifecycle.providerTerminationConfirmed)
+        .toBe(true);
+      expect(providerCalls.find((call) =>
+        call.name === "begin_provider_termination_attempt"
+      )?.args?.p_reason).toBe("sideband_killed_budget");
+      expect(providerCalls.filter((call) =>
+        call.name === "complete_provider_termination_attempt"
+      )).toHaveLength(1);
+      expect(liveSessions.has(onboardingCap.callId)).toBe(false);
+    } finally {
+      liveSessions.delete(onboardingCap.callId);
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+
+  test("lost budget-pause ACK becomes durable error and closes without replaying uncertain speech", async () => {
+    const originalWebSocket = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const onboardingCap = makeCapability(
+      "rocha-plumbing",
+      "tenant-1",
+      "call-onboarding-budget-ack-lost",
+      30,
+      "onboarding",
+      { authEpoch: 1, policyEpoch: 1, simulation: true },
+      "owner-1",
+    );
+    const providerCalls: Array<{
+      name: string;
+      args?: Record<string, unknown>;
+    }> = [];
+    let providerConfirmed = false;
+    _setClient({
+      from(table: string) {
+        const api: any = {
+          update() { return api; },
+          select() { return api; },
+          eq() { return api; },
+          maybeSingle: async () => table === "calls" && providerConfirmed
+            ? {
+                data: {
+                  id: onboardingCap.callId,
+                  status: "error",
+                  provider_termination_state: "confirmed",
+                },
+                error: null,
+              }
+            : { data: null, error: null },
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({ data: null, error: null }).then(resolve);
+          },
+        };
+        return api;
+      },
+      rpc(name: string, args?: Record<string, unknown>) {
+        providerCalls.push({ name, args });
+        if (name === "begin_provider_termination_attempt")
+          return Promise.resolve({
+            data: {
+              should_attempt: true,
+              attempt_id: "attempt-budget-ack-lost",
+              request_id: "request-budget-ack-lost",
+              openai_call_id: "rtc-onboarding-budget-ack-lost",
+              provider_termination_mode: "hangup",
+            },
+            error: null,
+          });
+        if (name === "complete_provider_termination_attempt") {
+          providerConfirmed = true;
+          return Promise.resolve({ data: true, error: null });
+        }
+        return Promise.resolve({ data: true, error: null });
+      },
+    } as any);
+    try {
+      const control = attachSideband(
+        onboardingCap,
+        "rtc-onboarding-budget-ack-lost",
+        "gpt-realtime-2.1",
+        {
+          onboarding: { expectedBusinessName: "Rocha Plumbing" },
+          fetchImpl: async () => new Response(null, { status: 200 }),
+        },
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      const adapter = control.ledger.onboarding!;
+      const intentKey = `budget-pause:${onboardingCap.callId}`;
+      adapter.lifecycle.phase = "budget_pause_speaking" as any;
+      adapter.lifecycle.responseIntents = {
+        [intentKey]: {
+          intentKey,
+          purpose: "budget_pause" as any,
+          state: "sent",
+          sentSocketGeneration: 1,
+        },
+      };
+      adapter.pendingResponseCommands = {};
+      adapter.lifecycle.budgetPause = {
+        costUsd: 6.5,
+        softLimitUsd: 6.5,
+        hardLimitUsd: 7.5,
+        transcript: "",
+        transcriptFinal: false,
+        audioDone: false,
+        responseDone: false,
+        playbackStopped: false,
+        interrupted: false,
+        attempt: 0,
+      };
+      delete adapter.lifecycle.activeResponseId;
+      control.ledger.responseActive = false;
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(control.ledger.status).toBe("error");
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("closed");
+      expect(control.ledger.onboarding!.lifecycle.providerTerminationConfirmed)
+        .toBe(true);
+      expect(second.sent.map((raw) => JSON.parse(raw)).filter((frame) =>
+        frame.type === "response.create" &&
+        frame.response?.metadata?.purpose === "budget_pause"
+      )).toHaveLength(0);
+      expect(providerCalls.find((call) =>
+        call.name === "begin_provider_termination_attempt"
+      )?.args?.p_reason).toBe("sideband_error");
       expect(liveSessions.has(onboardingCap.callId)).toBe(false);
     } finally {
       liveSessions.delete(onboardingCap.callId);

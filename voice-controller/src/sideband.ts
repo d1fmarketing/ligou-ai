@@ -252,6 +252,14 @@ export function terminalStatusForReason(
   return reason === "caller_hung_up" ? "ended" : "error";
 }
 
+function onboardingProviderTerminationPhase(phase: string): boolean {
+  return [
+    "provider_terminating",
+    "budget_pause_provider_terminating",
+    "budget_error_provider_terminating",
+  ].includes(phase);
+}
+
 function createOnboardingAdapter(
   callId: string,
   expectedBusinessName: string,
@@ -552,7 +560,7 @@ function pendingResponseCommandIsCurrent(
     );
   return adapter.lifecycle.phase !== "blocked" &&
     adapter.lifecycle.phase !== "closed" &&
-    adapter.lifecycle.phase !== "provider_terminating";
+    !onboardingProviderTerminationPhase(adapter.lifecycle.phase);
 }
 
 function hasDrainablePendingResponseCommand(
@@ -845,7 +853,8 @@ async function executeOnboardingCommands(
       (command.type === "request_response" ||
         command.type === "resend_output" ||
         command.type === "request_hangup" ||
-        command.type === "request_budget_hangup")
+        command.type === "request_budget_hangup" ||
+        command.type === "request_budget_error_hangup")
     )
       continue;
     if (command.type === "request_response" && adapter.speechPending)
@@ -1224,7 +1233,12 @@ async function executeOnboardingCommands(
       }
       case "request_budget_hangup": {
         if (adapter.pendingHangupIntentKey) break;
-        if (adapter.lifecycle.phase !== "budget_pause_ready_to_terminate")
+        await dispatchOnboardingEvent(context, {
+          type: "provider.termination_requested",
+          intentKey: command.intentKey,
+          elapsedMs: 0,
+        });
+        if (adapter.lifecycle.phase !== "budget_pause_provider_terminating")
           break;
         adapter.pendingHangupIntentKey = command.intentKey;
         ledger.status = "killed_budget";
@@ -1232,6 +1246,25 @@ async function executeOnboardingCommands(
           role: "system",
           text:
             `session paused: cost soft limit reached after truthful playback ($${command.costUsd.toFixed(2)} >= $${command.softLimitUsd.toFixed(2)})`,
+          at: new Date().toISOString(),
+        });
+        try { ws.close(); } catch {}
+        break;
+      }
+      case "request_budget_error_hangup": {
+        if (adapter.pendingHangupIntentKey) break;
+        await dispatchOnboardingEvent(context, {
+          type: "provider.termination_requested",
+          intentKey: command.intentKey,
+          elapsedMs: 0,
+        });
+        if (adapter.lifecycle.phase !== "budget_error_provider_terminating")
+          break;
+        adapter.pendingHangupIntentKey = command.intentKey;
+        ledger.status = "error";
+        ledger.transcript.push({
+          role: "system",
+          text: `session ended: budget pause delivery indeterminate (${command.reason})`,
           at: new Date().toISOString(),
         });
         try { ws.close(); } catch {}
@@ -1249,7 +1282,7 @@ async function drainPendingResponseCommands(
     !context.isCurrent() || adapter.speechPending ||
     adapter.lifecycle.phase === "blocked" ||
     adapter.lifecycle.phase === "closed" ||
-    adapter.lifecycle.phase === "provider_terminating"
+    onboardingProviderTerminationPhase(adapter.lifecycle.phase)
   ) return;
   for (const [intentKey, command] of Object.entries(
     adapter.pendingResponseCommands,
@@ -1308,7 +1341,7 @@ async function attachOnboardingSocket(
     applicationOpening && generation > 1 &&
     adapter.lifecycle.phase !== "blocked" &&
     adapter.lifecycle.phase !== "closed" &&
-    adapter.lifecycle.phase !== "provider_terminating"
+    !onboardingProviderTerminationPhase(adapter.lifecycle.phase)
   ) {
     const eventId = applicationOpeningRetrieveEventId(
       context.ledger,
@@ -1325,7 +1358,7 @@ async function attachOnboardingSocket(
   if (
     adapter.lifecycle.phase !== "blocked" &&
     adapter.lifecycle.phase !== "closed" &&
-    adapter.lifecycle.phase !== "provider_terminating"
+    !onboardingProviderTerminationPhase(adapter.lifecycle.phase)
   )
     for (const key of pendingMutationKeysBeforeAttach) {
       const timer = adapter.pendingMutationRetryTimers[key];
@@ -1393,6 +1426,11 @@ async function onboardingTerminationIsDurable(
 ): Promise<boolean> {
   const intentKey = ledger.onboarding?.pendingHangupIntentKey;
   if (!intentKey) return false;
+  const expectedStatus = intentKey.startsWith("budget-hangup:")
+    ? "killed_budget"
+    : intentKey.startsWith("budget-error-hangup:")
+      ? "error"
+      : "ended";
   try {
     const { data, error } = await supa()
       .from("calls")
@@ -1400,7 +1438,8 @@ async function onboardingTerminationIsDurable(
       .eq("id", cap.callId)
       .eq("tenant_id", cap.tenantId)
       .maybeSingle();
-    return !error && data?.id === cap.callId && data?.status === "ended" &&
+    return !error && data?.id === cap.callId &&
+      data?.status === expectedStatus &&
       data?.provider_termination_state === "confirmed";
   } catch {
     return false;
@@ -1446,7 +1485,7 @@ function enqueueOnboardingTransportInterruption(
   ledger: SessionLedger,
 ): void {
   const adapter = ledger.onboarding;
-  if (!adapter || adapter.lifecycle.phase === "provider_terminating" ||
+  if (!adapter || onboardingProviderTerminationPhase(adapter.lifecycle.phase) ||
     adapter.lifecycle.phase === "closed") return;
   adapter.interrupted = true;
   const responseId = authoritySpeechResponseAwaitingPlayback(
@@ -2282,9 +2321,14 @@ async function handleOnboardingRawEvent(
         ledger.providerUsageEvidence.terminal = true;
         ledger.providerUsageEvidence.lastReceivedAt = new Date().toISOString();
       }
-      if (adapter.lifecycle.phase === "provider_terminating" ||
-        adapter.lifecycle.phase === "closed") {
+      if (adapter.lifecycle.phase === "provider_terminating") {
         ledger.status = "ended";
+      } else if (
+        adapter.lifecycle.phase === "budget_pause_provider_terminating" ||
+        adapter.lifecycle.phase === "budget_error_provider_terminating" ||
+        adapter.lifecycle.phase === "closed"
+      ) {
+        if (ledger.status === "active") ledger.status = "ended";
       } else {
         adapter.interrupted = true;
         await interruptOnboardingAudio(context, adapter.lifecycle.activeResponseId ?? null);

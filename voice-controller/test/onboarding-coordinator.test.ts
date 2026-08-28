@@ -22,7 +22,7 @@ import { requestResponse } from "../src/response-coordinator.ts";
 const callId = "7f58ee06-6a13-4d45-a2d5-c60244dc92a3";
 const businessName = "Rocha Plumbing";
 const budgetPauseSentence =
-  "Estamos chegando ao limite desta sessão. Suas informações foram salvas e podemos continuar imediatamente.";
+  "Estamos chegando ao limite desta sessão. Suas informações foram salvas. Vou encerrar esta sessão agora.";
 
 function step(
   lifecycle: OnboardingLifecycle,
@@ -701,6 +701,22 @@ describe("onboarding lifecycle forbidden transitions", () => {
       }),
     ]);
 
+    const terminating = step(playback.lifecycle, {
+      type: "provider.termination_requested",
+      intentKey: `budget-hangup:${callId}`,
+      elapsedMs: 432_009,
+    });
+    expect(terminating.lifecycle.phase)
+      .toBe("budget_pause_provider_terminating" as any);
+    const confirmed = step(terminating.lifecycle, {
+      type: "provider.termination_confirmed",
+      intentKey: `budget-hangup:${callId}`,
+      terminalPersisted: true,
+      elapsedMs: 432_010,
+    });
+    expect(confirmed.lifecycle.phase).toBe("closed");
+    expect(confirmed.lifecycle.providerTerminationConfirmed).toBe(true);
+
     const duplicatePlayback = step(playback.lifecycle, {
       type: "output_audio_buffer.stopped",
       responseId: "response-budget-pause",
@@ -712,7 +728,7 @@ describe("onboarding lifecycle forbidden transitions", () => {
     )).toBe(false);
   });
 
-  test("budget pause barge-in retries once while a lost response ACK blocks without duplicate speech or fake hangup", () => {
+  test("budget pause barge-in retries once while a lost response ACK terminates explicitly without replay", () => {
     let lifecycle = budgetPauseQueued();
     const intentKey = `budget-pause:${callId}`;
     ({ lifecycle } = step(lifecycle, {
@@ -726,7 +742,8 @@ describe("onboarding lifecycle forbidden transitions", () => {
       socketGeneration: 2,
       elapsedMs: 2,
     });
-    expect(lostAck.lifecycle.phase).toBe("blocked");
+    expect(lostAck.lifecycle.phase)
+      .toBe("budget_pause_error_ready_to_terminate" as any);
     expect(lostAck.commands).toContainEqual(expect.objectContaining({
       type: "block",
       code: "response_intent_ack_indeterminate",
@@ -735,6 +752,15 @@ describe("onboarding lifecycle forbidden transitions", () => {
       command.type === "request_response" ||
       command.type === "request_budget_hangup"
     )).toBe(false);
+    expect(lostAck.commands.filter((command) =>
+      command.type === "request_budget_error_hangup"
+    )).toEqual([
+      expect.objectContaining({
+        type: "request_budget_error_hangup",
+        intentKey: `budget-error-hangup:${callId}`,
+        reason: "budget_pause_response_ack_indeterminate",
+      }),
+    ]);
 
     lifecycle = budgetPauseQueued();
     ({ lifecycle } = step(lifecycle, {
