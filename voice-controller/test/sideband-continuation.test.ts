@@ -19,10 +19,12 @@ import {
   handleEvent,
   liveSessions,
   persistLedger,
+  totalSessionCostUsd,
   type SessionLedger,
 } from "../src/sideband.ts";
 import { hashOnboardingToolArgs } from "../src/onboarding-coordinator.ts";
 import { makeCapability, runTool, type Capability } from "../src/tools.ts";
+import { TEST10_CAUSAL_BUDGET_FIXTURE } from "./fixtures/test10-budget.ts";
 
 const ownerId = "owner-1";
 const onboardingOptions = {
@@ -5623,30 +5625,36 @@ test("application TTS cost participates in both the live kill switch and termina
 });
 
 test("the real Test 10 USD 1.52 shape remains active for onboarding while customer calls retain the USD 1.50 kill", async () => {
+  const fixture = TEST10_CAUSAL_BUDGET_FIXTURE;
   const onboarding = onboardingCap("call-test-10-budget");
   const onboardingLedger = ledger(onboarding.callId);
-  onboardingLedger.externalCostUsd = 1.52;
-  onboardingLedger.startedAt = Date.now() - 432_000;
+  onboardingLedger.externalCostUsd = fixture.applicationTtsCostUsd;
+  onboardingLedger.startedAt = Date.now() - fixture.elapsedMs;
   const onboardingSocket = socket();
   await handleEvent(
     onboarding,
     onboardingLedger,
     onboardingSocket as any,
-    responseDone("resp-test-10-budget"),
+    structuredClone(fixture.responseDone),
   );
+  expect(onboardingLedger.providerUsageEvidence.eventCount).toBe(1);
+  expect(onboardingLedger.usage.audioOut).toBe(23_725);
+  expect(totalSessionCostUsd(onboardingLedger)).toBe(fixture.totalCostUsd);
   expect(onboardingLedger.status).toBe("active");
   expect(onboardingSocket.closed).toBe(0);
 
   const customer = customerCap("call-customer-budget");
   const customerLedger = ledger(customer.callId);
-  customerLedger.externalCostUsd = 1.52;
+  customerLedger.externalCostUsd = fixture.applicationTtsCostUsd;
   const customerSocket = socket();
   await handleEvent(
     customer,
     customerLedger,
     customerSocket as any,
-    responseDone("resp-customer-budget"),
+    structuredClone(fixture.responseDone),
   );
+  expect(customerLedger.providerUsageEvidence.eventCount).toBe(1);
+  expect(totalSessionCostUsd(customerLedger)).toBe(fixture.totalCostUsd);
   expect(customerLedger.status).toBe("killed_budget");
   expect(customerSocket.closed).toBe(1);
 });

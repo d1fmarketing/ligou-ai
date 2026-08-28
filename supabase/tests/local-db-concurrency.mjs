@@ -489,6 +489,26 @@ function onboardingApprovalSql({
   )::text;`;
 }
 
+function test10LegacyApplicationOpeningPayload() {
+  const text =
+    "Oi! Aqui é o Ligou, agente de inteligência artificial da Empresa Sintética. Quais serviços sua empresa oferece?";
+  const audioBase64 = "SUQzBA==";
+  return {
+    version: 1,
+    item_id: `lgo-${sha256(text).slice(0, 28)}`,
+    text,
+    text_sha256: sha256(text),
+    audio_base64: audioBase64,
+    audio_sha256: createHash("sha256")
+      .update(Buffer.from(audioBase64, "base64"))
+      .digest("hex"),
+    mime: "audio/mpeg",
+    voice: "ash",
+    tts_model: "tts-1",
+    cost_usd: Number(([...text].length * 15 / 1_000_000).toFixed(8)),
+  };
+}
+
 function onboardingResumeSourceReceiptSql({
   tenantId,
   callId,
@@ -496,29 +516,180 @@ function onboardingResumeSourceReceiptSql({
   requestId,
   revision = 33,
 }) {
+  const services = [
+    "desentupimento",
+    "conserto_de_vazamento",
+    "diagnostico_hidraulico",
+  ];
+  const serviceFields = [
+    "service.name_synonyms",
+    "service.price_mode",
+    "service.price_target",
+    "service.negotiation",
+    "service.duration",
+    "service.inclusions_exclusions",
+    "service.materials_parts",
+    "service.warranty",
+    "service.emergency_eligibility",
+    "service.escalation",
+  ];
+  const missingRequired = [
+    ...services.flatMap((subject) => serviceFields.map((field) => ({
+      field,
+      subject,
+    }))),
+    { field: "business.customer_types" },
+    { field: "area.out_of_area_policy" },
+    { field: "schedule.business_hours" },
+    { field: "emergency.types" },
+    { field: "policy.payment_estimate" },
+    { field: "authority.quote_price" },
+  ];
+  const ambiguous = [{ field: "area.coverage" }];
+  const requiredFields = [...missingRequired, ...ambiguous];
+  const activeKeys = new Set(requiredFields.map(({ field, subject }) =>
+    subject ? `service:${subject}:${field}` : field
+  ));
+  const domainDefinitions = [
+    {
+      key: "domain:business", category: "negocio", scope: "geral",
+      schema: "ligou.rule.business.v2",
+      fields: [
+        "business.customer_types", "business.excluded_work",
+        "business.languages_tone",
+      ],
+    },
+    {
+      key: "domain:area", category: "area", scope: "localizacao",
+      schema: "ligou.rule.area.v2",
+      fields: ["area.coverage", "area.out_of_area_policy", "area.travel_fee"],
+    },
+    {
+      key: "domain:schedule", category: "agenda", scope: "geral",
+      schema: "ligou.rule.schedule.v2",
+      fields: [
+        "schedule.business_hours", "schedule.same_day_lead_time",
+        "schedule.capacity_buffer", "schedule.reschedule_cancel",
+        "schedule.holidays",
+      ],
+    },
+    {
+      key: "domain:emergency", category: "emergencia", scope: "geral",
+      schema: "ligou.rule.emergency.v2",
+      fields: [
+        "emergency.types", "emergency.safety_escalation",
+        "emergency.after_hours", "emergency.fee_authority",
+      ],
+    },
+    {
+      key: "domain:policy", category: "politica", scope: "geral",
+      schema: "ligou.rule.policy.v2",
+      fields: [
+        "policy.payment_estimate", "policy.warranty_materials",
+        "policy.access_cancellation", "policy.complaints_returns",
+      ],
+    },
+    {
+      key: "domain:authority", category: "autoridade", scope: "geral",
+      schema: "ligou.rule.authority.v2",
+      fields: [
+        "authority.quote_price", "authority.negotiate_floor",
+        "authority.read_calendar", "authority.book",
+        "authority.reschedule_cancel", "authority.charge_fee",
+        "authority.emergency", "authority.out_of_area",
+      ],
+    },
+  ];
+  const incompleteMaterialization = ({
+    key,
+    category,
+    scope,
+    schema,
+    serviceType,
+    sourceRefs,
+  }) => finalizeMaterialization({
+    key,
+    category,
+    scope,
+    state: "incomplete",
+    review_ready: false,
+    text: serviceType ? `Serviço ${serviceType.replaceAll("_", " ")}.` : "",
+    source_refs: sourceRefs,
+    structured: {
+      schema,
+      ...(serviceType ? {
+        service_type: serviceType,
+        service_names: [serviceType.replaceAll("_", " ")],
+        price_mode: "owner_review",
+        quoteable: false,
+        negotiable: false,
+        owner_review_fields: [],
+      } : {
+        owner_review_fields: [],
+        fields: {},
+      }),
+      operational_state: "incomplete",
+      materialization_key: key,
+      materialization_eligible: false,
+      review_ready: false,
+      coverage_revision: revision,
+      source_call_id: callId,
+      source_refs: sourceRefs,
+    },
+  });
+  const materializations = [
+    ...domainDefinitions.map(({ key, category, scope, schema, fields }) =>
+      incompleteMaterialization({
+        key, category, scope, schema,
+        sourceRefs: fields.filter((field) => activeKeys.has(field)).sort(),
+      })
+    ),
+    ...services.map((serviceType) => incompleteMaterialization({
+      key: `service:${serviceType}`,
+      category: "preco",
+      scope: "servico",
+      schema: "ligou.rule.service.v2",
+      serviceType,
+      sourceRefs: serviceFields.map((field) =>
+        `service:${serviceType}:${field}`
+      ).filter((key) => activeKeys.has(key)).sort(),
+    })),
+  ];
   const snapshot = {
     tenantId,
     callId,
     revision,
-    services: [],
+    services,
     cells: {},
     followUps: 11,
-    followUpGroups: {},
+    followUpGroups: Object.fromEntries([
+      "area.coverage",
+      "business.customer_types",
+      "business.excluded_work",
+      "business.languages_tone",
+      "area.out_of_area_policy",
+      "area.travel_fee",
+      "schedule.business_hours",
+      "schedule.same_day_lead_time",
+      "schedule.capacity_buffer",
+      "schedule.reschedule_cancel",
+      "schedule.holidays",
+    ].map((field) => [field, 1])),
     summaryInvalidated: false,
   };
   const readback = {
     schema_version: 2,
-    transition_kind: "answer",
+    transition_kind: "directed_followup",
     tenant_id: tenantId,
     call_id: callId,
     revision,
     complete: false,
     snapshot,
     progress: {
-      requiredFields: [],
+      requiredFields,
       conditionalFields: [],
-      missingRequired: [{ field: "area.coverage" }],
-      ambiguous: [],
+      missingRequired,
+      ambiguous,
       answered: [],
       ownerReviewRequired: [],
       notApplicable: [],
@@ -536,7 +707,7 @@ function onboardingResumeSourceReceiptSql({
       question_pt: "Qual é a área atendida?",
     },
     current_answer_hashes: {},
-    materializations: [],
+    materializations,
     summary_projection: null,
     summary_hash: null,
     rule_id: null,
@@ -565,20 +736,12 @@ function onboardingResumeSourceReceiptSql({
     ),
     '${"e".repeat(64)}',
     jsonb_build_object(
-      'transition_kind', 'answer',
+      'transition_kind', 'directed_followup',
       'transition_schema', 2,
       'source_revision', ${revision - 1},
       'source_digest', '${"f".repeat(64)}',
-      'answer_hash', '${"a".repeat(64)}',
-      'provider_tool_call_id', 'resume-source-answer',
-      'fact', jsonb_build_object(
-        'topic', 'area', 'field', 'area.coverage',
-        'disposition', 'owner_review_required',
-        'rule_text', 'Área pendente de confirmação.',
-        'structured', jsonb_build_object('value', null),
-        'owner_words', 'Ainda não confirmei a área.'
-      ),
-      'coverage_key', 'area.coverage',
+      'field', 'area.coverage',
+      'question_pt', 'Qual é a área atendida?',
       'materialization_key', 'domain:area',
       'materialization_action', 'coverage_only',
       'browser_request_id', '${requestId}'
@@ -4131,12 +4294,13 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     insert into public.browser_session_requests (
       id, tenant_id, user_id, session_type, offer_sdp, status,
       answer_sdp, call_id, handled_at, opening_mode_requested,
-      opening_mode_applied
+      opening_mode_applied, opening_payload
     ) values (
       '${ids.sourceRequest}', '${ids.tenant}', '${ids.owner}', 'onboarding',
       'resume-source-offer', 'ready', 'resume-source-answer',
       '${ids.sourceCall}', clock_timestamp() - interval '2 minutes',
-      'provider_model_v1', 'provider_model_v1'
+      'application_tts_v1', 'application_tts_v1',
+      ${jsonb(test10LegacyApplicationOpeningPayload())}
     );
     insert into public.budget_reservations (
       tenant_id, call_id, budget_day, reserved_cost_usd, reserved_minutes,
@@ -4152,6 +4316,30 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
       requestId: ids.sourceRequest,
     })}
   `), "onboarding resume fixture");
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (r.readback->>'transition_kind') || ':' ||
+      jsonb_array_length(r.readback->'materializations')::text || ':' ||
+      (r.readback->'snapshot'->>'followUps') || ':' ||
+      jsonb_array_length(r.readback->'progress'->'missingRequired')::text || ':' ||
+      jsonb_array_length(r.readback->'progress'->'ambiguous')::text || ':' ||
+      br.opening_mode_requested || ':' || br.opening_mode_applied || ':' ||
+      (br.opening_payload->>'version') || ':' ||
+      (br.opening_payload->>'voice') || ':' ||
+      (br.opening_payload->>'tts_model') || ':' ||
+      (not exists (
+        select 1
+        from jsonb_array_elements(r.readback->'materializations') item
+        where item->>'state' <> 'incomplete'
+           or item->>'review_ready' <> 'false'
+           or item->'structured'->>'materialization_eligible' <> 'false'
+      ))::text
+    from public.receipts r
+    join public.browser_session_requests br
+      on br.id = '${ids.sourceRequest}' and br.call_id = r.call_id
+    where r.id = '${ids.sourceReceipt}';
+  `), "real Test 10 resume source shape"),
+  "directed_followup:9:11:36:1:application_tts_v1:application_tts_v1:1:ash:tts-1:true");
 
   const ownerResumeStatus = async (callId, label) => JSON.parse(scalar(
     await runSql(connection, home, authenticatedTransaction(ids.owner, `
@@ -4309,7 +4497,8 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
         where id = '${ids.sourceReceipt}')::text || ':' ||
       (select reserved_minutes::text from public.budget_reservations
         where call_id = '${ids.targetCall}');
-  `), "onboarding resume immutable source invariant"), "1:1:33:answer:30");
+  `), "onboarding resume immutable source invariant"),
+  "1:1:33:directed_followup:30");
   assert.equal(
     (await ownerResumeStatus(
       ids.sourceCall,
