@@ -479,6 +479,103 @@ function onboardingApprovalSql({
   )::text;`;
 }
 
+function onboardingResumeSourceReceiptSql({
+  tenantId,
+  callId,
+  receiptId,
+  requestId,
+  revision = 33,
+}) {
+  const snapshot = {
+    tenantId,
+    callId,
+    revision,
+    services: [],
+    cells: {},
+    followUps: 11,
+    followUpGroups: {},
+    summaryInvalidated: false,
+  };
+  const readback = {
+    schema_version: 2,
+    transition_kind: "answer",
+    tenant_id: tenantId,
+    call_id: callId,
+    revision,
+    complete: false,
+    snapshot,
+    progress: {
+      requiredFields: [],
+      conditionalFields: [],
+      missingRequired: [{ field: "area.coverage" }],
+      ambiguous: [],
+      answered: [],
+      ownerReviewRequired: [],
+      notApplicable: [],
+      nextQuestion: {
+        field: "area.coverage",
+        questionPt: "Qual é a área atendida?",
+      },
+      catalogNormallyComplete: true,
+      summaryInvalidated: false,
+    },
+    selected_rule_ids: [],
+    next_action: {
+      type: "ask",
+      field: "area.coverage",
+      question_pt: "Qual é a área atendida?",
+    },
+    current_answer_hashes: {},
+    materializations: [],
+    summary_projection: null,
+    summary_hash: null,
+    rule_id: null,
+    rule_group_id: null,
+    materialization_action: "coverage_only",
+    authority: {
+      rules_approved: false,
+      powers_granted: false,
+      operational_mode_changed: false,
+    },
+  };
+  return `with source_readback as (
+    select ${jsonb(readback)} as value
+  )
+  insert into public.receipts (
+    id, tenant_id, call_id, kind, outcome, external_id, readback,
+    payload_hash, detail
+  )
+  select
+    '${receiptId}', '${tenantId}', '${callId}', 'onboarding_coverage',
+    'accepted', '${"d".repeat(64)}',
+    source_readback.value || jsonb_build_object(
+      'snapshot_digest', encode(extensions.digest(
+        convert_to(source_readback.value::text, 'UTF8'), 'sha256'
+      ), 'hex')
+    ),
+    '${"e".repeat(64)}',
+    jsonb_build_object(
+      'transition_kind', 'answer',
+      'transition_schema', 2,
+      'source_revision', ${revision - 1},
+      'source_digest', '${"f".repeat(64)}',
+      'answer_hash', '${"a".repeat(64)}',
+      'provider_tool_call_id', 'resume-source-answer',
+      'fact', jsonb_build_object(
+        'topic', 'area', 'field', 'area.coverage',
+        'disposition', 'owner_review_required',
+        'rule_text', 'Área pendente de confirmação.',
+        'structured', jsonb_build_object('value', null),
+        'owner_words', 'Ainda não confirmei a área.'
+      ),
+      'coverage_key', 'area.coverage',
+      'materialization_key', 'domain:area',
+      'materialization_action', 'coverage_only',
+      'browser_request_id', '${requestId}'
+    )
+  from source_readback;`;
+}
+
 async function waitForOnboardingAdvisoryBlock(connection, home, queryMarker) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const waiting = scalar(await runSql(connection, home, `
@@ -538,9 +635,10 @@ async function parallelBudgetReservationCap(connection, home) {
   assert.match(secondResult.stderr, /budget_exceeded/);
   assert.ok(Date.now() - secondStartedAt >= 500, "the competing reservation must wait on the tenant lock");
   assert.equal(scalar(await runSql(connection, home, `
-    select count(*)::text || ':' || coalesce(sum(reserved_cost_usd), 0)::text
+    select count(*)::text || ':' || coalesce(sum(reserved_cost_usd), 0)::text || ':' ||
+      min(reserved_minutes)::text
     from public.budget_reservations where tenant_id = '${tenant}'
-  `), "budget invariant"), "1:6");
+  `), "budget invariant"), "1:6:15");
 }
 
 async function setupSlotAuthority(connection, home) {
@@ -3983,6 +4081,309 @@ async function onboardingLocalityFollowupAuthority(connection, home) {
   );
 }
 
+async function onboardingResumeCheckpointConcurrency(connection, home) {
+  const ids = {
+    owner: "86000000-0000-4000-8000-000000000001",
+    tenant: "86000000-0000-4000-8000-000000000010",
+    sourceCall: "86000000-0000-4000-8000-000000000020",
+    targetCall: "86000000-0000-4000-8000-000000000021",
+    laterTargetCall: "86000000-0000-4000-8000-000000000022",
+    sourceRequest: "86000000-0000-4000-8000-000000000030",
+    targetRequest: "86000000-0000-4000-8000-000000000031",
+    laterTargetRequest: "86000000-0000-4000-8000-000000000032",
+    sourceReceipt: "86000000-0000-4000-8000-000000000040",
+  };
+
+  requireSuccess(await runSql(connection, home, `
+    insert into auth.users (id, email)
+    values ('${ids.owner}', 'onboarding-resume@example.invalid');
+    insert into public.tenants (
+      id, slug, name, owner_user_id, status, operational_mode,
+      daily_budget_usd, session_max_minutes
+    ) values (
+      '${ids.tenant}', 'synthetic-onboarding-resume',
+      'Synthetic Onboarding Resume', '${ids.owner}',
+      'onboarding', 'simulation_only', 15, 15
+    );
+    insert into public.calls (
+      id, tenant_id, channel, session_type, status, started_at,
+      ended_at, duration_seconds, provider_termination_state,
+      provider_termination_mode, provider_termination_reason,
+      provider_terminated_at
+    ) values (
+      '${ids.sourceCall}', '${ids.tenant}', 'browser', 'onboarding',
+      'killed_budget', clock_timestamp() - interval '10 minutes',
+      clock_timestamp() - interval '2 minutes', 432, 'confirmed',
+      'hangup', 'sideband_killed_budget', clock_timestamp() - interval '2 minutes'
+    );
+    insert into public.browser_session_requests (
+      id, tenant_id, user_id, session_type, offer_sdp, status,
+      answer_sdp, call_id, handled_at, opening_mode_requested,
+      opening_mode_applied
+    ) values (
+      '${ids.sourceRequest}', '${ids.tenant}', '${ids.owner}', 'onboarding',
+      'resume-source-offer', 'ready', 'resume-source-answer',
+      '${ids.sourceCall}', clock_timestamp() - interval '2 minutes',
+      'provider_model_v1', 'provider_model_v1'
+    );
+    insert into public.budget_reservations (
+      tenant_id, call_id, budget_day, reserved_cost_usd, reserved_minutes,
+      status, outcome, final_cost_usd, final_minutes, settled_at
+    ) values (
+      '${ids.tenant}', '${ids.sourceCall}', current_date, 7.5, 30,
+      'settled', 'killed_budget', 1.52, 7.2, clock_timestamp() - interval '2 minutes'
+    );
+    ${onboardingResumeSourceReceiptSql({
+      tenantId: ids.tenant,
+      callId: ids.sourceCall,
+      receiptId: ids.sourceReceipt,
+      requestId: ids.sourceRequest,
+    })}
+    insert into public.browser_session_requests (
+      id, tenant_id, user_id, session_type, offer_sdp, status,
+      call_id, opening_mode_requested
+    ) values (
+      '${ids.targetRequest}', '${ids.tenant}', '${ids.owner}', 'onboarding',
+      'resume-target-offer', 'processing', '${ids.targetCall}',
+      'application_tts_v1'
+    );
+    insert into public.calls (
+      id, tenant_id, channel, session_type, status, started_at
+    ) values (
+      '${ids.targetCall}', '${ids.tenant}', 'browser', 'onboarding',
+      'active', clock_timestamp()
+    );
+    select public.reserve_call_budget(
+      '${ids.tenant}', '${ids.targetCall}', 7.5
+    );
+  `), "onboarding resume fixture");
+
+  const first = startSql(connection, home, serviceTransaction(`
+    select public.initialize_onboarding_resume(
+      '${ids.tenant}', '${ids.targetCall}', '${ids.owner}'
+    )::text;
+    select 'RESUME_LOCK_HELD';
+    select pg_sleep(0.75);
+  `));
+  await first.waitFor("RESUME_LOCK_HELD");
+  const secondStartedAt = Date.now();
+  const secondPromise = runSql(connection, home, serviceTransaction(`
+    select public.initialize_onboarding_resume(
+      '${ids.tenant}', '${ids.targetCall}', '${ids.owner}'
+    )::text;
+  `));
+  await waitForOnboardingAdvisoryBlock(
+    connection,
+    home,
+    "initialize_onboarding_resume",
+  );
+  const [firstResult, secondResult] = await Promise.all([
+    first.done,
+    secondPromise,
+  ]);
+  requireSuccess(firstResult, "first onboarding resume initialization");
+  const firstJson = firstResult.stdout.split("\n")
+    .find((line) => line.startsWith("{"));
+  assert.ok(firstJson, "first resume result must contain a JSON readback");
+  const firstResume = JSON.parse(firstJson);
+  const secondResume = JSON.parse(scalar(
+    secondResult,
+    "second onboarding resume initialization",
+  ));
+  assert.ok(
+    Date.now() - secondStartedAt >= 500,
+    "the competing resume must wait on the tenant advisory lock",
+  );
+  assert.deepEqual(
+    [firstResume.status, secondResume.status].sort(),
+    ["initialized", "reused"],
+  );
+  assert.equal(
+    firstResume.coverage_receipt_id,
+    secondResume.coverage_receipt_id,
+  );
+  assert.equal(firstResume.revision, 1);
+  assert.equal(firstResume.coverage.snapshot.callId, ids.targetCall);
+  assert.equal(firstResume.coverage.snapshot.revision, 1);
+  assert.equal(
+    firstResume.coverage.resume_context.source_call_id,
+    ids.sourceCall,
+  );
+  assert.deepEqual(firstResume.coverage.next_action, {
+    type: "ask",
+    field: "area.coverage",
+    question_pt: "Qual é a área atendida?",
+  });
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (select count(*) from public.onboarding_resume_consumptions
+        where tenant_id = '${ids.tenant}')::text || ':' ||
+      (select count(*) from public.receipts
+        where tenant_id = '${ids.tenant}' and call_id = '${ids.targetCall}'
+          and kind = 'onboarding_coverage')::text || ':' ||
+      (select (readback->>'revision') from public.receipts
+        where id = '${ids.sourceReceipt}')::text || ':' ||
+      (select (readback->>'transition_kind') from public.receipts
+        where id = '${ids.sourceReceipt}')::text || ':' ||
+      (select reserved_minutes::text from public.budget_reservations
+        where call_id = '${ids.targetCall}');
+  `), "onboarding resume immutable source invariant"), "1:1:33:answer:30");
+
+  for (const role of ["anon", "authenticated"]) {
+    const denied = await runSql(connection, home, `
+      begin;
+      set local role ${role};
+      select public.initialize_onboarding_resume(
+        '${ids.tenant}', '${ids.targetCall}', '${ids.owner}'
+      );
+      rollback;
+    `);
+    assert.notEqual(denied.code, 0, `${role} must not execute resume`);
+    assert.match(denied.stderr, /permission denied for function initialize_onboarding_resume/);
+  }
+
+  requireSuccess(await runSql(connection, home, `
+    update public.browser_session_requests
+    set status = 'ready',
+        answer_sdp = 'resume-target-answer',
+        handled_at = clock_timestamp(),
+        opening_mode_applied = 'application_tts_v1',
+        opening_payload = ${jsonb({
+          version: 1,
+          item_id: `lgo-${"c".repeat(28)}`,
+          text: "Checkpoint local pronto.",
+          text_sha256: "a".repeat(64),
+          audio_base64: "SUQzBA==",
+          audio_sha256: "b".repeat(64),
+          mime: "audio/mpeg",
+          voice: "ash",
+          tts_model: "tts-1",
+          cost_usd: 0.001,
+        })}
+    where id = '${ids.targetRequest}'
+      and status = 'processing';
+  `), "onboarding resume simulated ready handoff");
+
+  const cell = {
+    state: "answered",
+    attempts: 1,
+    value: { localities: [{
+      locality_id: "loc_4bc5a435c3c9a7013a252ae4",
+      display_name: "Anaheim",
+      country_code: "US",
+      region_code: "CA",
+    }] },
+  };
+  const snapshot = {
+    ...firstResume.coverage.snapshot,
+    revision: 2,
+    cells: { "area.coverage": cell },
+  };
+  const answerHash = coverageCellHash("area.coverage", cell);
+  const areaMaterialization = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    `select public.onboarding_materialization_v3(
+      ${jsonb(snapshot)}, 'domain:area', 2, '${ids.targetCall}'
+    )::text;`,
+  ), "resumed first-answer materialization"));
+  const nextAction = {
+    type: "ask",
+    field: "service.catalog_closure",
+    question_pt: "Há mais algum serviço?",
+  };
+  const answerCoverage = {
+    schema_version: 2,
+    transition_kind: "answer",
+    tenant_id: ids.tenant,
+    call_id: ids.targetCall,
+    revision: 2,
+    complete: false,
+    snapshot,
+    progress: {
+      requiredFields: [],
+      conditionalFields: [],
+      missingRequired: [{ field: "service.catalog_closure" }],
+      ambiguous: [],
+      answered: [{ field: "area.coverage" }],
+      ownerReviewRequired: [],
+      notApplicable: [],
+      nextQuestion: {
+        field: "service.catalog_closure",
+        questionPt: "Há mais algum serviço?",
+      },
+      catalogNormallyComplete: true,
+      summaryInvalidated: false,
+    },
+    selected_rule_ids: [],
+    next_action: nextAction,
+    current_answer_hashes: { "area.coverage": answerHash },
+    materializations: [areaMaterialization],
+    summary_projection: null,
+    summary_hash: null,
+    authority: {
+      rules_approved: false,
+      powers_granted: false,
+      operational_mode_changed: false,
+    },
+  };
+  const firstAnswer = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(onboardingAnswerSql({
+      tenantId: ids.tenant,
+      callId: ids.targetCall,
+      ownerId: ids.owner,
+      providerToolCallId: "resume-first-answer",
+      answerHash,
+      expectedRevision: 1,
+      fact: {
+        topic: "area",
+        field: "area.coverage",
+        disposition: "answered",
+        rule_text: "Atende Anaheim.",
+        structured: { value: { localities: [{
+          display_name: "Anaheim",
+          country_code: "US",
+          region_code: "CA",
+        }] } },
+        owner_words: "Atendemos Anaheim.",
+      },
+      coverage: answerCoverage,
+    })),
+  ), "resumed first answer"));
+  assert.equal(firstAnswer.revision, 2);
+  assert.equal(firstAnswer.coverage.snapshot.callId, ids.targetCall);
+
+  requireSuccess(await runSql(connection, home, `
+    insert into public.browser_session_requests (
+      id, tenant_id, user_id, session_type, offer_sdp, status,
+      call_id, opening_mode_requested
+    ) values (
+      '${ids.laterTargetRequest}', '${ids.tenant}', '${ids.owner}',
+      'onboarding', 'resume-later-target-offer', 'processing',
+      '${ids.laterTargetCall}', 'application_tts_v1'
+    );
+    insert into public.calls (
+      id, tenant_id, channel, session_type, status, started_at
+    ) values (
+      '${ids.laterTargetCall}', '${ids.tenant}', 'browser', 'onboarding',
+      'active', clock_timestamp() + interval '1 second'
+    );
+  `), "unsupported latest onboarding resume fixture");
+  const unsupported = await runSql(connection, home, serviceRollback(`
+    select public.initialize_onboarding_resume(
+      '${ids.tenant}', '${ids.laterTargetCall}', '${ids.owner}'
+    );
+  `));
+  assert.notEqual(unsupported.code, 0);
+  assert.match(unsupported.stderr, /onboarding_resume_latest_ineligible/);
+  assert.equal(scalar(await runSql(connection, home, `
+    select count(*)::text from public.onboarding_resume_consumptions
+    where tenant_id = '${ids.tenant}';
+  `), "resume source single-consumption invariant"), "1");
+}
+
 export async function runConcurrencySuite(env = process.env) {
   const connection = connectionFromEnvironment(env);
   const isolatedHome = await mkdtemp(path.join(os.tmpdir(), "ligou-rc1-psql-home-"));
@@ -4003,6 +4404,7 @@ export async function runConcurrencySuite(env = process.env) {
     ["V2 current-relative materialization and followups", onboardingV2CurrentRelativeMaterialization],
     ["concurrent onboarding answer and followup", concurrentOnboardingAnswerAndFollowup],
     ["owner-evidence locality followup authority", onboardingLocalityFollowupAuthority],
+    ["onboarding resume checkpoint concurrency", onboardingResumeCheckpointConcurrency],
   ];
   try {
     for (const [, test] of tests) await test(connection, isolatedHome);

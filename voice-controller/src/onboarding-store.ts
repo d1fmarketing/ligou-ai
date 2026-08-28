@@ -140,6 +140,20 @@ export interface FollowupSuccess {
 }
 export type RecordedFollowup = FollowupSuccess | StoreFailure;
 
+export interface OnboardingResumeSuccess {
+  ok: true;
+  status: "initialized" | "reused";
+  sourceCallId: string;
+  sourceReceiptId: string;
+  coverageReceiptId: string;
+  revision: 1;
+  digest: string;
+  nextAction: Record<string, unknown>;
+  coverage: Record<string, unknown>;
+  durationMs: number;
+}
+export type OnboardingResume = OnboardingResumeSuccess | StoreFailure;
+
 export type SnapshotResult =
   | {
       ok: true;
@@ -172,6 +186,7 @@ type SnapshotFailureCode =
   | "changed";
 
 export interface OnboardingStore {
+  initializeOnboardingResume(cap: Capability): Promise<OnboardingResume>;
   recordOnboardingAnswer(
     cap: Capability,
     providerToolCallId: string,
@@ -1026,6 +1041,171 @@ export function createOnboardingStore(
       digest: String(readback.snapshot_digest),
       durationMs: elapsed(now, started),
     };
+  };
+
+  const initializeOnboardingResume = async (
+    cap: Capability,
+  ): Promise<OnboardingResume> => {
+    const started = now();
+    if (
+      !boundOwner(cap) ||
+      !UUID_RE.test(cap.tenantId) ||
+      !UUID_RE.test(cap.callId) ||
+      !UUID_RE.test(cap.ownerUserId!)
+    )
+      return failure(
+        "not_owner_bound",
+        "onboarding owner binding is unavailable",
+        now,
+        started,
+      );
+    try {
+      const result = await bounded((signal) =>
+        abortable<BoundaryResult<unknown>>(client.rpc(
+          "initialize_onboarding_resume",
+          {
+            p_tenant: cap.tenantId,
+            p_target_call: cap.callId,
+            p_owner: cap.ownerUserId!,
+          },
+        ), signal)
+      );
+      if (result.error) {
+        const message = String(result.error.message ?? "").toLowerCase();
+        if (
+          message.includes("latest_ineligible") ||
+          message.includes("source_missing") ||
+          message.includes("source_consumed")
+        )
+          return failure(
+            "empty",
+            "no resumable onboarding checkpoint is available",
+            now,
+            started,
+          );
+        if (
+          result.error.code === "42501" ||
+          message.includes("not_owner_bound")
+        )
+          return failure(
+            "not_owner_bound",
+            "onboarding owner binding is unavailable",
+            now,
+            started,
+          );
+        return failure(
+          "query_error",
+          "onboarding resume initialization failed",
+          now,
+          started,
+        );
+      }
+      if (!result.data || typeof result.data !== "object")
+        return failure(
+          "query_error",
+          "onboarding resume initialization returned no checkpoint",
+          now,
+          started,
+        );
+      const data = result.data as Record<string, unknown>;
+      const coverage = data.coverage && typeof data.coverage === "object" &&
+          !Array.isArray(data.coverage)
+        ? data.coverage as Record<string, unknown>
+        : null;
+      const sourceContext = coverage?.resume_context &&
+          typeof coverage.resume_context === "object" &&
+          !Array.isArray(coverage.resume_context)
+        ? coverage.resume_context as Record<string, unknown>
+        : null;
+      const sourceCallId = String(data.source_call_id ?? "");
+      const sourceReceiptId = String(data.source_receipt_id ?? "");
+      const coverageReceiptId = String(data.coverage_receipt_id ?? "");
+      const digest = String(data.snapshot_digest ?? "");
+      const revision = Number(data.revision);
+      const status = data.status === "initialized" || data.status === "reused"
+        ? data.status
+        : null;
+      const nextAction = data.next_action &&
+          typeof data.next_action === "object" &&
+          !Array.isArray(data.next_action)
+        ? data.next_action as Record<string, unknown>
+        : null;
+      const snapshot = coverage
+        ? hydrateSnapshot(coverage.snapshot, cap)
+        : null;
+      const selected = coverage?.selected_rule_ids;
+      const materializations = coverage?.materializations;
+      const progress = coverage?.progress;
+      const currentHashes = coverage?.current_answer_hashes;
+      if (
+        !coverage || !sourceContext || !nextAction || !snapshot ||
+        !status ||
+        !UUID_RE.test(sourceCallId) || !UUID_RE.test(sourceReceiptId) ||
+        !UUID_RE.test(coverageReceiptId) ||
+        sourceCallId === cap.callId ||
+        revision !== 1 || snapshot.revision !== 1 ||
+        !/^[0-9a-f]{64}$/.test(digest) ||
+        coverage.schema_version !== 2 ||
+        coverage.transition_kind !== "resume_checkpoint" ||
+        coverage.tenant_id !== cap.tenantId ||
+        coverage.call_id !== cap.callId ||
+        coverage.revision !== 1 || coverage.complete !== false ||
+        coverage.snapshot_digest !== digest ||
+        sourceContext.source_call_id !== sourceCallId ||
+        sourceContext.source_receipt_id !== sourceReceiptId ||
+        !Number.isSafeInteger(Number(sourceContext.source_revision)) ||
+        Number(sourceContext.source_revision) < 1 ||
+        !/^[0-9a-f]{64}$/.test(String(
+          sourceContext.source_snapshot_digest ?? "",
+        )) ||
+        !Array.isArray(selected) || selected.length !== 0 ||
+        !Array.isArray(materializations) || materializations.length !== 0 ||
+        !progress || typeof progress !== "object" || Array.isArray(progress) ||
+        !Array.isArray((progress as Record<string, unknown>).missingRequired) ||
+        !Array.isArray((progress as Record<string, unknown>).ambiguous) ||
+        !currentHashes || typeof currentHashes !== "object" ||
+        Array.isArray(currentHashes) ||
+        canonicalJson(coverage.authority) !== canonicalJson(FALSE_AUTHORITY) ||
+        coverage.summary_projection !== null || coverage.summary_hash !== null ||
+        nextAction.type !== "ask" ||
+        typeof nextAction.field !== "string" || !nextAction.field ||
+        typeof nextAction.question_pt !== "string" ||
+        !nextAction.question_pt.trim() ||
+        canonicalJson(nextAction) !== canonicalJson(coverage.next_action)
+      )
+        return failure(
+          "changed",
+          "onboarding resume checkpoint is invalid",
+          now,
+          started,
+        );
+      return {
+        ok: true,
+        status,
+        sourceCallId,
+        sourceReceiptId,
+        coverageReceiptId,
+        revision: 1,
+        digest,
+        nextAction,
+        coverage,
+        durationMs: elapsed(now, started),
+      };
+    } catch (error) {
+      return ambiguousBoundaryFailure(error)
+        ? failure(
+            "indeterminate",
+            "onboarding resume initialization is indeterminate",
+            now,
+            started,
+          )
+        : failure(
+            "query_error",
+            "onboarding resume initialization failed",
+            now,
+            started,
+          );
+    }
   };
 
   const loadOnboardingSnapshot = async (
@@ -1920,6 +2100,7 @@ export function createOnboardingStore(
   };
 
   return {
+    initializeOnboardingResume,
     recordOnboardingAnswer,
     recordOnboardingFollowup,
     loadOnboardingSnapshot,
@@ -1942,6 +2123,12 @@ export async function recordOnboardingAnswer(
     providerToolCallId,
     args,
   );
+}
+
+export async function initializeOnboardingResume(
+  cap: Capability,
+): Promise<OnboardingResume> {
+  return await (await defaultStore()).initializeOnboardingResume(cap);
 }
 
 export async function loadOnboardingSnapshot(

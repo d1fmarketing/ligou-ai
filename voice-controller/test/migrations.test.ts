@@ -12,6 +12,71 @@ function migrationSql(suffix: string): string {
   return readFileSync(path.join(migrationsDir, names[0]!), "utf8").replace(/\s+/g, " ").trim();
 }
 
+describe("durable onboarding resume migration contract", () => {
+  test("persists reservation minutes and keeps the three-argument budget boundary compatible", () => {
+    const sql = migrationSql("onboarding_resume_checkpoint");
+    expect(sql).toContain("add column if not exists reserved_minutes numeric");
+    expect(sql).toContain("alter column reserved_minutes set not null");
+    expect(sql).toContain("check (reserved_minutes > 0)");
+    expect(sql).toContain("function public.reserve_call_budget(uuid,uuid,numeric,numeric)");
+    expect(sql).toContain("function public.reserve_call_budget(uuid,uuid,numeric)");
+    expect(sql).toContain("values (p_tenant, p_call, v_day, p_est_cost, p_reserved_minutes)");
+    expect(sql).toContain("'reserved_minutes', v_reservation.reserved_minutes");
+  });
+
+  test("serializes one immutable source consumption and one target revision-one checkpoint", () => {
+    const sql = migrationSql("onboarding_resume_checkpoint");
+    expect(sql).toContain("create table public.onboarding_resume_consumptions");
+    expect(sql).toContain("source_call_id uuid not null unique");
+    expect(sql).toContain("target_call_id uuid not null unique");
+    expect(sql).toContain("source_receipt_id uuid not null unique");
+    expect(sql).toContain("target_receipt_id uuid not null unique");
+    expect(sql).toContain("function public.initialize_onboarding_resume(");
+    expect(sql).toContain("p_tenant uuid, p_target_call uuid, p_owner uuid");
+    expect(sql).toContain("pg_advisory_xact_lock(hashtextextended( 'ligou.v0_2.onboarding_resume:' || p_tenant::text");
+    expect(sql).toContain("order by c.started_at desc, c.id desc");
+    expect(sql).toContain("v_source.status not in ('killed_budget','killed_deadline')");
+    expect(sql).toContain("v_source.provider_termination_state is distinct from 'confirmed'");
+    expect(sql).toContain("v_reservation.status is distinct from 'settled'");
+    expect(sql).toContain("v_source_receipt.readback->'schema_version' is distinct from '2'::jsonb");
+    expect(sql).toContain("v_source_receipt.readback->'complete' is distinct from 'false'::jsonb");
+    expect(sql).toContain("v_source_receipt.readback->'next_action'->>'type' is distinct from 'ask'");
+    expect(sql).toContain("jsonb_array_length(v_source_receipt.readback->'selected_rule_ids') <> 0");
+    expect(sql).toContain("r.kind = 'onboarding_voice_approval'");
+    expect(sql).toContain("from public.rules r");
+    expect(sql).toContain("item->>'review_ready' = 'true'");
+    expect(sql).toContain("'transition_kind', 'resume_checkpoint'");
+    expect(sql).toContain("'revision', 1");
+    expect(sql).toContain("'callId', p_target_call");
+    expect(sql).toContain("'source_call_id', v_source.id");
+    expect(sql).toContain("'source_receipt_id', v_source_receipt.id");
+  });
+
+  test("is grant-only service-role authority with a fixed search path", () => {
+    const sql = migrationSql("onboarding_resume_checkpoint");
+    const resumeSignature = "public.initialize_onboarding_resume(uuid,uuid,uuid)";
+    for (const signature of [
+      resumeSignature,
+      "public.reserve_call_budget(uuid,uuid,numeric,numeric)",
+      "public.reserve_call_budget(uuid,uuid,numeric)",
+      "public.claim_budget_reconciliation(text)",
+    ]) {
+      expect(sql).toContain(`revoke all on function ${signature} from public, anon, authenticated, service_role`);
+      expect(sql).toContain(`grant execute on function ${signature} to service_role`);
+    }
+    const resumeAt = sql.indexOf("function public.initialize_onboarding_resume");
+    const resumeEnd = sql.indexOf(`revoke all on function ${resumeSignature}`, resumeAt);
+    const resumeSql = sql.slice(resumeAt, resumeEnd);
+    expect(resumeSql).toContain("security definer set search_path = ''");
+    expect(resumeSql).not.toContain("auth.role()");
+    expect(resumeSql).not.toContain("auth.jwt()");
+    expect(resumeSql).not.toContain("current_setting(");
+    expect(sql).toContain("alter table public.onboarding_resume_consumptions enable row level security");
+    expect(sql).toContain("alter table public.onboarding_resume_consumptions force row level security");
+    expect(sql).toContain("revoke all on table public.onboarding_resume_consumptions from public, anon, authenticated, service_role");
+  });
+});
+
 describe("OAuth connector hardening migration contract", () => {
   test("state consumption is atomic, short-lived, fully bound, and service-role-only", () => {
     const sql = migrationSql("connector_oauth_hardening");

@@ -14,6 +14,9 @@ import { createOnboardingStore } from "../src/onboarding-store.ts";
 const TENANT_ID = "11111111-1111-4111-8111-111111111111";
 const CALL_ID = "22222222-2222-4222-8222-222222222222";
 const OWNER_ID = "33333333-3333-4333-8333-333333333333";
+const SOURCE_CALL_ID = "66666666-6666-4666-8666-666666666666";
+const SOURCE_RECEIPT_ID = "77777777-7777-4777-8777-777777777777";
+const TARGET_RECEIPT_ID = "88888888-8888-4888-8888-888888888888";
 
 type QueryError = { code?: string; message: string };
 type ReceiptRow = {
@@ -280,6 +283,139 @@ function ownerCapability() {
     simulation: true,
   };
 }
+
+function resumeRpcResult(
+  overrides: Partial<Record<string, unknown>> = {},
+) {
+  const digest = "b".repeat(64);
+  const nextAction = {
+    type: "ask",
+    field: "area.coverage",
+    question_pt: "Qual é a área atendida?",
+  };
+  const snapshot = emptySnapshot(1);
+  const coverage = {
+    schema_version: 2,
+    transition_kind: "resume_checkpoint",
+    tenant_id: TENANT_ID,
+    call_id: CALL_ID,
+    revision: 1,
+    complete: false,
+    snapshot,
+    progress: {
+      missingRequired: [{ field: "area.coverage" }],
+      ambiguous: [],
+    },
+    selected_rule_ids: [],
+    next_action: nextAction,
+    current_answer_hashes: {},
+    materializations: [],
+    summary_projection: null,
+    summary_hash: null,
+    resume_context: {
+      source_call_id: SOURCE_CALL_ID,
+      source_receipt_id: SOURCE_RECEIPT_ID,
+      source_revision: 33,
+      source_snapshot_digest: "c".repeat(64),
+    },
+    authority: {
+      rules_approved: false,
+      powers_granted: false,
+      operational_mode_changed: false,
+    },
+    snapshot_digest: digest,
+  };
+  return {
+    status: "initialized",
+    source_call_id: SOURCE_CALL_ID,
+    source_receipt_id: SOURCE_RECEIPT_ID,
+    coverage_receipt_id: TARGET_RECEIPT_ID,
+    revision: 1,
+    snapshot_digest: digest,
+    next_action: nextAction,
+    coverage,
+    ...overrides,
+  };
+}
+
+describe("initializeOnboardingResume", () => {
+  test("calls the service RPC with the exact owner-bound target and returns revision one", async () => {
+    const boundary = new SupabaseBoundaryFake();
+    boundary.rpcResult = { data: resumeRpcResult(), error: null };
+    const store = createOnboardingStore({
+      client: boundary.client(),
+      now: () => 10,
+    });
+
+    expect(await store.initializeOnboardingResume(ownerCapability())).toEqual({
+      ok: true,
+      status: "initialized",
+      sourceCallId: SOURCE_CALL_ID,
+      sourceReceiptId: SOURCE_RECEIPT_ID,
+      coverageReceiptId: TARGET_RECEIPT_ID,
+      revision: 1,
+      digest: "b".repeat(64),
+      nextAction: {
+        type: "ask",
+        field: "area.coverage",
+        question_pt: "Qual é a área atendida?",
+      },
+      coverage: resumeRpcResult().coverage,
+      durationMs: 0,
+    });
+    expect(boundary.rpcCalls).toEqual([{
+      name: "initialize_onboarding_resume",
+      args: {
+        p_tenant: TENANT_ID,
+        p_target_call: CALL_ID,
+        p_owner: OWNER_ID,
+      },
+    }]);
+  });
+
+  test("rejects a capability without an onboarding owner before the boundary", async () => {
+    const boundary = new SupabaseBoundaryFake();
+    const store = createOnboardingStore({ client: boundary.client() });
+    const cap = { ...ownerCapability(), ownerUserId: undefined };
+
+    expect(await store.initializeOnboardingResume(cap)).toMatchObject({
+      ok: false,
+      code: "not_owner_bound",
+    });
+    expect(boundary.rpcCalls).toHaveLength(0);
+  });
+
+  test("fails closed on an ineligible latest source and on malformed readback", async () => {
+    const denied = new SupabaseBoundaryFake();
+    denied.rpcResult = {
+      data: null,
+      error: { code: "55000", message: "onboarding_resume_latest_ineligible" },
+    };
+    const deniedStore = createOnboardingStore({ client: denied.client() });
+    expect(await deniedStore.initializeOnboardingResume(ownerCapability()))
+      .toMatchObject({ ok: false, code: "empty" });
+
+    const malformed = new SupabaseBoundaryFake();
+    malformed.rpcResult = {
+      data: resumeRpcResult({ revision: 2 }),
+      error: null,
+    };
+    const malformedStore = createOnboardingStore({ client: malformed.client() });
+    expect(await malformedStore.initializeOnboardingResume(ownerCapability()))
+      .toMatchObject({ ok: false, code: "changed" });
+  });
+
+  test("reports an ambiguous RPC timeout as indeterminate", async () => {
+    const boundary = new SupabaseBoundaryFake();
+    boundary.rpcNeverResolves = true;
+    const store = createOnboardingStore({
+      client: boundary.client(),
+      timeoutMs: 5,
+    });
+    expect(await store.initializeOnboardingResume(ownerCapability()))
+      .toMatchObject({ ok: false, code: "indeterminate" });
+  });
+});
 
 const AREA_FACT = {
   topic: "area",
