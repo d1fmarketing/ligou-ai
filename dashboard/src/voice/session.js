@@ -63,43 +63,23 @@ function approvalRevision(row, callId) {
   return row.readback.snapshot_revision;
 }
 
-function resumableCoverage(row, callId) {
+function onboardingResumeStatus(row) {
   if (!isObject(row)
-    || typeof row.id !== "string"
-    || row.call_id !== callId
-    || row.kind !== "onboarding_coverage"
-    || row.outcome !== "accepted"
-    || !isObject(row.readback)
-    || row.readback.schema_version !== 2
-    || row.readback.call_id !== callId
-    || row.readback.complete !== false
-    || !Number.isSafeInteger(row.readback.revision)
-    || row.readback.revision < 1
-    || !/^[0-9a-f]{64}$/.test(row.readback.snapshot_digest ?? "")
-    || !isObject(row.readback.next_action)) return null;
-  const action = row.readback.next_action;
-  const actionKeys = ["type", "field", "question_pt"];
-  if (action.subject !== undefined) actionKeys.push("subject");
-  if (Object.keys(action).length !== actionKeys.length
-    || !actionKeys.every((key) => Object.hasOwn(action, key))
-    || action.type !== "ask"
-    || typeof action.field !== "string"
-    || !action.field.trim()
-    || typeof action.question_pt !== "string"
-    || !action.question_pt.trim()
-    || (action.subject !== undefined
-      && (typeof action.subject !== "string" || !action.subject.trim()))) {
-    return null;
-  }
-  return {
-    revision: row.readback.revision,
-    nextAction: {
-      type: "ask",
-      field: action.field,
-      ...(action.subject ? { subject: action.subject } : {}),
-      question_pt: action.question_pt,
-    },
-  };
+    || Object.keys(row).length !== 3
+    || !Object.hasOwn(row, "status")
+    || !Object.hasOwn(row, "revision")
+    || !Object.hasOwn(row, "snapshot_digest")
+    || !["pending", "eligible", "blocked"].includes(row.status)) return null;
+  const revision = Number.isSafeInteger(row.revision) && row.revision > 0
+    ? row.revision
+    : null;
+  const snapshotDigest = /^[0-9a-f]{64}$/.test(row.snapshot_digest ?? "")
+    ? row.snapshot_digest
+    : null;
+  if ((row.revision !== null && revision === null)
+    || (row.snapshot_digest !== null && snapshotDigest === null)
+    || (row.status === "eligible" && (revision === null || snapshotDigest === null))) return null;
+  return { status: row.status, revision, snapshotDigest };
 }
 
 export function settleStartedSession({ session, runId, currentRunId, cancelled, ended, onAccepted }) {
@@ -172,22 +152,12 @@ export async function resolveOnboardingOutcome({
   while (!cancellationRequested(isCancelled, signal)) {
     const remaining = deadline - now();
     if (remaining <= 0) break;
-    const [approvalRead, coverageRead, callRead] = await Promise.all([
+    const [approvalRead, callRead] = await Promise.all([
       boundedRead((readSignal) => client
         .from("receipts")
         .select("id,call_id,kind,outcome,readback,created_at")
         .eq("call_id", callId)
         .eq("kind", "onboarding_voice_approval")
-        .eq("outcome", "accepted")
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .abortSignal(readSignal)
-        .maybeSingle(), remaining, signal),
-      boundedRead((readSignal) => client
-        .from("receipts")
-        .select("id,call_id,kind,outcome,readback,created_at")
-        .eq("call_id", callId)
-        .eq("kind", "onboarding_coverage")
         .eq("outcome", "accepted")
         .order("created_at", { ascending: false })
         .limit(1)
@@ -219,13 +189,28 @@ export async function resolveOnboardingOutcome({
       ? callResult.data
       : null;
     if (call && ["killed_budget", "killed_deadline"].includes(call.status)) {
-      const coverageResult = coverageRead.ok ? coverageRead.value : null;
-      const resumable = coverageResult && !coverageResult.error
-        ? resumableCoverage(coverageResult.data, callId)
+      const finalizing = () => revision === null
+        ? { status: "finalizing" }
+        : { status: "finalizing", revision };
+      const statusRemaining = deadline - now();
+      if (statusRemaining <= 0 || typeof client.rpc !== "function") return finalizing();
+      const resumeRead = await boundedRead((readSignal) => client
+        .rpc("get_onboarding_resume_status", { p_call: callId })
+        .abortSignal(readSignal), statusRemaining, signal);
+      if (cancellationRequested(isCancelled, signal)) return { status: "interrupted" };
+      const resumeResult = resumeRead.ok ? resumeRead.value : null;
+      const resume = resumeResult && !resumeResult.error
+        ? onboardingResumeStatus(resumeResult.data)
         : null;
-      if (call.provider_termination_state === "confirmed" && resumable) {
-        return { status: "resumable", ...resumable };
+      if (!resume || resume.status === "pending") {
+        if (resume?.revision != null) revision = resume.revision;
+        return finalizing();
       }
+      if (resume.status === "eligible") return {
+        status: "resumable",
+        revision: resume.revision,
+        snapshotDigest: resume.snapshotDigest,
+      };
       return revision === null ? { status: "interrupted" } : {
         status: "interrupted",
         revision,
@@ -285,7 +270,10 @@ export function onboardingOutcomeCopy(outcome) {
     return `Entrevista concluída. Cobertura confirmada por voz · revisão ${outcome.revision}. Regras ainda aguardando aprovação na Memória.`;
   }
   if (outcome?.status === "finalizing") {
-    return `Finalizando… Cobertura confirmada por voz · revisão ${outcome.revision}. O encerramento do provedor ainda não foi confirmado. Regras ainda aguardando aprovação na Memória.`;
+    const revision = Number.isSafeInteger(outcome.revision) && outcome.revision > 0
+      ? ` · revisão ${outcome.revision}`
+      : "";
+    return `Finalizando… A pausa e a possibilidade de continuar ainda estão sendo confirmadas${revision}.`;
   }
   if (outcome?.status === "resumable") {
     return `Entrevista pausada com segurança · revisão ${outcome.revision}. Você pode continuar da pergunta salva.`;

@@ -134,6 +134,16 @@ rollback;
 `;
 }
 
+function authenticatedTransaction(userId, statement) {
+  return `begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '${userId}', true);
+select set_config('request.jwt.claim.role', 'authenticated', true);
+${statement}
+commit;
+`;
+}
+
 function sha256(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
@@ -4141,6 +4151,76 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
       receiptId: ids.sourceReceipt,
       requestId: ids.sourceRequest,
     })}
+  `), "onboarding resume fixture");
+
+  const ownerResumeStatus = async (callId, label) => JSON.parse(scalar(
+    await runSql(connection, home, authenticatedTransaction(ids.owner, `
+      select public.get_onboarding_resume_status('${callId}')::text;
+    `)),
+    label,
+  ));
+  requireSuccess(await runSql(connection, home, `
+    update public.calls
+    set provider_termination_state = 'pending'
+    where id = '${ids.sourceCall}';
+  `), "resume status provider-pending fixture");
+  const providerPendingStatus = await ownerResumeStatus(
+    ids.sourceCall,
+    "provider-pending resume status",
+  );
+  assert.equal(providerPendingStatus.status, "pending");
+  assert.equal(providerPendingStatus.revision, 33);
+  assert.match(providerPendingStatus.snapshot_digest, /^[0-9a-f]{64}$/);
+  requireSuccess(await runSql(connection, home, `
+    update public.calls
+    set provider_termination_state = 'confirmed'
+    where id = '${ids.sourceCall}';
+    update public.budget_reservations
+    set status = 'active',
+        outcome = null,
+        final_cost_usd = null,
+        final_minutes = null,
+        settled_at = null
+    where call_id = '${ids.sourceCall}';
+  `), "resume status unsettled-budget fixture");
+  assert.equal(
+    (await ownerResumeStatus(
+      ids.sourceCall,
+      "unsettled-budget resume status",
+    )).status,
+    "pending",
+  );
+  requireSuccess(await runSql(connection, home, `
+    update public.budget_reservations
+    set status = 'settled',
+        outcome = 'killed_budget',
+        final_cost_usd = 1.52,
+        final_minutes = 7.2,
+        settled_at = clock_timestamp()
+    where call_id = '${ids.sourceCall}';
+  `), "resume status settled fixture");
+  const eligibleStatus = await ownerResumeStatus(
+    ids.sourceCall,
+    "eligible resume status",
+  );
+  assert.equal(eligibleStatus.status, "eligible");
+  assert.equal(eligibleStatus.revision, 33);
+  assert.match(eligibleStatus.snapshot_digest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(Object.keys(eligibleStatus).sort(), [
+    "revision", "snapshot_digest", "status",
+  ]);
+  const foreignStatus = await runSql(
+    connection,
+    home,
+    authenticatedTransaction(
+      "86000000-0000-4000-8000-000000000099",
+      `select public.get_onboarding_resume_status('${ids.sourceCall}');`,
+    ),
+  );
+  assert.notEqual(foreignStatus.code, 0);
+  assert.match(foreignStatus.stderr, /onboarding_resume_status_not_owner_bound/);
+
+  requireSuccess(await runSql(connection, home, `
     insert into public.browser_session_requests (
       id, tenant_id, user_id, session_type, offer_sdp, status,
       call_id, opening_mode_requested
@@ -4158,7 +4238,7 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     select public.reserve_call_budget(
       '${ids.tenant}', '${ids.targetCall}', 7.5
     );
-  `), "onboarding resume fixture");
+  `), "onboarding resume target fixture");
 
   const first = startSql(connection, home, serviceTransaction(`
     select public.initialize_onboarding_resume(
@@ -4230,6 +4310,13 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
       (select reserved_minutes::text from public.budget_reservations
         where call_id = '${ids.targetCall}');
   `), "onboarding resume immutable source invariant"), "1:1:33:answer:30");
+  assert.equal(
+    (await ownerResumeStatus(
+      ids.sourceCall,
+      "consumed source resume status",
+    )).status,
+    "blocked",
+  );
 
   for (const role of ["anon", "authenticated"]) {
     const denied = await runSql(connection, home, `
@@ -4264,6 +4351,14 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
         final_minutes = 0,
         settled_at = clock_timestamp()
     where call_id = '${ids.targetCall}' and status = 'active';
+  `), "abandoned resume checkpoint fixture");
+  const abandonedStatus = await ownerResumeStatus(
+    ids.targetCall,
+    "abandoned checkpoint resume status",
+  );
+  assert.equal(abandonedStatus.status, "eligible");
+  assert.equal(abandonedStatus.revision, 1);
+  requireSuccess(await runSql(connection, home, `
     insert into public.browser_session_requests (
       id, tenant_id, user_id, session_type, offer_sdp, status,
       call_id, opening_mode_requested
@@ -4281,7 +4376,7 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     select public.reserve_call_budget(
       '${ids.tenant}', '${ids.recoveredTargetCall}', 7.5
     );
-  `), "abandoned resume checkpoint transfer fixture");
+  `), "abandoned resume checkpoint transfer target fixture");
   const chainedResume = JSON.parse(scalar(await runSql(
     connection,
     home,
@@ -4451,6 +4546,15 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
         final_minutes = 0,
         settled_at = clock_timestamp()
     where call_id = '${ids.recoveredTargetCall}' and status = 'active';
+  `), "unsafe answered error resume-status fixture");
+  assert.equal(
+    (await ownerResumeStatus(
+      ids.recoveredTargetCall,
+      "unsafe error resume status",
+    )).status,
+    "blocked",
+  );
+  requireSuccess(await runSql(connection, home, `
     insert into public.browser_session_requests (
       id, tenant_id, user_id, session_type, offer_sdp, status,
       call_id, opening_mode_requested

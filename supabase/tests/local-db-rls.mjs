@@ -254,6 +254,57 @@ export async function runAuthenticatedRlsSuite(options) {
   assert.notEqual(bootstrapB1.body.tenant_id, bootTenantA, "two users must receive two distinct tenants"); checks++;
   const bootTenantB = bootstrapB1.body.tenant_id;
 
+  const resumeCallA = randomUUID();
+  const resumeCallB = randomUUID();
+  psql(env, `
+    insert into public.calls (
+      id, tenant_id, channel, session_type, status, ended_at,
+      provider_termination_state, provider_termination_mode,
+      provider_termination_reason, provider_terminated_at
+    ) values
+      ('${resumeCallA}', '${bootTenantA}', 'browser', 'onboarding',
+       'killed_budget', clock_timestamp(), 'confirmed', 'hangup',
+       'sideband_killed_budget', clock_timestamp()),
+      ('${resumeCallB}', '${bootTenantB}', 'browser', 'onboarding',
+       'killed_budget', clock_timestamp(), 'confirmed', 'hangup',
+       'sideband_killed_budget', clock_timestamp());
+    insert into public.browser_session_requests (
+      tenant_id, user_id, session_type, offer_sdp, status, answer_sdp,
+      call_id, handled_at, opening_mode_requested, opening_mode_applied
+    ) values
+      ('${bootTenantA}', '${userA}', 'onboarding', 'rls-resume-a', 'ready',
+       'rls-resume-answer-a', '${resumeCallA}', clock_timestamp(),
+       'provider_model_v1', 'provider_model_v1'),
+      ('${bootTenantB}', '${userB}', 'onboarding', 'rls-resume-b', 'ready',
+       'rls-resume-answer-b', '${resumeCallB}', clock_timestamp(),
+       'provider_model_v1', 'provider_model_v1');
+  `);
+
+  const ownResumeStatus = await rest(tokenA, "/rest/v1/rpc/get_onboarding_resume_status", {
+    method: "POST", body: JSON.stringify({ p_call: resumeCallA }),
+  });
+  assert.equal(ownResumeStatus.response.ok, true, `owner resume status failed: ${ownResumeStatus.safeError()}`);
+  assert.deepEqual(ownResumeStatus.body, {
+    status: "blocked", revision: null, snapshot_digest: null,
+  }); checks++;
+
+  const crossResumeStatus = await rest(tokenB, "/rest/v1/rpc/get_onboarding_resume_status", {
+    method: "POST", body: JSON.stringify({ p_call: resumeCallA }),
+  });
+  assert.equal(crossResumeStatus.response.ok, false, "another owner must not inspect resume eligibility"); checks++;
+
+  const anonResumeStatus = await jsonRequest(`${env.apiUrl}/rest/v1/rpc/get_onboarding_resume_status`, {
+    method: "POST",
+    headers: { apikey: env.publishableKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ p_call: resumeCallA }),
+  }, [env.serviceRoleKey, env.publishableKey]);
+  assert.equal(anonResumeStatus.response.ok, false, "anonymous resume status must be denied"); checks++;
+
+  const serviceResumeStatus = await serviceRest("/rest/v1/rpc/get_onboarding_resume_status", {
+    method: "POST", body: JSON.stringify({ p_call: resumeCallA }),
+  });
+  assert.equal(serviceResumeStatus.response.ok, false, "service role must not execute owner status RPC"); checks++;
+
   const bootstrapA2 = await rest(tokenA, "/rest/v1/rpc/ensure_owner_tenant", { method: "POST", body: "{}" });
   assert.equal(bootstrapA2.response.ok, true);
   assert.equal(bootstrapA2.body.created, false, "repeated bootstrap must not create");

@@ -66,6 +66,7 @@ select extensions.ok(
       ('ensure_owner_tenant()'),
       ('get_calendar_test_state(uuid)'),
       ('get_connector_status(uuid)'),
+      ('get_onboarding_resume_status(uuid)'),
       ('grant_power(uuid,text,text,text,jsonb,numeric,timestamp with time zone)'),
       ('reset_owner_test_memory()'),
       ('revoke_power(uuid)'),

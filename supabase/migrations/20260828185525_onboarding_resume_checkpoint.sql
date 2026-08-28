@@ -1145,3 +1145,265 @@ create trigger browser_session_requests_protocol_identity
 before update on public.browser_session_requests
 for each row execute function
   public.enforce_browser_session_protocol_identity_v2();
+
+create or replace function public.get_onboarding_resume_status(p_call uuid)
+returns jsonb
+language plpgsql
+security definer
+stable
+set search_path = ''
+as $$
+declare
+  v_owner uuid := auth.uid();
+  v_call public.calls;
+  v_reservation public.budget_reservations;
+  v_receipt public.receipts;
+  v_revision integer;
+  v_digest text;
+begin
+  if p_call is null or v_owner is null then
+    raise exception using errcode = '42501',
+      message = 'onboarding_resume_status_not_owner_bound';
+  end if;
+
+  select c.* into v_call
+  from public.calls c
+  join public.tenants t
+    on t.id = c.tenant_id
+   and t.owner_user_id = v_owner
+   and t.status = 'onboarding'
+   and t.operational_mode = 'simulation_only'
+  join public.browser_session_requests br
+    on br.tenant_id = c.tenant_id
+   and br.call_id = c.id
+   and br.user_id = v_owner
+   and br.session_type = 'onboarding'
+  where c.id = p_call
+    and c.channel = 'browser'
+    and c.session_type = 'onboarding'
+  order by br.created_at desc, br.id desc
+  limit 1;
+  if v_call.id is null then
+    raise exception using errcode = '42501',
+      message = 'onboarding_resume_status_not_owner_bound';
+  end if;
+
+  select br.* into v_reservation
+  from public.budget_reservations br
+  where br.tenant_id = v_call.tenant_id and br.call_id = v_call.id;
+  select r.* into v_receipt
+  from public.receipts r
+  where r.tenant_id = v_call.tenant_id
+    and r.call_id = v_call.id
+    and r.kind = 'onboarding_coverage'
+  order by (r.readback->>'revision')::integer desc,
+    r.created_at desc, r.id desc
+  limit 1;
+  v_revision := case
+    when coalesce(v_receipt.readback->>'revision' ~ '^[1-9][0-9]*$', false)
+      then (v_receipt.readback->>'revision')::integer
+    else null
+  end;
+  v_digest := case
+    when coalesce(v_receipt.readback->>'snapshot_digest' ~
+      '^[0-9a-f]{64}$', false)
+      then v_receipt.readback->>'snapshot_digest'
+    else null
+  end;
+
+  if exists (
+    select 1
+    from public.calls newer
+    join public.browser_session_requests newer_request
+      on newer_request.tenant_id = newer.tenant_id
+     and newer_request.call_id = newer.id
+     and newer_request.user_id = v_owner
+     and newer_request.session_type = 'onboarding'
+    where newer.tenant_id = v_call.tenant_id
+      and newer.channel = 'browser'
+      and newer.session_type = 'onboarding'
+      and (newer.started_at, newer.id) > (v_call.started_at, v_call.id)
+  ) then
+    return jsonb_build_object(
+      'status', 'blocked',
+      'revision', v_revision,
+      'snapshot_digest', v_digest
+    );
+  end if;
+
+  if v_call.status not in ('killed_budget','killed_deadline','error') then
+    return jsonb_build_object(
+      'status', 'blocked', 'revision', v_revision,
+      'snapshot_digest', v_digest
+    );
+  end if;
+  if v_call.provider_termination_state in ('active','pending','unknown') then
+    return jsonb_build_object(
+      'status', 'pending', 'revision', v_revision,
+      'snapshot_digest', v_digest
+    );
+  end if;
+  if (
+    v_call.status in ('killed_budget','killed_deadline')
+    and v_call.provider_termination_state is distinct from 'confirmed'
+  ) or (
+    v_call.status = 'error'
+    and v_call.provider_termination_state not in ('confirmed','not_required')
+  ) then
+    return jsonb_build_object(
+      'status', 'blocked', 'revision', v_revision,
+      'snapshot_digest', v_digest
+    );
+  end if;
+  if v_reservation.id is null then
+    return jsonb_build_object(
+      'status', 'blocked', 'revision', v_revision,
+      'snapshot_digest', v_digest
+    );
+  end if;
+  if v_reservation.status is distinct from 'settled' then
+    return jsonb_build_object(
+      'status', 'pending', 'revision', v_revision,
+      'snapshot_digest', v_digest
+    );
+  end if;
+
+  if (
+       v_call.status in ('killed_budget','killed_deadline')
+       and v_reservation.outcome is distinct from v_call.status
+     ) or (
+       v_call.status = 'error'
+       and v_reservation.outcome not in ('startup_error','error')
+     ) or v_reservation.reserved_minutes <= 0
+     or v_receipt.id is null
+     or exists (
+       select 1 from public.onboarding_resume_consumptions oc
+       where oc.source_call_id = v_call.id
+          or oc.source_receipt_id = v_receipt.id
+     )
+     or exists (
+       select 1 from public.receipts r
+       where r.tenant_id = v_call.tenant_id
+         and r.call_id = v_call.id
+         and r.kind = 'onboarding_voice_approval'
+     )
+     or exists (
+       select 1 from public.rules r
+       where r.tenant_id = v_call.tenant_id
+         and r.related_call_id = v_call.id
+     ) then
+    return jsonb_build_object(
+      'status', 'blocked', 'revision', v_revision,
+      'snapshot_digest', v_digest
+    );
+  end if;
+
+  if v_call.status = 'error' and (
+       v_receipt.readback->>'transition_kind' <> 'resume_checkpoint'
+       or v_receipt.readback->>'revision' <> '1'
+       or v_receipt.detail->>'transition_kind' <> 'resume_checkpoint'
+       or v_receipt.detail->'transition_schema' is distinct from '2'::jsonb
+       or (
+         select count(*) from public.receipts r
+         where r.tenant_id = v_call.tenant_id
+           and r.call_id = v_call.id
+           and r.kind = 'onboarding_coverage'
+       ) <> 1
+       or exists (
+         select 1 from public.receipts r
+         where r.tenant_id = v_call.tenant_id
+           and r.call_id = v_call.id
+           and r.kind = 'onboarding_event_alias'
+       )
+       or jsonb_array_length(v_receipt.readback->'materializations') <> 0
+     ) then
+    return jsonb_build_object(
+      'status', 'blocked', 'revision', v_revision,
+      'snapshot_digest', v_digest
+    );
+  end if;
+
+  if v_receipt.readback->'schema_version' is distinct from '2'::jsonb
+     or v_receipt.readback->'complete' is distinct from 'false'::jsonb
+     or v_receipt.readback->>'tenant_id' <> v_call.tenant_id::text
+     or v_receipt.readback->>'call_id' <> v_call.id::text
+     or jsonb_typeof(v_receipt.readback->'snapshot') <> 'object'
+     or jsonb_typeof(v_receipt.readback->'snapshot'->'cells') <> 'object'
+     or jsonb_typeof(v_receipt.readback->'snapshot'->'services') <> 'array'
+     or jsonb_typeof(v_receipt.readback->'snapshot'->'followUps') <> 'number'
+     or jsonb_typeof(
+       v_receipt.readback->'snapshot'->'followUpGroups'
+     ) <> 'object'
+     or v_receipt.readback->'snapshot'->>'tenantId' <>
+       v_call.tenant_id::text
+     or v_receipt.readback->'snapshot'->>'callId' <> v_call.id::text
+     or v_receipt.readback->'snapshot'->>'revision' <>
+       v_receipt.readback->>'revision'
+     or jsonb_typeof(v_receipt.readback->'progress') <> 'object'
+     or jsonb_typeof(
+       v_receipt.readback->'progress'->'missingRequired'
+     ) <> 'array'
+     or jsonb_typeof(v_receipt.readback->'progress'->'ambiguous') <> 'array'
+     or jsonb_typeof(v_receipt.readback->'selected_rule_ids') <> 'array'
+     or jsonb_typeof(v_receipt.readback->'current_answer_hashes') <> 'object'
+     or jsonb_typeof(v_receipt.readback->'materializations') <> 'array'
+     or v_receipt.readback->'summary_projection' is distinct from 'null'::jsonb
+     or v_receipt.readback->'summary_hash' is distinct from 'null'::jsonb
+     or v_receipt.readback->'authority' is distinct from jsonb_build_object(
+       'rules_approved', false,
+       'powers_granted', false,
+       'operational_mode_changed', false
+     )
+     or v_receipt.readback->'next_action'->>'type' is distinct from 'ask'
+     or coalesce(btrim(v_receipt.readback->'next_action'->>'field'), '') = ''
+     or coalesce(
+       btrim(v_receipt.readback->'next_action'->>'question_pt'), ''
+     ) = '' then
+    return jsonb_build_object(
+      'status', 'blocked', 'revision', v_revision,
+      'snapshot_digest', v_digest
+    );
+  end if;
+
+  if jsonb_array_length(v_receipt.readback->'selected_rule_ids') <> 0
+     or exists (
+       select 1 from jsonb_array_elements(
+         v_receipt.readback->'materializations'
+       ) item
+       where item->>'review_ready' = 'true'
+          or item->'structured'->>'review_ready' = 'true'
+          or item->'structured'->>'materialization_eligible' = 'true'
+     )
+     or v_receipt.readback->'current_answer_hashes' is distinct from
+       public.onboarding_snapshot_hashes_v1(v_receipt.readback->'snapshot')
+     or v_receipt.readback->'next_action'->>'field' is distinct from
+       v_receipt.readback->'progress'->'nextQuestion'->>'field'
+     or coalesce(v_receipt.readback->'next_action'->>'subject', '')
+       is distinct from coalesce(
+         v_receipt.readback->'progress'->'nextQuestion'->>'subject', ''
+       )
+     or v_receipt.readback->'next_action'->>'question_pt' is distinct from
+       v_receipt.readback->'progress'->'nextQuestion'->>'questionPt'
+     or v_digest is null
+     or v_digest is distinct from encode(extensions.digest(
+       convert_to((v_receipt.readback - 'snapshot_digest')::text, 'UTF8'),
+       'sha256'
+     ), 'hex') then
+    return jsonb_build_object(
+      'status', 'blocked', 'revision', v_revision,
+      'snapshot_digest', v_digest
+    );
+  end if;
+
+  return jsonb_build_object(
+    'status', 'eligible',
+    'revision', v_revision,
+    'snapshot_digest', v_digest
+  );
+end;
+$$;
+
+revoke all on function public.get_onboarding_resume_status(uuid)
+  from public, anon, authenticated, service_role;
+grant execute on function public.get_onboarding_resume_status(uuid)
+  to authenticated;

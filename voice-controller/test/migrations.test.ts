@@ -114,6 +114,27 @@ describe("durable onboarding resume migration contract", () => {
     expect(sql).toContain("new.onboarding_protocol_version is distinct from old.onboarding_protocol_version");
     expect(sql).toContain("message = 'browser_session_protocol_identity_invalid'");
   });
+
+  test("exposes one owner-safe resume-status RPC with the initializer eligibility envelope", () => {
+    const sql = migrationSql("onboarding_resume_checkpoint");
+    expect(sql).toContain("function public.get_onboarding_resume_status(p_call uuid)");
+    expect(sql).toContain("security definer stable set search_path = ''");
+    expect(sql).toContain("auth.uid()");
+    expect(sql).toContain("t.owner_user_id = v_owner");
+    expect(sql).toContain("t.status = 'onboarding'");
+    expect(sql).toContain("t.operational_mode = 'simulation_only'");
+    expect(sql).toContain("'status', 'pending'");
+    expect(sql).toContain("'status', 'eligible'");
+    expect(sql).toContain("'status', 'blocked'");
+    expect(sql).toContain("v_reservation.status is distinct from 'settled'");
+    expect(sql).toContain("provider_termination_state");
+    expect(sql).toContain("r.kind = 'onboarding_voice_approval'");
+    expect(sql).toContain("from public.rules r");
+    expect(sql).toContain("jsonb_array_length(v_receipt.readback->'selected_rule_ids')");
+    expect(sql).toContain("review_ready");
+    expect(sql).toContain("revoke all on function public.get_onboarding_resume_status(uuid) from public, anon, authenticated, service_role");
+    expect(sql).toContain("grant execute on function public.get_onboarding_resume_status(uuid) to authenticated");
+  });
 });
 
 describe("OAuth connector hardening migration contract", () => {

@@ -155,28 +155,6 @@ function approvalRow(overrides = {}) {
   };
 }
 
-function coverageRow(overrides = {}) {
-  return {
-    id: "66666666-6666-4666-8666-666666666666",
-    call_id: CALL_ID,
-    kind: "onboarding_coverage",
-    outcome: "accepted",
-    readback: {
-      schema_version: 2,
-      call_id: CALL_ID,
-      revision: 7,
-      complete: false,
-      snapshot_digest: "b".repeat(64),
-      next_action: {
-        type: "ask",
-        field: "area.coverage",
-        question_pt: "Qual é a área atendida?",
-      },
-    },
-    ...overrides,
-  };
-}
-
 function callRow(overrides = {}) {
   return {
     id: CALL_ID,
@@ -190,12 +168,26 @@ function callRow(overrides = {}) {
 
 function queryClient({
   receipt = { data: null, error: null },
-  coverage = { data: null, error: null },
   call = { data: null, error: null },
+  resumeStatus = { data: { status: "blocked", revision: null, snapshot_digest: null }, error: null },
 } = {}) {
   const queries = [];
   return {
     queries,
+    rpc(name, args) {
+      const query = { table: "rpc", name, args, abortSignal: null };
+      queries.push(query);
+      const operation = {
+        abortSignal(signal) { query.abortSignal = signal; return operation; },
+        then(resolve, reject) {
+          const configured = typeof resumeStatus === "function"
+            ? resumeStatus(query)
+            : resumeStatus;
+          return Promise.resolve(configured).then(resolve, reject);
+        },
+      };
+      return operation;
+    },
     from(table) {
       const query = { table, columns: null, equals: [], orders: [], limit: null, abortSignal: null };
       queries.push(query);
@@ -206,10 +198,7 @@ function queryClient({
         limit(value) { query.limit = value; return builder; },
         abortSignal(signal) { query.abortSignal = signal; return builder; },
         maybeSingle() {
-          const kind = query.equals.find(([column]) => column === "kind")?.[1];
-          const configured = table === "receipts"
-            ? kind === "onboarding_coverage" ? coverage : receipt
-            : call;
+          const configured = table === "receipts" ? receipt : call;
           return typeof configured === "function" ? configured(query) : Promise.resolve(configured);
         },
       };
@@ -986,10 +975,17 @@ test("peer close without an acknowledgement is interrupted and queries only the 
   ]);
 });
 
-test("budget or deadline termination is resumable only with one durable incomplete coverage question", async () => {
+test("budget or deadline termination is resumable only when the owner-safe RPC says eligible", async () => {
   for (const status of ["killed_budget", "killed_deadline"]) {
     const client = queryClient({
-      coverage: { data: coverageRow(), error: null },
+      resumeStatus: {
+        data: {
+          status: "eligible",
+          revision: 7,
+          snapshot_digest: "b".repeat(64),
+        },
+        error: null,
+      },
       call: {
         data: callRow({
           status,
@@ -1009,67 +1005,152 @@ test("budget or deadline termination is resumable only with one durable incomple
     assert.deepEqual(outcome, {
       status: "resumable",
       revision: 7,
-      nextAction: {
-        type: "ask",
-        field: "area.coverage",
-        question_pt: "Qual é a área atendida?",
-      },
+      snapshotDigest: "b".repeat(64),
     });
-    const coverageQuery = client.queries.find((entry) =>
-      entry.table === "receipts" &&
-      entry.equals.some(([column, value]) =>
-        column === "kind" && value === "onboarding_coverage"
-      )
+    const resumeQuery = client.queries.find((entry) =>
+      entry.table === "rpc"
     );
-    assert.deepEqual(coverageQuery.equals, [
-      ["call_id", CALL_ID],
-      ["kind", "onboarding_coverage"],
-      ["outcome", "accepted"],
-    ]);
+    assert.equal(resumeQuery.name, "get_onboarding_resume_status");
+    assert.deepEqual(resumeQuery.args, { p_call: CALL_ID });
   }
 });
 
-test("manual, error, complete, or malformed coverage remains non-resumable", async () => {
+test("provider reconciliation, unsettled budget, and ambiguous status stay finalizing", async () => {
+  for (const candidate of [
+    {
+      providerState: "pending",
+      resumeStatus: {
+        data: { status: "pending", revision: 7, snapshot_digest: "b".repeat(64) },
+        error: null,
+      },
+    },
+    {
+      providerState: "unknown",
+      resumeStatus: {
+        data: { status: "pending", revision: 7, snapshot_digest: "b".repeat(64) },
+        error: null,
+      },
+    },
+    {
+      providerState: "confirmed",
+      resumeStatus: {
+        data: { status: "pending", revision: 7, snapshot_digest: "b".repeat(64) },
+        error: null,
+      },
+    },
+    { providerState: "confirmed", resumeStatus: { data: null, error: { message: "fetch ambiguous" } } },
+    { providerState: "confirmed", resumeStatus: () => new Promise(() => {}) },
+  ]) {
+    const client = queryClient({
+      resumeStatus: candidate.resumeStatus,
+      call: {
+        data: callRow({
+          status: "killed_budget",
+          provider_termination_state: candidate.providerState,
+          provider_termination_reason: "sideband_killed_budget",
+        }),
+        error: null,
+      },
+    });
+    const outcome = await resolveOnboardingOutcome({
+      client,
+      reason: "remote_hangup",
+      callId: CALL_ID,
+      timeoutMs: 5,
+      pollIntervalMs: 1,
+      knownRevision: 7,
+    });
+    assert.deepEqual(outcome, { status: "finalizing", revision: 7 });
+  }
+});
+
+test("Test 10 pause sequence stays finalizing until the owner-safe RPC becomes eligible", async () => {
+  const clients = [
+    queryClient({
+      resumeStatus: {
+        data: { status: "pending", revision: 33, snapshot_digest: "c".repeat(64) },
+        error: null,
+      },
+      call: { data: callRow({
+        status: "killed_budget",
+        provider_termination_state: "pending",
+        provider_termination_reason: "sideband_killed_budget",
+      }), error: null },
+    }),
+    queryClient({
+      resumeStatus: {
+        data: { status: "pending", revision: 33, snapshot_digest: "c".repeat(64) },
+        error: null,
+      },
+      call: { data: callRow({
+        status: "killed_budget",
+        provider_termination_state: "confirmed",
+        provider_termination_reason: "sideband_killed_budget",
+      }), error: null },
+    }),
+    queryClient({
+      resumeStatus: {
+        data: { status: "eligible", revision: 33, snapshot_digest: "c".repeat(64) },
+        error: null,
+      },
+      call: { data: callRow({
+        status: "killed_budget",
+        provider_termination_state: "confirmed",
+        provider_termination_reason: "sideband_killed_budget",
+      }), error: null },
+    }),
+  ];
+  const published = [];
+  let probe = 0;
+  const outcome = await watchOnboardingOutcome({
+    client: {},
+    reason: "remote_hangup",
+    callId: CALL_ID,
+    retryDelayMs: 250,
+    sleep: async () => {},
+    resolve: (scope) => resolveOnboardingOutcome({
+      ...scope,
+      client: clients[probe++],
+      timeoutMs: 50,
+      pollIntervalMs: 1,
+    }),
+    onOutcome: (value) => { published.push(value); },
+  });
+
+  assert.deepEqual(published, [
+    { status: "finalizing", revision: 33 },
+    { status: "finalizing", revision: 33 },
+    { status: "resumable", revision: 33, snapshotDigest: "c".repeat(64) },
+  ]);
+  assert.deepEqual(outcome, published.at(-1));
+  assert.equal(probe, 3);
+});
+
+test("manual, generic error, and RPC-blocked pause states remain non-resumable", async () => {
   const cases = [
     {
       reason: "manual_hangup",
       call: callRow({ status: "killed_budget" }),
-      coverage: coverageRow(),
     },
     {
       reason: "remote_hangup",
       call: callRow({ status: "error" }),
-      coverage: coverageRow(),
     },
     {
       reason: "remote_hangup",
       call: callRow({ status: "killed_budget" }),
-      coverage: coverageRow({
-        readback: { ...coverageRow().readback, complete: true },
-      }),
     },
     {
       reason: "remote_hangup",
       call: callRow({ status: "killed_deadline" }),
-      coverage: coverageRow({
-        readback: {
-          ...coverageRow().readback,
-          next_action: { type: "prepare_summary" },
-        },
-      }),
-    },
-    {
-      reason: "remote_hangup",
-      call: callRow({
-        status: "killed_budget",
-        provider_termination_state: "unknown",
-      }),
-      coverage: coverageRow(),
     },
   ];
   for (const candidate of cases) {
     const client = queryClient({
-      coverage: { data: candidate.coverage, error: null },
+      resumeStatus: {
+        data: { status: "blocked", revision: null, snapshot_digest: null },
+        error: null,
+      },
       call: { data: candidate.call, error: null },
     });
     assert.deepEqual(await resolveOnboardingOutcome({
@@ -1525,7 +1606,11 @@ test("onboarding result copy distinguishes interrupted, finalizing, and durable 
   );
   assert.equal(
     onboardingOutcomeCopy({ status: "finalizing", revision: 8 }),
-    "Finalizando… Cobertura confirmada por voz · revisão 8. O encerramento do provedor ainda não foi confirmado. Regras ainda aguardando aprovação na Memória.",
+    "Finalizando… A pausa e a possibilidade de continuar ainda estão sendo confirmadas · revisão 8.",
+  );
+  assert.equal(
+    onboardingOutcomeCopy({ status: "finalizing" }),
+    "Finalizando… A pausa e a possibilidade de continuar ainda estão sendo confirmadas.",
   );
   assert.equal(
     onboardingOutcomeCopy({ status: "complete", revision: 8 }),
