@@ -518,7 +518,7 @@ function onboardingResumeSourceReceiptSql({
 }) {
   const services = [
     "desentupimento",
-    "conserto_de_vazamento",
+    "conserto_vazamento",
     "diagnostico_hidraulico",
   ];
   const serviceFields = [
@@ -533,147 +533,158 @@ function onboardingResumeSourceReceiptSql({
     "service.emergency_eligibility",
     "service.escalation",
   ];
-  const missingRequired = [
+  const domainFields = [
+    "business.customer_types", "business.excluded_work",
+    "business.languages_tone", "area.coverage",
+    "area.out_of_area_policy", "area.travel_fee",
+    "schedule.business_hours", "schedule.same_day_lead_time",
+    "schedule.capacity_buffer", "schedule.reschedule_cancel",
+    "schedule.holidays", "emergency.types",
+    "emergency.safety_escalation", "emergency.after_hours",
+    "emergency.fee_authority", "policy.payment_estimate",
+    "policy.warranty_materials", "policy.access_cancellation",
+    "policy.complaints_returns", "authority.quote_price",
+    "authority.negotiate_floor", "authority.read_calendar",
+    "authority.book", "authority.reschedule_cancel",
+    "authority.charge_fee", "authority.emergency",
+    "authority.out_of_area",
+  ];
+  const requiredFields = [
+    { field: "service.catalog_closure" },
     ...services.flatMap((subject) => serviceFields.map((field) => ({
       field,
       subject,
     }))),
-    { field: "business.customer_types" },
-    { field: "area.out_of_area_policy" },
-    { field: "schedule.business_hours" },
-    { field: "emergency.types" },
-    { field: "policy.payment_estimate" },
-    { field: "authority.quote_price" },
+    ...domainFields.map((field) => ({ field })),
   ];
-  const ambiguous = [{ field: "area.coverage" }];
-  const requiredFields = [...missingRequired, ...ambiguous];
-  const activeKeys = new Set(requiredFields.map(({ field, subject }) =>
-    subject ? `service:${subject}:${field}` : field
-  ));
-  const domainDefinitions = [
+  const answered = (value) => ({ state: "answered", attempts: 1, value });
+  const answeredFacts = [
     {
-      key: "domain:business", category: "negocio", scope: "geral",
-      schema: "ligou.rule.business.v2",
-      fields: [
-        "business.customer_types", "business.excluded_work",
-        "business.languages_tone",
-      ],
+      field: "service.name_synonyms", subject: "desentupimento",
+      cell: answered(["desentupimento"]),
     },
     {
-      key: "domain:area", category: "area", scope: "localizacao",
-      schema: "ligou.rule.area.v2",
-      fields: ["area.coverage", "area.out_of_area_policy", "area.travel_fee"],
+      field: "service.price_mode", subject: "desentupimento",
+      cell: answered("fixed"),
     },
     {
-      key: "domain:schedule", category: "agenda", scope: "geral",
-      schema: "ligou.rule.schedule.v2",
-      fields: [
-        "schedule.business_hours", "schedule.same_day_lead_time",
-        "schedule.capacity_buffer", "schedule.reschedule_cancel",
-        "schedule.holidays",
-      ],
+      field: "service.price_target", subject: "desentupimento",
+      cell: answered(180),
     },
     {
-      key: "domain:emergency", category: "emergencia", scope: "geral",
-      schema: "ligou.rule.emergency.v2",
-      fields: [
-        "emergency.types", "emergency.safety_escalation",
-        "emergency.after_hours", "emergency.fee_authority",
-      ],
+      field: "service.duration", subject: "desentupimento",
+      cell: answered(60),
     },
     {
-      key: "domain:policy", category: "politica", scope: "geral",
-      schema: "ligou.rule.policy.v2",
-      fields: [
-        "policy.payment_estimate", "policy.warranty_materials",
-        "policy.access_cancellation", "policy.complaints_returns",
-      ],
+      field: "service.inclusions_exclusions", subject: "desentupimento",
+      cell: answered("Mão de obra e diagnóstico da obstrução."),
     },
     {
-      key: "domain:authority", category: "autoridade", scope: "geral",
-      schema: "ligou.rule.authority.v2",
-      fields: [
-        "authority.quote_price", "authority.negotiate_floor",
-        "authority.read_calendar", "authority.book",
-        "authority.reschedule_cancel", "authority.charge_fee",
-        "authority.emergency", "authority.out_of_area",
-      ],
+      field: "service.materials_parts", subject: "desentupimento",
+      cell: answered("Materiais cobrados à parte."),
+    },
+    {
+      field: "service.warranty", subject: "desentupimento",
+      cell: answered("Garantia de 30 dias."),
+    },
+    {
+      field: "service.escalation", subject: "desentupimento",
+      cell: answered("Encaminhar dano estrutural ao responsável."),
+    },
+    {
+      field: "service.name_synonyms", subject: "conserto_vazamento",
+      cell: answered(["conserto de vazamento"]),
+    },
+    {
+      field: "service.price_mode", subject: "conserto_vazamento",
+      cell: answered("fixed"),
+    },
+    {
+      field: "service.price_target", subject: "conserto_vazamento",
+      cell: answered(220),
+    },
+    {
+      field: "service.duration", subject: "conserto_vazamento",
+      cell: answered(90),
+    },
+    {
+      field: "service.inclusions_exclusions", subject: "conserto_vazamento",
+      cell: answered("Reparo do ponto identificado."),
+    },
+    {
+      field: "service.materials_parts", subject: "conserto_vazamento",
+      cell: answered("Peças cobradas à parte."),
+    },
+    {
+      field: "service.escalation", subject: "conserto_vazamento",
+      cell: answered("Encaminhar vazamento estrutural ao responsável."),
+    },
+    {
+      field: "service.name_synonyms", subject: "diagnostico_hidraulico",
+      cell: answered(["diagnóstico hidráulico"]),
+    },
+    {
+      field: "service.price_mode", subject: "diagnostico_hidraulico",
+      cell: answered("fixed"),
+    },
+    {
+      field: "service.price_target", subject: "diagnostico_hidraulico",
+      cell: answered(120),
+    },
+    {
+      field: "service.duration", subject: "diagnostico_hidraulico",
+      cell: answered(45),
+    },
+    {
+      field: "service.inclusions_exclusions",
+      subject: "diagnostico_hidraulico",
+      cell: answered("Inspeção e relatório do diagnóstico."),
+    },
+    {
+      field: "service.catalog_closure",
+      cell: answered(true),
     },
   ];
-  const incompleteMaterialization = ({
-    key,
-    category,
-    scope,
-    schema,
-    serviceType,
-    sourceRefs,
-  }) => finalizeMaterialization({
-    key,
-    category,
-    scope,
-    state: "incomplete",
-    review_ready: false,
-    text: serviceType ? `Serviço ${serviceType.replaceAll("_", " ")}.` : "",
-    source_refs: sourceRefs,
-    structured: {
-      schema,
-      ...(serviceType ? {
-        service_type: serviceType,
-        service_names: [serviceType.replaceAll("_", " ")],
-        price_mode: "owner_review",
-        quoteable: false,
-        negotiable: false,
-        owner_review_fields: [],
-      } : {
-        owner_review_fields: [],
-        fields: {},
-      }),
-      operational_state: "incomplete",
-      materialization_key: key,
-      materialization_eligible: false,
-      review_ready: false,
-      coverage_revision: revision,
-      source_call_id: callId,
-      source_refs: sourceRefs,
-    },
-  });
-  const materializations = [
-    ...domainDefinitions.map(({ key, category, scope, schema, fields }) =>
-      incompleteMaterialization({
-        key, category, scope, schema,
-        sourceRefs: fields.filter((field) => activeKeys.has(field)).sort(),
-      })
-    ),
-    ...services.map((serviceType) => incompleteMaterialization({
-      key: `service:${serviceType}`,
-      category: "preco",
-      scope: "servico",
-      schema: "ligou.rule.service.v2",
-      serviceType,
-      sourceRefs: serviceFields.map((field) =>
-        `service:${serviceType}:${field}`
-      ).filter((key) => activeKeys.has(key)).sort(),
-    })),
-  ];
+  const cellKey = ({ field, subject }) => subject
+    ? `service:${subject}:${field}`
+    : field;
+  const cells = Object.fromEntries([
+    ...answeredFacts.map((fact) => [cellKey(fact), fact.cell]),
+    [
+      "service:desentupimento:service.emergency_eligibility",
+      {
+        state: "ambiguous",
+        attempts: 2,
+        reason: "owner_confirmation_required",
+      },
+    ],
+  ]);
+  const ambiguous = [{
+    field: "service.emergency_eligibility",
+    subject: "desentupimento",
+  }];
+  const missingRequired = requiredFields.filter((ref) =>
+    !Object.hasOwn(cells, cellKey(ref))
+  );
   const snapshot = {
     tenantId,
     callId,
     revision,
     services,
-    cells: {},
+    cells,
     followUps: 11,
     followUpGroups: Object.fromEntries([
-      "area.coverage",
-      "business.customer_types",
-      "business.excluded_work",
-      "business.languages_tone",
-      "area.out_of_area_policy",
-      "area.travel_fee",
-      "schedule.business_hours",
-      "schedule.same_day_lead_time",
-      "schedule.capacity_buffer",
-      "schedule.reschedule_cancel",
-      "schedule.holidays",
+      "service:desentupimento:service.price_mode",
+      "service:desentupimento:service.price_target",
+      "service:desentupimento:service.duration",
+      "service:desentupimento:service.inclusions_exclusions",
+      "service:desentupimento:service.materials_parts",
+      "service:desentupimento:service.warranty",
+      "service:desentupimento:service.escalation",
+      "service:desentupimento:service.emergency_eligibility",
+      "service:conserto_vazamento:service.price_mode",
+      "service:conserto_vazamento:service.price_target",
+      "service:conserto_vazamento:service.duration",
     ].map((field) => [field, 1])),
     summaryInvalidated: false,
   };
@@ -690,12 +701,16 @@ function onboardingResumeSourceReceiptSql({
       conditionalFields: [],
       missingRequired,
       ambiguous,
-      answered: [],
+      answered: answeredFacts.map(({ field, subject }) => ({
+        field,
+        ...(subject ? { subject } : {}),
+      })),
       ownerReviewRequired: [],
       notApplicable: [],
       nextQuestion: {
-        field: "area.coverage",
-        questionPt: "Qual é a área atendida?",
+        field: "service.emergency_eligibility",
+        subject: "conserto_vazamento",
+        questionPt: "Conserto de vazamento atende emergências?",
       },
       catalogNormallyComplete: true,
       summaryInvalidated: false,
@@ -703,11 +718,12 @@ function onboardingResumeSourceReceiptSql({
     selected_rule_ids: [],
     next_action: {
       type: "ask",
-      field: "area.coverage",
-      question_pt: "Qual é a área atendida?",
+      field: "service.emergency_eligibility",
+      subject: "conserto_vazamento",
+      question_pt: "Conserto de vazamento atende emergências?",
     },
-    current_answer_hashes: {},
-    materializations,
+    current_answer_hashes: snapshotCellHashes(snapshot),
+    materializations: [],
     summary_projection: null,
     summary_hash: null,
     rule_id: null,
@@ -719,8 +735,27 @@ function onboardingResumeSourceReceiptSql({
       operational_mode_changed: false,
     },
   };
-  return `with source_readback as (
+  const materializationKeys = [
+    "domain:area", "domain:authority", "domain:business",
+    "domain:emergency", "domain:policy", "domain:schedule",
+    ...services.map((service) => `service:${service}`),
+  ];
+  return `with base_readback as (
     select ${jsonb(readback)} as value
+  ), source_readback as (
+    select base.value || jsonb_build_object(
+      'materializations', (
+        select jsonb_agg(
+          public.onboarding_materialization_v3(
+            base.value->'snapshot', item.key, ${revision}, '${callId}'
+          ) order by item.key
+        )
+        from unnest(array[${materializationKeys.map((key) =>
+          `'${key}'`
+        ).join(",")}]::text[]) item(key)
+      )
+    ) as value
+    from base_readback base
   )
   insert into public.receipts (
     id, tenant_id, call_id, kind, outcome, external_id, readback,
@@ -740,9 +775,10 @@ function onboardingResumeSourceReceiptSql({
       'transition_schema', 2,
       'source_revision', ${revision - 1},
       'source_digest', '${"f".repeat(64)}',
-      'field', 'area.coverage',
-      'question_pt', 'Qual é a área atendida?',
-      'materialization_key', 'domain:area',
+      'field', 'service.emergency_eligibility',
+      'subject', 'conserto_vazamento',
+      'question_pt', 'Conserto de vazamento atende emergências?',
+      'materialization_key', 'service:conserto_vazamento',
       'materialization_action', 'coverage_only',
       'browser_request_id', '${requestId}'
     )
@@ -4316,6 +4352,80 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
       requestId: ids.sourceRequest,
     })}
   `), "onboarding resume fixture");
+  const sourceCoverage = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    `select readback::text from public.receipts
+     where id = '${ids.sourceReceipt}';`,
+  ), "sanitized Test 10 source coverage"));
+  assert.deepEqual(sourceCoverage.snapshot.services, [
+    "desentupimento",
+    "conserto_vazamento",
+    "diagnostico_hidraulico",
+  ]);
+  assert.equal(Object.keys(sourceCoverage.snapshot.cells).length, 22);
+  assert.deepEqual(
+    sourceCoverage.snapshot.cells[
+      "service:desentupimento:service.emergency_eligibility"
+    ],
+    {
+      state: "ambiguous",
+      attempts: 2,
+      reason: "owner_confirmation_required",
+    },
+  );
+  assert.equal(
+    Object.hasOwn(
+      sourceCoverage.snapshot.cells,
+      "service:conserto_vazamento:service.emergency_eligibility",
+    ),
+    false,
+  );
+  assert.deepEqual(sourceCoverage.next_action, {
+    type: "ask",
+    field: "service.emergency_eligibility",
+    subject: "conserto_vazamento",
+    question_pt: "Conserto de vazamento atende emergências?",
+  });
+  assert.deepEqual(
+    sourceCoverage.snapshot.cells[
+      "service:desentupimento:service.price_target"
+    ],
+    { state: "answered", attempts: 1, value: 180 },
+  );
+  assert.deepEqual(
+    sourceCoverage.snapshot.cells[
+      "service:conserto_vazamento:service.escalation"
+    ],
+    {
+      state: "answered",
+      attempts: 1,
+      value: "Encaminhar vazamento estrutural ao responsável.",
+    },
+  );
+  assert.deepEqual(
+    sourceCoverage.snapshot.cells[
+      "service:diagnostico_hidraulico:service.inclusions_exclusions"
+    ],
+    {
+      state: "answered",
+      attempts: 1,
+      value: "Inspeção e relatório do diagnóstico.",
+    },
+  );
+  assert.equal(scalar(await runSql(connection, home, `
+    select bool_and(
+      item.value is not distinct from public.onboarding_materialization_v3(
+        r.readback->'snapshot', item.value->>'key',
+        (r.readback->>'revision')::integer, r.call_id
+      )
+    )::text
+    from public.receipts r
+    cross join lateral jsonb_array_elements(
+      r.readback->'materializations'
+    ) item(value)
+    where r.id = '${ids.sourceReceipt}';
+  `), "source materializations generated by SQL"), "true");
   assert.equal(scalar(await runSql(connection, home, `
     select
       (r.readback->>'transition_kind') || ':' ||
@@ -4475,14 +4585,19 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
   assert.equal(firstResume.revision, 1);
   assert.equal(firstResume.coverage.snapshot.callId, ids.targetCall);
   assert.equal(firstResume.coverage.snapshot.revision, 1);
+  assert.deepEqual(
+    firstResume.coverage.snapshot.cells,
+    sourceCoverage.snapshot.cells,
+  );
   assert.equal(
     firstResume.coverage.resume_context.source_call_id,
     ids.sourceCall,
   );
   assert.deepEqual(firstResume.coverage.next_action, {
     type: "ask",
-    field: "area.coverage",
-    question_pt: "Qual é a área atendida?",
+    field: "service.emergency_eligibility",
+    subject: "conserto_vazamento",
+    question_pt: "Conserto de vazamento atende emergências?",
   });
   assert.equal(scalar(await runSql(connection, home, `
     select
@@ -4585,6 +4700,10 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     ids.recoveredTargetCall,
   );
   assert.deepEqual(
+    chainedResume.coverage.snapshot.cells,
+    sourceCoverage.snapshot.cells,
+  );
+  assert.deepEqual(
     chainedResume.coverage.next_action,
     firstResume.coverage.next_action,
   );
@@ -4624,34 +4743,56 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
       and status = 'processing';
   `), "onboarding resume simulated ready handoff");
 
+  const resumedAnswerRef = {
+    field: "service.emergency_eligibility",
+    subject: "conserto_vazamento",
+  };
+  const resumedAnswerKey =
+    "service:conserto_vazamento:service.emergency_eligibility";
   const cell = {
     state: "answered",
     attempts: 1,
-    value: { localities: [{
-      locality_id: "loc_4bc5a435c3c9a7013a252ae4",
-      display_name: "Anaheim",
-      country_code: "US",
-      region_code: "CA",
-    }] },
+    value: true,
   };
   const snapshot = {
     ...chainedResume.coverage.snapshot,
     revision: 2,
-    cells: { "area.coverage": cell },
+    currentSubject: resumedAnswerRef.subject,
+    cells: {
+      ...chainedResume.coverage.snapshot.cells,
+      [resumedAnswerKey]: cell,
+    },
   };
-  const answerHash = coverageCellHash("area.coverage", cell);
-  const areaMaterialization = JSON.parse(scalar(await runSql(
+  const answerHash = coverageCellHash(resumedAnswerKey, cell);
+  const answerMaterializationKeys = [
+    "domain:area", "domain:authority", "domain:business",
+    "domain:emergency", "domain:policy", "domain:schedule",
+    "service:desentupimento", "service:conserto_vazamento",
+    "service:diagnostico_hidraulico",
+  ];
+  const answerMaterializations = JSON.parse(scalar(await runSql(
     connection,
     home,
-    `select public.onboarding_materialization_v3(
-      ${jsonb(snapshot)}, 'domain:area', 2, '${ids.recoveredTargetCall}'
-    )::text;`,
+    `select jsonb_agg(
+       public.onboarding_materialization_v3(
+         ${jsonb(snapshot)}, item.key, 2, '${ids.recoveredTargetCall}'
+       ) order by item.key
+     )::text
+     from unnest(array[${answerMaterializationKeys.map((key) =>
+       `'${key}'`
+     ).join(",")}]::text[]) item(key);`,
   ), "resumed first-answer materialization"));
   const nextAction = {
     type: "ask",
-    field: "service.catalog_closure",
-    question_pt: "Há mais algum serviço?",
+    field: "service.emergency_eligibility",
+    subject: "diagnostico_hidraulico",
+    question_pt: "Diagnóstico hidráulico atende emergências?",
   };
+  const remainingMissing = chainedResume.coverage.progress.missingRequired
+    .filter((ref) =>
+      ref.field !== resumedAnswerRef.field ||
+      ref.subject !== resumedAnswerRef.subject
+    );
   const answerCoverage = {
     schema_version: 2,
     transition_kind: "answer",
@@ -4661,24 +4802,22 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     complete: false,
     snapshot,
     progress: {
-      requiredFields: [],
-      conditionalFields: [],
-      missingRequired: [{ field: "service.catalog_closure" }],
-      ambiguous: [],
-      answered: [{ field: "area.coverage" }],
-      ownerReviewRequired: [],
-      notApplicable: [],
+      ...chainedResume.coverage.progress,
+      missingRequired: remainingMissing,
+      answered: [
+        ...chainedResume.coverage.progress.answered,
+        resumedAnswerRef,
+      ],
       nextQuestion: {
-        field: "service.catalog_closure",
-        questionPt: "Há mais algum serviço?",
+        field: nextAction.field,
+        subject: nextAction.subject,
+        questionPt: nextAction.question_pt,
       },
-      catalogNormallyComplete: true,
-      summaryInvalidated: false,
     },
     selected_rule_ids: [],
     next_action: nextAction,
-    current_answer_hashes: { "area.coverage": answerHash },
-    materializations: [areaMaterialization],
+    current_answer_hashes: snapshotCellHashes(snapshot),
+    materializations: answerMaterializations,
     summary_projection: null,
     summary_hash: null,
     authority: {
@@ -4698,16 +4837,13 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
       answerHash,
       expectedRevision: 1,
       fact: {
-        topic: "area",
-        field: "area.coverage",
+        topic: "emergencia",
+        field: resumedAnswerRef.field,
+        subject: resumedAnswerRef.subject,
         disposition: "answered",
-        rule_text: "Atende Anaheim.",
-        structured: { value: { localities: [{
-          display_name: "Anaheim",
-          country_code: "US",
-          region_code: "CA",
-        }] } },
-        owner_words: "Atendemos Anaheim.",
+        rule_text: "Conserto de vazamento pode atender emergência.",
+        structured: { value: true },
+        owner_words: "Sim, pode ser atendido como emergência.",
       },
       coverage: answerCoverage,
     })),
@@ -4716,6 +4852,15 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
   assert.equal(
     firstAnswer.coverage.snapshot.callId,
     ids.recoveredTargetCall,
+  );
+  assert.equal(Object.keys(firstAnswer.coverage.snapshot.cells).length, 23);
+  for (const [key, value] of Object.entries(sourceCoverage.snapshot.cells))
+    assert.deepEqual(firstAnswer.coverage.snapshot.cells[key], value);
+  assert.deepEqual(
+    firstAnswer.coverage.snapshot.cells[
+      "service:conserto_vazamento:service.emergency_eligibility"
+    ],
+    { state: "answered", attempts: 1, value: true },
   );
 
   requireSuccess(await runSql(connection, home, `

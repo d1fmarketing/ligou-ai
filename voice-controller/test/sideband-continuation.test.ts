@@ -24,7 +24,9 @@ import {
 } from "../src/sideband.ts";
 import { hashOnboardingToolArgs } from "../src/onboarding-coordinator.ts";
 import { makeCapability, runTool, type Capability } from "../src/tools.ts";
-import { TEST10_CAUSAL_BUDGET_FIXTURE } from "./fixtures/test10-budget.ts";
+import {
+  TEST10_SYNTHETIC_THRESHOLD_EQUIVALENCE,
+} from "./fixtures/test10-budget.ts";
 
 const ownerId = "owner-1";
 const onboardingOptions = {
@@ -5624,37 +5626,55 @@ test("application TTS cost participates in both the live kill switch and termina
   expect((settlements[0] as any)?.p_actual_cost).toBe(0.001605);
 });
 
-test("the real Test 10 USD 1.52 shape remains active for onboarding while customer calls retain the USD 1.50 kill", async () => {
-  const fixture = TEST10_CAUSAL_BUDGET_FIXTURE;
+test("synthetic_threshold_equivalence accumulates unique response.done turns to the observed Test 10 cost threshold", async () => {
+  const fixture = TEST10_SYNTHETIC_THRESHOLD_EQUIVALENCE;
+  const expectedAudioOut = [4_000, 9_000, 13_500, 18_725, 23_725];
+  const expectedCosts = [0.257605, 0.577605, 0.865605, 1.200005, 1.520005];
+  expect(fixture.kind).toBe("synthetic_threshold_equivalence");
+  expect(new Set(fixture.responseDoneEvents.map((event) =>
+    event.response.id
+  )).size).toBe(fixture.responseDoneEvents.length);
+
   const onboarding = onboardingCap("call-test-10-budget");
   const onboardingLedger = ledger(onboarding.callId);
   onboardingLedger.externalCostUsd = fixture.applicationTtsCostUsd;
   onboardingLedger.startedAt = Date.now() - fixture.elapsedMs;
   const onboardingSocket = socket();
-  await handleEvent(
-    onboarding,
-    onboardingLedger,
-    onboardingSocket as any,
-    structuredClone(fixture.responseDone),
-  );
-  expect(onboardingLedger.providerUsageEvidence.eventCount).toBe(1);
-  expect(onboardingLedger.usage.audioOut).toBe(23_725);
-  expect(totalSessionCostUsd(onboardingLedger)).toBe(fixture.totalCostUsd);
-  expect(onboardingLedger.status).toBe("active");
-  expect(onboardingSocket.closed).toBe(0);
+  for (const [index, event] of fixture.responseDoneEvents.entries()) {
+    await handleEvent(
+      onboarding,
+      onboardingLedger,
+      onboardingSocket as any,
+      structuredClone(event),
+    );
+    expect(onboardingLedger.providerUsageEvidence.eventCount).toBe(index + 1);
+    expect(onboardingLedger.usage.audioOut).toBe(expectedAudioOut[index]);
+    expect(totalSessionCostUsd(onboardingLedger))
+      .toBeCloseTo(expectedCosts[index]!, 8);
+    expect(onboardingLedger.status).toBe("active");
+    expect(onboardingSocket.closed).toBe(0);
+  }
 
   const customer = customerCap("call-customer-budget");
   const customerLedger = ledger(customer.callId);
   customerLedger.externalCostUsd = fixture.applicationTtsCostUsd;
   const customerSocket = socket();
-  await handleEvent(
-    customer,
-    customerLedger,
-    customerSocket as any,
-    structuredClone(fixture.responseDone),
-  );
-  expect(customerLedger.providerUsageEvidence.eventCount).toBe(1);
-  expect(totalSessionCostUsd(customerLedger)).toBe(fixture.totalCostUsd);
+  for (const [index, event] of fixture.responseDoneEvents.entries()) {
+    await handleEvent(
+      customer,
+      customerLedger,
+      customerSocket as any,
+      structuredClone(event),
+    );
+    expect(customerLedger.providerUsageEvidence.eventCount).toBe(index + 1);
+    expect(customerLedger.usage.audioOut).toBe(expectedAudioOut[index]);
+    expect(totalSessionCostUsd(customerLedger))
+      .toBeCloseTo(expectedCosts[index]!, 8);
+    if (index < fixture.responseDoneEvents.length - 1) {
+      expect(customerLedger.status).toBe("active");
+      expect(customerSocket.closed).toBe(0);
+    }
+  }
   expect(customerLedger.status).toBe("killed_budget");
   expect(customerSocket.closed).toBe(1);
 });
