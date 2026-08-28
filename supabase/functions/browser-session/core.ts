@@ -12,8 +12,9 @@ const APPLICATION_STARTUP_DEADLINE_MS = 35_000;
 const PROVIDER_STARTUP_DEADLINE_MS = 20_000;
 const CANCEL_ACK_POLL_MS = 200;
 const CANCEL_ACK_MAX_POLLS = 60;
-const CLEANUP_COLUMNS = "id,status,session_type,call_id,answer_sdp,error,opening_mode_requested,opening_mode_applied,opening_payload";
-const OPENING_KEYS = [
+const ONBOARDING_PROTOCOL_VERSION = 2;
+const CLEANUP_COLUMNS = "id,status,session_type,call_id,answer_sdp,error,opening_mode_requested,opening_mode_applied,opening_payload,onboarding_protocol_version";
+const OPENING_V1_KEYS = [
   "version",
   "item_id",
   "text",
@@ -25,6 +26,7 @@ const OPENING_KEYS = [
   "tts_model",
   "cost_usd",
 ] as const;
+const OPENING_V2_KEYS = [...OPENING_V1_KEYS, "resume_context"] as const;
 
 type OpeningMode = typeof APPLICATION_MODE | typeof PROVIDER_MODE;
 
@@ -44,35 +46,105 @@ function boundedString(value: unknown, min: number, max: number): value is strin
   return typeof value === "string" && value.length >= min && value.length <= max;
 }
 
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]) {
+  const keys = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return keys.length === wanted.length &&
+    wanted.every((key, index) => keys[index] === key);
+}
+
+function exactTtsCost(text: string, rate: 15 | 30): number {
+  return Number(([...text].length * rate / 1_000_000).toFixed(8));
+}
+
+function validResumeContext(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const context = value as Record<string, unknown>;
+  if (!exactKeys(context, [
+    "coverage_receipt_id", "revision", "snapshot_digest", "next_action",
+  ]) ||
+    !boundedString(context.coverage_receipt_id, 36, 36) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      context.coverage_receipt_id,
+    ) ||
+    context.revision !== 1 ||
+    !boundedString(context.snapshot_digest, 64, 64) ||
+    !/^[0-9a-f]{64}$/.test(context.snapshot_digest) ||
+    !context.next_action || typeof context.next_action !== "object" ||
+    Array.isArray(context.next_action)) return false;
+  const action = context.next_action as Record<string, unknown>;
+  const keys = ["type", "field", "question_pt"];
+  if (action.subject !== undefined) keys.push("subject");
+  return exactKeys(action, keys) && action.type === "ask" &&
+    boundedString(action.field, 1, 255) && Boolean(action.field.trim()) &&
+    boundedString(action.question_pt, 1, 1_000) &&
+    Boolean(action.question_pt.trim()) &&
+    (action.subject === undefined ||
+      (boundedString(action.subject, 1, 255) && Boolean(action.subject.trim())));
+}
+
 export function isApplicationOpeningPayload(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const payload = value as Record<string, unknown>;
-  const keys = Object.keys(payload).sort();
-  if (keys.length !== OPENING_KEYS.length || !OPENING_KEYS.every((key) => keys.includes(key))) return false;
-  if (payload.version !== 1) return false;
+  if (payload.version === 1) {
+    if (!exactKeys(payload, OPENING_V1_KEYS) || payload.tts_model !== "tts-1")
+      return false;
+  } else if (payload.version === 2) {
+    if (!exactKeys(payload, OPENING_V2_KEYS) ||
+      payload.tts_model !== "tts-1-hd" ||
+      !(payload.resume_context === null ||
+        validResumeContext(payload.resume_context))) return false;
+  } else return false;
   if (!boundedString(payload.item_id, 32, 32) || !/^lgo-[0-9a-f]{28}$/.test(payload.item_id)) return false;
   if (!boundedString(payload.text, 1, 1000) || !payload.text.trim()) return false;
   if (!boundedString(payload.text_sha256, 64, 64) || !/^[0-9a-f]{64}$/.test(payload.text_sha256)) return false;
   if (!boundedString(payload.audio_base64, 4, 2_000_000)) return false;
   if (payload.audio_base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(payload.audio_base64)) return false;
   if (!boundedString(payload.audio_sha256, 64, 64) || !/^[0-9a-f]{64}$/.test(payload.audio_sha256)) return false;
-  if (payload.mime !== "audio/mpeg" || payload.voice !== "ash" || payload.tts_model !== "tts-1") return false;
+  if (payload.mime !== "audio/mpeg" || payload.voice !== "ash") return false;
   return typeof payload.cost_usd === "number"
     && Number.isFinite(payload.cost_usd)
-    && payload.cost_usd >= 0
-    && payload.cost_usd <= 1;
+    && payload.cost_usd === exactTtsCost(
+      String(payload.text),
+      payload.version === 2 ? 30 : 15,
+    );
+}
+
+function expectedApplicationOpeningText(
+  businessName: string,
+  payload: Record<string, unknown>,
+): string | null {
+  const identity =
+    `Oi! Aqui é o Ligou, agente de inteligência artificial da ${businessName}.`;
+  if (payload.version === 1 || payload.resume_context === null)
+    return `${identity} Quais serviços sua empresa oferece?`;
+  if (!validResumeContext(payload.resume_context)) return null;
+  return `${identity} Vamos continuar de onde paramos. ${(payload.resume_context.next_action as Record<string, unknown>).question_pt}`;
 }
 
 function validReadyOpening(
   requested: OpeningMode,
   row: Record<string, unknown>,
+  protocolVersion: number | null,
+  businessName?: string,
 ): boolean {
   if (!boundedString(row.answer_sdp, 1, 1_000_000) || !boundedString(row.call_id, 1, 128)) return false;
   if (requested === PROVIDER_MODE) {
-    return row.opening_mode_applied === PROVIDER_MODE && row.opening_payload === null;
+    return protocolVersion === null &&
+      row.onboarding_protocol_version == null &&
+      row.opening_mode_applied === PROVIDER_MODE &&
+      row.opening_payload === null;
   }
-  return row.opening_mode_applied === APPLICATION_MODE
-    && isApplicationOpeningPayload(row.opening_payload);
+  if (row.onboarding_protocol_version !== protocolVersion ||
+    row.opening_mode_applied !== APPLICATION_MODE ||
+    !isApplicationOpeningPayload(row.opening_payload) ||
+    (protocolVersion === ONBOARDING_PROTOCOL_VERSION &&
+      row.opening_payload.version !== 2)) return false;
+  return businessName === undefined ||
+    row.opening_payload.text === expectedApplicationOpeningText(
+      businessName,
+      row.opening_payload,
+    );
 }
 
 async function waitForPollOrAbort(
@@ -113,6 +185,7 @@ function exactCancellableReady(
   row: Record<string, unknown>,
   requestId: string,
   requested: OpeningMode,
+  protocolVersion: number | null,
   status: "ready" | "cancel_requested",
   expectedCallId?: string,
 ): boolean {
@@ -122,13 +195,14 @@ function exactCancellableReady(
     && row.session_type === "onboarding"
     && row.opening_mode_requested === requested
     && (expectedCallId === undefined || row.call_id === expectedCallId)
-    && validReadyOpening(requested, row);
+    && validReadyOpening(requested, row, protocolVersion);
 }
 
 function exactCancellableProcessing(
   row: Record<string, unknown>,
   requestId: string,
   requested: OpeningMode,
+  protocolVersion: number | null,
   status: "processing" | "cancel_requested",
   expectedCallId?: string,
 ): boolean {
@@ -137,6 +211,7 @@ function exactCancellableProcessing(
     && requested === APPLICATION_MODE
     && row.session_type === "onboarding"
     && row.opening_mode_requested === APPLICATION_MODE
+    && row.onboarding_protocol_version === protocolVersion
     && typeof row.call_id === "string"
     && (expectedCallId === undefined || row.call_id === expectedCallId)
     && row.answer_sdp === null
@@ -158,6 +233,7 @@ async function expireOpenRequest(
   requestId: string,
   reason: "request_aborted" | "controller_timeout",
   requested: OpeningMode,
+  protocolVersion: number | null,
 ): Promise<boolean> {
   const { data: expiredRows, error: expireError } = await client.from("browser_session_requests")
     .update({ status: "expired", error: reason })
@@ -180,19 +256,27 @@ async function expireOpenRequest(
   let expectedCallId: string;
   let boundKind: "processing" | "ready";
   let sourceStatus: "processing" | "ready";
-  if (exactCancellableReady(row, requestId, requested, "ready")) {
+  if (exactCancellableReady(
+    row, requestId, requested, protocolVersion, "ready"
+  )) {
     expectedCallId = row.call_id as string;
     boundKind = "ready";
     sourceStatus = "ready";
-  } else if (exactCancellableProcessing(row, requestId, requested, "processing")) {
+  } else if (exactCancellableProcessing(
+    row, requestId, requested, protocolVersion, "processing"
+  )) {
     expectedCallId = row.call_id as string;
     boundKind = "processing";
     sourceStatus = "processing";
-  } else if (exactCancellableReady(row, requestId, requested, "cancel_requested")) {
+  } else if (exactCancellableReady(
+    row, requestId, requested, protocolVersion, "cancel_requested"
+  )) {
     expectedCallId = row.call_id as string;
     boundKind = "ready";
     sourceStatus = "ready";
-  } else if (exactCancellableProcessing(row, requestId, requested, "cancel_requested")) {
+  } else if (exactCancellableProcessing(
+    row, requestId, requested, protocolVersion, "cancel_requested"
+  )) {
     expectedCallId = row.call_id as string;
     boundKind = "processing";
     sourceStatus = "processing";
@@ -210,8 +294,14 @@ async function expireOpenRequest(
     if (cancelError || !Array.isArray(cancelRows) || cancelRows.length > 1) return false;
     if (cancelRows.length === 1) {
       const exact = boundKind === "ready"
-        ? exactCancellableReady(cancelRows[0], requestId, requested, "cancel_requested", expectedCallId)
-        : exactCancellableProcessing(cancelRows[0], requestId, requested, "cancel_requested", expectedCallId);
+        ? exactCancellableReady(
+          cancelRows[0], requestId, requested, protocolVersion,
+          "cancel_requested", expectedCallId,
+        )
+        : exactCancellableProcessing(
+          cancelRows[0], requestId, requested, protocolVersion,
+          "cancel_requested", expectedCallId,
+        );
       if (!exact) return false;
       row = cancelRows[0];
     } else {
@@ -219,8 +309,14 @@ async function expireOpenRequest(
       if (!row) return false;
       if (exactExpiredCleanup(row, requestId, expectedCallId)) return true;
       const exact = boundKind === "ready"
-        ? exactCancellableReady(row, requestId, requested, "cancel_requested", expectedCallId)
-        : exactCancellableProcessing(row, requestId, requested, "cancel_requested", expectedCallId);
+        ? exactCancellableReady(
+          row, requestId, requested, protocolVersion,
+          "cancel_requested", expectedCallId,
+        )
+        : exactCancellableProcessing(
+          row, requestId, requested, protocolVersion,
+          "cancel_requested", expectedCallId,
+        );
       if (!exact) return false;
     }
   }
@@ -231,8 +327,14 @@ async function expireOpenRequest(
     if (!row) return false;
     if (exactExpiredCleanup(row, requestId, expectedCallId)) return true;
     const exact = boundKind === "ready"
-      ? exactCancellableReady(row, requestId, requested, "cancel_requested", expectedCallId)
-      : exactCancellableProcessing(row, requestId, requested, "cancel_requested", expectedCallId);
+      ? exactCancellableReady(
+        row, requestId, requested, protocolVersion,
+        "cancel_requested", expectedCallId,
+      )
+      : exactCancellableProcessing(
+        row, requestId, requested, protocolVersion,
+        "cancel_requested", expectedCallId,
+      );
     if (!exact) return false;
   }
   return false;
@@ -276,6 +378,13 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
     if (sessionType === "onboarding" && body.opening_mode_requested !== APPLICATION_MODE) {
       return json({ error: "client_upgrade_required" }, 409);
     }
+    const protocolVersion = sessionType === "onboarding"
+      ? body.onboarding_protocol_version
+      : null;
+    if (sessionType === "onboarding" &&
+      protocolVersion !== ONBOARDING_PROTOCOL_VERSION) {
+      return json({ error: "client_upgrade_required" }, 409);
+    }
 
     const defaultTenant = dependencies.env("LIGOU_TENANT") ?? "rocha-plumbing";
     let tenant;
@@ -295,6 +404,9 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
       model_override: body.model ?? null,
       offer_sdp: String(body.sdp),
       opening_mode_requested: openingModeRequested,
+      ...(sessionType === "onboarding"
+        ? { onboarding_protocol_version: ONBOARDING_PROTOCOL_VERSION }
+        : {}),
     }).select("id").single();
     if (insertError || !requestRow) return json({ error: `enqueue_failed: ${insertError?.message}` }, 500);
 
@@ -308,6 +420,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
         String(requestRow.id),
         reason,
         openingModeRequested,
+        protocolVersion as number | null,
       );
       if (!expired) return json({ error: "request_cleanup_failed" }, 502);
       if (reason === "request_aborted") return json({ error: reason }, status);
@@ -327,13 +440,18 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
       if (request.signal.aborted) return stopOpenRequest("request_aborted", 499);
       if (dependencies.now() >= deadline) break;
       const { data: row } = await client.from("browser_session_requests")
-        .select("status,answer_sdp,call_id,error,opening_mode_applied,opening_payload")
+        .select("status,answer_sdp,call_id,error,opening_mode_applied,opening_payload,onboarding_protocol_version")
         .eq("id", requestRow.id)
         .single();
       if (request.signal.aborted) return stopOpenRequest("request_aborted", 499);
       if (!row) break;
       if (row.status === "ready") {
-        if (!validReadyOpening(openingModeRequested, row)) {
+        if (!validReadyOpening(
+          openingModeRequested,
+          row,
+          protocolVersion as number | null,
+          businessName,
+        )) {
           const error = openingModeRequested === APPLICATION_MODE
             ? "invalid_application_opening_contract"
             : "invalid_provider_opening_contract";
@@ -348,6 +466,15 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
           model: call?.model ?? null,
           opening_mode_applied: row.opening_mode_applied,
           opening_payload: row.opening_payload,
+          ...(sessionType === "onboarding"
+            ? {
+                onboarding_protocol_version: ONBOARDING_PROTOCOL_VERSION,
+                resume_context: (row.opening_payload as Record<string, unknown>)
+                  .resume_context,
+                opening_text: (row.opening_payload as Record<string, unknown>)
+                  .text,
+              }
+            : {}),
           business_name: businessName,
         });
       }

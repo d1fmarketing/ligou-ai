@@ -289,7 +289,33 @@ test("real onboarding RPC approval reloads into servicePolicies and quote_price"
       opening_mode_requested: "application_tts_v1",
       opening_mode_applied: "application_tts_v1",
       opening_payload: resumedV2Payload,
+      onboarding_protocol_version: 2,
     })).error).toBeNull();
+    const resumedV2Readback = await service
+      .from("browser_session_requests")
+      .select("id,onboarding_protocol_version,opening_payload")
+      .eq("id", resumedV2Request)
+      .single();
+    expect(resumedV2Readback.error).toBeNull();
+    expect(resumedV2Readback.data).toMatchObject({
+      id: resumedV2Request,
+      onboarding_protocol_version: 2,
+      opening_payload: resumedV2Payload,
+    });
+    const invalidProtocolWrite = await service
+      .from("browser_session_requests")
+      .insert({
+        id: randomUUID(),
+        tenant_id: tenantId,
+        user_id: ownerId,
+        session_type: "onboarding",
+        offer_sdp: "invalid-protocol-offer",
+        opening_mode_requested: "application_tts_v1",
+        onboarding_protocol_version: 1,
+      });
+    expect(invalidProtocolWrite.error?.message).toContain(
+      "browser_session_requests_onboarding_protocol_check",
+    );
     const malformedV2Request = randomUUID();
     const malformedV2 = structuredClone(resumedV2Payload) as any;
     delete malformedV2.resume_context;

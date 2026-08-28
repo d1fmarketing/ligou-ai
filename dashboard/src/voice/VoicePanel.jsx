@@ -7,6 +7,7 @@ import {
   endedVoiceSessionCopy,
   settleStartedSession,
   startVoiceSession,
+  voiceSessionRestartLabel,
   watchOnboardingOutcome,
 } from "./session.js";
 import { statusLineFor } from "./panel-copy.js";
@@ -191,7 +192,9 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
               </select>
             </label>
             <button type="button" className="voice-live-button" onClick={begin}>
-              <IconMicrophone2 aria-hidden="true" /> {status === "ended" ? "Ligar de novo" : (interviewing ? "Começar entrevista" : "Iniciar chamada")}
+              <IconMicrophone2 aria-hidden="true" /> {status === "ended"
+                ? voiceSessionRestartLabel({ endedSessionType, onboardingOutcome })
+                : (interviewing ? "Começar entrevista" : "Iniciar chamada")}
             </button>
             {status === "ended" ? (
               <p className="voice-live-note">

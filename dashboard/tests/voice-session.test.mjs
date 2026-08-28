@@ -22,6 +22,7 @@ const {
   resolveOnboardingOutcome,
   settleStartedSession,
   startVoiceSession,
+  voiceSessionRestartLabel,
   watchOnboardingOutcome,
 } = sessionModule;
 
@@ -32,6 +33,21 @@ const OPENING_TEXT = "Oi! Aqui é o Ligou, agente de inteligência artificial da
 const OPENING_AUDIO_BASE64 = "SUQzZmFrZS1tcDM=";
 const OPENING_TEXT_SHA256 = "413f79d3d184ea3985fdb593f99ac331c612c157e871034df0135f06a7817e06";
 const OPENING_AUDIO_SHA256 = "5adfb17f8a9c1829a1e83bd24bb4133262fd8f45027bb35a7124c5dbd3690e9a";
+const RESUME_QUESTION = "Quais cidades e regiões sua empresa atende?";
+const RESUME_TEXT =
+  `Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Vamos continuar de onde paramos. ${RESUME_QUESTION}`;
+const RESUME_TEXT_SHA256 =
+  "643ca15a2dbc57364f4eca5ae9e846674df997f7837b42873c9998ed2ff5bbf3";
+const RESUME_CONTEXT = {
+  coverage_receipt_id: "44444444-4444-4444-8444-444444444444",
+  revision: 1,
+  snapshot_digest: "c".repeat(64),
+  next_action: {
+    type: "ask",
+    field: "area.coverage",
+    question_pt: RESUME_QUESTION,
+  },
+};
 
 function openingResponse(overrides = {}) {
   const payload = {
@@ -44,7 +60,7 @@ function openingResponse(overrides = {}) {
     mime: "audio/mpeg",
     voice: "ash",
     tts_model: "tts-1",
-    cost_usd: 0.000021,
+    cost_usd: 0.001605,
     ...(overrides.opening_payload ?? {}),
   };
   return {
@@ -54,6 +70,41 @@ function openingResponse(overrides = {}) {
     model: "gpt-realtime-2.1",
     opening_mode_applied: "application_tts_v1",
     business_name: "D1F Marketing",
+    opening_payload: payload,
+    ...overrides,
+    ...(overrides.opening_payload ? { opening_payload: payload } : {}),
+  };
+}
+
+function openingResponseV2({ resumeContext = null, ...overrides } = {}) {
+  const resumed = resumeContext !== null;
+  const text = resumed ? RESUME_TEXT : OPENING_TEXT;
+  const payload = {
+    version: 2,
+    item_id: resumed
+      ? "lgo-b00cbaf9911210b676ace0d7dda5"
+      : "lgo-a89f1f9391ab7a82b4f27f198407",
+    text,
+    text_sha256: resumed ? RESUME_TEXT_SHA256 : OPENING_TEXT_SHA256,
+    audio_base64: OPENING_AUDIO_BASE64,
+    audio_sha256: OPENING_AUDIO_SHA256,
+    mime: "audio/mpeg",
+    voice: "ash",
+    tts_model: "tts-1-hd",
+    cost_usd: resumed ? 0.00444 : 0.00321,
+    resume_context: resumeContext,
+    ...(overrides.opening_payload ?? {}),
+  };
+  return {
+    sdp: "answer-sdp",
+    call_id: CALL_ID,
+    max_minutes: 30,
+    model: "gpt-realtime-2.1",
+    opening_mode_applied: "application_tts_v1",
+    onboarding_protocol_version: 2,
+    business_name: "D1F Marketing",
+    opening_text: text,
+    resume_context: resumeContext,
     opening_payload: payload,
     ...overrides,
     ...(overrides.opening_payload ? { opening_payload: payload } : {}),
@@ -104,6 +155,28 @@ function approvalRow(overrides = {}) {
   };
 }
 
+function coverageRow(overrides = {}) {
+  return {
+    id: "66666666-6666-4666-8666-666666666666",
+    call_id: CALL_ID,
+    kind: "onboarding_coverage",
+    outcome: "accepted",
+    readback: {
+      schema_version: 2,
+      call_id: CALL_ID,
+      revision: 7,
+      complete: false,
+      snapshot_digest: "b".repeat(64),
+      next_action: {
+        type: "ask",
+        field: "area.coverage",
+        question_pt: "Qual é a área atendida?",
+      },
+    },
+    ...overrides,
+  };
+}
+
 function callRow(overrides = {}) {
   return {
     id: CALL_ID,
@@ -115,7 +188,11 @@ function callRow(overrides = {}) {
   };
 }
 
-function queryClient({ receipt = { data: null, error: null }, call = { data: null, error: null } } = {}) {
+function queryClient({
+  receipt = { data: null, error: null },
+  coverage = { data: null, error: null },
+  call = { data: null, error: null },
+} = {}) {
   const queries = [];
   return {
     queries,
@@ -129,7 +206,10 @@ function queryClient({ receipt = { data: null, error: null }, call = { data: nul
         limit(value) { query.limit = value; return builder; },
         abortSignal(signal) { query.abortSignal = signal; return builder; },
         maybeSingle() {
-          const configured = table === "receipts" ? receipt : call;
+          const kind = query.equals.find(([column]) => column === "kind")?.[1];
+          const configured = table === "receipts"
+            ? kind === "onboarding_coverage" ? coverage : receipt
+            : call;
           return typeof configured === "function" ? configured(query) : Promise.resolve(configured);
         },
       };
@@ -332,6 +412,7 @@ test("Test 10 invariant: verified application MP3 is the only audible onboarding
       sdp: "offer-sdp",
       session_type: "onboarding",
       opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
     }]);
     assert.equal(browser.actions.includes("peer:addTrack:enabled=false"), true);
     assert.equal(browser.actions.includes("audio:1:play:remote-muted=true:mic=false"), true);
@@ -360,6 +441,62 @@ test("Test 10 invariant: verified application MP3 is the only audible onboarding
   }
 });
 
+test("protocol v2 fresh opening validates exact HD Ash cost and service question before voice release", async () => {
+  const response = openingResponseV2();
+  const browser = installVoiceBrowser({ response });
+  const events = [];
+  try {
+    const session = await startVoiceSession({
+      accessToken: "owner-token",
+      sessionType: "onboarding",
+      onEvent: (event) => { events.push(event); },
+    });
+    assert.deepEqual(browser.requestBodies, [{
+      sdp: "offer-sdp",
+      session_type: "onboarding",
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
+    }]);
+    assert.equal(browser.audios[1].playCalls, 1);
+    assert.equal(browser.actions.includes("audio:1:play:remote-muted=true:mic=false"), true);
+    assert.equal(browser.tracks[0].enabled, true);
+    assert.equal(browser.audios[0].muted, false);
+    assert.deepEqual(events, [{ kind: "agent", text: OPENING_TEXT }]);
+    assert.equal(response.opening_payload.resume_context, null);
+    session.end();
+  } finally {
+    browser.restore();
+  }
+});
+
+test("protocol v2 resume speaks identity, continuation, and persisted question exactly once", async () => {
+  const response = openingResponseV2({ resumeContext: RESUME_CONTEXT });
+  const browser = installVoiceBrowser({ response });
+  const events = [];
+  try {
+    const session = await startVoiceSession({
+      accessToken: "owner-token",
+      sessionType: "onboarding",
+      onEvent: (event) => { events.push(event); },
+    });
+    assert.equal(response.opening_payload.text.split(
+      "Vamos continuar de onde paramos.",
+    ).length, 2);
+    assert.equal(response.opening_payload.text.split(RESUME_QUESTION).length, 2);
+    assert.deepEqual(browser.channel.sent[0].item.content, [{
+      type: "output_text",
+      text: RESUME_TEXT,
+    }]);
+    assert.deepEqual(events, [{ kind: "agent", text: RESUME_TEXT }]);
+    assert.equal(browser.audios[1].playCalls, 1);
+    assert.equal(browser.actions.includes("audio:1:play:remote-muted=true:mic=false"), true);
+    assert.equal(browser.tracks[0].enabled, true);
+    session.end();
+  } finally {
+    browser.restore();
+  }
+});
+
 test("onboarding rejects every provider or missing opening mode before accepting remote speech", async () => {
   for (const opening_mode_applied of [null, "provider", "application_tts_v2", 1]) {
     const browser = installVoiceBrowser({ response: openingResponse({ opening_mode_applied }) });
@@ -382,6 +519,11 @@ test("onboarding rejects every provider or missing opening mode before accepting
 test("onboarding validates exact server-owned opening text, payload shape, hashes, and cost before playback", async () => {
   const invalidResponses = [
     openingResponse({ business_name: " D1F Marketing " }),
+    openingResponse({
+      onboarding_protocol_version: 2,
+      resume_context: null,
+      opening_text: OPENING_TEXT,
+    }),
     openingResponse({ opening_payload: { text: "Oi, eu sou uma assistente virtual brasileira." } }),
     openingResponse({ opening_payload: { text_sha256: "0".repeat(64) } }),
     openingResponse({ opening_payload: { audio_sha256: "0".repeat(64) } }),
@@ -405,6 +547,43 @@ test("onboarding validates exact server-owned opening text, payload shape, hashe
         /abertura|opening|payload|áudio|audio|hash|custo|empresa/i,
       );
       assert.equal(browser.audios.slice(1).every((audio) => audio.playCalls === 0), true);
+      assert.equal(browser.tracks[0].stopCalls, 1);
+    } finally {
+      browser.restore();
+    }
+  }
+});
+
+test("protocol v2 mismatches fail before remote description, playback, or microphone release", async () => {
+  const invalidResponses = [
+    openingResponseV2({ opening_text: "wrong" }),
+    openingResponseV2({ resume_context: RESUME_CONTEXT }),
+    openingResponseV2({
+      resumeContext: RESUME_CONTEXT,
+      opening_payload: { resume_context: null },
+    }),
+    openingResponseV2({
+      resumeContext: RESUME_CONTEXT,
+      opening_payload: { text: `${RESUME_TEXT} ${RESUME_QUESTION}` },
+    }),
+    openingResponseV2({ opening_payload: { tts_model: "tts-1" } }),
+    openingResponseV2({ opening_payload: { voice: "alloy" } }),
+    openingResponseV2({ opening_payload: { cost_usd: 0.0032 } }),
+    openingResponseV2({ opening_payload: { text_sha256: "0".repeat(64) } }),
+  ];
+  for (const response of invalidResponses) {
+    const browser = installVoiceBrowser({ response });
+    try {
+      await assert.rejects(
+        () => startVoiceSession({
+          accessToken: "owner-token",
+          sessionType: "onboarding",
+        }),
+        /abertura|opening|payload|contexto|texto|hash|custo|voz|modelo/i,
+      );
+      assert.equal(browser.actions.includes("peer:setRemoteDescription"), false);
+      assert.equal(browser.audios.slice(1).every((audio) => audio.playCalls === 0), true);
+      assert.equal(browser.tracks[0].enabled, false);
       assert.equal(browser.tracks[0].stopCalls, 1);
     } finally {
       browser.restore();
@@ -805,6 +984,102 @@ test("peer close without an acknowledgement is interrupted and queries only the 
     ["id", CALL_ID],
     ["session_type", "onboarding"],
   ]);
+});
+
+test("budget or deadline termination is resumable only with one durable incomplete coverage question", async () => {
+  for (const status of ["killed_budget", "killed_deadline"]) {
+    const client = queryClient({
+      coverage: { data: coverageRow(), error: null },
+      call: {
+        data: callRow({
+          status,
+          provider_termination_state: "confirmed",
+          provider_termination_reason: `sideband_${status}`,
+        }),
+        error: null,
+      },
+    });
+    const outcome = await resolveOnboardingOutcome({
+      client,
+      reason: "remote_hangup",
+      callId: CALL_ID,
+      timeoutMs: 50,
+      pollIntervalMs: 1,
+    });
+    assert.deepEqual(outcome, {
+      status: "resumable",
+      revision: 7,
+      nextAction: {
+        type: "ask",
+        field: "area.coverage",
+        question_pt: "Qual é a área atendida?",
+      },
+    });
+    const coverageQuery = client.queries.find((entry) =>
+      entry.table === "receipts" &&
+      entry.equals.some(([column, value]) =>
+        column === "kind" && value === "onboarding_coverage"
+      )
+    );
+    assert.deepEqual(coverageQuery.equals, [
+      ["call_id", CALL_ID],
+      ["kind", "onboarding_coverage"],
+      ["outcome", "accepted"],
+    ]);
+  }
+});
+
+test("manual, error, complete, or malformed coverage remains non-resumable", async () => {
+  const cases = [
+    {
+      reason: "manual_hangup",
+      call: callRow({ status: "killed_budget" }),
+      coverage: coverageRow(),
+    },
+    {
+      reason: "remote_hangup",
+      call: callRow({ status: "error" }),
+      coverage: coverageRow(),
+    },
+    {
+      reason: "remote_hangup",
+      call: callRow({ status: "killed_budget" }),
+      coverage: coverageRow({
+        readback: { ...coverageRow().readback, complete: true },
+      }),
+    },
+    {
+      reason: "remote_hangup",
+      call: callRow({ status: "killed_deadline" }),
+      coverage: coverageRow({
+        readback: {
+          ...coverageRow().readback,
+          next_action: { type: "prepare_summary" },
+        },
+      }),
+    },
+    {
+      reason: "remote_hangup",
+      call: callRow({
+        status: "killed_budget",
+        provider_termination_state: "unknown",
+      }),
+      coverage: coverageRow(),
+    },
+  ];
+  for (const candidate of cases) {
+    const client = queryClient({
+      coverage: { data: candidate.coverage, error: null },
+      call: { data: candidate.call, error: null },
+    });
+    assert.deepEqual(await resolveOnboardingOutcome({
+      client,
+      reason: candidate.reason,
+      callId: CALL_ID,
+      timeoutMs: 5,
+      pollIntervalMs: 1,
+    }), { status: "interrupted" });
+  }
 });
 
 test("durable acknowledgement with provider termination pending is finalizing", async () => {
@@ -1256,6 +1531,22 @@ test("onboarding result copy distinguishes interrupted, finalizing, and durable 
     onboardingOutcomeCopy({ status: "complete", revision: 8 }),
     "Entrevista concluída. Cobertura confirmada por voz · revisão 8. Regras ainda aguardando aprovação na Memória.",
   );
+  assert.equal(
+    onboardingOutcomeCopy({ status: "resumable", revision: 7 }),
+    "Entrevista pausada com segurança · revisão 7. Você pode continuar da pergunta salva.",
+  );
+  assert.equal(voiceSessionRestartLabel({
+    endedSessionType: "onboarding",
+    onboardingOutcome: { status: "resumable", revision: 7 },
+  }), "Continuar entrevista");
+  for (const [endedSessionType, onboardingOutcome] of [
+    ["onboarding", { status: "interrupted" }],
+    ["owner_browser", { status: "resumable", revision: 7 }],
+    ["onboarding", null],
+  ]) assert.equal(voiceSessionRestartLabel({
+    endedSessionType,
+    onboardingOutcome,
+  }), "Ligar de novo");
 });
 
 test("ended copy follows the ended run type rather than the next-run selector", () => {

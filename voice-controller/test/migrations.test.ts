@@ -103,6 +103,17 @@ describe("durable onboarding resume migration contract", () => {
     expect(sql).toContain("r.kind = 'onboarding_event_alias'");
     expect(sql).toContain("message = 'onboarding_resume_latest_ineligible'");
   });
+
+  test("persists immutable onboarding protocol 2 while retaining nullable legacy rows", () => {
+    const sql = migrationSql("onboarding_resume_checkpoint");
+    expect(sql).toContain("add column if not exists onboarding_protocol_version integer");
+    expect(sql).toContain("onboarding_protocol_version is null or onboarding_protocol_version = 2");
+    expect(sql).toContain("session_type = 'onboarding'");
+    expect(sql).toContain("opening_mode_requested = 'application_tts_v1'");
+    expect(sql).toContain("opening_payload->'version' = '2'::jsonb");
+    expect(sql).toContain("new.onboarding_protocol_version is distinct from old.onboarding_protocol_version");
+    expect(sql).toContain("message = 'browser_session_protocol_identity_invalid'");
+  });
 });
 
 describe("OAuth connector hardening migration contract", () => {

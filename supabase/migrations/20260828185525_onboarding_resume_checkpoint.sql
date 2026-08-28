@@ -1087,3 +1087,61 @@ alter table public.browser_session_requests
       )
     ), false)
   );
+
+alter table public.browser_session_requests
+  add column if not exists onboarding_protocol_version integer;
+
+alter table public.browser_session_requests
+  drop constraint if exists browser_session_requests_onboarding_protocol_check;
+alter table public.browser_session_requests
+  add constraint browser_session_requests_onboarding_protocol_check check (
+    (
+      onboarding_protocol_version is null
+      or onboarding_protocol_version = 2
+    )
+    and (
+      onboarding_protocol_version is null
+      or (
+        session_type = 'onboarding'
+        and opening_mode_requested = 'application_tts_v1'
+      )
+    )
+    and (
+      session_type = 'onboarding'
+      or onboarding_protocol_version is null
+    )
+    and (
+      onboarding_protocol_version is distinct from 2
+      or status not in ('ready','cancel_requested')
+      or coalesce(opening_payload->'version' = '2'::jsonb, false)
+    )
+  ) not valid;
+alter table public.browser_session_requests
+  validate constraint browser_session_requests_onboarding_protocol_check;
+
+create or replace function public.enforce_browser_session_protocol_identity_v2()
+returns trigger
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+begin
+  if tg_op = 'UPDATE'
+     and new.onboarding_protocol_version is distinct from
+       old.onboarding_protocol_version then
+    raise exception using errcode = '23514',
+      message = 'browser_session_protocol_identity_invalid';
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function public.enforce_browser_session_protocol_identity_v2()
+  from public, anon, authenticated, service_role;
+
+drop trigger if exists browser_session_requests_protocol_identity
+  on public.browser_session_requests;
+create trigger browser_session_requests_protocol_identity
+before update on public.browser_session_requests
+for each row execute function
+  public.enforce_browser_session_protocol_identity_v2();

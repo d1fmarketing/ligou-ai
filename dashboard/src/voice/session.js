@@ -63,6 +63,45 @@ function approvalRevision(row, callId) {
   return row.readback.snapshot_revision;
 }
 
+function resumableCoverage(row, callId) {
+  if (!isObject(row)
+    || typeof row.id !== "string"
+    || row.call_id !== callId
+    || row.kind !== "onboarding_coverage"
+    || row.outcome !== "accepted"
+    || !isObject(row.readback)
+    || row.readback.schema_version !== 2
+    || row.readback.call_id !== callId
+    || row.readback.complete !== false
+    || !Number.isSafeInteger(row.readback.revision)
+    || row.readback.revision < 1
+    || !/^[0-9a-f]{64}$/.test(row.readback.snapshot_digest ?? "")
+    || !isObject(row.readback.next_action)) return null;
+  const action = row.readback.next_action;
+  const actionKeys = ["type", "field", "question_pt"];
+  if (action.subject !== undefined) actionKeys.push("subject");
+  if (Object.keys(action).length !== actionKeys.length
+    || !actionKeys.every((key) => Object.hasOwn(action, key))
+    || action.type !== "ask"
+    || typeof action.field !== "string"
+    || !action.field.trim()
+    || typeof action.question_pt !== "string"
+    || !action.question_pt.trim()
+    || (action.subject !== undefined
+      && (typeof action.subject !== "string" || !action.subject.trim()))) {
+    return null;
+  }
+  return {
+    revision: row.readback.revision,
+    nextAction: {
+      type: "ask",
+      field: action.field,
+      ...(action.subject ? { subject: action.subject } : {}),
+      question_pt: action.question_pt,
+    },
+  };
+}
+
 export function settleStartedSession({ session, runId, currentRunId, cancelled, ended, onAccepted }) {
   if (runId !== currentRunId || cancelled || ended) {
     session?.end?.(cancelled ? "manual_hangup" : "remote_hangup");
@@ -133,12 +172,22 @@ export async function resolveOnboardingOutcome({
   while (!cancellationRequested(isCancelled, signal)) {
     const remaining = deadline - now();
     if (remaining <= 0) break;
-    const [approvalRead, callRead] = await Promise.all([
+    const [approvalRead, coverageRead, callRead] = await Promise.all([
       boundedRead((readSignal) => client
         .from("receipts")
         .select("id,call_id,kind,outcome,readback,created_at")
         .eq("call_id", callId)
         .eq("kind", "onboarding_voice_approval")
+        .eq("outcome", "accepted")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .abortSignal(readSignal)
+        .maybeSingle(), remaining, signal),
+      boundedRead((readSignal) => client
+        .from("receipts")
+        .select("id,call_id,kind,outcome,readback,created_at")
+        .eq("call_id", callId)
+        .eq("kind", "onboarding_coverage")
         .eq("outcome", "accepted")
         .order("created_at", { ascending: false })
         .limit(1)
@@ -169,6 +218,19 @@ export async function resolveOnboardingOutcome({
       && callResult.data.id === callId && callResult.data.session_type === "onboarding"
       ? callResult.data
       : null;
+    if (call && ["killed_budget", "killed_deadline"].includes(call.status)) {
+      const coverageResult = coverageRead.ok ? coverageRead.value : null;
+      const resumable = coverageResult && !coverageResult.error
+        ? resumableCoverage(coverageResult.data, callId)
+        : null;
+      if (call.provider_termination_state === "confirmed" && resumable) {
+        return { status: "resumable", ...resumable };
+      }
+      return revision === null ? { status: "interrupted" } : {
+        status: "interrupted",
+        revision,
+      };
+    }
     if (call && TERMINAL_FAILURE_STATUSES.has(call.status)) {
       return revision === null ? { status: "interrupted" } : { status: "interrupted", revision };
     }
@@ -225,7 +287,20 @@ export function onboardingOutcomeCopy(outcome) {
   if (outcome?.status === "finalizing") {
     return `Finalizando… Cobertura confirmada por voz · revisão ${outcome.revision}. O encerramento do provedor ainda não foi confirmado. Regras ainda aguardando aprovação na Memória.`;
   }
+  if (outcome?.status === "resumable") {
+    return `Entrevista pausada com segurança · revisão ${outcome.revision}. Você pode continuar da pergunta salva.`;
+  }
   return "Entrevista interrompida. A conclusão não foi confirmada. Revise na Memória as sugestões que já foram registradas.";
+}
+
+export function voiceSessionRestartLabel({
+  endedSessionType,
+  onboardingOutcome,
+}) {
+  return endedSessionType === "onboarding"
+      && onboardingOutcome?.status === "resumable"
+    ? "Continuar entrevista"
+    : "Ligar de novo";
 }
 
 export function endedVoiceSessionCopy({ endedSessionType, onboardingOutcome }) {
@@ -235,7 +310,8 @@ export function endedVoiceSessionCopy({ endedSessionType, onboardingOutcome }) {
 }
 
 const APPLICATION_OPENING_MODE = "application_tts_v1";
-const APPLICATION_OPENING_PAYLOAD_KEYS = [
+const ONBOARDING_PROTOCOL_VERSION = 2;
+const APPLICATION_OPENING_V1_KEYS = [
   "version",
   "item_id",
   "text",
@@ -246,6 +322,10 @@ const APPLICATION_OPENING_PAYLOAD_KEYS = [
   "voice",
   "tts_model",
   "cost_usd",
+];
+const APPLICATION_OPENING_V2_KEYS = [
+  ...APPLICATION_OPENING_V1_KEYS,
+  "resume_context",
 ];
 const MAX_OPENING_BUSINESS_NAME_LENGTH = 256;
 const MAX_OPENING_TEXT_LENGTH = 1_000;
@@ -266,6 +346,46 @@ function exactKeys(value, keys) {
   if (!isObject(value)) return false;
   const actual = Object.keys(value);
   return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function exactTtsCost(text, rate) {
+  return Number(([...text].length * rate / 1_000_000).toFixed(8));
+}
+
+function validOpeningResumeContext(value) {
+  if (!exactKeys(value, [
+    "coverage_receipt_id",
+    "revision",
+    "snapshot_digest",
+    "next_action",
+  ])
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      value.coverage_receipt_id ?? "",
+    )
+    || value.revision !== 1
+    || !/^[0-9a-f]{64}$/.test(value.snapshot_digest ?? "")
+    || !isObject(value.next_action)) return false;
+  const actionKeys = ["type", "field", "question_pt"];
+  if (value.next_action.subject !== undefined) actionKeys.push("subject");
+  return exactKeys(value.next_action, actionKeys)
+    && value.next_action.type === "ask"
+    && typeof value.next_action.field === "string"
+    && Boolean(value.next_action.field.trim())
+    && typeof value.next_action.question_pt === "string"
+    && Boolean(value.next_action.question_pt.trim())
+    && (value.next_action.subject === undefined
+      || (typeof value.next_action.subject === "string"
+        && Boolean(value.next_action.subject.trim())));
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (isObject(value)) return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => [key, canonicalJson(nested)]),
+  );
+  return value;
 }
 
 function decodeBoundedBase64(value) {
@@ -310,8 +430,13 @@ async function validateApplicationOpening(response) {
     throw safeOpeningError("nome da empresa inválido");
   }
   const payload = response.opening_payload;
-  if (!exactKeys(payload, APPLICATION_OPENING_PAYLOAD_KEYS)
-    || payload.version !== 1
+  const legacyV1 = payload?.version === 1;
+  const currentV2 = payload?.version === 2;
+  if (!(legacyV1 || currentV2)
+    || !exactKeys(
+      payload,
+      currentV2 ? APPLICATION_OPENING_V2_KEYS : APPLICATION_OPENING_V1_KEYS,
+    )
     || typeof payload.item_id !== "string"
     || payload.item_id.length !== 32
     || !/^lgo-[0-9a-f]{28}$/.test(payload.item_id)
@@ -322,15 +447,31 @@ async function validateApplicationOpening(response) {
     || !/^[0-9a-f]{64}$/.test(payload.audio_sha256 ?? "")
     || payload.mime !== "audio/mpeg"
     || payload.voice !== "ash"
-    || payload.tts_model !== "tts-1"
+    || payload.tts_model !== (currentV2 ? "tts-1-hd" : "tts-1")
     || typeof payload.cost_usd !== "number"
     || !Number.isFinite(payload.cost_usd)
-    || payload.cost_usd < 0
-    || payload.cost_usd > 1) {
+    || payload.cost_usd !== exactTtsCost(payload.text, currentV2 ? 30 : 15)
+    || (currentV2 && !(payload.resume_context === null
+      || validOpeningResumeContext(payload.resume_context)))) {
     throw safeOpeningError("contrato do payload inválido");
   }
-  const expectedText = `Oi! Aqui é o Ligou, agente de inteligência artificial da ${businessName}. Quais serviços sua empresa oferece?`;
+  const identity =
+    `Oi! Aqui é o Ligou, agente de inteligência artificial da ${businessName}.`;
+  const expectedText = currentV2 && payload.resume_context !== null
+    ? `${identity} Vamos continuar de onde paramos. ${payload.resume_context.next_action.question_pt}`
+    : `${identity} Quais serviços sua empresa oferece?`;
   if (payload.text !== expectedText) throw safeOpeningError("texto de abertura divergente");
+  if (legacyV1 && (
+    response.onboarding_protocol_version !== undefined
+    || response.opening_text !== undefined
+    || response.resume_context !== undefined
+  )) throw safeOpeningError("identidade de protocolo divergente");
+  if (currentV2 && (
+    response.onboarding_protocol_version !== ONBOARDING_PROTOCOL_VERSION
+    || response.opening_text !== payload.text
+    || JSON.stringify(canonicalJson(response.resume_context)) !==
+      JSON.stringify(canonicalJson(payload.resume_context))
+  )) throw safeOpeningError("contexto de abertura divergente");
   const audioBytes = decodeBoundedBase64(payload.audio_base64);
   const [textHash, audioHash] = await Promise.all([
     sha256Hex(new TextEncoder().encode(payload.text)),
@@ -579,7 +720,10 @@ export async function startVoiceSession({
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     const requestBody = { sdp: offer.sdp, session_type: sessionType, model };
-    if (onboarding) requestBody.opening_mode_requested = APPLICATION_OPENING_MODE;
+    if (onboarding) {
+      requestBody.opening_mode_requested = APPLICATION_OPENING_MODE;
+      requestBody.onboarding_protocol_version = ONBOARDING_PROTOCOL_VERSION;
+    }
     const res = await fetch(SESSION_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },

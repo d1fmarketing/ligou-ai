@@ -8,17 +8,56 @@ const TENANT = {
   name: "D1F Marketing",
   owner_user_id: "owner-a",
 };
-const PAYLOAD = {
+const LEGACY_PAYLOAD = {
   version: 1,
-  item_id: `lgo-${"c".repeat(28)}`,
-  text: "Oi. Aqui e o Ligou, agente de inteligencia artificial da D1F Marketing.",
-  text_sha256: "a".repeat(64),
-  audio_base64: "SUQzBA==",
-  audio_sha256: "b".repeat(64),
+  item_id: "lgo-a89f1f9391ab7a82b4f27f198407",
+  text:
+    "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Quais serviços sua empresa oferece?",
+  text_sha256:
+    "413f79d3d184ea3985fdb593f99ac331c612c157e871034df0135f06a7817e06",
+  audio_base64: "SUQzBAAAAAAAAP/7kGQ=",
+  audio_sha256:
+    "b15db04aea85ebd3f59185796229df945e67f42931c7e9da411e97b83c856ce8",
   mime: "audio/mpeg",
   voice: "ash",
   tts_model: "tts-1",
-  cost_usd: 0.001,
+  cost_usd: 0.001605,
+};
+const PAYLOAD = {
+  version: 2,
+  item_id: "lgo-a89f1f9391ab7a82b4f27f198407",
+  text:
+    "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Quais serviços sua empresa oferece?",
+  text_sha256:
+    "413f79d3d184ea3985fdb593f99ac331c612c157e871034df0135f06a7817e06",
+  audio_base64: "SUQzBAAAAAAAAP/7kGQ=",
+  audio_sha256:
+    "b15db04aea85ebd3f59185796229df945e67f42931c7e9da411e97b83c856ce8",
+  mime: "audio/mpeg",
+  voice: "ash",
+  tts_model: "tts-1-hd",
+  cost_usd: 0.00321,
+  resume_context: null,
+};
+const RESUME_CONTEXT = {
+  coverage_receipt_id: "44444444-4444-4444-8444-444444444444",
+  revision: 1,
+  snapshot_digest: "c".repeat(64),
+  next_action: {
+    type: "ask",
+    field: "area.coverage",
+    question_pt: "Quais cidades e regiões sua empresa atende?",
+  },
+};
+const RESUMED_PAYLOAD = {
+  ...PAYLOAD,
+  item_id: "lgo-b00cbaf9911210b676ace0d7dda5",
+  text:
+    "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Vamos continuar de onde paramos. Quais cidades e regiões sua empresa atende?",
+  text_sha256:
+    "643ca15a2dbc57364f4eca5ae9e846674df997f7837b42873c9998ed2ff5bbf3",
+  cost_usd: 0.00444,
+  resume_context: RESUME_CONTEXT,
 };
 
 let handler: BrowserHandler | undefined;
@@ -44,6 +83,7 @@ function edgeClient(options: {
     error: null,
     opening_mode_applied: "application_tts_v1",
     opening_payload: PAYLOAD,
+    onboarding_protocol_version: 2,
   };
   const readyRows = [...(options.readyRows ?? [])];
   const updateResults = [...(options.updateResults ?? [])];
@@ -150,12 +190,36 @@ beforeEach(() => {
 });
 
 describe("browser-session opening contract", () => {
+  test("dual-validates legacy v1 and exact v2 payloads", () => {
+    const validate = (edgeModule as any).isApplicationOpeningPayload;
+    expect(validate).toBeFunction();
+    expect(validate(LEGACY_PAYLOAD)).toBe(true);
+    expect(validate(PAYLOAD)).toBe(true);
+    expect(validate(RESUMED_PAYLOAD)).toBe(true);
+    expect(validate({ ...PAYLOAD, resume_context: undefined })).toBe(false);
+    expect(validate({ ...RESUMED_PAYLOAD, tts_model: "tts-1" })).toBe(false);
+  });
+
   test("rejects a stale onboarding client before it can enqueue work", async () => {
     expect(createBrowserSessionHandler).toBeFunction();
     for (const body of [
       { session_type: "onboarding" },
       { session_type: "onboarding", opening_mode_requested: "provider_model_v1" },
       { session_type: "onboarding", opening_mode_requested: "unknown" },
+      {
+        session_type: "onboarding",
+        opening_mode_requested: "application_tts_v1",
+      },
+      {
+        session_type: "onboarding",
+        opening_mode_requested: "application_tts_v1",
+        onboarding_protocol_version: 1,
+      },
+      {
+        session_type: "onboarding",
+        opening_mode_requested: "application_tts_v1",
+        onboarding_protocol_version: "2",
+      },
     ]) {
       currentClient = edgeClient();
       const response = await handler!(request(body));
@@ -165,12 +229,65 @@ describe("browser-session opening contract", () => {
     }
   });
 
+  test("persists protocol 2 and returns exact resumed context, business, and text", async () => {
+    currentClient = edgeClient({ readyRow: {
+      status: "ready",
+      answer_sdp: "resumed-answer-sdp",
+      call_id: "33333333-3333-4333-8333-333333333333",
+      error: null,
+      opening_mode_applied: "application_tts_v1",
+      opening_payload: RESUMED_PAYLOAD,
+      onboarding_protocol_version: 2,
+    } });
+    const response = await handler!(request({
+      session_type: "onboarding",
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
+    }));
+
+    expect(response.status).toBe(200);
+    expect(currentClient.inserts[0]).toMatchObject({
+      session_type: "onboarding",
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
+    });
+    expect(await response.json()).toMatchObject({
+      opening_payload: RESUMED_PAYLOAD,
+      onboarding_protocol_version: 2,
+      resume_context: RESUME_CONTEXT,
+      opening_text: RESUMED_PAYLOAD.text,
+      business_name: "D1F Marketing",
+    });
+  });
+
+  test("protocol 2 rejects a legacy v1 ready row", async () => {
+    currentClient = edgeClient({ readyRow: {
+      status: "ready",
+      answer_sdp: "legacy-answer-sdp",
+      call_id: "33333333-3333-4333-8333-333333333333",
+      error: null,
+      opening_mode_applied: "application_tts_v1",
+      opening_payload: LEGACY_PAYLOAD,
+      onboarding_protocol_version: 2,
+    } });
+    const response = await handler!(request({
+      session_type: "onboarding",
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
+    }));
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: "invalid_application_opening_contract",
+    });
+  });
+
   test("binds an application opening to the authenticated tenant and ignores browser payload fields", async () => {
     expect(createBrowserSessionHandler).toBeFunction();
     currentClient = edgeClient();
     const response = await handler!(request({
       session_type: "onboarding",
       opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
       opening_mode_applied: "provider_model_v1",
       opening_payload: { ...PAYLOAD, text: "browser spoof" },
       business_name: "Browser Spoof LLC",
@@ -185,6 +302,7 @@ describe("browser-session opening contract", () => {
       model_override: null,
       offer_sdp: "offer-sdp",
       opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
     }]);
     expect(await response.json()).toEqual({
       sdp: "answer-sdp",
@@ -193,6 +311,9 @@ describe("browser-session opening contract", () => {
       model: "gpt-realtime-2.1",
       opening_mode_applied: "application_tts_v1",
       opening_payload: PAYLOAD,
+      onboarding_protocol_version: 2,
+      resume_context: null,
+      opening_text: PAYLOAD.text,
       business_name: "D1F Marketing",
     });
   });
@@ -219,7 +340,11 @@ describe("browser-session opening contract", () => {
       },
     ]) {
       currentClient = edgeClient({ readyRow });
-      const response = await handler!(request({ session_type: "onboarding", opening_mode_requested: "application_tts_v1" }));
+      const response = await handler!(request({
+        session_type: "onboarding",
+        opening_mode_requested: "application_tts_v1",
+        onboarding_protocol_version: 2,
+      }));
       expect(response.status).toBe(502);
       expect(await response.json()).toEqual({ error: "invalid_application_opening_contract" });
     }
@@ -257,7 +382,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -276,6 +401,7 @@ describe("browser-session opening contract", () => {
         error: null,
         opening_mode_applied: null,
         opening_payload: null,
+        onboarding_protocol_version: 2,
       } });
       const times = [0, 0, 20_001];
       handler = buildHandler({
@@ -285,7 +411,7 @@ describe("browser-session opening contract", () => {
 
       const response = await handler!(request({
         session_type: "onboarding",
-        opening_mode_requested: "application_tts_v1",
+        opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
       }, abort.signal));
 
       expect(response.status).toBe(499);
@@ -314,7 +440,7 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: "race-answer-sdp",
       error: null,
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
       opening_mode_applied: "application_tts_v1",
       opening_payload: PAYLOAD,
     };
@@ -338,7 +464,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -396,7 +522,7 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: null,
       error: null,
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
       opening_mode_applied: null,
       opening_payload: null,
     };
@@ -413,7 +539,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -433,7 +559,7 @@ describe("browser-session opening contract", () => {
         call_id: "77777777-7777-4777-8777-777777777777",
         answer_sdp: "malformed-answer",
         error: null,
-        opening_mode_requested: "application_tts_v1",
+        opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
         opening_mode_applied: "provider_model_v1",
         opening_payload: null,
       }],
@@ -443,7 +569,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
     }, abort.signal));
 
     expect(response.status).toBe(502);
@@ -460,7 +586,7 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: "race-answer-sdp",
       error: null,
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
       opening_mode_applied: "application_tts_v1",
       opening_payload: PAYLOAD,
     };
@@ -484,7 +610,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -501,7 +627,7 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: "race-answer-sdp",
       error: null,
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
       opening_mode_applied: "application_tts_v1",
       opening_payload: PAYLOAD,
     };
@@ -521,7 +647,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
     }, abort.signal));
 
     expect(response.status).toBe(502);
@@ -543,7 +669,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
     }));
 
     expect(response.status).toBe(504);
@@ -577,6 +703,7 @@ describe("browser-session opening contract", () => {
         error: null,
         opening_mode_applied: "application_tts_v1",
         opening_payload: PAYLOAD,
+        onboarding_protocol_version: 2,
       },
     ] });
     const times = [0, 0, 20_001, 21_000, 22_000];
@@ -584,7 +711,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
     }));
 
     expect(response.status).toBe(200);
