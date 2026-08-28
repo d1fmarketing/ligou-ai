@@ -13,7 +13,6 @@ import type {
   OnboardingOpeningMode,
   OnboardingOpeningPayload,
 } from "./onboarding-greeting.ts";
-import { openingPayloadIsInternallyValid } from "./onboarding-greeting.ts";
 
 type StartSession = (
   userId: string,
@@ -40,6 +39,11 @@ type StartSession = (
 interface BrowserLiveControl {
   requestId: string;
   callId: string;
+  userId: string;
+  tenantId: string;
+  sessionType: "onboarding";
+  openingModeRequested: "application_tts_v1";
+  onboardingProtocolVersion: number | null;
   cancel(reason: string): Promise<void>;
   startupComplete(): boolean;
   cancelInvoked: boolean;
@@ -85,8 +89,17 @@ function registerBrowserLiveControl(
     startupComplete: boolean;
     cancel(reason: string): Promise<void>;
   },
+  binding: {
+    userId: string;
+    tenantId: string;
+    sessionType: "onboarding";
+    openingModeRequested: "application_tts_v1";
+    onboardingProtocolVersion: number | null;
+  },
 ): boolean {
-  if (!requestId.trim() || !cleanup.callId?.trim()) return false;
+  if (!requestId.trim() || !cleanup.callId?.trim() || !binding.userId.trim() ||
+    !binding.tenantId.trim() ||
+    ![null, 2].includes(binding.onboardingProtocolVersion)) return false;
   pruneTerminalBrowserControls();
   const existing = browserLiveControls.get(requestId);
   if (existing)
@@ -95,6 +108,7 @@ function registerBrowserLiveControl(
   browserLiveControls.set(requestId, {
     requestId,
     callId: cleanup.callId,
+    ...binding,
     cancel: cleanup.cancel,
     startupComplete: () => cleanup.startupComplete === true,
     cancelInvoked: false,
@@ -297,7 +311,7 @@ async function loadDurableCancellationRequest(
     const { data, error } = await supa()
       .from("browser_session_requests")
       .select(
-        "id,tenant_id,session_type,status,error,answer_sdp,call_id,opening_mode_requested,opening_mode_applied,opening_payload",
+        "id,user_id,tenant_id,session_type,status,error,answer_sdp,call_id,opening_mode_requested,opening_mode_applied,opening_payload,onboarding_protocol_version",
       )
       .eq("id", requestId)
       .maybeSingle();
@@ -311,21 +325,18 @@ type CancellationRequestKind = "processing" | "ready";
 
 function cancellationRequestKind(row: any): CancellationRequestKind | null {
   if (row?.session_type !== "onboarding" ||
-    row?.opening_mode_requested !== "application_tts_v1") return null;
+    row?.opening_mode_requested !== "application_tts_v1" ||
+    ![null, undefined, 2].includes(row?.onboarding_protocol_version) ||
+    typeof row?.call_id !== "string" || !row.call_id.trim()) return null;
   if (row.answer_sdp == null && row.opening_mode_applied == null &&
     row.opening_payload == null) return "processing";
   const payload = row.opening_payload;
-  const expectedResumeContext = payload?.version === 2
-    ? payload.resume_context
-    : undefined;
   if (typeof row.answer_sdp === "string" && row.answer_sdp.trim() &&
     row.opening_mode_applied === "application_tts_v1" && payload &&
-    typeof payload.text === "string" &&
-    openingPayloadIsInternallyValid(
-      payload,
-      payload.text,
-      expectedResumeContext,
-    )) return "ready";
+    typeof payload === "object" && !Array.isArray(payload) &&
+    (row.onboarding_protocol_version === 2
+      ? payload.version === 2
+      : payload.version === 1 || payload.version === 2)) return "ready";
   return null;
 }
 
@@ -333,12 +344,15 @@ function exactCancellationRequestMatches(eventRow: any, durableRow: any): boolea
   const kind = cancellationRequestKind(eventRow);
   return kind !== null && cancellationRequestKind(durableRow) === kind &&
     durableRow?.id === eventRow?.id &&
+    durableRow?.user_id === eventRow?.user_id &&
     durableRow?.status === "cancel_requested" &&
     durableRow?.call_id === eventRow?.call_id &&
     durableRow?.tenant_id === eventRow?.tenant_id &&
     durableRow?.session_type === eventRow?.session_type &&
     durableRow?.answer_sdp === eventRow?.answer_sdp &&
     durableRow?.opening_mode_requested === eventRow?.opening_mode_requested &&
+    (durableRow?.onboarding_protocol_version ?? null) ===
+      (eventRow?.onboarding_protocol_version ?? null) &&
     durableRow?.opening_mode_applied === eventRow?.opening_mode_applied &&
     exactOpeningPayloadMatches(
       durableRow?.opening_payload,
@@ -581,7 +595,15 @@ async function handleBrowserCancellation(
   const durableRow = await loadDurableCancellationRequest(requestId);
   if (!exactCancellationRequestMatches(row, durableRow)) return false;
   const control = browserLiveControls.get(requestId);
-  if (control && control.callId !== callId) return false;
+  if (control && (
+    control.callId !== callId ||
+    control.userId !== durableRow.user_id ||
+    control.tenantId !== durableRow.tenant_id ||
+    control.sessionType !== durableRow.session_type ||
+    control.openingModeRequested !== durableRow.opening_mode_requested ||
+    control.onboardingProtocolVersion !==
+      (durableRow.onboarding_protocol_version ?? null)
+  )) return false;
   const workKey = `${requestId}:${callId}`;
   const existingWork = cancellationWork.get(workKey);
   if (existingWork) return await existingWork;
@@ -657,7 +679,16 @@ async function handle(
       (cleanup) => {
         sessionCleanup = cleanup;
         if (needsDurableCancelControl &&
-          !registerBrowserLiveControl(String(row.id), cleanup))
+          !registerBrowserLiveControl(String(row.id), cleanup, {
+            userId: String(row.user_id ?? ""),
+            tenantId: String(row.tenant_id ?? ""),
+            sessionType: "onboarding",
+            openingModeRequested: "application_tts_v1",
+            onboardingProtocolVersion:
+              typeof row.onboarding_protocol_version === "number"
+                ? row.onboarding_protocol_version
+                : null,
+          }))
           controlRegistrationFailed = true;
       },
       {

@@ -818,26 +818,33 @@ describe("browser request handling", () => {
 });
 
 describe("durable browser cancel_requested handshake", () => {
-  test("ready cancellation classification accepts exact v1 and v2 payloads but rejects corrupt resume context", () => {
+  test("ready cancellation classification accepts wrong-cost V2 cleanup identity but rejects wrong protocol", () => {
     const classify = (browserRequestsModule as any)
       ._cancellationRequestKindForTests;
     expect(classify).toBeFunction();
-    const row = (opening_payload: Record<string, unknown>) => ({
+    const row = (
+      opening_payload: Record<string, unknown>,
+      onboarding_protocol_version: number | null,
+    ) => ({
+      id: "request-classification",
+      user_id: "owner-a",
+      tenant_id: V02_TENANT.id,
+      status: "cancel_requested",
+      call_id: "22222222-2222-4222-8222-222222222229",
       session_type: "onboarding",
       opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version,
       answer_sdp: "answer",
       opening_mode_applied: "application_tts_v1",
       opening_payload,
     });
-    expect(classify(row(APPLICATION_OPENING_PAYLOAD))).toBe("ready");
-    expect(classify(row(APPLICATION_OPENING_PAYLOAD_V2))).toBe("ready");
+    expect(classify(row(APPLICATION_OPENING_PAYLOAD, null))).toBe("ready");
+    expect(classify(row(APPLICATION_OPENING_PAYLOAD_V2, 2))).toBe("ready");
     expect(classify(row({
       ...APPLICATION_OPENING_PAYLOAD_V2,
-      resume_context: {
-        ...APPLICATION_OPENING_PAYLOAD_V2.resume_context,
-        snapshot_digest: "invalid",
-      },
-    }))).toBeNull();
+      cost_usd: APPLICATION_OPENING_PAYLOAD_V2.cost_usd + 0.000001,
+    }, 2))).toBe("ready");
+    expect(classify(row(APPLICATION_OPENING_PAYLOAD_V2, 1))).toBeNull();
   });
 
   test("ready reconciliation deep-compares v2 resume context instead of object identity", () => {
@@ -857,19 +864,24 @@ describe("durable browser cancel_requested handshake", () => {
     }, APPLICATION_OPENING_PAYLOAD_V2)).toBe(false);
   });
 
-  function boundary(options: { transitionRows?: number } = {}) {
+  function boundary(options: {
+    transitionRows?: number;
+    protocolVersion?: number | null;
+  } = {}) {
     const patches: Array<{
       patch: Record<string, unknown>;
       filters: Record<string, unknown>;
     }> = [];
     const row: Record<string, unknown> = {
       id: "request-cancel-1",
+      user_id: "owner-a",
       status: "pending",
       call_id: null,
       answer_sdp: null,
       session_type: "onboarding",
       tenant_id: V02_TENANT.id,
       opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: options.protocolVersion ?? null,
       opening_mode_applied: null,
       opening_payload: null,
     };
@@ -954,6 +966,71 @@ describe("durable browser cancel_requested handshake", () => {
       get expiredTransitions() { return expiredTransitions; },
     };
   }
+
+  test("wrong-cost V2 Edge cancellation reaches controller cleanup and expires exactly once", async () => {
+    const poll = (browserRequestsModule as any)._pollBrowserCancellations;
+    const reset = (browserRequestsModule as any)
+      ._resetBrowserLiveControlsForTests;
+    const size = (browserRequestsModule as any)._browserLiveControlCount;
+    reset();
+    const b = boundary({ protocolVersion: 2 });
+    _setClient(b.client as any);
+    const reasons: string[] = [];
+    const wrongCostPayload = {
+      ...APPLICATION_OPENING_PAYLOAD_V2,
+      cost_usd: APPLICATION_OPENING_PAYLOAD_V2.cost_usd + 0.000001,
+    };
+    await _handleBrowserRequest(
+      {
+        id: "request-cancel-1",
+        user_id: "owner-a",
+        tenant_id: V02_TENANT.id,
+        session_type: "onboarding",
+        offer_sdp: "offer-wrong-cost-v2",
+        opening_mode_requested: "application_tts_v1",
+        onboarding_protocol_version: 2,
+      },
+      async (...args: unknown[]) => {
+        (args[5] as any)?.({
+          callId: "22222222-2222-4222-8222-222222222229",
+          cancel: async (reason: string) => {
+            reasons.push(reason);
+            Object.assign(b.call, {
+              status: "error",
+              provider_termination_state: "confirmed",
+            });
+          },
+        });
+        return {
+          sdp: "answer-wrong-cost-v2",
+          call_id: "22222222-2222-4222-8222-222222222229",
+          opening_mode_applied: "application_tts_v1",
+          opening_payload: wrongCostPayload,
+        } as any;
+      },
+    );
+    expect(size()).toBe(1);
+    Object.assign(b.row, {
+      status: "cancel_requested",
+      error: "invalid_application_opening_contract",
+    });
+
+    expect(await poll({
+      loadRows: async () => [structuredClone(b.row)],
+    })).toBe(1);
+    expect(reasons).toEqual(["invalid_application_opening_contract"]);
+    expect(b.expiredTransitions).toBe(1);
+    expect(b.row).toMatchObject({
+      status: "expired",
+      call_id: "22222222-2222-4222-8222-222222222229",
+      answer_sdp: null,
+      opening_mode_applied: null,
+      opening_payload: null,
+      onboarding_protocol_version: 2,
+    });
+    expect(size()).toBe(0);
+    reset();
+  });
 
   test("ready→cancel_requested runs exact cleanup once across realtime/poll duplicates, then expires with call audit linkage", async () => {
     const cancel = (browserRequestsModule as any)._handleBrowserCancellation;
@@ -1045,6 +1122,16 @@ describe("durable browser cancel_requested handshake", () => {
         } as any;
       },
     );
+    Object.assign(b.row, {
+      status: "cancel_requested",
+      error: "edge_identity_negative",
+      user_id: "owner-b",
+    });
+    expect(await cancel(structuredClone(b.row))).toBe(false);
+    b.row.user_id = "owner-a";
+    b.row.onboarding_protocol_version = 2;
+    expect(await cancel(structuredClone(b.row))).toBe(false);
+    b.row.onboarding_protocol_version = null;
     expect(await cancel({
       ...b.row, status: "cancel_requested", call_id: "foreign-call",
     })).toBe(false);
