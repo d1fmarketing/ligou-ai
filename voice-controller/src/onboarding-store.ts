@@ -152,7 +152,15 @@ export interface OnboardingResumeSuccess {
   coverage: Record<string, unknown>;
   durationMs: number;
 }
-export type OnboardingResume = OnboardingResumeSuccess | StoreFailure;
+export interface OnboardingResumeNone {
+  ok: true;
+  status: "none";
+  durationMs: number;
+}
+export type OnboardingResume =
+  | OnboardingResumeSuccess
+  | OnboardingResumeNone
+  | StoreFailure;
 
 export type SnapshotResult =
   | {
@@ -1072,14 +1080,19 @@ export function createOnboardingStore(
       );
       if (result.error) {
         const message = String(result.error.message ?? "").toLowerCase();
+        if (message.includes("onboarding_resume_source_missing"))
+          return {
+            ok: true,
+            status: "none",
+            durationMs: elapsed(now, started),
+          };
         if (
-          message.includes("latest_ineligible") ||
-          message.includes("source_missing") ||
-          message.includes("source_consumed")
+          message.includes("onboarding_resume_latest_ineligible") ||
+          message.includes("onboarding_resume_source_consumed")
         )
           return failure(
-            "empty",
-            "no resumable onboarding checkpoint is available",
+            "changed",
+            "latest onboarding state cannot be resumed safely",
             now,
             started,
           );

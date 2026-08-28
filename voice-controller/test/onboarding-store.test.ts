@@ -385,7 +385,25 @@ describe("initializeOnboardingResume", () => {
     expect(boundary.rpcCalls).toHaveLength(0);
   });
 
-  test("fails closed on an ineligible latest source and on malformed readback", async () => {
+  test("returns an explicit no-resume success only when no prior source exists", async () => {
+    const boundary = new SupabaseBoundaryFake();
+    boundary.rpcResult = {
+      data: null,
+      error: { code: "P0002", message: "onboarding_resume_source_missing" },
+    };
+    const store = createOnboardingStore({
+      client: boundary.client(),
+      now: () => 12,
+    });
+
+    expect(await store.initializeOnboardingResume(ownerCapability())).toEqual({
+      ok: true,
+      status: "none",
+      durationMs: 0,
+    });
+  });
+
+  test("blocks an ineligible latest source instead of permitting fresh fallback", async () => {
     const denied = new SupabaseBoundaryFake();
     denied.rpcResult = {
       data: null,
@@ -393,8 +411,21 @@ describe("initializeOnboardingResume", () => {
     };
     const deniedStore = createOnboardingStore({ client: denied.client() });
     expect(await deniedStore.initializeOnboardingResume(ownerCapability()))
-      .toMatchObject({ ok: false, code: "empty" });
+      .toMatchObject({ ok: false, code: "changed" });
+  });
 
+  test("blocks a consumed source instead of permitting a reset", async () => {
+    const consumed = new SupabaseBoundaryFake();
+    consumed.rpcResult = {
+      data: null,
+      error: { code: "55000", message: "onboarding_resume_source_consumed" },
+    };
+    const consumedStore = createOnboardingStore({ client: consumed.client() });
+    expect(await consumedStore.initializeOnboardingResume(ownerCapability()))
+      .toMatchObject({ ok: false, code: "changed" });
+  });
+
+  test("fails closed on malformed resume readback", async () => {
     const malformed = new SupabaseBoundaryFake();
     malformed.rpcResult = {
       data: resumeRpcResult({ revision: 2 }),
