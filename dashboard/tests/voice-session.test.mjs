@@ -18,6 +18,8 @@ after(async () => { await vite.close(); });
 const {
   applyCurrentSessionRun,
   endedVoiceSessionCopy,
+  handleClientUpgradeRequired,
+  markVoiceSessionAccepted,
   onboardingOutcomeCopy,
   resolveOnboardingOutcome,
   settleStartedSession,
@@ -25,6 +27,9 @@ const {
   voiceSessionRestartLabel,
   watchOnboardingOutcome,
 } = sessionModule;
+
+const CLIENT_UPGRADE_MESSAGE_PT =
+  "O Ligou foi atualizado. Recarregue esta página para continuar.";
 
 const CALL_ID = "7f58ee06-6a13-4d45-a2d5-c60244dc92a3";
 const APPROVAL_ID = "11111111-1111-4111-8111-111111111111";
@@ -926,6 +931,96 @@ test("fetch rejection after microphone acquisition releases every browser resour
   } finally {
     browser.restore();
   }
+});
+
+test("409 client_upgrade_required preserves a code and maps to actionable PT-BR copy", async () => {
+  const browser = installVoiceBrowser({
+    fetchImpl: async () => new Response(JSON.stringify({
+      error: "client_upgrade_required",
+    }), {
+      status: 409,
+      headers: { "content-type": "application/json" },
+    }),
+  });
+  try {
+    await assert.rejects(
+      () => startVoiceSession({
+        accessToken: "owner-token",
+        sessionType: "onboarding",
+      }),
+      (error) => {
+        assert.equal(error.code, "client_upgrade_required");
+        assert.equal(error.message, CLIENT_UPGRADE_MESSAGE_PT);
+        return true;
+      },
+    );
+    assert.equal(browser.tracks[0].stopCalls, 1);
+    assert.equal(browser.peers[0].closeCalls, 1);
+  } finally {
+    browser.restore();
+  }
+});
+
+test("client upgrade recovery reloads once and then shows PT-BR copy without looping", () => {
+  assert.equal(typeof handleClientUpgradeRequired, "function");
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+    removeItem: (key) => { values.delete(key); },
+  };
+  let reloads = 0;
+  const error = Object.assign(new Error(CLIENT_UPGRADE_MESSAGE_PT), {
+    code: "client_upgrade_required",
+  });
+
+  assert.deepEqual(handleClientUpgradeRequired(error, {
+    storage,
+    reload: () => { reloads += 1; },
+  }), { handled: true, reloaded: true, message: null });
+  assert.equal(reloads, 1);
+  assert.deepEqual(handleClientUpgradeRequired(error, {
+    storage,
+    reload: () => { reloads += 1; },
+  }), {
+    handled: true,
+    reloaded: false,
+    message: CLIENT_UPGRADE_MESSAGE_PT,
+  });
+  assert.equal(reloads, 1);
+});
+
+test("the client-upgrade sentinel clears only after a session is accepted", () => {
+  assert.equal(typeof markVoiceSessionAccepted, "function");
+  const values = new Map();
+  let removals = 0;
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+    removeItem: (key) => { removals += 1; values.delete(key); },
+  };
+  let reloads = 0;
+  const error = Object.assign(new Error(CLIENT_UPGRADE_MESSAGE_PT), {
+    code: "client_upgrade_required",
+  });
+
+  handleClientUpgradeRequired(error, {
+    storage,
+    reload: () => { reloads += 1; },
+  });
+  handleClientUpgradeRequired(new Error("outro erro"), {
+    storage,
+    reload: () => { reloads += 1; },
+  });
+  assert.equal(removals, 0);
+  assert.equal(reloads, 1);
+  markVoiceSessionAccepted({ storage });
+  assert.equal(removals, 1);
+  handleClientUpgradeRequired(error, {
+    storage,
+    reload: () => { reloads += 1; },
+  });
+  assert.equal(reloads, 2);
 });
 
 test("remote-description failure releases resources and normal cleanup stays idempotent", async () => {

@@ -4,6 +4,10 @@ const CONTROLLER_URL = import.meta.env.VITE_CONTROLLER_URL || "http://127.0.0.1:
 // Remote mode (production): a public Supabase Edge Function bootstraps the session and the EC2 controller
 // (zero inbound ports) services it via Realtime. Set VITE_SESSION_URL to the function URL to enable.
 const SESSION_URL = import.meta.env.VITE_SESSION_URL || `${CONTROLLER_URL}/session`;
+const CLIENT_UPGRADE_REQUIRED = "client_upgrade_required";
+const CLIENT_UPGRADE_RELOAD_SENTINEL = "ligou.voice.client-upgrade-reload.v1";
+const CLIENT_UPGRADE_MESSAGE_PT =
+  "O Ligou foi atualizado. Recarregue esta página para continuar.";
 
 const MANUAL_END_REASONS = new Set(["user", "manual_hangup", "dialog_close"]);
 const TERMINAL_FAILURE_STATUSES = new Set(["error", "killed_budget", "killed_deadline"]);
@@ -11,6 +15,75 @@ const RECONCILABLE_PROVIDER_STATES = new Set(["active", "pending", "unknown"]);
 
 function isObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function browserSessionStorage(provided) {
+  if (provided !== undefined) return provided;
+  try { return globalThis.sessionStorage ?? null; } catch { return null; }
+}
+
+export function handleClientUpgradeRequired(error, options = {}) {
+  if (error?.code !== CLIENT_UPGRADE_REQUIRED) return {
+    handled: false,
+    reloaded: false,
+    message: null,
+  };
+  const storage = browserSessionStorage(options.storage);
+  if (!storage) return {
+    handled: true,
+    reloaded: false,
+    message: CLIENT_UPGRADE_MESSAGE_PT,
+  };
+  try {
+    if (storage.getItem(CLIENT_UPGRADE_RELOAD_SENTINEL) === "1") return {
+      handled: true,
+      reloaded: false,
+      message: CLIENT_UPGRADE_MESSAGE_PT,
+    };
+    storage.setItem(CLIENT_UPGRADE_RELOAD_SENTINEL, "1");
+  } catch {
+    return {
+      handled: true,
+      reloaded: false,
+      message: CLIENT_UPGRADE_MESSAGE_PT,
+    };
+  }
+  const reload = options.reload ?? (() => globalThis.location?.reload?.());
+  try {
+    reload();
+    return { handled: true, reloaded: true, message: null };
+  } catch {
+    return {
+      handled: true,
+      reloaded: false,
+      message: CLIENT_UPGRADE_MESSAGE_PT,
+    };
+  }
+}
+
+export function markVoiceSessionAccepted(options = {}) {
+  const storage = browserSessionStorage(options.storage);
+  if (!storage) return false;
+  try {
+    storage.removeItem(CLIENT_UPGRADE_RELOAD_SENTINEL);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function voiceSessionStartError(body, status) {
+  const code = typeof body?.error === "string" && body.error
+    ? body.error
+    : `voice_session_start_${status}`;
+  const message = code === "budget_exceeded"
+    ? "Orçamento diário de voz atingido — sessão bloqueada."
+    : code === CLIENT_UPGRADE_REQUIRED
+      ? CLIENT_UPGRADE_MESSAGE_PT
+      : typeof body?.error === "string" && body.error
+        ? body.error
+        : `Falha ao iniciar sessão (${status})`;
+  return Object.assign(new Error(message), { code, status });
 }
 
 async function boundedRead(read, timeoutMs, signal) {
@@ -720,7 +793,7 @@ export async function startVoiceSession({
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.error === "budget_exceeded" ? "Orçamento diário de voz atingido — sessão bloqueada." : body.error || `Falha ao iniciar sessão (${res.status})`);
+      throw voiceSessionStartError(body, res.status);
     }
     const response = await res.json();
     const { sdp, call_id, max_minutes } = response;

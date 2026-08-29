@@ -5,6 +5,8 @@ import { supabase } from "../lib/supabase.js";
 import {
   applyCurrentSessionRun,
   endedVoiceSessionCopy,
+  handleClientUpgradeRequired,
+  markVoiceSessionAccepted,
   settleStartedSession,
   startVoiceSession,
   voiceSessionRestartLabel,
@@ -138,13 +140,16 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
         cancelled: cancelledRef.current,
         ended: endedRef.current,
         onAccepted: (acceptedSession) => {
+          markVoiceSessionAccepted();
           sessionRef.current = acceptedSession;
           setStatus("live");
         },
       });
     } catch (e) {
       if (sessionRunRef.current !== runId || cancelledRef.current || endedRef.current) return;
-      setError(e.message);
+      const upgrade = handleClientUpgradeRequired(e);
+      if (upgrade.reloaded) return;
+      setError(upgrade.handled ? upgrade.message : e.message);
       setStatus("error");
     } finally {
       if (startAbortRef.current === startAbort) startAbortRef.current = null;
