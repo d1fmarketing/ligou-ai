@@ -177,9 +177,10 @@ alter table public.worker_runtime_slots
   add constraint worker_runtime_slots_current_attempt_fk
   foreign key (current_attempt_id) references public.worker_attempts (id);
 
--- Runtime resource names live longer than a process. These immutable
--- reservations prevent an old cleanup receipt from ever naming a resource
--- owned by a later attempt, including after the original slot is reusable.
+-- Durable runtime names remain reserved forever so an old cleanup receipt can
+-- never name a later attempt's resource. The finite loopback endpoint pair is
+-- different: it becomes reusable only after the cleanup RPC records proof that
+-- both the listener and the attempt-identity process are absent.
 create table public.worker_runtime_resource_reservations (
   attempt_id uuid not null references public.worker_attempts (id),
   resource_namespace text not null check (resource_namespace in (
@@ -198,8 +199,12 @@ create table public.worker_runtime_resource_reservations (
   resource_identifier text not null
     check (length(resource_identifier) between 1 and 256),
   created_at timestamp with time zone not null default now(),
+  released_at timestamp with time zone,
   primary key (attempt_id, resource_kind),
-  unique (resource_namespace, resource_identifier),
+  check (
+    released_at is null
+    or resource_kind in ('loopback_port', 'socket_identifier')
+  ),
   check (
     (resource_kind = 'bundle_hash' and resource_namespace = 'bundle')
     or (resource_kind in ('cell_container', 'bridge_container')
@@ -217,6 +222,18 @@ create table public.worker_runtime_resource_reservations (
     or (resource_kind = 'output_identifier' and resource_namespace = 'output')
   )
 );
+
+create unique index worker_runtime_resource_reservations_permanent_unique
+  on public.worker_runtime_resource_reservations (
+    resource_namespace, resource_identifier
+  )
+  where resource_kind not in ('loopback_port', 'socket_identifier');
+
+create unique index worker_runtime_resource_reservations_active_endpoint_unique
+  on public.worker_runtime_resource_reservations (
+    resource_namespace, resource_identifier
+  )
+  where resource_kind in ('loopback_port', 'socket_identifier') and released_at is null;
 
 -- ---------------------------------------------------------------- immutable candidates and evidence
 create table public.worker_results (
@@ -377,6 +394,29 @@ $$;
 revoke all on function public.guard_worker_job_identity()
   from public, anon, authenticated, service_role;
 
+create or replace function public.guard_worker_runtime_resource_release()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if tg_op = 'UPDATE'
+     and old.resource_kind in ('loopback_port', 'socket_identifier')
+     and old.released_at is null
+     and new.released_at is not null
+     and (to_jsonb(new) - 'released_at') is not distinct from
+       (to_jsonb(old) - 'released_at') then
+    return new;
+  end if;
+  raise exception using errcode = '55000',
+    message = 'company_discovery_runtime_resource_release_invalid';
+end;
+$$;
+
+revoke all on function public.guard_worker_runtime_resource_release()
+  from public, anon, authenticated, service_role;
+
 create trigger worker_jobs_identity_immutable
   before update on public.worker_jobs
   for each row execute function public.guard_worker_job_identity();
@@ -386,7 +426,7 @@ create trigger worker_results_append_only
   for each row execute function public.block_mutation();
 create trigger worker_runtime_resource_reservations_append_only
   before update or delete on public.worker_runtime_resource_reservations
-  for each row execute function public.block_mutation();
+  for each row execute function public.guard_worker_runtime_resource_release();
 create trigger discovery_source_snapshots_append_only
   before update or delete on public.discovery_source_snapshots
   for each row execute function public.block_mutation();
@@ -1442,12 +1482,19 @@ declare
   v_runtime_hash text;
   v_name_key text;
   v_name text;
+  v_image_key text;
+  v_digest_key text;
+  v_image jsonb;
   v_name_keys constant text[] := array[
     'cell_container_name', 'bridge_container_name',
     'internal_network_name', 'egress_network_name',
     'config_volume_name', 'state_volume_name', 'workspace_volume_name',
     'output_volume_name', 'gateway_secret_volume_name',
     'bridge_secret_volume_name', 'profile_name'
+  ];
+  v_image_keys constant text[] := array[
+    'reference', 'index_digest', 'platform',
+    'selected_manifest_digest', 'image_id', 'config_digest'
   ];
 begin
   select a.* into v_attempt
@@ -1490,8 +1537,10 @@ begin
   end if;
   if jsonb_typeof(p_runtime_identity) <> 'object'
      or octet_length(p_runtime_identity::text) > 4096
-     or not (p_runtime_identity ?& (v_name_keys || array['loopback_port']))
-     or (p_runtime_identity - (v_name_keys || array['loopback_port'])) <> '{}'::jsonb
+     or not (p_runtime_identity ?&
+       (v_name_keys || array['loopback_port', 'cell_image', 'bridge_image']))
+     or (p_runtime_identity -
+       (v_name_keys || array['loopback_port', 'cell_image', 'bridge_image'])) <> '{}'::jsonb
      or p_runtime_identity ?| array[
        'tenant_id', 'job_id', 'claim_token', 'gateway_token', 'bridge_token',
        'credential', 'api_key', 'config_path', 'state_path', 'workspace_path',
@@ -1503,6 +1552,51 @@ begin
     raise exception using errcode = '22023',
       message = 'company_discovery_runtime_identity_invalid';
   end if;
+  foreach v_image_key in array array['cell_image', 'bridge_image']
+  loop
+    v_image := p_runtime_identity->v_image_key;
+    if jsonb_typeof(v_image) <> 'object'
+       or not (v_image ?& v_image_keys)
+       or (v_image - v_image_keys) <> '{}'::jsonb
+       or jsonb_typeof(v_image->'reference') <> 'string'
+       or length(v_image->>'reference') not between 1 and 384
+       or jsonb_typeof(v_image->'platform') <> 'string'
+       or v_image->>'platform' not in ('linux/arm64', 'linux/amd64') then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_runtime_identity_invalid';
+    end if;
+    foreach v_digest_key in array array[
+      'index_digest', 'selected_manifest_digest', 'image_id', 'config_digest'
+    ]
+    loop
+      if jsonb_typeof(v_image->v_digest_key) <> 'string'
+         or (v_image->>v_digest_key) !~ '^sha256:[0-9a-f]{64}$' then
+        raise exception using errcode = '22023',
+          message = 'company_discovery_runtime_identity_invalid';
+      end if;
+    end loop;
+    if split_part(v_image->>'reference', '@', 2) is distinct from
+         v_image->>'index_digest' then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_runtime_identity_invalid';
+    end if;
+    if v_image_key = 'cell_image'
+       and v_image->>'reference' <>
+         'ghcr.io/openclaw/openclaw@sha256:e7849cb6c1ef1ead39ab4be7d85edb2df89611f486e283284c7cf35ce39a20d4' then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_runtime_identity_invalid';
+    end if;
+    if v_image_key = 'bridge_image'
+       and (
+         v_image->>'reference' !~
+           '^ligou-discovery-bridge@sha256:[0-9a-f]{64}$'
+         or v_image->>'index_digest' is distinct from
+           v_image->>'selected_manifest_digest'
+       ) then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_runtime_identity_invalid';
+    end if;
+  end loop;
   foreach v_name_key in array v_name_keys
   loop
     if jsonb_typeof(p_runtime_identity->v_name_key) <> 'string' then
@@ -1700,7 +1794,7 @@ create or replace function public.commit_company_discovery_result(
   p_claim_token text,
   p_result jsonb,
   p_result_hash text
-) returns uuid
+) returns jsonb
 language plpgsql
 security definer
 set search_path = ''
@@ -2054,8 +2148,15 @@ begin
   update public.worker_jobs
   set status = 'awaiting_review', version = version + 1,
       fallback_state = 'discovery_available', updated_at = clock_timestamp()
-  where id = v_job.id;
-  return v_result_id;
+  where id = v_job.id
+  returning * into v_job;
+  return jsonb_build_object(
+    'job_id', v_job.id,
+    'attempt_id', v_attempt.id,
+    'result_id', v_result_id,
+    'job_version', v_job.version,
+    'fence_generation', v_job.fence_generation
+  );
 end;
 $$;
 
@@ -2135,7 +2236,8 @@ create or replace function public.claim_expired_company_discovery_cleanup(
   runtime_identity jsonb,
   fence_generation bigint,
   claim_token text,
-  job_version bigint
+  job_version bigint,
+  recovery_outcome text
 )
 language plpgsql
 security definer
@@ -2149,6 +2251,7 @@ declare
   v_runtime_bound boolean;
   v_requeue boolean := false;
   v_now timestamp with time zone;
+  v_job_version bigint;
 begin
   if p_worker_id is null or btrim(p_worker_id) = ''
      or p_lease_seconds not between 1 and 600 then
@@ -2167,23 +2270,62 @@ begin
       (a.status = 'running'
         and j.status = 'running'
         and j.current_attempt_id = a.id)
-      or a.status in ('failed', 'cancelled', 'superseded')
+      or (
+        a.status in ('validated', 'selected', 'failed', 'cancelled', 'superseded')
+        and (
+          a.status not in ('validated', 'selected')
+          or (
+            j.current_attempt_id = a.id
+            and (
+              (a.status = 'validated'
+                and j.status = 'awaiting_review'
+                and j.selected_attempt_id is null)
+              or (a.status = 'selected'
+                and j.status in ('awaiting_review', 'reviewed')
+                and j.selected_attempt_id = a.id)
+            )
+          )
+        )
+      )
     )
   order by a.lease_until, a.created_at, a.id
   limit 1
   for update of a skip locked;
   if v_attempt.id is null then return; end if;
-  select j.* into v_job
-  from public.worker_jobs j
-  where j.id = v_attempt.job_id
-  for update;
+  -- Selection/cancellation lock the job before the attempt. NOWAIT avoids a
+  -- job<->attempt deadlock after this reaper has claimed the attempt lock; a
+  -- later poll can reclaim once the competing transition commits.
+  begin
+    select j.* into v_job
+    from public.worker_jobs j
+    where j.id = v_attempt.job_id
+    for update nowait;
+  exception when lock_not_available then
+    return;
+  end;
   if v_attempt.cleanup_state <> 'pending'
      or v_attempt.lease_until > clock_timestamp()
      or not (
        (v_attempt.status = 'running'
          and v_job.status = 'running'
          and v_job.current_attempt_id = v_attempt.id)
-       or v_attempt.status in ('failed', 'cancelled', 'superseded')
+       or (
+         v_attempt.status in ('validated', 'selected', 'failed', 'cancelled', 'superseded')
+         and (
+           v_attempt.status not in ('validated', 'selected')
+           or (
+             v_job.current_attempt_id = v_attempt.id
+             and (
+               (v_attempt.status = 'validated'
+                 and v_job.status = 'awaiting_review'
+                 and v_job.selected_attempt_id is null)
+               or (v_attempt.status = 'selected'
+                 and v_job.status in ('awaiting_review', 'reviewed')
+                 and v_job.selected_attempt_id = v_attempt.id)
+             )
+           )
+         )
+       )
      ) then
     raise exception using errcode = '40001',
       message = 'company_discovery_expired_cleanup_race_lost';
@@ -2195,6 +2337,7 @@ begin
     v_job.fence_generation,
     v_attempt.fence_generation
   ) + 1;
+  v_job_version := v_job.version;
 
   if not v_runtime_bound then
     if v_attempt.runtime_identity <> '{}'::jsonb
@@ -2244,7 +2387,9 @@ begin
           selected_attempt_id = null,
           fallback_state = 'existing_onboarding',
           updated_at = v_now
-      where id = v_job.id;
+      where id = v_job.id
+      returning * into v_job;
+      v_job_version := v_job.version;
       update public.company_discovery_review_nonces as n
       set invalidated_at = v_now,
           invalidation_reason = 'attempt_runtime_not_bound'
@@ -2265,6 +2410,11 @@ begin
       raise exception using errcode = '55000',
         message = 'company_discovery_runtime_slot_not_current';
     end if;
+    return query select
+      v_job.id, v_attempt.id, v_attempt.adapter_id,
+      v_attempt.runtime_slot_id, '{}'::jsonb,
+      v_new_fence, null::text, v_job_version,
+      'runtime_not_bound'::text;
     return;
   end if;
 
@@ -2292,13 +2442,35 @@ begin
         selected_attempt_id = null,
         fallback_state = 'existing_onboarding',
         updated_at = v_now
-    where id = v_job.id;
+    where id = v_job.id
+    returning * into v_job;
+    v_job_version := v_job.version;
     update public.company_discovery_review_nonces as n
     set invalidated_at = v_now,
         invalidation_reason = 'attempt_expired'
     where n.job_id = v_job.id
       and n.consumed_at is null
       and n.invalidated_at is null;
+  elsif v_attempt.status in ('validated', 'selected') then
+    update public.worker_jobs
+    set fence_generation = v_new_fence,
+        updated_at = v_now
+    where id = v_job.id
+      and current_attempt_id = v_attempt.id
+      and (
+        (v_attempt.status = 'validated'
+          and status = 'awaiting_review'
+          and selected_attempt_id is null)
+        or (v_attempt.status = 'selected'
+          and status in ('awaiting_review', 'reviewed')
+          and selected_attempt_id = v_attempt.id)
+      )
+    returning * into v_job;
+    if v_job.id is null then
+      raise exception using errcode = '40001',
+        message = 'company_discovery_expired_cleanup_race_lost';
+    end if;
+    v_job_version := v_job.version;
   end if;
   update public.worker_runtime_slots as s
   set status = 'quarantined',
@@ -2315,7 +2487,7 @@ begin
     v_job.id, v_attempt.id, v_attempt.adapter_id,
     v_attempt.runtime_slot_id, v_attempt.runtime_identity,
     v_new_fence, v_cleanup_token,
-    v_job.version + case when v_attempt.status = 'running' then 1 else 0 end;
+    v_job_version, 'cleanup_claimed'::text;
 end;
 $$;
 
@@ -2337,6 +2509,7 @@ as $$
 declare
   v_attempt public.worker_attempts;
   v_proved boolean;
+  v_released_resources integer := 0;
   v_slot_rows integer := 0;
   v_slot_updated boolean := false;
 begin
@@ -2395,6 +2568,20 @@ begin
     and p_proof->'listener_closed' = 'true'::jsonb
     and p_proof->'identity_process_absent' = 'true'::jsonb
     and p_proof->'late_result_rejected' = 'true'::jsonb;
+  if v_proved
+     and p_proof->'listener_closed' = 'true'::jsonb
+     and p_proof->'identity_process_absent' = 'true'::jsonb then
+    update public.worker_runtime_resource_reservations
+    set released_at = clock_timestamp()
+    where attempt_id = v_attempt.id
+      and resource_kind in ('loopback_port', 'socket_identifier')
+      and released_at is null;
+    get diagnostics v_released_resources = row_count;
+    if v_released_resources <> 2 then
+      raise exception using errcode = '55000',
+        message = 'company_discovery_runtime_resource_release_invalid';
+    end if;
+  end if;
   update public.worker_attempts
   set cleanup_state = case when v_proved then 'proved' else 'cleanup_unresolved' end,
       cleanup_outcome = case when v_proved
