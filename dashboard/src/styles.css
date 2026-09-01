@@ -388,6 +388,13 @@ button:disabled {
   .workspace:has(> .chat-view) {
     padding-bottom: calc(var(--nav-height) + 100px + env(safe-area-inset-bottom, 0px));
   }
+
+  /* A revisão longa usa o mesmo espaço vertical da conversa. Enquanto está
+     aberta, o composer fixo não cobre evidência ou confirmações; ao fechar,
+     a conversa volta exatamente ao estado anterior. */
+  .workspace:has(> .discovery-review[open]) > .chat-view .composer {
+    display: none;
+  }
 }
 
 /* Âncora do auto-scroll do chat: no mobile o composer fixo + nav cobrem o pé
@@ -3277,6 +3284,743 @@ button:disabled {
   }
 }
 
+/* ═══ Descoberta pública: evidência → autoridade ═════════════ */
+.discovery-status,
+.discovery-start,
+.discovery-review {
+  width: min(calc(100% - 24px), 920px);
+  margin: 12px auto 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--white);
+  box-shadow: var(--shadow-soft);
+}
+
+.discovery-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: 56px;
+  padding: 12px 14px;
+}
+
+.discovery-status > svg {
+  flex: 0 0 auto;
+  color: var(--teal);
+}
+
+.discovery-status p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--type-small);
+  line-height: var(--leading-compact);
+}
+
+.discovery-status strong {
+  color: var(--ink-900);
+}
+
+.discovery-status--fallback {
+  border-color: rgba(255, 90, 54, 0.26);
+  background: var(--orange-soft);
+}
+
+.discovery-status--fallback > svg {
+  color: var(--orange-dark);
+}
+
+.discovery-status--complete {
+  border-color: rgba(11, 101, 90, 0.22);
+  background: var(--teal-soft);
+}
+
+.discovery-status-pulse {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--teal);
+  box-shadow: 0 0 0 0 rgba(11, 101, 90, 0.26);
+  animation: discovery-pulse 1.8s var(--ease-out) infinite;
+}
+
+@keyframes discovery-pulse {
+  70% { box-shadow: 0 0 0 8px rgba(11, 101, 90, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(11, 101, 90, 0); }
+}
+
+.discovery-start {
+  display: grid;
+  gap: var(--space-md);
+  padding: 16px;
+}
+
+.discovery-kicker,
+.discovery-claim-type {
+  color: var(--teal);
+  font-size: var(--type-micro);
+  font-weight: 800;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.discovery-start h2,
+.discovery-review-header h2 {
+  margin: 4px 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: var(--track-display);
+}
+
+.discovery-start h2 {
+  font-size: 19px;
+}
+
+.discovery-start p,
+.discovery-review-header p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--type-small);
+  line-height: var(--leading-body);
+}
+
+.discovery-start form,
+.discovery-start form > div {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.discovery-start label {
+  color: var(--ink-900);
+  font-size: var(--type-small);
+  font-weight: 700;
+}
+
+.discovery-start input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink-950);
+  background: var(--paper);
+}
+
+.discovery-inline-error,
+.discovery-submit-error {
+  margin: 0;
+  color: var(--orange-dark);
+  font-size: var(--type-small);
+  font-weight: 700;
+}
+
+.discovery-review {
+  overflow: clip;
+}
+
+.discovery-review[open] {
+  overflow: visible;
+  box-shadow: var(--shadow-float);
+}
+
+.discovery-review-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-sm);
+  min-height: 72px;
+  padding: 14px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.discovery-review-header::-webkit-details-marker {
+  display: none;
+}
+
+.discovery-review-header h2 {
+  font-size: 21px;
+}
+
+.discovery-review-meta {
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  gap: 3px;
+  max-width: none;
+  text-align: left;
+}
+
+.discovery-review-meta strong {
+  color: var(--orange-dark);
+  font-size: var(--type-small);
+  line-height: var(--leading-compact);
+}
+
+.discovery-review-meta small {
+  color: var(--text-muted);
+  font-size: var(--type-micro);
+}
+
+.discovery-review-toggle {
+  color: var(--teal);
+  font-size: var(--type-small);
+  font-weight: 800;
+}
+
+.discovery-review-toggle::after {
+  content: " +";
+}
+
+.discovery-review[open] .discovery-review-toggle::after {
+  content: " −";
+}
+
+.discovery-review-body {
+  border-top: 1px solid var(--border);
+}
+
+.discovery-result-caveats {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-sm);
+  margin: 16px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  color: var(--ink-900);
+  background: var(--orange-soft);
+}
+
+.discovery-result-caveats > svg {
+  color: var(--orange-dark);
+}
+
+.discovery-result-caveats strong,
+.discovery-result-caveats p {
+  display: block;
+  margin: 0;
+  font-size: var(--type-small);
+  line-height: var(--leading-compact);
+}
+
+.discovery-result-caveats p {
+  margin-top: 4px;
+  color: var(--text-secondary);
+}
+
+.discovery-review-form {
+  display: grid;
+  gap: var(--space-lg);
+  padding: 0 16px 16px;
+}
+
+.discovery-group {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--paper);
+}
+
+.discovery-group > header {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--paper-warm);
+}
+
+.discovery-group > header > span {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  color: var(--teal);
+  background: var(--teal-soft);
+}
+
+.discovery-group--safety > header > span {
+  color: var(--orange-dark);
+  background: var(--orange-soft);
+}
+
+.discovery-group > header h3,
+.discovery-private h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.discovery-group > header p,
+.discovery-private p {
+  margin: 3px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--type-small);
+  line-height: var(--leading-compact);
+}
+
+.discovery-group > header > strong {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  color: var(--white);
+  background: var(--ink-900);
+  font-size: var(--type-small);
+}
+
+.discovery-claims {
+  display: grid;
+  gap: 1px;
+  background: var(--border);
+}
+
+.discovery-claim {
+  min-width: 0;
+  padding: 14px;
+  background: var(--white);
+}
+
+.discovery-claim > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.discovery-claim h4 {
+  max-width: 70ch;
+  margin: 5px 0 0;
+  color: var(--ink-950);
+  font-size: var(--type-body);
+  line-height: var(--leading-body);
+}
+
+.discovery-version {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  background: var(--paper-warm);
+  font-size: var(--type-micro);
+  font-weight: 700;
+}
+
+.discovery-authority-rail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 5px;
+  margin-top: 14px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+}
+
+.discovery-authority-rail > svg {
+  justify-self: center;
+  width: 15px;
+  height: 15px;
+  color: var(--text-muted);
+  transform: rotate(90deg);
+}
+
+.discovery-rail-step {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 0 8px;
+  min-width: 0;
+}
+
+.discovery-rail-step > span {
+  display: grid;
+  grid-row: 1 / 3;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--text-secondary);
+  background: var(--white);
+  font-size: var(--type-micro);
+  font-weight: 800;
+}
+
+.discovery-rail-step strong,
+.discovery-rail-step small {
+  display: block;
+  min-width: 0;
+}
+
+.discovery-rail-step strong {
+  font-size: var(--type-small);
+}
+
+.discovery-rail-step small {
+  color: var(--text-muted);
+  font-size: var(--type-micro);
+}
+
+.discovery-rail-step.is-evidence > span,
+.discovery-rail-step.is-candidate > span {
+  color: var(--teal);
+  border-color: rgba(11, 101, 90, 0.28);
+  background: var(--teal-soft);
+}
+
+.discovery-rail-step.is-decided > span,
+.discovery-rail-step.is-rule > span {
+  color: var(--white);
+  border-color: var(--teal);
+  background: var(--teal);
+}
+
+.discovery-rail-step.is-locked {
+  opacity: 0.68;
+}
+
+.discovery-evidence-details {
+  margin-top: 10px;
+}
+
+.discovery-evidence-details summary {
+  width: fit-content;
+  min-height: 44px;
+  padding: 13px 3px;
+  color: var(--teal);
+  font-size: var(--type-small);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.discovery-evidence-list {
+  display: grid;
+  gap: 8px;
+}
+
+.discovery-evidence {
+  min-width: 0;
+  padding: 11px;
+  border-left: 3px solid var(--teal);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--teal-soft);
+}
+
+.discovery-evidence a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--teal);
+  font-size: var(--type-small);
+  font-weight: 700;
+}
+
+.discovery-evidence a svg {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+
+.discovery-evidence blockquote {
+  margin: 8px 0;
+  color: var(--ink-900);
+  font-size: var(--type-small);
+  line-height: var(--leading-body);
+}
+
+.discovery-evidence small {
+  color: var(--text-secondary);
+  font-size: var(--type-micro);
+}
+
+.discovery-signals {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.discovery-signal {
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--paper-warm);
+}
+
+.discovery-signal--conflict {
+  background: var(--orange-soft);
+}
+
+.discovery-signal strong,
+.discovery-signal li {
+  font-size: var(--type-small);
+  line-height: var(--leading-compact);
+}
+
+.discovery-signal ul {
+  margin: 5px 0 0;
+  padding-left: 18px;
+}
+
+.discovery-decisions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 14px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.discovery-decisions legend {
+  grid-column: 1 / -1;
+  margin-bottom: 5px;
+  color: var(--ink-900);
+  font-size: var(--type-small);
+  font-weight: 700;
+}
+
+.discovery-decisions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 44px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink-900);
+  background: var(--white);
+  font-size: var(--type-small);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.discovery-decisions button:last-child {
+  grid-column: 1 / -1;
+}
+
+.discovery-decisions button.is-selected {
+  color: var(--white);
+  border-color: var(--teal);
+  background: var(--teal);
+}
+
+.discovery-decisions button.is-reject {
+  border-color: var(--orange-dark);
+  background: var(--orange-dark);
+}
+
+.discovery-edit-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: var(--ink-900);
+  font-size: var(--type-small);
+  font-weight: 700;
+}
+
+.discovery-edit-field textarea {
+  width: 100%;
+  min-height: 88px;
+  padding: 10px;
+  resize: vertical;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink-950);
+  background: var(--paper);
+  font-family: "Archivo", system-ui, sans-serif;
+  font-size: var(--type-small);
+  line-height: var(--leading-body);
+}
+
+.discovery-edit-field small {
+  color: var(--orange-dark);
+}
+
+.discovery-evidence-ack,
+.discovery-group-confirmation {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  color: var(--ink-900);
+  font-size: var(--type-small);
+  font-weight: 600;
+  line-height: var(--leading-compact);
+  cursor: pointer;
+}
+
+.discovery-evidence-ack {
+  margin-top: 12px;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--orange-soft);
+}
+
+.discovery-evidence-ack input,
+.discovery-group-confirmation input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--teal);
+}
+
+.discovery-group-confirmation {
+  padding: 14px;
+  border-top: 1px solid var(--border);
+  background: var(--teal-soft);
+}
+
+.discovery-group-confirmation--safety {
+  background: var(--orange-soft);
+}
+
+.discovery-private {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  padding: 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--paper-warm);
+}
+
+.discovery-private > svg {
+  width: 28px;
+  height: 28px;
+  color: var(--text-secondary);
+}
+
+.discovery-private ul {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding-left: 18px;
+}
+
+.discovery-private li {
+  color: var(--ink-900);
+  font-size: var(--type-small);
+  line-height: var(--leading-compact);
+}
+
+.discovery-review-actions {
+  display: grid;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.discovery-review-actions p {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--type-small);
+  line-height: var(--leading-compact);
+}
+
+.discovery-review-actions p svg {
+  flex: 0 0 auto;
+}
+
+.discovery-review-actions .button {
+  width: 100%;
+  min-height: 48px;
+}
+
+@media (min-width: 430px) {
+  .discovery-start {
+    grid-template-columns: minmax(0, 0.85fr) minmax(240px, 1.15fr);
+    align-items: end;
+  }
+
+  .discovery-start form > div {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .discovery-decisions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .discovery-decisions button:last-child {
+    grid-column: auto;
+  }
+}
+
+@media (min-width: 560px) {
+  .discovery-review-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .discovery-review-meta {
+    justify-items: end;
+    max-width: 230px;
+    text-align: right;
+  }
+
+  .discovery-authority-rail {
+    grid-template-columns: minmax(96px, 1fr) auto minmax(86px, 0.9fr) auto minmax(96px, 1fr) auto minmax(96px, 1fr);
+    align-items: center;
+  }
+
+  .discovery-authority-rail > svg {
+    transform: none;
+  }
+
+  .discovery-rail-step {
+    display: block;
+    text-align: center;
+  }
+
+  .discovery-rail-step > span {
+    margin: 0 auto 5px;
+  }
+
+  .discovery-evidence-list,
+  .discovery-signals {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .discovery-review-actions {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .discovery-review-actions .button {
+    width: auto;
+  }
+}
+
+@media (min-width: 768px) {
+  .discovery-status,
+  .discovery-start,
+  .discovery-review {
+    width: min(calc(100% - 48px), 860px);
+    margin-top: 18px;
+  }
+
+  .discovery-review-form {
+    padding: 0 22px 22px;
+  }
+
+  .discovery-result-caveats {
+    margin: 22px;
+  }
+
+  .discovery-claim,
+  .discovery-group > header,
+  .discovery-group-confirmation {
+    padding: 16px;
+  }
+}
+
 @media (hover: hover) {
   .destination-link,
   .button,
@@ -3286,6 +4030,16 @@ button:disabled {
   .approvals-list-item,
   .reset-button {
     transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease, transform 140ms ease;
+  }
+
+  .discovery-decisions button,
+  .discovery-review-header {
+    transition: color var(--dur-fast) ease, background-color var(--dur-fast) ease, border-color var(--dur-fast) ease;
+  }
+
+  .discovery-review-header:hover,
+  .discovery-decisions button:hover:not(.is-selected) {
+    background: var(--teal-soft);
   }
 
   .button:hover:not(:disabled),

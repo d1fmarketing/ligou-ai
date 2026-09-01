@@ -8,6 +8,141 @@ import {
   projectRowsAfterTestReset,
   scopeUsageAlertQuery,
 } from "./gateway-rule-mapping.js";
+import { buildDiscoveryReviewRequest, mapDiscoveryRead } from "../discovery-model.js";
+
+const DISCOVERY_ERROR_COPY = {
+  company_discovery_stale_version: "A descoberta mudou enquanto você revisava. Recarregue antes de confirmar.",
+  company_discovery_review_nonce_invalid: "A confirmação expirou. Revise o lote e tente novamente.",
+  company_discovery_review_nonce_race_lost: "Esta confirmação já foi usada. Recarregue antes de tentar novamente.",
+  company_discovery_operational_confirmation_required: "Confirme explicitamente o grupo operacional.",
+  company_discovery_safety_evidence_ack_required: "Confirme a evidência exata de cada item de segurança.",
+  company_discovery_owner_private_fact_forbidden: "Assuntos privados só podem ser respondidos na entrevista.",
+  company_discovery_disabled: "A leitura automática do site está desativada. A entrevista continua disponível.",
+  company_discovery_tenant_not_allowlisted: "A leitura automática do site não está disponível para esta empresa. A entrevista continua disponível.",
+  company_discovery_deadline_expired: "O tempo da leitura terminou. A entrevista continua disponível.",
+};
+
+function discoveryError(error) {
+  const code = error?.message || "company_discovery_failed";
+  const mapped = new Error(DISCOVERY_ERROR_COPY[code] || code);
+  mapped.code = code;
+  return mapped;
+}
+
+async function discoveryRpc(client, name, payload) {
+  const { data, error } = await client.rpc(name, payload);
+  if (error) throw discoveryError(error);
+  return data;
+}
+
+export async function submitCompanyDiscoveryVia(client, url, idempotencyKey) {
+  return discoveryRpc(client, "submit_company_discovery", {
+    p_url: url,
+    p_idempotency_key: idempotencyKey,
+  });
+}
+
+export async function cancelCompanyDiscoveryVia(client, jobId, expectedVersion) {
+  return discoveryRpc(client, "cancel_company_discovery", {
+    p_job: jobId,
+    p_expected_version: expectedVersion,
+  });
+}
+
+export async function retryCompanyDiscoveryVia(client, jobId, expectedVersion) {
+  return discoveryRpc(client, "retry_company_discovery", {
+    p_job: jobId,
+    p_expected_version: expectedVersion,
+  });
+}
+
+export async function reviewCompanyDiscoveryVia(client, review, reviewState) {
+  const claimIds = review.groups
+    .flatMap((group) => group.claims.map((claim) => claim.id))
+    .sort((left, right) => left.localeCompare(right));
+  const nonce = await discoveryRpc(client, "create_company_discovery_review_nonce", {
+    p_job: review.job.id,
+    p_result: review.result.id,
+    p_claim_ids: claimIds,
+  });
+  const payload = buildDiscoveryReviewRequest(review, reviewState, nonce);
+  return discoveryRpc(client, "review_company_discovery_claims", payload);
+}
+
+function discoveryData(result) {
+  if (result?.error) throw discoveryError(result.error);
+  return result?.data ?? null;
+}
+
+export async function loadCompanyDiscoveryVia(client, tenantId, {
+  hasOwnerAnswers = false,
+  now = new Date().toISOString(),
+} = {}) {
+  if (typeof tenantId !== "string" || !tenantId) throw new Error("active_tenant_required");
+  const [allowlistResult, jobResult] = await Promise.all([
+    client
+      .from("company_discovery_allowlist")
+      .select("active,expires_at")
+      .eq("tenant_id", tenantId)
+      .maybeSingle(),
+    client
+      .from("worker_jobs")
+      .select("id,tenant_id,version,status,current_attempt_id,selected_attempt_id,deadline_at,fallback_state,normalized_origin,updated_at")
+      .eq("tenant_id", tenantId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
+  const allowlist = discoveryData(allowlistResult);
+  const job = discoveryData(jobResult);
+  if (!job?.selected_attempt_id) {
+    return mapDiscoveryRead({ allowlist, job, hasOwnerAnswers, now });
+  }
+
+  const result = discoveryData(await client
+    .from("worker_results")
+    .select("id,tenant_id,job_id,attempt_id,result_hash,candidate_result,validation_state,validated_at")
+    .eq("tenant_id", tenantId)
+    .eq("job_id", job.id)
+    .eq("attempt_id", job.selected_attempt_id)
+    .eq("validation_state", "validated")
+    .maybeSingle());
+  if (!result) return mapDiscoveryRead({ allowlist, job, hasOwnerAnswers, now });
+
+  const [claimsResult, sourcesResult, decisionsResult] = await Promise.all([
+    client
+      .from("discovery_claims")
+      .select("id,tenant_id,job_id,result_id,claim_class,claim_type,normalized_value,evidence_refs,contradictions,uncertainty,claim_version,created_at")
+      .eq("tenant_id", tenantId)
+      .eq("job_id", job.id)
+      .eq("result_id", result.id)
+      .order("created_at", { ascending: true }),
+    client
+      .from("discovery_source_snapshots")
+      .select("id,tenant_id,job_id,result_id,url,retrieved_at,http_status,mime_type,byte_length,content_hash,excerpt,crawl_order,crawl_depth")
+      .eq("tenant_id", tenantId)
+      .eq("job_id", job.id)
+      .eq("result_id", result.id)
+      .order("crawl_order", { ascending: true }),
+    client
+      .from("discovery_decisions")
+      .select("id,tenant_id,job_id,result_id,claim_id,decision,decided_at")
+      .eq("tenant_id", tenantId)
+      .eq("job_id", job.id)
+      .eq("result_id", result.id)
+      .order("decided_at", { ascending: true }),
+  ]);
+  return mapDiscoveryRead({
+    allowlist,
+    job,
+    result,
+    claims: discoveryData(claimsResult) ?? [],
+    sources: discoveryData(sourcesResult) ?? [],
+    decisions: discoveryData(decisionsResult) ?? [],
+    hasOwnerAnswers,
+    now,
+  });
+}
 
 const SCOPE_TO_DB = {
   service: "servico", "serviço": "servico", servico: "servico",
@@ -154,6 +289,36 @@ export function createSupabaseGateway() {
       try { return await fetchAll(); } catch (e) { return { state: null, warning: e.message }; }
     },
 
+    async loadCompanyDiscovery({ hasOwnerAnswers = false } = {}) {
+      try {
+        return await loadCompanyDiscoveryVia(supabase, activeTenantId, { hasOwnerAnswers });
+      } catch (error) {
+        return {
+          phase: "fallback",
+          reason: error?.code || "load_failed",
+          message: error?.message,
+          interviewAvailable: true,
+        };
+      }
+    },
+
+    async startCompanyDiscovery(url) {
+      const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      return submitCompanyDiscoveryVia(supabase, url, `dashboard-${suffix}`);
+    },
+
+    async cancelCompanyDiscovery(jobId, expectedVersion) {
+      return cancelCompanyDiscoveryVia(supabase, jobId, expectedVersion);
+    },
+
+    async retryCompanyDiscovery(jobId, expectedVersion) {
+      return retryCompanyDiscoveryVia(supabase, jobId, expectedVersion);
+    },
+
+    async reviewCompanyDiscovery(review, reviewState) {
+      return reviewCompanyDiscoveryVia(supabase, review, reviewState);
+    },
+
     subscribe(onChange) {
       if (channel || !supabase) return () => {};
       channel = supabase
@@ -162,6 +327,10 @@ export function createSupabaseGateway() {
         .on("postgres_changes", { event: "*", schema: "public", table: "rules" }, onChange)
         .on("postgres_changes", { event: "*", schema: "public", table: "calls" }, onChange)
         .on("postgres_changes", { event: "*", schema: "public", table: "notifications" }, onChange)
+        .on("postgres_changes", { event: "*", schema: "public", table: "worker_jobs" }, onChange)
+        .on("postgres_changes", { event: "*", schema: "public", table: "worker_results" }, onChange)
+        .on("postgres_changes", { event: "*", schema: "public", table: "discovery_claims" }, onChange)
+        .on("postgres_changes", { event: "*", schema: "public", table: "discovery_decisions" }, onChange)
         .subscribe();
       return () => { supabase.removeChannel(channel); channel = null; };
     },

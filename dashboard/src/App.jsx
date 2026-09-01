@@ -9,6 +9,7 @@ import { supabaseGateway } from "./data/gateway.supabase.js";
 import { requireSuccess } from "./data/gateway-outcome.js";
 import { ApprovalsView } from "./views/ApprovalsView.jsx";
 import { ChatView } from "./views/ChatView.jsx";
+import { DiscoveryReviewView } from "./views/DiscoveryReviewView.jsx";
 import { MemoryView } from "./views/MemoryView.jsx";
 import { PowersView } from "./views/PowersView.jsx";
 import { SettingsView } from "./views/SettingsView.jsx";
@@ -193,6 +194,21 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
   const [memoryQuery, setMemoryQuery] = useState("");
   const [memoryFilter, setMemoryFilter] = useState("all");
   const [selectedApprovalId, setSelectedApprovalId] = useState(null);
+  const [discovery, setDiscovery] = useState({ phase: supabaseConfigured ? "loading" : "hidden" });
+  const [discoveryBusy, setDiscoveryBusy] = useState(false);
+
+  const refreshDiscovery = useCallback(async (ownerState) => {
+    if (typeof gateway.loadCompanyDiscovery !== "function") return null;
+    const next = await gateway.loadCompanyDiscovery({
+      hasOwnerAnswers: Boolean(
+        ownerState?.memory?.length
+        || ownerState?.testState?.calls
+        || ownerState?.business?.status === "ativo",
+      ),
+    });
+    setDiscovery(next);
+    return next;
+  }, []);
 
   const refresh = useCallback(async () => {
     const result = await gateway.loadState();
@@ -200,8 +216,9 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
     setState(nextState);
     if (result?.warning) setToast({ kind: "warning", text: result.warning });
     setLoading(false);
+    void refreshDiscovery(nextState);
     return nextState;
-  }, []);
+  }, [refreshDiscovery]);
 
   useEffect(() => {
     refresh().catch(() => {
@@ -289,6 +306,41 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
   const openMemoryEdit = (entry) => setDialog({ type: "memory-edit", entry });
   const openMemoryRevoke = (entry) => setDialog({ type: "memory-revoke", entry });
 
+  const startDiscovery = async (url) => {
+    if (discoveryBusy || typeof gateway.startCompanyDiscovery !== "function") return;
+    setDiscoveryBusy(true);
+    try {
+      await gateway.startCompanyDiscovery(url);
+      setDiscovery({ phase: "working", interviewAvailable: true });
+      await refreshDiscovery(state);
+    } catch (error) {
+      setDiscovery({
+        phase: "fallback",
+        reason: error?.code || "failed",
+        interviewAvailable: true,
+      });
+      throw error;
+    } finally {
+      setDiscoveryBusy(false);
+    }
+  };
+
+  const confirmDiscoveryReview = async ({ review, reviewState }) => {
+    if (discoveryBusy || typeof gateway.reviewCompanyDiscovery !== "function") return;
+    setDiscoveryBusy(true);
+    try {
+      await gateway.reviewCompanyDiscovery(review, reviewState);
+      await refresh();
+      setToast({ kind: "success", text: "Revisão confirmada em um lote. Só suas decisões viraram perfil ou regra." });
+    } catch (error) {
+      setToast({ kind: "warning", text: error?.message || "A revisão não foi confirmada." });
+      await refreshDiscovery(state).catch(() => {});
+      throw error;
+    } finally {
+      setDiscoveryBusy(false);
+    }
+  };
+
   if (loading) {
     return <LoadingScreen>Preparando o painel do Ligou…</LoadingScreen>;
   }
@@ -330,20 +382,30 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
         onReset={() => setDialog({ type: "reset" })}
       >
         {route === "ligou" ? (
-          <ChatView
-            messages={state.messages}
-            callContext={state.callContext}
-            pendingApproval={pendingApproval}
-            sending={sending}
-            onSend={sendMessage}
-            onVoice={() => setDialog({ type: "voice", sessionType: defaultSessionType(tenant?.status) })}
-            onboardingCtaLabel={onboardingCta(tenant?.status)}
-            onStartOnboarding={() => setDialog({ type: "voice", sessionType: "onboarding" })}
-            prototype={!supabaseConfigured}
-            onApprove={openApproval}
-            onAdjust={openAdjustment}
-            onReject={openRejection}
-          />
+          <>
+            {supabaseConfigured ? (
+              <DiscoveryReviewView
+                discovery={discovery}
+                busy={discoveryBusy}
+                onDiscover={startDiscovery}
+                onReview={confirmDiscoveryReview}
+              />
+            ) : null}
+            <ChatView
+              messages={state.messages}
+              callContext={state.callContext}
+              pendingApproval={pendingApproval}
+              sending={sending}
+              onSend={sendMessage}
+              onVoice={() => setDialog({ type: "voice", sessionType: defaultSessionType(tenant?.status) })}
+              onboardingCtaLabel={onboardingCta(tenant?.status)}
+              onStartOnboarding={() => setDialog({ type: "voice", sessionType: "onboarding" })}
+              prototype={!supabaseConfigured}
+              onApprove={openApproval}
+              onAdjust={openAdjustment}
+              onReject={openRejection}
+            />
+          </>
         ) : null}
         {route === "memoria" ? (
           <MemoryView
