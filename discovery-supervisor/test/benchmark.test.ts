@@ -4,6 +4,7 @@ import type { WorkerJob, WorkerResult } from "../src/contracts";
 import {
   loadBenchmarkCase,
   scoreBenchmarkResult,
+  sha256,
 } from "../benchmark/score";
 import {
   runBenchmark,
@@ -26,8 +27,8 @@ const syntheticSnapshots = [
     retrieved_at: "2026-09-01T10:00:00.000Z",
     http_status: 200,
     mime_type: "text/html" as const,
-    byte_length: 312,
-    content_hash: "1".repeat(64),
+    byte_length: 167,
+    content_hash: "75c27340a5a7ddadd70dcb8d5d4c00e33d755616e2de9b651d160e09ad58ad12",
     excerpt: "North Bay Plumbing. Call (415) 555-0142 or email hello@northbay.example. Drain unclogging costs $225 and takes 60 minutes. Leak repair costs $320 and takes 90 minutes.",
     crawl_order: 0,
     crawl_depth: 0,
@@ -37,8 +38,8 @@ const syntheticSnapshots = [
     retrieved_at: "2026-09-01T10:00:01.000Z",
     http_status: 200,
     mime_type: "text/html" as const,
-    byte_length: 196,
-    content_hash: "2".repeat(64),
+    byte_length: 134,
+    content_hash: "9c6c4534369927514ce75fee7322abff0dea429f6980cf75703a8efcfb281f83",
     excerpt: "If you smell gas or suspect carbon monoxide, leave immediately and call 911 or the utility company. Never operate electrical switches.",
     crawl_order: 1,
     crawl_depth: 1,
@@ -225,6 +226,10 @@ describe("immutable company discovery benchmark corpus", () => {
     expect(artifacts.flatMap((artifact) => artifact.case.source_snapshots)
       .every((snapshot) => snapshot.url.endsWith(".invalid/") || snapshot.url.includes(".invalid/")))
       .toBe(true);
+    for (const snapshot of artifacts.flatMap((artifact) => artifact.case.source_snapshots)) {
+      expect(snapshot.byte_length).toBe(new TextEncoder().encode(snapshot.excerpt).byteLength);
+      expect(snapshot.content_hash).toBe(sha256(snapshot.excerpt));
+    }
 
     const mutated = JSON.parse((await Bun.file(join(CORPUS_DIRECTORY, "hostile-injection.json")).text()));
     mutated.oracle.policy_activated = true;

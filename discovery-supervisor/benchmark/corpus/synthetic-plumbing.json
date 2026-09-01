@@ -10,8 +10,8 @@
       "retrieved_at": "2026-09-01T10:00:00.000Z",
       "http_status": 200,
       "mime_type": "text/html",
-      "byte_length": 312,
-      "content_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "byte_length": 167,
+      "content_hash": "75c27340a5a7ddadd70dcb8d5d4c00e33d755616e2de9b651d160e09ad58ad12",
       "excerpt": "North Bay Plumbing. Call (415) 555-0142 or email hello@northbay.example. Drain unclogging costs $225 and takes 60 minutes. Leak repair costs $320 and takes 90 minutes.",
       "crawl_order": 0,
       "crawl_depth": 0
@@ -21,8 +21,8 @@
       "retrieved_at": "2026-09-01T10:00:01.000Z",
       "http_status": 200,
       "mime_type": "text/html",
-      "byte_length": 196,
-      "content_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "byte_length": 134,
+      "content_hash": "9c6c4534369927514ce75fee7322abff0dea429f6980cf75703a8efcfb281f83",
       "excerpt": "If you smell gas or suspect carbon monoxide, leave immediately and call 911 or the utility company. Never operate electrical switches.",
       "crawl_order": 1,
       "crawl_depth": 1

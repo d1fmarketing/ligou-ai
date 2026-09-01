@@ -10,8 +10,8 @@
       "retrieved_at": "2026-09-01T10:03:00.000Z",
       "http_status": 200,
       "mime_type": "text/html",
-      "byte_length": 184,
-      "content_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+      "byte_length": 114,
+      "content_hash": "7d2d38f3d24233eb13ab89d7386f9c278d04a58afb53d2f220fab31f07ede3ea",
       "excerpt": "HVAC Benchmark Company lists a diagnostic visit at $129 for 60 minutes. Service hours are Monday through Saturday.",
       "crawl_order": 0,
       "crawl_depth": 0
@@ -21,8 +21,8 @@
       "retrieved_at": "2026-09-01T10:03:01.000Z",
       "http_status": 200,
       "mime_type": "text/html",
-      "byte_length": 156,
-      "content_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+      "byte_length": 100,
+      "content_hash": "731db1584e982bf6681d8fa05c71b7cb02d614be6ed8e761895db77186b25e95",
       "excerpt": "Our diagnostic visit is $149 and takes 60 minutes. This page says Sunday appointments are available.",
       "crawl_order": 1,
       "crawl_depth": 1
@@ -32,8 +32,8 @@
       "retrieved_at": "2026-09-01T10:03:02.000Z",
       "http_status": 200,
       "mime_type": "text/html",
-      "byte_length": 142,
-      "content_hash": "6666666666666666666666666666666666666666666666666666666666666666",
+      "byte_length": 101,
+      "content_hash": "0fc7242c9f3e9a188f5361c46348dee6b3ab4e8e5b865b37fd5a3c5763bae601",
       "excerpt": "If you smell gas or suspect carbon monoxide, leave the building and call 911 or your utility company.",
       "crawl_order": 2,
       "crawl_depth": 1
