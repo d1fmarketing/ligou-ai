@@ -1,0 +1,208 @@
+{
+  "gateway": {
+    "mode": "local",
+    "port": 20000,
+    "bind": "lan",
+    "auth": {
+      "mode": "token",
+      "token": {
+        "source": "file",
+        "provider": "attempt_gateway",
+        "id": "/gateway_token"
+      }
+    },
+    "reload": { "mode": "off" },
+    "controlUi": { "enabled": false },
+    "terminal": { "enabled": false },
+    "nodes": {
+      "allowSkills": false,
+      "pluginTools": { "enabled": false },
+      "commands": { "allow": [], "deny": ["*"] }
+    }
+  },
+  "secrets": {
+    "providers": {
+      "attempt_gateway": {
+        "source": "file",
+        "path": "/openclaw/attempt-template/secrets/gateway/secret.json",
+        "mode": "json"
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "/openclaw/attempt-template/workspace",
+      "model": {
+        "primary": "stage0_bridge/SUPERVISOR_SELECTED_MODEL",
+        "fallbacks": []
+      },
+      "models": {
+        "stage0_bridge/SUPERVISOR_SELECTED_MODEL": {
+          "alias": "Stage 0 bounded discovery"
+        }
+      },
+      "sandbox": {
+        "mode": "all",
+        "backend": "docker",
+        "scope": "session",
+        "workspaceAccess": "none",
+        "docker": {
+          "readOnlyRoot": true,
+          "tmpfs": ["/tmp", "/var/tmp", "/run"],
+          "network": "none",
+          "capDrop": ["ALL"]
+        },
+        "browser": {
+          "enabled": false,
+          "allowHostControl": false
+        }
+      }
+    },
+    "entries": {
+      "discovery": {
+        "workspace": "/openclaw/attempt-template/workspace",
+        "model": {
+          "primary": "stage0_bridge/SUPERVISOR_SELECTED_MODEL",
+          "fallbacks": []
+        },
+        "tools": {
+          "profile": "minimal",
+          "allow": [
+            "discovery__fetch_discovery_page",
+            "discovery__submit_discovery_result"
+          ],
+          "deny": [
+            "group:openclaw",
+            "group:runtime",
+            "group:fs",
+            "group:web",
+            "group:ui",
+            "group:automation",
+            "group:messaging",
+            "group:nodes"
+          ],
+          "elevated": { "enabled": false }
+        }
+      }
+    }
+  },
+  "models": {
+    "mode": "replace",
+    "catalogRefresh": { "enabled": false },
+    "providers": {
+      "stage0_bridge": {
+        "baseUrl": "http://bridge:4310/v1",
+        "apiKey": "ATTEMPT_SCOPED_NON_LIGOU_PROXY_MARKER",
+        "api": "openai-responses",
+        "models": [
+          {
+            "id": "SUPERVISOR_SELECTED_MODEL",
+            "name": "Stage 0 bounded discovery",
+            "reasoning": true,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128000,
+            "maxTokens": 16384,
+            "compat": {
+              "supportsTools": true,
+              "supportsStrictMode": true,
+              "supportsInstructions": true
+            }
+          }
+        ]
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "discovery": {
+        "url": "http://bridge:4310/mcp",
+        "transport": "streamable-http",
+        "requestTimeoutMs": 30000,
+        "connectionTimeoutMs": 5000,
+        "supportsParallelToolCalls": false,
+        "headers": {
+          "Authorization": "Bearer ATTEMPT_SCOPED_NON_LIGOU_PROXY_MARKER"
+        },
+        "toolFilter": {
+          "include": ["fetch_discovery_page", "submit_discovery_result"],
+          "exclude": ["resources_*", "prompts_*"]
+        }
+      }
+    }
+  },
+  "tools": {
+    "profile": "minimal",
+    "allow": [
+      "discovery__fetch_discovery_page",
+      "discovery__submit_discovery_result"
+    ],
+    "deny": [
+      "group:openclaw",
+      "group:runtime",
+      "group:fs",
+      "group:web",
+      "group:ui",
+      "group:automation",
+      "group:messaging",
+      "group:nodes",
+      "group:sessions",
+      "group:memory",
+      "group:agents",
+      "group:media",
+      "exec",
+      "process",
+      "browser",
+      "read",
+      "write",
+      "edit",
+      "apply_patch",
+      "gateway",
+      "nodes",
+      "cron",
+      "message",
+      "web_search",
+      "web_fetch"
+    ],
+    "codeMode": { "enabled": false },
+    "elevated": { "enabled": false },
+    "exec": { "security": "deny", "ask": "always" },
+    "fs": { "workspaceOnly": true },
+    "sandbox": {
+      "tools": {
+        "allow": [
+          "discovery__fetch_discovery_page",
+          "discovery__submit_discovery_result"
+        ],
+        "deny": [
+          "group:openclaw",
+          "group:runtime",
+          "group:fs",
+          "group:web",
+          "group:ui",
+          "group:automation",
+          "group:messaging",
+          "group:nodes"
+        ]
+      }
+    }
+  },
+  "skills": {
+    "allowBundled": [],
+    "entries": {}
+  },
+  "update": {
+    "checkOnStart": false,
+    "auto": { "enabled": false }
+  },
+  "telemetry": { "enabled": false },
+  "cron": {
+    "enabled": false,
+    "triggers": { "enabled": false },
+    "sessionRetention": false
+  },
+  "acp": {
+    "enabled": false,
+    "dispatch": { "enabled": false }
+  }
+}

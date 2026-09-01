@@ -1,0 +1,18 @@
+FROM oven/bun:1.2.13-alpine@sha256:3476c857e7c05a7950b3a8a684ffbc82f5cbeffe1b523ea1a92bdefc4539dc57 AS build
+
+WORKDIR /build
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+COPY src ./src
+RUN bun build src/openclaw/trusted-bridge.ts \
+    --target=bun \
+    --format=esm \
+    --outfile=/out/trusted-bridge.mjs
+
+FROM oven/bun:1.2.13-alpine@sha256:3476c857e7c05a7950b3a8a684ffbc82f5cbeffe1b523ea1a92bdefc4539dc57
+
+WORKDIR /opt/ligou-discovery-bridge
+COPY --from=build --chown=bun:bun /out/trusted-bridge.mjs ./trusted-bridge.mjs
+USER bun
+ENV NODE_ENV=production
+ENTRYPOINT ["bun", "/opt/ligou-discovery-bridge/trusted-bridge.mjs"]
