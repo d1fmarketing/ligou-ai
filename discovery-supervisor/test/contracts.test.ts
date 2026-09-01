@@ -290,4 +290,45 @@ describe("company_discovery.result.v1 exact contract", () => {
       expect(() => parseWorkerJob(candidate)).toThrow("budget");
     }
   });
+
+  test("accepts Z or colon offsets and rejects naive or impossible deadlines", () => {
+    const baseJob = {
+      job_type: "company_discovery.v1",
+      job_id: "11111111-1111-4111-8111-111111111111",
+      attempt_id: "22222222-2222-4222-8222-222222222222",
+      attempt_number: 1,
+      fence_generation: 3,
+      claim_token: "claim-token",
+      normalized_origin: "https://example.com/",
+      deadline_at: "2026-09-01T10:10:00.123456Z",
+      budget: {
+        max_pages: 1,
+        max_depth: 0,
+        max_page_bytes: 128,
+        max_job_bytes: 128,
+        deadline_seconds: 600,
+      },
+      source_snapshots: [snapshot],
+    };
+
+    for (const deadline of [
+      "2026-09-01T10:10:00Z",
+      "2026-09-01T10:10:00.123456+00:00",
+      "2026-09-01T03:10:00-07:00",
+    ]) {
+      expect(parseWorkerJob({ ...baseJob, deadline_at: deadline }).deadline_at).toBe(deadline);
+    }
+    for (const deadline of [
+      "2026-09-01T10:10:00",
+      "2026-09-01T10:10:00+0000",
+      "2026-02-30T10:10:00Z",
+      "2026-09-01T24:10:00Z",
+      "2026-09-01T10:10:00+24:00",
+      "2026-09-01T10:10:00+00:60",
+    ]) {
+      expect(() => parseWorkerJob({ ...baseJob, deadline_at: deadline })).toThrow(
+        "invalid ISO-8601 timestamp",
+      );
+    }
+  });
 });

@@ -146,6 +146,7 @@ const HANDLE_KEYS = [
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const UTC_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
+const DEADLINE_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?:Z|[+-](\d{2}):(\d{2}))$/;
 const SERVICE_TYPE_PATTERN = /^[a-z0-9][a-z0-9_]{0,199}$/;
 
 function fail(path: string, message: string): never {
@@ -208,6 +209,24 @@ function byteLength(value: unknown, path: string, maximum: number): void {
   if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > maximum) {
     fail(path, `exceeds ${maximum} bytes`);
   }
+}
+
+function isStrictIsoTimestamp(value: string): boolean {
+  const match = DEADLINE_TIMESTAMP_PATTERN.exec(value);
+  if (match === null) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[7] === undefined ? 0 : Number(match[7]);
+  const offsetMinute = match[8] === undefined ? 0 : Number(match[8]);
+  if (year < 1 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59 ||
+      offsetHour > 23 || offsetMinute > 59) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day >= 1 && day <= daysInMonth[month - 1]! && !Number.isNaN(Date.parse(value));
 }
 
 function parseStringArray(
@@ -445,9 +464,11 @@ export function parseWorkerJob(
     fail("job.normalized_origin", "invalid URL");
   }
   if (origin.protocol !== "https:") fail("job.normalized_origin", "HTTPS required");
-  const deadlineAt = boundedString(candidate.deadline_at, "job.deadline_at", 20, 32);
-  if (!UTC_TIMESTAMP_PATTERN.test(deadlineAt) || Number.isNaN(Date.parse(deadlineAt))) {
-    fail("job.deadline_at", "invalid UTC timestamp");
+  const deadlineAt = typeof candidate.deadline_at === "string"
+    ? candidate.deadline_at
+    : fail("job.deadline_at", "invalid ISO-8601 timestamp");
+  if (deadlineAt.length > 32 || !isStrictIsoTimestamp(deadlineAt)) {
+    fail("job.deadline_at", "invalid ISO-8601 timestamp");
   }
   const budget = record(candidate.budget, "job.budget");
   exactKeys(budget, BUDGET_KEYS, "job.budget");

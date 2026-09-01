@@ -200,6 +200,30 @@ describe("JobStore service RPC boundary", () => {
     expect(store.bindSourceSnapshots(claimed!, [snapshot])).toEqual(job);
   });
 
+  test("accepts the exact ISO offset returned for a timestamptz claim deadline", async () => {
+    const store = new JobStore({
+      async rpc() {
+        return {
+          data: [{
+            job_id: job.job_id,
+            attempt_id: job.attempt_id,
+            attempt_number: 1,
+            fence_generation: 3,
+            claim_token: "claim-token",
+            normalized_origin: "https://example.com/",
+            deadline_at: "2026-09-01T10:10:00+00:00",
+            budget: job.budget,
+          }],
+          error: null,
+        };
+      },
+    });
+
+    const claimed = await store.claimAttempt("direct-model-offset-slot", 300);
+
+    expect(claimed?.deadline_at).toBe("2026-09-01T10:10:00+00:00");
+  });
+
   test("allows terminal cleanup for a trusted attempt before evidence was fetched", async () => {
     const calls: string[] = [];
     const store = new JobStore({
