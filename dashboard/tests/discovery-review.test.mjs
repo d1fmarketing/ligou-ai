@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import react from "@vitejs/plugin-react";
@@ -24,9 +28,195 @@ const IDS = {
   evidenceB: "10000000-0000-4000-8000-000000000022",
 };
 
+const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+
+function interactionModuleSource() {
+  const rows = discoveryRows();
+  return `
+    import React from "react";
+    import { createRoot } from "react-dom/client";
+    import "/src/styles.css";
+    import { LigouWorkspace } from "/src/App.jsx";
+    import { buildDiscoveryReviewRequest, mapDiscoveryRead } from "/src/discovery-model.js";
+
+    const source = ${JSON.stringify(rows)};
+    const kind = new URLSearchParams(location.search).get("kind") || "service";
+    const wanted = kind === "safety" ? "safety_critical" : "operational";
+    source.claims = source.claims.filter((claim) => claim.claim_class === wanted);
+    const review = mapDiscoveryRead(source);
+    window.addEventListener("error", (event) => { window.__fatal = event.error?.stack || event.message; });
+    window.__rpcCalls = 0;
+    window.__voiceCalls = 0;
+    window.__payload = null;
+    window.__reviewError = null;
+
+    function onReview({ review: currentReview, reviewState }) {
+      try {
+        const payload = buildDiscoveryReviewRequest(currentReview, reviewState, "browser-nonce");
+        window.__rpcCalls += 2;
+        window.__payload = payload;
+      } catch (error) {
+        window.__reviewError = error.message;
+      }
+    }
+
+    function Harness() {
+      return <main className="workspace"><LigouWorkspace
+        showDiscovery
+        discoveryProps={{
+          discovery: review,
+          onReview,
+          onStartInterview: () => { window.__voiceCalls += 1; },
+        }}
+        chatProps={{
+          messages: [],
+          callContext: null,
+          pendingApproval: null,
+          onboardingCtaLabel: "Começar a entrevista de onboarding (voz)",
+          onStartOnboarding: () => { window.__voiceCalls += 1; },
+          onSend: () => true,
+        }}
+      /></main>;
+    }
+
+    createRoot(document.getElementById("root")).render(<Harness />);
+    window.__ready = true;
+  `;
+}
+
+async function startInteractionBrowser() {
+  const virtualId = "/__virtual_discovery_interaction.jsx";
+  const resolvedId = virtualId;
+  const profile = await mkdtemp(join(tmpdir(), "ligou-discovery-browser-"));
+  const harnessPlugin = {
+    name: "discovery-interaction-harness",
+    resolveId(id) { return id === virtualId ? resolvedId : null; },
+    load(id) { return id === resolvedId ? interactionModuleSource() : null; },
+    configureServer(server) {
+      server.middlewares.use(async (request, response, next) => {
+        if (!request.url?.startsWith("/__discovery_interaction__")) return next();
+        const html = await server.transformIndexHtml(request.url, `<!doctype html><html lang="pt-BR"><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div><script type="module" src="${virtualId}"></script></body></html>`);
+        response.statusCode = 200;
+        response.setHeader("Content-Type", "text/html; charset=utf-8");
+        response.end(html);
+      });
+    },
+  };
+  const vite = await createServer({
+    configFile: false,
+    root: process.cwd(),
+    cacheDir: join(profile, "vite-cache"),
+    appType: "custom",
+    server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false, ws: false },
+    resolve: { dedupe: ["react", "react-dom"] },
+    optimizeDeps: { noDiscovery: true, include: ["react", "react-dom/client", "@tabler/icons-react"] },
+    plugins: [react(), harnessPlugin],
+  });
+  await vite.listen();
+  const address = vite.httpServer.address();
+  const port = typeof address === "object" ? address.port : null;
+  assert.ok(port);
+
+  const chrome = spawn(CHROME_PATH, [
+    "--headless=new",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-extensions",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--remote-debugging-port=0",
+    `--user-data-dir=${profile}`,
+    "about:blank",
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  const devtoolsUrl = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("chrome_debug_timeout")), 8000);
+    chrome.stderr.on("data", (chunk) => {
+      const match = String(chunk).match(/DevTools listening on (ws:\/\/[^\s]+)/);
+      if (match) { clearTimeout(timeout); resolve(match[1]); }
+    });
+    chrome.once("exit", (code) => { clearTimeout(timeout); reject(new Error(`chrome_exited_${code}`)); });
+  });
+  const debugBase = devtoolsUrl.replace(/^ws:/, "http:").replace(/\/devtools\/browser\/.+$/, "");
+
+  async function connectPage() {
+    let page;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const pages = await (await fetch(`${debugBase}/json/list`)).json();
+      page = pages.find((item) => item.type === "page");
+      if (page) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(page, "interaction page must open");
+    const socket = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise((resolve) => { socket.onopen = resolve; });
+    let messageId = 0;
+    const pending = new Map();
+    const runtimeErrors = [];
+    socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.method === "Runtime.exceptionThrown") runtimeErrors.push(message.params.exceptionDetails);
+      if (message.id && pending.has(message.id)) {
+        pending.get(message.id)(message);
+        pending.delete(message.id);
+      }
+    };
+    const send = (method, params = {}) => new Promise((resolve) => {
+      const id = ++messageId;
+      pending.set(id, resolve);
+      socket.send(JSON.stringify({ id, method, params }));
+    });
+    return { socket, send, runtimeErrors };
+  }
+
+  const page = await connectPage();
+  await page.send("Runtime.enable");
+  await page.send("Page.navigate", { url: `http://127.0.0.1:${port}/__discovery_interaction__?kind=service` });
+  const evaluate = async (expression) => {
+    const result = await page.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+    if (result.result.exceptionDetails) throw new Error(result.result.exceptionDetails.exception?.description || "browser_evaluation_failed");
+    return result.result.result.value;
+  };
+  const cleanup = async () => {
+    page.socket.close();
+    const exited = new Promise((resolve) => chrome.once("exit", resolve));
+    chrome.kill("SIGTERM");
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 2000))]);
+    if (chrome.exitCode == null) chrome.kill("SIGKILL");
+    await vite.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  };
+  let ready = false;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (await evaluate("Boolean(window.__ready && document.querySelector('.discovery-review'))")) { ready = true; break; }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!ready) {
+    const diagnostic = await evaluate("JSON.stringify({ fatal: window.__fatal, html: document.documentElement.outerHTML, resources: performance.getEntriesByType('resource').map((entry) => entry.name).slice(0, 20) })");
+    const runtime = page.runtimeErrors.map((error) => error.exception?.description || error.text);
+    await cleanup();
+    throw new Error(`interaction_page_not_ready:${diagnostic}:${JSON.stringify(runtime)}`);
+  }
+  return {
+    port,
+    page,
+    evaluate,
+    async navigate(kind) {
+      await page.send("Page.navigate", { url: `http://127.0.0.1:${port}/__discovery_interaction__?kind=${kind}` });
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        if (await evaluate("Boolean(window.__ready && document.querySelector('.discovery-review'))")) return;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error("interaction_page_not_ready");
+    },
+    async close() {
+      await cleanup();
+    },
+  };
+}
+
 function discoveryRows(overrides = {}) {
   return {
-    allowlist: { active: true, expires_at: "2026-09-02T00:00:00Z" },
+    ownerStatus: { enabled: true, allowlisted: true, expires_at: "2026-09-02T00:00:00Z", available: true },
     job: {
       id: IDS.job,
       version: 7,
@@ -211,6 +401,37 @@ test("builds one exact atomic owner RPC payload with pinned versions, nonce, gro
   });
 });
 
+test("invalid visible service and safety drafts replace the prior value and block review before nonce", () => {
+  const review = mapDiscoveryRead(discoveryRows());
+  let state = createDiscoveryReviewState(review);
+  state = discoveryReviewReducer(state, { type: "decide", claimId: IDS.operational, decision: "edit" });
+  state = discoveryReviewReducer(state, {
+    type: "editField",
+    claimId: IDS.operational,
+    field: "amount",
+    value: "149",
+  });
+  assert.equal(state.decisions[IDS.operational].editor.valid, false);
+  assert.equal(state.decisions[IDS.operational].value, null);
+  assert.match(state.decisions[IDS.operational].editor.error, /0\.00/);
+
+  state = discoveryReviewReducer(state, { type: "decide", claimId: IDS.safety, decision: "edit" });
+  state = discoveryReviewReducer(state, {
+    type: "editField",
+    claimId: IDS.safety,
+    field: "guidance",
+    value: "",
+  });
+  assert.equal(state.decisions[IDS.safety].editor.valid, false);
+  assert.equal(state.decisions[IDS.safety].value, null);
+  assert.match(state.decisions[IDS.safety].editor.error, /orientação de emergência/);
+
+  assert.throws(
+    () => buildDiscoveryReviewRequest(review, state, "nonce-must-not-be-requested"),
+    /Corrija os campos visíveis antes de confirmar/,
+  );
+});
+
 test("refuses incomplete, stale, private, operational, and safety review boundaries before an RPC", () => {
   const review = mapDiscoveryRead(discoveryRows());
   const undecided = createDiscoveryReviewState(review);
@@ -259,15 +480,28 @@ test("failed, expired, disabled, and non-allowlisted discovery fail open to the 
   assert.deepEqual(mapDiscoveryRead(discoveryRows({
     job: { ...discoveryRows().job, status: "queued", deadline_at: "2026-09-01T19:59:59Z" },
   })).phase, "fallback");
-  assert.deepEqual(mapDiscoveryRead(discoveryRows({ allowlist: { active: false, expires_at: null }, job: null })).phase, "unavailable");
-  assert.deepEqual(mapDiscoveryRead(discoveryRows({ allowlist: { active: true, expires_at: "2026-08-31T00:00:00Z" }, job: null })).phase, "unavailable");
+  assert.equal(mapDiscoveryRead(discoveryRows({
+    ownerStatus: { enabled: false, allowlisted: true, expires_at: null, available: false }, job: null,
+  })).reason, "disabled");
+  assert.equal(mapDiscoveryRead(discoveryRows({
+    ownerStatus: { enabled: true, allowlisted: false, expires_at: null, available: false }, job: null,
+  })).reason, "not_allowlisted");
+  assert.equal(mapDiscoveryRead(discoveryRows({
+    ownerStatus: { enabled: true, allowlisted: true, expires_at: "2026-08-31T00:00:00Z", available: false }, job: null,
+  })).reason, "allowlist_expired");
 });
 
-test("a late result stays labeled as suggestion and cannot overwrite owner answers", () => {
-  const review = mapDiscoveryRead(discoveryRows({ hasOwnerAnswers: true }));
-  assert.equal(review.lateSuggestion, true);
-  assert.equal(review.authorityEffect, "suggestion_only");
-  assert.equal(review.groups.flatMap((group) => group.claims).every((claim) => claim.decision === null), true);
+test("late labeling comes only from authoritative fallback state and every result remains a neutral suggestion", () => {
+  const neutral = mapDiscoveryRead(discoveryRows({ hasOwnerAnswers: true }));
+  const late = mapDiscoveryRead(discoveryRows({
+    job: { ...discoveryRows().job, fallback_state: "existing_onboarding" },
+  }));
+  assert.equal(neutral.lateSuggestion, false);
+  assert.equal(late.lateSuggestion, true);
+  for (const review of [neutral, late]) {
+    assert.equal(review.authorityEffect, "suggestion_only");
+    assert.equal(review.groups.flatMap((group) => group.claims).every((claim) => claim.decision === null), true);
+  }
 });
 
 test("owner discovery gateway emits exact Task 1 RPC names and payloads", async () => {
@@ -359,6 +593,83 @@ test("stale owner review errors become actionable Portuguese copy and never retr
   ]);
 });
 
+test("every review, nonce, and version conflict maps to actionable reload copy without raw database codes", async () => {
+  const vite = await createServer({
+    configFile: false,
+    root: process.cwd(),
+    appType: "custom",
+    server: { middlewareMode: true, hmr: false, ws: false },
+    optimizeDeps: { noDiscovery: true },
+    plugins: [react()],
+  });
+  const { reviewCompanyDiscoveryVia } = await vite.ssrLoadModule("/src/data/gateway.supabase.js");
+  const codes = [
+    "company_discovery_review_result_not_owner",
+    "company_discovery_claim_already_reviewed",
+    "company_discovery_stale_version",
+    "company_discovery_review_nonce_invalid",
+    "company_discovery_review_nonce_race_lost",
+    "company_discovery_review_not_awaiting",
+    "company_discovery_review_claim_set_invalid",
+    "company_discovery_review_claim_set_mismatch",
+  ];
+  const review = mapDiscoveryRead(discoveryRows());
+  try {
+    for (const code of codes) {
+      let call = 0;
+      const client = {
+        async rpc() {
+          call += 1;
+          if (call === 1 && ["company_discovery_stale_version", "company_discovery_review_nonce_invalid", "company_discovery_review_nonce_race_lost", "company_discovery_review_not_awaiting", "company_discovery_review_claim_set_mismatch"].includes(code)) {
+            return { data: "fresh-nonce", error: null };
+          }
+          return { data: null, error: { message: code } };
+        },
+      };
+      await assert.rejects(
+        reviewCompanyDiscoveryVia(client, review, fullyDecided(review)),
+        (error) => {
+          assert.match(error.message, /Recarregue|Atualize/);
+          assert.equal(error.message.includes(code), false);
+          return true;
+        },
+      );
+    }
+  } finally {
+    await vite.close();
+  }
+});
+
+test("an invalid visible editor draft reaches neither nonce nor review RPC", async () => {
+  const vite = await createServer({
+    configFile: false,
+    root: process.cwd(),
+    appType: "custom",
+    server: { middlewareMode: true, hmr: false, ws: false },
+    optimizeDeps: { noDiscovery: true },
+    plugins: [react()],
+  });
+  const { reviewCompanyDiscoveryVia } = await vite.ssrLoadModule("/src/data/gateway.supabase.js");
+  const calls = [];
+  const review = mapDiscoveryRead(discoveryRows());
+  let state = fullyDecided(review);
+  state = discoveryReviewReducer(state, {
+    type: "editField",
+    claimId: IDS.operational,
+    field: "amount",
+    value: "139",
+  });
+  try {
+    await assert.rejects(
+      reviewCompanyDiscoveryVia({ rpc: async (...args) => { calls.push(args); return { data: null, error: null }; } }, review, state),
+      /Corrija os campos visíveis/,
+    );
+  } finally {
+    await vite.close();
+  }
+  assert.deepEqual(calls, []);
+});
+
 test("owner discovery reads stay tenant, job, attempt, and result pinned through RLS tables", async () => {
   const vite = await createServer({
     configFile: false,
@@ -372,7 +683,6 @@ test("owner discovery reads stay tenant, job, attempt, and result pinned through
   const rows = discoveryRows();
   const operations = [];
   const responses = {
-    company_discovery_allowlist: { data: rows.allowlist, error: null },
     worker_jobs: { data: rows.job, error: null },
     worker_results: { data: rows.result, error: null },
     discovery_claims: { data: rows.claims, error: null },
@@ -380,6 +690,10 @@ test("owner discovery reads stay tenant, job, attempt, and result pinned through
     discovery_decisions: { data: rows.decisions, error: null },
   };
   const client = {
+    async rpc(name, payload) {
+      operations.push(["rpc", name, payload]);
+      return { data: rows.ownerStatus, error: null };
+    },
     from(table) {
       const query = {
         select(columns) { operations.push([table, "select", columns]); return query; },
@@ -394,14 +708,17 @@ test("owner discovery reads stay tenant, job, attempt, and result pinned through
   };
   try {
     const projected = await loadCompanyDiscoveryVia(client, "tenant-exact", {
-      hasOwnerAnswers: true,
       now: rows.now,
     });
     assert.equal(projected.phase, "review");
-    assert.equal(projected.lateSuggestion, true);
+    assert.equal(projected.lateSuggestion, false);
   } finally {
     await vite.close();
   }
+  assert.deepEqual(operations[0], ["rpc", "company_discovery_owner_status", undefined]);
+  assert.deepEqual(operations.filter((operation) => operation[0] === "rpc"), [
+    ["rpc", "company_discovery_owner_status", undefined],
+  ]);
   for (const table of Object.keys(responses)) {
     assert.equal(
       operations.some((operation) => operation[0] === table && operation[1] === "eq" && operation[2] === "tenant_id" && operation[3] === "tenant-exact"),
@@ -423,6 +740,41 @@ test("owner discovery reads stay tenant, job, attempt, and result pinned through
       true,
       `${table} must be pinned to the exact result`,
     );
+  }
+});
+
+test("initial discovery load uses the exact no-arg owner status RPC and fails open for disabled, refused, or expired access", async () => {
+  const vite = await createServer({
+    configFile: false,
+    root: process.cwd(),
+    appType: "custom",
+    server: { middlewareMode: true, hmr: false, ws: false },
+    optimizeDeps: { noDiscovery: true },
+    plugins: [react()],
+  });
+  const { loadCompanyDiscoveryVia } = await vite.ssrLoadModule("/src/data/gateway.supabase.js");
+  const cases = [
+    [{ enabled: false, allowlisted: true, expires_at: null, available: false }, "disabled"],
+    [{ enabled: true, allowlisted: false, expires_at: null, available: false }, "not_allowlisted"],
+    [{ enabled: true, allowlisted: true, expires_at: "2026-08-31T00:00:00Z", available: false }, "allowlist_expired"],
+  ];
+  try {
+    for (const [status, reason] of cases) {
+      const calls = [];
+      const client = {
+        async rpc(name, payload) {
+          calls.push([name, payload]);
+          return { data: status, error: null };
+        },
+        from(table) { throw new Error(`unexpected_table_read:${table}`); },
+      };
+      const projection = await loadCompanyDiscoveryVia(client, "tenant-exact", { now: "2026-09-01T20:00:00Z" });
+      assert.equal(projection.phase, "unavailable");
+      assert.equal(projection.reason, reason);
+      assert.deepEqual(calls, [["company_discovery_owner_status", undefined]]);
+    }
+  } finally {
+    await vite.close();
   }
 });
 
@@ -465,15 +817,24 @@ test("the real review component renders evidence-to-authority rail, boundaries, 
     "Qual é o menor preço que você aceita negociar?",
     "Nunca são aprovados como fatos.",
   ]) assert.match(html, new RegExp(visible.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(html, /Sugestão pública · sem efeito automático/);
+  assert.doesNotMatch(html, /Chegou depois da entrevista/);
 
+  const descriptiveSection = html.slice(html.indexOf("Dados públicos"), html.indexOf("Operação"));
+  assert.match(descriptiveSection, /Perfil da empresa/);
+  assert.doesNotMatch(descriptiveSection, /Regra da Ligou/);
   const privateSection = html.slice(html.indexOf("Perguntas para a entrevista"));
   assert.doesNotMatch(privateSection, /Aprovar como fato/);
+  assert.doesNotMatch(privateSection, /Evidência do site|Candidato|Perfil da empresa|Regra da Ligou/);
 });
 
 test("loading and failure discovery copy never replaces the existing Portuguese interview CTA", async () => {
-  const [loading, fallback, chat] = await Promise.all([
+  const [loading, fallback, disabled, refused, expired, chat] = await Promise.all([
     renderModule("/src/views/DiscoveryReviewView.jsx", "DiscoveryReviewView", { discovery: { phase: "loading" } }),
     renderModule("/src/views/DiscoveryReviewView.jsx", "DiscoveryReviewView", { discovery: { phase: "fallback", reason: "failed" } }),
+    renderModule("/src/views/DiscoveryReviewView.jsx", "DiscoveryReviewView", { discovery: { phase: "unavailable", reason: "disabled" } }),
+    renderModule("/src/views/DiscoveryReviewView.jsx", "DiscoveryReviewView", { discovery: { phase: "unavailable", reason: "not_allowlisted" } }),
+    renderModule("/src/views/DiscoveryReviewView.jsx", "DiscoveryReviewView", { discovery: { phase: "unavailable", reason: "allowlist_expired" } }),
     renderModule("/src/views/ChatView.jsx", "ChatView", {
       messages: [],
       callContext: null,
@@ -484,5 +845,125 @@ test("loading and failure discovery copy never replaces the existing Portuguese 
   ]);
   assert.match(loading, /Você não precisa esperar/);
   assert.match(fallback, /A entrevista em português continua disponível agora/);
+  assert.match(disabled, /está desativada/);
+  assert.match(refused, /não foi liberada/);
+  assert.match(expired, /permissão.*expirou/);
   assert.match(chat, /Começar a entrevista de onboarding \(voz\)/);
+});
+
+test("real component interactions block invalid structured edits, submit visible values, and keep mobile voice", { timeout: 25000 }, async () => {
+  const browser = await startInteractionBrowser();
+  const setField = (selector, value) => `(() => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    if (!element) return false;
+    const prototype = element instanceof HTMLSelectElement
+      ? HTMLSelectElement.prototype
+      : element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, ${JSON.stringify(value)});
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`;
+  try {
+    await browser.page.send("Emulation.setDeviceMetricsOverride", {
+      width: 320,
+      height: 900,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    await browser.evaluate("document.body.tabIndex = -1; document.body.focus()");
+    for (const type of ["keyDown", "keyUp"]) await browser.page.send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+    const summaryFocus = JSON.parse(await browser.evaluate(`JSON.stringify({
+      tag: document.activeElement.tagName,
+      className: document.activeElement.className,
+      outline: getComputedStyle(document.activeElement).outlineWidth
+    })`));
+    assert.deepEqual(summaryFocus, { tag: "SUMMARY", className: "discovery-review-header", outline: "3px" });
+    await browser.page.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", text: "\r", windowsVirtualKeyCode: 13 });
+    await browser.page.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+    assert.equal(await browser.evaluate("document.querySelector('.discovery-review').open"), true);
+    for (const type of ["keyDown", "keyUp"]) await browser.page.send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const voiceState = JSON.parse(await browser.evaluate(`JSON.stringify({
+      shortcut: Boolean(document.querySelector('.discovery-interview-shortcut')),
+      shortcutHeight: document.querySelector('.discovery-interview-shortcut')?.getBoundingClientRect().height || 0,
+      composerDisplay: getComputedStyle(document.querySelector('.composer')).display,
+      chatCta: Boolean(document.querySelector('.onboarding-cta button'))
+    })`));
+    assert.deepEqual(voiceState, {
+      shortcut: true,
+      shortcutHeight: 44,
+      composerDisplay: "flex",
+      chatCta: true,
+    });
+    assert.equal(await browser.evaluate("document.activeElement.classList.contains('discovery-interview-shortcut')"), true);
+    await browser.page.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", text: "\r", windowsVirtualKeyCode: 13 });
+    await browser.page.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+    assert.equal(await browser.evaluate("window.__voiceCalls"), 1);
+
+    await browser.evaluate(`[...document.querySelectorAll('.discovery-claim button')].find((button) => button.textContent.includes('Editar')).click()`);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('[name=serviceNames]') && document.querySelector('[name=publicAmount]') && document.querySelector('[name=durationMinutes]'))"), true);
+    assert.equal(await browser.evaluate(setField("[name=publicAmount]", "139")), true);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const invalidService = JSON.parse(await browser.evaluate(`JSON.stringify({
+      disabled: document.querySelector('.discovery-review-actions button').disabled,
+      error: document.querySelector('.discovery-edit-field [role=alert]')?.textContent || '',
+      rpcCalls: window.__rpcCalls
+    })`));
+    assert.equal(invalidService.disabled, true);
+    assert.match(invalidService.error, /0\.00/);
+    assert.equal(invalidService.rpcCalls, 0);
+
+    for (const [selector, value] of [
+      ["[name=serviceNames]", "Desentupimento, Limpeza de dreno"],
+      ["[name=publicAmount]", "139.00"],
+      ["[name=publicCurrency]", "USD"],
+      ["[name=publicQualifier]", "exact"],
+      ["[name=durationMinutes]", "45"],
+    ]) assert.equal(await browser.evaluate(setField(selector, value)), true);
+    await browser.evaluate("document.querySelector('.discovery-group-confirmation input').click()");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(await browser.evaluate("document.querySelector('.discovery-review-actions button').disabled"), false);
+    await browser.evaluate("document.querySelector('.discovery-review-actions button').click()");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const serviceResult = JSON.parse(await browser.evaluate("JSON.stringify({ rpcCalls: window.__rpcCalls, payload: window.__payload })"));
+    assert.equal(serviceResult.rpcCalls, 2);
+    assert.deepEqual(serviceResult.payload.p_decisions[0].value, {
+      service_type: "drain_cleaning",
+      service_names: ["Desentupimento", "Limpeza de dreno"],
+      public_price: { amount: "139.00", currency: "USD", qualifier: "exact" },
+      duration_minutes: 45,
+    });
+
+    await browser.navigate("safety");
+    await browser.evaluate("document.querySelector('.discovery-review').open = true");
+    await browser.evaluate(`[...document.querySelectorAll('.discovery-claim button')].find((button) => button.textContent.includes('Editar')).click()`);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('[name=emergencyGuidance]'))"), true);
+    assert.equal(await browser.evaluate(setField("[name=emergencyGuidance]", "")), true);
+    await browser.evaluate("document.querySelector('.discovery-group-confirmation input').click()");
+    await browser.evaluate("document.querySelector('.discovery-evidence-ack input').click()");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const invalidSafety = JSON.parse(await browser.evaluate(`JSON.stringify({
+      disabled: document.querySelector('.discovery-review-actions button').disabled,
+      error: document.querySelector('.discovery-edit-field [role=alert]')?.textContent || '',
+      rpcCalls: window.__rpcCalls
+    })`));
+    assert.equal(invalidSafety.disabled, true);
+    assert.match(invalidSafety.error, /orientação de emergência/);
+    assert.equal(invalidSafety.rpcCalls, 0);
+
+    const guidance = "Feche o registro, saia do imóvel e ligue para 911.";
+    assert.equal(await browser.evaluate(setField("[name=emergencyGuidance]", guidance)), true);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(await browser.evaluate("document.querySelector('.discovery-review-actions button').disabled"), false);
+    await browser.evaluate("document.querySelector('.discovery-review-actions button').click()");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const safetyResult = JSON.parse(await browser.evaluate("JSON.stringify({ rpcCalls: window.__rpcCalls, payload: window.__payload })"));
+    assert.equal(safetyResult.rpcCalls, 2);
+    assert.deepEqual(safetyResult.payload.p_decisions[0].value, { guidance });
+  } finally {
+    await browser.close();
+  }
 });

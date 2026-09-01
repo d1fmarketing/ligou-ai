@@ -6,11 +6,13 @@ import {
   IconExternalLink,
   IconFileSearch,
   IconLock,
+  IconMicrophone2,
   IconPencil,
   IconShieldCheck,
   IconX,
 } from "@tabler/icons-react";
 import {
+  buildDiscoveryReviewRequest,
   createDiscoveryReviewState,
   discoveryReviewReducer,
   formatDiscoveryValue,
@@ -55,7 +57,13 @@ function StatusSurface({ phase, reason, onDiscover }) {
       ? "A leitura do site não terminou."
       : reason === "deadline_expired" || reason === "company_discovery_deadline_expired"
         ? "O tempo reservado para a leitura terminou."
-        : "A leitura automática do site não está disponível para esta empresa.";
+        : reason === "disabled"
+          ? "A leitura automática do site está desativada."
+          : reason === "not_allowlisted"
+            ? "A leitura automática do site não foi liberada para esta empresa."
+            : reason === "allowlist_expired"
+              ? "A permissão para leitura automática expirou."
+              : "A leitura automática do site não está disponível para esta empresa.";
     return (
       <aside className="discovery-status discovery-status--fallback" role="status">
         <IconAlertTriangle aria-hidden="true" />
@@ -116,8 +124,9 @@ function StatusSurface({ phase, reason, onDiscover }) {
   );
 }
 
-function EvidenceRail({ decision }) {
+function EvidenceRail({ decision, groupId }) {
   const accepted = decision === "approve" || decision === "edit";
+  const finalLabel = groupId === "descriptive" ? "Perfil da empresa" : "Regra da Ligou";
   return (
     <div className="discovery-authority-rail" aria-label="Evidência até autoridade">
       <div className="discovery-rail-step is-evidence">
@@ -134,7 +143,7 @@ function EvidenceRail({ decision }) {
       <IconArrowRight aria-hidden="true" />
       <div className={`discovery-rail-step ${accepted ? "is-rule" : "is-locked"}`}>
         <span>{accepted ? <IconCheck aria-hidden="true" /> : <IconLock aria-hidden="true" />}</span>
-        <strong>Regra da Ligou</strong>
+        <strong>{finalLabel}</strong>
         <small>{accepted ? "Só após confirmar" : decision === "reject" ? "Não será criada" : "Bloqueada"}</small>
       </div>
     </div>
@@ -177,36 +186,67 @@ function ClaimSignals({ claim }) {
   );
 }
 
-function EditValue({ claim, value, onChange }) {
-  const [draft, setDraft] = useState(typeof value === "string" ? value : JSON.stringify(value, null, 2));
-  const [error, setError] = useState("");
-  useEffect(() => {
-    setDraft(typeof value === "string" ? value : JSON.stringify(value, null, 2));
-    setError("");
-  }, [claim.id]);
-
-  const update = (next) => {
-    setDraft(next);
-    if (typeof claim.value === "string") {
-      setError(next.trim() ? "" : "O valor não pode ficar vazio.");
-      if (next.trim()) onChange(next.trim());
-      return;
-    }
-    try {
-      const parsed = JSON.parse(next);
-      setError("");
-      onChange(parsed);
-    } catch {
-      setError("Revise o formato antes de confirmar.");
-    }
-  };
-
+function EditValue({ claim, editor, onField }) {
+  const error = editor?.error;
+  if (editor?.kind === "service") {
+    const draft = editor.draft;
+    return (
+      <fieldset className="discovery-edit-field discovery-service-editor">
+        <legend>Corrigir dados públicos do serviço</legend>
+        <label className="discovery-edit-wide">
+          <span>Nomes publicados do serviço</span>
+          <input name="serviceNames" value={draft.serviceNames} onChange={(event) => onField("serviceNames", event.target.value)} />
+          <small>Separe nomes diferentes com vírgulas.</small>
+        </label>
+        <label className="discovery-price-toggle discovery-edit-wide">
+          <input name="publicPricePublished" type="checkbox" checked={draft.pricePublished} onChange={(event) => onField("pricePublished", event.target.checked)} />
+          <span>O site publica um preço para este serviço</span>
+        </label>
+        <label>
+          <span>Valor público</span>
+          <input name="publicAmount" inputMode="decimal" placeholder="149.00" disabled={!draft.pricePublished} value={draft.amount} onChange={(event) => onField("amount", event.target.value)} />
+        </label>
+        <label>
+          <span>Moeda</span>
+          <input name="publicCurrency" inputMode="text" maxLength="3" disabled={!draft.pricePublished} value={draft.currency} onChange={(event) => onField("currency", event.target.value.toUpperCase())} />
+        </label>
+        <label>
+          <span>Como aparece</span>
+          <select name="publicQualifier" disabled={!draft.pricePublished} value={draft.qualifier} onChange={(event) => onField("qualifier", event.target.value)}>
+            <option value="exact">Preço exato</option>
+            <option value="starting_at">A partir de</option>
+          </select>
+        </label>
+        <label>
+          <span>Duração pública em minutos</span>
+          <input name="durationMinutes" type="number" min="1" max="10080" value={draft.durationMinutes} onChange={(event) => onField("durationMinutes", event.target.value)} />
+        </label>
+        <p className="discovery-editor-boundary discovery-edit-wide">Preço privado, piso e negociação não fazem parte desta revisão.</p>
+        {error ? <small className="discovery-editor-error discovery-edit-wide" role="alert">{error}</small> : null}
+      </fieldset>
+    );
+  }
+  if (editor?.kind === "emergency") {
+    return (
+      <fieldset className="discovery-edit-field">
+        <legend>Corrigir orientação pública de segurança</legend>
+        <label>
+          <span>Orientação de emergência</span>
+          <textarea name="emergencyGuidance" rows="5" maxLength="2000" value={editor.draft.guidance} onChange={(event) => onField("guidance", event.target.value)} />
+        </label>
+        {error ? <small className="discovery-editor-error" role="alert">{error}</small> : null}
+      </fieldset>
+    );
+  }
   return (
-    <label className="discovery-edit-field">
-      <span>Valor corrigido</span>
-      <textarea rows={typeof claim.value === "string" ? 3 : 7} value={draft} onChange={(event) => update(event.target.value)} />
-      {error ? <small role="alert">{error}</small> : null}
-    </label>
+    <fieldset className="discovery-edit-field">
+      <legend>Corrigir dado público</legend>
+      <label>
+        <span>{TYPE_LABELS[claim.type] || "Valor público"}</span>
+        <textarea name="descriptiveValue" rows="3" maxLength="2000" value={editor?.draft.text ?? ""} onChange={(event) => onField("text", event.target.value)} />
+      </label>
+      {error ? <small className="discovery-editor-error" role="alert">{error}</small> : null}
+    </fieldset>
   );
 }
 
@@ -222,7 +262,7 @@ function ClaimCard({ claim, groupId, reviewState, dispatch }) {
         <span className="discovery-version">claim v{claim.version}</span>
       </header>
 
-      <EvidenceRail decision={selected.decision} />
+      <EvidenceRail decision={selected.decision} groupId={groupId} />
       <details className="discovery-evidence-details" open={groupId === "safety"}>
         <summary>Ver URL, trecho e hash da evidência</summary>
         <EvidenceList claim={claim} />
@@ -254,8 +294,8 @@ function ClaimCard({ claim, groupId, reviewState, dispatch }) {
       {selected.decision === "edit" ? (
         <EditValue
           claim={claim}
-          value={selected.value}
-          onChange={(value) => dispatch({ type: "edit", claimId: claim.id, value })}
+          editor={selected.editor}
+          onField={(field, value) => dispatch({ type: "editField", claimId: claim.id, field, value })}
         />
       ) : null}
 
@@ -291,6 +331,7 @@ export function DiscoveryReviewView({
   discovery = { phase: "loading" },
   onDiscover,
   onReview,
+  onStartInterview,
   busy = false,
 }) {
   const [reviewState, dispatch] = useReducer(discoveryReviewReducer, discovery, createDiscoveryReviewState);
@@ -307,6 +348,15 @@ export function DiscoveryReviewView({
       : 0,
     [discovery],
   );
+  const reviewError = useMemo(() => {
+    if (discovery.phase !== "review") return "";
+    try {
+      buildDiscoveryReviewRequest(discovery, reviewState, "readiness-check");
+      return "";
+    } catch (caught) {
+      return caught?.message || "Revise todos os campos antes de confirmar.";
+    }
+  }, [discovery, reviewState]);
 
   if (discovery.phase !== "review") {
     return <StatusSurface phase={discovery.phase} reason={discovery.reason} onDiscover={onDiscover} />;
@@ -321,13 +371,21 @@ export function DiscoveryReviewView({
           <p>{claimCount} {claimCount === 1 ? "candidato público" : "candidatos públicos"}. Nada muda até sua confirmação atômica.</p>
         </div>
         <div className="discovery-review-meta">
-          {discovery.lateSuggestion ? <strong>Chegou depois da entrevista · apenas sugestão</strong> : <strong>Aguardando sua revisão</strong>}
+          {discovery.lateSuggestion ? <strong>Chegou depois da entrevista · apenas sugestão</strong> : <strong>Sugestão pública · sem efeito automático</strong>}
           <small>job v{discovery.job.version} · resultado {discovery.result.hash?.slice(0, 12)}</small>
           <span className="discovery-review-toggle">Abrir revisão</span>
         </div>
       </summary>
 
       <div className="discovery-review-body">
+      {onStartInterview ? (
+        <aside className="discovery-interview-shortcut-wrap">
+          <p><strong>Prefere responder falando?</strong> A entrevista em português continua disponível agora.</p>
+          <button className="button button--ghost discovery-interview-shortcut" type="button" onClick={onStartInterview}>
+            <IconMicrophone2 aria-hidden="true" /> Começar entrevista em português
+          </button>
+        </aside>
+      ) : null}
       {(discovery.contradictions.length || discovery.uncertainty.length) ? (
         <aside className="discovery-result-caveats">
           <IconAlertTriangle aria-hidden="true" />
@@ -382,7 +440,7 @@ export function DiscoveryReviewView({
         {error ? <p className="discovery-submit-error" role="alert">{error}</p> : null}
         <footer className="discovery-review-actions">
           <p><IconLock aria-hidden="true" /> Um nonce curto vincula exatamente este job, resultado e conjunto de claims.</p>
-          <button className="button button--primary" type="submit" disabled={busy}>
+          <button className="button button--primary" type="submit" disabled={busy || Boolean(reviewError)} title={reviewError || undefined}>
             {busy ? "Confirmando o lote…" : "Confirmar revisão em um lote"}
           </button>
         </footer>

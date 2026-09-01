@@ -37,10 +37,17 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function isAllowlisted(allowlist, now) {
-  if (!allowlist?.active) return false;
-  if (!allowlist.expires_at) return true;
-  return Date.parse(allowlist.expires_at) > Date.parse(now);
+function discoveryAvailability(ownerStatus, now) {
+  if (!ownerStatus || typeof ownerStatus !== "object" || Array.isArray(ownerStatus)) {
+    return { available: false, reason: "status_unavailable" };
+  }
+  if (ownerStatus.enabled !== true) return { available: false, reason: "disabled" };
+  if (ownerStatus.allowlisted !== true) return { available: false, reason: "not_allowlisted" };
+  if (ownerStatus.expires_at && Date.parse(ownerStatus.expires_at) <= Date.parse(now)) {
+    return { available: false, reason: "allowlist_expired" };
+  }
+  if (ownerStatus.available !== true) return { available: false, reason: "unavailable" };
+  return { available: true, reason: null };
 }
 
 function evidenceProjection(source) {
@@ -53,24 +60,114 @@ function evidenceProjection(source) {
   };
 }
 
+function serviceNames(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function editorFromValue(claim, value = claim.value) {
+  if (claim.type === "service") {
+    return validateEditor({
+      kind: "service",
+      draft: {
+        serviceType: value?.service_type ?? claim.value?.service_type ?? "",
+        serviceNames: asArray(value?.service_names).join(", "),
+        pricePublished: value?.public_price != null,
+        amount: value?.public_price?.amount ?? "",
+        currency: value?.public_price?.currency ?? "USD",
+        qualifier: value?.public_price?.qualifier ?? "exact",
+        durationMinutes: value?.duration_minutes == null ? "" : String(value.duration_minutes),
+      },
+    });
+  }
+  if (claim.type === "emergency") {
+    return validateEditor({
+      kind: "emergency",
+      draft: { guidance: value?.guidance ?? "" },
+    });
+  }
+  return validateEditor({
+    kind: "descriptive",
+    draft: { text: typeof value === "string" ? value : "" },
+  });
+}
+
+function validateEditor(editor) {
+  const draft = clone(editor.draft);
+  if (editor.kind === "service") {
+    const names = serviceNames(draft.serviceNames);
+    if (!names.length || names.length > 20 || names.some((name) => name.length > 200)) {
+      return { ...editor, draft, valid: false, error: "Informe de 1 a 20 nomes públicos do serviço.", value: null };
+    }
+    let publicPrice = null;
+    if (draft.pricePublished) {
+      if (!/^(0|[1-9][0-9]{0,8})\.[0-9]{2}$/.test(draft.amount)) {
+        return { ...editor, draft, valid: false, error: "Use o valor público no formato 0.00, sem símbolo.", value: null };
+      }
+      const currency = String(draft.currency ?? "").trim().toUpperCase();
+      if (!/^[A-Z]{3}$/.test(currency)) {
+        return { ...editor, draft, valid: false, error: "Informe a moeda pública com 3 letras, como USD.", value: null };
+      }
+      if (!["exact", "starting_at"].includes(draft.qualifier)) {
+        return { ...editor, draft, valid: false, error: "Escolha se o preço é exato ou inicial.", value: null };
+      }
+      publicPrice = { amount: draft.amount, currency, qualifier: draft.qualifier };
+    }
+    let duration = null;
+    if (String(draft.durationMinutes).trim()) {
+      const parsed = Number(draft.durationMinutes);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10080) {
+        return { ...editor, draft, valid: false, error: "A duração pública deve ficar entre 1 e 10.080 minutos.", value: null };
+      }
+      duration = parsed;
+    }
+    return {
+      ...editor,
+      draft,
+      valid: true,
+      error: null,
+      value: {
+        service_type: draft.serviceType,
+        service_names: names,
+        public_price: publicPrice,
+        duration_minutes: duration,
+      },
+    };
+  }
+  if (editor.kind === "emergency") {
+    const guidance = String(draft.guidance ?? "").trim();
+    if (!guidance || guidance.length > 2000) {
+      return { ...editor, draft, valid: false, error: "Informe uma orientação de emergência de até 2.000 caracteres.", value: null };
+    }
+    return { ...editor, draft, valid: true, error: null, value: { guidance } };
+  }
+  const text = String(draft.text ?? "").trim();
+  if (!text || text.length > 2000) {
+    return { ...editor, draft, valid: false, error: "Informe um texto público de até 2.000 caracteres.", value: null };
+  }
+  return { ...editor, draft, valid: true, error: null, value: text };
+}
+
 export function mapDiscoveryRead({
-  allowlist = null,
+  ownerStatus = null,
   job = null,
   result = null,
   claims = [],
   sources = [],
   decisions = [],
   errorCode = null,
-  hasOwnerAnswers = false,
   now = new Date().toISOString(),
 } = {}) {
   if (FALLBACK_ERROR_CODES.has(errorCode)) {
     return { phase: "fallback", reason: errorCode, interviewAvailable: true };
   }
-  if (!isAllowlisted(allowlist, now)) {
+  const availability = discoveryAvailability(ownerStatus, now);
+  if (!availability.available) {
     return {
       phase: "unavailable",
-      reason: allowlist?.active ? "allowlist_expired" : "not_allowlisted",
+      reason: availability.reason,
       interviewAvailable: true,
     };
   }
@@ -153,7 +250,7 @@ export function mapDiscoveryRead({
     phase: job.status === "reviewed" || mappedClaims.length === 0 ? "complete" : "review",
     interviewAvailable: true,
     authorityEffect: "suggestion_only",
-    lateSuggestion: Boolean(hasOwnerAnswers),
+    lateSuggestion: job.fallback_state === "existing_onboarding",
     job: {
       id: job.id,
       version: Number(job.version),
@@ -180,10 +277,14 @@ export function createDiscoveryReviewState(review) {
     expectedJobVersion: review?.job?.version ?? null,
     expectedResultId: review?.result?.id ?? null,
     expectedClaimVersions: Object.fromEntries(claims.map((claim) => [claim.id, claim.version])),
-    decisions: Object.fromEntries(claims.map((claim) => [claim.id, {
-      decision: null,
-      value: clone(claim.value),
-    }])),
+    decisions: Object.fromEntries(claims.map((claim) => {
+      const editor = editorFromValue(claim);
+      return [claim.id, {
+        decision: null,
+        value: clone(editor.value),
+        editor,
+      }];
+    })),
     confirmations: { descriptive: false, operational: false, safety: false },
     evidenceAcks: {},
   };
@@ -203,11 +304,37 @@ export function discoveryReviewReducer(state, action) {
   }
   if (action.type === "edit") {
     if (!state.decisions[action.claimId]) return state;
+    const editor = editorFromValue({
+      type: state.decisions[action.claimId].editor.kind === "emergency"
+        ? "emergency"
+        : state.decisions[action.claimId].editor.kind === "service" ? "service" : "descriptive",
+      value: state.decisions[action.claimId].value,
+    }, action.value);
     return {
       ...state,
       decisions: {
         ...state.decisions,
-        [action.claimId]: { decision: "edit", value: clone(action.value) },
+        [action.claimId]: { decision: "edit", value: clone(editor.value), editor },
+      },
+    };
+  }
+  if (action.type === "editField") {
+    const current = state.decisions[action.claimId];
+    if (!current?.editor || !Object.hasOwn(current.editor.draft, action.field)) return state;
+    const editor = validateEditor({
+      ...current.editor,
+      draft: { ...current.editor.draft, [action.field]: action.value },
+    });
+    return {
+      ...state,
+      decisions: {
+        ...state.decisions,
+        [action.claimId]: {
+          ...current,
+          decision: "edit",
+          value: clone(editor.value),
+          editor,
+        },
       },
     };
   }
@@ -239,6 +366,12 @@ export function buildDiscoveryReviewRequest(review, state, nonce) {
   }
 
   const claims = groups.flatMap((group) => asArray(group.claims));
+  if (claims.some((claim) => {
+    const selected = state.decisions?.[claim.id];
+    return selected?.decision === "edit" && !selected.editor?.valid;
+  })) {
+    throw new Error("Corrija os campos visíveis antes de confirmar a revisão.");
+  }
   for (const claim of claims) {
     if (!claim.evidenceRefs?.length || claim.evidence?.length !== claim.evidenceRefs.length) {
       throw new Error("A evidência desta sugestão não carregou por completo. Recarregue antes de decidir.");

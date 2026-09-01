@@ -184,6 +184,15 @@ export function App() {
 
 const gateway = supabaseConfigured ? supabaseGateway : dashboardGateway;
 
+export function LigouWorkspace({ showDiscovery = false, discoveryProps = {}, chatProps = {} }) {
+  return (
+    <>
+      {showDiscovery ? <DiscoveryReviewView {...discoveryProps} /> : null}
+      <ChatView {...chatProps} />
+    </>
+  );
+}
+
 function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
   const [route, setRoute] = useState(routeFromHash);
   const [state, setState] = useState(null);
@@ -197,15 +206,9 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
   const [discovery, setDiscovery] = useState({ phase: supabaseConfigured ? "loading" : "hidden" });
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
 
-  const refreshDiscovery = useCallback(async (ownerState) => {
+  const refreshDiscovery = useCallback(async () => {
     if (typeof gateway.loadCompanyDiscovery !== "function") return null;
-    const next = await gateway.loadCompanyDiscovery({
-      hasOwnerAnswers: Boolean(
-        ownerState?.memory?.length
-        || ownerState?.testState?.calls
-        || ownerState?.business?.status === "ativo",
-      ),
-    });
+    const next = await gateway.loadCompanyDiscovery();
     setDiscovery(next);
     return next;
   }, []);
@@ -382,30 +385,30 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
         onReset={() => setDialog({ type: "reset" })}
       >
         {route === "ligou" ? (
-          <>
-            {supabaseConfigured ? (
-              <DiscoveryReviewView
-                discovery={discovery}
-                busy={discoveryBusy}
-                onDiscover={startDiscovery}
-                onReview={confirmDiscoveryReview}
-              />
-            ) : null}
-            <ChatView
-              messages={state.messages}
-              callContext={state.callContext}
-              pendingApproval={pendingApproval}
-              sending={sending}
-              onSend={sendMessage}
-              onVoice={() => setDialog({ type: "voice", sessionType: defaultSessionType(tenant?.status) })}
-              onboardingCtaLabel={onboardingCta(tenant?.status)}
-              onStartOnboarding={() => setDialog({ type: "voice", sessionType: "onboarding" })}
-              prototype={!supabaseConfigured}
-              onApprove={openApproval}
-              onAdjust={openAdjustment}
-              onReject={openRejection}
-            />
-          </>
+          <LigouWorkspace
+            showDiscovery={supabaseConfigured}
+            discoveryProps={{
+              discovery,
+              busy: discoveryBusy,
+              onDiscover: startDiscovery,
+              onReview: confirmDiscoveryReview,
+              onStartInterview: () => setDialog({ type: "voice", sessionType: "onboarding" }),
+            }}
+            chatProps={{
+              messages: state.messages,
+              callContext: state.callContext,
+              pendingApproval,
+              sending,
+              onSend: sendMessage,
+              onVoice: () => setDialog({ type: "voice", sessionType: defaultSessionType(tenant?.status) }),
+              onboardingCtaLabel: onboardingCta(tenant?.status),
+              onStartOnboarding: () => setDialog({ type: "voice", sessionType: "onboarding" }),
+              prototype: !supabaseConfigured,
+              onApprove: openApproval,
+              onAdjust: openAdjustment,
+              onReject: openRejection,
+            }}
+          />
         ) : null}
         {route === "memoria" ? (
           <MemoryView

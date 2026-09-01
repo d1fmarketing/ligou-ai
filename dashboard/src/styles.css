@@ -388,13 +388,6 @@ button:disabled {
   .workspace:has(> .chat-view) {
     padding-bottom: calc(var(--nav-height) + 100px + env(safe-area-inset-bottom, 0px));
   }
-
-  /* A revisão longa usa o mesmo espaço vertical da conversa. Enquanto está
-     aberta, o composer fixo não cobre evidência ou confirmações; ao fechar,
-     a conversa volta exatamente ao estado anterior. */
-  .workspace:has(> .discovery-review[open]) > .chat-view .composer {
-    display: none;
-  }
 }
 
 /* Âncora do auto-scroll do chat: no mobile o composer fixo + nav cobrem o pé
@@ -3479,6 +3472,35 @@ button:disabled {
   border-top: 1px solid var(--border);
 }
 
+.discovery-interview-shortcut-wrap {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(11, 101, 90, 0.18);
+  background: rgba(234, 247, 242, 0.97);
+  backdrop-filter: blur(10px);
+}
+
+.discovery-interview-shortcut-wrap p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--type-small);
+  line-height: var(--leading-compact);
+}
+
+.discovery-interview-shortcut-wrap strong {
+  color: var(--ink-900);
+}
+
+.discovery-interview-shortcut {
+  width: 100%;
+  min-height: 44px;
+}
+
 .discovery-result-caveats {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -3819,16 +3841,31 @@ button:disabled {
   display: grid;
   gap: 6px;
   margin-top: 12px;
+  padding: 0;
+  border: 0;
   color: var(--ink-900);
   font-size: var(--type-small);
   font-weight: 700;
 }
 
+.discovery-edit-field legend {
+  margin-bottom: 4px;
+  font-size: var(--type-small);
+  font-weight: 800;
+}
+
+.discovery-edit-field label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.discovery-edit-field input:not([type="checkbox"]),
+.discovery-edit-field select,
 .discovery-edit-field textarea {
   width: 100%;
-  min-height: 88px;
-  padding: 10px;
-  resize: vertical;
+  min-height: 44px;
+  padding: 9px 10px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   color: var(--ink-950);
@@ -3838,8 +3875,58 @@ button:disabled {
   line-height: var(--leading-body);
 }
 
-.discovery-edit-field small {
+.discovery-edit-field textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.discovery-edit-field input:disabled,
+.discovery-edit-field select:disabled {
+  color: var(--text-muted);
+  background: var(--paper-warm);
+}
+
+.discovery-edit-field label > small {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.discovery-service-editor {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.discovery-price-toggle {
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--teal-soft);
+  cursor: pointer;
+}
+
+.discovery-price-toggle input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--teal);
+}
+
+.discovery-editor-boundary {
+  margin: 0;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  background: var(--paper-warm);
+  font-size: var(--type-small);
+  font-weight: 600;
+  line-height: var(--leading-compact);
+}
+
+.discovery-editor-error {
   color: var(--orange-dark);
+  font-weight: 700;
 }
 
 .discovery-evidence-ack,
@@ -3955,6 +4042,23 @@ button:disabled {
 }
 
 @media (min-width: 560px) {
+  .discovery-interview-shortcut-wrap {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .discovery-interview-shortcut {
+    width: auto;
+  }
+
+  .discovery-service-editor {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .discovery-edit-wide {
+    grid-column: 1 / -1;
+  }
+
   .discovery-review-header {
     grid-template-columns: minmax(0, 1fr) auto;
   }

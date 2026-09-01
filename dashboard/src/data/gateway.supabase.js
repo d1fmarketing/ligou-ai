@@ -12,8 +12,13 @@ import { buildDiscoveryReviewRequest, mapDiscoveryRead } from "../discovery-mode
 
 const DISCOVERY_ERROR_COPY = {
   company_discovery_stale_version: "A descoberta mudou enquanto você revisava. Recarregue antes de confirmar.",
-  company_discovery_review_nonce_invalid: "A confirmação expirou. Revise o lote e tente novamente.",
-  company_discovery_review_nonce_race_lost: "Esta confirmação já foi usada. Recarregue antes de tentar novamente.",
+  company_discovery_review_result_not_owner: "Este resultado não é mais a revisão atual. Recarregue o painel.",
+  company_discovery_claim_already_reviewed: "Uma destas sugestões já foi revisada. Recarregue o painel para ver o estado atual.",
+  company_discovery_review_not_awaiting: "Esta descoberta não está mais aguardando revisão. Recarregue o painel.",
+  company_discovery_review_claim_set_invalid: "O conjunto de sugestões mudou. Recarregue o painel antes de confirmar.",
+  company_discovery_review_claim_set_mismatch: "O conjunto de sugestões mudou. Recarregue o painel antes de confirmar.",
+  company_discovery_review_nonce_invalid: "A confirmação expirou ou foi invalidada. Recarregue o painel e confirme novamente.",
+  company_discovery_review_nonce_race_lost: "Esta confirmação já foi usada. Recarregue o painel antes de tentar novamente.",
   company_discovery_operational_confirmation_required: "Confirme explicitamente o grupo operacional.",
   company_discovery_safety_evidence_ack_required: "Confirme a evidência exata de cada item de segurança.",
   company_discovery_owner_private_fact_forbidden: "Assuntos privados só podem ser respondidos na entrevista.",
@@ -57,16 +62,20 @@ export async function retryCompanyDiscoveryVia(client, jobId, expectedVersion) {
 }
 
 export async function reviewCompanyDiscoveryVia(client, review, reviewState) {
-  const claimIds = review.groups
-    .flatMap((group) => group.claims.map((claim) => claim.id))
-    .sort((left, right) => left.localeCompare(right));
+  // Validate the complete visible draft before minting a nonce. An invalid
+  // editor must produce zero server calls and can never fall back to a prior
+  // valid value held elsewhere.
+  const payload = buildDiscoveryReviewRequest(review, reviewState, "preflight-only");
+  const claimIds = payload.p_decisions.map((decision) => decision.claim_id);
   const nonce = await discoveryRpc(client, "create_company_discovery_review_nonce", {
     p_job: review.job.id,
     p_result: review.result.id,
     p_claim_ids: claimIds,
   });
-  const payload = buildDiscoveryReviewRequest(review, reviewState, nonce);
-  return discoveryRpc(client, "review_company_discovery_claims", payload);
+  return discoveryRpc(client, "review_company_discovery_claims", {
+    ...payload,
+    p_confirmation_nonce: nonce,
+  });
 }
 
 function discoveryData(result) {
@@ -75,28 +84,22 @@ function discoveryData(result) {
 }
 
 export async function loadCompanyDiscoveryVia(client, tenantId, {
-  hasOwnerAnswers = false,
   now = new Date().toISOString(),
 } = {}) {
   if (typeof tenantId !== "string" || !tenantId) throw new Error("active_tenant_required");
-  const [allowlistResult, jobResult] = await Promise.all([
-    client
-      .from("company_discovery_allowlist")
-      .select("active,expires_at")
-      .eq("tenant_id", tenantId)
-      .maybeSingle(),
-    client
-      .from("worker_jobs")
-      .select("id,tenant_id,version,status,current_attempt_id,selected_attempt_id,deadline_at,fallback_state,normalized_origin,updated_at")
-      .eq("tenant_id", tenantId)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-  ]);
-  const allowlist = discoveryData(allowlistResult);
+  const ownerStatus = discoveryData(await client.rpc("company_discovery_owner_status"));
+  const availability = mapDiscoveryRead({ ownerStatus, now });
+  if (availability.phase === "unavailable") return availability;
+  const jobResult = await client
+    .from("worker_jobs")
+    .select("id,tenant_id,version,status,current_attempt_id,selected_attempt_id,deadline_at,fallback_state,normalized_origin,updated_at")
+    .eq("tenant_id", tenantId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
   const job = discoveryData(jobResult);
   if (!job?.selected_attempt_id) {
-    return mapDiscoveryRead({ allowlist, job, hasOwnerAnswers, now });
+    return mapDiscoveryRead({ ownerStatus, job, now });
   }
 
   const result = discoveryData(await client
@@ -107,7 +110,7 @@ export async function loadCompanyDiscoveryVia(client, tenantId, {
     .eq("attempt_id", job.selected_attempt_id)
     .eq("validation_state", "validated")
     .maybeSingle());
-  if (!result) return mapDiscoveryRead({ allowlist, job, hasOwnerAnswers, now });
+  if (!result) return mapDiscoveryRead({ ownerStatus, job, now });
 
   const [claimsResult, sourcesResult, decisionsResult] = await Promise.all([
     client
@@ -133,13 +136,12 @@ export async function loadCompanyDiscoveryVia(client, tenantId, {
       .order("decided_at", { ascending: true }),
   ]);
   return mapDiscoveryRead({
-    allowlist,
+    ownerStatus,
     job,
     result,
     claims: discoveryData(claimsResult) ?? [],
     sources: discoveryData(sourcesResult) ?? [],
     decisions: discoveryData(decisionsResult) ?? [],
-    hasOwnerAnswers,
     now,
   });
 }
@@ -289,9 +291,9 @@ export function createSupabaseGateway() {
       try { return await fetchAll(); } catch (e) { return { state: null, warning: e.message }; }
     },
 
-    async loadCompanyDiscovery({ hasOwnerAnswers = false } = {}) {
+    async loadCompanyDiscovery() {
       try {
-        return await loadCompanyDiscoveryVia(supabase, activeTenantId, { hasOwnerAnswers });
+        return await loadCompanyDiscoveryVia(supabase, activeTenantId);
       } catch (error) {
         return {
           phase: "fallback",
