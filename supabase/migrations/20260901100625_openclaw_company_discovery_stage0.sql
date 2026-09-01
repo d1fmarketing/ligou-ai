@@ -110,9 +110,11 @@ create table public.worker_attempts (
   lease_until timestamp with time zone not null,
   runtime_slot_id uuid references public.worker_runtime_slots (id),
   runtime_identity jsonb not null default '{}'::jsonb,
+  runtime_identity_hash text,
   provider_metadata jsonb not null default '{}'::jsonb,
   result_id uuid,
   terminal_at timestamp with time zone,
+  terminal_reason text,
   cleanup_state text not null default 'pending'
     check (cleanup_state in ('pending', 'proved', 'cleanup_unresolved')),
   cleanup_proof jsonb,
@@ -122,6 +124,10 @@ create table public.worker_attempts (
   foreign key (job_id, tenant_id) references public.worker_jobs (id, tenant_id),
   check (lease_until > claimed_at),
   check (jsonb_typeof(runtime_identity) = 'object'),
+  check (
+    runtime_identity_hash is null or
+    runtime_identity_hash ~ '^[0-9a-f]{64}$'
+  ),
   check (jsonb_typeof(provider_metadata) = 'object')
 );
 
@@ -467,6 +473,59 @@ grant insert, update on table public.company_discovery_controls,
 grant insert on table public.worker_runtime_slots to service_role;
 
 -- ---------------------------------------------------------------- owner RPCs
+create or replace function public.company_discovery_owner_status()
+returns jsonb
+language plpgsql
+security definer
+stable
+set search_path = ''
+as $$
+declare
+  v_owner uuid := auth.uid();
+  v_tenants uuid[];
+  v_enabled boolean := false;
+  v_allowlisted boolean := false;
+  v_expires_at timestamp with time zone;
+  v_expired boolean := false;
+begin
+  if v_owner is null then
+    raise exception using errcode = '42501', message = 'authentication_required';
+  end if;
+  select array_agg(t.id order by t.created_at, t.id)
+    into v_tenants
+  from public.tenants t
+  where t.owner_user_id = v_owner;
+  if coalesce(cardinality(v_tenants), 0) > 1 then
+    raise exception using errcode = '42501',
+      message = 'company_discovery_owner_tenant_ambiguous';
+  end if;
+  select coalesce(c.enabled, false) into v_enabled
+  from public.company_discovery_controls c
+  where c.singleton;
+  v_enabled := coalesce(v_enabled, false);
+  if cardinality(v_tenants) = 1 then
+    select coalesce(a.active, false), a.expires_at
+      into v_allowlisted, v_expires_at
+    from public.company_discovery_allowlist a
+    where a.tenant_id = v_tenants[1];
+    v_allowlisted := coalesce(v_allowlisted, false);
+  end if;
+  v_expired := v_expires_at is not null and v_expires_at <= statement_timestamp();
+  return jsonb_build_object(
+    'enabled', v_enabled,
+    'allowlisted', v_allowlisted,
+    'expires_at', v_expires_at,
+    'available',
+      v_enabled and v_allowlisted and not v_expired
+  );
+end;
+$$;
+
+revoke all on function public.company_discovery_owner_status()
+  from public, anon, authenticated, service_role;
+grant execute on function public.company_discovery_owner_status()
+  to authenticated;
+
 create or replace function public.submit_company_discovery(
   p_url text,
   p_idempotency_key text
@@ -1186,15 +1245,21 @@ grant execute on function public.review_company_discovery_claims(uuid,uuid,bigin
   to authenticated;
 
 -- ---------------------------------------------------------------- supervisor RPCs
+drop function if exists public.claim_company_discovery_attempt(text,integer);
+
 create or replace function public.claim_company_discovery_attempt(
   p_worker_id text,
+  p_adapter_id text,
   p_lease_seconds integer
 ) returns table (
   job_id uuid,
   attempt_id uuid,
   attempt_number integer,
+  adapter_id text,
   fence_generation bigint,
   claim_token text,
+  runtime_slot_id uuid,
+  job_version bigint,
   normalized_origin text,
   deadline_at timestamp with time zone,
   budget jsonb
@@ -1211,17 +1276,22 @@ declare
   v_token text := encode(extensions.gen_random_bytes(32), 'hex');
 begin
   if p_worker_id is null or btrim(p_worker_id) = ''
+     or p_adapter_id not in ('openclaw', 'direct_model')
      or p_lease_seconds not between 1 and 600 then
     raise exception using errcode = '22023',
       message = 'company_discovery_claim_invalid';
   end if;
   insert into public.worker_runtime_slots (
-    slot_name, supervisor_worker_id, status
-  ) values (btrim(p_worker_id), btrim(p_worker_id), 'available')
+    slot_name, supervisor_worker_id, adapter_id, status
+  ) values (
+    btrim(p_worker_id), btrim(p_worker_id), p_adapter_id, 'available'
+  )
   on conflict (slot_name) do nothing;
   select s.* into v_slot
   from public.worker_runtime_slots s
-  where s.slot_name = btrim(p_worker_id) and s.status = 'available'
+  where s.slot_name = btrim(p_worker_id)
+    and s.adapter_id = p_adapter_id
+    and s.status = 'available'
   for update skip locked;
   if v_slot.id is null then return; end if;
   select j.* into v_job
@@ -1248,10 +1318,10 @@ begin
     fence_generation, claim_token_hash, claimed_by, lease_until,
     runtime_slot_id, runtime_identity
   ) values (
-    v_attempt, v_job.tenant_id, v_job.id, v_attempt_number, v_slot.adapter_id,
+    v_attempt, v_job.tenant_id, v_job.id, v_attempt_number, p_adapter_id,
     v_job.fence_generation, extensions.digest(v_token, 'sha256'), btrim(p_worker_id),
     clock_timestamp() + make_interval(secs => p_lease_seconds),
-    v_slot.id, jsonb_build_object('slot_id', v_slot.id, 'worker_id', btrim(p_worker_id))
+    v_slot.id, '{}'::jsonb
   );
   update public.worker_jobs
   set status = 'running', current_attempt_id = v_attempt,
@@ -1262,14 +1332,253 @@ begin
       current_attempt_id = v_attempt, updated_at = clock_timestamp()
   where id = v_slot.id;
   return query select
-    v_job.id, v_attempt, v_attempt_number, v_job.fence_generation,
-    v_token, v_job.normalized_origin, v_job.deadline_at, v_job.budget;
+    v_job.id, v_attempt, v_attempt_number, p_adapter_id,
+    v_job.fence_generation, v_token, v_slot.id, v_job.version + 1,
+    v_job.normalized_origin, v_job.deadline_at, v_job.budget;
 end;
 $$;
 
-revoke all on function public.claim_company_discovery_attempt(text,integer)
+revoke all on function public.claim_company_discovery_attempt(text,text,integer)
   from public, anon, authenticated, service_role;
-grant execute on function public.claim_company_discovery_attempt(text,integer)
+grant execute on function public.claim_company_discovery_attempt(text,text,integer)
+  to service_role;
+
+create or replace function public.bind_company_discovery_runtime(
+  p_attempt_id uuid,
+  p_fence_generation bigint,
+  p_claim_token text,
+  p_runtime_identity jsonb
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_attempt public.worker_attempts;
+  v_job public.worker_jobs;
+  v_runtime_hash text;
+  v_name_key text;
+  v_name text;
+  v_name_keys constant text[] := array[
+    'cell_container_name', 'bridge_container_name',
+    'internal_network_name', 'egress_network_name',
+    'config_volume_name', 'state_volume_name', 'workspace_volume_name',
+    'output_volume_name', 'gateway_secret_volume_name',
+    'bridge_secret_volume_name', 'profile_name'
+  ];
+begin
+  select a.* into v_attempt
+  from public.worker_attempts a
+  where a.id = p_attempt_id
+  for update;
+  if v_attempt.id is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_attempt_not_found';
+  end if;
+  select j.* into v_job
+  from public.worker_jobs j
+  where j.id = v_attempt.job_id
+  for update;
+  if v_attempt.status <> 'running'
+     or v_job.status <> 'running'
+     or v_job.current_attempt_id is distinct from v_attempt.id then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_attempt_not_current';
+  end if;
+  if v_job.fence_generation is distinct from p_fence_generation
+     or v_attempt.fence_generation is distinct from p_fence_generation then
+    raise exception using errcode = '40001',
+      message = 'company_discovery_stale_fence';
+  end if;
+  if v_attempt.claim_token_hash is distinct from
+       extensions.digest(p_claim_token, 'sha256') then
+    raise exception using errcode = '42501',
+      message = 'company_discovery_claim_token_invalid';
+  end if;
+  if v_attempt.lease_until <= clock_timestamp()
+     or v_job.deadline_at <= clock_timestamp() then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_attempt_lease_expired';
+  end if;
+  if v_attempt.runtime_identity <> '{}'::jsonb
+     or v_attempt.runtime_identity_hash is not null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_runtime_already_bound';
+  end if;
+  if jsonb_typeof(p_runtime_identity) <> 'object'
+     or octet_length(p_runtime_identity::text) > 4096
+     or not (p_runtime_identity ?& (v_name_keys || array['loopback_port']))
+     or (p_runtime_identity - (v_name_keys || array['loopback_port'])) <> '{}'::jsonb
+     or p_runtime_identity ?| array[
+       'tenant_id', 'job_id', 'claim_token', 'gateway_token', 'bridge_token',
+       'credential', 'api_key', 'config_path', 'state_path', 'workspace_path',
+       'output_path'
+     ]
+     or jsonb_typeof(p_runtime_identity->'loopback_port') <> 'number'
+     or (p_runtime_identity->>'loopback_port') !~ '^[0-9]+$'
+     or (p_runtime_identity->>'loopback_port')::integer not between 1024 and 65535 then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_runtime_identity_invalid';
+  end if;
+  foreach v_name_key in array v_name_keys
+  loop
+    if jsonb_typeof(p_runtime_identity->v_name_key) <> 'string' then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_runtime_identity_invalid';
+    end if;
+    v_name := p_runtime_identity->>v_name_key;
+    if length(v_name) not between 1 and 128
+       or v_name !~ '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'
+       or position('..' in v_name) > 0
+       or (v_name_key = 'profile_name' and lower(v_name) = 'default') then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_runtime_identity_invalid';
+    end if;
+  end loop;
+  v_runtime_hash := encode(extensions.digest(convert_to(p_runtime_identity::text, 'utf8'), 'sha256'
+  ), 'hex');
+  update public.worker_attempts
+  set runtime_identity = p_runtime_identity,
+      runtime_identity_hash = v_runtime_hash
+  where id = v_attempt.id
+    and runtime_identity = '{}'::jsonb
+    and runtime_identity_hash is null;
+  if not found then
+    raise exception using errcode = '40001',
+      message = 'company_discovery_runtime_bind_race_lost';
+  end if;
+  return jsonb_build_object(
+    'attempt_id', v_attempt.id,
+    'runtime_slot_id', v_attempt.runtime_slot_id,
+    'job_id', v_job.id,
+    'job_version', v_job.version,
+    'fence_generation', v_attempt.fence_generation,
+    'runtime_identity', p_runtime_identity,
+    'runtime_identity_hash', v_runtime_hash
+  );
+end;
+$$;
+
+revoke all on function public.bind_company_discovery_runtime(uuid,bigint,text,jsonb)
+  from public, anon, authenticated, service_role;
+grant execute on function public.bind_company_discovery_runtime(uuid,bigint,text,jsonb)
+  to service_role;
+
+create or replace function public.terminalize_company_discovery_attempt(
+  p_attempt_id uuid,
+  p_fence_generation bigint,
+  p_claim_token text,
+  p_outcome text,
+  p_reason text
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_attempt public.worker_attempts;
+  v_job public.worker_jobs;
+  v_new_fence bigint;
+  v_cleanup_token text := encode(extensions.gen_random_bytes(32), 'hex');
+begin
+  if p_outcome not in ('failed', 'cancelled') then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_terminal_outcome_invalid';
+  end if;
+  if p_reason is null or p_reason !~ '^[a-z][a-z0-9_]{0,99}$' then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_terminal_reason_invalid';
+  end if;
+  select a.* into v_attempt
+  from public.worker_attempts a
+  where a.id = p_attempt_id
+  for update;
+  if v_attempt.id is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_attempt_not_found';
+  end if;
+  select j.* into v_job
+  from public.worker_jobs j
+  where j.id = v_attempt.job_id
+  for update;
+  if v_attempt.status <> 'running'
+     or v_job.status <> 'running'
+     or v_job.current_attempt_id is distinct from v_attempt.id then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_attempt_not_current';
+  end if;
+  if v_job.fence_generation is distinct from p_fence_generation
+     or v_attempt.fence_generation is distinct from p_fence_generation then
+    raise exception using errcode = '40001',
+      message = 'company_discovery_stale_fence';
+  end if;
+  if v_attempt.claim_token_hash is distinct from
+       extensions.digest(p_claim_token, 'sha256') then
+    raise exception using errcode = '42501',
+      message = 'company_discovery_claim_token_invalid';
+  end if;
+  if v_attempt.lease_until <= clock_timestamp() then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_attempt_lease_expired';
+  end if;
+  if v_attempt.runtime_identity = '{}'::jsonb
+     or v_attempt.runtime_identity_hash is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_runtime_not_bound';
+  end if;
+  v_new_fence := greatest(
+    v_job.fence_generation,
+    v_attempt.fence_generation
+  ) + 1;
+  update public.worker_attempts
+  set status = p_outcome,
+      fence_generation = v_new_fence,
+      claim_token_hash = extensions.digest(v_cleanup_token, 'sha256'),
+      claimed_at = clock_timestamp(),
+      lease_until = clock_timestamp() + interval '10 minutes',
+      terminal_at = clock_timestamp(),
+      terminal_reason = p_reason,
+      cleanup_state = 'pending',
+      cleanup_proof = null
+  where id = v_attempt.id;
+  update public.worker_jobs
+  set status = p_outcome,
+      fence_generation = v_new_fence,
+      version = version + 1,
+      selected_attempt_id = null,
+      fallback_state = 'existing_onboarding',
+      updated_at = clock_timestamp()
+  where id = v_job.id;
+  update public.company_discovery_review_nonces
+  set invalidated_at = clock_timestamp(),
+      invalidation_reason = 'attempt_' || p_outcome
+  where job_id = v_job.id
+    and consumed_at is null
+    and invalidated_at is null;
+  update public.worker_runtime_slots
+  set status = 'busy', updated_at = clock_timestamp()
+  where id = v_attempt.runtime_slot_id
+    and current_attempt_id = v_attempt.id;
+  if not found then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_runtime_slot_not_current';
+  end if;
+  return jsonb_build_object(
+    'job_id', v_job.id,
+    'attempt_id', v_attempt.id,
+    'runtime_slot_id', v_attempt.runtime_slot_id,
+    'job_version', v_job.version + 1,
+    'fence_generation', v_new_fence,
+    'claim_token', v_cleanup_token,
+    'status', p_outcome,
+    'cleanup_state', 'pending'
+  );
+end;
+$$;
+
+revoke all on function public.terminalize_company_discovery_attempt(uuid,bigint,text,text,text)
+  from public, anon, authenticated, service_role;
+grant execute on function public.terminalize_company_discovery_attempt(uuid,bigint,text,text,text)
   to service_role;
 
 create or replace function public.commit_company_discovery_result(
@@ -1310,6 +1619,11 @@ begin
   end if;
   if v_job.current_attempt_id is distinct from v_attempt.id then
     raise exception using errcode = '55000', message = 'company_discovery_attempt_not_current';
+  end if;
+  if v_attempt.runtime_identity = '{}'::jsonb
+     or v_attempt.runtime_identity_hash is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_runtime_not_bound';
   end if;
   if v_job.fence_generation is distinct from p_fence_generation
      or v_attempt.fence_generation is distinct from p_fence_generation then
@@ -1697,6 +2011,110 @@ revoke all on function public.select_company_discovery_result(uuid,uuid,bigint)
 grant execute on function public.select_company_discovery_result(uuid,uuid,bigint)
   to service_role;
 
+create or replace function public.claim_expired_company_discovery_cleanup(
+  p_worker_id text,
+  p_lease_seconds integer
+) returns table (
+  job_id uuid,
+  attempt_id uuid,
+  adapter_id text,
+  runtime_slot_id uuid,
+  runtime_identity jsonb,
+  fence_generation bigint,
+  claim_token text,
+  job_version bigint
+)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_attempt public.worker_attempts;
+  v_job public.worker_jobs;
+  v_new_fence bigint;
+  v_cleanup_token text := encode(extensions.gen_random_bytes(32), 'hex');
+begin
+  if p_worker_id is null or btrim(p_worker_id) = ''
+     or p_lease_seconds not between 1 and 600 then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_expired_cleanup_claim_invalid';
+  end if;
+  select a.* into v_attempt
+  from public.worker_attempts a
+  join public.worker_jobs j on j.id = a.job_id
+  where a.status = 'running'
+    and a.cleanup_state = 'pending'
+    and a.lease_until <= clock_timestamp()
+    and a.runtime_identity <> '{}'::jsonb
+    and a.runtime_identity_hash is not null
+    and j.status = 'running'
+    and j.current_attempt_id = a.id
+  order by a.lease_until, a.created_at, a.id
+  limit 1
+  for update skip locked;
+  if v_attempt.id is null then return; end if;
+  select j.* into v_job
+  from public.worker_jobs j
+  where j.id = v_attempt.job_id
+  for update;
+  if v_job.status <> 'running'
+     or v_job.current_attempt_id is distinct from v_attempt.id then
+    raise exception using errcode = '40001',
+      message = 'company_discovery_expired_cleanup_race_lost';
+  end if;
+  v_new_fence := greatest(
+    v_job.fence_generation,
+    v_attempt.fence_generation
+  ) + 1;
+  update public.worker_attempts
+  set status = 'failed',
+      fence_generation = v_new_fence,
+      claim_token_hash = extensions.digest(v_cleanup_token, 'sha256'),
+      claimed_by = btrim(p_worker_id),
+      claimed_at = clock_timestamp(),
+      lease_until = clock_timestamp() + make_interval(secs => p_lease_seconds),
+      terminal_at = clock_timestamp(),
+      terminal_reason = 'expired_lease',
+      cleanup_state = 'pending',
+      cleanup_proof = null
+  where id = v_attempt.id;
+  update public.worker_jobs
+  set status = 'failed',
+      fence_generation = v_new_fence,
+      version = version + 1,
+      selected_attempt_id = null,
+      fallback_state = 'existing_onboarding',
+      updated_at = clock_timestamp()
+  where id = v_job.id;
+  update public.company_discovery_review_nonces as n
+  set invalidated_at = clock_timestamp(),
+      invalidation_reason = 'attempt_expired'
+  where n.job_id = v_job.id
+    and n.consumed_at is null
+    and n.invalidated_at is null;
+  update public.worker_runtime_slots as s
+  set status = 'quarantined',
+      quarantine_reason = 'expired_lease_cleanup',
+      quarantine_proof_hash = null,
+      updated_at = clock_timestamp()
+  where s.id = v_attempt.runtime_slot_id
+    and s.current_attempt_id = v_attempt.id;
+  if not found then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_runtime_slot_not_current';
+  end if;
+  return query select
+    v_job.id, v_attempt.id, v_attempt.adapter_id,
+    v_attempt.runtime_slot_id, v_attempt.runtime_identity,
+    v_new_fence, v_cleanup_token, v_job.version + 1;
+end;
+$$;
+
+revoke all on function public.claim_expired_company_discovery_cleanup(text,integer)
+  from public, anon, authenticated, service_role;
+grant execute on function public.claim_expired_company_discovery_cleanup(text,integer)
+  to service_role;
+
 create or replace function public.record_company_discovery_cleanup(
   p_attempt_id uuid,
   p_fence_generation bigint,
@@ -1731,15 +2149,37 @@ begin
   if v_attempt.cleanup_state <> 'pending' then
     raise exception using errcode = '55000', message = 'company_discovery_cleanup_already_recorded';
   end if;
+  if jsonb_typeof(p_proof) <> 'object'
+     or not (p_proof ?& array[
+       'gateway_exited', 'container_removed', 'bridge_removed',
+       'config_removed', 'state_removed', 'workspace_removed',
+       'output_removed', 'network_removed', 'credential_revoked',
+       'listener_closed', 'identity_process_absent', 'late_result_rejected'
+     ])
+     or (p_proof - array[
+       'gateway_exited', 'container_removed', 'bridge_removed',
+       'config_removed', 'state_removed', 'workspace_removed',
+       'output_removed', 'network_removed', 'credential_revoked',
+       'listener_closed', 'identity_process_absent', 'late_result_rejected'
+     ]::text[]) <> '{}'::jsonb
+     or exists (
+       select 1 from jsonb_each(p_proof) proof where jsonb_typeof(proof.value) <> 'boolean'
+     ) then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_cleanup_proof_invalid';
+  end if;
   v_proved := jsonb_typeof(p_proof) = 'object'
     and p_proof->'gateway_exited' = 'true'::jsonb
     and p_proof->'container_removed' = 'true'::jsonb
+    and p_proof->'bridge_removed' = 'true'::jsonb
+    and p_proof->'config_removed' = 'true'::jsonb
     and p_proof->'state_removed' = 'true'::jsonb
     and p_proof->'workspace_removed' = 'true'::jsonb
     and p_proof->'output_removed' = 'true'::jsonb
     and p_proof->'network_removed' = 'true'::jsonb
     and p_proof->'credential_revoked' = 'true'::jsonb
     and p_proof->'listener_closed' = 'true'::jsonb
+    and p_proof->'identity_process_absent' = 'true'::jsonb
     and p_proof->'late_result_rejected' = 'true'::jsonb;
   update public.worker_attempts
   set cleanup_state = case when v_proved then 'proved' else 'cleanup_unresolved' end,

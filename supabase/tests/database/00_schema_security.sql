@@ -61,6 +61,7 @@ select extensions.ok(
       ('adjust_case(uuid,text)'),
       ('begin_connector_handoff(uuid,text,text)'),
       ('cancel_company_discovery(uuid,bigint)'),
+      ('company_discovery_owner_status()'),
       ('create_company_discovery_review_nonce(uuid,uuid,uuid[])'),
       ('decide_case(uuid,text,text,text,jsonb,text,text)'),
       ('decide_rule(uuid,text)'),
@@ -99,8 +100,10 @@ select extensions.ok(
       ('begin_phone_sideband(uuid,uuid)'),
       ('begin_phone_termination(uuid,uuid,text,text,text)'),
       ('begin_provider_termination_attempt(uuid,text,text,text)'),
+      ('bind_company_discovery_runtime(uuid,bigint,text,jsonb)'),
       ('claim_budget_reconciliation(text)'),
-      ('claim_company_discovery_attempt(text,integer)'),
+      ('claim_company_discovery_attempt(text,text,integer)'),
+      ('claim_expired_company_discovery_cleanup(text,integer)'),
       ('claim_phone_event(uuid,text)'),
       ('claim_phone_lifecycle_reconciliation(text)'),
       ('claim_provider_termination_reconciliation(text)'),
@@ -140,6 +143,7 @@ select extensions.ok(
       ('select_company_discovery_result(uuid,uuid,bigint)'),
       ('settle_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
       ('settle_unresolved_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
+      ('terminalize_company_discovery_attempt(uuid,bigint,text,text,text)'),
       ('transition_claimed_intent(uuid,uuid,text,text,integer)')
     ) expected(signature)
     order by signature
