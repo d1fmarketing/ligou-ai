@@ -9,6 +9,7 @@ import {
 import {
   createDiscoveryAttemptContext,
   DiscoveryFetchGateway,
+  RequestGovernor,
   type DiscoveryAttemptContext,
 } from "../src/fetch/discovery-fetch-gateway";
 import { HttpsClient } from "../src/fetch/https-client";
@@ -65,19 +66,22 @@ class HoldingTransport {
   maxActive = 0;
   private readonly releases: Array<() => void> = [];
 
+  constructor(private readonly bodies: Readonly<Record<string, Buffer>> = {}) {}
+
   request(input: any): Promise<any> {
     this.active += 1;
     this.maxActive = Math.max(this.maxActive, this.active);
     return new Promise((resolve) => {
       this.releases.push(() => {
+        const body = this.bodies[input.url.href] ?? BASIC_HTML;
         this.active -= 1;
-        input.onBodyBytes(BASIC_HTML.byteLength);
+        input.onBodyBytes(body.byteLength);
         resolve({
           statusCode: 200,
           headers: { "content-type": "text/html" },
-          body: BASIC_HTML,
+          body,
           remoteAddress: input.address.address,
-          bodyBytesConsumed: BASIC_HTML.byteLength,
+          bodyBytesConsumed: body.byteLength,
           bodyDiscarded: false,
         });
       });
@@ -132,6 +136,61 @@ class CoordinatedBodyTransport {
       });
     });
   }
+}
+
+function controlledParserWorkers() {
+  let active = 0;
+  let maxActive = 0;
+  const workers: Array<{
+    complete(): void;
+  }> = [];
+  const factory = () => {
+    const listeners = new Map<string, Set<(...arguments_: any[]) => void>>();
+    let terminated = false;
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    const worker = {
+      on(event: string, listener: (...arguments_: any[]) => void) {
+        const bucket = listeners.get(event) ?? new Set();
+        bucket.add(listener);
+        listeners.set(event, bucket);
+        return this;
+      },
+      off(event: string, listener: (...arguments_: any[]) => void) {
+        listeners.get(event)?.delete(listener);
+        return this;
+      },
+      postMessage() {},
+      terminate() {
+        if (!terminated) {
+          terminated = true;
+          active -= 1;
+        }
+        return Promise.resolve(0);
+      },
+    };
+    workers.push({
+      complete: () => {
+        for (const listener of listeners.get("message") ?? []) {
+          listener({
+            ok: true,
+            page: {
+              excerpt: "hostile evidence",
+              links: [],
+              contentHash: "a".repeat(64),
+            },
+          });
+        }
+      },
+    });
+    return worker;
+  };
+  return {
+    factory,
+    workers,
+    get active() { return active; },
+    get maxActive() { return maxActive; },
+  };
 }
 
 class StaticResolver {
@@ -466,6 +525,74 @@ describe("pinned HTTPS request", () => {
 });
 
 describe("fetch and redirect containment", () => {
+  test("rejects concurrent two-node redirect dependency cycles promptly and clears claims", async () => {
+    const clock = new FakeClock();
+    const controller = new AbortController();
+    const { gateway: fetchGateway } = gateway(clock, {
+      "https://www.example.com/a": [{
+        status: 302,
+        headers: { location: "/b" },
+        body: Buffer.alloc(0),
+      }, { body: BASIC_HTML }],
+      "https://www.example.com/b": {
+        status: 302,
+        headers: { location: "/a" },
+        body: Buffer.alloc(0),
+      },
+    });
+    const attempt = context(clock, { max_pages: 3 }, controller.signal);
+    const cycle = Promise.allSettled([
+      fetchGateway.fetchPage(attempt, "https://www.example.com/a"),
+      fetchGateway.fetchPage(attempt, "https://www.example.com/b"),
+    ]);
+    const outcome = await settleWithin(cycle, 100);
+    if (outcome === "timeout") controller.abort();
+    const results = await cycle;
+
+    expect(outcome).toBe("fulfilled");
+    expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+    expect(results.map((result) => (result as PromiseRejectedResult).reason.message)).toEqual([
+      expect.stringContaining("redirect dependency cycle"),
+      expect.stringContaining("redirect dependency cycle"),
+    ]);
+    if (outcome !== "fulfilled") return;
+    expect(await fetchGateway.fetchPage(attempt, "https://www.example.com/a")).toMatchObject({
+      url: "https://www.example.com/a",
+    });
+  });
+
+  test("rejects concurrent longer redirect dependency cycles promptly", async () => {
+    const clock = new FakeClock();
+    const controller = new AbortController();
+    const { gateway: fetchGateway } = gateway(clock, {
+      "https://www.example.com/a": {
+        status: 302,
+        headers: { location: "/b" },
+        body: Buffer.alloc(0),
+      },
+      "https://www.example.com/b": {
+        status: 302,
+        headers: { location: "/c" },
+        body: Buffer.alloc(0),
+      },
+      "https://www.example.com/c": {
+        status: 302,
+        headers: { location: "/a" },
+        body: Buffer.alloc(0),
+      },
+    });
+    const attempt = context(clock, { max_pages: 3 }, controller.signal);
+    const cycle = Promise.allSettled(["a", "b", "c"].map((path) =>
+      fetchGateway.fetchPage(attempt, `https://www.example.com/${path}`)
+    ));
+    const outcome = await settleWithin(cycle, 100);
+    if (outcome === "timeout") controller.abort();
+    const results = await cycle;
+
+    expect(outcome).toBe("fulfilled");
+    expect(results.map((result) => result.status)).toEqual(["rejected", "rejected", "rejected"]);
+  });
+
   test("charges discarded redirect bodies to the attempt byte ledger", async () => {
     const clock = new FakeClock();
     const sites: Record<string, SiteResponse> = {};
@@ -628,6 +755,114 @@ describe("fetch and redirect containment", () => {
 });
 
 describe("static HTML response policy", () => {
+  test("bounds parser workers across gateway instances under many fast hostile responses", async () => {
+    const Limiter = (htmlPageModule as unknown as {
+      ParserWorkerLimiter?: new (options: { maxConcurrent: number; maxQueued: number }) => any;
+    }).ParserWorkerLimiter;
+    expect(typeof Limiter).toBe("function");
+    if (Limiter === undefined) return;
+    const controlled = controlledParserWorkers();
+    const limiter = new Limiter({ maxConcurrent: 2, maxQueued: 4 });
+    const Parser = (htmlPageModule as any).WorkerHtmlPageParser;
+    const clock = new FakeClock();
+    const parserA = new Parser(controlled.factory, clock.now, limiter);
+    const parserB = new Parser(controlled.factory, clock.now, limiter);
+    const firstTransport = new ScriptedTransport({
+      "https://a.example.com/": { body: HOSTILE_HTML },
+      "https://c.example.com/": { body: HOSTILE_HTML },
+    }, clock.now);
+    const secondTransport = new ScriptedTransport({
+      "https://b.example.com/": { body: HOSTILE_HTML },
+      "https://d.example.com/": { body: HOSTILE_HTML },
+    }, clock.now);
+    const dependencies = {
+      addressPolicy: new StaticResolver(),
+      now: clock.now,
+      sleep: clock.sleep,
+      parseHtml: undefined,
+    };
+    const firstGateway = new DiscoveryFetchGateway({
+      ...dependencies,
+      httpsClient: new HttpsClient(firstTransport),
+      htmlParser: parserA,
+    });
+    const secondGateway = new DiscoveryFetchGateway({
+      ...dependencies,
+      httpsClient: new HttpsClient(secondTransport),
+      htmlParser: parserB,
+    });
+    const pending = [
+      firstGateway.fetchPage(context(clock), "https://a.example.com/"),
+      secondGateway.fetchPage(context(clock), "https://b.example.com/"),
+      firstGateway.fetchPage(context(clock), "https://c.example.com/"),
+      secondGateway.fetchPage(context(clock), "https://d.example.com/"),
+    ];
+
+    await spinUntil(() => controlled.workers.length === 2);
+    expect(controlled.active).toBe(2);
+    controlled.workers.slice(0, 2).forEach((worker) => worker.complete());
+    await spinUntil(() => controlled.workers.length === 4);
+    expect(controlled.active).toBe(2);
+    controlled.workers.slice(2, 4).forEach((worker) => worker.complete());
+    expect((await Promise.all(pending)).map((snapshot) => snapshot.excerpt)).toEqual([
+      "[UNTRUSTED WEBSITE EVIDENCE]\nhostile evidence",
+      "[UNTRUSTED WEBSITE EVIDENCE]\nhostile evidence",
+      "[UNTRUSTED WEBSITE EVIDENCE]\nhostile evidence",
+      "[UNTRUSTED WEBSITE EVIDENCE]\nhostile evidence",
+    ]);
+    expect(controlled.maxActive).toBe(2);
+  });
+
+  test("bounds the parser queue and reuses capacity after queued abort", async () => {
+    const Limiter = (htmlPageModule as unknown as {
+      ParserWorkerLimiter?: new (options: { maxConcurrent: number; maxQueued: number }) => any;
+    }).ParserWorkerLimiter;
+    expect(typeof Limiter).toBe("function");
+    if (Limiter === undefined) return;
+    const controlled = controlledParserWorkers();
+    const limiter = new Limiter({ maxConcurrent: 1, maxQueued: 1 });
+    const Parser = (htmlPageModule as any).WorkerHtmlPageParser;
+    const parser = new Parser(controlled.factory, Date.now, limiter);
+    const first = parser.parse(HOSTILE_HTML, new AbortController().signal, Date.now() + 1_000);
+    await spinUntil(() => controlled.workers.length === 1);
+    const queuedController = new AbortController();
+    const queued = parser.parse(HOSTILE_HTML, queuedController.signal, Date.now() + 1_000);
+    const overflow = parser.parse(HOSTILE_HTML, new AbortController().signal, Date.now() + 1_000);
+
+    await expect(overflow).rejects.toThrow("queue limit");
+    expect(controlled.workers).toHaveLength(1);
+    queuedController.abort();
+    await expect(queued).rejects.toThrow(/abort/i);
+    controlled.workers[0]!.complete();
+    await first;
+
+    const reusable = parser.parse(HOSTILE_HTML, new AbortController().signal, Date.now() + 1_000);
+    await spinUntil(() => controlled.workers.length === 2);
+    controlled.workers[1]!.complete();
+    await expect(reusable).resolves.toMatchObject({ excerpt: "hostile evidence" });
+    expect(controlled.maxActive).toBe(1);
+  });
+
+  test("expires a parser request while it is queued without creating a worker", async () => {
+    const Limiter = (htmlPageModule as unknown as {
+      ParserWorkerLimiter?: new (options: { maxConcurrent: number; maxQueued: number }) => any;
+    }).ParserWorkerLimiter;
+    expect(typeof Limiter).toBe("function");
+    if (Limiter === undefined) return;
+    const controlled = controlledParserWorkers();
+    const limiter = new Limiter({ maxConcurrent: 1, maxQueued: 1 });
+    const Parser = (htmlPageModule as any).WorkerHtmlPageParser;
+    const parser = new Parser(controlled.factory, Date.now, limiter);
+    const first = parser.parse(HOSTILE_HTML, new AbortController().signal, Date.now() + 1_000);
+    await spinUntil(() => controlled.workers.length === 1);
+    const queued = parser.parse(HOSTILE_HTML, new AbortController().signal, Date.now() + 20);
+
+    expect(await settleWithin(queued, 150)).toBe("rejected");
+    expect(controlled.workers).toHaveLength(1);
+    controlled.workers[0]!.complete();
+    await first;
+  });
+
   test("terminates a slow parser worker on abort", async () => {
     const Parser = (htmlPageModule as unknown as {
       WorkerHtmlPageParser?: new (factory?: () => any) => {
@@ -638,6 +873,7 @@ describe("static HTML response policy", () => {
     if (Parser === undefined) return;
     const listeners = new Map<string, Set<(...args: any[]) => void>>();
     let terminated = 0;
+    let posted = false;
     const worker = {
       on(event: string, listener: (...args: any[]) => void) {
         const bucket = listeners.get(event) ?? new Set();
@@ -649,7 +885,7 @@ describe("static HTML response policy", () => {
         listeners.get(event)?.delete(listener);
         return this;
       },
-      postMessage() {},
+      postMessage() { posted = true; },
       terminate() {
         terminated += 1;
         return Promise.resolve(0);
@@ -658,6 +894,7 @@ describe("static HTML response policy", () => {
     const controller = new AbortController();
     const pending = new Parser(() => worker).parse(BASIC_HTML, controller.signal, Date.now() + 1_000);
 
+    await spinUntil(() => posted);
     controller.abort();
     expect(await settleWithin(pending)).toBe("rejected");
     expect(terminated).toBe(1);
@@ -670,10 +907,11 @@ describe("static HTML response policy", () => {
       };
     }).WorkerHtmlPageParser;
     let finishTermination!: (code: number) => void;
+    let posted = false;
     const worker = {
       on() { return this; },
       off() { return this; },
-      postMessage() {},
+      postMessage() { posted = true; },
       terminate: () => new Promise<number>((resolve) => {
         finishTermination = resolve;
       }),
@@ -681,6 +919,7 @@ describe("static HTML response policy", () => {
     const controller = new AbortController();
     const pending = new Parser(() => worker).parse(BASIC_HTML, controller.signal, Date.now() + 1_000);
 
+    await spinUntil(() => posted);
     controller.abort();
     expect(await settleWithin(pending, 20)).toBe("timeout");
     finishTermination(0);
@@ -1001,6 +1240,47 @@ describe("attempt-scoped accounting", () => {
     ]);
   });
 
+  test("rejects a cached crawl snapshot when fetchPage requests different provenance", async () => {
+    const clock = new FakeClock();
+    const root = Buffer.from("<!doctype html><html><body><a href='/about'>About</a></body></html>");
+    const { gateway: fetchGateway, transport } = gateway(clock, {
+      "https://www.example.com/": { body: root },
+      "https://www.example.com/about": { body: BASIC_HTML },
+    });
+    const attempt = context(clock, { max_pages: 2 });
+
+    await fetchGateway.crawl(attempt, "https://www.example.com/");
+    await expect(fetchGateway.fetchPage(attempt, "https://www.example.com/about")).rejects.toThrow("crawl position");
+    expect(transport.calls).toHaveLength(2);
+  });
+
+  test("rejects in-flight snapshot reuse at a conflicting crawl position", async () => {
+    const clock = new FakeClock();
+    const root = Buffer.from("<!doctype html><html><body><a href='/about'>About</a></body></html>");
+    const transport = new HoldingTransport({
+      "https://www.example.com/": root,
+      "https://www.example.com/about": BASIC_HTML,
+    });
+    const fetchGateway = new DiscoveryFetchGateway({
+      addressPolicy: new StaticResolver(),
+      httpsClient: new HttpsClient(transport),
+      now: clock.now,
+      sleep: clock.sleep,
+      parseHtml: htmlPageModule.parseStaticHtml,
+    });
+    const attempt = context(clock, { max_pages: 2 });
+    const crawl = fetchGateway.crawl(attempt, "https://www.example.com/");
+    await spinUntil(() => transport.active === 1);
+    transport.releaseOne();
+    await spinUntil(() => transport.active === 1);
+    const standalone = fetchGateway.fetchPage(attempt, "https://www.example.com/about");
+    transport.releaseOne();
+
+    expect(await crawl).toHaveLength(2);
+    await expect(standalone).rejects.toThrow("crawl position");
+    expect(transport.maxActive).toBe(1);
+  });
+
 
   test("shares one redirect-final snapshot across concurrent alias calls", async () => {
     const clock = new FakeClock();
@@ -1277,6 +1557,82 @@ describe("attempt cancellation and deadlines", () => {
 });
 
 describe("bounded shared request governor", () => {
+  test("releases pacing permits when abort wins at the sleep-completion handoff", async () => {
+    let timestamp = Date.parse("2026-09-01T10:00:00.000Z");
+    let boundaryController: AbortController | undefined;
+    let abortOnNextClockRead = false;
+    const now = (): number => {
+      if (abortOnNextClockRead) {
+        abortOnNextClockRead = false;
+        queueMicrotask(() => boundaryController?.abort());
+      }
+      return timestamp;
+    };
+    const sleep = async (milliseconds: number): Promise<void> => {
+      timestamp += milliseconds;
+      if (boundaryController !== undefined) abortOnNextClockRead = true;
+    };
+    const governor = new RequestGovernor({
+      now,
+      sleep,
+      maxGlobalConcurrency: 1,
+      maxPerOriginConcurrency: 1,
+      maxTrackedOrigins: 2,
+      maxQueued: 2,
+    });
+    const firstTransport = new ScriptedTransport({
+      "https://www.example.com/one": { body: BASIC_HTML },
+      "https://www.example.com/three": { body: BASIC_HTML },
+    }, now);
+    const secondTransport = new ScriptedTransport({
+      "https://www.example.com/two": { body: BASIC_HTML },
+    }, now);
+    const dependencies = {
+      addressPolicy: new StaticResolver(),
+      now,
+      sleep,
+      governor,
+      parseHtml: htmlPageModule.parseStaticHtml,
+    };
+    const firstGateway = new DiscoveryFetchGateway({
+      ...dependencies,
+      httpsClient: new HttpsClient(firstTransport),
+    });
+    const secondGateway = new DiscoveryFetchGateway({
+      ...dependencies,
+      httpsClient: new HttpsClient(secondTransport),
+    });
+    const newAttempt = (signal?: AbortSignal) => createDiscoveryAttemptContext({
+      normalized_origin: "https://www.example.com/",
+      deadline_at: new Date(timestamp + 600_000).toISOString(),
+      budget: DEFAULT_BUDGET,
+      signal,
+    });
+
+    await firstGateway.fetchPage(newAttempt(), "https://www.example.com/one");
+    boundaryController = new AbortController();
+    await expect(secondGateway.fetchPage(
+      newAttempt(boundaryController.signal),
+      "https://www.example.com/two",
+    )).rejects.toThrow(/abort/i);
+    boundaryController = undefined;
+
+    const reuseController = new AbortController();
+    const reusable = firstGateway.fetchPage(
+      newAttempt(reuseController.signal),
+      "https://www.example.com/three",
+    );
+    const outcome = await settleWithin(reusable, 100);
+    if (outcome === "timeout") reuseController.abort();
+    await Promise.allSettled([reusable]);
+    expect(outcome).toBe("fulfilled");
+    expect(firstTransport.calls.map((call) => call.url)).toEqual([
+      "https://www.example.com/one",
+      "https://www.example.com/three",
+    ]);
+    expect(secondTransport.calls).toHaveLength(0);
+  });
+
   test("bounds queued callers before additional pacing waits are created", async () => {
     const clock = new FakeClock();
     const controller = new AbortController();

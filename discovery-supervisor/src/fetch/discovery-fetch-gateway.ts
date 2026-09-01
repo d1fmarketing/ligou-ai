@@ -80,6 +80,7 @@ interface AttemptLedger {
   readonly activeControllers: Set<AbortController>;
   readonly fetchedPages: Map<string, FetchedPage>;
   readonly inFlightPages: Map<string, Promise<FetchedPage>>;
+  readonly redirectDependencies: Map<string, Map<string, number>>;
 }
 
 const ATTEMPT_LEDGERS = new WeakMap<object, AttemptLedger>();
@@ -104,6 +105,7 @@ export function createDiscoveryAttemptContext(
     activeControllers: new Set(),
     fetchedPages: new Map(),
     inFlightPages: new Map(),
+    redirectDependencies: new Map(),
   });
   return context;
 }
@@ -173,6 +175,54 @@ function remainingAttemptBytes(state: RunState): number {
     throw new DiscoveryFetchPolicyError("attempt byte budget is exhausted");
   }
   return remaining;
+}
+
+class CachedSnapshotPositionError extends DiscoveryFetchPolicyError {
+  constructor(readonly url: string) {
+    super("cached canonical snapshot has a conflicting crawl position");
+    this.name = "CachedSnapshotPositionError";
+  }
+}
+
+function assertSnapshotPosition(page: FetchedPage, crawlOrder: number, crawlDepth: number): void {
+  if (page.snapshot.crawl_order !== crawlOrder || page.snapshot.crawl_depth !== crawlDepth) {
+    throw new CachedSnapshotPositionError(page.snapshot.url);
+  }
+}
+
+function redirectPathExists(
+  ledger: AttemptLedger,
+  from: string,
+  target: string,
+  visited = new Set<string>(),
+): boolean {
+  if (from === target) return true;
+  if (visited.has(from)) return false;
+  visited.add(from);
+  for (const next of ledger.redirectDependencies.get(from)?.keys() ?? []) {
+    if (redirectPathExists(ledger, next, target, visited)) return true;
+  }
+  return false;
+}
+
+function registerRedirectDependency(ledger: AttemptLedger, from: string, to: string): () => void {
+  if (redirectPathExists(ledger, to, from)) {
+    throw new DiscoveryFetchPolicyError("redirect dependency cycle detected");
+  }
+  const targets = ledger.redirectDependencies.get(from) ?? new Map<string, number>();
+  targets.set(to, (targets.get(to) ?? 0) + 1);
+  ledger.redirectDependencies.set(from, targets);
+  let removed = false;
+  return () => {
+    if (removed) return;
+    removed = true;
+    const currentTargets = ledger.redirectDependencies.get(from);
+    const count = currentTargets?.get(to);
+    if (currentTargets === undefined || count === undefined) return;
+    if (count <= 1) currentTargets.delete(to);
+    else currentTargets.set(to, count - 1);
+    if (currentTargets.size === 0) ledger.redirectDependencies.delete(from);
+  };
 }
 
 function header(response: HttpsResponse, name: string): string | undefined {
@@ -357,12 +407,19 @@ export class RequestGovernor {
       if (reservedStart > now) {
         await this.abortable(this.sleep(reservedStart - now), signal);
       }
+      const completedAt = this.now();
+      if (signal.aborted) throw new DiscoveryFetchPolicyError("request governor aborted");
+      state.lastUsedAt = completedAt;
     } catch (error) {
       releaseGlobal();
       releaseOrigin();
       throw error;
     }
-    state.lastUsedAt = this.now();
+    if (signal.aborted) {
+      releaseGlobal();
+      releaseOrigin();
+      throw new DiscoveryFetchPolicyError("request governor aborted");
+    }
     let released = false;
     return () => {
       if (released) return;
@@ -501,17 +558,21 @@ export class DiscoveryFetchGateway {
     while (queue.length > 0 && snapshots.length < state.budget.max_pages) {
       const next = queue.shift()!;
       if (completed.has(next.url)) continue;
-      const fetched = await this.fetchContainedPage(
-        state,
-        next.url,
-        snapshots.length,
-        next.depth,
-        state.budget.max_page_bytes,
-      );
-      if (completed.has(fetched.snapshot.url)) continue;
-      if (fetched.snapshot.crawl_order !== snapshots.length || fetched.snapshot.crawl_depth !== next.depth) {
-        throw new DiscoveryFetchPolicyError("cached canonical snapshot has a conflicting crawl position");
+      let fetched: FetchedPage;
+      try {
+        fetched = await this.fetchContainedPage(
+          state,
+          next.url,
+          snapshots.length,
+          next.depth,
+          state.budget.max_page_bytes,
+        );
+      } catch (error) {
+        if (error instanceof CachedSnapshotPositionError && completed.has(error.url)) continue;
+        throw error;
       }
+      if (completed.has(fetched.snapshot.url)) continue;
+      assertSnapshotPosition(fetched, snapshots.length, next.depth);
       completed.add(fetched.snapshot.url);
       snapshots.push(fetched.snapshot);
       scheduled.add(fetched.snapshot.url);
@@ -578,10 +639,14 @@ export class DiscoveryFetchGateway {
     }
   }
 
-  private awaitOperation<T>(promise: Promise<T>, state: RunState): Promise<T> {
+  private awaitOperation<T>(
+    promise: Promise<T>,
+    state: RunState,
+    disposeLate?: (value: T) => void,
+  ): Promise<T> {
     const signal = state.operation.controller.signal;
     if (!state.operation.active || state.ledger.retired || signal.aborted) {
-      promise.catch(() => undefined);
+      promise.then((value) => disposeLate?.(value), () => undefined);
       return Promise.reject(new DiscoveryFetchPolicyError("attempt operation aborted"));
     }
     return new Promise<T>((resolve, reject) => {
@@ -598,6 +663,7 @@ export class DiscoveryFetchGateway {
             assertActiveOperation(state);
             resolve(value);
           } catch (error) {
+            disposeLate?.(value);
             reject(error);
           }
         },
@@ -625,6 +691,7 @@ export class DiscoveryFetchGateway {
       true,
       0,
       new Set(),
+      undefined,
     );
   }
 
@@ -637,38 +704,54 @@ export class DiscoveryFetchGateway {
     reservePageSlot: boolean,
     redirects: number,
     visited: ReadonlySet<string>,
+    dependencyFrom: string | undefined,
   ): Promise<FetchedPage> {
     assertActiveOperation(state);
     assertWithinRegistrableDomain(state.origin, current);
     if (visited.has(current.href)) throw new DiscoveryFetchPolicyError("redirect loop detected");
     const cached = state.ledger.fetchedPages.get(current.href);
-    if (cached !== undefined) return cached;
-    const inFlight = state.ledger.inFlightPages.get(current.href);
-    if (inFlight !== undefined) return this.awaitOperation(inFlight, state);
-    if (redirects > 5) throw new DiscoveryFetchPolicyError("redirect limit exceeded");
-    if (reservePageSlot) reservePage(state);
-    const nextVisited = new Set(visited);
-    nextVisited.add(current.href);
-    const request = this.fetchCanonicalNetwork(
-      state,
-      current,
-      crawlOrder,
-      crawlDepth,
-      maxBytes,
-      redirects,
-      nextVisited,
-    );
-    state.ledger.inFlightPages.set(current.href, request);
+    if (cached !== undefined) {
+      assertSnapshotPosition(cached, crawlOrder, crawlDepth);
+      return cached;
+    }
+    const removeDependency = dependencyFrom === undefined
+      ? () => undefined
+      : registerRedirectDependency(state.ledger, dependencyFrom, current.href);
     try {
-      const fetched = await this.awaitOperation(request, state);
-      assertActiveOperation(state);
-      state.ledger.fetchedPages.set(current.href, fetched);
-      state.ledger.fetchedPages.set(fetched.snapshot.url, fetched);
-      return fetched;
-    } finally {
-      if (state.ledger.inFlightPages.get(current.href) === request) {
-        state.ledger.inFlightPages.delete(current.href);
+      const inFlight = state.ledger.inFlightPages.get(current.href);
+      if (inFlight !== undefined) {
+        const fetched = await this.awaitOperation(inFlight, state);
+        assertSnapshotPosition(fetched, crawlOrder, crawlDepth);
+        return fetched;
       }
+      if (redirects > 5) throw new DiscoveryFetchPolicyError("redirect limit exceeded");
+      if (reservePageSlot) reservePage(state);
+      const nextVisited = new Set(visited);
+      nextVisited.add(current.href);
+      const request = this.fetchCanonicalNetwork(
+        state,
+        current,
+        crawlOrder,
+        crawlDepth,
+        maxBytes,
+        redirects,
+        nextVisited,
+      );
+      state.ledger.inFlightPages.set(current.href, request);
+      try {
+        const fetched = await this.awaitOperation(request, state);
+        assertActiveOperation(state);
+        assertSnapshotPosition(fetched, crawlOrder, crawlDepth);
+        state.ledger.fetchedPages.set(current.href, fetched);
+        state.ledger.fetchedPages.set(fetched.snapshot.url, fetched);
+        return fetched;
+      } finally {
+        if (state.ledger.inFlightPages.get(current.href) === request) {
+          state.ledger.inFlightPages.delete(current.href);
+        }
+      }
+    } finally {
+      removeDependency();
     }
   }
 
@@ -688,7 +771,7 @@ export class DiscoveryFetchGateway {
       current.origin,
       state.deadlineAt,
       state.operation.controller.signal,
-    ), state);
+    ), state, (release) => release());
     let response: HttpsResponse;
     try {
       const addresses = await this.awaitOperation(
@@ -732,6 +815,7 @@ export class DiscoveryFetchGateway {
         false,
         redirects + 1,
         visited,
+        current.href,
       );
     }
 

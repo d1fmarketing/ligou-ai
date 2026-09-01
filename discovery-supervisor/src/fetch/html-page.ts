@@ -28,6 +28,16 @@ interface ParserWorkerResult {
   readonly error?: string;
 }
 
+interface ParserWaiter {
+  readonly signal: AbortSignal;
+  readonly deadlineAt: number;
+  readonly now: () => number;
+  readonly resolve: (release: () => void) => void;
+  readonly reject: (error: Error) => void;
+  readonly abort: () => void;
+  timer: ReturnType<typeof setTimeout> | undefined;
+}
+
 export class HtmlPolicyError extends Error {
   constructor(message: string) {
     super(message);
@@ -35,18 +45,123 @@ export class HtmlPolicyError extends Error {
   }
 }
 
+export interface ParserWorkerLimiterOptions {
+  readonly maxConcurrent: number;
+  readonly maxQueued: number;
+}
+
+export class ParserWorkerLimiter {
+  private active = 0;
+  private readonly waiters: ParserWaiter[] = [];
+
+  constructor(private readonly options: ParserWorkerLimiterOptions) {
+    if (!Number.isSafeInteger(options.maxConcurrent) || options.maxConcurrent < 1 || options.maxConcurrent > 8) {
+      throw new HtmlPolicyError("invalid parser worker concurrency limit");
+    }
+    if (!Number.isSafeInteger(options.maxQueued) || options.maxQueued < 0 || options.maxQueued > 256) {
+      throw new HtmlPolicyError("invalid parser worker queue limit");
+    }
+  }
+
+  acquire(
+    signal: AbortSignal,
+    deadlineAt: number,
+    now: () => number = Date.now,
+  ): Promise<() => void> {
+    if (signal.aborted) return Promise.reject(new HtmlPolicyError("parser worker acquisition aborted"));
+    if (deadlineAt <= now()) return Promise.reject(new HtmlPolicyError("parser worker queue deadline exceeded"));
+    if (this.active < this.options.maxConcurrent) {
+      this.active += 1;
+      return Promise.resolve(this.releaseHandle());
+    }
+    if (this.waiters.length >= this.options.maxQueued) {
+      return Promise.reject(new HtmlPolicyError("parser worker queue limit exceeded"));
+    }
+    return new Promise((resolve, reject) => {
+      const waiter: ParserWaiter = {
+        signal,
+        deadlineAt,
+        now,
+        resolve,
+        reject,
+        abort: () => this.rejectWaiter(waiter, new HtmlPolicyError("parser worker acquisition aborted")),
+        timer: undefined,
+      };
+      waiter.timer = setTimeout(
+        () => this.rejectWaiter(waiter, new HtmlPolicyError("parser worker queue deadline exceeded")),
+        Math.max(0, deadlineAt - now()),
+      );
+      this.waiters.push(waiter);
+      signal.addEventListener("abort", waiter.abort, { once: true });
+    });
+  }
+
+  private rejectWaiter(waiter: ParserWaiter, error: Error): void {
+    const index = this.waiters.indexOf(waiter);
+    if (index < 0) return;
+    this.waiters.splice(index, 1);
+    this.cleanupWaiter(waiter);
+    waiter.reject(error);
+  }
+
+  private cleanupWaiter(waiter: ParserWaiter): void {
+    if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+    waiter.signal.removeEventListener("abort", waiter.abort);
+  }
+
+  private releaseHandle(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      while (this.waiters.length > 0) {
+        const waiter = this.waiters.shift()!;
+        this.cleanupWaiter(waiter);
+        if (waiter.signal.aborted) {
+          waiter.reject(new HtmlPolicyError("parser worker acquisition aborted"));
+          continue;
+        }
+        if (waiter.deadlineAt <= waiter.now()) {
+          waiter.reject(new HtmlPolicyError("parser worker queue deadline exceeded"));
+          continue;
+        }
+        waiter.resolve(this.releaseHandle());
+        return;
+      }
+      this.active -= 1;
+    };
+  }
+}
+
+const SHARED_PARSER_WORKER_LIMITER = new ParserWorkerLimiter({
+  maxConcurrent: 4,
+  maxQueued: 64,
+});
+
 export class WorkerHtmlPageParser implements HtmlPageParser {
   constructor(
     private readonly workerFactory: () => ParserWorker = () =>
       new Worker(new URL("./html-parser-worker.ts", import.meta.url)),
     private readonly now: () => number = Date.now,
+    private readonly limiter: ParserWorkerLimiter = SHARED_PARSER_WORKER_LIMITER,
   ) {}
 
-  parse(bytes: Buffer, signal: AbortSignal, deadlineAt: number): Promise<ParsedHtmlPage> {
+  async parse(bytes: Buffer, signal: AbortSignal, deadlineAt: number): Promise<ParsedHtmlPage> {
     if (signal.aborted || deadlineAt <= this.now()) {
-      return Promise.reject(new HtmlPolicyError("HTML parsing aborted"));
+      throw new HtmlPolicyError("HTML parsing aborted");
     }
-    const worker = this.workerFactory();
+    const releasePermit = await this.limiter.acquire(signal, deadlineAt, this.now);
+    if (signal.aborted || deadlineAt <= this.now()) {
+      releasePermit();
+      throw new HtmlPolicyError("HTML parsing aborted");
+    }
+    let worker: ParserWorker;
+    try {
+      worker = this.workerFactory();
+    } catch (error) {
+      releasePermit();
+      throw error;
+    }
     return new Promise<ParsedHtmlPage>((resolve, reject) => {
       let settled = false;
       const stopWorker = async (): Promise<void> => {
@@ -67,7 +182,10 @@ export class WorkerHtmlPageParser implements HtmlPageParser {
         if (settled) return;
         settled = true;
         cleanup();
-        void stopWorker().then(() => reject(error));
+        void stopWorker().then(() => {
+          releasePermit();
+          reject(error);
+        });
       };
       const aborted = (): void => fail(new HtmlPolicyError("HTML parsing aborted"));
       const messaged = (message: ParserWorkerResult): void => {
@@ -83,7 +201,10 @@ export class WorkerHtmlPageParser implements HtmlPageParser {
           links: Object.freeze([...message.page.links]),
           contentHash: message.page.contentHash,
         });
-        void stopWorker().then(() => resolve(result));
+        void stopWorker().then(() => {
+          releasePermit();
+          resolve(result);
+        });
       };
       const errored = (error: Error): void => fail(error);
       const exited = (code: number): void => {
