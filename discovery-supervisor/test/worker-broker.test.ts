@@ -8,6 +8,10 @@ import type {
   WorkerStatus,
 } from "../src/contracts";
 import { JobStore } from "../src/job-store";
+import type {
+  CleanupAuthority,
+  RuntimeIdentityBinding,
+} from "../src/job-store";
 import { WorkerBroker } from "../src/worker-broker";
 
 const snapshot = {
@@ -55,6 +59,55 @@ const result: WorkerResult = {
   missing_questions: [],
   contradictions: [],
   uncertainty: [],
+};
+
+const runtimeSlotId = "44444444-4444-4444-8444-444444444444";
+const runtimeIdentity: RuntimeIdentityBinding = {
+  cell_container_name: "ligou-cell-a",
+  bridge_container_name: "ligou-bridge-a",
+  internal_network_name: "ligou-internal-a",
+  egress_network_name: "ligou-egress-a",
+  config_volume_name: "ligou-config-a",
+  state_volume_name: "ligou-state-a",
+  workspace_volume_name: "ligou-workspace-a",
+  output_volume_name: "ligou-output-a",
+  gateway_secret_volume_name: "ligou-gateway-secret-a",
+  bridge_secret_volume_name: "ligou-bridge-secret-a",
+  profile_name: "ligou-profile-a",
+  loopback_port: 30_123,
+};
+const runtimeIdentityHash = "7518844113ab6430b45bd1b9fd96c6cb95bc47c41c1c4970e95a5726fc33ecc1";
+const recoveryClaimRow = {
+  job_id: job.job_id,
+  attempt_id: job.attempt_id,
+  attempt_number: 1,
+  adapter_id: "openclaw",
+  fence_generation: 3,
+  claim_token: "claim-token",
+  runtime_slot_id: runtimeSlotId,
+  job_version: 2,
+  normalized_origin: "https://example.com/",
+  deadline_at: "2026-09-01T10:10:00+00:00",
+  budget: job.budget,
+};
+const directClaimRow = {
+  ...recoveryClaimRow,
+  adapter_id: "direct_model",
+  deadline_at: "2026-09-01T10:10:00.000Z",
+};
+const detailedCleanupProof = {
+  gateway_exited: true,
+  container_removed: true,
+  bridge_removed: true,
+  config_removed: true,
+  state_removed: true,
+  workspace_removed: true,
+  output_removed: true,
+  network_removed: true,
+  credential_revoked: true,
+  listener_closed: true,
+  identity_process_absent: true,
+  late_result_rejected: true,
 };
 
 class MemoryAdapter implements WorkerAdapter {
@@ -156,6 +209,285 @@ describe("WorkerBroker", () => {
   });
 });
 
+describe("JobStore recovery authority seam", () => {
+  test("claims an adapter-bound attempt with exact slot/version readback and trusted cleanup authority", async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const store = new JobStore({
+      async rpc(name, args) {
+        calls.push({ name, args });
+        return { data: [recoveryClaimRow], error: null };
+      },
+    });
+
+    const claimed = await store.claimAttempt("openclaw-slot-1", "openclaw", 300);
+
+    expect(calls).toEqual([{
+      name: "claim_company_discovery_attempt",
+      args: {
+        p_worker_id: "openclaw-slot-1",
+        p_adapter_id: "openclaw",
+        p_lease_seconds: 300,
+      },
+    }]);
+    expect(claimed).toEqual({
+      job: { ...job, deadline_at: "2026-09-01T10:10:00+00:00", source_snapshots: [] },
+      adapter_id: "openclaw",
+      runtime_slot_id: runtimeSlotId,
+      job_version: 2,
+      cleanup_authority: {
+        job_id: job.job_id,
+        attempt_id: job.attempt_id,
+        runtime_slot_id: runtimeSlotId,
+        fence_generation: 3,
+        claim_token: "claim-token",
+      },
+    });
+    expect("tenant_id" in claimed!.job).toBe(false);
+  });
+
+  test("rejects claim adapter mismatch and extra readback fields", async () => {
+    for (const data of [[{ ...recoveryClaimRow, adapter_id: "direct_model" }], [{
+      ...recoveryClaimRow,
+      tenant_id: "55555555-5555-4555-8555-555555555555",
+    }]]) {
+      const store = new JobStore({ async rpc() { return { data, error: null }; } });
+      await expect(store.claimAttempt("openclaw-slot-2", "openclaw", 300)).rejects.toThrow(
+        "claim readback",
+      );
+    }
+  });
+
+  test("binds one exact nonsecret runtime identity and terminalizes to rotated cleanup authority", async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const store = new JobStore({
+      async rpc(name, args) {
+        calls.push({ name, args });
+        if (name === "claim_company_discovery_attempt")
+          return { data: [recoveryClaimRow], error: null };
+        if (name === "bind_company_discovery_runtime") {
+          return {
+            data: {
+              attempt_id: job.attempt_id,
+              runtime_slot_id: runtimeSlotId,
+              job_id: job.job_id,
+              job_version: 2,
+              fence_generation: 3,
+              runtime_identity: runtimeIdentity,
+              runtime_identity_hash: runtimeIdentityHash,
+            },
+            error: null,
+          };
+        }
+        if (name === "terminalize_company_discovery_attempt") {
+          return {
+            data: {
+              job_id: job.job_id,
+              attempt_id: job.attempt_id,
+              runtime_slot_id: runtimeSlotId,
+              job_version: 3,
+              fence_generation: 4,
+              claim_token: "rotated-cleanup-token",
+              status: "failed",
+              cleanup_state: "pending",
+            },
+            error: null,
+          };
+        }
+        throw new Error(`unexpected RPC ${name}`);
+      },
+    });
+    const claimed = await store.claimAttempt("openclaw-slot-3", "openclaw", 300);
+
+    expect(await store.bindRuntime(claimed!, runtimeIdentity)).toEqual({
+      attempt_id: job.attempt_id,
+      runtime_slot_id: runtimeSlotId,
+      job_id: job.job_id,
+      job_version: 2,
+      fence_generation: 3,
+      runtime_identity: runtimeIdentity,
+      runtime_identity_hash: runtimeIdentityHash,
+    });
+    await expect(store.bindRuntime(claimed!, runtimeIdentity)).rejects.toThrow("already bound");
+    const authority = await store.terminalizeAttempt(claimed!, "failed", "adapter_failed");
+    expect(authority).toEqual({
+      job_id: job.job_id,
+      attempt_id: job.attempt_id,
+      runtime_slot_id: runtimeSlotId,
+      job_version: 3,
+      fence_generation: 4,
+      claim_token: "rotated-cleanup-token",
+      runtime_identity: runtimeIdentity,
+      runtime_identity_hash: runtimeIdentityHash,
+      status: "failed",
+      cleanup_state: "pending",
+    });
+    expect(calls[1]).toEqual({
+      name: "bind_company_discovery_runtime",
+      args: {
+        p_attempt_id: job.attempt_id,
+        p_fence_generation: 3,
+        p_claim_token: "claim-token",
+        p_runtime_identity: runtimeIdentity,
+      },
+    });
+    expect(calls[2]).toEqual({
+      name: "terminalize_company_discovery_attempt",
+      args: {
+        p_attempt_id: job.attempt_id,
+        p_fence_generation: 3,
+        p_claim_token: "claim-token",
+        p_outcome: "failed",
+        p_reason: "adapter_failed",
+      },
+    });
+    expect(() => store.bindSourceSnapshots(claimed!.job, [snapshot])).toThrow("stale");
+    await expect(store.recordCleanup(claimed!.cleanup_authority, detailedCleanupProof))
+      .rejects.toThrow("stale");
+  });
+
+  test("reclaims expired cleanup repeatedly and accepts only the newest authority object", async () => {
+    let reclaim = 0;
+    const store = new JobStore({
+      async rpc(name) {
+        if (name === "claim_expired_company_discovery_cleanup") {
+          reclaim += 1;
+          return {
+            data: [{
+              job_id: job.job_id,
+              attempt_id: job.attempt_id,
+              adapter_id: "openclaw",
+              runtime_slot_id: runtimeSlotId,
+              runtime_identity: runtimeIdentity,
+              fence_generation: 3 + reclaim,
+              claim_token: `reaper-token-${reclaim}`,
+              job_version: 3,
+            }],
+            error: null,
+          };
+        }
+        if (name === "record_company_discovery_cleanup") {
+          return {
+            data: {
+              attempt_id: job.attempt_id,
+              cleanup_state: "proved",
+              slot_updated: true,
+            },
+            error: null,
+          };
+        }
+        throw new Error(`unexpected RPC ${name}`);
+      },
+    });
+
+    const first = await store.claimExpiredCleanup("reaper-1", 300);
+    const second = await store.claimExpiredCleanup("reaper-2", 300);
+
+    expect(first).toMatchObject({
+      adapter_id: "openclaw",
+      runtime_identity: runtimeIdentity,
+      runtime_identity_hash: runtimeIdentityHash,
+      fence_generation: 4,
+      claim_token: "reaper-token-1",
+    });
+    expect(second).toMatchObject({
+      runtime_identity_hash: runtimeIdentityHash,
+      fence_generation: 5,
+      claim_token: "reaper-token-2",
+    });
+    await expect(store.recordCleanup(first!.cleanup_authority, detailedCleanupProof))
+      .rejects.toThrow("stale");
+    expect(await store.recordCleanup(second!.cleanup_authority, detailedCleanupProof)).toEqual({
+      attempt_id: job.attempt_id,
+      cleanup_state: "proved",
+      slot_updated: true,
+    });
+    await expect(store.recordCleanup({ ...second!.cleanup_authority }, detailedCleanupProof))
+      .rejects.toThrow("trusted cleanup authority");
+  });
+
+  test("treats an empty expired-cleanup readback as database-handled runtime_not_bound or idle", async () => {
+    const store = new JobStore({
+      async rpc(name, args) {
+        expect(name).toBe("claim_expired_company_discovery_cleanup");
+        expect(args).toEqual({ p_worker_id: "reaper-runtime-not-bound", p_lease_seconds: 300 });
+        return { data: [], error: null };
+      },
+    });
+
+    expect(await store.claimExpiredCleanup("reaper-runtime-not-bound", 300)).toBeNull();
+  });
+
+  test("rejects malformed bind, terminal, expired, and cleanup readbacks", async () => {
+    const malformedByRpc: Record<string, unknown> = {
+      bind_company_discovery_runtime: {
+        attempt_id: job.attempt_id,
+        runtime_slot_id: runtimeSlotId,
+        job_id: job.job_id,
+        job_version: 2,
+        fence_generation: 3,
+        runtime_identity: runtimeIdentity,
+        runtime_identity_hash: runtimeIdentityHash,
+        extra: true,
+      },
+      terminalize_company_discovery_attempt: {
+        job_id: job.job_id,
+        attempt_id: job.attempt_id,
+        runtime_slot_id: runtimeSlotId,
+        job_version: 3,
+        fence_generation: 4,
+        claim_token: "rotated-cleanup-token",
+        status: "selected",
+        cleanup_state: "pending",
+      },
+      claim_expired_company_discovery_cleanup: [{
+        job_id: job.job_id,
+        attempt_id: job.attempt_id,
+        adapter_id: "openclaw",
+        runtime_slot_id: runtimeSlotId,
+        runtime_identity: { ...runtimeIdentity, claim_token: "forbidden" },
+        fence_generation: 5,
+        claim_token: "reaper-token",
+        job_version: 3,
+      }],
+    };
+    for (const target of Object.keys(malformedByRpc)) {
+      const store = new JobStore({
+        async rpc(name) {
+          if (name === "claim_company_discovery_attempt")
+            return { data: [recoveryClaimRow], error: null };
+          if (name === "bind_company_discovery_runtime" &&
+              target !== "bind_company_discovery_runtime") {
+            return {
+              data: {
+                attempt_id: job.attempt_id,
+                runtime_slot_id: runtimeSlotId,
+                job_id: job.job_id,
+                job_version: 2,
+                fence_generation: 3,
+                runtime_identity: runtimeIdentity,
+                runtime_identity_hash: runtimeIdentityHash,
+              },
+              error: null,
+            };
+          }
+          return { data: malformedByRpc[name], error: null };
+        },
+      });
+      const claimed = await store.claimAttempt("openclaw-malformed", "openclaw", 300);
+      if (target === "bind_company_discovery_runtime") {
+        await expect(store.bindRuntime(claimed!, runtimeIdentity)).rejects.toThrow("runtime bind readback");
+      } else if (target === "terminalize_company_discovery_attempt") {
+        await store.bindRuntime(claimed!, runtimeIdentity).catch(() => undefined);
+        await expect(store.terminalizeAttempt(claimed!, "failed", "adapter_failed"))
+          .rejects.toThrow("terminal readback");
+      } else {
+        await expect(store.claimExpiredCleanup("reaper-malformed", 300))
+          .rejects.toThrow("expired cleanup readback");
+      }
+    }
+  });
+});
+
 describe("JobStore service RPC boundary", () => {
   test("rejects caller-authored job and fence identity that did not come from claim readback", async () => {
     const store = new JobStore({
@@ -172,56 +504,39 @@ describe("JobStore service RPC boundary", () => {
     const rpc = {
       async rpc(name: string, args: Record<string, unknown>) {
         calls.push({ name, args });
-        return {
-          data: [{
-            job_id: job.job_id,
-            attempt_id: job.attempt_id,
-            attempt_number: 1,
-            fence_generation: 3,
-            claim_token: "claim-token",
-            normalized_origin: "https://example.com/",
-            deadline_at: "2026-09-01T10:10:00.000Z",
-            budget: job.budget,
-          }],
-          error: null,
-        };
+        return { data: [directClaimRow], error: null };
       },
     };
     const store = new JobStore(rpc);
 
-    const claimed = await store.claimAttempt("direct-model-slot-1", 300);
+    const claimed = await store.claimAttempt("direct-model-slot-1", "direct_model", 300);
 
     expect(calls).toEqual([{
       name: "claim_company_discovery_attempt",
-      args: { p_worker_id: "direct-model-slot-1", p_lease_seconds: 300 },
+      args: {
+        p_worker_id: "direct-model-slot-1",
+        p_adapter_id: "direct_model",
+        p_lease_seconds: 300,
+      },
     }]);
-    expect(claimed).toEqual({ ...job, source_snapshots: [] });
-    expect("tenant_id" in claimed!).toBe(false);
-    expect(store.bindSourceSnapshots(claimed!, [snapshot])).toEqual(job);
+    expect(claimed?.job).toEqual({ ...job, source_snapshots: [] });
+    expect("tenant_id" in claimed!.job).toBe(false);
+    expect(store.bindSourceSnapshots(claimed!.job, [snapshot])).toEqual(job);
   });
 
   test("accepts the exact ISO offset returned for a timestamptz claim deadline", async () => {
     const store = new JobStore({
       async rpc() {
         return {
-          data: [{
-            job_id: job.job_id,
-            attempt_id: job.attempt_id,
-            attempt_number: 1,
-            fence_generation: 3,
-            claim_token: "claim-token",
-            normalized_origin: "https://example.com/",
-            deadline_at: "2026-09-01T10:10:00+00:00",
-            budget: job.budget,
-          }],
+          data: [{ ...directClaimRow, deadline_at: "2026-09-01T10:10:00+00:00" }],
           error: null,
         };
       },
     });
 
-    const claimed = await store.claimAttempt("direct-model-offset-slot", 300);
+    const claimed = await store.claimAttempt("direct-model-offset-slot", "direct_model", 300);
 
-    expect(claimed?.deadline_at).toBe("2026-09-01T10:10:00+00:00");
+    expect(claimed?.job.deadline_at).toBe("2026-09-01T10:10:00+00:00");
   });
 
   test("allows terminal cleanup for a trusted attempt before evidence was fetched", async () => {
@@ -231,16 +546,7 @@ describe("JobStore service RPC boundary", () => {
         calls.push(name);
         if (name === "claim_company_discovery_attempt") {
           return {
-            data: [{
-              job_id: job.job_id,
-              attempt_id: job.attempt_id,
-              attempt_number: 1,
-              fence_generation: 3,
-              claim_token: "claim-token",
-              normalized_origin: "https://example.com/",
-              deadline_at: "2026-09-01T10:10:00.000Z",
-              budget: job.budget,
-            }],
+            data: [directClaimRow],
             error: null,
           };
         }
@@ -254,19 +560,9 @@ describe("JobStore service RPC boundary", () => {
         };
       },
     });
-    const claimed = await store.claimAttempt("direct-model-slot-3", 300);
+    const claimed = await store.claimAttempt("direct-model-slot-3", "direct_model", 300);
 
-    await store.recordCleanup(claimed!, {
-      gateway_exited: true,
-      container_removed: true,
-      state_removed: true,
-      workspace_removed: true,
-      output_removed: true,
-      network_removed: true,
-      credential_revoked: true,
-      listener_closed: true,
-      late_result_rejected: true,
-    });
+    await store.recordCleanup(claimed!.cleanup_authority, detailedCleanupProof);
 
     expect(calls).toEqual([
       "claim_company_discovery_attempt",
@@ -279,24 +575,15 @@ describe("JobStore service RPC boundary", () => {
       async rpc(name: string) {
         if (name === "claim_company_discovery_attempt") {
           return {
-            data: [{
-              job_id: job.job_id,
-              attempt_id: job.attempt_id,
-              attempt_number: 1,
-              fence_generation: 3,
-              claim_token: "claim-token",
-              normalized_origin: "https://example.com/",
-              deadline_at: "2026-09-01T10:10:00.000Z",
-              budget: job.budget,
-            }],
+            data: [directClaimRow],
             error: null,
           };
         }
         throw new Error("must not commit replaced evidence");
       },
     });
-    const claimed = await store.claimAttempt("direct-model-slot-4", 300);
-    const trustedJob = store.bindSourceSnapshots(claimed!, [snapshot]);
+    const claimed = await store.claimAttempt("direct-model-slot-4", "direct_model", 300);
+    const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
     const replacedEvidence = {
       ...result,
       source_snapshots: [{ ...snapshot, excerpt: "model-authored replacement" }],
@@ -312,24 +599,30 @@ describe("JobStore service RPC boundary", () => {
       async rpc(name: string) {
         if (name === "claim_company_discovery_attempt") {
           return {
-            data: [{
-              job_id: job.job_id,
+            data: [directClaimRow],
+            error: null,
+          };
+        }
+        if (name === "bind_company_discovery_runtime") {
+          return {
+            data: {
               attempt_id: job.attempt_id,
-              attempt_number: 1,
+              runtime_slot_id: runtimeSlotId,
+              job_id: job.job_id,
+              job_version: 2,
               fence_generation: 3,
-              claim_token: "claim-token",
-              normalized_origin: "https://example.com/",
-              deadline_at: "2026-09-01T10:10:00.000Z",
-              budget: job.budget,
-            }],
+              runtime_identity: runtimeIdentity,
+              runtime_identity_hash: runtimeIdentityHash,
+            },
             error: null,
           };
         }
         return { data: "not-a-result-uuid", error: null };
       },
     });
-    const claimed = await store.claimAttempt("direct-model-slot-5", 300);
-    const trustedJob = store.bindSourceSnapshots(claimed!, [snapshot]);
+    const claimed = await store.claimAttempt("direct-model-slot-5", "direct_model", 300);
+    await store.bindRuntime(claimed!, runtimeIdentity);
+    const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
 
     await expect(store.commitResult(trustedJob, result)).rejects.toThrow("commit readback");
   });
@@ -339,16 +632,7 @@ describe("JobStore service RPC boundary", () => {
       async rpc(name: string) {
         if (name === "claim_company_discovery_attempt") {
           return {
-            data: [{
-              job_id: job.job_id,
-              attempt_id: job.attempt_id,
-              attempt_number: 1,
-              fence_generation: 3,
-              claim_token: "claim-token",
-              normalized_origin: "https://example.com/",
-              deadline_at: "2026-09-01T10:10:00.000Z",
-              budget: job.budget,
-            }],
+            data: [directClaimRow],
             error: null,
           };
         }
@@ -357,7 +641,7 @@ describe("JobStore service RPC boundary", () => {
             job_id: "55555555-5555-4555-8555-555555555555",
             attempt_id: job.attempt_id,
             result_id: "33333333-3333-4333-8333-333333333333",
-            version: 8,
+            version: 3,
             fence_generation: 4,
             approval_state: "approved",
           },
@@ -365,10 +649,10 @@ describe("JobStore service RPC boundary", () => {
         };
       },
     });
-    const claimed = await store.claimAttempt("direct-model-slot-6", 300);
-    const trustedJob = store.bindSourceSnapshots(claimed!, [snapshot]);
+    const claimed = await store.claimAttempt("direct-model-slot-6", "direct_model", 300);
+    const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
 
-    await expect(store.selectResult(trustedJob, 7)).rejects.toThrow("selection readback");
+    await expect(store.selectResult(trustedJob, 2)).rejects.toThrow("selection readback");
   });
 
   test("rejects exact selection readbacks for the wrong job identity", async () => {
@@ -376,16 +660,7 @@ describe("JobStore service RPC boundary", () => {
       async rpc(name: string) {
         if (name === "claim_company_discovery_attempt") {
           return {
-            data: [{
-              job_id: job.job_id,
-              attempt_id: job.attempt_id,
-              attempt_number: 1,
-              fence_generation: 3,
-              claim_token: "claim-token",
-              normalized_origin: "https://example.com/",
-              deadline_at: "2026-09-01T10:10:00.000Z",
-              budget: job.budget,
-            }],
+            data: [directClaimRow],
             error: null,
           };
         }
@@ -394,17 +669,17 @@ describe("JobStore service RPC boundary", () => {
             job_id: "55555555-5555-4555-8555-555555555555",
             attempt_id: job.attempt_id,
             result_id: "33333333-3333-4333-8333-333333333333",
-            version: 8,
+            version: 3,
             fence_generation: 4,
           },
           error: null,
         };
       },
     });
-    const claimed = await store.claimAttempt("direct-model-slot-9", 300);
-    const trustedJob = store.bindSourceSnapshots(claimed!, [snapshot]);
+    const claimed = await store.claimAttempt("direct-model-slot-9", "direct_model", 300);
+    const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
 
-    await expect(store.selectResult(trustedJob, 7)).rejects.toThrow("trusted identity");
+    await expect(store.selectResult(trustedJob, 2)).rejects.toThrow("trusted identity");
   });
 
   test("rejects cleanup readbacks with wrong attempt, state, or extra fields", async () => {
@@ -412,16 +687,7 @@ describe("JobStore service RPC boundary", () => {
       async rpc(name: string) {
         if (name === "claim_company_discovery_attempt") {
           return {
-            data: [{
-              job_id: job.job_id,
-              attempt_id: job.attempt_id,
-              attempt_number: 1,
-              fence_generation: 3,
-              claim_token: "claim-token",
-              normalized_origin: "https://example.com/",
-              deadline_at: "2026-09-01T10:10:00.000Z",
-              budget: job.budget,
-            }],
+            data: [directClaimRow],
             error: null,
           };
         }
@@ -436,19 +702,10 @@ describe("JobStore service RPC boundary", () => {
         };
       },
     });
-    const claimed = await store.claimAttempt("direct-model-slot-7", 300);
+    const claimed = await store.claimAttempt("direct-model-slot-7", "direct_model", 300);
 
-    await expect(store.recordCleanup(claimed!, {
-      gateway_exited: true,
-      container_removed: true,
-      state_removed: true,
-      workspace_removed: true,
-      output_removed: true,
-      network_removed: true,
-      credential_revoked: true,
-      listener_closed: true,
-      late_result_rejected: true,
-    })).rejects.toThrow("cleanup readback");
+    await expect(store.recordCleanup(claimed!.cleanup_authority, detailedCleanupProof))
+      .rejects.toThrow("cleanup readback");
   });
 
   test("rejects exact cleanup readbacks with wrong attempt and state", async () => {
@@ -456,16 +713,7 @@ describe("JobStore service RPC boundary", () => {
       async rpc(name: string) {
         if (name === "claim_company_discovery_attempt") {
           return {
-            data: [{
-              job_id: job.job_id,
-              attempt_id: job.attempt_id,
-              attempt_number: 1,
-              fence_generation: 3,
-              claim_token: "claim-token",
-              normalized_origin: "https://example.com/",
-              deadline_at: "2026-09-01T10:10:00.000Z",
-              budget: job.budget,
-            }],
+            data: [directClaimRow],
             error: null,
           };
         }
@@ -479,57 +727,42 @@ describe("JobStore service RPC boundary", () => {
         };
       },
     });
-    const claimed = await store.claimAttempt("direct-model-slot-10", 300);
+    const claimed = await store.claimAttempt("direct-model-slot-10", "direct_model", 300);
 
-    await expect(store.recordCleanup(claimed!, {
-      gateway_exited: true,
-      container_removed: true,
-      state_removed: true,
-      workspace_removed: true,
-      output_removed: true,
-      network_removed: true,
-      credential_revoked: true,
-      listener_closed: true,
-      late_result_rejected: true,
-    })).rejects.toThrow("identity, state");
+    await expect(store.recordCleanup(claimed!.cleanup_authority, detailedCleanupProof))
+      .rejects.toThrow("identity, state");
   });
 
   test("rejects class instances as cleanup proof JSON", async () => {
     class CleanupProofObject {
       gateway_exited = true;
       container_removed = true;
+      bridge_removed = true;
+      config_removed = true;
       state_removed = true;
       workspace_removed = true;
       output_removed = true;
       network_removed = true;
       credential_revoked = true;
       listener_closed = true;
+      identity_process_absent = true;
       late_result_rejected = true;
     }
     const store = new JobStore({
       async rpc(name: string) {
         if (name === "claim_company_discovery_attempt") {
           return {
-            data: [{
-              job_id: job.job_id,
-              attempt_id: job.attempt_id,
-              attempt_number: 1,
-              fence_generation: 3,
-              claim_token: "claim-token",
-              normalized_origin: "https://example.com/",
-              deadline_at: "2026-09-01T10:10:00.000Z",
-              budget: job.budget,
-            }],
+            data: [directClaimRow],
             error: null,
           };
         }
         throw new Error("must reject before cleanup RPC");
       },
     });
-    const claimed = await store.claimAttempt("direct-model-slot-8", 300);
+    const claimed = await store.claimAttempt("direct-model-slot-8", "direct_model", 300);
 
     await expect(store.recordCleanup(
-      claimed!,
+      claimed!.cleanup_authority,
       new CleanupProofObject(),
     )).rejects.toThrow("plain object");
   });
@@ -555,16 +788,21 @@ describe("JobStore service RPC boundary", () => {
         calls.push({ name, args });
         if (name === "claim_company_discovery_attempt") {
           return {
-            data: [{
-              job_id: job.job_id,
+            data: [directClaimRow],
+            error: null,
+          };
+        }
+        if (name === "bind_company_discovery_runtime") {
+          return {
+            data: {
               attempt_id: job.attempt_id,
-              attempt_number: 1,
+              runtime_slot_id: runtimeSlotId,
+              job_id: job.job_id,
+              job_version: 2,
               fence_generation: 3,
-              claim_token: "claim-token",
-              normalized_origin: "https://example.com/",
-              deadline_at: "2026-09-01T10:10:00.000Z",
-              budget: job.budget,
-            }],
+              runtime_identity: runtimeIdentity,
+              runtime_identity_hash: runtimeIdentityHash,
+            },
             error: null,
           };
         }
@@ -576,7 +814,7 @@ describe("JobStore service RPC boundary", () => {
               job_id: job.job_id,
               attempt_id: job.attempt_id,
               result_id: "33333333-3333-4333-8333-333333333333",
-              version: 8,
+              version: 3,
               fence_generation: 4,
             },
             error: null,
@@ -598,31 +836,22 @@ describe("JobStore service RPC boundary", () => {
       },
     };
     const store = new JobStore(rpc);
-    const cleanupProof = {
-      gateway_exited: true,
-      container_removed: true,
-      state_removed: true,
-      workspace_removed: true,
-      output_removed: true,
-      network_removed: true,
-      credential_revoked: true,
-      listener_closed: true,
-      late_result_rejected: true,
-    };
+    const cleanupProof = detailedCleanupProof;
 
-    const claimed = await store.claimAttempt("direct-model-slot-2", 300);
-    const trustedJob = store.bindSourceSnapshots(claimed!, [snapshot]);
+    const claimed = await store.claimAttempt("direct-model-slot-2", "direct_model", 300);
+    await store.bindRuntime(claimed!, runtimeIdentity);
+    const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
     expect(await store.commitResult(trustedJob, result)).toBe(
       "33333333-3333-4333-8333-333333333333",
     );
-    expect(await store.selectResult(trustedJob, 7)).toEqual({
+    expect(await store.selectResult(trustedJob, 2)).toEqual({
       job_id: job.job_id,
       attempt_id: job.attempt_id,
       result_id: "33333333-3333-4333-8333-333333333333",
-      version: 8,
+      version: 3,
       fence_generation: 4,
     });
-    expect(await store.recordCleanup(trustedJob, cleanupProof)).toEqual({
+    expect(await store.recordCleanup(claimed!.cleanup_authority, cleanupProof)).toEqual({
       attempt_id: job.attempt_id,
       cleanup_state: "proved",
       slot_updated: true,
@@ -635,30 +864,31 @@ describe("JobStore service RPC boundary", () => {
 
     expect(calls.map((call) => call.name)).toEqual([
       "claim_company_discovery_attempt",
+      "bind_company_discovery_runtime",
       "commit_company_discovery_result",
       "select_company_discovery_result",
       "record_company_discovery_cleanup",
       "quarantine_company_discovery_slot",
     ]);
-    expect(calls[1]!.args).toEqual({
+    expect(calls[2]!.args).toEqual({
       p_attempt_id: job.attempt_id,
       p_fence_generation: 3,
       p_claim_token: "claim-token",
       p_result: result,
       p_result_hash: "f199655726b66c8a333468ce2432572ffaf0adbfb87713f615e9fc9878bad40d",
     });
-    expect(calls[2]!.args).toEqual({
+    expect(calls[3]!.args).toEqual({
       p_job_id: job.job_id,
       p_attempt_id: job.attempt_id,
-      p_expected_version: 7,
+      p_expected_version: 2,
     });
-    expect(calls[3]!.args).toEqual({
+    expect(calls[4]!.args).toEqual({
       p_attempt_id: job.attempt_id,
       p_fence_generation: 3,
       p_claim_token: "claim-token",
       p_proof: cleanupProof,
     });
-    expect(calls[4]!.args).toEqual({
+    expect(calls[5]!.args).toEqual({
       p_slot_id: "44444444-4444-4444-8444-444444444444",
       p_reason: "cleanup_unresolved",
       p_proof_hash: "b".repeat(64),
