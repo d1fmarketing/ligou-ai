@@ -3,6 +3,7 @@ import type {
   HttpsResponse,
   PinnedHttpsTransport,
 } from "../../src/fetch/https-client";
+import { shouldBufferResponseBody } from "../../src/fetch/https-client";
 
 export const PUBLIC_V4 = "93.184.216.34";
 export const SECOND_PUBLIC_V4 = "93.184.216.35";
@@ -49,11 +50,18 @@ export class ScriptedTransport implements PinnedHttpsTransport {
         configured.length - 1,
       )]!
       : configured;
+    const statusCode = selected.status ?? 200;
+    const headers = selected.headers ?? { "content-type": "text/html; charset=utf-8" };
+    const body = selected.body ?? BASIC_HTML;
+    input.onBodyBytes?.(body.byteLength);
+    const bufferBody = shouldBufferResponseBody(statusCode, headers);
     return {
-      statusCode: selected.status ?? 200,
-      headers: selected.headers ?? { "content-type": "text/html; charset=utf-8" },
-      body: selected.body ?? BASIC_HTML,
+      statusCode,
+      headers,
+      body: bufferBody ? body : Buffer.alloc(0),
       remoteAddress: selected.remoteAddress ?? input.address.address,
+      bodyBytesConsumed: body.byteLength,
+      bodyDiscarded: !bufferBody,
     };
   }
 }

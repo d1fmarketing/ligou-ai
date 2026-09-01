@@ -15,7 +15,7 @@ export interface ResolvedAddress {
 }
 
 export interface PublicAddressResolver {
-  resolvePublicAddresses(hostname: string): Promise<readonly ResolvedAddress[]>;
+  resolvePublicAddresses(hostname: string, signal?: AbortSignal): Promise<readonly ResolvedAddress[]>;
 }
 
 export class AddressPolicyError extends Error {

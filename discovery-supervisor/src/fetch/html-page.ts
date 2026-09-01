@@ -37,6 +37,13 @@ function truncateUtf8(value: string, maximumBytes: number): string {
 }
 
 function decodeHtml(bytes: Buffer): string {
+  const withoutBom = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
+    ? bytes.subarray(3)
+    : bytes;
+  const binaryPrefix = withoutBom.subarray(0, 512).toString("latin1").replace(/^\s*/u, "");
+  if (/^(?:%PDF-|%!PS-|GIF8|\x89PNG\r\n\x1a\n|\xff\xd8\xff|PK\x03\x04|\x7fELF|MZ|RIFF)/.test(binaryPrefix)) {
+    throw new HtmlPolicyError("content sniffing detected a non-HTML binary prefix");
+  }
   let html: string;
   try {
     html = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -44,6 +51,11 @@ function decodeHtml(bytes: Buffer): string {
     throw new HtmlPolicyError("HTML body is not valid UTF-8");
   }
   if (html.includes("\0")) throw new HtmlPolicyError("HTML body contains binary data");
+  const controls = [...html.slice(0, 4_096)].filter((character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 && character !== "\t" && character !== "\n" && character !== "\r";
+  }).length;
+  if (controls > 4) throw new HtmlPolicyError("HTML body contains binary control data");
   const probe = html.slice(0, 4_096);
   if (!/<(?:!doctype\s+html|html|head|body|title|meta|main|article|section|div|p|h[1-6]|a)(?:\s|>)/i.test(probe)) {
     throw new HtmlPolicyError("content sniffing did not identify HTML");

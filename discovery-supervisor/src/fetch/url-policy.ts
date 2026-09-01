@@ -44,7 +44,7 @@ export function normalizeDiscoveryUrl(input: string | URL, base?: URL): URL {
 
 export function registrableDomain(url: URL): string {
   const domain = getDomain(url.hostname, {
-    allowPrivateDomains: false,
+    allowPrivateDomains: true,
     detectIp: true,
     validateHostname: true,
   });

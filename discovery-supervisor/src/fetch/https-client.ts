@@ -8,6 +8,8 @@ export interface HttpsRequest {
   readonly address: ResolvedAddress;
   readonly maxBytes: number;
   readonly deadlineAt: number;
+  readonly onBodyBytes?: (byteLength: number) => void;
+  readonly signal?: AbortSignal;
 }
 
 export interface HttpsResponse {
@@ -15,6 +17,8 @@ export interface HttpsResponse {
   readonly headers: Readonly<Record<string, string | readonly string[] | undefined>>;
   readonly body: Buffer;
   readonly remoteAddress: string | undefined;
+  readonly bodyBytesConsumed: number;
+  readonly bodyDiscarded: boolean;
 }
 
 export interface PinnedHttpsTransport {
@@ -35,8 +39,57 @@ export class ResponseByteLimitError extends HttpsPolicyError {
   }
 }
 
+export function buildPinnedHttpsRequestOptions(input: HttpsRequest): https.RequestOptions {
+  const lookup: LookupFunction = ((_hostname, _options, callback) => {
+    callback(null, input.address.address, input.address.family);
+  }) as LookupFunction;
+  return {
+    protocol: "https:",
+    hostname: input.url.hostname,
+    port: 443,
+    path: `${input.url.pathname}${input.url.search}`,
+    method: "GET",
+    servername: input.url.hostname,
+    lookup,
+    agent: false,
+    rejectUnauthorized: true,
+    signal: input.signal,
+    headers: {
+      Accept: "text/html",
+      "Accept-Encoding": "identity",
+      "Cache-Control": "no-cache",
+      Connection: "close",
+      Host: input.url.hostname,
+      "User-Agent": "Ligou-Discovery-Gateway/1.0",
+    },
+  };
+}
+
 function normalizeHeaders(headers: IncomingHttpHeaders): Readonly<Record<string, string | readonly string[] | undefined>> {
   return Object.freeze({ ...headers });
+}
+
+function responseHeader(
+  headers: Readonly<Record<string, string | readonly string[] | undefined>>,
+  name: string,
+): string | undefined {
+  const value = headers[name.toLowerCase()];
+  if (typeof value === "string" || value === undefined) return value;
+  return value.join(", ");
+}
+
+export function shouldBufferResponseBody(
+  statusCode: number,
+  headers: Readonly<Record<string, string | readonly string[] | undefined>>,
+): boolean {
+  if (statusCode < 200 || statusCode >= 300) return false;
+  const mime = responseHeader(headers, "content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (mime !== "text/html") return false;
+  if (/(?:^|,)\s*attachment(?:\s*;|\s*,|\s*$)/i.test(responseHeader(headers, "content-disposition") ?? "")) {
+    return false;
+  }
+  const encoding = responseHeader(headers, "content-encoding")?.trim().toLowerCase();
+  return encoding === undefined || encoding === "" || encoding === "identity";
 }
 
 const nodeTransport: PinnedHttpsTransport = {
@@ -56,36 +109,17 @@ const nodeTransport: PinnedHttpsTransport = {
         if (hardDeadlineTimer !== undefined) clearTimeout(hardDeadlineTimer);
         reject(error);
       };
-      const lookup: LookupFunction = ((_hostname, _options, callback) => {
-        callback(null, input.address.address, input.address.family);
-      }) as LookupFunction;
-      const request = https.request({
-        protocol: "https:",
-        hostname: input.url.hostname,
-        port: 443,
-        path: `${input.url.pathname}${input.url.search}`,
-        method: "GET",
-        servername: input.url.hostname,
-        lookup,
-        agent: false,
-        rejectUnauthorized: true,
-        headers: {
-          Accept: "text/html",
-          "Accept-Encoding": "identity",
-          "Cache-Control": "no-cache",
-          Connection: "close",
-          Host: input.url.hostname,
-          "User-Agent": "Ligou-Discovery-Gateway/1.0",
-        },
-      }, (response) => {
+      const request = https.request(buildPinnedHttpsRequestOptions(input), (response) => {
         const remoteAddress = response.socket.remoteAddress;
         if (!peerAddressMatches(input.address.address, remoteAddress)) {
           response.destroy();
           finishReject(new HttpsPolicyError("peer address mismatch"));
           return;
         }
+        const headers = normalizeHeaders(response.headers);
+        const bufferBody = shouldBufferResponseBody(response.statusCode ?? 0, headers);
         const declaredLength = Number(response.headers["content-length"]);
-        if (Number.isFinite(declaredLength) && declaredLength > input.maxBytes) {
+        if (bufferBody && Number.isFinite(declaredLength) && declaredLength > input.maxBytes) {
           response.destroy();
           finishReject(new ResponseByteLimitError());
           return;
@@ -95,12 +129,19 @@ const nodeTransport: PinnedHttpsTransport = {
         response.on("data", (chunk: Buffer | Uint8Array | string) => {
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           byteLength += buffer.byteLength;
-          if (byteLength > input.maxBytes) {
+          try {
+            input.onBodyBytes?.(buffer.byteLength);
+          } catch (error) {
+            response.destroy();
+            finishReject(error instanceof Error ? error : new Error(String(error)));
+            return;
+          }
+          if (bufferBody && byteLength > input.maxBytes) {
             response.destroy();
             finishReject(new ResponseByteLimitError());
             return;
           }
-          chunks.push(buffer);
+          if (bufferBody) chunks.push(buffer);
         });
         response.on("end", () => {
           if (settled) return;
@@ -108,9 +149,11 @@ const nodeTransport: PinnedHttpsTransport = {
           if (hardDeadlineTimer !== undefined) clearTimeout(hardDeadlineTimer);
           resolve({
             statusCode: response.statusCode ?? 0,
-            headers: normalizeHeaders(response.headers),
-            body: Buffer.concat(chunks, byteLength),
+            headers,
+            body: bufferBody ? Buffer.concat(chunks, byteLength) : Buffer.alloc(0),
             remoteAddress,
+            bodyBytesConsumed: byteLength,
+            bodyDiscarded: !bufferBody,
           });
         });
         response.on("error", finishReject);
@@ -131,7 +174,20 @@ export class HttpsClient {
   constructor(private readonly transport: PinnedHttpsTransport = nodeTransport) {}
 
   async request(input: HttpsRequest): Promise<HttpsResponse> {
-    const response = await this.transport.request(input);
+    let meteredBytes = 0;
+    const response = await raceWithSignal(this.transport.request({
+      ...input,
+      onBodyBytes: (byteLength) => {
+        if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+          throw new HttpsPolicyError("invalid transport byte meter value");
+        }
+        meteredBytes += byteLength;
+        input.onBodyBytes?.(byteLength);
+      },
+    }), input.signal);
+    if (response.bodyBytesConsumed !== meteredBytes || response.body.byteLength > meteredBytes) {
+      throw new HttpsPolicyError("transport body metering mismatch");
+    }
     if (!peerAddressMatches(input.address.address, response.remoteAddress)) {
       throw new HttpsPolicyError("peer address mismatch");
     }
@@ -142,4 +198,30 @@ export class HttpsClient {
       body: Buffer.from(response.body),
     });
   }
+}
+
+function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return promise;
+  if (signal.aborted) {
+    promise.catch(() => undefined);
+    return Promise.reject(new HttpsPolicyError("HTTPS request aborted"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const aborted = (): void => {
+      cleanup();
+      reject(new HttpsPolicyError("HTTPS request aborted"));
+    };
+    const cleanup = (): void => signal.removeEventListener("abort", aborted);
+    signal.addEventListener("abort", aborted, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
