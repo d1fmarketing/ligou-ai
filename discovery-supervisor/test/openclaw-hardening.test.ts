@@ -114,14 +114,16 @@ describe("outer-cell security boundary", () => {
       browser: { enabled: false, allowHostControl: false },
     });
     expect(config.tools.allow).toEqual([
+      "bundle-mcp",
       "discovery__fetch_discovery_page",
       "discovery__submit_discovery_result",
     ]);
+    expect(config.tools.profile).toBe("coding");
     expect(config.tools.deny).toEqual(expect.arrayContaining([
       "exec", "process", "browser", "read", "write", "web_fetch", "gateway",
     ]));
     expect(config.models.providers.stage0_bridge).toMatchObject({
-      baseUrl: `http://bridge:${runtime.bridge_http_port}`,
+      baseUrl: `http://127.0.0.1:${runtime.bridge_http_port}/codex`,
       api: "openai-chatgpt-responses",
     });
     expect(config.agents.defaults.models[`stage0_bridge/gpt-5.6-sol`].params).toEqual({
@@ -219,11 +221,56 @@ describe("outer-cell security boundary", () => {
       ]));
       expect(create.argv.join(" ")).toMatch(/o=size=[0-9]+,uid=1000,gid=1000,mode=0700/);
     }
+    const keeperName = `ligou-oc-volume-keeper-${runtime.opaque_id.slice(0, 16)}`;
+    const keeper = plan.find((entry) => entry.label === "start-volume-keeper")!;
+    expect(keeper.argv).toEqual(expect.arrayContaining([
+      "--name", keeperName,
+      "--network", "none",
+      "--read-only",
+      "--cap-drop=ALL",
+      "--security-opt=no-new-privileges",
+      "--user", "1000:1000",
+    ]));
+    for (const [name, volume] of Object.entries(runtime.volume_names)) {
+      expect(keeper.argv).toContain(`type=volume,src=${volume},dst=/volumes/${name}`);
+    }
+    for (const [label, target] of [
+      ["prepare-state-volume", "/volumes/state"],
+      ["prepare-workspace-volume", "/volumes/workspace"],
+      ["prepare-output-volume", "/volumes/output"],
+    ] as const) {
+      const prepare = plan.find((entry) => entry.label === label)!;
+      expect(prepare.argv).toEqual(expect.arrayContaining([
+        "docker", "exec", "--user", "1000:1000", keeperName,
+      ]));
+      expect(prepare.argv).not.toContain("run");
+      const shell = prepare.argv[prepare.argv.indexOf("-c") + 1]!;
+      expect(shell).toContain('stat -c %u:%g:%a "$1"');
+      expect(shell).not.toMatch(/chown|chmod/);
+      expect(prepare.argv.at(-1)).toBe(target);
+    }
     const writeSecret = plan.find((entry) => entry.label === "write-bridge-secret")!;
     const writeConfig = plan.find((entry) => entry.label === "write-openclaw-config")!;
+    const writeGateway = plan.find((entry) => entry.label === "write-gateway-secret")!;
+    for (const writer of [writeConfig, writeGateway, writeSecret]) {
+      expect(writer.argv).toEqual(expect.arrayContaining([
+        "docker", "exec", "-i", "--user", "1000:1000", keeperName,
+      ]));
+      expect(writer.argv).not.toContain("run");
+      const shell = writer.argv[writer.argv.indexOf("-c") + 1]!;
+      expect(shell).toContain('stat -c %u:%g:%a "$1"');
+      expect(shell).toContain('stat -c %u:%g:%a "$target"');
+      expect(shell).not.toContain("chown");
+    }
+    const startCellIndex = plan.findIndex((entry) => entry.label === "start-cell");
+    const stopKeeperIndex = plan.findIndex((entry) => entry.label === "stop-volume-keeper");
+    const removeKeeperIndex = plan.findIndex((entry) => entry.label === "remove-volume-keeper");
+    expect(startCellIndex).toBeGreaterThan(plan.findIndex((entry) => entry.label === "start-volume-keeper"));
+    expect(stopKeeperIndex).toBeGreaterThan(startCellIndex);
+    expect(removeKeeperIndex).toBeGreaterThan(stopKeeperIndex);
     expect(writeConfig.sensitive_stdin).toBe(true);
-    expect(writeSecret.argv).toContain(`ligou-discovery-bridge@${images.bridge_image.selected_manifest_digest}`);
-    expect(writeSecret.argv).not.toContain(`ghcr.io/openclaw/openclaw@${images.cell_image.selected_manifest_digest}`);
+    expect(keeper.argv).toContain(`ligou-discovery-bridge@${images.bridge_image.selected_manifest_digest}`);
+    expect(keeper.argv).not.toContain(`ghcr.io/openclaw/openclaw@${images.cell_image.selected_manifest_digest}`);
     const cell = plan.find((entry) => entry.label === "start-cell")!;
     expect(cell.argv.join(" ")).not.toContain(runtime.volume_names.bridge_secret);
 
@@ -372,6 +419,28 @@ function codexRequest(marker: string, extras: Record<string, unknown> = {}) {
       text: { verbosity: "low" },
       include: ["reasoning.encrypted_content"],
       prompt_cache_key: "cell-selected-cache-key",
+      ...extras,
+    }),
+  });
+}
+
+function observedOpenClawRequest(marker: string, extras: Record<string, unknown> = {}) {
+  return new Request("http://bridge:4310/codex/responses", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${marker}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-5.6-sol",
+      store: false,
+      stream: true,
+      instructions: "Use only the two discovery tools.",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "discover" }] }],
+      tools: codexTools,
+      reasoning: { effort: "medium", summary: "auto" },
+      include: ["reasoning.encrypted_content"],
+      max_output_tokens: 8_192,
       ...extras,
     }),
   });
@@ -594,7 +663,7 @@ describe("trusted Codex subscription proxy", () => {
       },
     });
 
-    const inboundRequest = codexRequest(markerJwt(now));
+    const inboundRequest = observedOpenClawRequest(markerJwt(now));
     const inboundBytes = (await inboundRequest.clone().arrayBuffer()).byteLength;
     const response = await proxy.forward(inboundRequest);
     expect(response.status).toBe(200);
@@ -962,7 +1031,9 @@ describe("inspect-after cleanup proof", () => {
         async run(command) {
           commands.push(command);
           if (command.label.startsWith("inspect-")) {
-            const resource = command.label.includes("volume")
+            const resource = command.label.includes("volume-keeper")
+              ? "No such object"
+              : command.label.includes("volume")
               ? "No such volume"
               : command.label.includes("network")
                 ? "network not found"

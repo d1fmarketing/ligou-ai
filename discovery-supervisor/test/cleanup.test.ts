@@ -149,7 +149,10 @@ const completeDirectLocalProof = {
 class RecordingRunner implements CommandRunner {
   readonly commands: CommandSpec[] = [];
 
-  constructor(private readonly failLabels = new Set<string>()) {}
+  constructor(
+    private readonly failLabels = new Set<string>(),
+    private readonly absentInspectStdout = "",
+  ) {}
 
   async run(command: CommandSpec): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     this.commands.push(command);
@@ -157,12 +160,14 @@ class RecordingRunner implements CommandRunner {
       return { exitCode: 1, stdout: "", stderr: `forced ${command.label} failure` };
     }
     if (command.label.startsWith("inspect-")) {
-      const stderr = command.label.includes("volume")
+      const stderr = command.label.includes("volume-keeper")
+        ? "Error: No such object"
+        : command.label.includes("volume")
         ? "Error: No such volume"
         : command.label.includes("network")
         ? "Error: network not found"
         : "Error: No such object";
-      return { exitCode: 1, stdout: "", stderr };
+      return { exitCode: 1, stdout: this.absentInspectStdout, stderr };
     }
     return { exitCode: 0, stdout: "", stderr: "" };
   }
@@ -286,11 +291,13 @@ describe("CellRuntime exhaustive cleanup", () => {
       late_result_rejected: true,
     });
     expect(runner.commands.map((command) => command.label)).toEqual([
+      "remove-bridge",
+      "inspect-bridge-absence",
       "stop-cell",
       "remove-cell",
       "inspect-cell-absence",
-      "remove-bridge",
-      "inspect-bridge-absence",
+      "remove-volume-keeper",
+      "inspect-volume-keeper-absence",
       "remove-config-volume",
       "inspect-config-volume-absence",
       "remove-state-volume",
@@ -310,6 +317,16 @@ describe("CellRuntime exhaustive cleanup", () => {
     ]);
   });
 
+  test("accepts Docker 29 exact empty-array inspect output only with not-found evidence", async () => {
+    const runtime = cellRuntime({
+      command_runner: new RecordingRunner(new Set(), "[]\n"),
+      listener_closed: async () => true,
+      identity_process_absent: async () => true,
+    });
+
+    expect(await runtime.cleanup({ identity: await identity() })).toEqual(completeRuntimeProof);
+  });
+
   test("continues after a failure at every cleanup command and makes only the affected proof fail", async () => {
     const cases: ReadonlyArray<{
       label: string;
@@ -318,6 +335,8 @@ describe("CellRuntime exhaustive cleanup", () => {
       { label: "inspect-cell-absence", field: "gateway_exited" },
       { label: "inspect-cell-absence", field: "cell_removed" },
       { label: "inspect-bridge-absence", field: "bridge_removed" },
+      { label: "inspect-volume-keeper-absence", field: "gateway_exited" },
+      { label: "inspect-volume-keeper-absence", field: "cell_removed" },
       { label: "inspect-config-volume-absence", field: "config_removed" },
       { label: "inspect-state-volume-absence", field: "state_removed" },
       { label: "inspect-workspace-volume-absence", field: "workspace_removed" },
@@ -339,7 +358,7 @@ describe("CellRuntime exhaustive cleanup", () => {
       const proof = await runtime.cleanup({ identity: await identity() });
 
       expect(proof[fault.field]).toBe(false);
-      expect(runner.commands).toHaveLength(21);
+      expect(runner.commands).toHaveLength(23);
     }
   });
 

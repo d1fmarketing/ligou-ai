@@ -508,7 +508,7 @@ describe("runtime cleanup observers", () => {
     expect(await proveLoopbackListenerClosed(address.port, 100)).toBe(true);
   });
 
-  test("requires exact empty Docker process readback for both attempt containers", async () => {
+  test("requires exact empty Docker process readback for every attempt container", async () => {
     const commands: string[] = [];
     const absent = await proveDockerIdentityProcessesAbsent({
       async run(command) {
@@ -516,17 +516,18 @@ describe("runtime cleanup observers", () => {
         return { exitCode: 0, stdout: "", stderr: "" };
       },
     }, {
-      cell_container_name: "ligou-oc-cell-abcdef",
-      bridge_container_name: "ligou-oc-bridge-abcdef",
+      cell_container_name: "ligou-oc-cell-abcdefabcdefabcd",
+      bridge_container_name: "ligou-oc-bridge-abcdefabcdefabcd",
     });
     expect(absent).toBe(true);
-    expect(commands).toHaveLength(2);
+    expect(commands).toHaveLength(3);
+    expect(commands[2]).toContain("ligou-oc-volume-keeper-abcdefabcdefabcd");
 
     expect(await proveDockerIdentityProcessesAbsent({
       async run() { return { exitCode: 0, stdout: "container-id\n", stderr: "" }; },
     }, {
-      cell_container_name: "ligou-oc-cell-abcdef",
-      bridge_container_name: "ligou-oc-bridge-abcdef",
+      cell_container_name: "ligou-oc-cell-abcdefabcdefabcd",
+      bridge_container_name: "ligou-oc-bridge-abcdefabcdefabcd",
     })).toBe(false);
   });
 

@@ -1,5 +1,8 @@
 import { connect } from "node:net";
-import type { CommandRunner } from "../openclaw/cell-runtime";
+import {
+  volumeKeeperContainerName,
+  type CommandRunner,
+} from "../openclaw/cell-runtime";
 
 export function proveLoopbackListenerClosed(
   port: number,
@@ -45,6 +48,7 @@ export async function proveDockerIdentityProcessesAbsent(
   for (const name of [
     containerName(identity.cell_container_name),
     containerName(identity.bridge_container_name),
+    containerName(volumeKeeperContainerName(identity.cell_container_name)),
   ]) {
     let result;
     try {

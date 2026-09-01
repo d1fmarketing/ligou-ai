@@ -62,6 +62,7 @@ const ALLOWED_TOOLS = new Set(Object.keys(TOOL_PARAMETERS));
 const OPENCLAW_REQUEST_KEYS = new Set([
   "model", "store", "stream", "instructions", "input", "tools", "tool_choice",
   "parallel_tool_calls", "reasoning", "text", "include", "prompt_cache_key",
+  "max_output_tokens",
 ]);
 const DIRECT_REQUEST_KEYS = new Set([
   "model", "store", "stream", "instructions", "input",
@@ -367,10 +368,20 @@ function sanitizeOpenClawBody(body: Record<string, unknown>, model: string): Rec
   const instructions = boundedString(body.instructions, "model instructions", 65_536);
   const input = validateInput(body.input);
   const tools = validateTools(body.tools);
-  if (body.tool_choice !== "auto") throw new ModelProxyPolicyError("model request tool choice is invalid");
-  const text = record(body.text, "model request text");
-  if (Object.keys(text).length !== 1 || text.verbosity !== "low") {
-    throw new ModelProxyPolicyError("model request text settings are invalid");
+  if (body.tool_choice !== undefined && body.tool_choice !== "auto") {
+    throw new ModelProxyPolicyError("model request tool choice is invalid");
+  }
+  if (body.parallel_tool_calls !== undefined && typeof body.parallel_tool_calls !== "boolean") {
+    throw new ModelProxyPolicyError("model request parallel tool setting is invalid");
+  }
+  if (body.max_output_tokens !== undefined) {
+    integer(body.max_output_tokens, "model request output token limit", 1, 8_192);
+  }
+  if (body.text !== undefined) {
+    const text = record(body.text, "model request text");
+    if (Object.keys(text).length !== 1 || text.verbosity !== "low") {
+      throw new ModelProxyPolicyError("model request text settings are invalid");
+    }
   }
   if (!Array.isArray(body.include) || body.include.length !== 1 ||
       body.include[0] !== "reasoning.encrypted_content") {

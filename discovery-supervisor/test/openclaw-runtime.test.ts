@@ -251,13 +251,19 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
     expect(config.gateway).toEqual({
       mode: "local",
       port: identity.gateway_port,
-      bind: "lan",
+      bind: "loopback",
       auth: {
         mode: "token",
         token: { source: "file", provider: "attempt_gateway", id: "/gateway_token" },
       },
       reload: { mode: "off" },
-      controlUi: { enabled: false },
+      controlUi: {
+        enabled: false,
+        allowedOrigins: [
+          `http://127.0.0.1:${identity.host_gateway_port}`,
+          `http://localhost:${identity.host_gateway_port}`,
+        ],
+      },
       terminal: { enabled: false },
       nodes: {
         allowSkills: false,
@@ -268,7 +274,7 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
     expect(config.models.catalogRefresh).toEqual({ enabled: false });
     expect(config.models.mode).toBe("replace");
     expect(config.models.providers.stage0_bridge).toMatchObject({
-      baseUrl: `http://bridge:${identity.bridge_http_port}`,
+      baseUrl: `http://127.0.0.1:${identity.bridge_http_port}/codex`,
       apiKey: TEST_MARKER,
       api: "openai-chatgpt-responses",
     });
@@ -278,9 +284,20 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
       browser: { enabled: false, allowHostControl: false },
     });
     expect(config.tools.allow).toEqual([
+      "bundle-mcp",
       "discovery__fetch_discovery_page",
       "discovery__submit_discovery_result",
     ]);
+    expect(config.tools.profile).toBe("coding");
+    const discoveryAgent = config.agents.entries.discovery as {
+      readonly tools: { readonly allow: readonly string[]; readonly profile: string };
+    };
+    expect(discoveryAgent.tools.allow).toEqual([
+      "bundle-mcp",
+      "discovery__fetch_discovery_page",
+      "discovery__submit_discovery_result",
+    ]);
+    expect(discoveryAgent.tools.profile).toBe("coding");
     expect(config.tools.elevated).toEqual({ enabled: false });
     expect(config.skills).toEqual({ allowBundled: [], entries: {} });
     expect(config.tools.deny).toEqual(expect.arrayContaining([
@@ -310,6 +327,9 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
       include: ["fetch_discovery_page", "submit_discovery_result"],
       exclude: ["resources_*", "prompts_*"],
     });
+    expect(config.mcp.servers.discovery.url).toBe(
+      `http://127.0.0.1:${identity.bridge_http_port}/mcp`,
+    );
 
     const serialized = JSON.stringify(config);
     for (const forbidden of [job.job_id, job.attempt_id, "fence_generation", "claim_token"]) {
@@ -398,6 +418,12 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
       "--cpus=1",
       "--network",
       identity.internal_network_name,
+      "--env",
+      "XDG_CACHE_HOME=/tmp/openclaw-cache",
+      "--env",
+      "TMPDIR=/tmp",
+      "-p",
+      `127.0.0.1:${identity.host_gateway_port}:${identity.bridge_relay_port}`,
       `ghcr.io/openclaw/openclaw@${TEST_IMAGES.cell_image.selected_manifest_digest}`,
       "gateway",
       "run",
@@ -427,37 +453,35 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
       "--network",
-      identity.egress_network_name,
-      "-p",
-      `127.0.0.1:${identity.host_gateway_port}:${identity.bridge_relay_port}`,
+      `container:${identity.cell_container_name}`,
+      "--env",
+      "OPENCLAW_CELL_HOST=127.0.0.1",
     ]));
-    expect(plan).toContainEqual(expect.objectContaining({
-      label: "connect-bridge-internal",
-      argv: [
-        "docker", "network", "connect", "--alias", "bridge",
-        identity.internal_network_name,
-        identity.bridge_container_name,
-      ],
-    }));
+    expect(bridge.argv).not.toContain("-p");
+    expect(plan.some((command) => command.label === "connect-bridge-internal")).toBe(false);
+    expect(plan.findIndex((command) => command.label === "start-cell")).toBeLessThan(
+      plan.findIndex((command) => command.label === "start-bridge"),
+    );
     expect(plan).toContainEqual(expect.objectContaining({
       label: "create-internal-network",
       argv: ["docker", "network", "create", "--internal", identity.internal_network_name],
     }));
+    expect(plan.some((command) => command.label === "create-egress-network")).toBe(false);
+    const keeperName = `ligou-oc-volume-keeper-${identity.opaque_id.slice(0, 16)}`;
     for (const volume of ["state", "workspace", "output"] as const) {
       expect(plan).toContainEqual(expect.objectContaining({
         label: `prepare-${volume}-volume`,
         argv: expect.arrayContaining([
-          "--user", "0:0",
-          `type=volume,src=${identity.volume_names[volume]},dst=/target`,
-          "chown 1000:1000 /target; chmod 0700 /target",
+          "docker", "exec", "--user", "1000:1000", keeperName,
+          `/volumes/${volume}`,
         ]),
       }));
     }
     for (const label of ["write-openclaw-config", "write-gateway-secret", "write-bridge-secret"]) {
       expect(plan.find((command) => command.label === label)?.argv).toEqual(expect.arrayContaining([
-        "--user", "0:0",
+        "docker", "exec", "-i", "--user", "1000:1000", keeperName,
       ]));
-      expect(plan.find((command) => command.label === label)?.argv.join(" ")).toContain("chown 1000:1000");
+      expect(plan.find((command) => command.label === label)?.argv.join(" ")).not.toContain("chown");
     }
   });
 });
@@ -542,6 +566,58 @@ describe("trusted bridge authority", () => {
 });
 
 describe("supervisor-owned Gateway connection", () => {
+  test("rejects a recovery marker that carries no executable operator scope", async () => {
+    const connection = {
+      hello: {
+        type: "hello-ok",
+        protocol: 4,
+        server: { version: "2026.8.1", connId: "conn-shared-token" },
+        features: { methods: ["agent", "agent.wait", "sessions.abort"], events: [] },
+        snapshot: {},
+        auth: {
+          role: "operator",
+          scopes: [],
+          recoveryScope: "a".repeat(43),
+        },
+        policy: { maxPayload: 26_214_400, maxBufferedBytes: 52_428_800, tickIntervalMs: 15_000 },
+      },
+      async request() { return {}; },
+      close() {},
+    } satisfies GatewayConnection;
+    const client = new OpenClawGatewayClient({ connect: async () => connection });
+
+    await expect(client.run({
+      url: "ws://127.0.0.1:29104",
+      token: "attempt-gateway-secret",
+      prompt: "bounded discovery",
+      deadline_at: "2099-09-01T10:10:00.000Z",
+    })).rejects.toThrow("insufficient operator scope");
+  });
+
+  test("rejects empty operator scopes without an authenticated recovery scope", async () => {
+    const connection: GatewayConnection = {
+      hello: {
+        type: "hello-ok",
+        protocol: 4,
+        server: { version: "2026.8.1", connId: "conn-unbound" },
+        features: { methods: ["agent", "agent.wait", "sessions.abort"], events: [] },
+        snapshot: {},
+        auth: { role: "operator", scopes: [] },
+        policy: { maxPayload: 26_214_400, maxBufferedBytes: 52_428_800, tickIntervalMs: 15_000 },
+      },
+      async request() { return {}; },
+      close() {},
+    };
+    const client = new OpenClawGatewayClient({ connect: async () => connection });
+
+    await expect(client.run({
+      url: "ws://127.0.0.1:29103",
+      token: "attempt-gateway-secret",
+      prompt: "bounded discovery",
+      deadline_at: "2099-09-01T10:10:00.000Z",
+    })).rejects.toThrow("insufficient operator scope");
+  });
+
   test("connects only to loopback on wire v4, waits for its exact run, and aborts that run", async () => {
     const requests: Array<{ method: string; params: unknown; options: unknown }> = [];
     const connection: GatewayConnection = {
@@ -551,7 +627,7 @@ describe("supervisor-owned Gateway connection", () => {
         server: { version: "2026.8.1", connId: "conn-1" },
         features: { methods: ["agent", "agent.wait", "sessions.abort"], events: [] },
         snapshot: {},
-        auth: { role: "operator", scopes: ["operator.read", "operator.write"] },
+        auth: { role: "operator", scopes: ["operator.write"] },
         policy: { maxPayload: 26_214_400, maxBufferedBytes: 52_428_800, tickIntervalMs: 15_000 },
       },
       async request(method, params, options) {
@@ -589,7 +665,12 @@ describe("supervisor-owned Gateway connection", () => {
     expect(requests).toEqual([
       {
         method: "agent",
-        params: expect.objectContaining({ message: "Use only the discovery tools." }),
+        params: expect.objectContaining({
+          message: "Use only the discovery tools.",
+          promptMode: "minimal",
+          suppressPromptPersistence: true,
+          sessionEffects: "internal",
+        }),
         options: undefined,
       },
       {
@@ -599,6 +680,7 @@ describe("supervisor-owned Gateway connection", () => {
       },
       { method: "sessions.abort", params: { runId: "run-1" }, options: undefined },
     ]);
+    expect(requests[0]?.params).not.toHaveProperty("modelRun");
   });
 
   test("rejects non-loopback relays and incompatible Gateway hello frames", async () => {
@@ -609,7 +691,7 @@ describe("supervisor-owned Gateway connection", () => {
         server: { version: "2026.7.1", connId: "conn-old" },
         features: { methods: ["agent"], events: [] },
         snapshot: {},
-        auth: { role: "operator", scopes: ["operator.read", "operator.write"] },
+        auth: { role: "operator", scopes: ["operator.write"] },
         policy: { maxPayload: 1, maxBufferedBytes: 1, tickIntervalMs: 1 },
       },
       async request() { return {}; },
@@ -642,7 +724,7 @@ describe("supervisor-owned Gateway connection", () => {
         server: { version: "2026.8.1", connId: "conn-2" },
         features: { methods: ["agent", "agent.wait", "sessions.abort"], events: [] },
         snapshot: {},
-        auth: { role: "operator", scopes: ["operator.read", "operator.write"] },
+        auth: { role: "operator", scopes: ["operator.write"] },
         policy: { maxPayload: 26_214_400, maxBufferedBytes: 52_428_800, tickIntervalMs: 15_000 },
       },
       async request(method, params) {
@@ -709,7 +791,7 @@ describe("supervisor-owned Gateway connection", () => {
         server: { version: "2026.8.1", connId: "conn-retry" },
         features: { methods: ["agent", "agent.wait", "sessions.abort"], events: [] },
         snapshot: {},
-        auth: { role: "operator", scopes: ["operator.read", "operator.write"] },
+        auth: { role: "operator", scopes: ["operator.write"] },
         policy: { maxPayload: 26_214_400, maxBufferedBytes: 52_428_800, tickIntervalMs: 15_000 },
       },
       async request(method) {
@@ -738,6 +820,43 @@ describe("supervisor-owned Gateway connection", () => {
       prompt: "bounded discovery",
       deadline_at: "2099-09-01T10:10:00.000Z",
     })).run_id).toBe("run-retry");
+    expect(attempts).toBe(3);
+  });
+
+  test("retries a relay early-close ErrorEvent only before hello-ok", async () => {
+    let attempts = 0;
+    const connection: GatewayConnection = {
+      hello: {
+        type: "hello-ok",
+        protocol: 4,
+        server: { version: "2026.8.1", connId: "conn-relay-retry" },
+        features: { methods: ["agent", "agent.wait", "sessions.abort"], events: [] },
+        snapshot: {},
+        auth: { role: "operator", scopes: ["operator.write"] },
+        policy: { maxPayload: 26_214_400, maxBufferedBytes: 52_428_800, tickIntervalMs: 15_000 },
+      },
+      async request(method) {
+        if (method === "agent") return { status: "accepted", runId: "run-relay-retry" };
+        if (method === "agent.wait") return { status: "ok", runId: "run-relay-retry" };
+        return { aborted: true };
+      },
+      close() {},
+    };
+    const client = new OpenClawGatewayClient({
+      connect: async () => {
+        attempts += 1;
+        if (attempts < 3) throw new Error("[object ErrorEvent]");
+        return connection;
+      },
+      sleep: async () => undefined,
+    });
+
+    expect((await client.run({
+      url: "ws://127.0.0.1:29109",
+      token: "attempt-gateway-secret",
+      prompt: "bounded discovery",
+      deadline_at: new Date(Date.now() + 60_000).toISOString(),
+    })).run_id).toBe("run-relay-retry");
     expect(attempts).toBe(3);
   });
 });
