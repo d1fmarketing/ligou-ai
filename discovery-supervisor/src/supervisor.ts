@@ -7,7 +7,18 @@ import type {
   WorkerResult,
   WorkerStatus,
 } from "./contracts";
-import type { CleanupReadback, JobStore, SelectionReadback } from "./job-store";
+import type {
+  ClaimedAttempt,
+  CleanupAuthority,
+  CleanupReadback,
+  CommittedResultCapability,
+  ExpiredCleanupClaim,
+  ExpiredCleanupRecovery,
+  JobStore,
+  RuntimeBindReadback,
+  RuntimeSlotCapability,
+  SelectionReadback,
+} from "./job-store";
 import {
   storeCleanupProof,
   type DetailedCleanupProof,
@@ -20,49 +31,17 @@ import {
   type RuntimeIdentityBinding,
 } from "./openclaw/runtime-identity";
 
-export interface SupervisorClaimedAttempt {
-  readonly job: WorkerJob;
-  readonly adapter_id: DiscoveryAdapterId;
-  readonly runtime_slot_id: string;
-  readonly job_version: number;
-  readonly cleanup_authority: SupervisorCleanupAuthority;
-}
-
-export interface SupervisorRuntimeBindReadback {
-  readonly attempt_id: string;
-  readonly runtime_slot_id: string;
-  readonly job_id: string;
-  readonly job_version: number;
-  readonly fence_generation: number;
-  readonly runtime_identity: RuntimeIdentityBinding;
-  readonly runtime_identity_hash: string;
-}
-
-export interface SupervisorCleanupAuthority {
-  readonly job_id: string;
-  readonly attempt_id: string;
-  readonly runtime_slot_id: string;
-  readonly fence_generation: number;
-  readonly claim_token: string;
-}
-
-export interface SupervisorExpiredCleanupClaim {
-  readonly job_id: string;
-  readonly attempt_id: string;
-  readonly adapter_id: DiscoveryAdapterId;
-  readonly runtime_slot_id: string;
-  readonly runtime_identity: RuntimeIdentityBinding;
-  readonly fence_generation: number;
-  readonly claim_token: string;
-  readonly job_version: number;
-  readonly cleanup_authority: SupervisorCleanupAuthority;
-}
+export type SupervisorClaimedAttempt = ClaimedAttempt;
+export type SupervisorRuntimeBindReadback = RuntimeBindReadback;
+export type SupervisorCleanupAuthority = CleanupAuthority;
+export type SupervisorExpiredCleanupClaim = ExpiredCleanupClaim;
+export type SupervisorExpiredCleanupRecovery = ExpiredCleanupRecovery;
 
 export interface SupervisorStore {
   claimExpiredCleanup(
     workerId: string,
     leaseSeconds: number,
-  ): Promise<SupervisorExpiredCleanupClaim | null>;
+  ): Promise<SupervisorExpiredCleanupRecovery | null>;
   claimAttempt(
     workerId: string,
     adapterId: DiscoveryAdapterId,
@@ -76,8 +55,11 @@ export interface SupervisorStore {
     claimedJob: WorkerJob,
     snapshots: readonly DiscoverySourceSnapshot[],
   ): WorkerJob;
-  commitResult(job: WorkerJob, candidate: WorkerResult): Promise<string>;
-  selectResult(job: WorkerJob, expectedVersion: number): Promise<SelectionReadback>;
+  commitResult(
+    job: WorkerJob,
+    candidate: WorkerResult,
+  ): Promise<CommittedResultCapability>;
+  selectResult(committed: CommittedResultCapability): Promise<SelectionReadback>;
   terminalizeAttempt(
     claim: SupervisorClaimedAttempt,
     outcome: "failed" | "cancelled",
@@ -87,7 +69,11 @@ export interface SupervisorStore {
     authority: SupervisorCleanupAuthority,
     proof: DetailedCleanupProof,
   ): Promise<CleanupReadback>;
-  quarantineSlot(slotId: string, reason: string, proofHash: string): Promise<void>;
+  quarantineSlot(
+    runtimeSlot: RuntimeSlotCapability,
+    reason: string,
+    proofHash: string,
+  ): Promise<void>;
 }
 
 type AssertTrue<T extends true> = T;
@@ -135,6 +121,11 @@ export type SupervisorRunOutcome =
       readonly state: "cleanup_recovered";
       readonly attempt_id: string;
       readonly runtime_slot_id: string;
+    }
+  | {
+      readonly state: "runtime_not_bound_recovered";
+      readonly attempt_id: string;
+      readonly runtime_slot_id: string;
     };
 
 class SupervisorCancelledError extends Error {
@@ -175,7 +166,7 @@ function assertRuntimeBinding(
   readback: SupervisorRuntimeBindReadback,
 ): void {
   if (readback.job_id !== claim.job.job_id || readback.attempt_id !== claim.job.attempt_id ||
-      readback.runtime_slot_id !== claim.runtime_slot_id ||
+      readback.runtime_slot_id !== claim.runtime_slot.runtime_slot_id ||
       readback.job_version !== claim.job_version ||
       readback.fence_generation !== claim.job.fence_generation ||
       !/^[0-9a-f]{64}$/.test(readback.runtime_identity_hash) ||
@@ -189,15 +180,13 @@ function assertCleanupAuthority(
   expected: {
     readonly job_id: string;
     readonly attempt_id: string;
-    readonly runtime_slot_id: string;
+    readonly runtime_slot: RuntimeSlotCapability;
     readonly fence_generation: number;
-    readonly claim_token: string;
   },
 ): void {
   if (authority.job_id !== expected.job_id || authority.attempt_id !== expected.attempt_id ||
-      authority.runtime_slot_id !== expected.runtime_slot_id ||
-      authority.fence_generation !== expected.fence_generation ||
-      authority.claim_token !== expected.claim_token) {
+      authority.runtime_slot !== expected.runtime_slot ||
+      authority.fence_generation !== expected.fence_generation) {
     throw new Error("cleanup authority mismatched trusted attempt readback");
   }
 }
@@ -207,10 +196,9 @@ function assertRotatedCleanupAuthority(
   authority: SupervisorCleanupAuthority,
 ): void {
   if (authority.job_id !== claim.job.job_id || authority.attempt_id !== claim.job.attempt_id ||
-      authority.runtime_slot_id !== claim.runtime_slot_id ||
+      authority.runtime_slot !== claim.runtime_slot ||
       !Number.isSafeInteger(authority.fence_generation) ||
-      authority.fence_generation <= claim.job.fence_generation ||
-      authority.claim_token.trim() === "" || authority.claim_token === claim.job.claim_token) {
+      authority.fence_generation <= claim.job.fence_generation) {
     throw new Error("terminal cleanup authority did not rotate the exact attempt fence");
   }
 }
@@ -281,6 +269,13 @@ export class DiscoverySupervisor {
       this.#options.worker_id,
       this.#leaseSeconds,
     );
+    if (expired?.recovery_outcome === "runtime_not_bound") {
+      return Object.freeze({
+        state: "runtime_not_bound_recovered",
+        attempt_id: expired.attempt_id,
+        runtime_slot_id: expired.runtime_slot_id,
+      });
+    }
     if (expired !== null) return this.#recoverExpiredCleanup(expired);
 
     const adapterId = this.#options.select_adapter();
@@ -291,14 +286,13 @@ export class DiscoverySupervisor {
       this.#leaseSeconds,
     );
     if (claimed === null) return Object.freeze({ state: "idle" });
-    assertUuid(claimed.runtime_slot_id, "claimed runtime slot id is invalid");
+    assertUuid(claimed.runtime_slot.runtime_slot_id, "claimed runtime slot id is invalid");
     if (claimed.adapter_id !== adapterId) throw new Error("claimed adapter differs from selected adapter");
     assertCleanupAuthority(claimed.cleanup_authority, {
       job_id: claimed.job.job_id,
       attempt_id: claimed.job.attempt_id,
-      runtime_slot_id: claimed.runtime_slot_id,
+      runtime_slot: claimed.runtime_slot,
       fence_generation: claimed.job.fence_generation,
-      claim_token: claimed.job.claim_token,
     });
 
     let binding = runtimeIdentityBinding(runtimeIdentity);
@@ -354,17 +348,17 @@ export class DiscoverySupervisor {
       phase = "worker_result";
       const candidate = await withAbort(this.#options.broker.result(handle), signal);
       phase = "result_commit";
-      const resultId = await this.#options.store.commitResult(bound, candidate);
+      const committed = await this.#options.store.commitResult(bound, candidate);
       phase = "result_select";
-      const selection = await this.#options.store.selectResult(bound, claimed.job_version);
-      if (selection.result_id !== resultId) {
+      const selection = await this.#options.store.selectResult(committed);
+      if (selection.result_id !== committed.result_id) {
         throw new Error("selected result differs from committed result");
       }
       outcome = Object.freeze({
         state: "selected",
         job_id: claimed.job.job_id,
         attempt_id: claimed.job.attempt_id,
-        result_id: resultId,
+        result_id: committed.result_id,
       });
     } catch (error) {
       primaryError = error;
@@ -415,7 +409,11 @@ export class DiscoverySupervisor {
         } else {
           const missingProof = this.#missingCleanupProof();
           try {
-            await this.#quarantine(cleanupAuthority.runtime_slot_id, "cleanup_record_failed", missingProof);
+            await this.#quarantine(
+              cleanupAuthority.runtime_slot,
+              "cleanup_record_failed",
+              missingProof,
+            );
           } catch {
             // Preserve the primary failure while leaving the slot fail-closed in database authority.
           }
@@ -424,7 +422,7 @@ export class DiscoverySupervisor {
       } else {
         const missingProof = this.#missingCleanupProof();
         try {
-          await this.#quarantine(claimed.runtime_slot_id, "runtime_bind_failed", missingProof);
+          await this.#quarantine(claimed.runtime_slot, "runtime_bind_failed", missingProof);
         } catch {
           // A failed bind leaves the claimed slot non-reusable; quarantine is best-effort escalation.
         }
@@ -438,7 +436,10 @@ export class DiscoverySupervisor {
   async #recoverExpiredCleanup(
     claim: SupervisorExpiredCleanupClaim,
   ): Promise<SupervisorRunOutcome> {
-    assertUuid(claim.runtime_slot_id, "expired cleanup runtime slot id is invalid");
+    assertUuid(
+      claim.runtime_slot.runtime_slot_id,
+      "expired cleanup runtime slot id is invalid",
+    );
     assertCleanupAuthority(claim.cleanup_authority, claim);
     const authority = claim.cleanup_authority;
     let proof: RuntimeCleanupProof;
@@ -451,7 +452,7 @@ export class DiscoverySupervisor {
     return Object.freeze({
       state: "cleanup_recovered",
       attempt_id: claim.attempt_id,
-      runtime_slot_id: claim.runtime_slot_id,
+      runtime_slot_id: claim.runtime_slot.runtime_slot_id,
     });
   }
 
@@ -461,17 +462,17 @@ export class DiscoverySupervisor {
   ): Promise<void> {
     const readback = await this.#options.store.recordCleanup(authority, storeCleanupProof(proof));
     if (!cleanupIsProved(proof) || readback.cleanup_state !== "proved" || !readback.slot_updated) {
-      await this.#quarantine(authority.runtime_slot_id, "cleanup_unresolved", proof);
+      await this.#quarantine(authority.runtime_slot, "cleanup_unresolved", proof);
       throw new Error("runtime cleanup unresolved");
     }
   }
 
   async #quarantine(
-    slotId: string,
+    runtimeSlot: RuntimeSlotCapability,
     reason: string,
     proof: RuntimeCleanupProof,
   ): Promise<void> {
-    await this.#options.store.quarantineSlot(slotId, reason, cleanupHash(proof));
+    await this.#options.store.quarantineSlot(runtimeSlot, reason, cleanupHash(proof));
   }
 
   #missingCleanupProof(): RuntimeCleanupProof {

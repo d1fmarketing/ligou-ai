@@ -7,7 +7,13 @@ import type {
   WorkerResult,
   WorkerStatus,
 } from "../src/contracts";
-import type { CleanupReadback, SelectionReadback } from "../src/job-store";
+import { JobStore } from "../src/job-store";
+import type {
+  CleanupReadback,
+  CommittedResultCapability,
+  RuntimeSlotCapability,
+  SelectionReadback,
+} from "../src/job-store";
 import {
   CellRuntime,
   type CommandRunner,
@@ -37,6 +43,7 @@ import {
   type SupervisorCleanupAuthority,
   type SupervisorClaimedAttempt,
   type SupervisorExpiredCleanupClaim,
+  type SupervisorExpiredCleanupRecovery,
   type SupervisorFetchGateway,
   type SupervisorRuntimeBindReadback,
   type SupervisorStore,
@@ -60,7 +67,6 @@ const claimedJob: WorkerJob = {
   attempt_id: "22222222-2222-4222-8222-222222222222",
   attempt_number: 1,
   fence_generation: 7,
-  claim_token: "claim-token",
   normalized_origin: "https://example.com/",
   deadline_at: "2026-09-01T10:10:00.000Z",
   budget: {
@@ -349,7 +355,7 @@ describe("ephemeral OpenClaw attempt factory", () => {
     for (const forbidden of [
       boundJob.job_id,
       boundJob.attempt_id,
-      boundJob.claim_token,
+      "claim_token",
       "supervisor-upstream-secret",
     ]) {
       expect(exposed).not.toContain(forbidden);
@@ -450,33 +456,43 @@ describe("OpenClaw adapter fencing", () => {
 });
 
 const SLOT_ID = "44444444-4444-4444-8444-444444444444";
-const cleanupAuthority: SupervisorCleanupAuthority = {
+const runtimeSlot: RuntimeSlotCapability = {
   job_id: claimedJob.job_id,
   attempt_id: claimedJob.attempt_id,
   runtime_slot_id: SLOT_ID,
+};
+const cleanupAuthority: SupervisorCleanupAuthority = {
+  job_id: claimedJob.job_id,
+  attempt_id: claimedJob.attempt_id,
+  runtime_slot: runtimeSlot,
   fence_generation: 8,
-  claim_token: "rotated-cleanup-token",
 };
 const claimCleanupAuthority: SupervisorCleanupAuthority = {
   job_id: claimedJob.job_id,
   attempt_id: claimedJob.attempt_id,
-  runtime_slot_id: SLOT_ID,
+  runtime_slot: runtimeSlot,
   fence_generation: 7,
-  claim_token: "claim-token",
 };
 const claimedAttempt: SupervisorClaimedAttempt = {
   job: claimedJob,
   adapter_id: "openclaw",
-  runtime_slot_id: SLOT_ID,
+  runtime_slot: runtimeSlot,
   job_version: 2,
   cleanup_authority: claimCleanupAuthority,
+};
+const committedResult: CommittedResultCapability = {
+  job_id: claimedJob.job_id,
+  attempt_id: claimedJob.attempt_id,
+  result_id: "33333333-3333-4333-8333-333333333333",
+  job_version: 3,
+  fence_generation: 7,
 };
 
 interface FakeStoreOptions {
   readonly commitError?: Error;
   readonly terminalizeError?: Error;
   readonly cleanupReadback?: CleanupReadback;
-  readonly expiredCleanup?: SupervisorExpiredCleanupClaim;
+  readonly expiredCleanup?: SupervisorExpiredCleanupRecovery;
   readonly bindFailureCount?: number;
 }
 
@@ -484,7 +500,11 @@ class FakeStore implements SupervisorStore {
   readonly calls: string[] = [];
   cleanupProof?: DetailedCleanupProof;
   cleanupAuthority?: SupervisorCleanupAuthority;
-  quarantine?: { slotId: string; reason: string; proofHash: string };
+  quarantine?: {
+    runtimeSlot: RuntimeSlotCapability;
+    reason: string;
+    proofHash: string;
+  };
   runtimeBinding?: RuntimeIdentityBinding;
   private remainingBindFailures: number;
   private readonly trustedCleanupAuthorities = new WeakSet<object>();
@@ -493,12 +513,15 @@ class FakeStore implements SupervisorStore {
     this.remainingBindFailures = options.bindFailureCount ?? 0;
     this.trustedCleanupAuthorities.add(claimCleanupAuthority);
     this.trustedCleanupAuthorities.add(cleanupAuthority);
-    if (options.expiredCleanup !== undefined) {
+    if (options.expiredCleanup?.recovery_outcome === "cleanup_claimed") {
       this.trustedCleanupAuthorities.add(options.expiredCleanup.cleanup_authority);
     }
   }
 
-  async claimExpiredCleanup(workerId: string, leaseSeconds: number): Promise<SupervisorExpiredCleanupClaim | null> {
+  async claimExpiredCleanup(
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<SupervisorExpiredCleanupRecovery | null> {
     this.calls.push("claim-expired-cleanup");
     expect(workerId).toBe("openclaw-stage0-slot");
     expect(leaseSeconds).toBe(600);
@@ -530,7 +553,7 @@ class FakeStore implements SupervisorStore {
     this.runtimeBinding = binding;
     return {
       attempt_id: claim.job.attempt_id,
-      runtime_slot_id: claim.runtime_slot_id,
+      runtime_slot_id: claim.runtime_slot.runtime_slot_id,
       job_id: claim.job.job_id,
       job_version: claim.job_version,
       fence_generation: claim.job.fence_generation,
@@ -546,23 +569,25 @@ class FakeStore implements SupervisorStore {
     return boundJob;
   }
 
-  async commitResult(job: WorkerJob, candidate: WorkerResult): Promise<string> {
+  async commitResult(
+    job: WorkerJob,
+    candidate: WorkerResult,
+  ): Promise<CommittedResultCapability> {
     this.calls.push("commit");
     expect(job).toBe(boundJob);
     expect(candidate).toEqual(result);
     if (this.options.commitError !== undefined) throw this.options.commitError;
-    return "33333333-3333-4333-8333-333333333333";
+    return committedResult;
   }
 
-  async selectResult(job: WorkerJob, expectedVersion: number): Promise<SelectionReadback> {
+  async selectResult(committed: CommittedResultCapability): Promise<SelectionReadback> {
     this.calls.push("select");
-    expect(job).toBe(boundJob);
-    expect(expectedVersion).toBe(2);
+    expect(committed).toBe(committedResult);
     return {
-      job_id: job.job_id,
-      attempt_id: job.attempt_id,
-      result_id: "33333333-3333-4333-8333-333333333333",
-      version: 3,
+      job_id: committed.job_id,
+      attempt_id: committed.attempt_id,
+      result_id: committed.result_id,
+      version: 4,
       fence_generation: 8,
     };
   }
@@ -593,9 +618,13 @@ class FakeStore implements SupervisorStore {
     };
   }
 
-  async quarantineSlot(slotId: string, reason: string, proofHash: string): Promise<void> {
+  async quarantineSlot(
+    slot: RuntimeSlotCapability,
+    reason: string,
+    proofHash: string,
+  ): Promise<void> {
     this.calls.push("quarantine");
-    this.quarantine = { slotId, reason, proofHash };
+    this.quarantine = { runtimeSlot: slot, reason, proofHash };
   }
 }
 
@@ -694,9 +723,8 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
     expect(store.cleanupProof).toEqual(storeCleanupProof(completeRuntimeProof));
     expect(store.cleanupAuthority).toMatchObject({
       attempt_id: claimedJob.attempt_id,
-      runtime_slot_id: SLOT_ID,
+      runtime_slot: runtimeSlot,
       fence_generation: 7,
-      claim_token: "claim-token",
     });
     expect(store.runtimeBinding).toEqual(runtimeIdentityBinding(runtimeIdentity));
     expect(() => runtimeIdentities.resolve(boundJob)).toThrow("runtime identity");
@@ -732,7 +760,7 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
     expect(store.calls).toContain("record-cleanup");
     expect(store.cleanupAuthority).toMatchObject({
       fence_generation: 8,
-      claim_token: "rotated-cleanup-token",
+      runtime_slot: runtimeSlot,
     });
   });
 
@@ -787,7 +815,7 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
     await expect(supervisor.runOnce()).rejects.toThrow("stale_fence");
     expect(store.cleanupAuthority).toMatchObject({
       fence_generation: 7,
-      claim_token: "claim-token",
+      runtime_slot: runtimeSlot,
     });
     expect(store.calls).toContain("terminalize-failed-result_commit_failed");
     expect(store.calls).toContain("record-cleanup");
@@ -819,7 +847,7 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
     expect(fetchGateway.calls).toEqual([]);
     expect(broker.calls).toEqual([]);
     expect(store.calls).toContain("terminalize-failed-deadline_exceeded");
-    expect(store.cleanupAuthority?.claim_token).toBe("rotated-cleanup-token");
+    expect(store.cleanupAuthority).toBe(cleanupAuthority);
   });
 
   test("cancellation fences fetch and worker result before cleanup", async () => {
@@ -859,7 +887,7 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
     expect(fetchGateway.calls).toContain("retire-context");
     expect(store.calls).not.toContain("commit");
     expect(store.calls).toContain("terminalize-cancelled-supervisor_cancelled");
-    expect(store.cleanupAuthority?.claim_token).toBe("rotated-cleanup-token");
+    expect(store.cleanupAuthority).toBe(cleanupAuthority);
   });
 
   test("ambiguous cleanup quarantines only the slot returned by the trusted claim", async () => {
@@ -887,29 +915,119 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
     await expect(supervisor.runOnce()).rejects.toThrow("cleanup unresolved");
 
     expect(store.quarantine).toEqual({
-      slotId: SLOT_ID,
+      runtimeSlot,
       reason: "cleanup_unresolved",
       proofHash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
   });
 
+  test("runtime_not_bound recovery performs no runtime work and invalidates prior capabilities", async () => {
+    const rpcCalls: string[] = [];
+    const store = new JobStore({
+      async rpc(name) {
+        rpcCalls.push(name);
+        if (name === "claim_company_discovery_attempt") {
+          return {
+            data: [{
+              job_id: claimedJob.job_id,
+              attempt_id: claimedJob.attempt_id,
+              attempt_number: 1,
+              adapter_id: "openclaw",
+              fence_generation: 7,
+              claim_token: "private-preclaim-token",
+              runtime_slot_id: SLOT_ID,
+              job_version: 2,
+              normalized_origin: claimedJob.normalized_origin,
+              deadline_at: claimedJob.deadline_at,
+              budget: claimedJob.budget,
+            }],
+            error: null,
+          };
+        }
+        if (name === "claim_expired_company_discovery_cleanup") {
+          return {
+            data: [{
+              job_id: claimedJob.job_id,
+              attempt_id: claimedJob.attempt_id,
+              adapter_id: "openclaw",
+              runtime_slot_id: SLOT_ID,
+              runtime_identity: {},
+              fence_generation: 8,
+              claim_token: null,
+              job_version: 3,
+              recovery_outcome: "runtime_not_bound",
+            }],
+            error: null,
+          };
+        }
+        throw new Error(`unexpected RPC ${name}`);
+      },
+    });
+    const stale = await store.claimAttempt("preclaimed-slot", "openclaw", 300);
+    let allocated = false;
+    let cleaned = false;
+    let retired = false;
+    const supervisor = new DiscoverySupervisor({
+      worker_id: "runtime-not-bound-reaper",
+      store,
+      broker: new FakeBroker(),
+      fetch_gateway: new FakeFetchGateway(),
+      select_adapter: () => "openclaw",
+      allocate_runtime_identity: async () => {
+        allocated = true;
+        return identity();
+      },
+      runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      retire_worker: async () => {
+        retired = true;
+        return completeRuntimeProof;
+      },
+      cleanup_bound_runtime: async () => {
+        cleaned = true;
+        return completeRuntimeProof;
+      },
+    });
+
+    expect(await supervisor.runOnce()).toEqual({
+      state: "runtime_not_bound_recovered",
+      attempt_id: claimedJob.attempt_id,
+      runtime_slot_id: SLOT_ID,
+    });
+    expect({ allocated, cleaned, retired }).toEqual({
+      allocated: false,
+      cleaned: false,
+      retired: false,
+    });
+    expect(rpcCalls).toEqual([
+      "claim_company_discovery_attempt",
+      "claim_expired_company_discovery_cleanup",
+    ]);
+    await expect(store.recordCleanup(stale!.cleanup_authority, storeCleanupProof(completeRuntimeProof)))
+      .rejects.toThrow("stale cleanup");
+    await expect(store.quarantineSlot(
+      stale!.runtime_slot,
+      "cleanup_unresolved",
+      "b".repeat(64),
+    )).rejects.toThrow("stale runtime slot");
+  });
+
   test("reclaims expired cleanup authority before claiming new work", async () => {
     const runtimeIdentity = await identity();
     const expired: SupervisorExpiredCleanupClaim = {
+      recovery_outcome: "cleanup_claimed",
       job_id: claimedJob.job_id,
       attempt_id: claimedJob.attempt_id,
       adapter_id: "openclaw",
-      runtime_slot_id: SLOT_ID,
+      runtime_slot: runtimeSlot,
       runtime_identity: runtimeIdentityBinding(runtimeIdentity),
+      runtime_identity_hash: "d".repeat(64),
       fence_generation: 9,
-      claim_token: "expired-cleanup-token",
       job_version: 4,
       cleanup_authority: {
         job_id: claimedJob.job_id,
         attempt_id: claimedJob.attempt_id,
-        runtime_slot_id: SLOT_ID,
+        runtime_slot: runtimeSlot,
         fence_generation: 9,
-        claim_token: "expired-cleanup-token",
       },
     };
     const store = new FakeStore({ expiredCleanup: expired });
@@ -944,7 +1062,7 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
     expect(store.calls).toEqual(["claim-expired-cleanup", "record-cleanup"]);
     expect(store.cleanupAuthority).toMatchObject({
       fence_generation: 9,
-      claim_token: "expired-cleanup-token",
+      runtime_slot: runtimeSlot,
     });
   });
 });

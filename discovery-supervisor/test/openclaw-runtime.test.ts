@@ -94,7 +94,6 @@ const job: WorkerJob = {
   attempt_id: "22222222-2222-4222-8222-222222222222",
   attempt_number: 1,
   fence_generation: 7,
-  claim_token: "ligou-claim-token-must-not-enter-cell",
   normalized_origin: "https://example.com/",
   deadline_at: "2026-09-01T10:10:00.000Z",
   budget: {
@@ -240,7 +239,7 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
     });
 
     const serialized = JSON.stringify(config);
-    for (const forbidden of [job.job_id, job.attempt_id, job.claim_token, "fence_generation", "claim_token"]) {
+    for (const forbidden of [job.job_id, job.attempt_id, "fence_generation", "claim_token"]) {
       expect(serialized).not.toContain(forbidden);
     }
   });
