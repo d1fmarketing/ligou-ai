@@ -57,7 +57,7 @@ export interface CandidateFact {
   readonly normalized_value: unknown;
   readonly evidence_refs: readonly number[];
   readonly contradictions: readonly string[];
-  readonly uncertainty: Readonly<Record<string, unknown>>;
+  readonly uncertainty: readonly string[];
 }
 
 export interface WorkerResult {
@@ -66,7 +66,7 @@ export interface WorkerResult {
   readonly candidate_facts: readonly CandidateFact[];
   readonly missing_questions: readonly string[];
   readonly contradictions: readonly string[];
-  readonly uncertainty: Readonly<Record<string, unknown>>;
+  readonly uncertainty: readonly string[];
 }
 
 export interface WorkerAdapter {
@@ -143,44 +143,6 @@ const HANDLE_KEYS = [
   "fence_generation",
 ] as const;
 
-const FORBIDDEN_KEYS = new Set([
-  "tenant_id",
-  "tenantid",
-  "canonical_id",
-  "canonicalid",
-  "policy_group",
-  "approval",
-  "approved",
-  "approved_by",
-  "approved_at",
-  "status",
-  "effective",
-  "active",
-  "enabled",
-  "policy_hash",
-  "action_completion",
-  "action_completed",
-  "actioncompletion",
-  "rule_id",
-  "rule_group_id",
-  "power",
-  "powers",
-  "capability",
-  "grant",
-  "authority",
-  "materialization_key",
-  "materialization_eligible",
-  "review_ready",
-  "operational_state",
-  "source_kind",
-  "source_call_id",
-  "source_job_id",
-  "source_result_id",
-  "source_claim_id",
-  "source_decision_id",
-  "coverage_revision",
-]);
-
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const UTC_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
@@ -192,7 +154,11 @@ function fail(path: string, message: string): never {
 
 function record(value: unknown, path: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    fail(path, "expected object");
+    fail(path, "expected plain object");
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    fail(path, "expected plain object");
   }
   return value as Record<string, unknown>;
 }
@@ -244,32 +210,6 @@ function byteLength(value: unknown, path: string, maximum: number): void {
   }
 }
 
-function forbiddenKeyName(key: string): string {
-  return key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/-/g, "_").toLowerCase();
-}
-
-function assertJsonAndNoForbiddenKeys(value: unknown, path: string, seen = new Set<object>()): void {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) fail(path, "number must be finite");
-    return;
-  }
-  if (typeof value !== "object") fail(path, "must be JSON data");
-  if (seen.has(value as object)) fail(path, "must not be cyclic");
-  seen.add(value as object);
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertJsonAndNoForbiddenKeys(item, `${path}[${index}]`, seen));
-  } else {
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      if (FORBIDDEN_KEYS.has(forbiddenKeyName(key))) {
-        fail(`${path}.${key}`, "forbidden authority or identity field");
-      }
-      assertJsonAndNoForbiddenKeys(child, `${path}.${key}`, seen);
-    }
-  }
-  seen.delete(value as object);
-}
-
 function parseStringArray(
   value: unknown,
   path: string,
@@ -282,19 +222,10 @@ function parseStringArray(
   return value.map((item, index) => boundedString(item, `${path}[${index}]`, 1, maximumLength));
 }
 
-function parseUncertainty(value: unknown, path: string): Readonly<Record<string, unknown>> {
-  const parsed = record(value, path);
-  assertJsonAndNoForbiddenKeys(parsed, path);
-  byteLength(parsed, path, 4_096);
-  return deepFreeze(structuredClone(parsed));
-}
-
 function parseSnapshot(value: unknown, index: number): DiscoverySourceSnapshot {
   const path = `source_snapshots[${index}]`;
   const candidate = record(value, path);
   exactKeys(candidate, SNAPSHOT_KEYS, path);
-  assertJsonAndNoForbiddenKeys(candidate, path);
-
   const url = boundedString(candidate.url, `${path}.url`, 9, 2_048);
   let parsedUrl: URL;
   try {
@@ -331,7 +262,7 @@ function parseSnapshot(value: unknown, index: number): DiscoverySourceSnapshot {
 
 export function parseSourceSnapshots(
   value: unknown,
-  options: { allowEmpty?: boolean } = {},
+  options: { allowEmpty?: boolean; budget?: DiscoveryBudget } = {},
 ): readonly DiscoverySourceSnapshot[] {
   if (!Array.isArray(value)) fail("source_snapshots", "expected array");
   const minimum = options.allowEmpty ? 0 : 1;
@@ -346,6 +277,20 @@ export function parseSourceSnapshots(
   });
   const declaredBytes = snapshots.reduce((total, snapshot) => total + snapshot.byte_length, 0);
   if (declaredBytes > 10_485_760) fail("source_snapshots", "declared bytes exceed job limit");
+  if (options.budget !== undefined) {
+    if (snapshots.length > options.budget.max_pages) {
+      fail("job.budget.max_pages", "evidence exceeds job budget");
+    }
+    if (snapshots.some((snapshot) => snapshot.crawl_depth > options.budget!.max_depth)) {
+      fail("job.budget.max_depth", "evidence exceeds job budget");
+    }
+    if (snapshots.some((snapshot) => snapshot.byte_length > options.budget!.max_page_bytes)) {
+      fail("job.budget.max_page_bytes", "evidence exceeds job budget");
+    }
+    if (declaredBytes > options.budget.max_job_bytes) {
+      fail("job.budget.max_job_bytes", "evidence exceeds job budget");
+    }
+  }
   return deepFreeze(snapshots);
 }
 
@@ -354,46 +299,37 @@ function parseServiceValue(value: unknown, path: string): Readonly<Record<string
   const keys = [
     "service_type",
     "service_names",
-    "price_mode",
-    "negotiation_mode",
-    "price_target",
-    "price_min",
-    "duration_min",
+    "public_price",
+    "duration_minutes",
   ] as const;
   exactKeys(service, keys, path);
-  assertJsonAndNoForbiddenKeys(service, path);
   const serviceType = boundedString(service.service_type, `${path}.service_type`, 1, 200);
   if (!SERVICE_TYPE_PATTERN.test(serviceType)) fail(`${path}.service_type`, "invalid service type");
   const serviceNames = parseStringArray(service.service_names, `${path}.service_names`, 20, 200);
   if (serviceNames.length === 0) fail(`${path}.service_names`, "at least one name required");
-  if (service.price_mode !== "fixed" && service.price_mode !== "starting_at") {
-    fail(`${path}.price_mode`, "invalid price mode");
-  }
-  if (service.negotiation_mode !== "negotiable" && service.negotiation_mode !== "non_negotiable") {
-    fail(`${path}.negotiation_mode`, "invalid negotiation mode");
-  }
-  for (const key of ["price_target", "price_min", "duration_min"] as const) {
-    if (typeof service[key] !== "number" || !Number.isFinite(service[key])) {
-      fail(`${path}.${key}`, "expected finite number");
+  let publicPrice: Readonly<Record<string, unknown>> | null = null;
+  if (service.public_price !== null) {
+    const price = record(service.public_price, `${path}.public_price`);
+    exactKeys(price, ["amount", "currency", "qualifier"], `${path}.public_price`);
+    const amount = boundedString(price.amount, `${path}.public_price.amount`, 4, 12);
+    if (!/^(0|[1-9][0-9]{0,8})[.][0-9]{2}$/.test(amount)) {
+      fail(`${path}.public_price.amount`, "expected non-exponent decimal string");
     }
+    const currency = boundedString(price.currency, `${path}.public_price.currency`, 3, 3);
+    if (!/^[A-Z]{3}$/.test(currency)) fail(`${path}.public_price.currency`, "invalid currency");
+    if (price.qualifier !== "exact" && price.qualifier !== "starting_at") {
+      fail(`${path}.public_price.qualifier`, "invalid public price qualifier");
+    }
+    publicPrice = deepFreeze({ amount, currency, qualifier: price.qualifier });
   }
-  const priceTarget = service.price_target as number;
-  const priceMin = service.price_min as number;
-  const durationMin = service.duration_min as number;
-  if (priceTarget < 0 || priceMin < 0 || priceMin > priceTarget || durationMin <= 0) {
-    fail(path, "invalid price or duration bounds");
-  }
-  if (service.negotiation_mode === "non_negotiable" && priceMin !== priceTarget) {
-    fail(path, "non-negotiable price must have equal minimum and target");
-  }
+  const durationMinutes = service.duration_minutes === null
+    ? null
+    : integer(service.duration_minutes, `${path}.duration_minutes`, 1, 10_080);
   return deepFreeze({
     service_type: serviceType,
     service_names: serviceNames,
-    price_mode: service.price_mode,
-    negotiation_mode: service.negotiation_mode,
-    price_target: priceTarget,
-    price_min: priceMin,
-    duration_min: durationMin,
+    public_price: publicPrice,
+    duration_minutes: durationMinutes,
   });
 }
 
@@ -403,7 +339,6 @@ function parseNormalizedValue(
   value: unknown,
   path: string,
 ): unknown {
-  assertJsonAndNoForbiddenKeys(value, path);
   byteLength(value, path, 65_536);
   if (claimClass === "descriptive") {
     const types = new Set([
@@ -431,7 +366,6 @@ function parseFact(value: unknown, index: number, snapshotCount: number): Candid
   const path = `candidate_facts[${index}]`;
   const fact = record(value, path);
   exactKeys(fact, FACT_KEYS, path);
-  assertJsonAndNoForbiddenKeys(fact, path);
   if (fact.claim_class === "owner_private") fail(`${path}.claim_class`, "owner_private facts forbidden");
   if (fact.claim_class !== "descriptive" &&
       fact.claim_class !== "operational" &&
@@ -461,14 +395,13 @@ function parseFact(value: unknown, index: number, snapshotCount: number): Candid
     ),
     evidence_refs: deepFreeze(evidenceRefs),
     contradictions: deepFreeze(contradictions),
-    uncertainty: parseUncertainty(fact.uncertainty, `${path}.uncertainty`),
+    uncertainty: deepFreeze(parseStringArray(fact.uncertainty, `${path}.uncertainty`, 20, 1_000)),
   };
 }
 
 export function parseWorkerResult(value: unknown): WorkerResult {
   const candidate = record(value, "result");
   exactKeys(candidate, RESULT_KEYS, "result");
-  assertJsonAndNoForbiddenKeys(candidate, "result");
   if (candidate.schema_version !== "company_discovery.result.v1") {
     fail("result.schema_version", "company_discovery.result.v1 required");
   }
@@ -483,7 +416,7 @@ export function parseWorkerResult(value: unknown): WorkerResult {
     candidate_facts: deepFreeze(facts),
     missing_questions: deepFreeze(parseStringArray(candidate.missing_questions, "missing_questions", 50, 1_000)),
     contradictions: deepFreeze(parseStringArray(candidate.contradictions, "contradictions", 50, 2_000)),
-    uncertainty: parseUncertainty(candidate.uncertainty, "uncertainty"),
+    uncertainty: deepFreeze(parseStringArray(candidate.uncertainty, "uncertainty", 50, 1_000)),
   };
   byteLength(result, "result", 10_485_760);
   return deepFreeze(result);
@@ -537,6 +470,7 @@ export function parseWorkerJob(
     budget: deepFreeze(parsedBudget),
     source_snapshots: parseSourceSnapshots(candidate.source_snapshots, {
       allowEmpty: options.allowEmptyEvidence,
+      budget: parsedBudget,
     }),
   });
 }
