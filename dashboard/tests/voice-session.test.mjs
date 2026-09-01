@@ -10,7 +10,7 @@ const vite = await createServer({
   root: dashboardRoot,
   appType: "custom",
   logLevel: "silent",
-  server: { middlewareMode: true },
+  server: { middlewareMode: true, hmr: false, ws: false },
 });
 const sessionModule = await vite.ssrLoadModule("/src/voice/session.js");
 after(async () => { await vite.close(); });

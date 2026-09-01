@@ -90,7 +90,7 @@ test("MemoryView shows the effective policy and rejected correction with both ca
     configFile: false,
     root: process.cwd(),
     appType: "custom",
-    server: { middlewareMode: true, hmr: false },
+    server: { middlewareMode: true, hmr: false, ws: false },
     optimizeDeps: { noDiscovery: true },
     plugins: [react()],
   });

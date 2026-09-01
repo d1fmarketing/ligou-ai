@@ -8,7 +8,7 @@
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "preview": "vite preview",
     "test": "npm run test:dashboard && npm run build && npm run test:sites",
-    "test:dashboard": "node --test tests/dashboard-state.test.mjs tests/connector-status.test.mjs tests/session-custody.test.mjs tests/memory-approval.test.mjs tests/gateway-outcome.test.mjs tests/gateway-supabase-memory.test.mjs tests/memory-view.test.mjs tests/voice-session.test.mjs",
+    "test:dashboard": "node --test tests/dashboard-state.test.mjs tests/connector-status.test.mjs tests/session-custody.test.mjs tests/memory-approval.test.mjs tests/gateway-outcome.test.mjs tests/gateway-supabase-memory.test.mjs tests/memory-view.test.mjs tests/chat-view.test.mjs tests/voice-session.test.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs"
   },
   "dependencies": {

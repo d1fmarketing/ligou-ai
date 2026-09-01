@@ -57,14 +57,18 @@ function ChatMessage({ message, showAvatar = true }) {
 function CausalStrip({ context }) {
   return (
     <div className="causal-strip" aria-label="Contexto da ligação">
-      <div>
-        <span className="causal-icon"><IconPhone aria-hidden="true" /></span>
-        <p><small>Ligação</small><strong>{context?.language || "inglês"}</strong></p>
-      </div>
-      <div>
-        <span className="causal-icon"><IconNotebook aria-hidden="true" /></span>
-        <p><small>Regra consultada</small><strong>{context?.rule || "Encaixe no mesmo dia exige sua aprovação."}</strong></p>
-      </div>
+      {context?.language ? (
+        <div>
+          <span className="causal-icon"><IconPhone aria-hidden="true" /></span>
+          <p><small>Ligação</small><strong>{context.language}</strong></p>
+        </div>
+      ) : null}
+      {context?.rule ? (
+        <div>
+          <span className="causal-icon"><IconNotebook aria-hidden="true" /></span>
+          <p><small>Regra consultada</small><strong>{context.rule}</strong></p>
+        </div>
+      ) : null}
       <div>
         <span className="causal-icon causal-icon--pending"><IconClock aria-hidden="true" /></span>
         <p><small>Aguardando</small><strong>{["pending", "aguardando"].includes(context?.status) ? "sua decisão" : "decisão registrada"}</strong></p>
@@ -83,10 +87,14 @@ function OperationalTimeline({ messages, context, approval, onApprove, onAdjust,
         {messages[0] ? <ChatMessage message={messages[0]} showAvatar={false} /> : null}
       </div>
 
-      <span className="timeline-context-node" aria-hidden="true" />
-      <div className="timeline-content timeline-content--context">
-        <CausalStrip context={context} />
-      </div>
+      {context ? (
+        <>
+          <span className="timeline-context-node" aria-hidden="true" />
+          <div className="timeline-content timeline-content--context">
+            <CausalStrip context={context} />
+          </div>
+        </>
+      ) : null}
 
       <TimelineAvatar className="timeline-avatar-node--decision" />
       <div className="timeline-content timeline-content--message timeline-content--prompt">
@@ -131,7 +139,11 @@ export function ChatView({
 }) {
   const [draft, setDraft] = useState("");
   const initialMessages = useMemo(() => messages.slice(0, 3), [messages]);
-  const recentMessages = useMemo(() => messages.slice(3), [messages]);
+  const hasOperationalTimeline = Boolean(callContext || pendingApproval);
+  const recentMessages = useMemo(
+    () => messages.slice(hasOperationalTimeline ? 3 : 1),
+    [messages, hasOperationalTimeline],
+  );
 
   // New messages land below the fold; follow them — but only when the owner
   // is already at the tail or just sent something. Never yank someone who
@@ -194,14 +206,16 @@ export function ChatView({
       <div className="conversation" aria-live="polite" aria-relevant="additions text">
         {initialMessages[0] ? <ChatMessage message={initialMessages[0]} /> : null}
 
-        <OperationalTimeline
-          messages={[initialMessages[1], initialMessages[2]]}
-          context={callContext}
-          approval={pendingApproval}
-          onApprove={onApprove}
-          onAdjust={onAdjust}
-          onReject={onReject}
-        />
+        {hasOperationalTimeline ? (
+          <OperationalTimeline
+            messages={[initialMessages[1], initialMessages[2]]}
+            context={callContext}
+            approval={pendingApproval}
+            onApprove={onApprove}
+            onAdjust={onAdjust}
+            onReject={onReject}
+          />
+        ) : null}
 
         {recentMessages.map((message, index) => (
           <ChatMessage key={message.id || `recent-${index}`} message={message} />
