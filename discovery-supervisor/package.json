@@ -5,8 +5,10 @@
   "type": "module",
   "packageManager": "bun@1.2.13",
   "scripts": {
+    "start": "bun src/main.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --types bun src/contracts.ts src/job-store.ts src/worker-broker.ts src/adapters/direct-model.ts src/adapters/openclaw.ts src/fetch/url-policy.ts src/fetch/address-policy.ts src/fetch/https-client.ts src/fetch/html-page.ts src/fetch/html-parser-worker.ts src/fetch/discovery-fetch-gateway.ts src/openclaw/runtime-identity.ts src/openclaw/mcp-bridge.ts src/openclaw/model-proxy.ts src/openclaw/gateway-client.ts src/openclaw/cell-runtime.ts src/openclaw/trusted-bridge.ts src/supervisor.ts test/contracts.test.ts test/worker-broker.test.ts test/direct-model.test.ts test/fetch-gateway.test.ts test/openclaw-runtime.test.ts test/cleanup.test.ts",
+    "test:composition": "bun test test/main.test.ts",
+    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --types bun src/contracts.ts src/job-store.ts src/worker-broker.ts src/adapters/direct-model.ts src/adapters/openclaw.ts src/fetch/url-policy.ts src/fetch/address-policy.ts src/fetch/https-client.ts src/fetch/html-page.ts src/fetch/html-parser-worker.ts src/fetch/discovery-fetch-gateway.ts src/openclaw/runtime-identity.ts src/openclaw/mcp-bridge.ts src/openclaw/model-proxy.ts src/openclaw/hermes-codex-grant.ts src/openclaw/subscription-gateway.ts src/openclaw/gateway-client.ts src/openclaw/cell-runtime.ts src/openclaw/trusted-bridge.ts src/runtime/config.ts src/runtime/command-runner.ts src/runtime/service-rpc.ts src/runtime/process.ts src/runtime/proofs.ts src/supervisor.ts src/main.ts benchmark/score.ts benchmark/run-benchmark.ts test/contracts.test.ts test/worker-broker.test.ts test/direct-model.test.ts test/fetch-gateway.test.ts test/openclaw-runtime.test.ts test/openclaw-hardening.test.ts test/cleanup.test.ts test/main.test.ts test/benchmark.test.ts",
     "build:bridge": "bun build src/openclaw/trusted-bridge.ts --target=bun --format=esm --outfile=/tmp/ligou-stage0-trusted-bridge.mjs"
   },
   "devDependencies": {

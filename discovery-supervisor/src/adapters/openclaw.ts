@@ -4,6 +4,10 @@ import {
   parseWorkerHandle,
   parseWorkerJob,
   parseWorkerResult,
+  type ModelAccessCapability,
+  type RegisteredSubscriptionLease,
+  type SubscriptionGateway,
+  type SubscriptionUsage,
   type WorkerAdapter,
   type WorkerHandle,
   type WorkerJob,
@@ -15,9 +19,10 @@ import {
 import {
   buildCellLifecyclePlan,
   buildOpenClawConfig,
+  BRIDGE_SUBSCRIPTION_SOCKET_PATH,
   type CellRuntimeHandle,
   type CommandSpec,
-  type RuntimeCleanupProof,
+  type LocalOpenClawCleanupProof,
 } from "../openclaw/cell-runtime";
 import type {
   GatewayRunHandle,
@@ -28,11 +33,12 @@ import type { RuntimeIdentity } from "../openclaw/runtime-identity";
 export interface OpenClawAttemptSession {
   readonly result: Promise<unknown>;
   cancel(): Promise<void>;
-  cleanup(): Promise<RuntimeCleanupProof>;
+  cleanup(): Promise<LocalOpenClawCleanupProof>;
+  usage(): Readonly<SubscriptionUsage>;
 }
 
 export interface OpenClawAttemptFactory {
-  start(job: WorkerJob): Promise<OpenClawAttemptSession>;
+  start(job: WorkerJob, modelAccess: ModelAccessCapability): Promise<OpenClawAttemptSession>;
 }
 
 export interface AttemptCellRuntime {
@@ -40,8 +46,7 @@ export interface AttemptCellRuntime {
   readSubmittedResult(handle: CellRuntimeHandle): Promise<unknown>;
   cleanup(
     handle: CellRuntimeHandle,
-    options: { readonly late_result_rejected: boolean },
-  ): Promise<RuntimeCleanupProof>;
+  ): Promise<LocalOpenClawCleanupProof>;
 }
 
 export interface AttemptGatewayRunner {
@@ -52,11 +57,9 @@ export interface AttemptGatewayRunner {
 export interface EphemeralOpenClawAttemptFactoryOptions {
   readonly runtime: AttemptCellRuntime;
   readonly gateway_client: AttemptGatewayRunner;
-  readonly bridge_image: string;
-  readonly upstream_api_key: string;
   readonly upstream_model: string;
-  readonly upstream_url?: string;
   readonly resolve_identity: (job: WorkerJob) => Promise<RuntimeIdentity>;
+  readonly subscription_gateway: SubscriptionGateway;
   readonly random_bytes?: (size: number) => Buffer;
 }
 
@@ -88,60 +91,60 @@ function discoveryPrompt(job: WorkerJob): string {
 export class EphemeralOpenClawAttemptFactory implements OpenClawAttemptFactory {
   readonly #options: EphemeralOpenClawAttemptFactoryOptions;
   readonly #allocateIdentity: (job: WorkerJob) => Promise<RuntimeIdentity>;
+  readonly #subscriptionGateway: SubscriptionGateway;
   readonly #randomBytes: (size: number) => Buffer;
-  readonly #upstreamUrl: string;
 
   constructor(options: EphemeralOpenClawAttemptFactoryOptions) {
-    boundedSecret(options.upstream_api_key, "upstream API key");
     boundedSecret(options.upstream_model, "upstream model");
+    if (options.upstream_model !== "gpt-5.6-sol") {
+      throw new ContractValidationError("subscription discovery model must be gpt-5.6-sol");
+    }
     this.#options = options;
     this.#allocateIdentity = options.resolve_identity;
+    this.#subscriptionGateway = options.subscription_gateway;
     this.#randomBytes = options.random_bytes ?? systemRandomBytes;
-    this.#upstreamUrl = options.upstream_url ?? "https://api.openai.com/v1/responses";
-    const upstream = new URL(this.#upstreamUrl);
-    if (upstream.protocol !== "https:" || upstream.pathname !== "/v1/responses" ||
-        upstream.search !== "" || upstream.hash !== "" || upstream.username !== "" ||
-        upstream.password !== "" || upstream.port !== "") {
-      throw new ContractValidationError("upstream URL must be the fixed HTTPS Responses route");
-    }
   }
 
-  async start(candidate: WorkerJob): Promise<OpenClawAttemptSession> {
+  async start(
+    candidate: WorkerJob,
+    modelAccess: ModelAccessCapability,
+  ): Promise<OpenClawAttemptSession> {
     const job = parseWorkerJob(candidate);
     const identity = await this.#allocateIdentity(job);
     const seed = this.#randomBytes(32);
     if (!Buffer.isBuffer(seed) || seed.byteLength !== 32) {
       throw new ContractValidationError("attempt credential seed must be exactly 32 random bytes");
     }
+    const registration = await this.#subscriptionGateway.register(modelAccess);
+    this.#assertRegistration(registration, job, identity);
     const gatewayToken = derivedMarker(seed, "ligou-stage0-gateway");
-    const proxyMarker = `stage0_${derivedMarker(seed, "ligou-stage0-proxy")}`;
+    const proxyMarkerValue = registration.attempt_marker;
+    let plan: readonly CommandSpec[];
     const config = buildOpenClawConfig({
       identity,
-      proxy_marker: proxyMarker,
+      proxy_marker: proxyMarkerValue,
       upstream_model: this.#options.upstream_model,
     });
-    const plan = buildCellLifecyclePlan({
+    plan = buildCellLifecyclePlan({
       identity,
       config,
       gateway_token: gatewayToken,
       bridge_secret: {
-        upstream_api_key: this.#options.upstream_api_key,
-        upstream_url: this.#upstreamUrl,
         upstream_model: this.#options.upstream_model,
-        proxy_marker: proxyMarker,
+        proxy_marker: proxyMarkerValue,
+        subscription_socket_path: BRIDGE_SUBSCRIPTION_SOCKET_PATH,
         normalized_origin: job.normalized_origin,
         deadline_at: job.deadline_at,
         budget: job.budget,
         source_snapshots: job.source_snapshots,
       },
-      bridge_image: this.#options.bridge_image,
     });
     const cellHandle: CellRuntimeHandle = Object.freeze({ identity });
     const controller = new AbortController();
     const startup = this.#options.runtime.start(plan, controller.signal);
     let gatewayHandle: GatewayRunHandle | undefined;
     let gatewayClosed = false;
-    let cleanup: Promise<RuntimeCleanupProof> | undefined;
+    let cleanup: Promise<LocalOpenClawCleanupProof> | undefined;
     const closeGateway = async (): Promise<void> => {
       if (gatewayHandle === undefined || gatewayClosed) return;
       gatewayClosed = true;
@@ -159,7 +162,8 @@ export class EphemeralOpenClawAttemptFactory implements OpenClawAttemptFactory {
       });
       try {
         if (controller.signal.aborted) throw new Error("OpenClaw attempt cancelled");
-        return await this.#options.runtime.readSubmittedResult(cellHandle);
+        this.#assertCompleteUsage(this.#subscriptionGateway.usage(registration.lease));
+        return this.#options.runtime.readSubmittedResult(cellHandle);
       } finally {
         await closeGateway();
       }
@@ -174,11 +178,44 @@ export class EphemeralOpenClawAttemptFactory implements OpenClawAttemptFactory {
         cleanup ??= (async () => {
           await startup.catch(() => undefined);
           await closeGateway().catch(() => undefined);
-          return this.#options.runtime.cleanup(cellHandle, { late_result_rejected: true });
+          return this.#options.runtime.cleanup(cellHandle);
         })();
         return cleanup;
       },
+      usage: () => this.#subscriptionGateway.usage(registration.lease),
     });
+  }
+
+  #assertRegistration(
+    registration: RegisteredSubscriptionLease,
+    job: WorkerJob,
+    identity: RuntimeIdentity,
+  ): void {
+    if (registration === null || typeof registration !== "object" ||
+        registration.subscription_socket_path !== identity.subscription_socket_path ||
+        registration.policy.model !== "gpt-5.6-sol" ||
+        registration.policy.deadline_at !== job.deadline_at ||
+        registration.policy.max_requests !== Math.min(job.source_snapshots.length + 3, 28) ||
+        registration.policy.max_input_bytes !== 400_000 ||
+        registration.policy.max_output_bytes !== 8_388_608 ||
+        registration.policy.max_response_bytes !== 4_194_304 ||
+        registration.policy.concurrency !== 1 ||
+        registration.policy.cache_retention !== "none" ||
+        !/^stage0_session_[A-Za-z0-9_-]{16,80}$/.test(registration.session_id)) {
+      throw new ContractValidationError("OpenClaw subscription registration invalid");
+    }
+  }
+
+  #assertCompleteUsage(usage: Readonly<SubscriptionUsage>): void {
+    if (usage.schema_version !== "ligou.subscription_usage.v1" ||
+        usage.provider !== "openai-codex" || usage.model !== "gpt-5.6-sol" ||
+        usage.billing_basis !== "chatgpt_subscription" ||
+        usage.marginal_api_charge_usd !== 0 || usage.request_count < 1 ||
+        usage.active_requests !== 0 || !usage.usage_complete ||
+        usage.quota_state !== "available" || usage.retry_after_seconds !== null ||
+        usage.cooldown_until !== null || usage.revoked) {
+      throw new ContractValidationError("OpenClaw subscription usage is incomplete or unavailable");
+    }
   }
 }
 
@@ -193,7 +230,7 @@ interface Execution {
   cancelled: boolean;
   result?: WorkerResult;
   error?: Error;
-  cleanup?: Promise<RuntimeCleanupProof>;
+  cleanup?: Promise<LocalOpenClawCleanupProof>;
 }
 
 function executionKey(handle: WorkerHandle): string {
@@ -222,7 +259,7 @@ export class OpenClawDiscoveryAdapter implements WorkerAdapter {
     return jobType === "company_discovery.v1";
   }
 
-  async submit(candidate: WorkerJob): Promise<WorkerHandle> {
+  async submit(candidate: WorkerJob, modelAccess: ModelAccessCapability): Promise<WorkerHandle> {
     const job = parseWorkerJob(candidate);
     const handle = parseWorkerHandle({
       adapter_id: "openclaw",
@@ -235,7 +272,7 @@ export class OpenClawDiscoveryAdapter implements WorkerAdapter {
     if (this.#executions.has(key)) {
       throw new ContractValidationError("OpenClaw attempt already submitted");
     }
-    const session = await this.#attempts.start(job);
+    const session = await this.#attempts.start(job, modelAccess);
     let settleTerminal!: () => void;
     const terminal = new Promise<void>((resolve) => { settleTerminal = resolve; });
     const execution: Execution = {
@@ -282,7 +319,7 @@ export class OpenClawDiscoveryAdapter implements WorkerAdapter {
     throw execution.error ?? new Error("OpenClaw attempt did not produce a result");
   }
 
-  async retire(candidate: WorkerHandle): Promise<RuntimeCleanupProof> {
+  async retire(candidate: WorkerHandle): Promise<LocalOpenClawCleanupProof> {
     const execution = this.#execution(candidate);
     execution.acceptsResult = false;
     if (execution.state === "running") await this.cancel(execution.handle);
@@ -294,6 +331,10 @@ export class OpenClawDiscoveryAdapter implements WorkerAdapter {
       this.#executions.delete(key);
       this.#rememberRetired(key);
     }
+  }
+
+  subscriptionUsage(candidate: WorkerHandle): Readonly<SubscriptionUsage> {
+    return this.#execution(candidate).session.usage();
   }
 
   #execution(candidate: WorkerHandle): Execution {

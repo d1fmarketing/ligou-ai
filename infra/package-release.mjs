@@ -3,7 +3,13 @@ import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-const ALLOWED_ROOTS = new Set(["voice-controller", "hermes-cell", "supabase", "infra"]);
+const ALLOWED_ROOTS = new Set([
+  "voice-controller",
+  "discovery-supervisor",
+  "hermes-cell",
+  "supabase",
+  "infra",
+]);
 const BUILD_OR_DEPENDENCY = new Set(["node_modules", "dist", "build", "coverage", ".next", ".turbo", ".cache", "vendor"]);
 const ARCHIVE = /\.(?:zip|tar|tgz|gz|7z|rar)$/i;
 const BUILDER_ONLY = new Set([
@@ -41,6 +47,8 @@ export function excludedReleasePath(candidate) {
   const normalized = candidate.replace(/\/$/, "");
   if (normalized.startsWith("voice-controller/scripts/")
     || normalized.startsWith("voice-controller/test/")
+    || normalized.startsWith("discovery-supervisor/test/")
+    || normalized.startsWith("discovery-supervisor/benchmark/")
     || normalized.startsWith("hermes-cell/test/")
     || normalized.startsWith("supabase/scripts/")
     || normalized.startsWith("supabase/tests/")

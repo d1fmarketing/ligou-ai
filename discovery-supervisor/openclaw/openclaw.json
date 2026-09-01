@@ -38,20 +38,17 @@
       },
       "models": {
         "stage0_bridge/SUPERVISOR_SELECTED_MODEL": {
-          "alias": "Stage 0 bounded discovery"
+          "alias": "Stage 0 bounded discovery",
+          "params": {
+            "transport": "sse",
+            "cacheRetention": "none",
+            "maxRetries": 0
+          }
         }
       },
       "sandbox": {
-        "mode": "all",
-        "backend": "docker",
-        "scope": "session",
+        "mode": "off",
         "workspaceAccess": "none",
-        "docker": {
-          "readOnlyRoot": true,
-          "tmpfs": ["/tmp", "/var/tmp", "/run"],
-          "network": "none",
-          "capDrop": ["ALL"]
-        },
         "browser": {
           "enabled": false,
           "allowHostControl": false
@@ -91,9 +88,9 @@
     "catalogRefresh": { "enabled": false },
     "providers": {
       "stage0_bridge": {
-        "baseUrl": "http://bridge:4310/v1",
+        "baseUrl": "http://bridge:4310",
         "apiKey": "ATTEMPT_SCOPED_NON_LIGOU_PROXY_MARKER",
-        "api": "openai-responses",
+        "api": "openai-chatgpt-responses",
         "models": [
           {
             "id": "SUPERVISOR_SELECTED_MODEL",
@@ -101,8 +98,8 @@
             "reasoning": true,
             "input": ["text"],
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 128000,
-            "maxTokens": 16384,
+            "contextWindow": 272000,
+            "maxTokens": 8192,
             "compat": {
               "supportsTools": true,
               "supportsStrictMode": true,
@@ -167,25 +164,7 @@
     "codeMode": { "enabled": false },
     "elevated": { "enabled": false },
     "exec": { "security": "deny", "ask": "always" },
-    "fs": { "workspaceOnly": true },
-    "sandbox": {
-      "tools": {
-        "allow": [
-          "discovery__fetch_discovery_page",
-          "discovery__submit_discovery_result"
-        ],
-        "deny": [
-          "group:openclaw",
-          "group:runtime",
-          "group:fs",
-          "group:web",
-          "group:ui",
-          "group:automation",
-          "group:messaging",
-          "group:nodes"
-        ]
-      }
-    }
+    "fs": { "workspaceOnly": true }
   },
   "skills": {
     "allowBundled": [],

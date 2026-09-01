@@ -18,6 +18,7 @@ const EXCLUSIONS = [
   "**/auth.json",
   "**/*.{zip,tar,tgz,gz,7z,rar}",
   "voice-controller/{scripts,test}/**",
+  "discovery-supervisor/{benchmark,test}/**",
   "hermes-cell/test/**",
   "supabase/{scripts,tests}/**",
   "infra/test/**",
@@ -94,11 +95,19 @@ function forbidden(candidate) {
   if (!normalized) return false;
   const segments = normalized.split("/");
   const lower = segments.map((segment) => segment.toLowerCase());
-  if (!new Set(["voice-controller", "hermes-cell", "supabase", "infra"]).has(lower[0])) return true;
+  if (!new Set([
+    "voice-controller",
+    "discovery-supervisor",
+    "hermes-cell",
+    "supabase",
+    "infra",
+  ]).has(lower[0])) return true;
   if (segments.some((segment) => segment === "..")) return true;
   const basename = lower.at(-1) ?? "";
   if (normalized.startsWith("voice-controller/scripts/")
     || normalized.startsWith("voice-controller/test/")
+    || normalized.startsWith("discovery-supervisor/test/")
+    || normalized.startsWith("discovery-supervisor/benchmark/")
     || normalized.startsWith("hermes-cell/test/")
     || normalized.startsWith("supabase/scripts/")
     || normalized.startsWith("supabase/tests/")
@@ -165,15 +174,25 @@ function runtimeEvidence(artifact, hermesImage) {
   if (hermesImage !== PINNED_TOOLCHAIN.hermes_image) fail("release_hermes_image_not_approved");
   let toolchain;
   let packageJson;
+  let discoveryPackageJson;
   try {
     toolchain = JSON.parse(artifactFile(artifact, "infra/toolchain.json").toString("utf8"));
     packageJson = JSON.parse(artifactFile(artifact, "voice-controller/package.json").toString("utf8"));
+    discoveryPackageJson = JSON.parse(
+      artifactFile(artifact, "discovery-supervisor/package.json").toString("utf8"),
+    );
   } catch {
     fail("release_runtime_evidence_invalid");
   }
   if (canonical(toolchain) !== canonical(PINNED_TOOLCHAIN)
-    || packageJson.packageManager !== `bun@${PINNED_TOOLCHAIN.bun}`) fail("release_runtime_evidence_invalid");
+    || packageJson.packageManager !== `bun@${PINNED_TOOLCHAIN.bun}`
+    || discoveryPackageJson.packageManager !== `bun@${PINNED_TOOLCHAIN.bun}`
+    || discoveryPackageJson.dependencies?.["@openclaw/gateway-client"] !== "2026.8.1"
+    || discoveryPackageJson.dependencies?.["@openclaw/gateway-protocol"] !== "2026.8.1") {
+    fail("release_runtime_evidence_invalid");
+  }
   const lockfile = artifactFile(artifact, "voice-controller/bun.lock");
+  const discoveryLockfile = artifactFile(artifact, "discovery-supervisor/bun.lock");
   const denoLock = artifactFile(artifact, "supabase/deno.lock");
   return {
     application: { version: PINNED_TOOLCHAIN.application_version },
@@ -181,6 +200,13 @@ function runtimeEvidence(artifact, hermesImage) {
     bun: { version: PINNED_TOOLCHAIN.bun },
     deno: { version: PINNED_TOOLCHAIN.deno },
     supabase_cli: { version: PINNED_TOOLCHAIN.supabase_cli },
+    discovery_supervisor: {
+      package_manager: `bun@${PINNED_TOOLCHAIN.bun}`,
+      lockfile_path: "discovery-supervisor/bun.lock",
+      lockfile_sha256: createHash("sha256").update(discoveryLockfile).digest("hex"),
+      openclaw_gateway_client: "2026.8.1",
+      openclaw_gateway_protocol: "2026.8.1",
+    },
     dependencies: {
       lockfile_path: "voice-controller/bun.lock",
       lockfile_sha256: createHash("sha256").update(lockfile).digest("hex"),

@@ -83,6 +83,9 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
       "company_discovery_controls",
       "company_discovery_allowlist",
       "company_discovery_review_nonces",
+      "company_discovery_subscription_bindings",
+      "company_discovery_subscription_governors",
+      "company_discovery_subscription_reservations",
     ]) {
       expect(sql).toContain(`create table public.${table}`);
       expect(sql).toContain(`alter table public.${table} enable row level security`);
@@ -154,6 +157,11 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
       "bind_company_discovery_runtime(uuid,bigint,text,jsonb)",
       "terminalize_company_discovery_attempt(uuid,bigint,text,text,text)",
       "claim_expired_company_discovery_cleanup(text,integer)",
+      "read_company_discovery_model_access(uuid,bigint,text,bigint)",
+      "read_company_discovery_subscription_recovery(uuid,bigint,text)",
+      "reserve_company_discovery_subscription_request(uuid,bigint,text,bigint,uuid,integer,integer,integer)",
+      "settle_company_discovery_subscription_request(uuid,bigint,text,uuid,text,integer,integer,bigint,bigint,boolean,text,integer)",
+      "reap_company_discovery_subscription_reservations(integer)",
       "commit_company_discovery_result(uuid,bigint,text,jsonb,text)",
       "select_company_discovery_result(uuid,uuid,bigint)",
       "record_company_discovery_cleanup(uuid,bigint,text,jsonb)",
@@ -174,6 +182,82 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
     expect(sql).not.toContain(
       "grant execute on function public.claim_company_discovery_attempt(text,integer)",
     );
+    const modelAccess = functionBody(
+      sql,
+      "read_company_discovery_model_access(uuid,bigint,text,bigint)",
+      "revoke all on function public.read_company_discovery_model_access(uuid,bigint,text,bigint)",
+    );
+    expect(modelAccess).toContain("company_discovery_subscription_binding_missing");
+    expect(modelAccess).toContain("company_discovery_subscription_binding_stale");
+    expect(modelAccess).toContain("expected_account_hash");
+    expect(modelAccess).toContain("credential_owner_id");
+    expect(modelAccess).toContain("credential_generation");
+    for (const field of [
+      "tenant_id", "job_id", "attempt_id", "fence_generation",
+      "runtime_slot_id", "adapter_id", "deadline_at", "expected_account_hash",
+      "credential_owner_id", "credential_generation", "provider", "auth_kind", "model",
+      "subscription_socket_path", "runtime_identity_hash",
+    ]) expect(modelAccess).toContain(field);
+    const subscriptionRecovery = functionBody(
+      sql,
+      "read_company_discovery_subscription_recovery(uuid,bigint,text)",
+      "revoke all on function public.read_company_discovery_subscription_recovery(uuid,bigint,text)",
+    );
+    expect(subscriptionRecovery).toContain("company_discovery_subscription_recovery_not_current");
+    for (const field of [
+      "job_id", "attempt_id", "fence_generation", "subscription_socket_path",
+      "runtime_kind", "late_result_rejected",
+    ]) expect(subscriptionRecovery).toContain(`'${field}'`);
+    const reserve = functionBody(
+      sql,
+      "reserve_company_discovery_subscription_request(uuid,bigint,text,bigint,uuid,integer,integer,integer)",
+      "revoke all on function public.reserve_company_discovery_subscription_request(uuid,bigint,text,bigint,uuid,integer,integer,integer)",
+    );
+    expect(reserve).toContain("for update");
+    expect(reserve).toContain("v_governor.settled_requests + v_governor.reserved_requests + 1");
+    expect(reserve).toContain("v_governor.settled_input_bytes + v_governor.reserved_input_bytes +");
+    expect(reserve).toContain("v_governor.settled_output_bytes + v_governor.reserved_output_bytes +");
+    expect(reserve).toContain("v_governor.active_requests + 1 > v_governor.max_concurrency");
+    expect(reserve).toContain("v_tenant_requests + 1 > 28");
+    expect(reserve).toContain("v_tenant_input_bytes + p_input_bytes > 400000");
+    expect(reserve).toContain("v_tenant_output_bytes + p_output_bytes > 8388608");
+    expect(reserve).toContain("company_discovery_subscription_owner_limit_exceeded");
+    expect(reserve).toContain("company_discovery_subscription_tenant_limit_exceeded");
+    for (const field of [
+      "owner_current_requests", "owner_current_input_bytes",
+      "owner_current_output_bytes", "owner_max_requests",
+      "owner_max_input_bytes", "owner_max_output_bytes",
+    ]) expect(reserve).toContain(`'${field}'`);
+    expect(reserve).toContain("company_discovery_subscription_quota_unknown");
+    expect(reserve).toContain("company_discovery_subscription_cooldown");
+    expect(reserve).toContain("p_credential_generation is null");
+    const settle = functionBody(
+      sql,
+      "settle_company_discovery_subscription_request(uuid,bigint,text,uuid,text,integer,integer,bigint,bigint,boolean,text,integer)",
+      "revoke all on function public.settle_company_discovery_subscription_request(uuid,bigint,text,uuid,text,integer,integer,bigint,bigint,boolean,text,integer)",
+    );
+    expect(settle).toContain("p_quota_state not in ('available', 'cooldown', 'unknown')");
+    expect(settle).toContain("p_usage_complete is null or p_quota_state is null");
+    expect(settle).toContain("length(p_reservation_token) <> 64");
+    expect(settle).toContain("p_retry_after_seconds not between 1 and 3600");
+    expect(settle).toContain("company_discovery_subscription_settlement_invalid");
+    expect(settle).toContain("company_discovery_subscription_settlement_conflict");
+    expect(settle).toContain("company_discovery_subscription_governor_inconsistent");
+    expect(settle).not.toContain("greatest(reserved_requests - 1, 0)");
+    expect(settle).toContain("if v_reservation.state = 'settled' then");
+    const reap = functionBody(
+      sql,
+      "reap_company_discovery_subscription_reservations(integer)",
+      "revoke all on function public.reap_company_discovery_subscription_reservations(integer)",
+    );
+    expect(reap).toContain("for update skip locked");
+    expect(reap).toContain("p_limit is null or p_limit not between 1 and 1000");
+    expect(reap).toContain("quota_state = 'unknown'");
+    expect(reap).toContain("prospective_input_bytes");
+    expect(reap).toContain("company_discovery_subscription_governor_inconsistent");
+    expect(sql).toContain("max_requests integer not null default 140 check (max_requests = 140)");
+    expect(sql).toContain("max_input_bytes bigint not null default 2000000 check (max_input_bytes = 2000000)");
+    expect(sql).toContain("max_output_bytes bigint not null default 40000000 check (max_output_bytes = 40000000)");
   });
 
   test("claims an exact adapter-bound slot and returns complete post-claim authority", () => {
@@ -185,6 +269,8 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
     );
     expect(claim).toContain("p_adapter_id text");
     expect(claim).toContain("p_adapter_id not in ('openclaw', 'direct_model')");
+    expect(claim).toContain("v_slot_name := btrim(p_worker_id) || ':' || p_adapter_id");
+    expect(claim).toContain("where s.slot_name = v_slot_name");
     expect(claim).toContain("s.adapter_id = p_adapter_id");
     expect(claim).toContain("adapter_id text");
     expect(claim).toContain("runtime_slot_id uuid");
@@ -193,6 +279,8 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
       "job_id", "attempt_id", "attempt_number", "adapter_id",
       "fence_generation", "claim_token", "runtime_slot_id", "job_version",
       "normalized_origin", "deadline_at", "budget",
+      "tenant_id", "credential_owner_id", "credential_generation",
+      "subscription_account_hash",
     ]) expect(claim).toContain(field);
     expect(claim).toContain("v_job.version + 1");
   });
@@ -207,6 +295,10 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
     expect(sql).toContain("runtime_identity_hash text");
     expect(bind).toContain("company_discovery_runtime_already_bound");
     expect(bind).toContain("company_discovery_runtime_identity_invalid");
+    expect(bind).toContain("p_runtime_identity->>'runtime_kind' <> 'openclaw_cell'");
+    expect(bind).toContain("p_runtime_identity->>'runtime_kind' <> 'direct_model_subscription'");
+    expect(bind).toContain("v_attempt.adapter_id = 'openclaw'");
+    expect(bind).toContain("v_attempt.adapter_id = 'direct_model'");
     expect(bind).toContain("octet_length(p_runtime_identity::text) > 4096");
     expect(bind).toContain("v_job.current_attempt_id is distinct from v_attempt.id");
     expect(bind).toContain("v_attempt.lease_until <= clock_timestamp()");
@@ -218,6 +310,8 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
       "bridge_secret_volume_name", "profile_name", "loopback_port",
       "cell_image", "bridge_image", "reference", "index_digest", "platform",
       "selected_manifest_digest", "image_id", "config_digest",
+      "subscription_socket_path",
+      "runtime_kind",
     ]) expect(bind).toContain(`'${field}'`);
     expect(bind).toContain(
       "ghcr.io/openclaw/openclaw@sha256:e7849cb6c1ef1ead39ab4be7d85edb2df89611f486e283284c7cf35ce39a20d4",
@@ -225,7 +319,26 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
     expect(bind).toContain("in ('linux/arm64', 'linux/amd64')");
     expect(bind).toContain("split_part(v_image->>'reference', '@', 2)");
     expect(bind).toContain("v_image->>'index_digest'");
-    expect(bind).toContain("v_image->>'selected_manifest_digest'");
+    expect(bind).toContain("'index_digest', 'selected_manifest_digest', 'image_id', 'config_digest'");
+    expect(bind).toContain("^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$");
+    expect(bind).not.toContain(
+      "v_image->>'index_digest' is distinct from\n           v_image->>'selected_manifest_digest'",
+    );
+    expect(bind).not.toContain("^ligou-discovery-bridge@sha256:");
+    expect(bind).toContain(
+      "^/run/ligou-discovery/[0-9a-f]{48}/subscription[.]sock$",
+    );
+    expect(bind).toContain(
+      "'socket', 'socket_identifier', p_runtime_identity->>'subscription_socket_path'",
+    );
+    expect(bind).not.toContain("'127.0.0.1:' || (p_runtime_identity->>'loopback_port')");
+    expect(bind).toContain(
+      "not (p_runtime_identity ?& array[ 'runtime_kind', 'subscription_socket_path' ])",
+    );
+    expect(bind).toContain(
+      "(p_runtime_identity - array[ 'runtime_kind', 'subscription_socket_path' ]::text[]) <> '{}'::jsonb",
+    );
+    expect(bind).not.toContain("jsonb_object_length");
     for (const forbidden of [
       "tenant_id", "job_id", "claim_token", "gateway_token", "bridge_token",
       "credential", "api_key", "config_path", "state_path", "workspace_path",
@@ -267,6 +380,7 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
     );
     expect(expired).toContain("for update of a skip locked");
     expect(expired).toContain("a.lease_until <= clock_timestamp()");
+    expect(expired).toContain("s.supervisor_worker_id = btrim(p_worker_id)");
     expect(expired).toContain("v_runtime_bound := v_attempt.runtime_identity <> '{}'::jsonb");
     expect(expired).toContain(
       "v_attempt.status in ('validated', 'selected', 'failed', 'cancelled', 'superseded')",
@@ -286,6 +400,12 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
     ]) expect(expired).toContain(field);
     expect(expired).toContain("if v_attempt.id is null then return; end if");
     expect(expired).toContain("null::text");
+    const quarantine = functionBody(
+      sql,
+      "quarantine_company_discovery_slot(uuid,text,text)",
+      "revoke all on function public.quarantine_company_discovery_slot(uuid,text,text)",
+    );
+    expect(quarantine).toContain("p_proof_hash is null");
     const cleanup = functionBody(
       sql,
       "record_company_discovery_cleanup(uuid,bigint,text,jsonb)",
@@ -301,8 +421,17 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
     expect(sql).toContain("company_discovery_runtime_resource_release_invalid");
     expect(cleanup).toContain("p_proof->'listener_closed' = 'true'::jsonb");
     expect(cleanup).toContain("p_proof->'identity_process_absent' = 'true'::jsonb");
+    for (const field of [
+      "credential_material_removed", "subscription_lease_revoked",
+      "subscription_requests_drained", "subscription_listener_closed",
+      "subscription_socket_absent",
+    ]) expect(cleanup).toContain(`p_proof->'${field}' = 'true'::jsonb`);
+    expect(cleanup).not.toContain("credential_revoked");
     expect(cleanup).toContain("set released_at = clock_timestamp()");
-    expect(cleanup).toContain("resource_kind in ('loopback_port', 'socket_identifier')");
+    expect(cleanup).toContain("resource_kind = 'socket_identifier'");
+    expect(cleanup).toContain("resource_kind = 'loopback_port'");
+    expect(cleanup).toContain("v_expected_releases := case when v_attempt.adapter_id = 'openclaw' then 2 else 1 end");
+    expect(cleanup).toContain("company_discovery_cleanup_proof_kind_invalid");
     expect(sql).not.toContain(
       "grant update on table public.worker_runtime_resource_reservations",
     );
@@ -321,6 +450,19 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
     expect(sql).toContain(
       "grant insert on table public.worker_runtime_slots to service_role",
     );
+    expect(sql).toContain(
+      "grant select, insert, update on table public.company_discovery_subscription_bindings to service_role",
+    );
+    expect(sql).not.toContain(
+      "grant select on table public.company_discovery_subscription_bindings to authenticated",
+    );
+    expect(sql).toContain("provider text not null default 'openai-codex'");
+    expect(sql).toContain("auth_kind text not null default 'chatgpt_subscription_oauth'");
+    expect(sql).toContain("model text not null default 'gpt-5.6-sol'");
+    expect(sql).toContain("expected_account_hash text not null");
+    expect(sql).toContain("credential_owner_id uuid not null");
+    expect(sql).toContain("credential_generation bigint not null");
+    expect(sql).toContain("company_discovery_subscription_owner_account_mismatch");
     expect(sql).not.toMatch(/(?<!extensions[.])digest\(/);
     expect(sql).not.toMatch(/(?<!extensions[.])gen_random_bytes\(/);
   });
@@ -602,9 +744,14 @@ function runtimeIdentity(
   platform: "linux/arm64" | "linux/amd64" = "linux/arm64",
 ) {
   const prefix = `ligou-${label}`;
+  const subscriptionSocketId = createHash("sha256")
+    .update(`subscription:${label}`, "utf8")
+    .digest("hex")
+    .slice(0, 48);
   const openClawIndex = `sha256:${"e7849cb6c1ef1ead39ab4be7d85edb2df89611f486e283284c7cf35ce39a20d4"}`;
   const bridgeIndex = `sha256:${"b".repeat(64)}`;
   return {
+    runtime_kind: "openclaw_cell" as const,
     cell_container_name: `${prefix}-cell`,
     bridge_container_name: `${prefix}-bridge`,
     internal_network_name: `${prefix}-internal`,
@@ -617,6 +764,8 @@ function runtimeIdentity(
     bridge_secret_volume_name: `${prefix}-bridge-secret`,
     profile_name: `${prefix}-profile`,
     loopback_port: loopbackPort,
+    subscription_socket_path:
+      `/run/ligou-discovery/${subscriptionSocketId}/subscription.sock`,
     cell_image: {
       reference: `ghcr.io/openclaw/openclaw@${openClawIndex}`,
       index_digest: openClawIndex,
@@ -626,17 +775,34 @@ function runtimeIdentity(
       config_digest: `sha256:${"e".repeat(64)}`,
     },
     bridge_image: {
-      reference: `ligou-discovery-bridge@${bridgeIndex}`,
+      reference: `registry.example.invalid/ligou/discovery-bridge@${bridgeIndex}`,
       index_digest: bridgeIndex,
       platform,
-      selected_manifest_digest: bridgeIndex,
+      selected_manifest_digest: platform === "linux/arm64"
+        ? `sha256:${"9".repeat(64)}`
+        : `sha256:${"8".repeat(64)}`,
       image_id: `sha256:${"f".repeat(64)}`,
       config_digest: `sha256:${"0".repeat(64)}`,
     },
   };
 }
 
+function directRuntimeIdentity(label: string) {
+  const subscriptionSocketId = createHash("sha256")
+    .update(`direct-subscription:${label}`, "utf8")
+    .digest("hex")
+    .slice(0, 48);
+  return {
+    runtime_kind: "direct_model_subscription" as const,
+    subscription_socket_path:
+      `/run/ligou-discovery/${subscriptionSocketId}/subscription.sock`,
+  };
+}
+
 interface ClaimedAttempt {
+  tenant_id: string;
+  credential_owner_id: string;
+  credential_generation: number;
   job_id: string;
   attempt_id: string;
   attempt_number: number;
@@ -648,6 +814,7 @@ interface ClaimedAttempt {
   normalized_origin: string;
   deadline_at: string;
   budget: Record<string, unknown>;
+  subscription_account_hash: string;
 }
 
 interface CommittedResult {
@@ -670,6 +837,34 @@ interface CleanupRecovery {
   recovery_outcome: "cleanup_claimed" | "runtime_not_bound";
 }
 
+const completeDirectCleanupProof = {
+  subscription_lease_revoked: true,
+  subscription_requests_drained: true,
+  subscription_listener_closed: true,
+  subscription_socket_absent: true,
+  identity_process_absent: true,
+  late_result_rejected: true,
+};
+
+const completeOpenClawCleanupProof = {
+  gateway_exited: true,
+  container_removed: true,
+  bridge_removed: true,
+  config_removed: true,
+  state_removed: true,
+  workspace_removed: true,
+  output_removed: true,
+  network_removed: true,
+  credential_material_removed: true,
+  subscription_lease_revoked: true,
+  subscription_requests_drained: true,
+  subscription_listener_closed: true,
+  subscription_socket_absent: true,
+  listener_closed: true,
+  identity_process_absent: true,
+  late_result_rejected: true,
+} as const;
+
 test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
   "real Postgres keeps discovery fenced, owner-bound, atomic, and non-effective before review",
   async () => {
@@ -678,6 +873,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const serviceKey = process.env.SUPABASE_SECRET_KEY!;
     const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY!;
     const service = createClient(apiUrl, serviceKey, { auth: { persistSession: false } });
+    const serviceB = createClient(apiUrl, serviceKey, { auth: { persistSession: false } });
     const owner = createClient(apiUrl, publishableKey, { auth: { persistSession: false } });
     const intruder = createClient(apiUrl, publishableKey, { auth: { persistSession: false } });
     const ownerEmail = `discovery-owner-${randomUUID()}@example.invalid`;
@@ -686,10 +882,17 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const intruderPassword = `Intruder-${randomUUID()}-Aa1!`;
     const ownerTenant = randomUUID();
     const intruderTenant = randomUUID();
+    const ownerSubscriptionAccountHash = "1".repeat(64);
+    // Both tenants deliberately share one central credential owner/generation;
+    // therefore the authoritative account hash must be identical.
+    const intruderSubscriptionAccountHash = ownerSubscriptionAccountHash;
+    const designatedCredentialOwnerId = randomUUID();
     let runtimeSequence = 0;
     const bindClaim = async (claimed: ClaimedAttempt, label: string) => {
       runtimeSequence += 1;
-      const identity = runtimeIdentity(label, 30_000 + runtimeSequence);
+      const identity = claimed.adapter_id === "openclaw"
+        ? runtimeIdentity(label, 30_000 + runtimeSequence)
+        : directRuntimeIdentity(label);
       const bound = await service.rpc("bind_company_discovery_runtime", {
         p_attempt_id: claimed.attempt_id,
         p_fence_generation: claimed.fence_generation,
@@ -738,6 +941,32 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       status: "onboarding",
       operational_mode: "simulation_only",
     }])).error).toBeNull();
+    expect((await service.from("company_discovery_subscription_bindings").insert({
+      tenant_id: ownerTenant,
+      credential_owner_id: designatedCredentialOwnerId,
+      expected_account_hash: ownerSubscriptionAccountHash,
+      credential_generation: 1,
+      active: true,
+    })).error).toBeNull();
+    const mismatchedSharedOwner = await service
+      .from("company_discovery_subscription_bindings")
+      .insert({
+        tenant_id: intruderTenant,
+        credential_owner_id: designatedCredentialOwnerId,
+        expected_account_hash: "2".repeat(64),
+        credential_generation: 1,
+        active: true,
+      });
+    expect(mismatchedSharedOwner.error?.message).toContain(
+      "company_discovery_subscription_owner_account_mismatch",
+    );
+    expect((await service.from("company_discovery_subscription_bindings").insert({
+      tenant_id: intruderTenant,
+      credential_owner_id: designatedCredentialOwnerId,
+      expected_account_hash: intruderSubscriptionAccountHash,
+      credential_generation: 1,
+      active: true,
+    })).error).toBeNull();
     expect((await service.from("company_discovery_controls")
       .update({ enabled: true }).eq("singleton", true)).error).toBeNull();
     expect((await service.from("company_discovery_allowlist").insert({
@@ -752,6 +981,19 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       email: intruderEmail,
       password: intruderPassword,
     })).error).toBeNull();
+    const privateBindingRead = await owner
+      .from("company_discovery_subscription_bindings")
+      .select("tenant_id,credential_owner_id,expected_account_hash,credential_generation");
+    expect(privateBindingRead.error).not.toBeNull();
+    expect(privateBindingRead.data).toBeNull();
+    for (const privateTable of [
+      "company_discovery_subscription_governors",
+      "company_discovery_subscription_reservations",
+    ]) {
+      const privateRead = await owner.from(privateTable).select("*");
+      expect(privateRead.error).not.toBeNull();
+      expect(privateRead.data).toBeNull();
+    }
     expect((await service.from("company_discovery_controls")
       .update({ enabled: false }).eq("singleton", true)).error).toBeNull();
     const disabledOwnerStatus = await owner.rpc("company_discovery_owner_status");
@@ -832,11 +1074,16 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     expect(claim.job_id).toBe(firstJob);
     expect(Object.keys(claim).sort()).toEqual([
       "adapter_id", "attempt_id", "attempt_number", "budget", "claim_token",
-      "deadline_at", "fence_generation", "job_id", "job_version",
-      "normalized_origin", "runtime_slot_id",
+      "credential_generation", "credential_owner_id", "deadline_at",
+      "fence_generation", "job_id", "job_version", "normalized_origin",
+      "runtime_slot_id", "subscription_account_hash", "tenant_id",
     ]);
     expect(claim.adapter_id).toBe("openclaw");
     expect(claim.job_version).toBe(2);
+    expect(claim.tenant_id).toBe(ownerTenant);
+    expect(claim.subscription_account_hash).toBe(ownerSubscriptionAccountHash);
+    expect(claim.credential_owner_id).toBe(designatedCredentialOwnerId);
+    expect(claim.credential_generation).toBe(1);
     const unboundCommit = await service.rpc("commit_company_discovery_result", {
       p_attempt_id: claim.attempt_id,
       p_fence_generation: claim.fence_generation,
@@ -868,6 +1115,8 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       ...invalidRuntime,
       cell_image: { ...invalidRuntime.cell_image, unexpected: true },
     })).error?.message).toContain("company_discovery_runtime_identity_invalid");
+    expect((await invalidImageBind(directRuntimeIdentity("wrong-openclaw-kind")))
+      .error?.message).toContain("company_discovery_runtime_identity_invalid");
     expect((await invalidImageBind({
       ...invalidRuntime,
       cell_image: {
@@ -879,7 +1128,14 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       ...invalidRuntime,
       bridge_image: {
         ...invalidRuntime.bridge_image,
-        selected_manifest_digest: `sha256:${"2".repeat(64)}`,
+        selected_manifest_digest: `sha256:${"G".repeat(64)}`,
+      },
+    })).error?.message).toContain("company_discovery_runtime_identity_invalid");
+    expect((await invalidImageBind({
+      ...invalidRuntime,
+      bridge_image: {
+        ...invalidRuntime.bridge_image,
+        reference: `registry.example.invalid/ligou/discovery-bridge@sha256:${"2".repeat(64)}`,
       },
     })).error?.message).toContain("company_discovery_runtime_identity_invalid");
     expect((await invalidImageBind({
@@ -887,6 +1143,265 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       bridge_image: { ...invalidRuntime.bridge_image, platform: "linux/ppc64" },
     })).error?.message).toContain("company_discovery_runtime_identity_invalid");
     const firstRuntime = await bindClaim(claim, `first-${randomUUID()}`);
+    const staleModelAccess = await service.rpc("read_company_discovery_model_access", {
+      p_attempt_id: claim.attempt_id,
+      p_fence_generation: claim.fence_generation,
+      p_claim_token: claim.claim_token,
+      p_credential_generation: 2,
+    });
+    expect(staleModelAccess.error?.message).toContain(
+      "company_discovery_subscription_binding_stale",
+    );
+    const modelAccess = await service.rpc("read_company_discovery_model_access", {
+      p_attempt_id: claim.attempt_id,
+      p_fence_generation: claim.fence_generation,
+      p_claim_token: claim.claim_token,
+      p_credential_generation: claim.credential_generation,
+    });
+    expect(modelAccess.error).toBeNull();
+    expect(modelAccess.data).toEqual({
+      tenant_id: ownerTenant,
+      job_id: firstJob,
+      attempt_id: claim.attempt_id,
+      fence_generation: claim.fence_generation,
+      runtime_slot_id: claim.runtime_slot_id,
+      adapter_id: "openclaw",
+      deadline_at: claim.deadline_at,
+      credential_owner_id: designatedCredentialOwnerId,
+      expected_account_hash: ownerSubscriptionAccountHash,
+      credential_generation: 1,
+      subscription_socket_path: firstRuntime.subscription_socket_path,
+      runtime_identity_hash: postgresJsonbHash(firstRuntime),
+      provider: "openai-codex",
+      auth_kind: "chatgpt_subscription_oauth",
+      model: "gpt-5.6-sol",
+    });
+    const subscriptionRecovery = await service.rpc(
+      "read_company_discovery_subscription_recovery",
+      {
+        p_attempt_id: claim.attempt_id,
+        p_fence_generation: claim.fence_generation,
+        p_claim_token: claim.claim_token,
+      },
+    );
+    expect(subscriptionRecovery.error?.message).toContain(
+      "company_discovery_subscription_recovery_not_current",
+    );
+
+    const reserveSubscription = (
+      candidate: ClaimedAttempt,
+      requestKey: string,
+      inputBytes = 1_000,
+      outputBytes = 4_194_304,
+      leaseSeconds = 120,
+      client = service,
+    ) => client.rpc("reserve_company_discovery_subscription_request", {
+      p_attempt_id: candidate.attempt_id,
+      p_fence_generation: candidate.fence_generation,
+      p_claim_token: candidate.claim_token,
+      p_credential_generation: candidate.credential_generation,
+      p_request_key: requestKey,
+      p_input_bytes: inputBytes,
+      p_output_bytes: outputBytes,
+      p_lease_seconds: leaseSeconds,
+    });
+    const settleSubscription = (
+      candidate: ClaimedAttempt,
+      reservation: Record<string, unknown>,
+      options: {
+        input_bytes: number;
+        output_bytes: number;
+        observed_input_tokens: number | null;
+        observed_output_tokens: number | null;
+        usage_complete: boolean;
+        quota_state: "available" | "cooldown" | "unknown";
+        retry_after_seconds: number | null;
+      },
+    ) => service.rpc("settle_company_discovery_subscription_request", {
+      p_attempt_id: candidate.attempt_id,
+      p_fence_generation: candidate.fence_generation,
+      p_claim_token: candidate.claim_token,
+      p_reservation_id: reservation.reservation_id,
+      p_reservation_token: reservation.reservation_token,
+      p_input_bytes: options.input_bytes,
+      p_output_bytes: options.output_bytes,
+      p_observed_input_tokens: options.observed_input_tokens,
+      p_observed_output_tokens: options.observed_output_tokens,
+      p_usage_complete: options.usage_complete,
+      p_quota_state: options.quota_state,
+      p_retry_after_seconds: options.retry_after_seconds,
+    });
+
+    // Two independent service clients contend on one credential-owner row.
+    // PostgreSQL serializes the admission and global concurrency=1 permits
+    // exactly one reservation; no process-local counter participates.
+    const concurrencyRace = await Promise.all([
+      reserveSubscription(claim, randomUUID(), 1_000, 1_024, 120, service),
+      reserveSubscription(claim, randomUUID(), 1_000, 1_024, 120, serviceB),
+    ]);
+    const reservationWinners = concurrencyRace.filter((response) => response.error === null);
+    const reservationLosers = concurrencyRace.filter((response) => response.error !== null);
+    expect(reservationWinners).toHaveLength(1);
+    expect(reservationLosers).toHaveLength(1);
+    expect(reservationLosers[0]!.error?.message).toContain(
+      "company_discovery_subscription_owner_limit_exceeded",
+    );
+    const firstReservation = reservationWinners[0]!.data as Record<string, unknown>;
+    expect(firstReservation).toMatchObject({
+      quota_state: "available",
+      current_requests: 1,
+      max_requests: 28,
+      max_input_bytes: 400_000,
+      max_output_bytes: 8_388_608,
+      owner_current_requests: 1,
+      owner_max_requests: 140,
+      owner_max_input_bytes: 2_000_000,
+      owner_max_output_bytes: 40_000_000,
+      max_concurrency: 1,
+    });
+    const firstSettlement = {
+      input_bytes: 1_000,
+      output_bytes: 0,
+      observed_input_tokens: null,
+      observed_output_tokens: null,
+      usage_complete: false,
+      quota_state: "available",
+      retry_after_seconds: null,
+    } as const;
+    expect((await settleSubscription(claim, firstReservation, firstSettlement)).error)
+      .toBeNull();
+    const settlementRetry = await settleSubscription(
+      claim,
+      firstReservation,
+      firstSettlement,
+    );
+    expect(settlementRetry.error).toBeNull();
+    expect(settlementRetry.data.current_requests).toBe(1);
+
+    // Prospective bytes, not merely settled bytes, are checked against the
+    // tenant's fair share. Two full response reservations fit exactly; the
+    // next byte is rejected even though the owner-wide pool still has room.
+    for (let index = 0; index < 2; index += 1) {
+      const reserved = await reserveSubscription(
+        claim,
+        randomUUID(),
+        1_000,
+        4_194_304,
+      );
+      expect(reserved.error).toBeNull();
+      expect((await settleSubscription(claim, reserved.data, {
+        input_bytes: 1_000,
+        output_bytes: 4_194_304,
+        observed_input_tokens: 250,
+        observed_output_tokens: 1_024,
+        usage_complete: true,
+        quota_state: "available",
+        retry_after_seconds: null,
+      })).error).toBeNull();
+    }
+    const tenantLimit = await reserveSubscription(claim, randomUUID(), 1, 1);
+    expect(tenantLimit.error?.message).toContain(
+      "company_discovery_subscription_tenant_limit_exceeded",
+    );
+
+    // A second allowlisted tenant mapped to the same owner/generation retains
+    // its own fair share while contributing to the same owner-wide totals.
+    expect((await service.from("company_discovery_allowlist").insert({
+      tenant_id: intruderTenant,
+      active: true,
+    })).error).toBeNull();
+    const sharedOwnerSubmit = await intruder.rpc("submit_company_discovery", {
+      p_url: "https://example.net/",
+      p_idempotency_key: `shared-owner-${randomUUID()}`,
+    });
+    expect(sharedOwnerSubmit.error).toBeNull();
+    const sharedOwnerClaimResult = await service.rpc("claim_company_discovery_attempt", {
+      p_worker_id: `shared-owner-worker-${randomUUID()}`,
+      p_adapter_id: "direct_model",
+      p_lease_seconds: 300,
+    });
+    expect(sharedOwnerClaimResult.error).toBeNull();
+    const sharedOwnerClaim = sharedOwnerClaimResult.data![0] as ClaimedAttempt;
+    expect(sharedOwnerClaim.tenant_id).toBe(intruderTenant);
+    await bindClaim(sharedOwnerClaim, `shared-owner-${randomUUID()}`);
+    const sharedReservation = await reserveSubscription(
+      sharedOwnerClaim,
+      randomUUID(),
+      2_000,
+      2_048,
+    );
+    expect(sharedReservation.error).toBeNull();
+    expect(sharedReservation.data).toMatchObject({
+      current_requests: 1,
+      owner_current_requests: 4,
+      max_requests: 28,
+      owner_max_requests: 140,
+    });
+    const invalidRetryAfter = await settleSubscription(
+      sharedOwnerClaim,
+      sharedReservation.data,
+      {
+        input_bytes: 2_000,
+        output_bytes: 2_048,
+        observed_input_tokens: null,
+        observed_output_tokens: null,
+        usage_complete: false,
+        quota_state: "cooldown",
+        retry_after_seconds: 0,
+      },
+    );
+    expect(invalidRetryAfter.error?.message).toContain(
+      "company_discovery_subscription_settlement_invalid",
+    );
+    expect((await settleSubscription(sharedOwnerClaim, sharedReservation.data, {
+      input_bytes: 2_000,
+      output_bytes: 2_048,
+      observed_input_tokens: 500,
+      observed_output_tokens: 200,
+      usage_complete: true,
+      quota_state: "cooldown",
+      retry_after_seconds: 2,
+    })).error).toBeNull();
+    expect((await reserveSubscription(sharedOwnerClaim, randomUUID(), 1, 1))
+      .error?.message).toContain("company_discovery_subscription_cooldown");
+    await runDisposableLocalSql(`
+      update public.company_discovery_subscription_governors
+      set cooldown_until = clock_timestamp() - interval '1 second'
+      where credential_owner_id = ${localSqlUuid(designatedCredentialOwnerId)}
+        and credential_generation = 1;
+    `);
+
+    // An abandoned reservation is conservatively charged at its prospective
+    // byte ceilings and makes provider quota state unknown until intervention.
+    const abandoned = await reserveSubscription(
+      sharedOwnerClaim,
+      randomUUID(),
+      3_000,
+      4_096,
+      1,
+    );
+    expect(abandoned.error).toBeNull();
+    await runDisposableLocalSql(`
+      update public.company_discovery_subscription_reservations
+      set created_at = clock_timestamp() - interval '2 seconds',
+          lease_until = clock_timestamp() - interval '1 second'
+      where id = ${localSqlUuid(String(abandoned.data.reservation_id))};
+    `);
+    expect((await service.rpc("reap_company_discovery_subscription_reservations", {
+      p_limit: null,
+    })).error?.message).toContain("company_discovery_subscription_reap_limit_invalid");
+    expect((await service.rpc("reap_company_discovery_subscription_reservations", {
+      p_limit: 100,
+    })).data).toBe(1);
+    expect((await reserveSubscription(sharedOwnerClaim, randomUUID(), 1, 1))
+      .error?.message).toContain("company_discovery_subscription_quota_unknown");
+    expect(await runDisposableLocalSql(`
+      select concat_ws(':', state, quota_state, usage_complete::text,
+        settled_input_bytes::text, settled_output_bytes::text)
+      from public.company_discovery_subscription_reservations
+      where id = ${localSqlUuid(String(abandoned.data.reservation_id))};
+    `)).toBe("expired:unknown:false:3000:4096");
+
     const duplicateBind = await service.rpc("bind_company_discovery_runtime", {
       p_attempt_id: claim.attempt_id,
       p_fence_generation: claim.fence_generation,
@@ -1071,6 +1586,23 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_expected_version: committed.job_version,
     });
     expect(selected.error).toBeNull();
+    const selectedRecovery = await service.rpc(
+      "read_company_discovery_subscription_recovery",
+      {
+        p_attempt_id: claim.attempt_id,
+        p_fence_generation: claim.fence_generation,
+        p_claim_token: claim.claim_token,
+      },
+    );
+    expect(selectedRecovery.error).toBeNull();
+    expect(selectedRecovery.data).toEqual({
+      job_id: firstJob,
+      attempt_id: claim.attempt_id,
+      fence_generation: claim.fence_generation,
+      subscription_socket_path: firstRuntime.subscription_socket_path,
+      runtime_kind: "openclaw_cell",
+      late_result_rejected: true,
+    });
     expect((await owner.from("effective_rules").select("id").eq("tenant_id", ownerTenant)).data)
       .toEqual([]);
     const claimRows = await owner.from("discovery_claims")
@@ -1204,7 +1736,16 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const duplicateClaim = duplicateClaimResult.data![0] as ClaimedAttempt;
     expect(duplicateClaim.job_id).toBe(duplicateJob);
     expect(duplicateClaim.adapter_id).toBe("direct_model");
-    await bindClaim(duplicateClaim, `duplicate-${randomUUID()}`);
+    const falseOpenClawBinding = await service.rpc("bind_company_discovery_runtime", {
+      p_attempt_id: duplicateClaim.attempt_id,
+      p_fence_generation: duplicateClaim.fence_generation,
+      p_claim_token: duplicateClaim.claim_token,
+      p_runtime_identity: runtimeIdentity(`false-direct-cell-${randomUUID()}`, 30_900),
+    });
+    expect(falseOpenClawBinding.error?.message).toContain(
+      "company_discovery_runtime_identity_invalid",
+    );
+    const duplicateRuntime = await bindClaim(duplicateClaim, `duplicate-${randomUUID()}`);
     const duplicateCommit = await service.rpc("commit_company_discovery_result", {
       p_attempt_id: duplicateClaim.attempt_id,
       p_fence_generation: duplicateClaim.fence_generation,
@@ -1263,6 +1804,31 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_confirmation_nonce: String(duplicateNonce.data),
     });
     expect(duplicateReview.error).toBeNull();
+    const crossKindDirectCleanup = await service.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: duplicateClaim.attempt_id,
+      p_fence_generation: duplicateClaim.fence_generation,
+      p_claim_token: duplicateClaim.claim_token,
+      p_proof: completeOpenClawCleanupProof,
+    });
+    expect(crossKindDirectCleanup.error?.message).toContain(
+      "company_discovery_cleanup_proof_kind_invalid",
+    );
+    expect((await service.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: duplicateClaim.attempt_id,
+      p_fence_generation: duplicateClaim.fence_generation,
+      p_claim_token: duplicateClaim.claim_token,
+      p_proof: completeDirectCleanupProof,
+    })).error).toBeNull();
+    expect(await runDisposableLocalSql(`
+      select count(*)::text || '|' ||
+        count(*) filter (where resource_kind = 'socket_identifier')::text || '|' ||
+        count(*) filter (where released_at is not null)::text
+      from public.worker_runtime_resource_reservations
+      where attempt_id = ${localSqlUuid(duplicateClaim.attempt_id)};
+    `)).toBe("1|1|1");
+    expect(duplicateRuntime).toEqual(expect.objectContaining({
+      runtime_kind: "direct_model_subscription",
+    }));
     const singularService = await owner.from("effective_rules")
       .select("rule_group_id,version,category,structured")
       .eq("tenant_id", ownerTenant)
@@ -1285,21 +1851,6 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         },
       },
     });
-
-    const completeCleanupProof = {
-      gateway_exited: true,
-      container_removed: true,
-      bridge_removed: true,
-      config_removed: true,
-      state_removed: true,
-      workspace_removed: true,
-      output_removed: true,
-      network_removed: true,
-      credential_revoked: true,
-      listener_closed: true,
-      identity_process_absent: true,
-      late_result_rejected: true,
-    };
 
     const failureSubmit = await owner.rpc("submit_company_discovery", {
       p_url: "https://failure.example.com/",
@@ -1363,14 +1914,14 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: failureClaim.attempt_id,
       p_fence_generation: failureClaim.fence_generation,
       p_claim_token: failureClaim.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     });
     expect(staleTerminalCleanup.error?.message).toContain("company_discovery_stale_fence");
     const terminalCleanup = await service.rpc("record_company_discovery_cleanup", {
       p_attempt_id: failureClaim.attempt_id,
       p_fence_generation: terminalAuthority.fence_generation,
       p_claim_token: terminalAuthority.claim_token,
-      p_proof: { ...completeCleanupProof, identity_process_absent: false },
+      p_proof: { ...completeOpenClawCleanupProof, identity_process_absent: false },
     });
     expect(terminalCleanup.error).toBeNull();
     expect(terminalCleanup.data).toMatchObject({
@@ -1406,8 +1957,9 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     });
     expect(expiredSubmit.error).toBeNull();
     const expiredJob = String(expiredSubmit.data);
+    const expiredWorker = `stage0-expired-${randomUUID()}`;
     const expiredClaimResult = await service.rpc("claim_company_discovery_attempt", {
-      p_worker_id: `stage0-expired-${randomUUID()}`,
+      p_worker_id: expiredWorker,
       p_adapter_id: "openclaw",
       p_lease_seconds: 1,
     });
@@ -1419,7 +1971,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const expiredCleanupClaimResult = await service.rpc(
       "claim_expired_company_discovery_cleanup",
       {
-        p_worker_id: `stage0-reaper-${randomUUID()}`,
+        p_worker_id: expiredWorker,
         p_lease_seconds: 300,
       },
     );
@@ -1467,14 +2019,14 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: expiredClaim.attempt_id,
       p_fence_generation: expiredClaim.fence_generation,
       p_claim_token: expiredClaim.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     });
     expect(expiredOldCleanup.error?.message).toContain("company_discovery_stale_fence");
     const expiredCleanup = await service.rpc("record_company_discovery_cleanup", {
       p_attempt_id: expiredAuthority.attempt_id,
       p_fence_generation: expiredAuthority.fence_generation,
       p_claim_token: expiredAuthority.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     });
     expect(expiredCleanup.error).toBeNull();
     expect(expiredCleanup.data).toMatchObject({
@@ -1601,7 +2153,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     expect(retried.error).toBeNull();
     const directWorker = `stage0-direct-${randomUUID()}`;
     expect((await service.from("worker_runtime_slots").insert({
-      slot_name: directWorker,
+      slot_name: `${directWorker}:direct_model`,
       supervisor_worker_id: directWorker,
       adapter_id: "direct_model",
     })).error).toBeNull();
@@ -1655,7 +2207,11 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       workspace_removed: true,
       output_removed: true,
       network_removed: true,
-      credential_revoked: true,
+      credential_material_removed: true,
+      subscription_lease_revoked: true,
+      subscription_requests_drained: true,
+      subscription_listener_closed: true,
+      subscription_socket_absent: true,
       listener_closed: true,
       identity_process_absent: true,
       late_result_rejected: true,
@@ -1708,7 +2264,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: newAttempt.attempt_id,
       p_fence_generation: newAttempt.fence_generation,
       p_claim_token: newAttempt.claim_token,
-      p_proof: { ...cleanupProof, listener_closed: false },
+      p_proof: { ...completeDirectCleanupProof, subscription_socket_absent: false },
     });
     expect(unresolvedCleanup.error).toBeNull();
     expect(unresolvedCleanup.data).toMatchObject({
@@ -1782,6 +2338,13 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       status: "onboarding",
       operational_mode: "simulation_only",
     }])).error).toBeNull();
+    expect((await serviceA.from("company_discovery_subscription_bindings").insert({
+      tenant_id: ownerTenant,
+      credential_owner_id: randomUUID(),
+      expected_account_hash: "3".repeat(64),
+      credential_generation: 1,
+      active: true,
+    })).error).toBeNull();
     expect((await serviceA.from("company_discovery_controls")
       .update({ enabled: true }).eq("singleton", true)).error).toBeNull();
     expect((await serviceA.from("company_discovery_allowlist").insert({
@@ -1818,26 +2381,17 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     expect((await serviceA.from("company_discovery_allowlist")
       .update({ expires_at: null }).eq("tenant_id", ownerTenant)).error).toBeNull();
 
-    const completeCleanupProof = {
-      gateway_exited: true,
-      container_removed: true,
-      bridge_removed: true,
-      config_removed: true,
-      state_removed: true,
-      workspace_removed: true,
-      output_removed: true,
-      network_removed: true,
-      credential_revoked: true,
-      listener_closed: true,
-      identity_process_absent: true,
-      late_result_rejected: true,
-    };
     let identitySequence = 0;
-    const nextIdentity = (label: string, port?: number) => {
+    const nextIdentity = (
+      label: string,
+      port?: number,
+      platform: "linux/arm64" | "linux/amd64" = "linux/arm64",
+    ) => {
       identitySequence += 1;
       return runtimeIdentity(
         `${label}-${randomUUID()}`,
         port ?? 40_000 + identitySequence,
+        platform,
       );
     };
     const resultPayload = (origin: string) => ({
@@ -1943,9 +2497,15 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       "company_discovery_runtime_not_bound",
     );
     await expireLease(unboundClaim.attempt_id);
+    const foreignHostRecovery = await serviceB.rpc(
+      "claim_expired_company_discovery_cleanup",
+      { p_worker_id: `stage0-foreign-host-${randomUUID()}`, p_lease_seconds: 300 },
+    );
+    expect(foreignHostRecovery.error).toBeNull();
+    expect(foreignHostRecovery.data).toEqual([]);
     const unboundRecovery = await serviceA.rpc(
       "claim_expired_company_discovery_cleanup",
-      { p_worker_id: `stage0-reaper-${randomUUID()}`, p_lease_seconds: 300 },
+      { p_worker_id: unboundWorker, p_lease_seconds: 300 },
     );
     expect(unboundRecovery.error).toBeNull();
     expect(unboundRecovery.data).toHaveLength(1);
@@ -1963,7 +2523,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     });
     const trulyIdleRecovery = await serviceA.rpc(
       "claim_expired_company_discovery_cleanup",
-      { p_worker_id: `stage0-idle-reaper-${randomUUID()}`, p_lease_seconds: 300 },
+      { p_worker_id: unboundWorker, p_lease_seconds: 300 },
     );
     expect(trulyIdleRecovery.error).toBeNull();
     expect(trulyIdleRecovery.data).toEqual([]);
@@ -2031,7 +2591,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     expect(reboundClaim.job_id).toBe(unboundJob);
     expect(reboundClaim.attempt_id).not.toBe(unboundClaim.attempt_id);
     expect(reboundClaim.runtime_slot_id).toBe(unboundClaim.runtime_slot_id);
-    const firstIdentity = nextIdentity("first-bound");
+    const firstIdentity = nextIdentity("first-bound", undefined, "linux/amd64");
     expect((await bind(reboundClaim, firstIdentity)).error).toBeNull();
     const terminalized = await serviceA.rpc("terminalize_company_discovery_attempt", {
       p_attempt_id: reboundClaim.attempt_id,
@@ -2059,6 +2619,13 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     expect(activePortCollision.error?.message).toContain(
       "company_discovery_runtime_identity_conflict",
     );
+    const activeSocketCollision = await bind(activePortClaim, {
+      ...nextIdentity("active-socket-collision"),
+      subscription_socket_path: firstIdentity.subscription_socket_path,
+    });
+    expect(activeSocketCollision.error?.message).toContain(
+      "company_discovery_runtime_identity_conflict",
+    );
     const directRelease = await serviceA
       .from("worker_runtime_resource_reservations")
       .update({ released_at: "2026-09-01T10:00:00.000Z" })
@@ -2077,11 +2644,11 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     await expireLease(reboundClaim.attempt_id);
     const firstReaperRace = await concurrentRpc([
       () => serviceA.rpc("claim_expired_company_discovery_cleanup", {
-        p_worker_id: `stage0-reaper-a-${randomUUID()}`,
+        p_worker_id: unboundWorker,
         p_lease_seconds: 300,
       }),
       () => serviceB.rpc("claim_expired_company_discovery_cleanup", {
-        p_worker_id: `stage0-reaper-b-${randomUUID()}`,
+        p_worker_id: unboundWorker,
         p_lease_seconds: 300,
       }),
     ]);
@@ -2107,7 +2674,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: reboundClaim.attempt_id,
       p_fence_generation: terminalAuthority.fence_generation,
       p_claim_token: terminalAuthority.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     });
     expect(staleTerminalCleanup.error?.message).toContain(
       "company_discovery_stale_fence",
@@ -2116,10 +2683,10 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: reboundClaim.attempt_id,
       p_fence_generation: firstReaper.fence_generation,
       p_claim_token: firstReaper.claim_token,
-      p_proof: { ...completeCleanupProof, unexpected: true },
+      p_proof: { ...completeOpenClawCleanupProof, unexpected: true },
     });
     expect(malformedCleanup.error?.message).toContain(
-      "company_discovery_cleanup_proof_invalid",
+      "company_discovery_cleanup_proof_kind_invalid",
     );
     expect((await serviceA.from("worker_attempts")
       .select("cleanup_state,cleanup_outcome")
@@ -2131,11 +2698,11 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     await expireLease(reboundClaim.attempt_id);
     const secondReaperRace = await concurrentRpc([
       () => serviceA.rpc("claim_expired_company_discovery_cleanup", {
-        p_worker_id: `stage0-reaper-c-${randomUUID()}`,
+        p_worker_id: unboundWorker,
         p_lease_seconds: 300,
       }),
       () => serviceB.rpc("claim_expired_company_discovery_cleanup", {
-        p_worker_id: `stage0-reaper-d-${randomUUID()}`,
+        p_worker_id: unboundWorker,
         p_lease_seconds: 300,
       }),
     ]);
@@ -2148,14 +2715,14 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: reboundClaim.attempt_id,
       p_fence_generation: firstReaper.fence_generation,
       p_claim_token: firstReaper.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     });
     expect(firstReaperStale.error?.message).toContain("company_discovery_stale_fence");
     const provedCleanup = await serviceA.rpc("record_company_discovery_cleanup", {
       p_attempt_id: reboundClaim.attempt_id,
       p_fence_generation: secondReaper.fence_generation,
       p_claim_token: secondReaper.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     });
     expect(provedCleanup.error).toBeNull();
     expect(provedCleanup.data).toMatchObject({
@@ -2227,6 +2794,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const secondIdentity = {
       ...nextIdentity("released-port-reuse"),
       loopback_port: firstIdentity.loopback_port,
+      subscription_socket_path: firstIdentity.subscription_socket_path,
     };
     expect((await bind(reusedSlotClaim, secondIdentity)).error).toBeNull();
 
@@ -2269,7 +2837,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         p_attempt_id: reusedSlotClaim.attempt_id,
         p_fence_generation: authority.fence_generation,
         p_claim_token: authority.claim_token,
-        p_proof: completeCleanupProof,
+        p_proof: completeOpenClawCleanupProof,
       })).error).toBeNull();
     } else {
       expect(raceAttempt.data?.status).toBe("validated");
@@ -2278,7 +2846,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         p_attempt_id: reusedSlotClaim.attempt_id,
         p_fence_generation: reusedSlotClaim.fence_generation,
         p_claim_token: reusedSlotClaim.claim_token,
-        p_proof: completeCleanupProof,
+        p_proof: completeOpenClawCleanupProof,
       })).error).toBeNull();
     }
 
@@ -2292,21 +2860,31 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       new Set([portReuseRaceJobA, portReuseRaceJobB]),
     );
     const contestedPort = secondIdentity.loopback_port;
+    const contestedSocket = secondIdentity.subscription_socket_path;
     const portReuseRace = await concurrentRpc([
-      () => bind(portReuseClaimA, nextIdentity("port-reuse-race-a", contestedPort)),
-      () => bind(portReuseClaimB, nextIdentity("port-reuse-race-b", contestedPort), serviceB),
+      () => bind(portReuseClaimA, {
+        ...nextIdentity("port-reuse-race-a", contestedPort),
+        subscription_socket_path: contestedSocket,
+      }),
+      () => bind(portReuseClaimB, {
+        ...nextIdentity("port-reuse-race-b", contestedPort),
+        subscription_socket_path: contestedSocket,
+      }, serviceB),
     ]);
     expect(portReuseRace.filter((response) => response.error === null)).toHaveLength(1);
     expect(portReuseRace.filter((response) => response.error !== null)).toHaveLength(1);
     expect(portReuseRace.find((response) => response.error !== null)?.error?.message)
       .toContain("company_discovery_runtime_identity_conflict");
     expect(await runDisposableLocalSql(`
-      select count(*)::text
+      select count(*)::text || '|' ||
+        count(*) filter (where resource_kind = 'socket_identifier')::text
       from public.worker_runtime_resource_reservations
-      where resource_kind = 'loopback_port'
-        and resource_identifier = '${contestedPort}'
+      where (
+          (resource_kind = 'loopback_port' and resource_identifier = '${contestedPort}')
+          or (resource_kind = 'socket_identifier' and resource_identifier = '${contestedSocket}')
+        )
         and released_at is null;
-    `)).toBe("1");
+    `)).toBe("2|1");
 
     // The safe unbound policy fails instead of requeueing while the global gate
     // is disabled, while still proving no runtime and releasing the exact slot.
@@ -2318,7 +2896,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       .update({ enabled: false }).eq("singleton", true)).error).toBeNull();
     const disabledRecovery = await serviceA.rpc(
       "claim_expired_company_discovery_cleanup",
-      { p_worker_id: `stage0-disabled-reaper-${randomUUID()}`, p_lease_seconds: 300 },
+      { p_worker_id: disabledWorker, p_lease_seconds: 300 },
     );
     expect(disabledRecovery.error).toBeNull();
     expect(disabledRecovery.data).toHaveLength(1);
@@ -2350,14 +2928,15 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     // An expired worker can never beat the reaper even when both requests hit
     // PostgreSQL concurrently: the reaper rotates authority and the commit is stale.
     const staleCommitJob = await submit("reaper-stale-commit");
-    const staleCommitClaim = await claim(`stage0-stale-commit-${randomUUID()}`);
+    const staleCommitWorker = `stage0-stale-commit-${randomUUID()}`;
+    const staleCommitClaim = await claim(staleCommitWorker);
     const staleCommitIdentity = nextIdentity("stale-commit");
     expect((await bind(staleCommitClaim, staleCommitIdentity)).error).toBeNull();
     await expireLease(staleCommitClaim.attempt_id);
     const stalePayload = resultPayload(staleCommitClaim.normalized_origin);
     const reclaimCommitRace = await concurrentRpc([
       () => serviceA.rpc("claim_expired_company_discovery_cleanup", {
-        p_worker_id: `stage0-reclaim-${randomUUID()}`,
+        p_worker_id: staleCommitWorker,
         p_lease_seconds: 300,
       }),
       () => serviceB.rpc("commit_company_discovery_result", {
@@ -2376,7 +2955,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const eventualReclaim = reclaimResponse.data.length === 1
       ? reclaimResponse
       : await serviceA.rpc("claim_expired_company_discovery_cleanup", {
-        p_worker_id: `stage0-reclaim-followup-${randomUUID()}`,
+        p_worker_id: staleCommitWorker,
         p_lease_seconds: 300,
       });
     expect(eventualReclaim.error).toBeNull();
@@ -2393,13 +2972,14 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: staleCommitClaim.attempt_id,
       p_fence_generation: reclaimed.fence_generation,
       p_claim_token: reclaimed.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     })).error).toBeNull();
 
     // Cancelled terminal cleanup gets the same repeatable rotation path without
     // changing its terminal outcome or its bound adapter/runtime identity.
     const cancelledJob = await submit("cancelled-cleanup");
-    const cancelledClaim = await claim(`stage0-cancelled-${randomUUID()}`);
+    const cancelledWorker = `stage0-cancelled-${randomUUID()}`;
+    const cancelledClaim = await claim(cancelledWorker);
     const cancelledIdentity = nextIdentity("cancelled");
     expect((await bind(cancelledClaim, cancelledIdentity)).error).toBeNull();
     const cancelledTerminal = await serviceA.rpc(
@@ -2416,7 +2996,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     await expireLease(cancelledClaim.attempt_id);
     const cancelledReclaim = await serviceA.rpc(
       "claim_expired_company_discovery_cleanup",
-      { p_worker_id: `stage0-cancel-reaper-${randomUUID()}`, p_lease_seconds: 300 },
+      { p_worker_id: cancelledWorker, p_lease_seconds: 300 },
     );
     expect(cancelledReclaim.error).toBeNull();
     expect(cancelledReclaim.data).toHaveLength(1);
@@ -2441,7 +3021,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: cancelledClaim.attempt_id,
       p_fence_generation: cancelledAuthority.fence_generation,
       p_claim_token: cancelledAuthority.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     })).error).toBeNull();
 
     // A retry may move job.current_attempt_id before the old terminal slot is
@@ -2479,7 +3059,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     await expireLease(detachedOldClaim.attempt_id);
     const detachedReclaim = await serviceA.rpc(
       "claim_expired_company_discovery_cleanup",
-      { p_worker_id: `stage0-detached-reaper-${randomUUID()}`, p_lease_seconds: 300 },
+      { p_worker_id: detachedOldWorker, p_lease_seconds: 300 },
     );
     expect(detachedReclaim.error).toBeNull();
     expect(detachedReclaim.data).toHaveLength(1);
@@ -2514,7 +3094,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: detachedOldClaim.attempt_id,
       p_fence_generation: detachedAuthority.fence_generation,
       p_claim_token: detachedAuthority.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     })).error).toBeNull();
     const detachedReplacementTerminal = await serviceA.rpc(
       "terminalize_company_discovery_attempt",
@@ -2531,7 +3111,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: detachedReplacement.attempt_id,
       p_fence_generation: detachedReplacementTerminal.data.fence_generation,
       p_claim_token: detachedReplacementTerminal.data.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     })).error).toBeNull();
 
     // A prior selected result/nonce cannot cross a retry whose replacement is
@@ -2576,7 +3156,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: oldBoundaryClaim.attempt_id,
       p_fence_generation: oldBoundaryClaim.fence_generation,
       p_claim_token: oldBoundaryClaim.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     })).error).toBeNull();
     const boundaryRetry = await owner.rpc("retry_company_discovery", {
       p_job: staleBoundaryJob,
@@ -2623,7 +3203,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: replacementBoundary.attempt_id,
       p_fence_generation: replacementTerminal.data.fence_generation,
       p_claim_token: replacementTerminal.data.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     })).error).toBeNull();
 
     // A successful commit can lose its plaintext cleanup token before the
@@ -2631,9 +3211,8 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     // the immutable result, and the validated attempt remains selectable with
     // the exact returned job version and synchronized fence.
     const validatedCleanupJob = await submit("validated-cleanup-reclaim");
-    const validatedCleanupClaim = await claim(
-      `stage0-validated-cleanup-${randomUUID()}`,
-    );
+    const validatedCleanupWorker = `stage0-validated-cleanup-${randomUUID()}`;
+    const validatedCleanupClaim = await claim(validatedCleanupWorker);
     expect(validatedCleanupClaim.job_id).toBe(validatedCleanupJob);
     const validatedCleanupIdentity = nextIdentity("validated-cleanup");
     expect((await bind(validatedCleanupClaim, validatedCleanupIdentity)).error)
@@ -2658,7 +3237,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const validatedCleanupReclaim = await serviceA.rpc(
       "claim_expired_company_discovery_cleanup",
       {
-        p_worker_id: `stage0-validated-reaper-${randomUUID()}`,
+        p_worker_id: validatedCleanupWorker,
         p_lease_seconds: 300,
       },
     );
@@ -2693,7 +3272,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         p_attempt_id: validatedCleanupClaim.attempt_id,
         p_fence_generation: validatedCleanupClaim.fence_generation,
         p_claim_token: validatedCleanupClaim.claim_token,
-        p_proof: completeCleanupProof,
+        p_proof: completeOpenClawCleanupProof,
       },
     );
     expect(staleValidatedCleanup.error?.message)
@@ -2719,7 +3298,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: validatedCleanupClaim.attempt_id,
       p_fence_generation: validatedCleanupAuthority.fence_generation,
       p_claim_token: validatedCleanupAuthority.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     })).error).toBeNull();
     const validatedCleanupSelect = await serviceA.rpc(
       "select_company_discovery_result",
@@ -2749,7 +3328,8 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     // remains successful in either lock order, and any SKIP LOCKED miss is
     // reclaimed immediately afterward without invalidating selected state.
     const reclaimSelectJob = await submit("reclaim-select-race");
-    const reclaimSelectClaim = await claim(`stage0-reclaim-select-${randomUUID()}`);
+    const reclaimSelectWorker = `stage0-reclaim-select-${randomUUID()}`;
+    const reclaimSelectClaim = await claim(reclaimSelectWorker);
     expect(reclaimSelectClaim.job_id).toBe(reclaimSelectJob);
     expect((await bind(reclaimSelectClaim, nextIdentity("reclaim-select"))).error)
       .toBeNull();
@@ -2766,7 +3346,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     await expireLease(reclaimSelectClaim.attempt_id);
     const reclaimSelectRace = await concurrentRpc([
       () => serviceA.rpc("claim_expired_company_discovery_cleanup", {
-        p_worker_id: `stage0-reclaim-select-reaper-${randomUUID()}`,
+        p_worker_id: reclaimSelectWorker,
         p_lease_seconds: 300,
       }),
       () => serviceB.rpc("select_company_discovery_result", {
@@ -2784,7 +3364,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const eventualReclaimSelect = reclaimSelectRace[0]!.data.length === 1
       ? reclaimSelectRace[0]!
       : await serviceA.rpc("claim_expired_company_discovery_cleanup", {
-        p_worker_id: `stage0-reclaim-select-followup-${randomUUID()}`,
+        p_worker_id: reclaimSelectWorker,
         p_lease_seconds: 300,
       });
     expect(eventualReclaimSelect.error).toBeNull();
@@ -2806,7 +3386,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: reclaimSelectClaim.attempt_id,
       p_fence_generation: reclaimSelectAuthority.fence_generation,
       p_claim_token: reclaimSelectAuthority.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     })).error).toBeNull();
     expect((await serviceA.from("worker_jobs")
       .select("status,version,selected_attempt_id")
@@ -2820,7 +3400,8 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     // rotates the cleanup token/fence, the prior authority is rejected, and a
     // pre-existing review nonce stays valid through proved cleanup and review.
     const selectedCleanupJob = await submit("selected-cleanup-reclaim");
-    const selectedCleanupClaim = await claim(`stage0-selected-cleanup-${randomUUID()}`);
+    const selectedCleanupWorker = `stage0-selected-cleanup-${randomUUID()}`;
+    const selectedCleanupClaim = await claim(selectedCleanupWorker);
     expect(selectedCleanupClaim.job_id).toBe(selectedCleanupJob);
     const selectedCleanupIdentity = nextIdentity("selected-cleanup");
     expect((await bind(selectedCleanupClaim, selectedCleanupIdentity)).error)
@@ -2862,7 +3443,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const selectedCleanupReclaimOne = await serviceA.rpc(
       "claim_expired_company_discovery_cleanup",
       {
-        p_worker_id: `stage0-selected-reaper-one-${randomUUID()}`,
+        p_worker_id: selectedCleanupWorker,
         p_lease_seconds: 300,
       },
     );
@@ -2908,7 +3489,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const selectedCleanupReclaimTwo = await serviceA.rpc(
       "claim_expired_company_discovery_cleanup",
       {
-        p_worker_id: `stage0-selected-reaper-two-${randomUUID()}`,
+        p_worker_id: selectedCleanupWorker,
         p_lease_seconds: 300,
       },
     );
@@ -2931,7 +3512,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         p_attempt_id: selectedCleanupClaim.attempt_id,
         p_fence_generation: selectedAuthorityOne.fence_generation,
         p_claim_token: selectedAuthorityOne.claim_token,
-        p_proof: completeCleanupProof,
+        p_proof: completeOpenClawCleanupProof,
       },
     );
     expect(staleSelectedCleanup.error?.message)
@@ -2940,7 +3521,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: selectedCleanupClaim.attempt_id,
       p_fence_generation: selectedAuthorityTwo.fence_generation,
       p_claim_token: selectedAuthorityTwo.claim_token,
-      p_proof: completeCleanupProof,
+      p_proof: completeOpenClawCleanupProof,
     })).error).toBeNull();
     const nonceAfterCleanup = await owner.from("company_discovery_review_nonces")
       .select("invalidated_at,consumed_at")
@@ -3001,7 +3582,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const slotClaim = slotClaims[0] as ClaimedAttempt;
     expect([slotRaceJobA, slotRaceJobB]).toContain(slotClaim.job_id);
     expect((await serviceA.from("worker_runtime_slots")
-      .select("id,current_attempt_id").eq("slot_name", slotRaceWorker)).data)
+      .select("id,current_attempt_id").eq("slot_name", `${slotRaceWorker}:openclaw`)).data)
       .toEqual([{ id: slotClaim.runtime_slot_id, current_attempt_id: slotClaim.attempt_id }]);
     const unresolvedIdentity = nextIdentity("slot-race");
     expect((await bind(slotClaim, unresolvedIdentity)).error).toBeNull();
@@ -3017,7 +3598,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_attempt_id: slotClaim.attempt_id,
       p_fence_generation: slotTerminal.data.fence_generation,
       p_claim_token: slotTerminal.data.claim_token,
-      p_proof: { ...completeCleanupProof, listener_closed: false },
+      p_proof: { ...completeOpenClawCleanupProof, subscription_socket_absent: false },
     });
     expect(unresolved.error).toBeNull();
     expect(unresolved.data).toMatchObject({
@@ -3055,9 +3636,40 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const unresolvedPortCollision = await bind(unresolvedPortClaim, {
       ...nextIdentity("unresolved-port-collision"),
       loopback_port: unresolvedIdentity.loopback_port,
+      subscription_socket_path: unresolvedIdentity.subscription_socket_path,
     });
     expect(unresolvedPortCollision.error?.message).toContain(
       "company_discovery_runtime_identity_conflict",
     );
+
+    // Dynamic adapter selection uses two durable slot identities for one
+    // supervisor process, so a slot first seen as OpenClaw cannot make the
+    // later Direct baseline poll idle forever (or vice versa).
+    await submit("dual-adapter-a");
+    await submit("dual-adapter-b");
+    const dualAdapterWorker = `stage0-dual-adapter-${randomUUID()}`;
+    const dualAdapterClaims = await concurrentRpc([
+      () => serviceA.rpc("claim_company_discovery_attempt", {
+        p_worker_id: dualAdapterWorker,
+        p_adapter_id: "openclaw",
+        p_lease_seconds: 300,
+      }),
+      () => serviceB.rpc("claim_company_discovery_attempt", {
+        p_worker_id: dualAdapterWorker,
+        p_adapter_id: "direct_model",
+        p_lease_seconds: 300,
+      }),
+    ]);
+    for (const response of dualAdapterClaims) {
+      expect(response.error).toBeNull();
+      expect(response.data).toHaveLength(1);
+    }
+    expect((await serviceA.from("worker_runtime_slots")
+      .select("slot_name,adapter_id")
+      .eq("supervisor_worker_id", dualAdapterWorker)
+      .order("adapter_id")).data).toEqual([
+      { slot_name: `${dualAdapterWorker}:direct_model`, adapter_id: "direct_model" },
+      { slot_name: `${dualAdapterWorker}:openclaw`, adapter_id: "openclaw" },
+    ]);
   },
 );

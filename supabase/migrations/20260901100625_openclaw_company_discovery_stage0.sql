@@ -33,6 +33,62 @@ create table public.company_discovery_allowlist (
   check (expires_at is null or expires_at > created_at)
 );
 
+-- Service-only binding between a Ligou tenant and the expected ChatGPT
+-- subscription account identity. Only the SHA-256 digest is persisted; raw
+-- account IDs and OAuth material never enter tenant-readable relations.
+create table public.company_discovery_subscription_bindings (
+  tenant_id uuid primary key references public.tenants (id),
+  provider text not null default 'openai-codex'
+    check (provider = 'openai-codex'),
+  auth_kind text not null default 'chatgpt_subscription_oauth'
+    check (auth_kind = 'chatgpt_subscription_oauth'),
+  model text not null default 'gpt-5.6-sol'
+    check (model = 'gpt-5.6-sol'),
+  credential_owner_id uuid not null,
+  expected_account_hash text not null
+    check (expected_account_hash ~ '^[0-9a-f]{64}$'),
+  credential_generation bigint not null check (credential_generation > 0),
+  active boolean not null default false,
+  created_at timestamp with time zone not null default now(),
+  updated_at timestamp with time zone not null default now()
+);
+
+create table public.company_discovery_subscription_governors (
+  credential_owner_id uuid not null,
+  credential_generation bigint not null check (credential_generation > 0),
+  expected_account_hash text not null
+    check (expected_account_hash ~ '^[0-9a-f]{64}$'),
+  window_started_at timestamp with time zone not null default now(),
+  window_ends_at timestamp with time zone not null default (now() + interval '1 hour'),
+  -- One release-owned credential owner may serve the 3-5 allowlisted Stage 0
+  -- tenants. Its aggregate limits are deliberately wider than one tenant's
+  -- fair share, while concurrency remains globally serialized.
+  max_requests integer not null default 140 check (max_requests = 140),
+  max_input_bytes bigint not null default 2000000 check (max_input_bytes = 2000000),
+  max_output_bytes bigint not null default 40000000 check (max_output_bytes = 40000000),
+  max_concurrency integer not null default 1 check (max_concurrency = 1),
+  settled_requests integer not null default 0 check (settled_requests >= 0),
+  settled_input_bytes bigint not null default 0 check (settled_input_bytes >= 0),
+  settled_output_bytes bigint not null default 0 check (settled_output_bytes >= 0),
+  reserved_requests integer not null default 0 check (reserved_requests >= 0),
+  reserved_input_bytes bigint not null default 0 check (reserved_input_bytes >= 0),
+  reserved_output_bytes bigint not null default 0 check (reserved_output_bytes >= 0),
+  active_requests integer not null default 0 check (active_requests between 0 and 1),
+  quota_state text not null default 'available'
+    check (quota_state in ('available', 'cooldown', 'unknown')),
+  cooldown_until timestamp with time zone,
+  updated_at timestamp with time zone not null default now(),
+  primary key (credential_owner_id, credential_generation),
+  check (window_ends_at > window_started_at),
+  check (settled_requests + reserved_requests <= max_requests),
+  check (settled_input_bytes + reserved_input_bytes <= max_input_bytes),
+  check (settled_output_bytes + reserved_output_bytes <= max_output_bytes),
+  check (
+    (quota_state = 'cooldown' and cooldown_until is not null)
+    or (quota_state <> 'cooldown' and cooldown_until is null)
+  )
+);
+
 -- ---------------------------------------------------------------- jobs and fencing
 create table public.worker_jobs (
   id uuid primary key default gen_random_uuid(),
@@ -176,6 +232,68 @@ alter table public.worker_jobs
 alter table public.worker_runtime_slots
   add constraint worker_runtime_slots_current_attempt_fk
   foreign key (current_attempt_id) references public.worker_attempts (id);
+
+create table public.company_discovery_subscription_reservations (
+  id uuid primary key default gen_random_uuid(),
+  request_key uuid not null,
+  tenant_id uuid not null references public.tenants (id),
+  job_id uuid not null references public.worker_jobs (id),
+  attempt_id uuid not null references public.worker_attempts (id),
+  fence_generation bigint not null check (fence_generation > 0),
+  credential_owner_id uuid not null,
+  credential_generation bigint not null,
+  reservation_token_hash bytea not null,
+  claim_token_hash bytea not null,
+  prospective_input_bytes integer not null
+    check (prospective_input_bytes between 1 and 400000),
+  prospective_output_bytes integer not null
+    check (prospective_output_bytes between 1 and 4194304),
+  state text not null default 'reserved'
+    check (state in ('reserved', 'settled', 'expired')),
+  lease_until timestamp with time zone not null,
+  settled_input_bytes integer,
+  settled_output_bytes integer,
+  observed_input_tokens bigint,
+  observed_output_tokens bigint,
+  usage_complete boolean,
+  quota_state text check (quota_state in ('available', 'cooldown', 'unknown')),
+  retry_after_seconds integer,
+  created_at timestamp with time zone not null default now(),
+  settled_at timestamp with time zone,
+  unique (attempt_id, request_key),
+  foreign key (credential_owner_id, credential_generation)
+    references public.company_discovery_subscription_governors (
+      credential_owner_id, credential_generation
+    ),
+  check (lease_until > created_at),
+  check (
+    (state = 'reserved'
+      and settled_at is null
+      and settled_input_bytes is null
+      and settled_output_bytes is null
+      and observed_input_tokens is null
+      and observed_output_tokens is null
+      and usage_complete is null
+      and quota_state is null
+      and retry_after_seconds is null)
+    or (state in ('settled', 'expired')
+      and settled_at is not null
+      and settled_input_bytes between 0 and prospective_input_bytes
+      and settled_output_bytes between 0 and prospective_output_bytes
+      and usage_complete is not null
+      and quota_state is not null
+      and (observed_input_tokens is null or observed_input_tokens >= 0)
+      and (observed_output_tokens is null or observed_output_tokens >= 0)
+      and (
+        (quota_state = 'cooldown' and retry_after_seconds between 1 and 3600)
+        or (quota_state <> 'cooldown' and retry_after_seconds is null)
+      ))
+  )
+);
+
+create index company_discovery_subscription_reservations_expiry_idx
+  on public.company_discovery_subscription_reservations (lease_until, id)
+  where state = 'reserved';
 
 -- Durable runtime names remain reserved forever so an old cleanup receipt can
 -- never name a later attempt's resource. The finite loopback endpoint pair is
@@ -394,6 +512,70 @@ $$;
 revoke all on function public.guard_worker_job_identity()
   from public, anon, authenticated, service_role;
 
+create or replace function public.guard_company_discovery_subscription_binding()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if new.tenant_id is distinct from old.tenant_id
+     or new.provider is distinct from old.provider
+     or new.auth_kind is distinct from old.auth_kind
+     or new.model is distinct from old.model
+     or new.created_at is distinct from old.created_at
+     or new.credential_generation not in (
+       old.credential_generation, old.credential_generation + 1
+     )
+     or (
+       (
+         new.active is distinct from old.active
+         or
+         new.credential_owner_id is distinct from old.credential_owner_id
+         or new.expected_account_hash is distinct from old.expected_account_hash
+       ) is distinct from (
+         new.credential_generation = old.credential_generation + 1
+       )
+     ) then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_binding_transition_invalid';
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function public.guard_company_discovery_subscription_binding()
+  from public, anon, authenticated, service_role;
+
+create or replace function public.ensure_company_discovery_subscription_governor()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  insert into public.company_discovery_subscription_governors (
+    credential_owner_id, credential_generation, expected_account_hash
+  ) values (
+    new.credential_owner_id, new.credential_generation, new.expected_account_hash
+  ) on conflict (credential_owner_id, credential_generation) do nothing;
+  if not exists (
+    select 1
+    from public.company_discovery_subscription_governors governor
+    where governor.credential_owner_id = new.credential_owner_id
+      and governor.credential_generation = new.credential_generation
+      and governor.expected_account_hash = new.expected_account_hash
+  ) then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_owner_account_mismatch';
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function public.ensure_company_discovery_subscription_governor()
+  from public, anon, authenticated, service_role;
+
 create or replace function public.guard_worker_runtime_resource_release()
 returns trigger
 language plpgsql
@@ -420,6 +602,15 @@ revoke all on function public.guard_worker_runtime_resource_release()
 create trigger worker_jobs_identity_immutable
   before update on public.worker_jobs
   for each row execute function public.guard_worker_job_identity();
+
+create trigger company_discovery_subscription_binding_guard
+  before update on public.company_discovery_subscription_bindings
+  for each row execute function public.guard_company_discovery_subscription_binding();
+
+create trigger company_discovery_subscription_governor_ensure
+  after insert or update of credential_owner_id, credential_generation
+  on public.company_discovery_subscription_bindings
+  for each row execute function public.ensure_company_discovery_subscription_governor();
 
 create trigger worker_results_append_only
   before update or delete on public.worker_results
@@ -489,6 +680,12 @@ alter table public.company_discovery_controls enable row level security;
 alter table public.company_discovery_controls force row level security;
 alter table public.company_discovery_allowlist enable row level security;
 alter table public.company_discovery_allowlist force row level security;
+alter table public.company_discovery_subscription_bindings enable row level security;
+alter table public.company_discovery_subscription_bindings force row level security;
+alter table public.company_discovery_subscription_governors enable row level security;
+alter table public.company_discovery_subscription_governors force row level security;
+alter table public.company_discovery_subscription_reservations enable row level security;
+alter table public.company_discovery_subscription_reservations force row level security;
 alter table public.worker_jobs enable row level security;
 alter table public.worker_jobs force row level security;
 alter table public.worker_runtime_slots enable row level security;
@@ -566,7 +763,10 @@ create policy discovery_decisions_owner_select
   ));
 
 revoke all on table public.company_discovery_controls,
-  public.company_discovery_allowlist, public.worker_jobs,
+  public.company_discovery_allowlist,
+  public.company_discovery_subscription_bindings, public.worker_jobs,
+  public.company_discovery_subscription_governors,
+  public.company_discovery_subscription_reservations,
   public.worker_runtime_slots, public.worker_attempts,
   public.worker_runtime_resource_reservations, public.worker_results,
   public.discovery_source_snapshots, public.discovery_claims,
@@ -591,6 +791,13 @@ grant select on table
 
 grant insert, update on table public.company_discovery_controls,
   public.company_discovery_allowlist
+  to service_role;
+
+grant select, insert, update on table public.company_discovery_subscription_bindings
+  to service_role;
+
+grant select on table public.company_discovery_subscription_governors,
+  public.company_discovery_subscription_reservations
   to service_role;
 
 grant insert on table public.worker_runtime_slots to service_role;
@@ -732,6 +939,15 @@ begin
   ) then
     raise exception using errcode = '42501',
       message = 'company_discovery_tenant_not_allowlisted';
+  end if;
+  if not exists (
+    select 1
+    from public.company_discovery_subscription_bindings binding
+    where binding.tenant_id = v_tenant
+      and binding.active
+  ) then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_binding_missing';
   end if;
   insert into public.worker_jobs (
     tenant_id, normalized_origin, origin_host, registrable_domain, idempotency_key,
@@ -1385,7 +1601,11 @@ create or replace function public.claim_company_discovery_attempt(
   job_version bigint,
   normalized_origin text,
   deadline_at timestamp with time zone,
-  budget jsonb
+  budget jsonb,
+  tenant_id uuid,
+  credential_owner_id uuid,
+  credential_generation bigint,
+  subscription_account_hash text
 )
 language plpgsql
 security definer
@@ -1393,10 +1613,12 @@ set search_path = ''
 as $$
 declare
   v_job public.worker_jobs;
+  v_subscription public.company_discovery_subscription_bindings;
   v_slot public.worker_runtime_slots;
   v_attempt uuid := gen_random_uuid();
   v_attempt_number integer;
   v_token text := encode(extensions.gen_random_bytes(32), 'hex');
+  v_slot_name text;
 begin
   if p_worker_id is null or btrim(p_worker_id) = ''
      or p_adapter_id not in ('openclaw', 'direct_model')
@@ -1404,15 +1626,19 @@ begin
     raise exception using errcode = '22023',
       message = 'company_discovery_claim_invalid';
   end if;
+  -- One supervisor process may dynamically benchmark both adapters. The
+  -- durable slot identity therefore includes the selected adapter; otherwise
+  -- a pre-existing slot for the other adapter makes every later claim idle.
+  v_slot_name := btrim(p_worker_id) || ':' || p_adapter_id;
   insert into public.worker_runtime_slots (
     slot_name, supervisor_worker_id, adapter_id, status
   ) values (
-    btrim(p_worker_id), btrim(p_worker_id), p_adapter_id, 'available'
+    v_slot_name, btrim(p_worker_id), p_adapter_id, 'available'
   )
   on conflict (slot_name) do nothing;
   select s.* into v_slot
   from public.worker_runtime_slots s
-  where s.slot_name = btrim(p_worker_id)
+  where s.slot_name = v_slot_name
     and s.adapter_id = p_adapter_id
     and s.status = 'available'
   for update skip locked;
@@ -1433,6 +1659,15 @@ begin
   limit 1
   for update skip locked;
   if v_job.id is null then return; end if;
+  select binding.* into v_subscription
+  from public.company_discovery_subscription_bindings binding
+  where binding.tenant_id = v_job.tenant_id
+    and binding.active
+  for share;
+  if v_subscription.tenant_id is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_binding_missing';
+  end if;
   select coalesce(max(a.attempt_number), 0) + 1
     into v_attempt_number
   from public.worker_attempts a where a.job_id = v_job.id;
@@ -1457,13 +1692,645 @@ begin
   return query select
     v_job.id, v_attempt, v_attempt_number, p_adapter_id,
     v_job.fence_generation, v_token, v_slot.id, v_job.version + 1,
-    v_job.normalized_origin, v_job.deadline_at, v_job.budget;
+    v_job.normalized_origin, v_job.deadline_at, v_job.budget,
+    v_job.tenant_id, v_subscription.credential_owner_id,
+    v_subscription.credential_generation,
+    v_subscription.expected_account_hash;
 end;
 $$;
 
 revoke all on function public.claim_company_discovery_attempt(text,text,integer)
   from public, anon, authenticated, service_role;
 grant execute on function public.claim_company_discovery_attempt(text,text,integer)
+  to service_role;
+
+create or replace function public.read_company_discovery_model_access(
+  p_attempt_id uuid,
+  p_fence_generation bigint,
+  p_claim_token text,
+  p_credential_generation bigint
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_attempt public.worker_attempts;
+  v_job public.worker_jobs;
+  v_binding public.company_discovery_subscription_bindings;
+begin
+  select attempt.* into v_attempt
+  from public.worker_attempts attempt
+  where attempt.id = p_attempt_id
+  for share;
+  if v_attempt.id is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_attempt_not_found';
+  end if;
+  select job.* into v_job
+  from public.worker_jobs job
+  where job.id = v_attempt.job_id;
+  if v_attempt.status <> 'running'
+     or v_job.status <> 'running'
+     or v_job.current_attempt_id is distinct from v_attempt.id then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_attempt_not_current';
+  end if;
+  if v_job.fence_generation is distinct from p_fence_generation
+     or v_attempt.fence_generation is distinct from p_fence_generation then
+    raise exception using errcode = '40001',
+      message = 'company_discovery_stale_fence';
+  end if;
+  if v_attempt.claim_token_hash is distinct from
+       extensions.digest(p_claim_token, 'sha256') then
+    raise exception using errcode = '42501',
+      message = 'company_discovery_claim_token_invalid';
+  end if;
+  if v_attempt.lease_until <= clock_timestamp()
+     or v_job.deadline_at <= clock_timestamp() then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_attempt_lease_expired';
+  end if;
+  if v_attempt.runtime_slot_id is null
+     or v_attempt.runtime_identity = '{}'::jsonb
+     or v_attempt.runtime_identity_hash is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_runtime_not_bound';
+  end if;
+  if not exists (
+    select 1 from public.company_discovery_controls controls
+    where controls.singleton and controls.enabled
+  ) or not exists (
+    select 1 from public.company_discovery_allowlist allowed
+    where allowed.tenant_id = v_job.tenant_id
+      and allowed.active
+      and (allowed.expires_at is null or allowed.expires_at > clock_timestamp())
+  ) then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_model_access_disabled';
+  end if;
+  select binding.* into v_binding
+  from public.company_discovery_subscription_bindings binding
+  where binding.tenant_id = v_job.tenant_id
+    and binding.active
+  for share;
+  if v_binding.tenant_id is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_binding_missing';
+  end if;
+  if v_binding.credential_generation is distinct from p_credential_generation then
+    raise exception using errcode = '40001',
+      message = 'company_discovery_subscription_binding_stale';
+  end if;
+  return jsonb_build_object(
+    'tenant_id', v_job.tenant_id,
+    'job_id', v_job.id,
+    'attempt_id', v_attempt.id,
+    'fence_generation', v_attempt.fence_generation,
+    'runtime_slot_id', v_attempt.runtime_slot_id,
+    'adapter_id', v_attempt.adapter_id,
+    'deadline_at', v_job.deadline_at,
+    'subscription_socket_path',
+      v_attempt.runtime_identity->>'subscription_socket_path',
+    'runtime_identity_hash', v_attempt.runtime_identity_hash,
+    'credential_owner_id', v_binding.credential_owner_id,
+    'expected_account_hash', v_binding.expected_account_hash,
+    'credential_generation', v_binding.credential_generation,
+    'provider', v_binding.provider,
+    'auth_kind', v_binding.auth_kind,
+    'model', v_binding.model
+  );
+end;
+$$;
+
+revoke all on function public.read_company_discovery_model_access(uuid,bigint,text,bigint)
+  from public, anon, authenticated, service_role;
+grant execute on function public.read_company_discovery_model_access(uuid,bigint,text,bigint)
+  to service_role;
+
+create or replace function public.read_company_discovery_subscription_recovery(
+  p_attempt_id uuid,
+  p_fence_generation bigint,
+  p_claim_token text
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_attempt public.worker_attempts;
+  v_slot public.worker_runtime_slots;
+begin
+  select attempt.* into v_attempt
+  from public.worker_attempts attempt
+  where attempt.id = p_attempt_id
+  for share;
+  if v_attempt.id is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_attempt_not_found';
+  end if;
+  if v_attempt.fence_generation is distinct from p_fence_generation then
+    raise exception using errcode = '40001',
+      message = 'company_discovery_stale_fence';
+  end if;
+  if v_attempt.claim_token_hash is distinct from
+       extensions.digest(p_claim_token, 'sha256') then
+    raise exception using errcode = '42501',
+      message = 'company_discovery_claim_token_invalid';
+  end if;
+  if v_attempt.cleanup_state <> 'pending'
+     or v_attempt.runtime_slot_id is null
+     or v_attempt.runtime_identity = '{}'::jsonb
+     or v_attempt.runtime_identity_hash is null
+     or v_attempt.status = 'running' then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_recovery_not_current';
+  end if;
+  select slot.* into v_slot
+  from public.worker_runtime_slots slot
+  where slot.id = v_attempt.runtime_slot_id
+    and slot.current_attempt_id = v_attempt.id
+    and slot.status in ('busy', 'quarantined')
+  for share;
+  if v_slot.id is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_recovery_not_current';
+  end if;
+  return jsonb_build_object(
+    'job_id', v_attempt.job_id,
+    'attempt_id', v_attempt.id,
+    'fence_generation', v_attempt.fence_generation,
+    'subscription_socket_path',
+      v_attempt.runtime_identity->>'subscription_socket_path',
+    'runtime_kind', v_attempt.runtime_identity->>'runtime_kind',
+    'late_result_rejected', true
+  );
+end;
+$$;
+
+revoke all on function public.read_company_discovery_subscription_recovery(uuid,bigint,text)
+  from public, anon, authenticated, service_role;
+grant execute on function public.read_company_discovery_subscription_recovery(uuid,bigint,text)
+  to service_role;
+
+create or replace function public.reap_company_discovery_subscription_reservations(
+  p_limit integer
+) returns integer
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_reservation public.company_discovery_subscription_reservations;
+  v_reaped integer := 0;
+begin
+  if p_limit is null or p_limit not between 1 and 1000 then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_subscription_reap_limit_invalid';
+  end if;
+  for v_reservation in
+    select reservation.*
+    from public.company_discovery_subscription_reservations reservation
+    where reservation.state = 'reserved'
+      and reservation.lease_until <= clock_timestamp()
+    order by reservation.lease_until, reservation.id
+    limit p_limit
+    for update skip locked
+  loop
+    perform 1
+    from public.company_discovery_subscription_governors governor
+    where governor.credential_owner_id = v_reservation.credential_owner_id
+      and governor.credential_generation = v_reservation.credential_generation
+    for update;
+    update public.company_discovery_subscription_reservations
+    set state = 'expired',
+        settled_input_bytes = prospective_input_bytes,
+        settled_output_bytes = prospective_output_bytes,
+        observed_input_tokens = null,
+        observed_output_tokens = null,
+        usage_complete = false,
+        quota_state = 'unknown',
+        retry_after_seconds = null,
+        settled_at = clock_timestamp()
+    where id = v_reservation.id
+      and state = 'reserved';
+    if found then
+      update public.company_discovery_subscription_governors
+      set reserved_requests = reserved_requests - 1,
+          reserved_input_bytes =
+            reserved_input_bytes - v_reservation.prospective_input_bytes,
+          reserved_output_bytes =
+            reserved_output_bytes - v_reservation.prospective_output_bytes,
+          active_requests = active_requests - 1,
+          settled_requests = settled_requests + 1,
+          settled_input_bytes = settled_input_bytes +
+            v_reservation.prospective_input_bytes,
+          settled_output_bytes = settled_output_bytes +
+            v_reservation.prospective_output_bytes,
+          quota_state = 'unknown',
+          cooldown_until = null,
+          updated_at = clock_timestamp()
+      where credential_owner_id = v_reservation.credential_owner_id
+        and credential_generation = v_reservation.credential_generation
+        and reserved_requests >= 1
+        and reserved_input_bytes >= v_reservation.prospective_input_bytes
+        and reserved_output_bytes >= v_reservation.prospective_output_bytes
+        and active_requests >= 1;
+      if not found then
+        raise exception using errcode = '55000',
+          message = 'company_discovery_subscription_governor_inconsistent';
+      end if;
+      v_reaped := v_reaped + 1;
+    end if;
+  end loop;
+  return v_reaped;
+end;
+$$;
+
+revoke all on function public.reap_company_discovery_subscription_reservations(integer)
+  from public, anon, authenticated, service_role;
+grant execute on function public.reap_company_discovery_subscription_reservations(integer)
+  to service_role;
+
+create or replace function public.reserve_company_discovery_subscription_request(
+  p_attempt_id uuid,
+  p_fence_generation bigint,
+  p_claim_token text,
+  p_credential_generation bigint,
+  p_request_key uuid,
+  p_input_bytes integer,
+  p_output_bytes integer,
+  p_lease_seconds integer
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_access jsonb;
+  v_owner uuid;
+  v_tenant uuid;
+  v_governor public.company_discovery_subscription_governors;
+  v_existing public.company_discovery_subscription_reservations;
+  v_reservation_id uuid := gen_random_uuid();
+  v_reservation_token text := encode(extensions.gen_random_bytes(32), 'hex');
+  v_lease_until timestamp with time zone;
+  v_now timestamp with time zone := clock_timestamp();
+  v_tenant_requests integer;
+  v_tenant_input_bytes bigint;
+  v_tenant_output_bytes bigint;
+begin
+  if p_request_key is null
+     or p_attempt_id is null
+     or p_fence_generation is null
+     or p_claim_token is null
+     or p_credential_generation is null or p_credential_generation < 1
+     or p_input_bytes is null
+     or p_output_bytes is null
+     or p_lease_seconds is null
+     or p_input_bytes not between 1 and 400000
+     or p_output_bytes not between 1 and 4194304
+     or p_lease_seconds not between 1 and 600 then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_subscription_reservation_invalid';
+  end if;
+  v_access := public.read_company_discovery_model_access(
+    p_attempt_id, p_fence_generation, p_claim_token, p_credential_generation
+  );
+  v_owner := (v_access->>'credential_owner_id')::uuid;
+  v_tenant := (v_access->>'tenant_id')::uuid;
+  perform public.reap_company_discovery_subscription_reservations(100);
+  select governor.* into v_governor
+  from public.company_discovery_subscription_governors governor
+  where governor.credential_owner_id = v_owner
+    and governor.credential_generation = p_credential_generation
+  for update;
+  if v_governor.credential_owner_id is null
+     or v_governor.expected_account_hash is distinct from
+       (v_access->>'expected_account_hash') then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_governor_missing';
+  end if;
+  if v_governor.window_ends_at <= v_now
+     and v_governor.active_requests = 0
+     and v_governor.quota_state <> 'unknown'
+     and (v_governor.cooldown_until is null or v_governor.cooldown_until <= v_now) then
+    update public.company_discovery_subscription_governors
+    set window_started_at = v_now,
+        window_ends_at = v_now + interval '1 hour',
+        settled_requests = 0,
+        settled_input_bytes = 0,
+        settled_output_bytes = 0,
+        reserved_requests = 0,
+        reserved_input_bytes = 0,
+        reserved_output_bytes = 0,
+        quota_state = 'available',
+        cooldown_until = null,
+        updated_at = v_now
+    where credential_owner_id = v_owner
+      and credential_generation = p_credential_generation
+    returning * into v_governor;
+  elsif v_governor.quota_state = 'cooldown'
+        and v_governor.cooldown_until <= v_now then
+    update public.company_discovery_subscription_governors
+    set quota_state = 'available', cooldown_until = null, updated_at = v_now
+    where credential_owner_id = v_owner
+      and credential_generation = p_credential_generation
+    returning * into v_governor;
+  end if;
+  select reservation.* into v_existing
+  from public.company_discovery_subscription_reservations reservation
+  where reservation.attempt_id = p_attempt_id
+    and reservation.request_key = p_request_key
+  for update;
+  if v_existing.id is not null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_reservation_replay_unavailable';
+  end if;
+  if v_governor.quota_state = 'unknown' then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_quota_unknown';
+  end if;
+  if v_governor.quota_state = 'cooldown' then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_cooldown';
+  end if;
+  select
+    count(*)::integer,
+    coalesce(sum(case
+      when reservation.state = 'reserved' then reservation.prospective_input_bytes
+      else reservation.settled_input_bytes
+    end), 0)::bigint,
+    coalesce(sum(case
+      when reservation.state = 'reserved' then reservation.prospective_output_bytes
+      else reservation.settled_output_bytes
+    end), 0)::bigint
+  into v_tenant_requests, v_tenant_input_bytes, v_tenant_output_bytes
+  from public.company_discovery_subscription_reservations reservation
+  where reservation.credential_owner_id = v_owner
+    and reservation.credential_generation = p_credential_generation
+    and reservation.tenant_id = v_tenant
+    and reservation.created_at >= v_governor.window_started_at;
+  if v_governor.active_requests + 1 > v_governor.max_concurrency
+     or v_governor.settled_requests + v_governor.reserved_requests + 1 >
+       v_governor.max_requests
+     or v_governor.settled_input_bytes + v_governor.reserved_input_bytes +
+       p_input_bytes > v_governor.max_input_bytes
+     or v_governor.settled_output_bytes + v_governor.reserved_output_bytes +
+       p_output_bytes > v_governor.max_output_bytes then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_owner_limit_exceeded';
+  end if;
+  if v_tenant_requests + 1 > 28
+     or v_tenant_input_bytes + p_input_bytes > 400000
+     or v_tenant_output_bytes + p_output_bytes > 8388608 then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_tenant_limit_exceeded';
+  end if;
+  v_lease_until := least(
+    v_now + make_interval(secs => p_lease_seconds),
+    (v_access->>'deadline_at')::timestamp with time zone
+  );
+  if v_lease_until <= v_now then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_reservation_expired';
+  end if;
+  insert into public.company_discovery_subscription_reservations (
+    id, request_key, tenant_id, job_id, attempt_id, fence_generation,
+    credential_owner_id, credential_generation, reservation_token_hash,
+    claim_token_hash,
+    prospective_input_bytes, prospective_output_bytes, lease_until
+  ) values (
+    v_reservation_id, p_request_key, (v_access->>'tenant_id')::uuid,
+    (v_access->>'job_id')::uuid, p_attempt_id, p_fence_generation,
+    v_owner, p_credential_generation,
+    extensions.digest(v_reservation_token, 'sha256'),
+    extensions.digest(p_claim_token, 'sha256'),
+    p_input_bytes, p_output_bytes, v_lease_until
+  );
+  update public.company_discovery_subscription_governors
+  set reserved_requests = reserved_requests + 1,
+      reserved_input_bytes = reserved_input_bytes + p_input_bytes,
+      reserved_output_bytes = reserved_output_bytes + p_output_bytes,
+      active_requests = active_requests + 1,
+      updated_at = v_now
+  where credential_owner_id = v_owner
+    and credential_generation = p_credential_generation
+  returning * into v_governor;
+  v_tenant_requests := v_tenant_requests + 1;
+  v_tenant_input_bytes := v_tenant_input_bytes + p_input_bytes;
+  v_tenant_output_bytes := v_tenant_output_bytes + p_output_bytes;
+  return jsonb_build_object(
+    'reservation_id', v_reservation_id,
+    'reservation_token', v_reservation_token,
+    'request_number', v_tenant_requests,
+    'lease_until', v_lease_until,
+    'quota_state', 'available',
+    'current_requests', v_tenant_requests,
+    'current_input_bytes', v_tenant_input_bytes,
+    'current_output_bytes', v_tenant_output_bytes,
+    'max_requests', 28,
+    'max_input_bytes', 400000,
+    'max_output_bytes', 8388608,
+    'owner_current_requests',
+      v_governor.settled_requests + v_governor.reserved_requests,
+    'owner_current_input_bytes',
+      v_governor.settled_input_bytes + v_governor.reserved_input_bytes,
+    'owner_current_output_bytes',
+      v_governor.settled_output_bytes + v_governor.reserved_output_bytes,
+    'owner_max_requests', v_governor.max_requests,
+    'owner_max_input_bytes', v_governor.max_input_bytes,
+    'owner_max_output_bytes', v_governor.max_output_bytes,
+    'max_concurrency', v_governor.max_concurrency
+  );
+end;
+$$;
+
+revoke all on function public.reserve_company_discovery_subscription_request(uuid,bigint,text,bigint,uuid,integer,integer,integer)
+  from public, anon, authenticated, service_role;
+grant execute on function public.reserve_company_discovery_subscription_request(uuid,bigint,text,bigint,uuid,integer,integer,integer)
+  to service_role;
+
+create or replace function public.settle_company_discovery_subscription_request(
+  p_attempt_id uuid,
+  p_fence_generation bigint,
+  p_claim_token text,
+  p_reservation_id uuid,
+  p_reservation_token text,
+  p_input_bytes integer,
+  p_output_bytes integer,
+  p_observed_input_tokens bigint,
+  p_observed_output_tokens bigint,
+  p_usage_complete boolean,
+  p_quota_state text,
+  p_retry_after_seconds integer
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_reservation public.company_discovery_subscription_reservations;
+  v_governor public.company_discovery_subscription_governors;
+  v_cooldown_until timestamp with time zone;
+  v_tenant_requests integer;
+  v_tenant_input_bytes bigint;
+  v_tenant_output_bytes bigint;
+begin
+  if p_reservation_id is null
+     or p_attempt_id is null
+     or p_fence_generation is null
+     or p_claim_token is null
+     or p_reservation_token is null or length(p_reservation_token) <> 64
+     or p_reservation_token !~ '^[0-9a-f]{64}$'
+     or p_input_bytes is null or p_output_bytes is null
+     or p_usage_complete is null or p_quota_state is null
+     or p_input_bytes < 0 or p_output_bytes < 0
+     or p_quota_state not in ('available', 'cooldown', 'unknown')
+     or (p_quota_state = 'cooldown' and
+       (p_retry_after_seconds is null or p_retry_after_seconds not between 1 and 3600))
+     or (p_quota_state <> 'cooldown' and p_retry_after_seconds is not null)
+     or (p_usage_complete and
+       (p_observed_input_tokens is null or p_observed_output_tokens is null))
+     or (p_observed_input_tokens is not null and p_observed_input_tokens < 0)
+     or (p_observed_output_tokens is not null and p_observed_output_tokens < 0) then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_subscription_settlement_invalid';
+  end if;
+  select reservation.* into v_reservation
+  from public.company_discovery_subscription_reservations reservation
+  where reservation.id = p_reservation_id
+    and reservation.attempt_id = p_attempt_id
+    and reservation.fence_generation = p_fence_generation
+  for update;
+  if v_reservation.id is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_reservation_not_current';
+  end if;
+  if v_reservation.reservation_token_hash is distinct from
+       extensions.digest(p_reservation_token, 'sha256') then
+    raise exception using errcode = '42501',
+      message = 'company_discovery_subscription_reservation_token_invalid';
+  end if;
+  if v_reservation.claim_token_hash is distinct from
+       extensions.digest(p_claim_token, 'sha256') then
+    raise exception using errcode = '42501',
+      message = 'company_discovery_subscription_reservation_claim_invalid';
+  end if;
+  if v_reservation.state = 'settled' then
+    if v_reservation.settled_input_bytes is distinct from p_input_bytes
+       or v_reservation.settled_output_bytes is distinct from p_output_bytes
+       or v_reservation.observed_input_tokens is distinct from p_observed_input_tokens
+       or v_reservation.observed_output_tokens is distinct from p_observed_output_tokens
+       or v_reservation.usage_complete is distinct from p_usage_complete
+       or v_reservation.quota_state is distinct from p_quota_state
+       or v_reservation.retry_after_seconds is distinct from p_retry_after_seconds then
+      raise exception using errcode = '55000',
+        message = 'company_discovery_subscription_settlement_conflict';
+    end if;
+  elsif v_reservation.state <> 'reserved'
+        or v_reservation.lease_until <= clock_timestamp() then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_reservation_not_current';
+  end if;
+  if p_input_bytes > v_reservation.prospective_input_bytes
+     or p_output_bytes > v_reservation.prospective_output_bytes then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_subscription_settlement_invalid';
+  end if;
+  select governor.* into v_governor
+  from public.company_discovery_subscription_governors governor
+  where governor.credential_owner_id = v_reservation.credential_owner_id
+    and governor.credential_generation = v_reservation.credential_generation
+  for update;
+  if v_governor.credential_owner_id is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_subscription_governor_missing';
+  end if;
+  if v_reservation.state = 'reserved' then
+    v_cooldown_until := case when p_quota_state = 'cooldown'
+      then clock_timestamp() + make_interval(secs => p_retry_after_seconds)
+      else null
+    end;
+    update public.company_discovery_subscription_reservations
+    set state = 'settled',
+        settled_input_bytes = p_input_bytes,
+        settled_output_bytes = p_output_bytes,
+        observed_input_tokens = p_observed_input_tokens,
+        observed_output_tokens = p_observed_output_tokens,
+        usage_complete = p_usage_complete,
+        quota_state = p_quota_state,
+        retry_after_seconds = p_retry_after_seconds,
+        settled_at = clock_timestamp()
+    where id = v_reservation.id;
+    update public.company_discovery_subscription_governors
+    set reserved_requests = reserved_requests - 1,
+        reserved_input_bytes =
+          reserved_input_bytes - v_reservation.prospective_input_bytes,
+        reserved_output_bytes =
+          reserved_output_bytes - v_reservation.prospective_output_bytes,
+        active_requests = active_requests - 1,
+        settled_requests = settled_requests + 1,
+        settled_input_bytes = settled_input_bytes + p_input_bytes,
+        settled_output_bytes = settled_output_bytes + p_output_bytes,
+        quota_state = p_quota_state,
+        cooldown_until = v_cooldown_until,
+        updated_at = clock_timestamp()
+    where credential_owner_id = v_reservation.credential_owner_id
+      and credential_generation = v_reservation.credential_generation
+      and reserved_requests >= 1
+      and reserved_input_bytes >= v_reservation.prospective_input_bytes
+      and reserved_output_bytes >= v_reservation.prospective_output_bytes
+      and active_requests >= 1
+    returning * into v_governor;
+    if v_governor.credential_owner_id is null then
+      raise exception using errcode = '55000',
+        message = 'company_discovery_subscription_governor_inconsistent';
+    end if;
+  end if;
+  select
+    count(*)::integer,
+    coalesce(sum(case
+      when reservation.state = 'reserved' then reservation.prospective_input_bytes
+      else reservation.settled_input_bytes
+    end), 0)::bigint,
+    coalesce(sum(case
+      when reservation.state = 'reserved' then reservation.prospective_output_bytes
+      else reservation.settled_output_bytes
+    end), 0)::bigint
+  into v_tenant_requests, v_tenant_input_bytes, v_tenant_output_bytes
+  from public.company_discovery_subscription_reservations reservation
+  where reservation.credential_owner_id = v_reservation.credential_owner_id
+    and reservation.credential_generation = v_reservation.credential_generation
+    and reservation.tenant_id = v_reservation.tenant_id
+    and reservation.created_at >= v_governor.window_started_at;
+  return jsonb_build_object(
+    'settled', true,
+    'quota_state', v_governor.quota_state,
+    'cooldown_until', v_governor.cooldown_until,
+    'current_requests', v_tenant_requests,
+    'current_input_bytes', v_tenant_input_bytes,
+    'current_output_bytes', v_tenant_output_bytes,
+    'max_requests', 28,
+    'max_input_bytes', 400000,
+    'max_output_bytes', 8388608,
+    'owner_current_requests',
+      v_governor.settled_requests + v_governor.reserved_requests,
+    'owner_current_input_bytes',
+      v_governor.settled_input_bytes + v_governor.reserved_input_bytes,
+    'owner_current_output_bytes',
+      v_governor.settled_output_bytes + v_governor.reserved_output_bytes,
+    'owner_max_requests', v_governor.max_requests,
+    'owner_max_input_bytes', v_governor.max_input_bytes,
+    'owner_max_output_bytes', v_governor.max_output_bytes,
+    'max_concurrency', v_governor.max_concurrency
+  );
+end;
+$$;
+
+revoke all on function public.settle_company_discovery_subscription_request(uuid,bigint,text,uuid,text,integer,integer,bigint,bigint,boolean,text,integer)
+  from public, anon, authenticated, service_role;
+grant execute on function public.settle_company_discovery_subscription_request(uuid,bigint,text,uuid,text,integer,integer,bigint,bigint,boolean,text,integer)
   to service_role;
 
 create or replace function public.bind_company_discovery_runtime(
@@ -1537,10 +2404,25 @@ begin
   end if;
   if jsonb_typeof(p_runtime_identity) <> 'object'
      or octet_length(p_runtime_identity::text) > 4096
+     or jsonb_typeof(p_runtime_identity->'runtime_kind') <> 'string'
+     or jsonb_typeof(p_runtime_identity->'subscription_socket_path') <> 'string'
+     or p_runtime_identity->>'subscription_socket_path' !~
+       '^/run/ligou-discovery/[0-9a-f]{48}/subscription[.]sock$' then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_runtime_identity_invalid';
+  end if;
+  if v_attempt.adapter_id = 'openclaw' then
+    if p_runtime_identity->>'runtime_kind' <> 'openclaw_cell'
      or not (p_runtime_identity ?&
-       (v_name_keys || array['loopback_port', 'cell_image', 'bridge_image']))
+       (v_name_keys || array[
+         'runtime_kind', 'loopback_port', 'cell_image', 'bridge_image',
+         'subscription_socket_path'
+       ]))
      or (p_runtime_identity -
-       (v_name_keys || array['loopback_port', 'cell_image', 'bridge_image'])) <> '{}'::jsonb
+       (v_name_keys || array[
+         'runtime_kind', 'loopback_port', 'cell_image', 'bridge_image',
+         'subscription_socket_path'
+       ])) <> '{}'::jsonb
      or p_runtime_identity ?| array[
        'tenant_id', 'job_id', 'claim_token', 'gateway_token', 'bridge_token',
        'credential', 'api_key', 'config_path', 'state_path', 'workspace_path',
@@ -1549,17 +2431,19 @@ begin
      or jsonb_typeof(p_runtime_identity->'loopback_port') <> 'number'
      or (p_runtime_identity->>'loopback_port') !~ '^[0-9]+$'
      or (p_runtime_identity->>'loopback_port')::integer not between 1024 and 65535 then
-    raise exception using errcode = '22023',
-      message = 'company_discovery_runtime_identity_invalid';
-  end if;
-  foreach v_image_key in array array['cell_image', 'bridge_image']
-  loop
+      raise exception using errcode = '22023',
+        message = 'company_discovery_runtime_identity_invalid';
+    end if;
+    foreach v_image_key in array array['cell_image', 'bridge_image']
+    loop
     v_image := p_runtime_identity->v_image_key;
     if jsonb_typeof(v_image) <> 'object'
        or not (v_image ?& v_image_keys)
        or (v_image - v_image_keys) <> '{}'::jsonb
        or jsonb_typeof(v_image->'reference') <> 'string'
        or length(v_image->>'reference') not between 1 and 384
+       or v_image->>'reference' !~
+         '^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$'
        or jsonb_typeof(v_image->'platform') <> 'string'
        or v_image->>'platform' not in ('linux/arm64', 'linux/amd64') then
       raise exception using errcode = '22023',
@@ -1586,19 +2470,9 @@ begin
       raise exception using errcode = '22023',
         message = 'company_discovery_runtime_identity_invalid';
     end if;
-    if v_image_key = 'bridge_image'
-       and (
-         v_image->>'reference' !~
-           '^ligou-discovery-bridge@sha256:[0-9a-f]{64}$'
-         or v_image->>'index_digest' is distinct from
-           v_image->>'selected_manifest_digest'
-       ) then
-      raise exception using errcode = '22023',
-        message = 'company_discovery_runtime_identity_invalid';
-    end if;
-  end loop;
-  foreach v_name_key in array v_name_keys
-  loop
+    end loop;
+    foreach v_name_key in array v_name_keys
+    loop
     if jsonb_typeof(p_runtime_identity->v_name_key) <> 'string' then
       raise exception using errcode = '22023',
         message = 'company_discovery_runtime_identity_invalid';
@@ -1611,34 +2485,58 @@ begin
       raise exception using errcode = '22023',
         message = 'company_discovery_runtime_identity_invalid';
     end if;
-  end loop;
+    end loop;
+  elsif v_attempt.adapter_id = 'direct_model' then
+    if p_runtime_identity->>'runtime_kind' <> 'direct_model_subscription'
+       or not (p_runtime_identity ?& array[
+         'runtime_kind', 'subscription_socket_path'
+       ])
+       or (p_runtime_identity - array[
+         'runtime_kind', 'subscription_socket_path'
+       ]::text[]) <> '{}'::jsonb then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_runtime_identity_invalid';
+    end if;
+  else
+    raise exception using errcode = '22023',
+      message = 'company_discovery_runtime_identity_invalid';
+  end if;
   v_runtime_hash := encode(extensions.digest(convert_to(p_runtime_identity::text, 'utf8'), 'sha256'
   ), 'hex');
   begin
-    insert into public.worker_runtime_resource_reservations (
-      attempt_id, resource_namespace, resource_kind, resource_identifier
-    )
-    select v_attempt.id, reservation.resource_namespace,
-      reservation.resource_kind, reservation.resource_identifier
-    from (values
-      ('bundle', 'bundle_hash', v_runtime_hash),
-      ('container', 'cell_container', lower(p_runtime_identity->>'cell_container_name')),
-      ('container', 'bridge_container', lower(p_runtime_identity->>'bridge_container_name')),
-      ('network', 'internal_network', lower(p_runtime_identity->>'internal_network_name')),
-      ('network', 'egress_network', lower(p_runtime_identity->>'egress_network_name')),
-      ('volume', 'config_volume', lower(p_runtime_identity->>'config_volume_name')),
-      ('volume', 'state_volume', lower(p_runtime_identity->>'state_volume_name')),
-      ('volume', 'workspace_volume', lower(p_runtime_identity->>'workspace_volume_name')),
-      ('volume', 'output_volume', lower(p_runtime_identity->>'output_volume_name')),
-      ('volume', 'gateway_secret_volume', lower(p_runtime_identity->>'gateway_secret_volume_name')),
-      ('volume', 'bridge_secret_volume', lower(p_runtime_identity->>'bridge_secret_volume_name')),
-      ('profile', 'profile', lower(p_runtime_identity->>'profile_name')),
-      ('loopback_port', 'loopback_port', p_runtime_identity->>'loopback_port'),
-      ('socket', 'socket_identifier',
-        '127.0.0.1:' || (p_runtime_identity->>'loopback_port')),
-      ('config', 'config_identifier', lower(p_runtime_identity->>'config_volume_name')),
-      ('output', 'output_identifier', lower(p_runtime_identity->>'output_volume_name'))
-    ) as reservation(resource_namespace, resource_kind, resource_identifier);
+    if v_attempt.adapter_id = 'openclaw' then
+      insert into public.worker_runtime_resource_reservations (
+        attempt_id, resource_namespace, resource_kind, resource_identifier
+      )
+      select v_attempt.id, reservation.resource_namespace,
+        reservation.resource_kind, reservation.resource_identifier
+      from (values
+        ('bundle', 'bundle_hash', v_runtime_hash),
+        ('container', 'cell_container', lower(p_runtime_identity->>'cell_container_name')),
+        ('container', 'bridge_container', lower(p_runtime_identity->>'bridge_container_name')),
+        ('network', 'internal_network', lower(p_runtime_identity->>'internal_network_name')),
+        ('network', 'egress_network', lower(p_runtime_identity->>'egress_network_name')),
+        ('volume', 'config_volume', lower(p_runtime_identity->>'config_volume_name')),
+        ('volume', 'state_volume', lower(p_runtime_identity->>'state_volume_name')),
+        ('volume', 'workspace_volume', lower(p_runtime_identity->>'workspace_volume_name')),
+        ('volume', 'output_volume', lower(p_runtime_identity->>'output_volume_name')),
+        ('volume', 'gateway_secret_volume', lower(p_runtime_identity->>'gateway_secret_volume_name')),
+        ('volume', 'bridge_secret_volume', lower(p_runtime_identity->>'bridge_secret_volume_name')),
+        ('profile', 'profile', lower(p_runtime_identity->>'profile_name')),
+        ('loopback_port', 'loopback_port', p_runtime_identity->>'loopback_port'),
+        ('socket', 'socket_identifier',
+          p_runtime_identity->>'subscription_socket_path'),
+        ('config', 'config_identifier', lower(p_runtime_identity->>'config_volume_name')),
+        ('output', 'output_identifier', lower(p_runtime_identity->>'output_volume_name'))
+      ) as reservation(resource_namespace, resource_kind, resource_identifier);
+    else
+      insert into public.worker_runtime_resource_reservations (
+        attempt_id, resource_namespace, resource_kind, resource_identifier
+      ) values (
+        v_attempt.id, 'socket', 'socket_identifier',
+        p_runtime_identity->>'subscription_socket_path'
+      );
+    end if;
   exception when unique_violation then
     raise exception using errcode = '23505',
       message = 'company_discovery_runtime_identity_conflict';
@@ -2265,6 +3163,7 @@ begin
   where a.cleanup_state = 'pending'
     and a.lease_until <= clock_timestamp()
     and s.current_attempt_id = a.id
+    and s.supervisor_worker_id = btrim(p_worker_id)
     and s.status in ('busy', 'quarantined')
     and (
       (a.status = 'running'
@@ -2510,6 +3409,7 @@ declare
   v_attempt public.worker_attempts;
   v_proved boolean;
   v_released_resources integer := 0;
+  v_expected_releases integer := 0;
   v_slot_rows integer := 0;
   v_slot_updated boolean := false;
 begin
@@ -2536,48 +3436,85 @@ begin
     raise exception using errcode = '55000',
       message = 'company_discovery_cleanup_runtime_not_bound';
   end if;
-  if jsonb_typeof(p_proof) <> 'object'
-     or not (p_proof ?& array[
-       'gateway_exited', 'container_removed', 'bridge_removed',
-       'config_removed', 'state_removed', 'workspace_removed',
-       'output_removed', 'network_removed', 'credential_revoked',
-       'listener_closed', 'identity_process_absent', 'late_result_rejected'
-     ])
-     or (p_proof - array[
-       'gateway_exited', 'container_removed', 'bridge_removed',
-       'config_removed', 'state_removed', 'workspace_removed',
-       'output_removed', 'network_removed', 'credential_revoked',
-       'listener_closed', 'identity_process_absent', 'late_result_rejected'
-     ]::text[]) <> '{}'::jsonb
-     or exists (
-       select 1 from jsonb_each(p_proof) proof where jsonb_typeof(proof.value) <> 'boolean'
-     ) then
+  if jsonb_typeof(p_proof) <> 'object' or exists (
+    select 1 from jsonb_each(p_proof) proof
+    where jsonb_typeof(proof.value) <> 'boolean'
+  ) then
     raise exception using errcode = '22023',
       message = 'company_discovery_cleanup_proof_invalid';
   end if;
-  v_proved := jsonb_typeof(p_proof) = 'object'
-    and p_proof->'gateway_exited' = 'true'::jsonb
-    and p_proof->'container_removed' = 'true'::jsonb
-    and p_proof->'bridge_removed' = 'true'::jsonb
-    and p_proof->'config_removed' = 'true'::jsonb
-    and p_proof->'state_removed' = 'true'::jsonb
-    and p_proof->'workspace_removed' = 'true'::jsonb
-    and p_proof->'output_removed' = 'true'::jsonb
-    and p_proof->'network_removed' = 'true'::jsonb
-    and p_proof->'credential_revoked' = 'true'::jsonb
-    and p_proof->'listener_closed' = 'true'::jsonb
+  if v_attempt.adapter_id = 'openclaw' then
+    if not (p_proof ?& array[
+         'gateway_exited', 'container_removed', 'bridge_removed',
+         'config_removed', 'state_removed', 'workspace_removed',
+         'output_removed', 'network_removed', 'credential_material_removed',
+         'subscription_lease_revoked', 'subscription_requests_drained',
+         'subscription_listener_closed', 'subscription_socket_absent',
+         'listener_closed', 'identity_process_absent', 'late_result_rejected'
+       ]) or (p_proof - array[
+         'gateway_exited', 'container_removed', 'bridge_removed',
+         'config_removed', 'state_removed', 'workspace_removed',
+         'output_removed', 'network_removed', 'credential_material_removed',
+         'subscription_lease_revoked', 'subscription_requests_drained',
+         'subscription_listener_closed', 'subscription_socket_absent',
+         'listener_closed', 'identity_process_absent', 'late_result_rejected'
+       ]::text[]) <> '{}'::jsonb then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_cleanup_proof_kind_invalid';
+    end if;
+    v_proved := p_proof->'gateway_exited' = 'true'::jsonb
+      and p_proof->'container_removed' = 'true'::jsonb
+      and p_proof->'bridge_removed' = 'true'::jsonb
+      and p_proof->'config_removed' = 'true'::jsonb
+      and p_proof->'state_removed' = 'true'::jsonb
+      and p_proof->'workspace_removed' = 'true'::jsonb
+      and p_proof->'output_removed' = 'true'::jsonb
+      and p_proof->'network_removed' = 'true'::jsonb
+      and p_proof->'credential_material_removed' = 'true'::jsonb
+      and p_proof->'listener_closed' = 'true'::jsonb;
+  elsif v_attempt.adapter_id = 'direct_model' then
+    if not (p_proof ?& array[
+         'subscription_lease_revoked', 'subscription_requests_drained',
+         'subscription_listener_closed', 'subscription_socket_absent',
+         'identity_process_absent', 'late_result_rejected'
+       ]) or (p_proof - array[
+         'subscription_lease_revoked', 'subscription_requests_drained',
+         'subscription_listener_closed', 'subscription_socket_absent',
+         'identity_process_absent', 'late_result_rejected'
+       ]::text[]) <> '{}'::jsonb then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_cleanup_proof_kind_invalid';
+    end if;
+    v_proved := true;
+  else
+    raise exception using errcode = '22023',
+      message = 'company_discovery_cleanup_proof_kind_invalid';
+  end if;
+  v_proved := v_proved
+    and p_proof->'subscription_lease_revoked' = 'true'::jsonb
+    and p_proof->'subscription_requests_drained' = 'true'::jsonb
+    and p_proof->'subscription_listener_closed' = 'true'::jsonb
+    and p_proof->'subscription_socket_absent' = 'true'::jsonb
     and p_proof->'identity_process_absent' = 'true'::jsonb
     and p_proof->'late_result_rejected' = 'true'::jsonb;
   if v_proved
-     and p_proof->'listener_closed' = 'true'::jsonb
-     and p_proof->'identity_process_absent' = 'true'::jsonb then
+     and p_proof->'subscription_lease_revoked' = 'true'::jsonb
+     and p_proof->'subscription_requests_drained' = 'true'::jsonb
+     and p_proof->'subscription_listener_closed' = 'true'::jsonb
+     and p_proof->'subscription_socket_absent' = 'true'::jsonb
+     and p_proof->'identity_process_absent' = 'true'::jsonb
+     and p_proof->'late_result_rejected' = 'true'::jsonb then
+    v_expected_releases := case when v_attempt.adapter_id = 'openclaw' then 2 else 1 end;
     update public.worker_runtime_resource_reservations
     set released_at = clock_timestamp()
     where attempt_id = v_attempt.id
-      and resource_kind in ('loopback_port', 'socket_identifier')
+      and (
+        resource_kind = 'socket_identifier'
+        or (v_attempt.adapter_id = 'openclaw' and resource_kind = 'loopback_port')
+      )
       and released_at is null;
     get diagnostics v_released_resources = row_count;
-    if v_released_resources <> 2 then
+    if v_released_resources <> v_expected_releases then
       raise exception using errcode = '55000',
         message = 'company_discovery_runtime_resource_release_invalid';
     end if;
@@ -2627,6 +3564,7 @@ set search_path = ''
 as $$
 begin
   if p_reason is null or btrim(p_reason) = ''
+     or p_proof_hash is null
      or p_proof_hash !~ '^[0-9a-f]{64}$' then
     raise exception using errcode = '22023',
       message = 'company_discovery_quarantine_proof_invalid';

@@ -68,9 +68,201 @@ export interface WorkerResult {
   readonly uncertainty: readonly string[];
 }
 
+declare const modelAccessCapabilityBrand: unique symbol;
+declare const subscriptionLeaseCapabilityBrand: unique symbol;
+declare const subscriptionRecoveryCapabilityBrand: unique symbol;
+declare const subscriptionRequestReservationBrand: unique symbol;
+
+export interface ModelAccessCapability {
+  readonly [modelAccessCapabilityBrand]: "ligou-model-access";
+}
+
+export interface ModelAccessExpectation {
+  readonly adapter_id: DiscoveryAdapterId;
+  readonly job_id: string;
+  readonly attempt_id: string;
+  readonly fence_generation: number;
+  readonly runtime_slot_id?: string;
+}
+
+export interface ModelAccessContext extends ModelAccessExpectation {
+  readonly runtime_slot_id: string;
+  readonly tenant_id: string;
+  readonly credential_owner_id: string;
+  readonly credential_generation: number;
+  readonly expected_account_hash: string;
+  readonly deadline_at: string;
+  readonly source_snapshot_count: number;
+  readonly subscription_socket_path: string;
+  readonly runtime_identity_hash: string;
+  readonly provider: "openai-codex";
+  readonly auth_kind: "chatgpt_subscription_oauth";
+  readonly model: "gpt-5.6-sol";
+}
+
+export interface ModelAccessAuthority {
+  assertModelAccessCurrent(
+    capability: ModelAccessCapability,
+    expected?: ModelAccessExpectation,
+  ): Promise<Readonly<ModelAccessContext>>;
+  assertSubscriptionRecoveryCurrent(
+    capability: SubscriptionRecoveryCapability,
+  ): Promise<Readonly<SubscriptionRecoveryContext>>;
+  reserveSubscriptionRequest(
+    capability: ModelAccessCapability,
+    prospective: SubscriptionRequestProspective,
+  ): Promise<Readonly<SubscriptionReservationReadback>>;
+  settleSubscriptionRequest(
+    reservation: SubscriptionRequestReservationCapability,
+    settlement: SubscriptionRequestSettlement,
+  ): Promise<Readonly<SubscriptionSettlementReadback>>;
+}
+
+export interface SubscriptionRequestReservationCapability {
+  readonly [subscriptionRequestReservationBrand]: "ligou-subscription-request";
+}
+
+export interface SubscriptionRequestProspective {
+  readonly input_bytes: number;
+  readonly output_bytes: number;
+  readonly lease_seconds: number;
+}
+
+export interface SubscriptionReservationReadback {
+  readonly reservation: SubscriptionRequestReservationCapability;
+  readonly request_number: number;
+  readonly lease_until: string;
+  readonly quota_state: "available";
+  /** Tenant totals in the credential owner's current durable window. */
+  readonly current_requests: number;
+  readonly current_input_bytes: number;
+  readonly current_output_bytes: number;
+  readonly max_requests: 28;
+  readonly max_input_bytes: 400_000;
+  readonly max_output_bytes: 8_388_608;
+  /** Credential-owner totals across every tenant in the same durable window. */
+  readonly owner_current_requests: number;
+  readonly owner_current_input_bytes: number;
+  readonly owner_current_output_bytes: number;
+  readonly owner_max_requests: 140;
+  readonly owner_max_input_bytes: 2_000_000;
+  readonly owner_max_output_bytes: 40_000_000;
+  readonly max_concurrency: 1;
+}
+
+export interface SubscriptionRequestSettlement {
+  readonly input_bytes: number;
+  readonly output_bytes: number;
+  readonly observed_input_tokens: number | null;
+  readonly observed_output_tokens: number | null;
+  readonly usage_complete: boolean;
+  readonly quota_state: "available" | "cooldown" | "unknown";
+  readonly retry_after_seconds: number | null;
+}
+
+export interface SubscriptionSettlementReadback {
+  readonly settled: true;
+  readonly quota_state: "available" | "cooldown" | "unknown";
+  readonly cooldown_until: string | null;
+  /** Tenant totals in the credential owner's current durable window. */
+  readonly current_requests: number;
+  readonly current_input_bytes: number;
+  readonly current_output_bytes: number;
+  readonly max_requests: 28;
+  readonly max_input_bytes: 400_000;
+  readonly max_output_bytes: 8_388_608;
+  /** Credential-owner totals across every tenant in the same durable window. */
+  readonly owner_current_requests: number;
+  readonly owner_current_input_bytes: number;
+  readonly owner_current_output_bytes: number;
+  readonly owner_max_requests: 140;
+  readonly owner_max_input_bytes: 2_000_000;
+  readonly owner_max_output_bytes: 40_000_000;
+  readonly max_concurrency: 1;
+}
+
+export interface SubscriptionRecoveryCapability {
+  readonly [subscriptionRecoveryCapabilityBrand]: "ligou-subscription-recovery";
+}
+
+export interface SubscriptionRecoveryContext {
+  readonly job_id: string;
+  readonly attempt_id: string;
+  readonly fence_generation: number;
+  readonly subscription_socket_path: string;
+  readonly runtime_kind: "openclaw_cell" | "direct_model_subscription";
+  readonly late_result_rejected: true;
+}
+
+export interface SubscriptionPolicy {
+  readonly model: "gpt-5.6-sol";
+  readonly deadline_at: string;
+  readonly max_requests: number;
+  readonly max_input_bytes: 400_000;
+  readonly max_output_bytes: 8_388_608;
+  readonly max_response_bytes: 4_194_304;
+  readonly concurrency: 1;
+  readonly cache_retention: "none";
+}
+
+export interface SubscriptionLeaseCapability {
+  readonly [subscriptionLeaseCapabilityBrand]: "ligou-subscription-lease";
+}
+
+export interface RegisteredSubscriptionLease {
+  readonly lease: SubscriptionLeaseCapability;
+  readonly attempt_marker: string;
+  readonly subscription_socket_path: string;
+  readonly session_id: string;
+  readonly policy: Readonly<SubscriptionPolicy>;
+}
+
+export interface SubscriptionUsage {
+  readonly schema_version: "ligou.subscription_usage.v1";
+  readonly provider: "openai-codex";
+  readonly model: "gpt-5.6-sol";
+  readonly billing_basis: "chatgpt_subscription";
+  readonly marginal_api_charge_usd: 0;
+  readonly request_count: number;
+  readonly active_requests: number;
+  readonly input_bytes: number;
+  readonly output_bytes: number;
+  readonly input_tokens: number;
+  readonly cached_input_tokens: number;
+  readonly output_tokens: number;
+  readonly total_tokens: number;
+  readonly usage_complete: boolean;
+  readonly quota_state: "available" | "cooldown" | "unknown";
+  readonly retry_after_seconds: number | null;
+  readonly cooldown_until: string | null;
+  readonly revoked: boolean;
+}
+
+export interface SubscriptionRevocationReadback {
+  readonly generation: number;
+  readonly subscription_lease_revoked: true;
+  readonly subscription_requests_drained: true;
+  readonly subscription_listener_closed: true;
+  readonly subscription_socket_absent: true;
+}
+
+export interface SubscriptionGateway {
+  register(modelAccess: ModelAccessCapability): Promise<RegisteredSubscriptionLease>;
+  forward(
+    lease: SubscriptionLeaseCapability,
+    request: Request,
+    signal?: AbortSignal,
+  ): Promise<Response>;
+  usage(lease: SubscriptionLeaseCapability): Readonly<SubscriptionUsage>;
+  revoke(lease: SubscriptionLeaseCapability): Promise<SubscriptionRevocationReadback>;
+  recover(
+    authority: SubscriptionRecoveryCapability,
+  ): Promise<SubscriptionRevocationReadback>;
+}
+
 export interface WorkerAdapter {
   supports(jobType: WorkerJobType): boolean;
-  submit(job: WorkerJob): Promise<WorkerHandle>;
+  submit(job: WorkerJob, modelAccess: ModelAccessCapability): Promise<WorkerHandle>;
   cancel(handle: WorkerHandle): Promise<void>;
   status(handle: WorkerHandle): Promise<WorkerStatus>;
   result(handle: WorkerHandle): Promise<WorkerResult>;

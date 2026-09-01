@@ -12,6 +12,7 @@ import {
   type BenchmarkExecutionReceipt,
   type BenchmarkRunOptions,
   type BenchmarkExecutionRequest,
+  type RawBenchmarkMeasurements,
 } from "../benchmark/run-benchmark";
 
 const CORPUS_DIRECTORY = join(import.meta.dir, "..", "benchmark", "corpus");
@@ -143,12 +144,15 @@ const identities: readonly BenchmarkAdapterIdentity[] = [
 ] as const;
 
 const unknown = (reason: string) => ({ status: "unknown" as const, reason });
-const observed = (
-  value: number,
+const observed = <T extends number | boolean>(
+  value: T,
   source: "ligou_host_sampler" | "ligou_subscription_gateway" | "ligou_supervisor",
 ) => ({ status: "observed" as const, value, source, observed_at: "2026-09-01T10:10:00.000Z" });
 
-function measurements(adapterId: "direct_model" | "openclaw", parallelism: number) {
+function measurements(
+  adapterId: "direct_model" | "openclaw",
+  parallelism: number,
+): RawBenchmarkMeasurements {
   return {
     host: {
       cpu_milliseconds: unknown("host sampler not connected in scaffold test"),
@@ -163,9 +167,33 @@ function measurements(adapterId: "direct_model" | "openclaw", parallelism: numbe
     },
     subscription: {
       request_count: observed(1, "ligou_subscription_gateway"),
+      input_bytes: observed(1_000, "ligou_subscription_gateway"),
+      output_bytes: observed(2_000, "ligou_subscription_gateway"),
       input_tokens: observed(100, "ligou_subscription_gateway"),
       output_tokens: observed(50, "ligou_subscription_gateway"),
-      cached_input_tokens: unknown("gateway omitted cache detail"),
+      cached_input_tokens: observed(0, "ligou_subscription_gateway"),
+      usage_complete: observed(true, "ligou_subscription_gateway"),
+      governor: {
+        status: "observed" as const,
+        source: "ligou_supervisor" as const,
+        observed_at: "2026-09-01T10:10:00.000Z",
+        value: {
+          quota_state: "available" as const,
+          current_requests: 1,
+          current_input_bytes: 1_000,
+          current_output_bytes: 2_000,
+          max_requests: 28 as const,
+          max_input_bytes: 400_000 as const,
+          max_output_bytes: 8_388_608 as const,
+          owner_current_requests: 1,
+          owner_current_input_bytes: 1_000,
+          owner_current_output_bytes: 2_000,
+          owner_max_requests: 140 as const,
+          owner_max_input_bytes: 2_000_000 as const,
+          owner_max_output_bytes: 40_000_000 as const,
+          max_concurrency: 1 as const,
+        },
+      },
       quota_units_consumed: unknown("gateway omitted quota units"),
       quota_units_remaining: unknown("gateway omitted quota balance"),
       marginal_api_charge_usd_micros: observed(0, "ligou_subscription_gateway"),
@@ -177,24 +205,33 @@ function measurements(adapterId: "direct_model" | "openclaw", parallelism: numbe
       queue_delay_milliseconds: observed(0, "ligou_supervisor"),
       capacity_rejections: observed(0, "ligou_supervisor"),
     },
-    cleanup: adapterId === "direct_model"
-      ? { state: "not_required" as const, reason: "direct model has no ephemeral cell" }
-      : {
+    cleanup: {
           state: "observed" as const,
           source: "ligou_supervisor" as const,
           observed_at: "2026-09-01T10:10:00.000Z",
-          raw_receipt_json: JSON.stringify({
+          raw_receipt_json: JSON.stringify(adapterId === "direct_model" ? {
+            subscription_lease_revoked: true,
+            subscription_requests_drained: true,
+            subscription_listener_closed: true,
+            subscription_socket_absent: true,
+            identity_process_absent: true,
+            late_result_rejected: true,
+          } : {
             gateway_exited: true,
-            cell_removed: true,
+            container_removed: true,
             bridge_removed: true,
             config_removed: true,
             state_removed: true,
             workspace_removed: true,
             output_removed: true,
             network_removed: true,
-            credential_revoked: true,
+            credential_material_removed: true,
+            subscription_lease_revoked: true,
+            subscription_requests_drained: true,
+            subscription_listener_closed: true,
+            subscription_socket_absent: true,
             listener_closed: true,
-            no_identity_process: true,
+            identity_process_absent: true,
             late_result_rejected: true,
           }),
         },
@@ -410,6 +447,13 @@ describe("trusted benchmark runner", () => {
       .toEqual({ status: "unknown", reason: "no authoritative subscription allocation" });
     expect(report.attempts.find((attempt) => attempt.adapter_identity.adapter_id === "openclaw")!
       .measurements.cleanup).toMatchObject({ state: "observed", proved: true });
+    expect(report.attempts.find((attempt) => attempt.adapter_identity.adapter_id === "direct_model")!
+      .measurements.cleanup).toMatchObject({ state: "observed", proved: true });
+    expect(report.attempts.every((attempt) =>
+      attempt.measurements.subscription.usage_complete.status === "observed" &&
+      attempt.measurements.subscription.usage_complete.value === true &&
+      attempt.measurements.subscription.governor.status === "observed"
+    )).toBe(true);
     expect(peakActive).toBe(2);
   });
 
@@ -456,7 +500,7 @@ describe("trusted benchmark runner", () => {
       },
     });
 
-    await expect(runBenchmark({
+    const runWith = (attemptMeasurements: RawBenchmarkMeasurements) => runBenchmark({
       schema_version: "company_discovery.benchmark_run.v1",
       run_started_at: "2026-09-01T10:10:00.000Z",
       corpus: [artifact],
@@ -472,8 +516,32 @@ describe("trusted benchmark runner", () => {
         outcome: "succeeded",
         failure_code: null,
         raw_result_json: JSON.stringify(perfectSyntheticResult),
-        measurements: invalidMeasurements,
+        measurements: attemptMeasurements,
       }),
-    })).rejects.toThrow("marginal API charge must be zero");
+    });
+
+    await expect(runWith(invalidMeasurements))
+      .rejects.toThrow("marginal API charge must be zero");
+    await expect(runWith({
+      ...base,
+      subscription: {
+        ...base.subscription,
+        usage_complete: unknown("terminal usage was incomplete"),
+      },
+    })).rejects.toThrow("complete current subscription evidence");
+    await expect(runWith({
+      ...base,
+      subscription: {
+        ...base.subscription,
+        governor: unknown("durable settlement readback missing"),
+      },
+    })).rejects.toThrow("complete current subscription evidence");
+    await expect(runWith({
+      ...base,
+      cleanup: {
+        state: "not_required",
+        reason: "legacy direct-model shortcut",
+      } as never,
+    })).rejects.toThrow("observed or unknown required");
   });
 });

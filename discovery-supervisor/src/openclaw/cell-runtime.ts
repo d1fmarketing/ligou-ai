@@ -1,17 +1,23 @@
 import type {
   DiscoveryBudget,
   DiscoverySourceSnapshot,
+  SubscriptionRevocationReadback,
 } from "../contracts";
 import {
   OPENCLAW_CELL_IMAGE,
+  selectedImageReference,
+  type RuntimeImageEvidence,
   type RuntimeIdentity,
-  type RuntimeIdentityBinding,
+  type OpenClawRuntimeIdentityBinding,
 } from "./runtime-identity";
 
 const MCP_TOOL_NAMES = [
   "discovery__fetch_discovery_page",
   "discovery__submit_discovery_result",
 ] as const;
+
+export const BRIDGE_SUBSCRIPTION_SOCKET_PATH =
+  "/run/ligou-subscription/subscription.sock" as const;
 
 const DENIED_TOOLS = [
   "group:openclaw",
@@ -130,18 +136,15 @@ export function buildOpenClawConfig(input: OpenClawConfigInput): OpenClawConfig 
       defaults: Object.freeze({
         workspace: identity.workspace_path,
         model: Object.freeze({ primary: modelRef, fallbacks: Object.freeze([]) }),
-        models: Object.freeze({ [modelRef]: Object.freeze({ alias: "Stage 0 bounded discovery" }) }),
-        sandbox: Object.freeze({
-          mode: "all",
-          backend: "docker",
-          scope: "session",
-          workspaceAccess: "none",
-          docker: Object.freeze({
-            readOnlyRoot: true,
-            tmpfs: Object.freeze(["/tmp", "/var/tmp", "/run"]),
-            network: "none",
-            capDrop: Object.freeze(["ALL"]),
+        models: Object.freeze({
+          [modelRef]: Object.freeze({
+            alias: "Stage 0 bounded discovery",
+            params: Object.freeze({ transport: "sse", cacheRetention: "none", maxRetries: 0 }),
           }),
+        }),
+        sandbox: Object.freeze({
+          mode: "off",
+          workspaceAccess: "none",
           browser: Object.freeze({ enabled: false, allowHostControl: false }),
         }),
       }),
@@ -163,17 +166,17 @@ export function buildOpenClawConfig(input: OpenClawConfigInput): OpenClawConfig 
       catalogRefresh: Object.freeze({ enabled: false }),
       providers: Object.freeze({
         stage0_bridge: Object.freeze({
-          baseUrl: `http://bridge:${identity.bridge_http_port}/v1`,
+          baseUrl: `http://bridge:${identity.bridge_http_port}`,
           apiKey: marker,
-          api: "openai-responses",
+          api: "openai-chatgpt-responses",
           models: Object.freeze([Object.freeze({
             id: model,
             name: "Stage 0 bounded discovery",
             reasoning: true,
             input: Object.freeze(["text"]),
             cost: Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
-            contextWindow: 128_000,
-            maxTokens: 16_384,
+            contextWindow: 272_000,
+            maxTokens: 8_192,
             compat: Object.freeze({
               supportsTools: true,
               supportsStrictMode: true,
@@ -207,9 +210,6 @@ export function buildOpenClawConfig(input: OpenClawConfigInput): OpenClawConfig 
       elevated: Object.freeze({ enabled: false }),
       exec: Object.freeze({ security: "deny", ask: "always" }),
       fs: Object.freeze({ workspaceOnly: true }),
-      sandbox: Object.freeze({
-        tools: Object.freeze({ allow: Object.freeze([...MCP_TOOL_NAMES]), deny: Object.freeze([...DENIED_TOOLS]) }),
-      }),
     }),
     skills: Object.freeze({ allowBundled: Object.freeze([]), entries: Object.freeze({}) }),
     update: Object.freeze({ checkOnStart: false, auto: Object.freeze({ enabled: false }) }),
@@ -220,10 +220,9 @@ export function buildOpenClawConfig(input: OpenClawConfigInput): OpenClawConfig 
 }
 
 export interface BridgeSecret {
-  readonly upstream_api_key: string;
-  readonly upstream_url: string;
   readonly upstream_model: string;
   readonly proxy_marker: string;
+  readonly subscription_socket_path: string;
   readonly normalized_origin: string;
   readonly deadline_at: string;
   readonly budget: DiscoveryBudget;
@@ -235,7 +234,6 @@ export interface CellLifecyclePlanInput {
   readonly config: OpenClawConfig;
   readonly gateway_token: string;
   readonly bridge_secret: BridgeSecret;
-  readonly bridge_image: string;
 }
 
 export interface CommandSpec {
@@ -244,6 +242,8 @@ export interface CommandSpec {
   readonly env: Readonly<Record<string, string>>;
   readonly stdin?: string;
   readonly sensitive_stdin?: boolean;
+  readonly sensitive_stdout?: boolean;
+  readonly image_expectation?: RuntimeImageEvidence;
 }
 
 export interface CommandResult {
@@ -259,8 +259,26 @@ export interface CommandRunner {
 function command(label: string, argv: readonly string[], options: {
   readonly stdin?: string;
   readonly sensitive_stdin?: boolean;
+  readonly sensitive_stdout?: boolean;
+  readonly image_expectation?: RuntimeImageEvidence;
 } = {}): CommandSpec {
   return Object.freeze({ label, argv: Object.freeze([...argv]), env: Object.freeze({}), ...options });
+}
+
+function validateImageReadback(result: CommandResult, expected: RuntimeImageEvidence): void {
+  let decoded: unknown;
+  try { decoded = JSON.parse(result.stdout); }
+  catch { throw new Error("runtime image evidence readback is invalid"); }
+  if (!Array.isArray(decoded) || decoded.length !== 1 || decoded[0] === null ||
+      typeof decoded[0] !== "object" || Array.isArray(decoded[0])) {
+    throw new Error("runtime image evidence readback is invalid");
+  }
+  const image = decoded[0] as Record<string, unknown>;
+  const architecture = expected.platform.slice("linux/".length);
+  if (expected.image_id !== expected.config_digest || image.Id !== expected.image_id ||
+      image.Os !== "linux" || image.Architecture !== architecture) {
+    throw new Error("runtime image evidence mismatched local image");
+  }
 }
 
 function assertDigestImage(image: string, name: string): void {
@@ -275,52 +293,91 @@ function volumeWriter(
   filename: string,
   contents: string,
   sensitive: boolean,
+  helperImage: string,
+  platform: string,
 ): CommandSpec {
   return command(label, [
     "docker", "run", "--rm", "--network", "none",
+    "--platform", platform, "--pull=never",
     "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
     "--pids-limit=32", "--memory=67108864", "--cpus=0.25",
     "--user", "0:0",
     "--mount", `type=volume,src=${volume},dst=/target`,
-    "--entrypoint", "/bin/sh", OPENCLAW_CELL_IMAGE,
+    "--entrypoint", "/bin/sh", helperImage,
     "-c", `umask 077; cat > /target/${filename}; chown 1000:1000 /target/${filename}; chmod 0600 /target/${filename}; chown 1000:1000 /target; chmod 0700 /target`,
   ], { stdin: contents, sensitive_stdin: sensitive });
 }
 
-function volumePreparer(label: string, volume: string): CommandSpec {
+function volumePreparer(
+  label: string,
+  volume: string,
+  helperImage: string,
+  platform: string,
+): CommandSpec {
   return command(label, [
     "docker", "run", "--rm", "--network", "none",
+    "--platform", platform, "--pull=never",
     "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
     "--pids-limit=32", "--memory=67108864", "--cpus=0.25",
     "--user", "0:0",
     "--mount", `type=volume,src=${volume},dst=/target`,
-    "--entrypoint", "/bin/sh", OPENCLAW_CELL_IMAGE,
+    "--entrypoint", "/bin/sh", helperImage,
     "-c", "chown 1000:1000 /target; chmod 0700 /target",
   ]);
 }
 
 export function buildCellLifecyclePlan(input: CellLifecyclePlanInput): readonly CommandSpec[] {
   assertDigestImage(OPENCLAW_CELL_IMAGE, "OpenClaw cell image");
-  assertDigestImage(input.bridge_image, "trusted bridge image");
   nonEmpty(input.gateway_token, "Gateway token");
-  nonEmpty(input.bridge_secret.upstream_api_key, "upstream API key");
-  const id = input.identity;
-  const plan: CommandSpec[] = [
-    command("create-internal-network", ["docker", "network", "create", "--internal", id.internal_network_name]),
-    command("create-egress-network", ["docker", "network", "create", id.egress_network_name]),
-  ];
-  for (const [key, volume] of Object.entries(id.volume_names)) {
-    plan.push(command(`create-${key.replaceAll("_", "-")}-volume`, ["docker", "volume", "create", volume]));
+  if (input.bridge_secret.subscription_socket_path !== BRIDGE_SUBSCRIPTION_SOCKET_PATH) {
+    throw new Error("bridge subscription socket path must be fixed");
   }
-  plan.push(volumePreparer("prepare-state-volume", id.volume_names.state));
-  plan.push(volumePreparer("prepare-workspace-volume", id.volume_names.workspace));
-  plan.push(volumePreparer("prepare-output-volume", id.volume_names.output));
+  const id = input.identity;
+  const cellImage = selectedImageReference(id.image_evidence.cell_image);
+  const bridgeImage = selectedImageReference(id.image_evidence.bridge_image);
+  assertDigestImage(cellImage, "selected OpenClaw cell image");
+  assertDigestImage(bridgeImage, "selected trusted bridge image");
+  const plan: CommandSpec[] = [
+    command("verify-cell-image", ["docker", "image", "inspect", cellImage], {
+      image_expectation: id.image_evidence.cell_image,
+    }),
+    command("verify-bridge-image", ["docker", "image", "inspect", bridgeImage], {
+      image_expectation: id.image_evidence.bridge_image,
+    }),
+    command("create-internal-network", ["docker", "network", "create", "--internal", id.internal_network_name]),
+    command("create-egress-network", ["docker", "network", "create", "--internal", id.egress_network_name]),
+  ];
+  const volumeSizes = Object.freeze({
+    config: 1_048_576,
+    state: 134_217_728,
+    workspace: 33_554_432,
+    output: 16_777_216,
+    gateway_secret: 1_048_576,
+    bridge_secret: 16_777_216,
+  });
+  for (const [key, volume] of Object.entries(id.volume_names) as Array<
+    [keyof typeof id.volume_names, string]
+  >) {
+    plan.push(command(`create-${key.replaceAll("_", "-")}-volume`, [
+      "docker", "volume", "create",
+      "--driver", "local",
+      "--opt", "type=tmpfs",
+      "--opt", "device=tmpfs",
+      "--opt", `o=size=${volumeSizes[key]},uid=1000,gid=1000,mode=0700`,
+      volume,
+    ]));
+  }
+  plan.push(volumePreparer("prepare-state-volume", id.volume_names.state, bridgeImage, id.image_evidence.bridge_image.platform));
+  plan.push(volumePreparer("prepare-workspace-volume", id.volume_names.workspace, bridgeImage, id.image_evidence.bridge_image.platform));
+  plan.push(volumePreparer("prepare-output-volume", id.volume_names.output, bridgeImage, id.image_evidence.bridge_image.platform));
   plan.push(volumeWriter(
     "write-openclaw-config",
     id.volume_names.config,
     "openclaw.json",
     JSON.stringify(input.config),
-    false,
+    true,
+    bridgeImage,
+    id.image_evidence.bridge_image.platform,
   ));
   plan.push(volumeWriter(
     "write-gateway-secret",
@@ -328,6 +385,8 @@ export function buildCellLifecyclePlan(input: CellLifecyclePlanInput): readonly 
     "secret.json",
     JSON.stringify({ gateway_token: input.gateway_token }),
     true,
+    bridgeImage,
+    id.image_evidence.bridge_image.platform,
   ));
   plan.push(volumeWriter(
     "write-bridge-secret",
@@ -335,18 +394,25 @@ export function buildCellLifecyclePlan(input: CellLifecyclePlanInput): readonly 
     "secret.json",
     JSON.stringify(input.bridge_secret),
     true,
+    bridgeImage,
+    id.image_evidence.bridge_image.platform,
   ));
   plan.push(command("start-bridge", [
     "docker", "run", "--detach",
+    "--platform", id.image_evidence.bridge_image.platform,
+    "--pull=never",
     "--name", id.bridge_container_name,
     "--hostname", "bridge",
     "--network", id.egress_network_name,
     "--network-alias", "bridge",
     "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
     "--pids-limit=128", "--memory=268435456", "--cpus=0.5",
+    "--ulimit", "fsize=16777216:16777216",
+    "--log-driver=local", "--log-opt=max-size=10m", "--log-opt=max-file=2",
     "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=67108864",
     "--mount", `type=volume,src=${id.volume_names.bridge_secret},dst=${id.bridge_secret_path},readonly`,
     "--mount", `type=volume,src=${id.volume_names.output},dst=${id.output_path}`,
+    "--mount", `type=bind,src=${id.subscription_socket_path.slice(0, id.subscription_socket_path.lastIndexOf("/"))},dst=/run/ligou-subscription,readonly`,
     "--env", `BRIDGE_SECRET_PATH=${id.bridge_secret_path}/secret.json`,
     "--env", `BRIDGE_OUTPUT_PATH=${id.output_path}/result.json`,
     "--env", `BRIDGE_HTTP_PORT=${id.bridge_http_port}`,
@@ -354,7 +420,7 @@ export function buildCellLifecyclePlan(input: CellLifecyclePlanInput): readonly 
     "--env", `OPENCLAW_CELL_HOST=cell`,
     "--env", `OPENCLAW_CELL_GATEWAY_PORT=${id.gateway_port}`,
     "-p", `127.0.0.1:${id.host_gateway_port}:${id.bridge_relay_port}`,
-    input.bridge_image,
+    bridgeImage,
   ]));
   plan.push(command("connect-bridge-internal", [
     "docker", "network", "connect", "--alias", "bridge",
@@ -362,6 +428,8 @@ export function buildCellLifecyclePlan(input: CellLifecyclePlanInput): readonly 
   ]));
   plan.push(command("start-cell", [
     "docker", "run", "--detach",
+    "--platform", id.image_evidence.cell_image.platform,
+    "--pull=never",
     "--name", id.cell_container_name,
     "--hostname", "cell",
     "--network", id.internal_network_name,
@@ -369,6 +437,8 @@ export function buildCellLifecyclePlan(input: CellLifecyclePlanInput): readonly 
     "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
     "--no-healthcheck",
     "--pids-limit=256", "--memory=1073741824", "--cpus=1",
+    "--ulimit", "fsize=16777216:16777216",
+    "--log-driver=local", "--log-opt=max-size=10m", "--log-opt=max-file=2",
     "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=134217728",
     "--tmpfs", "/var/tmp:rw,noexec,nosuid,nodev,size=67108864",
     "--tmpfs", "/run:rw,noexec,nosuid,nodev,size=16777216",
@@ -379,7 +449,7 @@ export function buildCellLifecyclePlan(input: CellLifecyclePlanInput): readonly 
     "--env", `OPENCLAW_CONFIG_PATH=${id.config_path}/openclaw.json`,
     "--env", `OPENCLAW_STATE_DIR=${id.state_path}`,
     "--env", `OPENCLAW_NO_AUTO_UPDATE=1`,
-    OPENCLAW_CELL_IMAGE,
+    cellImage,
     "node", "/app/openclaw.mjs",
     "--profile", id.profile_name,
     "gateway", "run", "--port", String(id.gateway_port),
@@ -405,9 +475,16 @@ export interface RuntimeCleanupTarget {
     readonly bridge_secret: string;
   };
   readonly host_gateway_port: number;
+  readonly image_evidence: RuntimeIdentity["image_evidence"];
 }
 
-export interface RuntimeCleanupProof {
+export interface RuntimeDiskUsage {
+  readonly state_bytes: number;
+  readonly workspace_bytes: number;
+  readonly output_bytes: number;
+}
+
+export interface LocalOpenClawCleanupProof {
   readonly gateway_exited: boolean;
   readonly cell_removed: boolean;
   readonly bridge_removed: boolean;
@@ -416,11 +493,13 @@ export interface RuntimeCleanupProof {
   readonly workspace_removed: boolean;
   readonly output_removed: boolean;
   readonly network_removed: boolean;
-  readonly credential_revoked: boolean;
+  readonly credential_material_removed: boolean;
   readonly listener_closed: boolean;
   readonly no_identity_process: boolean;
-  readonly late_result_rejected: boolean;
 }
+
+/** @deprecated Use LocalOpenClawCleanupProof. */
+export type RuntimeCleanupProof = LocalOpenClawCleanupProof;
 
 export interface DetailedCleanupProof {
   readonly gateway_exited: boolean;
@@ -431,7 +510,11 @@ export interface DetailedCleanupProof {
   readonly workspace_removed: boolean;
   readonly output_removed: boolean;
   readonly network_removed: boolean;
-  readonly credential_revoked: boolean;
+  readonly credential_material_removed: boolean;
+  readonly subscription_lease_revoked: boolean;
+  readonly subscription_requests_drained: boolean;
+  readonly subscription_listener_closed: boolean;
+  readonly subscription_socket_absent: boolean;
   readonly listener_closed: boolean;
   readonly identity_process_absent: boolean;
   readonly late_result_rejected: boolean;
@@ -441,18 +524,66 @@ export interface CellRuntimeDependencies {
   readonly command_runner: CommandRunner;
   readonly listener_closed: (identity: RuntimeCleanupTarget) => Promise<boolean>;
   readonly identity_process_absent: (identity: RuntimeCleanupTarget) => Promise<boolean>;
+  readonly cleanup_command_timeout_ms?: number;
 }
 
-async function runCleanup(runner: CommandRunner, label: string, argv: readonly string[]): Promise<boolean> {
+async function runBounded(
+  runner: CommandRunner,
+  spec: CommandSpec,
+  timeoutMs: number,
+): Promise<CommandResult | null> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return (await runner.run(command(label, argv))).exitCode === 0;
+    const running = runner.run(spec, controller.signal);
+    running.catch(() => undefined);
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve(null);
+      }, timeoutMs);
+    });
+    return await Promise.race([running, timeout]);
   } catch {
-    return false;
+    return null;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
+type DockerResourceKind = "container" | "volume" | "network";
+
+function provesAbsent(result: CommandResult | null, kind: DockerResourceKind): boolean {
+  if (result === null || result.exitCode !== 1 || result.stdout.trim() !== "") return false;
+  const stderr = result.stderr.trim();
+  if (kind === "container") return /(?:no such object|no such container)/iu.test(stderr);
+  if (kind === "volume") return /no such volume/iu.test(stderr);
+  return /(?:no such network|network(?:\s+[^\s]+)?\s+not found)/iu.test(stderr);
+}
+
+async function removeAndProveAbsent(
+  runner: CommandRunner,
+  timeoutMs: number,
+  removeLabel: string,
+  removeArgv: readonly string[],
+  inspectLabel: string,
+  inspectArgv: readonly string[],
+  kind: DockerResourceKind,
+): Promise<boolean> {
+  await runBounded(runner, command(removeLabel, removeArgv), timeoutMs);
+  return provesAbsent(await runBounded(runner, command(inspectLabel, inspectArgv), timeoutMs), kind);
+}
+
 export class CellRuntime {
-  constructor(private readonly dependencies: CellRuntimeDependencies) {}
+  readonly #cleanupCommandTimeoutMs: number;
+
+  constructor(private readonly dependencies: CellRuntimeDependencies) {
+    this.#cleanupCommandTimeoutMs = dependencies.cleanup_command_timeout_ms ?? 5_000;
+    if (!Number.isSafeInteger(this.#cleanupCommandTimeoutMs) ||
+        this.#cleanupCommandTimeoutMs < 1 || this.#cleanupCommandTimeoutMs > 30_000) {
+      throw new Error("cleanup command timeout is invalid");
+    }
+  }
 
   async start(plan: readonly CommandSpec[], signal?: AbortSignal): Promise<void> {
     for (const step of plan) {
@@ -461,17 +592,22 @@ export class CellRuntime {
       if (result.exitCode !== 0) {
         throw new Error(`${step.label} failed: ${result.stderr || `exit ${result.exitCode}`}`);
       }
+      if (step.image_expectation !== undefined) {
+        validateImageReadback(result, step.image_expectation);
+      }
     }
   }
 
   async readSubmittedResult(handle: CellRuntimeHandle): Promise<unknown> {
     const id = handle.identity;
+    const helperImage = selectedImageReference(id.image_evidence.bridge_image);
     const result = await this.dependencies.command_runner.run(command("read-submitted-result", [
       "docker", "run", "--rm", "--network", "none",
+      "--platform", id.image_evidence.bridge_image.platform, "--pull=never",
       "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
       "--pids-limit=32", "--memory=67108864", "--cpus=0.25",
       "--mount", `type=volume,src=${id.volume_names.output},dst=${id.output_path},readonly`,
-      "--entrypoint", "/bin/sh", OPENCLAW_CELL_IMAGE,
+      "--entrypoint", "/bin/sh", helperImage,
       "-c", 'cat "$1"', "read-result", `${id.output_path}/result.json`,
     ]));
     if (result.exitCode !== 0) {
@@ -488,17 +624,57 @@ export class CellRuntime {
     }
   }
 
+  async observeDiskUsage(handle: CellRuntimeHandle): Promise<RuntimeDiskUsage> {
+    const id = handle.identity;
+    const helperImage = selectedImageReference(id.image_evidence.bridge_image);
+    const result = await runBounded(this.dependencies.command_runner, command(
+      "observe-runtime-disk-usage",
+      [
+        "docker", "run", "--rm", "--network", "none",
+        "--platform", id.image_evidence.bridge_image.platform, "--pull=never",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+        "--pids-limit=32", "--memory=67108864", "--cpus=0.25",
+        "--mount", `type=volume,src=${id.volume_names.state},dst=${id.state_path},readonly`,
+        "--mount", `type=volume,src=${id.volume_names.workspace},dst=${id.workspace_path},readonly`,
+        "--mount", `type=volume,src=${id.volume_names.output},dst=${id.output_path},readonly`,
+        "--entrypoint", "/bin/sh", helperImage,
+        "-c", 'du -sk "$1" "$2" "$3"', "observe-disk",
+        id.state_path, id.workspace_path, id.output_path,
+      ],
+    ), this.#cleanupCommandTimeoutMs);
+    if (result === null || result.exitCode !== 0 || result.stderr.trim() !== "") {
+      throw new Error("runtime disk usage observation is ambiguous");
+    }
+    const values = result.stdout.trim().split(/\r?\n/u).map((line) => {
+      const match = /^([0-9]+)\s+/u.exec(line);
+      if (match === null) throw new Error("runtime disk usage observation is invalid");
+      const kibibytes = Number(match[1]);
+      if (!Number.isSafeInteger(kibibytes)) throw new Error("runtime disk usage observation is invalid");
+      return kibibytes * 1_024;
+    });
+    if (values.length !== 3 || values[0]! > 134_217_728 ||
+        values[1]! > 33_554_432 || values[2]! > 16_777_216) {
+      throw new Error("runtime disk usage exceeds the bounded volume ceiling");
+    }
+    return Object.freeze({
+      state_bytes: values[0]!,
+      workspace_bytes: values[1]!,
+      output_bytes: values[2]!,
+    });
+  }
+
   async cleanup(
     handle: CellRuntimeHandle,
-    options: { readonly late_result_rejected: boolean },
   ): Promise<RuntimeCleanupProof> {
-    return this.#cleanupTarget(handle.identity, options);
+    return this.#cleanupTarget(handle.identity);
   }
 
   async cleanupBoundRuntime(
-    binding: RuntimeIdentityBinding,
-    options: { readonly late_result_rejected: boolean },
+    binding: OpenClawRuntimeIdentityBinding,
   ): Promise<RuntimeCleanupProof> {
+    if (binding.runtime_kind !== "openclaw_cell") {
+      throw new Error("OpenClaw cell runtime binding required");
+    }
     return this.#cleanupTarget({
       cell_container_name: binding.cell_container_name,
       bridge_container_name: binding.bridge_container_name,
@@ -513,54 +689,51 @@ export class CellRuntime {
         bridge_secret: binding.bridge_secret_volume_name,
       },
       host_gateway_port: binding.loopback_port,
-    }, options);
+      image_evidence: {
+        cell_image: binding.cell_image,
+        bridge_image: binding.bridge_image,
+      },
+    });
   }
 
   async #cleanupTarget(
     id: RuntimeCleanupTarget,
-    options: { readonly late_result_rejected: boolean },
   ): Promise<RuntimeCleanupProof> {
-    const gatewayExited = await runCleanup(this.dependencies.command_runner, "stop-cell", [
+    await runBounded(this.dependencies.command_runner, command("stop-cell", [
       "docker", "stop", "--time", "10", id.cell_container_name,
-    ]);
-    const cellRemoved = await runCleanup(this.dependencies.command_runner, "remove-cell", [
-      "docker", "rm", "--force", id.cell_container_name,
-    ]);
-    const bridgeRemoved = await runCleanup(this.dependencies.command_runner, "remove-bridge", [
-      "docker", "rm", "--force", id.bridge_container_name,
-    ]);
-    const configRemoved = await runCleanup(this.dependencies.command_runner, "remove-config-volume", [
-      "docker", "volume", "rm", id.volume_names.config,
-    ]);
-    const stateRemoved = await runCleanup(this.dependencies.command_runner, "remove-state-volume", [
-      "docker", "volume", "rm", id.volume_names.state,
-    ]);
-    const workspaceRemoved = await runCleanup(this.dependencies.command_runner, "remove-workspace-volume", [
-      "docker", "volume", "rm", id.volume_names.workspace,
-    ]);
-    const outputRemoved = await runCleanup(this.dependencies.command_runner, "remove-output-volume", [
-      "docker", "volume", "rm", id.volume_names.output,
-    ]);
-    const gatewaySecretRemoved = await runCleanup(
-      this.dependencies.command_runner,
-      "remove-gateway-secret-volume",
-      ["docker", "volume", "rm", id.volume_names.gateway_secret],
+    ]), this.#cleanupCommandTimeoutMs);
+    const cellRemoved = await removeAndProveAbsent(
+      this.dependencies.command_runner, this.#cleanupCommandTimeoutMs,
+      "remove-cell", ["docker", "rm", "--force", id.cell_container_name],
+      "inspect-cell-absence", ["docker", "container", "inspect", id.cell_container_name],
+      "container",
     );
-    const bridgeSecretRemoved = await runCleanup(
-      this.dependencies.command_runner,
-      "remove-bridge-secret-volume",
-      ["docker", "volume", "rm", id.volume_names.bridge_secret],
+    const bridgeRemoved = await removeAndProveAbsent(
+      this.dependencies.command_runner, this.#cleanupCommandTimeoutMs,
+      "remove-bridge", ["docker", "rm", "--force", id.bridge_container_name],
+      "inspect-bridge-absence", ["docker", "container", "inspect", id.bridge_container_name],
+      "container",
     );
-    const internalNetworkRemoved = await runCleanup(
-      this.dependencies.command_runner,
-      "remove-internal-network",
-      ["docker", "network", "rm", id.internal_network_name],
+    const removeVolume = (label: string, volume: string) => removeAndProveAbsent(
+      this.dependencies.command_runner, this.#cleanupCommandTimeoutMs,
+      `remove-${label}-volume`, ["docker", "volume", "rm", volume],
+      `inspect-${label}-volume-absence`, ["docker", "volume", "inspect", volume],
+      "volume",
     );
-    const egressNetworkRemoved = await runCleanup(
-      this.dependencies.command_runner,
-      "remove-egress-network",
-      ["docker", "network", "rm", id.egress_network_name],
+    const configRemoved = await removeVolume("config", id.volume_names.config);
+    const stateRemoved = await removeVolume("state", id.volume_names.state);
+    const workspaceRemoved = await removeVolume("workspace", id.volume_names.workspace);
+    const outputRemoved = await removeVolume("output", id.volume_names.output);
+    const gatewaySecretRemoved = await removeVolume("gateway-secret", id.volume_names.gateway_secret);
+    const bridgeSecretRemoved = await removeVolume("bridge-secret", id.volume_names.bridge_secret);
+    const removeNetwork = (label: string, network: string) => removeAndProveAbsent(
+      this.dependencies.command_runner, this.#cleanupCommandTimeoutMs,
+      `remove-${label}-network`, ["docker", "network", "rm", network],
+      `inspect-${label}-network-absence`, ["docker", "network", "inspect", network],
+      "network",
     );
+    const internalNetworkRemoved = await removeNetwork("internal", id.internal_network_name);
+    const egressNetworkRemoved = await removeNetwork("egress", id.egress_network_name);
     let listenerClosed = false;
     let noIdentityProcess = false;
     try {
@@ -574,7 +747,7 @@ export class CellRuntime {
       noIdentityProcess = false;
     }
     return Object.freeze({
-      gateway_exited: gatewayExited,
+      gateway_exited: cellRemoved,
       cell_removed: cellRemoved,
       bridge_removed: bridgeRemoved,
       config_removed: configRemoved,
@@ -582,15 +755,18 @@ export class CellRuntime {
       workspace_removed: workspaceRemoved,
       output_removed: outputRemoved,
       network_removed: internalNetworkRemoved && egressNetworkRemoved,
-      credential_revoked: gatewaySecretRemoved && bridgeSecretRemoved,
+      credential_material_removed: gatewaySecretRemoved && bridgeSecretRemoved,
       listener_closed: listenerClosed,
       no_identity_process: noIdentityProcess,
-      late_result_rejected: options.late_result_rejected,
     });
   }
 }
 
-export function storeCleanupProof(proof: RuntimeCleanupProof): DetailedCleanupProof {
+export function storeCleanupProof(
+  proof: LocalOpenClawCleanupProof,
+  subscription: SubscriptionRevocationReadback,
+  lateResultRejected: true,
+): DetailedCleanupProof {
   return Object.freeze({
     gateway_exited: proof.gateway_exited,
     container_removed: proof.cell_removed,
@@ -600,9 +776,13 @@ export function storeCleanupProof(proof: RuntimeCleanupProof): DetailedCleanupPr
     workspace_removed: proof.workspace_removed,
     output_removed: proof.output_removed,
     network_removed: proof.network_removed,
-    credential_revoked: proof.credential_revoked,
+    credential_material_removed: proof.credential_material_removed,
+    subscription_lease_revoked: subscription.subscription_lease_revoked,
+    subscription_requests_drained: subscription.subscription_requests_drained,
+    subscription_listener_closed: subscription.subscription_listener_closed,
+    subscription_socket_absent: subscription.subscription_socket_absent,
     listener_closed: proof.listener_closed,
     identity_process_absent: proof.no_identity_process,
-    late_result_rejected: proof.late_result_rejected,
+    late_result_rejected: lateResultRejected,
   });
 }

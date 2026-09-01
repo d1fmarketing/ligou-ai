@@ -6,6 +6,8 @@ import {
   parseWorkerResult,
   parseWorkerStatus,
   type DiscoveryAdapterId,
+  type ModelAccessAuthority,
+  type ModelAccessCapability,
   type WorkerAdapter,
   type WorkerHandle,
   type WorkerJob,
@@ -17,22 +19,34 @@ export type WorkerAdapterRegistry = Partial<Record<DiscoveryAdapterId, WorkerAda
 
 export class WorkerBroker {
   readonly #adapters: WorkerAdapterRegistry;
+  readonly #modelAccess: ModelAccessAuthority;
 
-  constructor(adapters: WorkerAdapterRegistry) {
+  constructor(adapters: WorkerAdapterRegistry, modelAccess: ModelAccessAuthority) {
     this.#adapters = { ...adapters };
+    this.#modelAccess = modelAccess;
   }
 
-  async submit(adapterId: DiscoveryAdapterId, candidate: WorkerJob): Promise<WorkerHandle> {
+  async submit(
+    adapterId: DiscoveryAdapterId,
+    candidate: WorkerJob,
+    modelAccess: ModelAccessCapability,
+  ): Promise<WorkerHandle> {
     if (!isDiscoveryAdapterId(adapterId)) {
       throw new ContractValidationError("adapter: only openclaw or direct_model allowed");
     }
+    const job = parseWorkerJob(candidate);
+    await this.#modelAccess.assertModelAccessCurrent(modelAccess, {
+      adapter_id: adapterId,
+      job_id: job.job_id,
+      attempt_id: job.attempt_id,
+      fence_generation: job.fence_generation,
+    });
     const adapter = this.#adapters[adapterId];
     if (adapter === undefined) throw new ContractValidationError(`adapter unavailable: ${adapterId}`);
-    const job = parseWorkerJob(candidate);
     if (!adapter.supports(job.job_type)) {
       throw new ContractValidationError(`adapter does not support ${job.job_type}`);
     }
-    const handle = parseWorkerHandle(await adapter.submit(job));
+    const handle = parseWorkerHandle(await adapter.submit(job, modelAccess));
     if (handle.adapter_id !== adapterId || handle.job_type !== job.job_type ||
         handle.job_id !== job.job_id || handle.attempt_id !== job.attempt_id ||
         handle.fence_generation !== job.fence_generation) {

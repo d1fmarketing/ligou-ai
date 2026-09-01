@@ -75,6 +75,20 @@ async function gitFixture(base) {
     "hermes-cell/config/cli-config.yaml": "model:\n  provider: openai-codex\n",
     "hermes-cell/docker-compose.yml": "services: {}\n",
     "hermes-cell/test/config.test.mjs": "test-only\n",
+    "discovery-supervisor/src/main.ts": "export const discovery = true;\n",
+    "discovery-supervisor/package.json": JSON.stringify({
+      name: "@ligou/discovery-supervisor",
+      packageManager: "bun@1.2.13",
+      dependencies: {
+        "@openclaw/gateway-client": "2026.8.1",
+        "@openclaw/gateway-protocol": "2026.8.1",
+      },
+    }) + "\n",
+    "discovery-supervisor/bun.lock": "fixture-discovery-lock\n",
+    "discovery-supervisor/openclaw/openclaw.json": "{}\n",
+    "discovery-supervisor/test/runtime.test.ts": "test-only\n",
+    "discovery-supervisor/benchmark/private-corpus.json": "test-only\n",
+    "discovery-supervisor/node_modules/dep.js": "forbidden dependency\n",
     "supabase/functions/good/index.ts": "export {};\n",
     "supabase/deno.json": "{\"imports\":{}}\n",
     "supabase/scripts/admin.ts": "admin-only\n",
@@ -82,6 +96,10 @@ async function gitFixture(base) {
     "supabase/deno.lock": "fixture-deno-lock\n",
     "supabase/.temp/project-ref": "forbidden temp\n",
     "infra/good.sh": "#!/bin/sh\nexit 0\n",
+    "infra/ligou-discovery-supervisor.service": await readFile(
+      path.join(repoRoot, "infra/ligou-discovery-supervisor.service"),
+      "utf8",
+    ),
     "infra/deploy-host.sh": await readFile(hostDeploy, "utf8"),
     "infra/release-manifest.mjs": await readFile(manifestTool, "utf8"),
     "infra/edge-release-identity.mjs": await readFile(path.join(repoRoot, "infra/edge-release-identity.mjs"), "utf8"),
@@ -149,9 +167,14 @@ test("packaging exact commit excludes contamination and emits a signed immutable
     assert.equal(entriesResult.status, 0, entriesResult.stderr);
     const entries = entriesResult.stdout.split("\n").filter(Boolean);
     assert.ok(entries.includes("voice-controller/src/good.ts"));
+    assert.ok(entries.includes("discovery-supervisor/src/main.ts"));
+    assert.ok(entries.includes("discovery-supervisor/package.json"));
+    assert.ok(entries.includes("discovery-supervisor/bun.lock"));
+    assert.ok(entries.includes("discovery-supervisor/openclaw/openclaw.json"));
+    assert.ok(entries.includes("infra/ligou-discovery-supervisor.service"));
     assert.ok(entries.includes("supabase/functions/good/index.ts"));
     assert.doesNotMatch(entries.join("\n"), /(?:^|\/)\._|(?:^|\/)\.env|node_modules|(?:^|\/)dist\/|supabase\/\.temp|private-backup[.]zip/);
-    assert.doesNotMatch(entries.join("\n"), /prove-onboarding|\/test\/|supabase\/scripts\/|infra\/(?:deploy|pull-env|package-release|bootstrap-module-closure)[.]/);
+    assert.doesNotMatch(entries.join("\n"), /prove-onboarding|\/test\/|discovery-supervisor\/benchmark\/|supabase\/scripts\/|infra\/(?:deploy|pull-env|package-release|bootstrap-module-closure)[.]/);
 
     const manifest = `${artifact}.manifest.json`;
     const created = createReleaseManifest(artifact, manifest, repo.commit);
@@ -169,6 +192,13 @@ test("packaging exact commit excludes contamination and emits a signed immutable
       bun: { version: "1.2.13" },
       deno: { version: "2.9.4" },
       supabase_cli: { version: "2.115.0" },
+      discovery_supervisor: {
+        package_manager: "bun@1.2.13",
+        lockfile_path: "discovery-supervisor/bun.lock",
+        lockfile_sha256: "3ea1016100fcd924ba65f580358f52a0d72328f62538d51d8a6e44ea34d4ff9c",
+        openclaw_gateway_client: "2026.8.1",
+        openclaw_gateway_protocol: "2026.8.1",
+      },
       dependencies: {
         lockfile_path: "voice-controller/bun.lock",
         lockfile_sha256: "b636fb14b47b7d83c9f26513d1341f630f18c8960192897a73e885e4303162dc",
@@ -582,8 +612,22 @@ async function runnableArtifact(fixture, commit, { healthScript = '#!/bin/sh\nex
   await writeTree(payload, {
     "voice-controller/package.json": '{"name":"fixture","packageManager":"bun@1.2.13"}\n',
     "voice-controller/bun.lock": "fixture-lock\n",
+    "discovery-supervisor/src/main.ts": "export {};\n",
+    "discovery-supervisor/package.json": JSON.stringify({
+      name: "@ligou/discovery-supervisor",
+      packageManager: "bun@1.2.13",
+      dependencies: {
+        "@openclaw/gateway-client": "2026.8.1",
+        "@openclaw/gateway-protocol": "2026.8.1",
+      },
+    }) + "\n",
+    "discovery-supervisor/bun.lock": "fixture-discovery-lock\n",
     "hermes-cell/validate-config.mjs": "process.exit(0);\n",
     "infra/release-health.sh": healthScript,
+    "infra/ligou-discovery-supervisor.service": await readFile(
+      path.join(repoRoot, "infra/ligou-discovery-supervisor.service"),
+      "utf8",
+    ),
     "infra/release-marker": "safe\n",
     "supabase/deno.lock": "fixture-deno-lock\n",
     "supabase/deno.json": '{"imports":{}}\n',
@@ -630,9 +674,10 @@ test("functional health failure atomically reactivates the previous release and 
     const old = await prepareOldRelease(deployRoot);
     const bin = path.join(fixture, "bin");
     const systemctlLog = path.join(fixture, "systemctl.log");
+    const bunLog = path.join(fixture, "bun.log");
     await mkdir(bin);
     await writeFile(path.join(bin, "systemctl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\nexit 0\n");
-    await writeFile(path.join(bin, "bun"), "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' 1.2.13; fi\nexit 0\n");
+    await writeFile(path.join(bin, "bun"), "#!/bin/sh\nprintf '%s|%s\\n' \"$PWD\" \"$*\" >> \"$BUN_LOG\"\nif [ \"$1\" = --version ]; then printf '%s\\n' 1.2.13; fi\nexit 0\n");
     await chmod(path.join(bin, "systemctl"), 0o755);
     await chmod(path.join(bin, "bun"), 0o755);
 
@@ -648,13 +693,20 @@ test("functional health failure atomically reactivates the previous release and 
         LIGOU_SERVICE_NAME: "ligou-controller",
         STUB_RELEASE_HEALTH_STATUS: "1",
         SYSTEMCTL_LOG: systemctlLog,
+        BUN_LOG: bunLog,
       },
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /release_health_failed_rollback_applied/);
     assert.equal(path.resolve(deployRoot, await readlink(path.join(deployRoot, "current"))), path.resolve(old));
     assert.equal(path.resolve(deployRoot, await readlink(path.join(deployRoot, "app"))), path.join(deployRoot, "current"));
-    assert.equal((await readFile(systemctlLog, "utf8")).split("\n").filter((line) => line.includes("restart")).length, 2);
+    const serviceCommands = await readFile(systemctlLog, "utf8");
+    assert.equal(serviceCommands.split("\n").filter((line) => line.includes("restart")).length, 4);
+    assert.equal(serviceCommands.split("\n").filter((line) => line.includes("restart ligou-controller")).length, 2);
+    assert.equal(serviceCommands.split("\n").filter((line) => line.includes("restart ligou-discovery-supervisor")).length, 2);
+    const bunCommands = await readFile(bunLog, "utf8");
+    assert.match(bunCommands, /voice-controller\|install --production --frozen-lockfile/);
+    assert.match(bunCommands, /discovery-supervisor\|install --production --frozen-lockfile/);
     const results = await readFile(path.join(deployRoot, "deploy-results.jsonl"), "utf8");
     assert.match(results, /"status":"rolled_back"/);
     assert.doesNotMatch(results, /synthetic|RELEASE_KEY|secret|stdout|stderr|access[_-]?token/i);

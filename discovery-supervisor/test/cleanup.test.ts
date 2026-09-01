@@ -2,6 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type {
   DiscoveryAdapterId,
   DiscoverySourceSnapshot,
+  ModelAccessCapability,
+  SubscriptionGateway,
+  SubscriptionLeaseCapability,
+  SubscriptionRecoveryCapability,
+  SubscriptionRevocationReadback,
+  SubscriptionUsage,
   WorkerHandle,
   WorkerJob,
   WorkerResult,
@@ -9,6 +15,7 @@ import type {
 } from "../src/contracts";
 import { JobStore } from "../src/job-store";
 import type {
+  CleanupProof,
   CleanupReadback,
   CommittedResultCapability,
   RuntimeSlotCapability,
@@ -16,6 +23,7 @@ import type {
 } from "../src/job-store";
 import {
   CellRuntime,
+  type CellRuntimeDependencies,
   type CommandRunner,
   type CommandSpec,
   type DetailedCleanupProof,
@@ -24,6 +32,7 @@ import {
 } from "../src/openclaw/cell-runtime";
 import {
   AttemptRuntimeIdentityRegistry,
+  allocateDirectModelRuntimeIdentity,
   allocateRuntimeIdentity,
   runtimeIdentityBinding,
   type RuntimeIdentityBinding,
@@ -80,6 +89,7 @@ const claimedJob: WorkerJob = {
 };
 
 const boundJob: WorkerJob = { ...claimedJob, source_snapshots: [snapshot] };
+const modelAccess = Object.freeze(Object.create(null)) as ModelAccessCapability;
 
 const result: WorkerResult = {
   schema_version: "company_discovery.result.v1",
@@ -106,10 +116,34 @@ const completeRuntimeProof: RuntimeCleanupProof = {
   workspace_removed: true,
   output_removed: true,
   network_removed: true,
-  credential_revoked: true,
+  credential_material_removed: true,
   listener_closed: true,
   no_identity_process: true,
+};
+const completeRevocation = (generation: number): SubscriptionRevocationReadback =>
+  Object.freeze({
+    generation,
+    subscription_lease_revoked: true,
+    subscription_requests_drained: true,
+    subscription_listener_closed: true,
+    subscription_socket_absent: true,
+  });
+const completeDetailedProof: DetailedCleanupProof = storeCleanupProof(
+  completeRuntimeProof,
+  completeRevocation(7),
+  true,
+);
+const completeDirectProof = {
+  subscription_lease_revoked: true,
+  subscription_requests_drained: true,
+  subscription_listener_closed: true,
+  subscription_socket_absent: true,
+  identity_process_absent: true,
   late_result_rejected: true,
+};
+const completeDirectLocalProof = {
+  runtime_kind: "direct_model_subscription" as const,
+  identity_process_absent: true,
 };
 
 class RecordingRunner implements CommandRunner {
@@ -122,30 +156,118 @@ class RecordingRunner implements CommandRunner {
     if (this.failLabels.has(command.label)) {
       return { exitCode: 1, stdout: "", stderr: `forced ${command.label} failure` };
     }
+    if (command.label.startsWith("inspect-")) {
+      const stderr = command.label.includes("volume")
+        ? "Error: No such volume"
+        : command.label.includes("network")
+        ? "Error: network not found"
+        : "Error: No such object";
+      return { exitCode: 1, stdout: "", stderr };
+    }
     return { exitCode: 0, stdout: "", stderr: "" };
   }
 }
 
-async function identity() {
+async function identity(fill = 0x55, loopbackPort = 29_210) {
+  const cellIndex = "sha256:e7849cb6c1ef1ead39ab4be7d85edb2df89611f486e283284c7cf35ce39a20d4";
+  const bridgeIndex = `sha256:${"b".repeat(64)}`;
   return allocateRuntimeIdentity({
-    reserveLoopbackPort: async () => 29_210,
-    randomBytes: () => Buffer.alloc(24, 0x55),
+    reserveLoopbackPort: async () => loopbackPort,
+    randomBytes: () => Buffer.alloc(24, fill),
+    image_evidence: {
+      cell_image: {
+        reference: `ghcr.io/openclaw/openclaw@${cellIndex}`,
+        index_digest: cellIndex,
+        platform: "linux/arm64",
+        selected_manifest_digest: `sha256:${"c".repeat(64)}`,
+        image_id: `sha256:${"d".repeat(64)}`,
+        config_digest: `sha256:${"e".repeat(64)}`,
+      },
+      bridge_image: {
+        reference: `ligou-discovery-bridge@${bridgeIndex}`,
+        index_digest: bridgeIndex,
+        platform: "linux/arm64",
+        selected_manifest_digest: bridgeIndex,
+        image_id: `sha256:${"f".repeat(64)}`,
+        config_digest: `sha256:${"0".repeat(64)}`,
+      },
+    },
   });
+}
+
+function cellRuntime(dependencies: CellRuntimeDependencies): CellRuntime {
+  return new CellRuntime(dependencies);
+}
+
+const completeSubscriptionUsage: SubscriptionUsage = Object.freeze({
+  schema_version: "ligou.subscription_usage.v1",
+  provider: "openai-codex",
+  model: "gpt-5.6-sol",
+  billing_basis: "chatgpt_subscription",
+  marginal_api_charge_usd: 0,
+  request_count: 1,
+  active_requests: 0,
+  input_bytes: 1_000,
+  output_bytes: 2_000,
+  input_tokens: 250,
+  cached_input_tokens: 0,
+  output_tokens: 500,
+  total_tokens: 750,
+  usage_complete: true,
+  quota_state: "available",
+  retry_after_seconds: null,
+  cooldown_until: null,
+  revoked: false,
+});
+
+function subscriptionGatewayFor(subscriptionSocketPath: string): SubscriptionGateway {
+  const lease = Object.freeze(Object.create(null)) as SubscriptionLeaseCapability;
+  const revocation = Object.freeze({
+    generation: 1,
+    subscription_lease_revoked: true as const,
+    subscription_requests_drained: true as const,
+    subscription_listener_closed: true as const,
+    subscription_socket_absent: true as const,
+  });
+  return {
+    async register() {
+      return Object.freeze({
+        lease,
+        attempt_marker: "marker." + "a".repeat(43),
+        subscription_socket_path: subscriptionSocketPath,
+        session_id: "stage0_session_openclaw_test_1234",
+        policy: Object.freeze({
+          model: "gpt-5.6-sol" as const,
+          deadline_at: claimedJob.deadline_at,
+          max_requests: 4,
+          max_input_bytes: 400_000 as const,
+          max_output_bytes: 8_388_608 as const,
+          max_response_bytes: 4_194_304 as const,
+          concurrency: 1 as const,
+          cache_retention: "none" as const,
+        }),
+      });
+    },
+    async forward() { return new Response("", { status: 500 }); },
+    usage() { return completeSubscriptionUsage; },
+    async revoke() { return revocation; },
+    async recover() { return revocation; },
+  };
 }
 
 describe("CellRuntime exhaustive cleanup", () => {
   test("proves every runtime resource was destroyed and maps to the exact Task 1 proof", async () => {
     const runner = new RecordingRunner();
-    const runtime = new CellRuntime({
+    const runtime = cellRuntime({
       command_runner: runner,
       listener_closed: async () => true,
       identity_process_absent: async () => true,
     });
 
-    const proof = await runtime.cleanup({ identity: await identity() }, { late_result_rejected: true });
+    const proof = await runtime.cleanup({ identity: await identity() });
 
     expect(proof).toEqual(completeRuntimeProof);
-    expect(storeCleanupProof(proof)).toEqual({
+    expect(storeCleanupProof(proof, completeRevocation(1), true)).toEqual({
       gateway_exited: true,
       container_removed: true,
       bridge_removed: true,
@@ -154,7 +276,11 @@ describe("CellRuntime exhaustive cleanup", () => {
       workspace_removed: true,
       output_removed: true,
       network_removed: true,
-      credential_revoked: true,
+      credential_material_removed: true,
+      subscription_lease_revoked: true,
+      subscription_requests_drained: true,
+      subscription_listener_closed: true,
+      subscription_socket_absent: true,
       listener_closed: true,
       identity_process_absent: true,
       late_result_rejected: true,
@@ -162,15 +288,25 @@ describe("CellRuntime exhaustive cleanup", () => {
     expect(runner.commands.map((command) => command.label)).toEqual([
       "stop-cell",
       "remove-cell",
+      "inspect-cell-absence",
       "remove-bridge",
+      "inspect-bridge-absence",
       "remove-config-volume",
+      "inspect-config-volume-absence",
       "remove-state-volume",
+      "inspect-state-volume-absence",
       "remove-workspace-volume",
+      "inspect-workspace-volume-absence",
       "remove-output-volume",
+      "inspect-output-volume-absence",
       "remove-gateway-secret-volume",
+      "inspect-gateway-secret-volume-absence",
       "remove-bridge-secret-volume",
+      "inspect-bridge-secret-volume-absence",
       "remove-internal-network",
+      "inspect-internal-network-absence",
       "remove-egress-network",
+      "inspect-egress-network-absence",
     ]);
   });
 
@@ -179,53 +315,52 @@ describe("CellRuntime exhaustive cleanup", () => {
       label: string;
       field: keyof RuntimeCleanupProof;
     }> = [
-      { label: "stop-cell", field: "gateway_exited" },
-      { label: "remove-cell", field: "cell_removed" },
-      { label: "remove-bridge", field: "bridge_removed" },
-      { label: "remove-config-volume", field: "config_removed" },
-      { label: "remove-state-volume", field: "state_removed" },
-      { label: "remove-workspace-volume", field: "workspace_removed" },
-      { label: "remove-output-volume", field: "output_removed" },
-      { label: "remove-gateway-secret-volume", field: "credential_revoked" },
-      { label: "remove-bridge-secret-volume", field: "credential_revoked" },
-      { label: "remove-internal-network", field: "network_removed" },
-      { label: "remove-egress-network", field: "network_removed" },
+      { label: "inspect-cell-absence", field: "gateway_exited" },
+      { label: "inspect-cell-absence", field: "cell_removed" },
+      { label: "inspect-bridge-absence", field: "bridge_removed" },
+      { label: "inspect-config-volume-absence", field: "config_removed" },
+      { label: "inspect-state-volume-absence", field: "state_removed" },
+      { label: "inspect-workspace-volume-absence", field: "workspace_removed" },
+      { label: "inspect-output-volume-absence", field: "output_removed" },
+      { label: "inspect-gateway-secret-volume-absence", field: "credential_material_removed" },
+      { label: "inspect-bridge-secret-volume-absence", field: "credential_material_removed" },
+      { label: "inspect-internal-network-absence", field: "network_removed" },
+      { label: "inspect-egress-network-absence", field: "network_removed" },
     ];
 
     for (const fault of cases) {
       const runner = new RecordingRunner(new Set([fault.label]));
-      const runtime = new CellRuntime({
+      const runtime = cellRuntime({
         command_runner: runner,
         listener_closed: async () => true,
         identity_process_absent: async () => true,
       });
 
-      const proof = await runtime.cleanup({ identity: await identity() }, { late_result_rejected: true });
+      const proof = await runtime.cleanup({ identity: await identity() });
 
       expect(proof[fault.field]).toBe(false);
-      expect(runner.commands).toHaveLength(11);
+      expect(runner.commands).toHaveLength(21);
     }
   });
 
-  test("listener, process-identity, and late-result ambiguity each fail closed", async () => {
-    const runtime = new CellRuntime({
+  test("listener and process-identity ambiguity each fail closed locally", async () => {
+    const runtime = cellRuntime({
       command_runner: new RecordingRunner(),
       listener_closed: async () => false,
       identity_process_absent: async () => false,
     });
 
-    const proof = await runtime.cleanup({ identity: await identity() }, { late_result_rejected: false });
+    const proof = await runtime.cleanup({ identity: await identity() });
 
     expect(proof.listener_closed).toBe(false);
     expect(proof.no_identity_process).toBe(false);
-    expect(proof.late_result_rejected).toBe(false);
-    expect(storeCleanupProof(proof).listener_closed).toBe(false);
-    expect(storeCleanupProof(proof).late_result_rejected).toBe(false);
+    expect(storeCleanupProof(proof, completeRevocation(1), true).listener_closed).toBe(false);
+    expect(storeCleanupProof(proof, completeRevocation(1), true).late_result_rejected).toBe(true);
   });
 
   test("reads one bounded result only through the opaque output volume", async () => {
     const commands: CommandSpec[] = [];
-    const runtime = new CellRuntime({
+    const runtime = cellRuntime({
       command_runner: {
         async run(command) {
           commands.push(command);
@@ -256,7 +391,7 @@ describe("CellRuntime exhaustive cleanup", () => {
 
   test("destroys an expired attempt from its persisted non-secret runtime binding", async () => {
     const runner = new RecordingRunner();
-    const runtime = new CellRuntime({
+    const runtime = cellRuntime({
       command_runner: runner,
       listener_closed: async () => true,
       identity_process_absent: async () => true,
@@ -265,7 +400,6 @@ describe("CellRuntime exhaustive cleanup", () => {
 
     expect(await runtime.cleanupBoundRuntime(
       runtimeIdentityBinding(runtimeIdentity),
-      { late_result_rejected: true },
     )).toEqual(completeRuntimeProof);
     expect(runner.commands.find((command) => command.label === "remove-cell")?.argv)
       .toContain(runtimeIdentity.cell_container_name);
@@ -276,7 +410,7 @@ describe("CellRuntime exhaustive cleanup", () => {
   test("propagates cancellation into an in-flight Docker command", async () => {
     let commandStarted!: () => void;
     const observedStart = new Promise<void>((resolve) => { commandStarted = resolve; });
-    const runtime = new CellRuntime({
+    const runtime = cellRuntime({
       command_runner: {
         async run(_command, signal) {
           commandStarted();
@@ -334,14 +468,13 @@ describe("ephemeral OpenClaw attempt factory", () => {
     const factory = new EphemeralOpenClawAttemptFactory({
       runtime,
       gateway_client: gateway,
-      bridge_image: "ligou-discovery-bridge@sha256:" + "b".repeat(64),
-      upstream_api_key: "supervisor-upstream-secret",
-      upstream_model: "gpt-5.4-mini",
+      upstream_model: "gpt-5.6-sol",
       resolve_identity: async () => runtimeIdentity,
+      subscription_gateway: subscriptionGatewayFor(runtimeIdentity.subscription_socket_path),
       random_bytes: () => Buffer.alloc(32, 0x66),
     });
 
-    const session = await factory.start(boundJob);
+    const session = await factory.start(boundJob, modelAccess);
     expect(await session.result).toEqual(result);
     expect(gatewayClosed).toBe(true);
     expect(gatewayInput?.url).toBe(`ws://127.0.0.1:${runtimeIdentity.host_gateway_port}`);
@@ -396,15 +529,14 @@ describe("ephemeral OpenClaw attempt factory", () => {
       const factory = new EphemeralOpenClawAttemptFactory({
         runtime,
         gateway_client: gateway,
-        bridge_image: "ligou-discovery-bridge@sha256:" + "b".repeat(64),
-        upstream_api_key: "supervisor-upstream-secret",
-        upstream_model: "gpt-5.4-mini",
+        upstream_model: "gpt-5.6-sol",
         resolve_identity: async () => runtimeIdentity,
+        subscription_gateway: subscriptionGatewayFor(runtimeIdentity.subscription_socket_path),
         random_bytes: () => Buffer.alloc(32, 0x67),
       });
       const adapter = new OpenClawDiscoveryAdapter({ attempts: factory });
 
-      const handle = await adapter.submit(boundJob);
+      const handle = await adapter.submit(boundJob, modelAccess);
       await expect(adapter.result(handle)).rejects.toThrow(failure);
       expect(await adapter.status(handle)).toEqual({ state: "failed" });
       expect(await adapter.retire(handle)).toEqual(completeRuntimeProof);
@@ -421,15 +553,16 @@ describe("OpenClaw adapter fencing", () => {
       result: externalResult,
       async cancel() {},
       async cleanup() { return completeRuntimeProof; },
+      usage() { return completeSubscriptionUsage; },
     };
     const factory: OpenClawAttemptFactory = { async start() { return session; } };
     const adapter = new OpenClawDiscoveryAdapter({ attempts: factory });
 
-    const handle = await adapter.submit(boundJob);
+    const handle = await adapter.submit(boundJob, modelAccess);
     const cleanup = await adapter.retire(handle);
     settle(result);
 
-    expect(cleanup.late_result_rejected).toBe(true);
+    expect(cleanup).toEqual(completeRuntimeProof);
     await expect(adapter.result(handle)).rejects.toThrow("retired");
     await expect(adapter.status(handle)).rejects.toThrow("retired");
   });
@@ -443,11 +576,12 @@ describe("OpenClaw adapter fencing", () => {
             result: Promise.resolve(hostile),
             async cancel() {},
             async cleanup() { return completeRuntimeProof; },
+            usage() { return completeSubscriptionUsage; },
           };
         },
       },
     });
-    const handle = await adapter.submit(boundJob);
+    const handle = await adapter.submit(boundJob, modelAccess);
 
     await expect(adapter.status({ ...handle, fence_generation: 8 })).rejects.toThrow("attempt handle");
     await expect(adapter.result(handle)).rejects.toThrow("exact keys");
@@ -456,6 +590,10 @@ describe("OpenClaw adapter fencing", () => {
 });
 
 const SLOT_ID = "44444444-4444-4444-8444-444444444444";
+const claimSubscriptionRecovery = Object.freeze(Object.create(null)) as
+  SubscriptionRecoveryCapability;
+const terminalSubscriptionRecovery = Object.freeze(Object.create(null)) as
+  SubscriptionRecoveryCapability;
 const runtimeSlot: RuntimeSlotCapability = {
   job_id: claimedJob.job_id,
   attempt_id: claimedJob.attempt_id,
@@ -466,12 +604,14 @@ const cleanupAuthority: SupervisorCleanupAuthority = {
   attempt_id: claimedJob.attempt_id,
   runtime_slot: runtimeSlot,
   fence_generation: 8,
+  subscription_recovery: terminalSubscriptionRecovery,
 };
 const claimCleanupAuthority: SupervisorCleanupAuthority = {
   job_id: claimedJob.job_id,
   attempt_id: claimedJob.attempt_id,
   runtime_slot: runtimeSlot,
   fence_generation: 7,
+  subscription_recovery: claimSubscriptionRecovery,
 };
 const claimedAttempt: SupervisorClaimedAttempt = {
   job: claimedJob,
@@ -479,6 +619,11 @@ const claimedAttempt: SupervisorClaimedAttempt = {
   runtime_slot: runtimeSlot,
   job_version: 2,
   cleanup_authority: claimCleanupAuthority,
+  model_access: modelAccess,
+};
+const directClaimedAttempt: SupervisorClaimedAttempt = {
+  ...claimedAttempt,
+  adapter_id: "direct_model",
 };
 const committedResult: CommittedResultCapability = {
   job_id: claimedJob.job_id,
@@ -494,11 +639,12 @@ interface FakeStoreOptions {
   readonly cleanupReadback?: CleanupReadback;
   readonly expiredCleanup?: SupervisorExpiredCleanupRecovery;
   readonly bindFailureCount?: number;
+  readonly claimedAttempt?: SupervisorClaimedAttempt;
 }
 
 class FakeStore implements SupervisorStore {
   readonly calls: string[] = [];
-  cleanupProof?: DetailedCleanupProof;
+  cleanupProof?: CleanupProof;
   cleanupAuthority?: SupervisorCleanupAuthority;
   quarantine?: {
     runtimeSlot: RuntimeSlotCapability;
@@ -506,15 +652,30 @@ class FakeStore implements SupervisorStore {
     proofHash: string;
   };
   runtimeBinding?: RuntimeIdentityBinding;
+  lastRecoveryFence?: number;
   private remainingBindFailures: number;
   private readonly trustedCleanupAuthorities = new WeakSet<object>();
+  private readonly recoveryAuthorities =
+    new WeakMap<object, SupervisorCleanupAuthority>();
 
   constructor(private readonly options: FakeStoreOptions = {}) {
     this.remainingBindFailures = options.bindFailureCount ?? 0;
     this.trustedCleanupAuthorities.add(claimCleanupAuthority);
     this.trustedCleanupAuthorities.add(cleanupAuthority);
+    this.recoveryAuthorities.set(
+      claimCleanupAuthority.subscription_recovery,
+      claimCleanupAuthority,
+    );
+    this.recoveryAuthorities.set(
+      cleanupAuthority.subscription_recovery,
+      cleanupAuthority,
+    );
     if (options.expiredCleanup?.recovery_outcome === "cleanup_claimed") {
       this.trustedCleanupAuthorities.add(options.expiredCleanup.cleanup_authority);
+      this.recoveryAuthorities.set(
+        options.expiredCleanup.cleanup_authority.subscription_recovery,
+        options.expiredCleanup.cleanup_authority,
+      );
     }
   }
 
@@ -535,9 +696,9 @@ class FakeStore implements SupervisorStore {
   ): Promise<SupervisorClaimedAttempt | null> {
     this.calls.push("claim");
     expect(workerId).toBe("openclaw-stage0-slot");
-    expect(adapterId).toBe("openclaw");
+    expect(adapterId).toBe((this.options.claimedAttempt ?? claimedAttempt).adapter_id);
     expect(leaseSeconds).toBe(600);
-    return claimedAttempt;
+    return this.options.claimedAttempt ?? claimedAttempt;
   }
 
   async bindRuntime(
@@ -545,7 +706,7 @@ class FakeStore implements SupervisorStore {
     binding: RuntimeIdentityBinding,
   ): Promise<SupervisorRuntimeBindReadback> {
     this.calls.push("bind-runtime");
-    expect(claim).toBe(claimedAttempt);
+    expect(claim).toBe(this.options.claimedAttempt ?? claimedAttempt);
     if (this.remainingBindFailures > 0) {
       this.remainingBindFailures -= 1;
       throw new Error("company_discovery_runtime_identity_conflict");
@@ -564,7 +725,7 @@ class FakeStore implements SupervisorStore {
 
   bindSourceSnapshots(job: WorkerJob, snapshots: readonly DiscoverySourceSnapshot[]): WorkerJob {
     this.calls.push("bind-evidence");
-    expect(job).toBe(claimedJob);
+    expect(job).toBe((this.options.claimedAttempt ?? claimedAttempt).job);
     expect(snapshots).toEqual([snapshot]);
     return boundJob;
   }
@@ -598,14 +759,14 @@ class FakeStore implements SupervisorStore {
     reason: string,
   ): Promise<SupervisorCleanupAuthority> {
     this.calls.push(`terminalize-${outcome}-${reason}`);
-    expect(claim).toBe(claimedAttempt);
+    expect(claim).toBe(this.options.claimedAttempt ?? claimedAttempt);
     if (this.options.terminalizeError !== undefined) throw this.options.terminalizeError;
     return cleanupAuthority;
   }
 
   async recordCleanup(
     authority: SupervisorCleanupAuthority,
-    proof: DetailedCleanupProof,
+    proof: CleanupProof,
   ): Promise<CleanupReadback> {
     this.calls.push("record-cleanup");
     expect(this.trustedCleanupAuthorities.has(authority)).toBe(true);
@@ -618,6 +779,28 @@ class FakeStore implements SupervisorStore {
     };
   }
 
+  async assertSubscriptionRecoveryCurrent(
+    capability: SubscriptionRecoveryCapability,
+  ) {
+    this.calls.push("assert-subscription-recovery");
+    const authority = this.recoveryAuthorities.get(capability);
+    if (authority === undefined) throw new Error("store-issued recovery required");
+    const runtimeIdentity = this.runtimeBinding ??
+      (this.options.expiredCleanup?.recovery_outcome === "cleanup_claimed"
+        ? this.options.expiredCleanup.runtime_identity
+        : undefined);
+    if (runtimeIdentity === undefined) throw new Error("runtime identity unavailable");
+    this.lastRecoveryFence = authority.fence_generation;
+    return Object.freeze({
+      job_id: authority.job_id,
+      attempt_id: authority.attempt_id,
+      fence_generation: authority.fence_generation,
+      subscription_socket_path: runtimeIdentity.subscription_socket_path,
+      runtime_kind: runtimeIdentity.runtime_kind,
+      late_result_rejected: true as const,
+    });
+  }
+
   async quarantineSlot(
     slot: RuntimeSlotCapability,
     reason: string,
@@ -628,12 +811,33 @@ class FakeStore implements SupervisorStore {
   }
 }
 
+function supervisorSubscriptionGateway(store: FakeStore): SubscriptionGateway {
+  const base = subscriptionGatewayFor(
+    `/run/ligou-discovery/${"f".repeat(48)}/subscription.sock`,
+  );
+  return {
+    ...base,
+    async recover() {
+      if (store.lastRecoveryFence === undefined) {
+        throw new Error("subscription recovery was not DB-authorized");
+      }
+      return completeRevocation(store.lastRecoveryFence);
+    },
+  };
+}
+
 class FakeBroker implements SupervisorBroker {
   readonly calls: string[] = [];
+  modelAccess?: ModelAccessCapability;
   private state: WorkerStatus = { state: "succeeded" };
 
-  async submit(adapterId: DiscoveryAdapterId, job: WorkerJob): Promise<WorkerHandle> {
+  async submit(
+    adapterId: DiscoveryAdapterId,
+    job: WorkerJob,
+    capability: ModelAccessCapability,
+  ): Promise<WorkerHandle> {
     this.calls.push("submit");
+    this.modelAccess = capability;
     return {
       adapter_id: adapterId,
       job_type: job.job_type,
@@ -682,6 +886,90 @@ class FakeFetchGateway implements SupervisorFetchGateway {
 }
 
 describe("DiscoverySupervisor attempt lifecycle", () => {
+  test("runs DirectModel through a truthful UDS-only runtime and exact cleanup proof", async () => {
+    const store = new FakeStore({ claimedAttempt: directClaimedAttempt });
+    const broker = new FakeBroker();
+    let allocatedAdapter: DiscoveryAdapterId | undefined;
+    let retired = false;
+    const directIdentity = await allocateDirectModelRuntimeIdentity({
+      randomBytes: () => Buffer.alloc(24, 0x77),
+    });
+    const supervisor = new DiscoverySupervisor({
+      worker_id: "openclaw-stage0-slot",
+      store,
+      broker,
+      fetch_gateway: new FakeFetchGateway(),
+      select_adapter: () => "direct_model",
+      allocate_runtime_identity: async (adapterId) => {
+        allocatedAdapter = adapterId;
+        return directIdentity;
+      },
+      runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: supervisorSubscriptionGateway(store),
+      retire_worker: async () => {
+        retired = true;
+        return {
+          ...completeDirectLocalProof,
+          revocation: completeRevocation(7),
+        };
+      },
+      cleanup_bound_runtime: async () => {
+        throw new Error("success path must retire the direct worker lease");
+      },
+      now: () => Date.parse("2026-09-01T10:01:00.000Z"),
+    });
+
+    expect(await supervisor.runOnce()).toMatchObject({ state: "selected" });
+    expect(allocatedAdapter).toBe("direct_model");
+    expect(retired).toBe(true);
+    expect(store.runtimeBinding).toEqual({
+      runtime_kind: "direct_model_subscription",
+      subscription_socket_path: directIdentity.subscription_socket_path,
+    });
+    expect(store.cleanupProof).toEqual(completeDirectProof);
+    expect(JSON.stringify(store.runtimeBinding)).not.toMatch(
+      /container|image|network|loopback_port/,
+    );
+    expect(broker.modelAccess).toBe(modelAccess);
+  });
+
+  test("recovers a DirectModel bind-to-register crash through cleanup authority", async () => {
+    const store = new FakeStore({ claimedAttempt: directClaimedAttempt });
+    const directIdentity = await allocateDirectModelRuntimeIdentity({
+      randomBytes: () => Buffer.alloc(24, 0x78),
+    });
+    class RegisterCrashBroker extends FakeBroker {
+      override async submit(): Promise<WorkerHandle> {
+        throw new Error("subscription_register_crash");
+      }
+    }
+    const supervisor = new DiscoverySupervisor({
+      worker_id: "openclaw-stage0-slot",
+      store,
+      broker: new RegisterCrashBroker(),
+      fetch_gateway: new FakeFetchGateway(),
+      select_adapter: () => "direct_model",
+      allocate_runtime_identity: async () => directIdentity,
+      runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: supervisorSubscriptionGateway(store),
+      retire_worker: async () => {
+        throw new Error("no worker handle exists");
+      },
+      cleanup_bound_runtime: async (binding) => {
+        expect(binding).toEqual({
+          runtime_kind: "direct_model_subscription",
+          subscription_socket_path: directIdentity.subscription_socket_path,
+        });
+        return completeDirectLocalProof;
+      },
+      now: () => Date.parse("2026-09-01T10:01:00.000Z"),
+    });
+
+    await expect(supervisor.runOnce()).rejects.toThrow("subscription_register_crash");
+    expect(store.lastRecoveryFence).toBe(cleanupAuthority.fence_generation);
+    expect(store.cleanupProof).toEqual(completeDirectProof);
+  });
+
   test("claims, crawls, binds, runs, commits, selects, retires, and records proved cleanup", async () => {
     const store = new FakeStore();
     const broker = new FakeBroker();
@@ -696,6 +984,7 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
       select_adapter: () => "openclaw",
       allocate_runtime_identity: async () => runtimeIdentity,
       runtime_identities: runtimeIdentities,
+      subscription_gateway: supervisorSubscriptionGateway(store),
       retire_worker: async () => completeRuntimeProof,
       cleanup_bound_runtime: async () => completeRuntimeProof,
       now: () => Date.parse("2026-09-01T10:01:00.000Z"),
@@ -716,11 +1005,13 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
       "bind-evidence",
       "commit",
       "select",
+      "assert-subscription-recovery",
       "record-cleanup",
     ]);
     expect(fetchGateway.calls).toEqual(["create-context", "crawl", "retire-context"]);
     expect(broker.calls).toEqual(["submit", "status", "result"]);
-    expect(store.cleanupProof).toEqual(storeCleanupProof(completeRuntimeProof));
+    expect(broker.modelAccess).toBe(modelAccess);
+    expect(store.cleanupProof).toEqual(completeDetailedProof);
     expect(store.cleanupAuthority).toMatchObject({
       attempt_id: claimedJob.attempt_id,
       runtime_slot: runtimeSlot,
@@ -741,8 +1032,9 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
       broker,
       fetch_gateway: fetchGateway,
       select_adapter: () => "openclaw",
-      allocate_runtime_identity: identity,
+      allocate_runtime_identity: async () => identity(),
       runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: supervisorSubscriptionGateway(store),
       retire_worker: async () => {
         workerRetired = true;
         return completeRuntimeProof;
@@ -766,14 +1058,8 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
 
   test("reallocates opaque identity after a database reservation collision before creating resources", async () => {
     const store = new FakeStore({ bindFailureCount: 1 });
-    const firstIdentity = await allocateRuntimeIdentity({
-      reserveLoopbackPort: async () => 29_211,
-      randomBytes: () => Buffer.alloc(24, 0x61),
-    });
-    const secondIdentity = await allocateRuntimeIdentity({
-      reserveLoopbackPort: async () => 29_212,
-      randomBytes: () => Buffer.alloc(24, 0x62),
-    });
+    const firstIdentity = await identity(0x61, 29_211);
+    const secondIdentity = await identity(0x62, 29_212);
     const allocations = [firstIdentity, secondIdentity];
     const supervisor = new DiscoverySupervisor({
       worker_id: "openclaw-stage0-slot",
@@ -783,6 +1069,7 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
       select_adapter: () => "openclaw",
       allocate_runtime_identity: async () => allocations.shift()!,
       runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: supervisorSubscriptionGateway(store),
       retire_worker: async () => completeRuntimeProof,
       cleanup_bound_runtime: async () => completeRuntimeProof,
       now: () => Date.parse("2026-09-01T10:01:00.000Z"),
@@ -805,8 +1092,9 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
       broker: new FakeBroker(),
       fetch_gateway: new FakeFetchGateway(),
       select_adapter: () => "openclaw",
-      allocate_runtime_identity: identity,
+      allocate_runtime_identity: async () => identity(),
       runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: supervisorSubscriptionGateway(store),
       retire_worker: async () => completeRuntimeProof,
       cleanup_bound_runtime: async () => completeRuntimeProof,
       now: () => Date.parse("2026-09-01T10:01:00.000Z"),
@@ -832,8 +1120,9 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
       broker,
       fetch_gateway: fetchGateway,
       select_adapter: () => "openclaw",
-      allocate_runtime_identity: identity,
+      allocate_runtime_identity: async () => identity(),
       runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: supervisorSubscriptionGateway(store),
       retire_worker: async () => completeRuntimeProof,
       cleanup_bound_runtime: async () => {
         cleaned = true;
@@ -870,8 +1159,9 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
       broker,
       fetch_gateway: fetchGateway,
       select_adapter: () => "openclaw",
-      allocate_runtime_identity: identity,
+      allocate_runtime_identity: async () => identity(),
       runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: supervisorSubscriptionGateway(store),
       retire_worker: async () => completeRuntimeProof,
       cleanup_bound_runtime: async () => completeRuntimeProof,
       now: () => Date.parse("2026-09-01T10:01:00.000Z"),
@@ -905,8 +1195,9 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
       broker: new FakeBroker(),
       fetch_gateway: new FakeFetchGateway(),
       select_adapter: () => "openclaw",
-      allocate_runtime_identity: identity,
+      allocate_runtime_identity: async () => identity(),
       runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: supervisorSubscriptionGateway(store),
       retire_worker: async () => unresolved,
       cleanup_bound_runtime: async () => unresolved,
       now: () => Date.parse("2026-09-01T10:01:00.000Z"),
@@ -921,6 +1212,45 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
     });
   });
 
+  test("never promotes local teardown into subscription cleanup authority", async () => {
+    const store = new FakeStore({
+      cleanupReadback: {
+        attempt_id: claimedJob.attempt_id,
+        cleanup_state: "cleanup_unresolved",
+        slot_updated: false,
+      },
+    });
+    const gateway = supervisorSubscriptionGateway(store);
+    const supervisor = new DiscoverySupervisor({
+      worker_id: "openclaw-stage0-slot",
+      store,
+      broker: new FakeBroker(),
+      fetch_gateway: new FakeFetchGateway(),
+      select_adapter: () => "openclaw",
+      allocate_runtime_identity: async () => identity(),
+      runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: {
+        ...gateway,
+        async recover() { throw new Error("central recovery ambiguous"); },
+      },
+      retire_worker: async () => completeRuntimeProof,
+      cleanup_bound_runtime: async () => completeRuntimeProof,
+      now: () => Date.parse("2026-09-01T10:01:00.000Z"),
+    });
+
+    await expect(supervisor.runOnce()).rejects.toThrow("cleanup unresolved");
+    expect(store.cleanupProof).toMatchObject({
+      gateway_exited: true,
+      container_removed: true,
+      subscription_lease_revoked: false,
+      subscription_requests_drained: false,
+      subscription_listener_closed: false,
+      subscription_socket_absent: false,
+      late_result_rejected: true,
+    });
+    expect(store.quarantine?.runtimeSlot).toBe(runtimeSlot);
+  });
+
   test("runtime_not_bound recovery performs no runtime work and invalidates prior capabilities", async () => {
     const rpcCalls: string[] = [];
     const store = new JobStore({
@@ -929,6 +1259,10 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
         if (name === "claim_company_discovery_attempt") {
           return {
             data: [{
+              tenant_id: "55555555-5555-4555-8555-555555555555",
+              credential_owner_id: "66666666-6666-4666-8666-666666666666",
+              credential_generation: 1,
+              subscription_account_hash: "9".repeat(64),
               job_id: claimedJob.job_id,
               attempt_id: claimedJob.attempt_id,
               attempt_number: 1,
@@ -978,6 +1312,7 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
         return identity();
       },
       runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: supervisorSubscriptionGateway(store as unknown as FakeStore),
       retire_worker: async () => {
         retired = true;
         return completeRuntimeProof;
@@ -1002,7 +1337,7 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
       "claim_company_discovery_attempt",
       "claim_expired_company_discovery_cleanup",
     ]);
-    await expect(store.recordCleanup(stale!.cleanup_authority, storeCleanupProof(completeRuntimeProof)))
+    await expect(store.recordCleanup(stale!.cleanup_authority, completeDetailedProof))
       .rejects.toThrow("stale cleanup");
     await expect(store.quarantineSlot(
       stale!.runtime_slot,
@@ -1028,6 +1363,8 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
         attempt_id: claimedJob.attempt_id,
         runtime_slot: runtimeSlot,
         fence_generation: 9,
+        subscription_recovery: Object.freeze(Object.create(null)) as
+          SubscriptionRecoveryCapability,
       },
     };
     const store = new FakeStore({ expiredCleanup: expired });
@@ -1044,6 +1381,7 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
         return runtimeIdentity;
       },
       runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: supervisorSubscriptionGateway(store),
       retire_worker: async () => completeRuntimeProof,
       cleanup_bound_runtime: async (binding) => {
         cleanedBinding = binding;
@@ -1059,7 +1397,11 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
     });
     expect(allocated).toBe(false);
     expect(cleanedBinding).toEqual(expired.runtime_identity);
-    expect(store.calls).toEqual(["claim-expired-cleanup", "record-cleanup"]);
+    expect(store.calls).toEqual([
+      "claim-expired-cleanup",
+      "assert-subscription-recovery",
+      "record-cleanup",
+    ]);
     expect(store.cleanupAuthority).toMatchObject({
       fence_generation: 9,
       runtime_slot: runtimeSlot,

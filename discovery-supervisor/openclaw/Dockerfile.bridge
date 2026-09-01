@@ -11,8 +11,14 @@ RUN bun build src/openclaw/trusted-bridge.ts \
 
 FROM oven/bun:1.2.13-alpine@sha256:3476c857e7c05a7950b3a8a684ffbc82f5cbeffe1b523ea1a92bdefc4539dc57
 
+LABEL org.opencontainers.image.title="Ligou Stage 0 trusted discovery bridge" \
+      org.opencontainers.image.description="Secretless per-attempt bridge and volume initializer"
+
 WORKDIR /opt/ligou-discovery-bridge
 COPY --from=build --chown=bun:bun /out/trusted-bridge.mjs ./trusted-bridge.mjs
+RUN test "$(id -u bun)" = "1000" \
+    && test "$(id -g bun)" = "1000" \
+    && install -d -o bun -g bun -m 0550 /run/ligou-subscription
 USER bun
 ENV NODE_ENV=production
 ENTRYPOINT ["bun", "/opt/ligou-discovery-bridge/trusted-bridge.mjs"]

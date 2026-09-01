@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import type {
   DiscoveryAdapterId,
+  ModelAccessAuthority,
+  ModelAccessCapability,
   WorkerAdapter,
   WorkerHandle,
   WorkerJob,
@@ -61,7 +64,11 @@ const result: WorkerResult = {
 };
 
 const runtimeSlotId = "44444444-4444-4444-8444-444444444444";
+const tenantId = "55555555-5555-4555-8555-555555555555";
+const credentialOwnerId = "66666666-6666-4666-8666-666666666666";
+const subscriptionAccountHash = "9".repeat(64);
 const runtimeIdentity: RuntimeIdentityBinding = {
+  runtime_kind: "openclaw_cell" as const,
   cell_container_name: "ligou-cell-a",
   bridge_container_name: "ligou-bridge-a",
   internal_network_name: "ligou-internal-a",
@@ -74,9 +81,54 @@ const runtimeIdentity: RuntimeIdentityBinding = {
   bridge_secret_volume_name: "ligou-bridge-secret-a",
   profile_name: "ligou-profile-a",
   loopback_port: 30_123,
+  cell_image: {
+    reference: "ghcr.io/openclaw/openclaw@sha256:e7849cb6c1ef1ead39ab4be7d85edb2df89611f486e283284c7cf35ce39a20d4",
+    index_digest: "sha256:e7849cb6c1ef1ead39ab4be7d85edb2df89611f486e283284c7cf35ce39a20d4",
+    platform: "linux/arm64",
+    selected_manifest_digest: `sha256:${"c".repeat(64)}`,
+    image_id: `sha256:${"d".repeat(64)}`,
+    config_digest: `sha256:${"e".repeat(64)}`,
+  },
+  bridge_image: {
+    reference: `registry.example.invalid/ligou/discovery-bridge@sha256:${"b".repeat(64)}`,
+    index_digest: `sha256:${"b".repeat(64)}`,
+    platform: "linux/arm64",
+    selected_manifest_digest: `sha256:${"9".repeat(64)}`,
+    image_id: `sha256:${"f".repeat(64)}`,
+    config_digest: `sha256:${"0".repeat(64)}`,
+  },
+  subscription_socket_path:
+    `/run/ligou-discovery/${"a".repeat(48)}/subscription.sock`,
 };
-const runtimeIdentityHash = "7518844113ab6430b45bd1b9fd96c6cb95bc47c41c1c4970e95a5726fc33ecc1";
+function postgresJsonbText(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "number" ||
+      typeof value === "string") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(postgresJsonbText).join(", ")}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort((left, right) =>
+    Buffer.byteLength(left) - Buffer.byteLength(right) ||
+    Buffer.compare(Buffer.from(left), Buffer.from(right))
+  );
+  return `{${keys.map((key) =>
+    `${JSON.stringify(key)}: ${postgresJsonbText(record[key])}`
+  ).join(", ")}}`;
+}
+const runtimeIdentityHash = createHash("sha256")
+  .update(postgresJsonbText(runtimeIdentity), "utf8")
+  .digest("hex");
+const directRuntimeIdentity: RuntimeIdentityBinding = {
+  runtime_kind: "direct_model_subscription",
+  subscription_socket_path:
+    `/run/ligou-discovery/${"7".repeat(48)}/subscription.sock`,
+};
+const directRuntimeIdentityHash = createHash("sha256")
+  .update(postgresJsonbText(directRuntimeIdentity), "utf8")
+  .digest("hex");
 const recoveryClaimRow = {
+  tenant_id: tenantId,
+  credential_owner_id: credentialOwnerId,
+  credential_generation: 7,
+  subscription_account_hash: subscriptionAccountHash,
   job_id: job.job_id,
   attempt_id: job.attempt_id,
   attempt_number: 1,
@@ -94,6 +146,31 @@ const directClaimRow = {
   adapter_id: "direct_model",
   deadline_at: "2026-09-01T10:10:00.000Z",
 };
+const modelAccessReadback = {
+  tenant_id: tenantId,
+  credential_owner_id: credentialOwnerId,
+  credential_generation: 7,
+  expected_account_hash: subscriptionAccountHash,
+  job_id: job.job_id,
+  attempt_id: job.attempt_id,
+  fence_generation: 3,
+  runtime_slot_id: runtimeSlotId,
+  adapter_id: "openclaw",
+  deadline_at: "2026-09-01T10:10:00+00:00",
+  subscription_socket_path: runtimeIdentity.subscription_socket_path,
+  runtime_identity_hash: runtimeIdentityHash,
+  provider: "openai-codex",
+  auth_kind: "chatgpt_subscription_oauth",
+  model: "gpt-5.6-sol",
+};
+const subscriptionRecoveryReadback = {
+  job_id: job.job_id,
+  attempt_id: job.attempt_id,
+  fence_generation: 3,
+  subscription_socket_path: runtimeIdentity.subscription_socket_path,
+  runtime_kind: "openclaw_cell" as const,
+  late_result_rejected: true as const,
+};
 const detailedCleanupProof = {
   gateway_exited: true,
   container_removed: true,
@@ -103,8 +180,20 @@ const detailedCleanupProof = {
   workspace_removed: true,
   output_removed: true,
   network_removed: true,
-  credential_revoked: true,
+  credential_material_removed: true,
+  subscription_lease_revoked: true,
+  subscription_requests_drained: true,
+  subscription_listener_closed: true,
+  subscription_socket_absent: true,
   listener_closed: true,
+  identity_process_absent: true,
+  late_result_rejected: true,
+};
+const directCleanupProof = {
+  subscription_lease_revoked: true,
+  subscription_requests_drained: true,
+  subscription_listener_closed: true,
+  subscription_socket_absent: true,
   identity_process_absent: true,
   late_result_rejected: true,
 };
@@ -124,7 +213,10 @@ class MemoryAdapter implements WorkerAdapter {
     return jobType === "company_discovery.v1";
   }
 
-  async submit(candidate: WorkerJob): Promise<WorkerHandle> {
+  async submit(
+    candidate: WorkerJob,
+    _modelAccess: ModelAccessCapability,
+  ): Promise<WorkerHandle> {
     this.#state = { state: "succeeded" };
     return {
       adapter_id: this.adapterId,
@@ -148,11 +240,75 @@ class MemoryAdapter implements WorkerAdapter {
   }
 }
 
-describe("WorkerBroker", () => {
-  test("routes all four lifecycle methods to one capable selected adapter", async () => {
-    const broker = new WorkerBroker({ direct_model: new MemoryAdapter("direct_model") });
+const modelAccess = Object.freeze(Object.create(null)) as ModelAccessCapability;
+const modelAccessContext = Object.freeze({
+  tenant_id: tenantId,
+  credential_owner_id: credentialOwnerId,
+  credential_generation: 7,
+  expected_account_hash: subscriptionAccountHash,
+  job_id: job.job_id,
+  attempt_id: job.attempt_id,
+  fence_generation: job.fence_generation,
+  runtime_slot_id: runtimeSlotId,
+  adapter_id: "direct_model" as const,
+  deadline_at: job.deadline_at,
+  source_snapshot_count: 1,
+  subscription_socket_path: runtimeIdentity.subscription_socket_path,
+  runtime_identity_hash: runtimeIdentityHash,
+  provider: "openai-codex" as const,
+  auth_kind: "chatgpt_subscription_oauth" as const,
+  model: "gpt-5.6-sol" as const,
+});
+const acceptingModelAccess: ModelAccessAuthority = {
+  async assertModelAccessCurrent() { return modelAccessContext; },
+  async assertSubscriptionRecoveryCurrent() { throw new Error("unused recovery"); },
+  async reserveSubscriptionRequest() { throw new Error("unused reservation"); },
+  async settleSubscriptionRequest() { throw new Error("unused settlement"); },
+};
 
-    const handle = await broker.submit("direct_model", job);
+describe("WorkerBroker", () => {
+  test("rejects forged model access before invoking the selected adapter", async () => {
+    let adapterInvocations = 0;
+    class GuardedAdapter extends MemoryAdapter {
+      override supports(jobType: string): boolean {
+        adapterInvocations += 1;
+        return super.supports(jobType);
+      }
+      override async submit(
+        candidate: WorkerJob,
+        capability: ModelAccessCapability,
+      ): Promise<WorkerHandle> {
+        adapterInvocations += 1;
+        return super.submit(candidate, capability);
+      }
+    }
+    const authority: ModelAccessAuthority = {
+      async assertModelAccessCurrent() {
+        throw new Error("model access capability is not store-issued");
+      },
+      async assertSubscriptionRecoveryCurrent() { throw new Error("unused recovery"); },
+      async reserveSubscriptionRequest() { throw new Error("unused reservation"); },
+      async settleSubscriptionRequest() { throw new Error("unused settlement"); },
+    };
+    const broker = new WorkerBroker({
+      direct_model: new GuardedAdapter("direct_model"),
+    }, authority);
+
+    await expect(broker.submit(
+      "direct_model",
+      job,
+      { ...modelAccess } as ModelAccessCapability,
+    )).rejects.toThrow("store-issued");
+    expect(adapterInvocations).toBe(0);
+  });
+
+  test("routes all four lifecycle methods to one capable selected adapter", async () => {
+    const broker = new WorkerBroker(
+      { direct_model: new MemoryAdapter("direct_model") },
+      acceptingModelAccess,
+    );
+
+    const handle = await broker.submit("direct_model", job, modelAccess);
     expect(handle).toEqual({
       adapter_id: "direct_model",
       job_type: "company_discovery.v1",
@@ -167,42 +323,51 @@ describe("WorkerBroker", () => {
   });
 
   test("supports only company_discovery.v1 and the two fixed adapter IDs", async () => {
-    const broker = new WorkerBroker({ direct_model: new MemoryAdapter("direct_model") });
+    const broker = new WorkerBroker(
+      { direct_model: new MemoryAdapter("direct_model") },
+      acceptingModelAccess,
+    );
 
-    await expect(broker.submit("openclaw", job)).rejects.toThrow("adapter unavailable");
+    await expect(broker.submit("openclaw", job, modelAccess)).rejects.toThrow("adapter unavailable");
     await expect(broker.submit(
       "direct_model",
       { ...job, job_type: "general_workflow.v1" } as unknown as WorkerJob,
+      modelAccess,
     )).rejects.toThrow("company_discovery.v1");
     await expect(broker.submit(
       "marketplace" as DiscoveryAdapterId,
       job,
+      modelAccess,
     )).rejects.toThrow("adapter");
     await expect(broker.submit(
       "direct_model",
       { ...job, claim_token: "caller-authored-secret" } as unknown as WorkerJob,
+      modelAccess,
     )).rejects.toThrow("exact keys");
   });
 
   test("rejects a capable adapter that returns a handle for another attempt", async () => {
     class WrongHandleAdapter extends MemoryAdapter {
-      override async submit(candidate: WorkerJob): Promise<WorkerHandle> {
-        return { ...(await super.submit(candidate)), attempt_id: crypto.randomUUID() };
+      override async submit(
+        candidate: WorkerJob,
+        capability: ModelAccessCapability,
+      ): Promise<WorkerHandle> {
+        return { ...(await super.submit(candidate, capability)), attempt_id: crypto.randomUUID() };
       }
     }
     const broker = new WorkerBroker({
       direct_model: new WrongHandleAdapter("direct_model"),
-    });
+    }, acceptingModelAccess);
 
-    await expect(broker.submit("direct_model", job)).rejects.toThrow("handle identity");
+    await expect(broker.submit("direct_model", job, modelAccess)).rejects.toThrow("handle identity");
   });
 
   test("normalizes and detaches adapter results before returning them", async () => {
     const mutable = structuredClone(result) as WorkerResult;
     const broker = new WorkerBroker({
       direct_model: new MemoryAdapter("direct_model", mutable),
-    });
-    const handle = await broker.submit("direct_model", job);
+    }, acceptingModelAccess);
+    const handle = await broker.submit("direct_model", job, modelAccess);
 
     const normalized = await broker.result(handle);
     (mutable.source_snapshots[0] as { excerpt: string }).excerpt = "mutated";
@@ -218,6 +383,9 @@ describe("JobStore recovery authority seam", () => {
     const store = new JobStore({
       async rpc(name, args) {
         calls.push({ name, args });
+        if (name === "read_company_discovery_model_access") {
+          return { data: modelAccessReadback, error: null };
+        }
         return { data: [recoveryClaimRow], error: null };
       },
     });
@@ -232,7 +400,7 @@ describe("JobStore recovery authority seam", () => {
         p_lease_seconds: 300,
       },
     }]);
-    expect(claimed).toEqual({
+    expect(claimed).toMatchObject({
       job: { ...job, deadline_at: "2026-09-01T10:10:00+00:00", source_snapshots: [] },
       adapter_id: "openclaw",
       runtime_slot: {
@@ -252,21 +420,342 @@ describe("JobStore recovery authority seam", () => {
         fence_generation: 3,
       },
     });
+    expect(Object.keys(claimed!.model_access)).toEqual([]);
+    expect(Object.getPrototypeOf(claimed!.model_access)).toBeNull();
     expect(JSON.stringify(claimed)).not.toContain("claim-token");
+    expect(JSON.stringify(claimed)).not.toContain(tenantId);
+    expect(JSON.stringify(claimed)).not.toContain(credentialOwnerId);
+    expect(JSON.stringify(claimed)).not.toContain(subscriptionAccountHash);
     expect("claim_token" in claimed!.job).toBe(false);
     expect("tenant_id" in claimed!.job).toBe(false);
+    await expect(store.assertModelAccessCurrent(claimed!.model_access, {
+      adapter_id: "openclaw",
+      job_id: job.job_id,
+      attempt_id: job.attempt_id,
+      fence_generation: 3,
+      runtime_slot_id: runtimeSlotId,
+    })).rejects.toThrow("runtime identity is not bound");
   });
 
   test("rejects claim adapter mismatch and extra readback fields", async () => {
     for (const data of [[{ ...recoveryClaimRow, adapter_id: "direct_model" }], [{
       ...recoveryClaimRow,
-      tenant_id: "55555555-5555-4555-8555-555555555555",
+      raw_account_id: "forbidden-account-id",
     }]]) {
       const store = new JobStore({ async rpc() { return { data, error: null }; } });
       await expect(store.claimAttempt("openclaw-slot-2", "openclaw", 300)).rejects.toThrow(
         "claim readback",
       );
     }
+  });
+
+  test("keeps model access opaque, store-local, fenced, and revalidated against DB authority", async () => {
+    const makeStore = (readback: Record<string, unknown> = modelAccessReadback) =>
+      new JobStore({
+        async rpc(name) {
+          if (name === "claim_company_discovery_attempt") {
+            return { data: [recoveryClaimRow], error: null };
+          }
+          if (name === "read_company_discovery_model_access") {
+            return { data: readback, error: null };
+          }
+          if (name === "read_company_discovery_subscription_recovery") {
+            return { data: subscriptionRecoveryReadback, error: null };
+          }
+          if (name === "bind_company_discovery_runtime") {
+            return {
+              data: {
+                attempt_id: job.attempt_id,
+                runtime_slot_id: runtimeSlotId,
+                job_id: job.job_id,
+                job_version: 2,
+                fence_generation: 3,
+                runtime_identity: runtimeIdentity,
+                runtime_identity_hash: runtimeIdentityHash,
+              },
+              error: null,
+            };
+          }
+          throw new Error(`unexpected RPC ${name}`);
+        },
+      });
+    const expectation = {
+      adapter_id: "openclaw" as const,
+      job_id: job.job_id,
+      attempt_id: job.attempt_id,
+      fence_generation: 3,
+      runtime_slot_id: runtimeSlotId,
+    };
+    const store = makeStore();
+    const otherStore = makeStore();
+    const claimed = (await store.claimAttempt("opaque-model-access-a", "openclaw", 300))!;
+    const otherClaimed = (await otherStore.claimAttempt(
+      "opaque-model-access-b",
+      "openclaw",
+      300,
+    ))!;
+    await store.bindRuntime(claimed, runtimeIdentity);
+    await otherStore.bindRuntime(otherClaimed, runtimeIdentity);
+
+    expect(Object.keys(claimed.model_access)).toEqual([]);
+    expect(Object.keys(claimed.cleanup_authority.subscription_recovery)).toEqual([]);
+    await expect(store.assertSubscriptionRecoveryCurrent(
+      { ...claimed.cleanup_authority.subscription_recovery } as never,
+    )).rejects.toThrow("store-issued");
+    await expect(store.assertSubscriptionRecoveryCurrent(
+      otherClaimed.cleanup_authority.subscription_recovery,
+    )).rejects.toThrow("store-issued");
+    expect(await store.assertSubscriptionRecoveryCurrent(
+      claimed.cleanup_authority.subscription_recovery,
+    )).toEqual(subscriptionRecoveryReadback);
+    await expect(store.assertModelAccessCurrent(
+      { ...claimed.model_access } as ModelAccessCapability,
+      expectation,
+    )).rejects.toThrow("store-issued");
+    await expect(store.assertModelAccessCurrent(
+      otherClaimed.model_access,
+      expectation,
+    )).rejects.toThrow("store-issued");
+    for (const wrong of [
+      { ...expectation, job_id: crypto.randomUUID() },
+      { ...expectation, attempt_id: crypto.randomUUID() },
+      { ...expectation, fence_generation: 4 },
+      { ...expectation, runtime_slot_id: crypto.randomUUID() },
+      { ...expectation, adapter_id: "direct_model" as const },
+    ]) {
+      await expect(store.assertModelAccessCurrent(claimed.model_access, wrong))
+        .rejects.toThrow("model access expectation");
+    }
+    expect(await store.assertModelAccessCurrent(claimed.model_access, expectation))
+      .toMatchObject({
+        ...modelAccessContext,
+        adapter_id: "openclaw",
+        deadline_at: "2026-09-01T10:10:00+00:00",
+        source_snapshot_count: 0,
+      });
+    store.bindSourceSnapshots(claimed.job, [snapshot]);
+    expect(await store.assertModelAccessCurrent(claimed.model_access, expectation))
+      .toMatchObject({ source_snapshot_count: 1 });
+
+    for (const mutation of [
+      { tenant_id: crypto.randomUUID() },
+      { credential_owner_id: crypto.randomUUID() },
+      { credential_generation: 8 },
+      { expected_account_hash: "8".repeat(64) },
+      { job_id: crypto.randomUUID() },
+      { attempt_id: crypto.randomUUID() },
+      { fence_generation: 4 },
+      { runtime_slot_id: crypto.randomUUID() },
+      { adapter_id: "direct_model" },
+      { model: "gpt-5.4-mini" },
+    ]) {
+      const mismatched = makeStore({ ...modelAccessReadback, ...mutation });
+      const mismatchClaim = (await mismatched.claimAttempt(
+        `opaque-mismatch-${Object.keys(mutation)[0]}`,
+        "openclaw",
+        300,
+      ))!;
+      await mismatched.bindRuntime(mismatchClaim, runtimeIdentity);
+      await expect(mismatched.assertModelAccessCurrent(
+        mismatchClaim.model_access,
+        expectation,
+      )).rejects.toThrow("model access readback");
+      await expect(mismatched.assertModelAccessCurrent(
+        mismatchClaim.model_access,
+        expectation,
+      )).rejects.toThrow("inactive model access");
+    }
+  });
+
+  test("reserves and settles subscription capacity through opaque store-local authority", async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const reservationId = "77777777-7777-4777-8777-777777777777";
+    const reservationToken = "7".repeat(64);
+    const reservationReadback = {
+      reservation_id: reservationId,
+      reservation_token: reservationToken,
+      request_number: 1,
+      lease_until: "2026-09-01T10:05:00.000Z",
+      quota_state: "available",
+      current_requests: 1,
+      current_input_bytes: 12_345,
+      current_output_bytes: 4_194_304,
+      max_requests: 28,
+      max_input_bytes: 400_000,
+      max_output_bytes: 8_388_608,
+      owner_current_requests: 1,
+      owner_current_input_bytes: 12_345,
+      owner_current_output_bytes: 4_194_304,
+      owner_max_requests: 140,
+      owner_max_input_bytes: 2_000_000,
+      owner_max_output_bytes: 40_000_000,
+      max_concurrency: 1,
+    };
+    const settlementReadback = {
+      settled: true,
+      quota_state: "available",
+      cooldown_until: null,
+      current_requests: 1,
+      current_input_bytes: 12_000,
+      current_output_bytes: 2_000,
+      max_requests: 28,
+      max_input_bytes: 400_000,
+      max_output_bytes: 8_388_608,
+      owner_current_requests: 1,
+      owner_current_input_bytes: 12_000,
+      owner_current_output_bytes: 2_000,
+      owner_max_requests: 140,
+      owner_max_input_bytes: 2_000_000,
+      owner_max_output_bytes: 40_000_000,
+      max_concurrency: 1,
+    } as const;
+    const client = {
+      async rpc(name: string, args: Record<string, unknown>) {
+        calls.push({ name, args });
+        if (name === "claim_company_discovery_attempt") {
+          return { data: [recoveryClaimRow], error: null };
+        }
+        if (name === "bind_company_discovery_runtime") {
+          return {
+            data: {
+              attempt_id: job.attempt_id,
+              runtime_slot_id: runtimeSlotId,
+              job_id: job.job_id,
+              job_version: 2,
+              fence_generation: 3,
+              runtime_identity: runtimeIdentity,
+              runtime_identity_hash: runtimeIdentityHash,
+            },
+            error: null,
+          };
+        }
+        if (name === "read_company_discovery_model_access") {
+          return { data: modelAccessReadback, error: null };
+        }
+        if (name === "reserve_company_discovery_subscription_request") {
+          return { data: reservationReadback, error: null };
+        }
+        if (name === "settle_company_discovery_subscription_request") {
+          return { data: settlementReadback, error: null };
+        }
+        throw new Error(`unexpected RPC ${name}`);
+      },
+    };
+    const store = new JobStore(client);
+    const otherStore = new JobStore(client);
+    const claimed = (await store.claimAttempt("opaque-reservation-a", "openclaw", 300))!;
+    const otherClaimed = (await otherStore.claimAttempt(
+      "opaque-reservation-b",
+      "openclaw",
+      300,
+    ))!;
+    await store.bindRuntime(claimed, runtimeIdentity);
+    await otherStore.bindRuntime(otherClaimed, runtimeIdentity);
+    store.bindSourceSnapshots(claimed.job, [snapshot]);
+
+    const beforeForged = calls.length;
+    await expect(store.reserveSubscriptionRequest(
+      { ...claimed.model_access } as ModelAccessCapability,
+      { input_bytes: 12_345, output_bytes: 4_194_304, lease_seconds: 120 },
+    )).rejects.toThrow("store-issued");
+    expect(calls).toHaveLength(beforeForged);
+
+    const reserved = await store.reserveSubscriptionRequest(claimed.model_access, {
+      input_bytes: 12_345,
+      output_bytes: 4_194_304,
+      lease_seconds: 120,
+    });
+    expect(reserved).toMatchObject({
+      request_number: 1,
+      quota_state: "available",
+      current_requests: 1,
+      max_requests: 28,
+      owner_current_requests: 1,
+      owner_max_requests: 140,
+      max_concurrency: 1,
+    });
+    expect(Object.keys(reserved.reservation)).toEqual([]);
+    expect(Object.getPrototypeOf(reserved.reservation)).toBeNull();
+    expect(JSON.stringify(reserved)).not.toContain(reservationToken);
+    expect(JSON.stringify(reserved)).not.toContain(tenantId);
+    const reserveCall = calls.find((call) =>
+      call.name === "reserve_company_discovery_subscription_request"
+    )!;
+    expect(reserveCall.args).toMatchObject({
+      p_attempt_id: job.attempt_id,
+      p_fence_generation: 3,
+      p_claim_token: "claim-token",
+      p_credential_generation: 7,
+      p_input_bytes: 12_345,
+      p_output_bytes: 4_194_304,
+      p_lease_seconds: 120,
+    });
+    expect(reserveCall.args.p_request_key).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+
+    const beforeCrossStore = calls.length;
+    await expect(otherStore.settleSubscriptionRequest(reserved.reservation, {
+      input_bytes: 12_000,
+      output_bytes: 2_000,
+      observed_input_tokens: 3_000,
+      observed_output_tokens: 500,
+      usage_complete: true,
+      quota_state: "available",
+      retry_after_seconds: null,
+    })).rejects.toThrow("store-issued");
+    await expect(store.settleSubscriptionRequest(
+      { ...reserved.reservation } as never,
+      {
+        input_bytes: 12_000,
+        output_bytes: 2_000,
+        observed_input_tokens: 3_000,
+        observed_output_tokens: 500,
+        usage_complete: true,
+        quota_state: "available",
+        retry_after_seconds: null,
+      },
+    )).rejects.toThrow("store-issued");
+    expect(calls).toHaveLength(beforeCrossStore);
+
+    expect(await store.settleSubscriptionRequest(reserved.reservation, {
+      input_bytes: 12_000,
+      output_bytes: 2_000,
+      observed_input_tokens: 3_000,
+      observed_output_tokens: 500,
+      usage_complete: true,
+      quota_state: "available",
+      retry_after_seconds: null,
+    })).toEqual(settlementReadback);
+    const settleCall = calls.at(-1)!;
+    expect(settleCall).toEqual({
+      name: "settle_company_discovery_subscription_request",
+      args: {
+        p_attempt_id: job.attempt_id,
+        p_fence_generation: 3,
+        p_claim_token: "claim-token",
+        p_reservation_id: reservationId,
+        p_reservation_token: reservationToken,
+        p_input_bytes: 12_000,
+        p_output_bytes: 2_000,
+        p_observed_input_tokens: 3_000,
+        p_observed_output_tokens: 500,
+        p_usage_complete: true,
+        p_quota_state: "available",
+        p_retry_after_seconds: null,
+      },
+    });
+    const afterSettlement = calls.length;
+    await expect(store.settleSubscriptionRequest(reserved.reservation, {
+      input_bytes: 12_000,
+      output_bytes: 2_000,
+      observed_input_tokens: 3_000,
+      observed_output_tokens: 500,
+      usage_complete: true,
+      quota_state: "available",
+      retry_after_seconds: null,
+    })).rejects.toThrow("active store-issued");
+    expect(calls).toHaveLength(afterSettlement);
   });
 
   test("binds one exact nonsecret runtime identity and terminalizes to rotated cleanup authority", async () => {
@@ -321,7 +810,7 @@ describe("JobStore recovery authority seam", () => {
     });
     await expect(store.bindRuntime(claimed!, runtimeIdentity)).rejects.toThrow("already bound");
     const authority = await store.terminalizeAttempt(claimed!, "failed", "adapter_failed");
-    expect(authority).toEqual({
+    expect(authority).toMatchObject({
       job_id: job.job_id,
       attempt_id: job.attempt_id,
       runtime_slot: claimed!.runtime_slot,
@@ -332,6 +821,7 @@ describe("JobStore recovery authority seam", () => {
       status: "failed",
       cleanup_state: "pending",
     });
+    expect(Object.keys(authority.subscription_recovery)).toEqual([]);
     expect(JSON.stringify(authority)).not.toContain("rotated-cleanup-token");
     expect(calls[1]).toEqual({
       name: "bind_company_discovery_runtime",
@@ -482,6 +972,13 @@ describe("JobStore recovery authority seam", () => {
     }
 
     await expect(store.bindRuntime(claimed!, runtimeIdentity)).rejects.toThrow("stale claimed");
+    await expect(store.assertModelAccessCurrent(claimed!.model_access, {
+      adapter_id: "openclaw",
+      job_id: job.job_id,
+      attempt_id: job.attempt_id,
+      fence_generation: 3,
+      runtime_slot_id: runtimeSlotId,
+    })).rejects.toThrow("inactive model access");
     expect(() => store.bindSourceSnapshots(boundJob, [snapshot])).toThrow("stale job");
     await expect(store.commitResult(boundJob, result)).rejects.toThrow("stale job");
     await expect(store.recordCleanup(claimed!.cleanup_authority, detailedCleanupProof))
@@ -707,7 +1204,7 @@ describe("JobStore service RPC boundary", () => {
     });
     const claimed = await store.claimAttempt("direct-model-slot-3", "direct_model", 300);
 
-    await store.recordCleanup(claimed!.cleanup_authority, detailedCleanupProof);
+    await store.recordCleanup(claimed!.cleanup_authority, directCleanupProof);
 
     expect(calls).toEqual([
       "claim_company_discovery_attempt",
@@ -756,8 +1253,8 @@ describe("JobStore service RPC boundary", () => {
               job_id: job.job_id,
               job_version: 2,
               fence_generation: 3,
-              runtime_identity: runtimeIdentity,
-              runtime_identity_hash: runtimeIdentityHash,
+              runtime_identity: directRuntimeIdentity,
+              runtime_identity_hash: directRuntimeIdentityHash,
             },
             error: null,
           };
@@ -766,7 +1263,7 @@ describe("JobStore service RPC boundary", () => {
       },
     });
     const claimed = await store.claimAttempt("direct-model-slot-5", "direct_model", 300);
-    await store.bindRuntime(claimed!, runtimeIdentity);
+    await store.bindRuntime(claimed!, directRuntimeIdentity);
     const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
 
     await expect(store.commitResult(trustedJob, result)).rejects.toThrow("commit readback");
@@ -802,8 +1299,8 @@ describe("JobStore service RPC boundary", () => {
                 job_id: job.job_id,
                 job_version: 2,
                 fence_generation: 3,
-                runtime_identity: runtimeIdentity,
-                runtime_identity_hash: runtimeIdentityHash,
+                runtime_identity: directRuntimeIdentity,
+                runtime_identity_hash: directRuntimeIdentityHash,
               },
               error: null,
             };
@@ -812,7 +1309,7 @@ describe("JobStore service RPC boundary", () => {
         },
       });
       const claimed = await store.claimAttempt("direct-model-commit-mismatch", "direct_model", 300);
-      await store.bindRuntime(claimed!, runtimeIdentity);
+      await store.bindRuntime(claimed!, directRuntimeIdentity);
       const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
 
       await expect(store.commitResult(trustedJob, result)).rejects.toThrow("commit readback");
@@ -835,8 +1332,8 @@ describe("JobStore service RPC boundary", () => {
               job_id: job.job_id,
               job_version: 2,
               fence_generation: 3,
-              runtime_identity: runtimeIdentity,
-              runtime_identity_hash: runtimeIdentityHash,
+              runtime_identity: directRuntimeIdentity,
+              runtime_identity_hash: directRuntimeIdentityHash,
             },
             error: null,
           };
@@ -866,7 +1363,7 @@ describe("JobStore service RPC boundary", () => {
       },
     });
     const claimed = await store.claimAttempt("direct-model-commit-capability", "direct_model", 300);
-    await store.bindRuntime(claimed!, runtimeIdentity);
+    await store.bindRuntime(claimed!, directRuntimeIdentity);
     const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
     const committed = await store.commitResult(trustedJob, result);
     const forged = { ...committed } as CommittedResultCapability;
@@ -894,8 +1391,8 @@ describe("JobStore service RPC boundary", () => {
               job_id: job.job_id,
               job_version: 2,
               fence_generation: 3,
-              runtime_identity: runtimeIdentity,
-              runtime_identity_hash: runtimeIdentityHash,
+              runtime_identity: directRuntimeIdentity,
+              runtime_identity_hash: directRuntimeIdentityHash,
             },
             error: null,
           };
@@ -919,7 +1416,7 @@ describe("JobStore service RPC boundary", () => {
               attempt_id: job.attempt_id,
               adapter_id: "direct_model",
               runtime_slot_id: runtimeSlotId,
-              runtime_identity: runtimeIdentity,
+              runtime_identity: directRuntimeIdentity,
               fence_generation: 5,
               claim_token: "validated-attempt-reaper-token",
               job_version: 3,
@@ -932,14 +1429,14 @@ describe("JobStore service RPC boundary", () => {
       },
     });
     const claimed = await store.claimAttempt("direct-model-validated", "direct_model", 300);
-    await store.bindRuntime(claimed!, runtimeIdentity);
+    await store.bindRuntime(claimed!, directRuntimeIdentity);
     const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
     const committed = await store.commitResult(trustedJob, result);
 
     await store.claimExpiredCleanup("validated-reaper", 300);
 
     await expect(store.selectResult(committed)).rejects.toThrow("stale committed result");
-    await expect(store.recordCleanup(claimed!.cleanup_authority, detailedCleanupProof))
+    await expect(store.recordCleanup(claimed!.cleanup_authority, directCleanupProof))
       .rejects.toThrow("stale cleanup");
     await expect(store.quarantineSlot(
       claimed!.runtime_slot,
@@ -965,8 +1462,8 @@ describe("JobStore service RPC boundary", () => {
               job_id: job.job_id,
               job_version: 2,
               fence_generation: 3,
-              runtime_identity: runtimeIdentity,
-              runtime_identity_hash: runtimeIdentityHash,
+              runtime_identity: directRuntimeIdentity,
+              runtime_identity_hash: directRuntimeIdentityHash,
             },
             error: null,
           };
@@ -997,7 +1494,7 @@ describe("JobStore service RPC boundary", () => {
       },
     });
     const claimed = await store.claimAttempt("direct-model-slot-6", "direct_model", 300);
-    await store.bindRuntime(claimed!, runtimeIdentity);
+    await store.bindRuntime(claimed!, directRuntimeIdentity);
     const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
     const committed = await store.commitResult(trustedJob, result);
 
@@ -1021,8 +1518,8 @@ describe("JobStore service RPC boundary", () => {
               job_id: job.job_id,
               job_version: 2,
               fence_generation: 3,
-              runtime_identity: runtimeIdentity,
-              runtime_identity_hash: runtimeIdentityHash,
+              runtime_identity: directRuntimeIdentity,
+              runtime_identity_hash: directRuntimeIdentityHash,
             },
             error: null,
           };
@@ -1052,7 +1549,7 @@ describe("JobStore service RPC boundary", () => {
       },
     });
     const claimed = await store.claimAttempt("direct-model-slot-9", "direct_model", 300);
-    await store.bindRuntime(claimed!, runtimeIdentity);
+    await store.bindRuntime(claimed!, directRuntimeIdentity);
     const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
     const committed = await store.commitResult(trustedJob, result);
 
@@ -1081,7 +1578,7 @@ describe("JobStore service RPC boundary", () => {
     });
     const claimed = await store.claimAttempt("direct-model-slot-7", "direct_model", 300);
 
-    await expect(store.recordCleanup(claimed!.cleanup_authority, detailedCleanupProof))
+    await expect(store.recordCleanup(claimed!.cleanup_authority, directCleanupProof))
       .rejects.toThrow("cleanup readback");
   });
 
@@ -1106,7 +1603,7 @@ describe("JobStore service RPC boundary", () => {
     });
     const claimed = await store.claimAttempt("direct-model-slot-10", "direct_model", 300);
 
-    await expect(store.recordCleanup(claimed!.cleanup_authority, detailedCleanupProof))
+    await expect(store.recordCleanup(claimed!.cleanup_authority, directCleanupProof))
       .rejects.toThrow("identity, state");
   });
 
@@ -1120,7 +1617,11 @@ describe("JobStore service RPC boundary", () => {
       workspace_removed = true;
       output_removed = true;
       network_removed = true;
-      credential_revoked = true;
+      credential_material_removed = true;
+      subscription_lease_revoked = true;
+      subscription_requests_drained = true;
+      subscription_listener_closed = true;
+      subscription_socket_absent = true;
       listener_closed = true;
       identity_process_absent = true;
       late_result_rejected = true;
@@ -1224,8 +1725,8 @@ describe("JobStore service RPC boundary", () => {
               job_id: job.job_id,
               job_version: 2,
               fence_generation: 3,
-              runtime_identity: runtimeIdentity,
-              runtime_identity_hash: runtimeIdentityHash,
+              runtime_identity: directRuntimeIdentity,
+              runtime_identity_hash: directRuntimeIdentityHash,
             },
             error: null,
           };
@@ -1270,10 +1771,10 @@ describe("JobStore service RPC boundary", () => {
       },
     };
     const store = new JobStore(rpc);
-    const cleanupProof = detailedCleanupProof;
+    const cleanupProof = directCleanupProof;
 
     const claimed = await store.claimAttempt("direct-model-slot-2", "direct_model", 300);
-    await store.bindRuntime(claimed!, runtimeIdentity);
+    await store.bindRuntime(claimed!, directRuntimeIdentity);
     const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
     const committed = await store.commitResult(trustedJob, result);
     expect(committed).toEqual({

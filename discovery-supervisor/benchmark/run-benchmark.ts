@@ -61,13 +61,34 @@ export interface BenchmarkCrawlMeasurements {
 
 export interface BenchmarkSubscriptionMeasurements {
   readonly request_count: Measurement<number>;
+  readonly input_bytes: Measurement<number>;
+  readonly output_bytes: Measurement<number>;
   readonly input_tokens: Measurement<number>;
   readonly output_tokens: Measurement<number>;
   readonly cached_input_tokens: Measurement<number>;
+  readonly usage_complete: Measurement<boolean>;
+  readonly governor: Measurement<SubscriptionGovernorSnapshot>;
   readonly quota_units_consumed: Measurement<number>;
   readonly quota_units_remaining: Measurement<number>;
   readonly marginal_api_charge_usd_micros: Measurement<number>;
   readonly shared_fixed_cost_allocation_usd_micros: Measurement<number>;
+}
+
+export interface SubscriptionGovernorSnapshot {
+  readonly quota_state: "available" | "cooldown" | "unknown";
+  readonly current_requests: number;
+  readonly current_input_bytes: number;
+  readonly current_output_bytes: number;
+  readonly max_requests: 28;
+  readonly max_input_bytes: 400_000;
+  readonly max_output_bytes: 8_388_608;
+  readonly owner_current_requests: number;
+  readonly owner_current_input_bytes: number;
+  readonly owner_current_output_bytes: number;
+  readonly owner_max_requests: 140;
+  readonly owner_max_input_bytes: 2_000_000;
+  readonly owner_max_output_bytes: 40_000_000;
+  readonly max_concurrency: 1;
 }
 
 export interface BenchmarkSaturationMeasurements {
@@ -78,10 +99,6 @@ export interface BenchmarkSaturationMeasurements {
 }
 
 export type RawCleanupMeasurement =
-  | {
-      readonly state: "not_required";
-      readonly reason: string;
-    }
   | {
       readonly state: "unknown";
       readonly reason: string;
@@ -94,7 +111,7 @@ export type RawCleanupMeasurement =
     };
 
 export type BenchmarkCleanupMeasurement =
-  | Extract<RawCleanupMeasurement, { readonly state: "not_required" | "unknown" }>
+  | Extract<RawCleanupMeasurement, { readonly state: "unknown" }>
   | {
       readonly state: "observed";
       readonly source: "ligou_supervisor";
@@ -237,9 +254,13 @@ const HOST_KEYS = ["cpu_milliseconds", "peak_rss_bytes", "peak_storage_bytes"] a
 const CRAWL_KEYS = ["completed", "pages_served", "blocked_request_count", "duplicate_request_count"] as const;
 const SUBSCRIPTION_KEYS = [
   "request_count",
+  "input_bytes",
+  "output_bytes",
   "input_tokens",
   "output_tokens",
   "cached_input_tokens",
+  "usage_complete",
+  "governor",
   "quota_units_consumed",
   "quota_units_remaining",
   "marginal_api_charge_usd_micros",
@@ -251,19 +272,47 @@ const SATURATION_KEYS = [
   "queue_delay_milliseconds",
   "capacity_rejections",
 ] as const;
-const CLEANUP_KEYS = [
+const OPENCLAW_CLEANUP_KEYS = [
   "gateway_exited",
-  "cell_removed",
+  "container_removed",
   "bridge_removed",
   "config_removed",
   "state_removed",
   "workspace_removed",
   "output_removed",
   "network_removed",
-  "credential_revoked",
+  "credential_material_removed",
+  "subscription_lease_revoked",
+  "subscription_requests_drained",
+  "subscription_listener_closed",
+  "subscription_socket_absent",
   "listener_closed",
-  "no_identity_process",
+  "identity_process_absent",
   "late_result_rejected",
+] as const;
+const DIRECT_CLEANUP_KEYS = [
+  "subscription_lease_revoked",
+  "subscription_requests_drained",
+  "subscription_listener_closed",
+  "subscription_socket_absent",
+  "identity_process_absent",
+  "late_result_rejected",
+] as const;
+const GOVERNOR_KEYS = [
+  "quota_state",
+  "current_requests",
+  "current_input_bytes",
+  "current_output_bytes",
+  "max_requests",
+  "max_input_bytes",
+  "max_output_bytes",
+  "owner_current_requests",
+  "owner_current_input_bytes",
+  "owner_current_output_bytes",
+  "owner_max_requests",
+  "owner_max_input_bytes",
+  "owner_max_output_bytes",
+  "max_concurrency",
 ] as const;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const IDENTIFIER_PATTERN = /^[a-z0-9][a-z0-9._:@/+_-]{0,255}$/i;
@@ -419,21 +468,80 @@ function parseMeasurement<T extends number | boolean>(
   });
 }
 
+function parseGovernorMeasurement(value: unknown): Measurement<SubscriptionGovernorSnapshot> {
+  const path = "measurements.subscription.governor";
+  const candidate = plainRecord(value, path);
+  if (candidate.status === "unknown") {
+    exactKeys(candidate, ["status", "reason"], path);
+    return deepFreeze({ status: "unknown", reason: boundedString(candidate.reason, `${path}.reason`) });
+  }
+  if (candidate.status !== "observed") failure(`${path}.status`, "observed or unknown required");
+  exactKeys(candidate, ["status", "value", "source", "observed_at"], path);
+  if (candidate.source !== "ligou_supervisor") failure(`${path}.source`, "ligou_supervisor required");
+  const snapshot = plainRecord(candidate.value, `${path}.value`);
+  exactKeys(snapshot, GOVERNOR_KEYS, `${path}.value`);
+  if (snapshot.quota_state !== "available" && snapshot.quota_state !== "cooldown" &&
+      snapshot.quota_state !== "unknown") {
+    failure(`${path}.value.quota_state`, "invalid quota state");
+  }
+  const parsed: SubscriptionGovernorSnapshot = {
+    quota_state: snapshot.quota_state,
+    current_requests: safeInteger(snapshot.current_requests, `${path}.value.current_requests`, 28),
+    current_input_bytes: safeInteger(
+      snapshot.current_input_bytes,
+      `${path}.value.current_input_bytes`,
+      400_000,
+    ),
+    current_output_bytes: safeInteger(
+      snapshot.current_output_bytes,
+      `${path}.value.current_output_bytes`,
+      8_388_608,
+    ),
+    max_requests: snapshot.max_requests as 28,
+    max_input_bytes: snapshot.max_input_bytes as 400_000,
+    max_output_bytes: snapshot.max_output_bytes as 8_388_608,
+    owner_current_requests: safeInteger(
+      snapshot.owner_current_requests,
+      `${path}.value.owner_current_requests`,
+      140,
+    ),
+    owner_current_input_bytes: safeInteger(
+      snapshot.owner_current_input_bytes,
+      `${path}.value.owner_current_input_bytes`,
+      2_000_000,
+    ),
+    owner_current_output_bytes: safeInteger(
+      snapshot.owner_current_output_bytes,
+      `${path}.value.owner_current_output_bytes`,
+      40_000_000,
+    ),
+    owner_max_requests: snapshot.owner_max_requests as 140,
+    owner_max_input_bytes: snapshot.owner_max_input_bytes as 2_000_000,
+    owner_max_output_bytes: snapshot.owner_max_output_bytes as 40_000_000,
+    max_concurrency: snapshot.max_concurrency as 1,
+  };
+  if (parsed.max_requests !== 28 || parsed.max_input_bytes !== 400_000 ||
+      parsed.max_output_bytes !== 8_388_608 || parsed.owner_max_requests !== 140 ||
+      parsed.owner_max_input_bytes !== 2_000_000 ||
+      parsed.owner_max_output_bytes !== 40_000_000 || parsed.max_concurrency !== 1 ||
+      parsed.owner_current_requests < parsed.current_requests ||
+      parsed.owner_current_input_bytes < parsed.current_input_bytes ||
+      parsed.owner_current_output_bytes < parsed.current_output_bytes) {
+    failure(`${path}.value`, "durable governor counters or caps are invalid");
+  }
+  return deepFreeze({
+    status: "observed",
+    value: deepFreeze(parsed),
+    source: "ligou_supervisor",
+    observed_at: timestamp(candidate.observed_at, `${path}.observed_at`),
+  });
+}
+
 function parseCleanup(
   value: unknown,
   adapterId: DiscoveryAdapterId,
 ): BenchmarkCleanupMeasurement {
   const candidate = plainRecord(value, "measurements.cleanup");
-  if (candidate.state === "not_required") {
-    exactKeys(candidate, ["state", "reason"], "measurements.cleanup");
-    if (adapterId !== "direct_model") {
-      failure("measurements.cleanup", "OpenClaw cleanup cannot be not_required");
-    }
-    return deepFreeze({
-      state: "not_required",
-      reason: boundedString(candidate.reason, "measurements.cleanup.reason"),
-    });
-  }
   if (candidate.state === "unknown") {
     exactKeys(candidate, ["state", "reason"], "measurements.cleanup");
     return deepFreeze({
@@ -442,7 +550,7 @@ function parseCleanup(
     });
   }
   if (candidate.state !== "observed") {
-    failure("measurements.cleanup.state", "observed, unknown, or not_required required");
+    failure("measurements.cleanup.state", "observed or unknown required");
   }
   exactKeys(
     candidate,
@@ -464,8 +572,9 @@ function parseCleanup(
     failure("measurements.cleanup.raw_receipt_json", "invalid JSON");
   }
   const proof = plainRecord(decoded, "measurements.cleanup.receipt");
-  exactKeys(proof, CLEANUP_KEYS, "measurements.cleanup.receipt");
-  for (const key of CLEANUP_KEYS) {
+  const cleanupKeys = adapterId === "openclaw" ? OPENCLAW_CLEANUP_KEYS : DIRECT_CLEANUP_KEYS;
+  exactKeys(proof, cleanupKeys, "measurements.cleanup.receipt");
+  for (const key of cleanupKeys) {
     if (typeof proof[key] !== "boolean") {
       failure(`measurements.cleanup.receipt.${key}`, "boolean required");
     }
@@ -476,7 +585,7 @@ function parseCleanup(
     observed_at: timestamp(candidate.observed_at, "measurements.cleanup.observed_at"),
     raw_receipt_json: rawReceipt,
     receipt_sha256: sha256(rawReceipt),
-    proved: CLEANUP_KEYS.every((key) => proof[key] === true),
+    proved: cleanupKeys.every((key) => proof[key] === true),
   });
 }
 
@@ -571,6 +680,18 @@ function parseMeasurements(
         "ligou_subscription_gateway",
         "number",
       ),
+      input_bytes: parseMeasurement<number>(
+        subscription.input_bytes,
+        "measurements.subscription.input_bytes",
+        "ligou_subscription_gateway",
+        "number",
+      ),
+      output_bytes: parseMeasurement<number>(
+        subscription.output_bytes,
+        "measurements.subscription.output_bytes",
+        "ligou_subscription_gateway",
+        "number",
+      ),
       input_tokens: parseMeasurement<number>(
         subscription.input_tokens,
         "measurements.subscription.input_tokens",
@@ -589,6 +710,13 @@ function parseMeasurements(
         "ligou_subscription_gateway",
         "number",
       ),
+      usage_complete: parseMeasurement<boolean>(
+        subscription.usage_complete,
+        "measurements.subscription.usage_complete",
+        "ligou_subscription_gateway",
+        "boolean",
+      ),
+      governor: parseGovernorMeasurement(subscription.governor),
       quota_units_consumed: parseMeasurement<number>(
         subscription.quota_units_consumed,
         "measurements.subscription.quota_units_consumed",
@@ -639,6 +767,33 @@ function parseMeasurements(
   return deepFreeze(parsed);
 }
 
+function assertSuccessfulAttemptEvidence(measurements: BenchmarkMeasurements): void {
+  const requiredUsage = [
+    measurements.subscription.request_count,
+    measurements.subscription.input_bytes,
+    measurements.subscription.output_bytes,
+    measurements.subscription.input_tokens,
+    measurements.subscription.output_tokens,
+    measurements.subscription.cached_input_tokens,
+  ];
+  if (requiredUsage.some((measurement) => measurement.status !== "observed") ||
+      measurements.subscription.request_count.status !== "observed" ||
+      measurements.subscription.request_count.value < 1 ||
+      measurements.subscription.usage_complete.status !== "observed" ||
+      measurements.subscription.usage_complete.value !== true ||
+      measurements.subscription.governor.status !== "observed" ||
+      measurements.subscription.governor.value.quota_state !== "available" ||
+      measurements.subscription.governor.value.current_requests < 1 ||
+      measurements.subscription.governor.value.owner_current_requests < 1 ||
+      measurements.subscription.marginal_api_charge_usd_micros.status !== "observed" ||
+      measurements.subscription.marginal_api_charge_usd_micros.value !== 0) {
+    failure("measurements.subscription", "successful attempt requires complete current subscription evidence");
+  }
+  if (measurements.cleanup.state !== "observed" || !measurements.cleanup.proved) {
+    failure("measurements.cleanup", "successful attempt requires proved adapter cleanup");
+  }
+}
+
 function parseReceipt(
   value: unknown,
   request: BenchmarkExecutionRequest,
@@ -683,6 +838,7 @@ function parseReceipt(
     request.adapter_identity.adapter_id,
     request.parallelism,
   );
+  if (outcome === "succeeded") assertSuccessfulAttemptEvidence(measurements);
   return deepFreeze({
     receipt: {
       schema_version: "company_discovery.benchmark_execution_receipt.v1",

@@ -1,5 +1,12 @@
-import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer as createHttpServer,
+  request as httpRequest,
+  type ClientRequest,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { lookup } from "node:dns/promises";
+import { setMaxListeners } from "node:events";
 import { access, readFile, rename, writeFile } from "node:fs/promises";
 import {
   connect as connectTcp,
@@ -9,6 +16,7 @@ import {
 } from "node:net";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { pathToFileURL } from "node:url";
 import { Server as McpProtocolServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -20,7 +28,6 @@ import {
   AttemptMcpBridge,
   type BridgeConnection,
 } from "./mcp-bridge";
-import { FixedModelProxy } from "./model-proxy";
 import {
   parseSourceSnapshots,
   parseWorkerResult,
@@ -39,14 +46,32 @@ export interface TrustedBridgeServerOptions {
     readonly port: number;
   };
   readonly mcp_bridge: AttemptMcpBridge;
-  readonly model_proxy: FixedModelProxy;
+  readonly model_proxy: SubscriptionRequestForwarder;
   readonly max_proxy_request_bytes?: number;
+  readonly max_mcp_request_bytes?: number;
+  readonly max_http_connections?: number;
+  readonly max_mcp_concurrency?: number;
+  readonly max_relay_connections?: number;
+  readonly unauthenticated_admission_timeout_ms?: number;
+  readonly authenticated_session_timeout_ms?: number;
+}
+
+export interface SubscriptionRequestForwarder {
+  forward(request: Request): Promise<Response>;
+  retire(): void;
 }
 
 export interface TrustedBridgeAddress {
   readonly http_url: string;
   readonly http_port: number;
   readonly relay_port: number;
+}
+
+class BridgeRequestLimitError extends Error {
+  constructor() {
+    super("trusted bridge request exceeds byte limit");
+    this.name = "BridgeRequestLimitError";
+  }
 }
 
 function normalizedAddress(value: string | undefined): string {
@@ -100,13 +125,22 @@ async function closeServer(server: ReturnType<typeof createHttpServer> | TcpServ
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
-async function boundedBody(request: IncomingMessage, maximum: number): Promise<Buffer> {
+async function boundedBody(
+  request: IncomingMessage,
+  maximum: number,
+  signal: AbortSignal,
+): Promise<Buffer> {
+  const declared = request.headers["content-length"];
+  if (typeof declared === "string" && (!/^[0-9]+$/.test(declared) || Number(declared) > maximum)) {
+    throw new BridgeRequestLimitError();
+  }
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of request) {
+    if (signal.aborted) throw new Error("trusted bridge request aborted");
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += bytes.byteLength;
-    if (total > maximum) throw new Error("trusted bridge request exceeds byte limit");
+    if (total > maximum) throw new BridgeRequestLimitError();
     chunks.push(bytes);
   }
   return Buffer.concat(chunks, total);
@@ -151,12 +185,112 @@ function createMcpServer(
   return server;
 }
 
+export interface UnixSubscriptionForwarderOptions {
+  readonly socket_path: string;
+  readonly attempt_marker: string;
+  readonly max_request_bytes?: number;
+}
+
+export class UnixSubscriptionForwarder implements SubscriptionRequestForwarder {
+  readonly #socketPath: string;
+  readonly #marker: string;
+  readonly #maxRequestBytes: number;
+  readonly #requests = new Set<ClientRequest>();
+  #retired = false;
+
+  constructor(options: UnixSubscriptionForwarderOptions) {
+    if (options.socket_path !== "/run/ligou-subscription/subscription.sock") {
+      throw new Error("subscription socket path is invalid");
+    }
+    this.#socketPath = options.socket_path;
+    this.#marker = processString(options.attempt_marker, "subscription attempt marker", 4_096);
+    this.#maxRequestBytes = options.max_request_bytes ?? 400_000;
+    if (!Number.isSafeInteger(this.#maxRequestBytes) ||
+        this.#maxRequestBytes < 1 || this.#maxRequestBytes > 400_000) {
+      throw new Error("subscription forwarder request limit is invalid");
+    }
+  }
+
+  retire(): void {
+    if (this.#retired) return;
+    this.#retired = true;
+    for (const request of this.#requests) request.destroy(new Error("subscription relay retired"));
+  }
+
+  async forward(request: Request): Promise<Response> {
+    if (this.#retired) throw new Error("subscription relay is retired");
+    if (request.signal.aborted) throw new Error("subscription relay request aborted");
+    const url = new URL(request.url);
+    if (request.method !== "POST" || url.pathname !== "/codex/responses" || url.search || url.hash) {
+      throw new Error("subscription relay route is invalid");
+    }
+    const body = Buffer.from(await request.arrayBuffer());
+    if (body.length === 0 || body.length > this.#maxRequestBytes) {
+      throw new Error("subscription relay request exceeds byte limit");
+    }
+    return new Promise<Response>((resolve, reject) => {
+      let settled = false;
+      const forwarded = httpRequest({
+        socketPath: this.#socketPath,
+        path: "/codex/responses",
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.#marker}`,
+          "content-type": "application/json",
+          "content-length": String(body.length),
+          accept: "text/event-stream",
+          connection: "close",
+        },
+      }, (response) => {
+        settled = true;
+        cleanup();
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(response.headers)) {
+          if (typeof value === "string") headers.set(name, value);
+          else if (Array.isArray(value)) headers.set(name, value.join(", "));
+        }
+        const status = response.statusCode ?? 502;
+        resolve(new Response(
+          status === 204 || status === 304 ? null : Readable.toWeb(response) as ReadableStream,
+          { status, statusText: response.statusMessage, headers },
+        ));
+      });
+      this.#requests.add(forwarded);
+      const cleanup = (): void => {
+        request.signal.removeEventListener("abort", aborted);
+        this.#requests.delete(forwarded);
+      };
+      const aborted = (): void => { forwarded.destroy(new Error("subscription relay request aborted")); };
+      forwarded.once("error", (error) => {
+        cleanup();
+        if (!settled) reject(error);
+      });
+      forwarded.once("close", cleanup);
+      request.signal.addEventListener("abort", aborted, { once: true });
+      if (request.signal.aborted || this.#retired) {
+        aborted();
+        return;
+      }
+      forwarded.end(body);
+    });
+  }
+}
+
 export class TrustedBridgeServer {
   readonly #options: TrustedBridgeServerOptions;
   readonly #httpServer: ReturnType<typeof createHttpServer>;
   readonly #relayServer: TcpServer;
   readonly #sockets = new Set<Socket>();
   readonly #mcpServers = new Set<McpProtocolServer>();
+  readonly #maxProxyRequestBytes: number;
+  readonly #maxMcpRequestBytes: number;
+  readonly #maxMcpConcurrency: number;
+  readonly #maxRelayConnections: number;
+  readonly #admissionTimeoutMs: number;
+  readonly #authenticatedSessionTimeoutMs: number;
+  readonly #httpAdmissionTimers = new Map<Socket, ReturnType<typeof setTimeout>>();
+  #activeMcpRequests = 0;
+  #activeRelayConnections = 0;
   #started = false;
   #closed = false;
 
@@ -169,26 +303,79 @@ export class TrustedBridgeServer {
         options.relay_target.port > 65_535) {
       throw new Error("trusted bridge listener configuration is invalid");
     }
+    const boundedOption = (value: number | undefined, fallback: number, maximum: number, name: string) => {
+      const parsed = value ?? fallback;
+      if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+        throw new Error(`${name} is invalid`);
+      }
+      return parsed;
+    };
     this.#options = options;
+    this.#maxProxyRequestBytes = boundedOption(
+      options.max_proxy_request_bytes,
+      400_000,
+      400_000,
+      "trusted bridge proxy byte limit",
+    );
+    this.#maxMcpRequestBytes = boundedOption(
+      options.max_mcp_request_bytes,
+      262_144,
+      262_144,
+      "trusted bridge MCP byte limit",
+    );
+    this.#maxMcpConcurrency = boundedOption(
+      options.max_mcp_concurrency,
+      1,
+      1,
+      "trusted bridge MCP concurrency",
+    );
+    this.#maxRelayConnections = boundedOption(
+      options.max_relay_connections,
+      1,
+      1,
+      "trusted bridge relay concurrency",
+    );
+    this.#admissionTimeoutMs = boundedOption(
+      options.unauthenticated_admission_timeout_ms,
+      15_000,
+      30_000,
+      "trusted bridge unauthenticated admission timeout",
+    );
+    this.#authenticatedSessionTimeoutMs = boundedOption(
+      options.authenticated_session_timeout_ms,
+      600_000,
+      600_000,
+      "trusted bridge authenticated session timeout",
+    );
     this.#httpServer = createHttpServer((request, response) => {
       void this.#handleHttp(request, response).catch((error) => {
         if (!response.headersSent) {
-          writeJson(response, 500, {
-            error: "trusted_bridge_request_failed",
-            message: error instanceof Error ? error.message : String(error),
-          });
+          writeJson(
+            response,
+            error instanceof BridgeRequestLimitError ? 413 : 500,
+            { error: error instanceof BridgeRequestLimitError
+              ? "trusted_bridge_request_too_large"
+              : "trusted_bridge_request_failed" },
+          );
         } else {
           response.destroy(error instanceof Error ? error : new Error(String(error)));
         }
       });
     });
     this.#httpServer.maxHeadersCount = 32;
-    this.#httpServer.headersTimeout = 5_000;
-    this.#httpServer.requestTimeout = 600_000;
-    this.#httpServer.keepAliveTimeout = 5_000;
-    this.#httpServer.on("connection", (socket) => this.#trackSocket(socket));
+    this.#httpServer.maxConnections = boundedOption(
+      options.max_http_connections,
+      8,
+      32,
+      "trusted bridge HTTP connection limit",
+    );
+    this.#httpServer.maxRequestsPerSocket = 32;
+    this.#httpServer.headersTimeout = Math.min(5_000, this.#admissionTimeoutMs);
+    this.#httpServer.requestTimeout = this.#admissionTimeoutMs;
+    this.#httpServer.keepAliveTimeout = Math.min(5_000, this.#admissionTimeoutMs);
+    this.#httpServer.on("connection", (socket) => this.#trackHttpSocket(socket));
     this.#relayServer = createTcpServer((socket) => this.#relay(socket));
-    this.#relayServer.on("connection", (socket) => this.#trackSocket(socket));
+    this.#relayServer.on("connection", (socket) => this.#trackRelaySocket(socket));
   }
 
   async start(): Promise<TrustedBridgeAddress> {
@@ -216,6 +403,7 @@ export class TrustedBridgeServer {
     if (this.#closed) return;
     this.#closed = true;
     this.#options.mcp_bridge.retire();
+    this.#options.model_proxy.retire();
     for (const socket of this.#sockets) socket.destroy();
     await Promise.allSettled([...this.#mcpServers].map((server) => server.close()));
     await Promise.all([closeServer(this.#httpServer), closeServer(this.#relayServer)]);
@@ -231,7 +419,7 @@ export class TrustedBridgeServer {
       await this.#handleMcp(request, response);
       return;
     }
-    if (requestUrl.pathname === "/v1/responses" && requestUrl.search === "") {
+    if (requestUrl.pathname === "/codex/responses" && requestUrl.search === "") {
       await this.#handleProxy(request, response);
       return;
     }
@@ -239,6 +427,18 @@ export class TrustedBridgeServer {
   }
 
   async #handleMcp(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (request.method !== "POST") {
+      writeJson(response, 405, { error: "mcp_post_required" });
+      return;
+    }
+    const rawContentType = request.headers["content-type"];
+    const contentType = typeof rawContentType === "string"
+      ? rawContentType.split(";", 1)[0]?.trim().toLowerCase()
+      : undefined;
+    if (contentType !== "application/json") {
+      writeJson(response, 415, { error: "mcp_json_required" });
+      return;
+    }
     let connection: BridgeConnection;
     try {
       connection = this.#options.mcp_bridge.bindConnection({
@@ -249,13 +449,34 @@ export class TrustedBridgeServer {
       writeJson(response, 401, { error: "mcp_connection_rejected" });
       return;
     }
+    if (this.#activeMcpRequests >= this.#maxMcpConcurrency) {
+      writeJson(response, 429, { error: "mcp_concurrency_limited" });
+      return;
+    }
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    request.once("aborted", abort);
+    const responseClosed = (): void => { if (!response.writableEnded) abort(); };
+    response.once("close", responseClosed);
+    this.#activeMcpRequests += 1;
     const server = createMcpServer(this.#options.mcp_bridge, connection);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     this.#mcpServers.add(server);
     try {
+      const bytes = await boundedBody(request, this.#maxMcpRequestBytes, controller.signal);
+      this.#markHttpAdmitted(request.socket);
+      let parsedBody: unknown;
+      try { parsedBody = JSON.parse(bytes.toString("utf8")); }
+      catch {
+        writeJson(response, 400, { error: "mcp_json_invalid" });
+        return;
+      }
       await server.connect(transport);
-      await transport.handleRequest(request, response);
+      await transport.handleRequest(request, response, parsedBody);
     } finally {
+      this.#activeMcpRequests -= 1;
+      request.off("aborted", abort);
+      response.off("close", responseClosed);
       this.#mcpServers.delete(server);
       await transport.close().catch(() => undefined);
       await server.close().catch(() => undefined);
@@ -263,13 +484,15 @@ export class TrustedBridgeServer {
   }
 
   async #handleProxy(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const maximum = this.#options.max_proxy_request_bytes ?? 10_485_760;
-    const bytes = await boundedBody(request, maximum);
     const controller = new AbortController();
     const aborted = (): void => controller.abort();
     request.once("aborted", aborted);
+    const responseClosed = (): void => { if (!response.writableEnded) aborted(); };
+    response.once("close", responseClosed);
     try {
-      const webRequest = new Request(`http://bridge/v1/responses`, {
+      const bytes = await boundedBody(request, this.#maxProxyRequestBytes, controller.signal);
+      this.#markHttpAdmitted(request.socket);
+      const webRequest = new Request(`http://bridge/codex/responses`, {
         method: request.method,
         headers: webHeaders(request),
         body: bytes,
@@ -283,41 +506,111 @@ export class TrustedBridgeServer {
       if (proxied.body === null) {
         response.end();
       } else {
-        Readable.fromWeb(proxied.body as any).pipe(response);
+        await pipeline(
+          Readable.fromWeb(proxied.body as any),
+          response,
+          { signal: controller.signal },
+        );
       }
     } finally {
       request.off("aborted", aborted);
+      response.off("close", responseClosed);
     }
   }
 
   #relay(socket: Socket): void {
-    if (this.#closed) {
+    if (this.#closed || this.#activeRelayConnections >= this.#maxRelayConnections) {
       socket.destroy();
       return;
     }
+    this.#activeRelayConnections += 1;
     socket.setNoDelay(true);
     const upstream = connectTcp(this.#options.relay_target.port, this.#options.relay_target.host);
-    this.#trackSocket(upstream);
+    this.#trackAuthenticatedSocket(upstream);
+    // Two abort-aware pipelines share each duplex socket (one per direction).
+    // Raise only these attempt-local emitters above Node's default listener cap.
+    setMaxListeners(24, socket, upstream);
+    const controller = new AbortController();
+    let released = false;
     const fail = (): void => {
+      controller.abort();
       socket.destroy();
       upstream.destroy();
+      if (!released) {
+        released = true;
+        this.#activeRelayConnections -= 1;
+      }
     };
     socket.once("error", fail);
     upstream.once("error", fail);
-    socket.pipe(upstream).pipe(socket);
+    socket.once("timeout", fail);
+    upstream.once("timeout", fail);
+    socket.once("close", fail);
+    upstream.once("close", fail);
+    void Promise.all([
+      pipeline(socket, upstream, { signal: controller.signal }),
+      pipeline(upstream, socket, { signal: controller.signal }),
+    ]).catch(fail);
   }
 
-  #trackSocket(socket: Socket): void {
+  #trackHttpSocket(socket: Socket): void {
     this.#sockets.add(socket);
-    socket.once("close", () => this.#sockets.delete(socket));
+    const admissionTimer = setTimeout(() => socket.destroy(), this.#admissionTimeoutMs);
+    this.#httpAdmissionTimers.set(socket, admissionTimer);
+    socket.once("close", () => {
+      clearTimeout(admissionTimer);
+      this.#httpAdmissionTimers.delete(socket);
+      this.#sockets.delete(socket);
+    });
+  }
+
+  #markHttpAdmitted(socket: Socket): void {
+    const timer = this.#httpAdmissionTimers.get(socket);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#httpAdmissionTimers.delete(socket);
+    }
+    // Authenticated model work is bounded by the central attempt deadline, not
+    // by the unauthenticated 15-second admission window.
+    socket.setTimeout(0);
+  }
+
+  #trackRelaySocket(socket: Socket): void {
+    this.#sockets.add(socket);
+    const admissionTimer = setTimeout(() => socket.destroy(), this.#admissionTimeoutMs);
+    const admitted = (): void => {
+      clearTimeout(admissionTimer);
+      const sessionTimer = setTimeout(
+        () => socket.destroy(),
+        this.#authenticatedSessionTimeoutMs,
+      );
+      socket.once("close", () => clearTimeout(sessionTimer));
+    };
+    socket.once("data", admitted);
+    socket.once("close", () => {
+      clearTimeout(admissionTimer);
+      socket.off("data", admitted);
+      this.#sockets.delete(socket);
+    });
+  }
+
+  #trackAuthenticatedSocket(socket: Socket): void {
+    this.#sockets.add(socket);
+    const sessionTimer = setTimeout(
+      () => socket.destroy(),
+      this.#authenticatedSessionTimeoutMs,
+    );
+    socket.once("close", () => {
+      clearTimeout(sessionTimer);
+      this.#sockets.delete(socket);
+    });
   }
 }
 
 interface BridgeProcessSecret {
-  readonly upstream_api_key: string;
-  readonly upstream_url: string;
   readonly upstream_model: string;
   readonly proxy_marker: string;
+  readonly subscription_socket_path: string;
   readonly normalized_origin: string;
   readonly deadline_at: string;
   readonly budget: DiscoveryBudget;
@@ -367,10 +660,9 @@ async function readProcessSecret(path: string): Promise<BridgeProcessSecret> {
   }
   const candidate = processRecord(decoded, "bridge secret");
   const keys = [
-    "upstream_api_key",
-    "upstream_url",
     "upstream_model",
     "proxy_marker",
+    "subscription_socket_path",
     "normalized_origin",
     "deadline_at",
     "budget",
@@ -384,11 +676,18 @@ async function readProcessSecret(path: string): Promise<BridgeProcessSecret> {
     deadline_at: deadlineAt,
     budget: candidate.budget as DiscoveryBudget,
   });
+  const socketPath = processString(
+    candidate.subscription_socket_path,
+    "bridge subscription socket path",
+    96,
+  );
+  if (socketPath !== "/run/ligou-subscription/subscription.sock") {
+    throw new Error("bridge subscription socket path is invalid");
+  }
   return Object.freeze({
-    upstream_api_key: processString(candidate.upstream_api_key, "bridge upstream API key"),
-    upstream_url: processString(candidate.upstream_url, "bridge upstream URL", 2_048),
     upstream_model: processString(candidate.upstream_model, "bridge upstream model", 200),
     proxy_marker: processString(candidate.proxy_marker, "bridge proxy marker", 512),
+    subscription_socket_path: socketPath,
     normalized_origin: context.normalized_origin,
     deadline_at: context.deadline_at,
     budget: context.budget,
@@ -462,13 +761,15 @@ export async function startTrustedBridgeFromEnvironment(
     submit_result: (result) => atomicResultSink(outputPath, result),
     retire_attempt: () => undefined,
   });
-  const modelProxy = new FixedModelProxy({
-    proxy_marker: secret.proxy_marker,
-    upstream_api_key: secret.upstream_api_key,
-    upstream_url: secret.upstream_url,
-    upstream_model: secret.upstream_model,
-    fetch: globalThis.fetch,
+  const modelProxy = new UnixSubscriptionForwarder({
+    socket_path: secret.subscription_socket_path,
+    attempt_marker: secret.proxy_marker,
   });
+  const remainingAttemptMs = Date.parse(secret.deadline_at) - Date.now();
+  if (!Number.isFinite(remainingAttemptMs) || remainingAttemptMs <= 0 ||
+      remainingAttemptMs > 600_000) {
+    throw new Error("bridge attempt deadline is invalid");
+  }
   const server = new TrustedBridgeServer({
     host: "0.0.0.0",
     http_port: httpPort,
@@ -476,6 +777,7 @@ export async function startTrustedBridgeFromEnvironment(
     relay_target: { host: cellHost, port: gatewayPort },
     mcp_bridge: mcpBridge,
     model_proxy: modelProxy,
+    authenticated_session_timeout_ms: Math.ceil(remainingAttemptMs),
   });
   await server.start();
   const shutdown = (): void => {

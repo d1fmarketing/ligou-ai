@@ -23,6 +23,7 @@ export const unitTestFiles = [
   "test/phone-budget.test.ts",
   "test/calendar-authority.test.ts",
   "test/worker-authority.test.ts",
+  "test/summary-subscription.test.ts",
   "test/powers.test.ts",
   "test/timezone.test.ts",
   "test/tools.test.ts",

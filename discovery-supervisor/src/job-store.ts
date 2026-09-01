@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   ContractValidationError,
   isDiscoveryAdapterId,
@@ -7,6 +7,17 @@ import {
   parseWorkerResult,
   type DiscoveryAdapterId,
   type DiscoverySourceSnapshot,
+  type ModelAccessAuthority,
+  type ModelAccessCapability,
+  type ModelAccessContext,
+  type ModelAccessExpectation,
+  type SubscriptionRecoveryCapability,
+  type SubscriptionRecoveryContext,
+  type SubscriptionRequestProspective,
+  type SubscriptionRequestReservationCapability,
+  type SubscriptionRequestSettlement,
+  type SubscriptionReservationReadback,
+  type SubscriptionSettlementReadback,
   type WorkerJob,
   type WorkerResult,
 } from "./contracts";
@@ -20,7 +31,8 @@ export interface ServiceRpcClient {
   rpc(name: string, args: Record<string, unknown>): Promise<RpcResponse>;
 }
 
-export interface RuntimeIdentityBinding {
+export interface OpenClawRuntimeIdentityBinding {
+  readonly runtime_kind: "openclaw_cell";
   readonly cell_container_name: string;
   readonly bridge_container_name: string;
   readonly internal_network_name: string;
@@ -33,6 +45,27 @@ export interface RuntimeIdentityBinding {
   readonly bridge_secret_volume_name: string;
   readonly profile_name: string;
   readonly loopback_port: number;
+  readonly cell_image: RuntimeImageEvidence;
+  readonly bridge_image: RuntimeImageEvidence;
+  readonly subscription_socket_path: string;
+}
+
+export interface DirectModelRuntimeIdentityBinding {
+  readonly runtime_kind: "direct_model_subscription";
+  readonly subscription_socket_path: string;
+}
+
+export type RuntimeIdentityBinding =
+  | OpenClawRuntimeIdentityBinding
+  | DirectModelRuntimeIdentityBinding;
+
+export interface RuntimeImageEvidence {
+  readonly reference: string;
+  readonly index_digest: string;
+  readonly platform: "linux/arm64" | "linux/amd64";
+  readonly selected_manifest_digest: string;
+  readonly image_id: string;
+  readonly config_digest: string;
 }
 
 export interface RuntimeSlotCapability {
@@ -46,6 +79,7 @@ export interface CleanupAuthority {
   readonly attempt_id: string;
   readonly runtime_slot: RuntimeSlotCapability;
   readonly fence_generation: number;
+  readonly subscription_recovery: SubscriptionRecoveryCapability;
 }
 
 export interface TerminalCleanupAuthority extends CleanupAuthority {
@@ -62,6 +96,7 @@ export interface ClaimedAttempt {
   readonly runtime_slot: RuntimeSlotCapability;
   readonly job_version: number;
   readonly cleanup_authority: CleanupAuthority;
+  readonly model_access: ModelAccessCapability;
 }
 
 export interface RuntimeBindReadback {
@@ -107,7 +142,7 @@ export interface CommittedResultCapability {
   readonly fence_generation: number;
 }
 
-export interface CleanupProof {
+export interface OpenClawCleanupProof {
   readonly gateway_exited: boolean;
   readonly container_removed: boolean;
   readonly bridge_removed: boolean;
@@ -116,11 +151,26 @@ export interface CleanupProof {
   readonly workspace_removed: boolean;
   readonly output_removed: boolean;
   readonly network_removed: boolean;
-  readonly credential_revoked: boolean;
+  readonly credential_material_removed: boolean;
+  readonly subscription_lease_revoked: boolean;
+  readonly subscription_requests_drained: boolean;
+  readonly subscription_listener_closed: boolean;
+  readonly subscription_socket_absent: boolean;
   readonly listener_closed: boolean;
   readonly identity_process_absent: boolean;
   readonly late_result_rejected: boolean;
 }
+
+export interface DirectModelCleanupProof {
+  readonly subscription_lease_revoked: boolean;
+  readonly subscription_requests_drained: boolean;
+  readonly subscription_listener_closed: boolean;
+  readonly subscription_socket_absent: boolean;
+  readonly identity_process_absent: boolean;
+  readonly late_result_rejected: boolean;
+}
+
+export type CleanupProof = OpenClawCleanupProof | DirectModelCleanupProof;
 
 export interface SelectionReadback {
   readonly job_id: string;
@@ -148,8 +198,13 @@ const CLAIM_KEYS = [
   "normalized_origin",
   "deadline_at",
   "budget",
+  "tenant_id",
+  "credential_owner_id",
+  "credential_generation",
+  "subscription_account_hash",
 ] as const;
 const RUNTIME_IDENTITY_KEYS = [
+  "runtime_kind",
   "cell_container_name",
   "bridge_container_name",
   "internal_network_name",
@@ -162,6 +217,19 @@ const RUNTIME_IDENTITY_KEYS = [
   "bridge_secret_volume_name",
   "profile_name",
   "loopback_port",
+  "cell_image",
+  "bridge_image",
+  "subscription_socket_path",
+] as const;
+const DIRECT_RUNTIME_IDENTITY_KEYS = [
+  "runtime_kind",
+  "subscription_socket_path",
+] as const;
+const RUNTIME_NAME_KEYS = [
+  "cell_container_name", "bridge_container_name", "internal_network_name",
+  "egress_network_name", "config_volume_name", "state_volume_name",
+  "workspace_volume_name", "output_volume_name", "gateway_secret_volume_name",
+  "bridge_secret_volume_name", "profile_name",
 ] as const;
 const RUNTIME_BIND_KEYS = [
   "attempt_id",
@@ -209,14 +277,77 @@ const CLEANUP_PROOF_KEYS = [
   "workspace_removed",
   "output_removed",
   "network_removed",
-  "credential_revoked",
+  "credential_material_removed",
+  "subscription_lease_revoked",
+  "subscription_requests_drained",
+  "subscription_listener_closed",
+  "subscription_socket_absent",
   "listener_closed",
   "identity_process_absent",
   "late_result_rejected",
 ] as const;
+const DIRECT_CLEANUP_PROOF_KEYS = [
+  "subscription_lease_revoked",
+  "subscription_requests_drained",
+  "subscription_listener_closed",
+  "subscription_socket_absent",
+  "identity_process_absent",
+  "late_result_rejected",
+] as const;
+const MODEL_ACCESS_READBACK_KEYS = [
+  "tenant_id",
+  "job_id",
+  "attempt_id",
+  "fence_generation",
+  "runtime_slot_id",
+  "adapter_id",
+  "deadline_at",
+  "subscription_socket_path",
+  "runtime_identity_hash",
+  "credential_owner_id",
+  "expected_account_hash",
+  "credential_generation",
+  "provider",
+  "auth_kind",
+  "model",
+] as const;
+const SUBSCRIPTION_RECOVERY_READBACK_KEYS = [
+  "job_id",
+  "attempt_id",
+  "fence_generation",
+  "subscription_socket_path",
+  "runtime_kind",
+  "late_result_rejected",
+] as const;
+const SUBSCRIPTION_RESERVATION_READBACK_KEYS = [
+  "reservation_id", "reservation_token", "request_number", "lease_until",
+  "quota_state", "current_requests", "current_input_bytes",
+  "current_output_bytes", "max_requests", "max_input_bytes",
+  "max_output_bytes", "owner_current_requests", "owner_current_input_bytes",
+  "owner_current_output_bytes", "owner_max_requests", "owner_max_input_bytes",
+  "owner_max_output_bytes", "max_concurrency",
+] as const;
+const SUBSCRIPTION_SETTLEMENT_READBACK_KEYS = [
+  "settled", "quota_state", "cooldown_until", "current_requests",
+  "current_input_bytes", "current_output_bytes", "max_requests",
+  "max_input_bytes", "max_output_bytes", "owner_current_requests",
+  "owner_current_input_bytes", "owner_current_output_bytes",
+  "owner_max_requests", "owner_max_input_bytes", "owner_max_output_bytes",
+  "max_concurrency",
+] as const;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const RUNTIME_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
+const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const IMAGE_REFERENCE_PATTERN =
+  /^[a-z0-9][a-z0-9._:/-]{0,310}@sha256:[0-9a-f]{64}$/;
+const SUBSCRIPTION_SOCKET_PATTERN = /^\/run\/ligou-discovery\/[0-9a-f]{48}\/subscription[.]sock$/;
+const OPENCLAW_CELL_IMAGE =
+  "ghcr.io/openclaw/openclaw@sha256:e7849cb6c1ef1ead39ab4be7d85edb2df89611f486e283284c7cf35ce39a20d4";
+const RUNTIME_IMAGE_KEYS = [
+  "reference", "index_digest", "platform", "selected_manifest_digest",
+  "image_id", "config_digest",
+] as const;
 
 function plainRecord(value: unknown, message: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -243,6 +374,13 @@ function exactKeys(
 function positiveInteger(value: unknown, message: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) {
     throw new ContractValidationError(`${message}: positive integer required`);
+  }
+  return value as number;
+}
+
+function nonnegativeInteger(value: unknown, message: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new ContractValidationError(`${message}: nonnegative integer required`);
   }
   return value as number;
 }
@@ -315,11 +453,64 @@ function jsonbHash(value: unknown): string {
   return createHash("sha256").update(postgresJsonbText(value), "utf8").digest("hex");
 }
 
+function parseRuntimeImageEvidence(
+  value: unknown,
+  kind: "cell" | "bridge",
+  message: string,
+): RuntimeImageEvidence {
+  const candidate = plainRecord(value, message);
+  exactKeys(candidate, RUNTIME_IMAGE_KEYS, message);
+  const reference = nonemptyString(candidate.reference, `${message}.reference`, 384);
+  const indexDigest = nonemptyString(candidate.index_digest, `${message}.index_digest`, 71);
+  const selectedManifest = nonemptyString(
+    candidate.selected_manifest_digest,
+    `${message}.selected_manifest_digest`,
+    71,
+  );
+  const imageId = nonemptyString(candidate.image_id, `${message}.image_id`, 71);
+  const configDigest = nonemptyString(candidate.config_digest, `${message}.config_digest`, 71);
+  if (!DIGEST_PATTERN.test(indexDigest) || !DIGEST_PATTERN.test(selectedManifest) ||
+      !DIGEST_PATTERN.test(imageId) || !DIGEST_PATTERN.test(configDigest) ||
+      (candidate.platform !== "linux/arm64" && candidate.platform !== "linux/amd64") ||
+      !IMAGE_REFERENCE_PATTERN.test(reference) ||
+      reference.slice(reference.lastIndexOf("@") + 1) !== indexDigest ||
+      (kind === "cell" && reference !== OPENCLAW_CELL_IMAGE)) {
+    throw new ContractValidationError(`${message}: invalid runtime image evidence`);
+  }
+  return Object.freeze({
+    reference,
+    index_digest: indexDigest,
+    platform: candidate.platform,
+    selected_manifest_digest: selectedManifest,
+    image_id: imageId,
+    config_digest: configDigest,
+  } as RuntimeImageEvidence);
+}
+
 function parseRuntimeIdentity(value: unknown, message: string): RuntimeIdentityBinding {
   const candidate = plainRecord(value, message);
+  const socketPath = nonemptyString(
+    candidate.subscription_socket_path,
+    `${message}.subscription_socket_path`,
+    128,
+  );
+  if (!SUBSCRIPTION_SOCKET_PATTERN.test(socketPath)) {
+    throw new ContractValidationError(`${message}.subscription_socket_path: invalid path`);
+  }
+  if (candidate.runtime_kind === "direct_model_subscription") {
+    exactKeys(candidate, DIRECT_RUNTIME_IDENTITY_KEYS, message);
+    return Object.freeze({
+      runtime_kind: "direct_model_subscription",
+      subscription_socket_path: socketPath,
+    });
+  }
+  if (candidate.runtime_kind !== "openclaw_cell") {
+    throw new ContractValidationError(`${message}.runtime_kind: invalid kind`);
+  }
   exactKeys(candidate, RUNTIME_IDENTITY_KEYS, message);
-  const parsed: Record<string, string | number> = {};
-  for (const key of RUNTIME_IDENTITY_KEYS.slice(0, -1)) {
+  const parsed: Record<string, unknown> = {};
+  parsed.runtime_kind = "openclaw_cell";
+  for (const key of RUNTIME_NAME_KEYS) {
     const name = nonemptyString(candidate[key], `${message}.${key}`, 128);
     if (!RUNTIME_NAME_PATTERN.test(name) || name.includes("..") ||
         (key === "profile_name" && name.toLowerCase() === "default")) {
@@ -332,6 +523,13 @@ function parseRuntimeIdentity(value: unknown, message: string): RuntimeIdentityB
     throw new ContractValidationError(`${message}.loopback_port: invalid loopback port`);
   }
   parsed.loopback_port = loopbackPort;
+  parsed.cell_image = parseRuntimeImageEvidence(candidate.cell_image, "cell", `${message}.cell_image`);
+  parsed.bridge_image = parseRuntimeImageEvidence(
+    candidate.bridge_image,
+    "bridge",
+    `${message}.bridge_image`,
+  );
+  parsed.subscription_socket_path = socketPath;
   return Object.freeze(parsed as unknown as RuntimeIdentityBinding);
 }
 
@@ -352,12 +550,14 @@ function cleanupAuthority(
   attemptId: string,
   runtimeSlot: RuntimeSlotCapability,
   fenceGeneration: number,
+  subscriptionRecovery: SubscriptionRecoveryCapability,
 ): CleanupAuthority {
   return Object.freeze({
     job_id: jobId,
     attempt_id: attemptId,
     runtime_slot: runtimeSlot,
     fence_generation: fenceGeneration,
+    subscription_recovery: subscriptionRecovery,
   });
 }
 
@@ -367,6 +567,10 @@ interface ParsedClaimReadback {
   readonly runtime_slot_id: string;
   readonly job_version: number;
   readonly claim_token: string;
+  readonly tenant_id: string;
+  readonly credential_owner_id: string;
+  readonly credential_generation: number;
+  readonly subscription_account_hash: string;
 }
 
 function parseClaimReadback(
@@ -397,6 +601,19 @@ function parseClaimReadback(
     runtime_slot_id: runtimeSlotId,
     job_version: positiveInteger(row.job_version, "claim readback.job_version"),
     claim_token: claimToken,
+    tenant_id: uuid(row.tenant_id, "claim readback.tenant_id"),
+    credential_owner_id: uuid(
+      row.credential_owner_id,
+      "claim readback.credential_owner_id",
+    ),
+    credential_generation: positiveInteger(
+      row.credential_generation,
+      "claim readback.credential_generation",
+    ),
+    subscription_account_hash: hash(
+      row.subscription_account_hash,
+      "claim readback.subscription_account_hash",
+    ),
   };
 }
 
@@ -445,6 +662,7 @@ function parseTerminalReadback(
   outcome: "failed" | "cancelled",
   binding: RuntimeBindReadback,
   previousClaimToken: string,
+  subscriptionRecovery: SubscriptionRecoveryCapability,
 ): ParsedTerminalReadback {
   const row = plainRecord(value, "terminal readback");
   exactKeys(row, TERMINAL_KEYS, "terminal readback");
@@ -462,7 +680,13 @@ function parseTerminalReadback(
   }
   return {
     authority: Object.freeze({
-      ...cleanupAuthority(jobId, attemptId, claim.runtime_slot, fence),
+      ...cleanupAuthority(
+        jobId,
+        attemptId,
+        claim.runtime_slot,
+        fence,
+        subscriptionRecovery,
+      ),
       job_version: version,
       runtime_identity: binding.runtime_identity,
       runtime_identity_hash: binding.runtime_identity_hash,
@@ -603,13 +827,335 @@ function cleanupReadback(value: unknown, attemptId: string): CleanupReadback {
   });
 }
 
-function parseCleanupProof(value: CleanupProof): CleanupProof {
+function parseCleanupProof(
+  value: CleanupProof,
+  adapterId: DiscoveryAdapterId,
+): CleanupProof {
   const candidate = plainRecord(value, "cleanup proof");
-  exactKeys(candidate, CLEANUP_PROOF_KEYS, "cleanup proof");
-  if (CLEANUP_PROOF_KEYS.some((key) => typeof candidate[key] !== "boolean")) {
+  const keys = adapterId === "openclaw"
+    ? CLEANUP_PROOF_KEYS
+    : DIRECT_CLEANUP_PROOF_KEYS;
+  exactKeys(candidate, keys, "cleanup proof");
+  if (keys.some((key) => typeof candidate[key] !== "boolean")) {
     throw new ContractValidationError("cleanup proof: exact boolean fields required");
   }
-  return Object.freeze({ ...value });
+  return Object.freeze({ ...candidate }) as unknown as CleanupProof;
+}
+
+interface ModelAccessState {
+  readonly tenant_id: string;
+  readonly credential_owner_id: string;
+  readonly credential_generation: number;
+  readonly expected_account_hash: string;
+  readonly job_id: string;
+  readonly attempt_id: string;
+  readonly fence_generation: number;
+  readonly runtime_slot_id: string;
+  readonly adapter_id: DiscoveryAdapterId;
+  readonly deadline_at: string;
+  readonly source_snapshot_count: number;
+  readonly subscription_socket_path?: string;
+  readonly runtime_identity_hash?: string;
+}
+
+function opaqueModelAccessCapability(): ModelAccessCapability {
+  return Object.freeze(Object.create(null)) as ModelAccessCapability;
+}
+
+function opaqueSubscriptionRecoveryCapability(): SubscriptionRecoveryCapability {
+  return Object.freeze(Object.create(null)) as SubscriptionRecoveryCapability;
+}
+
+interface SubscriptionRecoveryState {
+  readonly job_id: string;
+  readonly attempt_id: string;
+  readonly fence_generation: number;
+  readonly subscription_socket_path?: string;
+  readonly runtime_kind?: RuntimeIdentityBinding["runtime_kind"];
+}
+
+function parseSubscriptionRecoveryReadback(
+  value: unknown,
+  state: SubscriptionRecoveryState,
+): Readonly<SubscriptionRecoveryContext> {
+  const row = plainRecord(value, "subscription recovery readback");
+  exactKeys(row, SUBSCRIPTION_RECOVERY_READBACK_KEYS, "subscription recovery readback");
+  if (state.subscription_socket_path === undefined || state.runtime_kind === undefined) {
+    throw new ContractValidationError("subscription recovery runtime identity is not bound");
+  }
+  const runtimeKind = row.runtime_kind;
+  if (runtimeKind !== "openclaw_cell" && runtimeKind !== "direct_model_subscription") {
+    throw new ContractValidationError("subscription recovery readback: invalid runtime kind");
+  }
+  if (row.late_result_rejected !== true) {
+    throw new ContractValidationError("subscription recovery readback: late result not rejected");
+  }
+  const parsed = Object.freeze({
+    job_id: uuid(row.job_id, "subscription recovery readback.job_id"),
+    attempt_id: uuid(row.attempt_id, "subscription recovery readback.attempt_id"),
+    fence_generation: positiveInteger(
+      row.fence_generation,
+      "subscription recovery readback.fence_generation",
+    ),
+    subscription_socket_path: nonemptyString(
+      row.subscription_socket_path,
+      "subscription recovery readback.subscription_socket_path",
+      128,
+    ),
+    runtime_kind: runtimeKind,
+    late_result_rejected: true as const,
+  });
+  if (parsed.job_id !== state.job_id || parsed.attempt_id !== state.attempt_id ||
+      parsed.fence_generation !== state.fence_generation ||
+      parsed.subscription_socket_path !== state.subscription_socket_path ||
+      parsed.runtime_kind !== state.runtime_kind) {
+    throw new ContractValidationError("subscription recovery readback mismatched authority");
+  }
+  return parsed;
+}
+
+interface SubscriptionReservationState {
+  readonly reservation_id: string;
+  readonly reservation_token: string;
+  readonly claim_token: string;
+  readonly attempt_id: string;
+  readonly fence_generation: number;
+  readonly prospective_input_bytes: number;
+  readonly prospective_output_bytes: number;
+}
+
+function opaqueSubscriptionReservation(): SubscriptionRequestReservationCapability {
+  return Object.freeze(Object.create(null)) as SubscriptionRequestReservationCapability;
+}
+
+function parseSubscriptionReservationReadback(
+  value: unknown,
+  prospective: SubscriptionRequestProspective,
+  deadlineAt: string,
+): {
+  readonly safe: Omit<SubscriptionReservationReadback, "reservation">;
+  readonly reservation_id: string;
+  readonly reservation_token: string;
+} {
+  const row = plainRecord(value, "subscription reservation readback");
+  exactKeys(row, SUBSCRIPTION_RESERVATION_READBACK_KEYS, "subscription reservation readback");
+  if (row.quota_state !== "available" || row.max_requests !== 28 ||
+      row.max_input_bytes !== 400_000 || row.max_output_bytes !== 8_388_608 ||
+      row.owner_max_requests !== 140 || row.owner_max_input_bytes !== 2_000_000 ||
+      row.owner_max_output_bytes !== 40_000_000 ||
+      row.max_concurrency !== 1) {
+    throw new ContractValidationError("subscription reservation readback: invalid limits");
+  }
+  const leaseUntil = nonemptyString(row.lease_until, "subscription reservation lease", 64);
+  if (Number.isNaN(Date.parse(leaseUntil)) ||
+      Date.parse(leaseUntil) > Date.parse(deadlineAt)) {
+    throw new ContractValidationError("subscription reservation readback: invalid lease");
+  }
+  const safe = Object.freeze({
+    request_number: positiveInteger(row.request_number, "subscription request number"),
+    lease_until: leaseUntil,
+    quota_state: "available" as const,
+    current_requests: positiveInteger(row.current_requests, "subscription current requests"),
+    current_input_bytes: positiveInteger(
+      row.current_input_bytes,
+      "subscription current input bytes",
+    ),
+    current_output_bytes: positiveInteger(
+      row.current_output_bytes,
+      "subscription current output bytes",
+    ),
+    max_requests: 28 as const,
+    max_input_bytes: 400_000 as const,
+    max_output_bytes: 8_388_608 as const,
+    owner_current_requests: positiveInteger(
+      row.owner_current_requests,
+      "subscription owner current requests",
+    ),
+    owner_current_input_bytes: positiveInteger(
+      row.owner_current_input_bytes,
+      "subscription owner current input bytes",
+    ),
+    owner_current_output_bytes: positiveInteger(
+      row.owner_current_output_bytes,
+      "subscription owner current output bytes",
+    ),
+    owner_max_requests: 140 as const,
+    owner_max_input_bytes: 2_000_000 as const,
+    owner_max_output_bytes: 40_000_000 as const,
+    max_concurrency: 1 as const,
+  });
+  if (safe.current_requests > safe.max_requests ||
+      safe.request_number !== safe.current_requests ||
+      safe.current_input_bytes > safe.max_input_bytes ||
+      safe.current_output_bytes > safe.max_output_bytes ||
+      safe.owner_current_requests > safe.owner_max_requests ||
+      safe.owner_current_input_bytes > safe.owner_max_input_bytes ||
+      safe.owner_current_output_bytes > safe.owner_max_output_bytes ||
+      safe.owner_current_requests < safe.current_requests ||
+      safe.owner_current_input_bytes < safe.current_input_bytes ||
+      safe.owner_current_output_bytes < safe.current_output_bytes ||
+      safe.current_input_bytes < prospective.input_bytes ||
+      safe.current_output_bytes < prospective.output_bytes ||
+      safe.owner_current_input_bytes < prospective.input_bytes ||
+      safe.owner_current_output_bytes < prospective.output_bytes) {
+    throw new ContractValidationError("subscription reservation readback: counters invalid");
+  }
+  return {
+    safe,
+    reservation_id: uuid(row.reservation_id, "subscription reservation id"),
+    reservation_token: (() => {
+      const token = nonemptyString(
+        row.reservation_token,
+        "subscription reservation token",
+        64,
+      );
+      if (!/^[0-9a-f]{64}$/.test(token)) {
+        throw new ContractValidationError("subscription reservation token: invalid format");
+      }
+      return token;
+    })(),
+  };
+}
+
+function parseSubscriptionSettlementReadback(
+  value: unknown,
+): Readonly<SubscriptionSettlementReadback> {
+  const row = plainRecord(value, "subscription settlement readback");
+  exactKeys(row, SUBSCRIPTION_SETTLEMENT_READBACK_KEYS, "subscription settlement readback");
+  if (row.settled !== true ||
+      (row.quota_state !== "available" && row.quota_state !== "cooldown" &&
+       row.quota_state !== "unknown") ||
+      ((row.quota_state === "cooldown") !== (row.cooldown_until !== null)) ||
+      (row.cooldown_until !== null &&
+       (typeof row.cooldown_until !== "string" || Number.isNaN(Date.parse(row.cooldown_until))))) {
+    throw new ContractValidationError("subscription settlement readback: invalid state");
+  }
+  if (row.max_requests !== 28 || row.max_input_bytes !== 400_000 ||
+      row.max_output_bytes !== 8_388_608 || row.owner_max_requests !== 140 ||
+      row.owner_max_input_bytes !== 2_000_000 ||
+      row.owner_max_output_bytes !== 40_000_000 || row.max_concurrency !== 1) {
+    throw new ContractValidationError("subscription settlement readback: invalid limits");
+  }
+  const parsed = Object.freeze({
+    settled: true,
+    quota_state: row.quota_state,
+    cooldown_until: row.cooldown_until as string | null,
+    current_requests: nonnegativeInteger(row.current_requests, "subscription current requests"),
+    current_input_bytes: nonnegativeInteger(
+      row.current_input_bytes,
+      "subscription current input bytes",
+    ),
+    current_output_bytes: nonnegativeInteger(
+      row.current_output_bytes,
+      "subscription current output bytes",
+    ),
+    max_requests: 28 as const,
+    max_input_bytes: 400_000 as const,
+    max_output_bytes: 8_388_608 as const,
+    owner_current_requests: nonnegativeInteger(
+      row.owner_current_requests,
+      "subscription owner current requests",
+    ),
+    owner_current_input_bytes: nonnegativeInteger(
+      row.owner_current_input_bytes,
+      "subscription owner current input bytes",
+    ),
+    owner_current_output_bytes: nonnegativeInteger(
+      row.owner_current_output_bytes,
+      "subscription owner current output bytes",
+    ),
+    owner_max_requests: 140 as const,
+    owner_max_input_bytes: 2_000_000 as const,
+    owner_max_output_bytes: 40_000_000 as const,
+    max_concurrency: 1 as const,
+  });
+  if (parsed.current_requests > parsed.max_requests ||
+      parsed.current_input_bytes > parsed.max_input_bytes ||
+      parsed.current_output_bytes > parsed.max_output_bytes ||
+      parsed.owner_current_requests > parsed.owner_max_requests ||
+      parsed.owner_current_input_bytes > parsed.owner_max_input_bytes ||
+      parsed.owner_current_output_bytes > parsed.owner_max_output_bytes ||
+      parsed.owner_current_requests < parsed.current_requests ||
+      parsed.owner_current_input_bytes < parsed.current_input_bytes ||
+      parsed.owner_current_output_bytes < parsed.current_output_bytes) {
+    throw new ContractValidationError("subscription settlement readback: counters invalid");
+  }
+  return parsed;
+}
+
+function expectationMatches(
+  state: ModelAccessState,
+  expected: ModelAccessExpectation,
+): boolean {
+  return state.adapter_id === expected.adapter_id && state.job_id === expected.job_id &&
+    state.attempt_id === expected.attempt_id &&
+    state.fence_generation === expected.fence_generation &&
+    (expected.runtime_slot_id === undefined ||
+      state.runtime_slot_id === expected.runtime_slot_id);
+}
+
+function parseModelAccessReadback(
+  value: unknown,
+  state: ModelAccessState,
+): Readonly<ModelAccessContext> {
+  const row = plainRecord(value, "model access readback");
+  exactKeys(row, MODEL_ACCESS_READBACK_KEYS, "model access readback");
+  if (state.subscription_socket_path === undefined || state.runtime_identity_hash === undefined) {
+    throw new ContractValidationError("model access runtime identity is not bound");
+  }
+  const adapter = row.adapter_id;
+  if (!isDiscoveryAdapterId(adapter) || row.provider !== "openai-codex" ||
+      row.auth_kind !== "chatgpt_subscription_oauth" || row.model !== "gpt-5.6-sol") {
+    throw new ContractValidationError("model access readback: fixed subscription identity required");
+  }
+  const parsed = Object.freeze({
+    tenant_id: uuid(row.tenant_id, "model access readback.tenant_id"),
+    credential_owner_id: uuid(
+      row.credential_owner_id,
+      "model access readback.credential_owner_id",
+    ),
+    credential_generation: positiveInteger(
+      row.credential_generation,
+      "model access readback.credential_generation",
+    ),
+    expected_account_hash: hash(
+      row.expected_account_hash,
+      "model access readback.expected_account_hash",
+    ),
+    job_id: uuid(row.job_id, "model access readback.job_id"),
+    attempt_id: uuid(row.attempt_id, "model access readback.attempt_id"),
+    fence_generation: positiveInteger(
+      row.fence_generation,
+      "model access readback.fence_generation",
+    ),
+    runtime_slot_id: uuid(row.runtime_slot_id, "model access readback.runtime_slot_id"),
+    adapter_id: adapter,
+    deadline_at: nonemptyString(row.deadline_at, "model access readback.deadline_at", 64),
+    source_snapshot_count: state.source_snapshot_count,
+    subscription_socket_path: nonemptyString(
+      row.subscription_socket_path,
+      "model access readback.subscription_socket_path",
+      128,
+    ),
+    runtime_identity_hash: hash(
+      row.runtime_identity_hash,
+      "model access readback.runtime_identity_hash",
+    ),
+    provider: "openai-codex" as const,
+    auth_kind: "chatgpt_subscription_oauth" as const,
+    model: "gpt-5.6-sol" as const,
+  });
+  if (parsed.tenant_id !== state.tenant_id ||
+      parsed.credential_owner_id !== state.credential_owner_id ||
+      parsed.credential_generation !== state.credential_generation ||
+      parsed.expected_account_hash !== state.expected_account_hash ||
+      !expectationMatches(state, parsed) ||
+      Date.parse(parsed.deadline_at) !== Date.parse(state.deadline_at) ||
+      parsed.subscription_socket_path !== state.subscription_socket_path ||
+      parsed.runtime_identity_hash !== state.runtime_identity_hash) {
+    throw new ContractValidationError("model access readback mismatched private authority");
+  }
+  return parsed;
 }
 
 function assertWorkerIdAndLease(workerId: string, leaseSeconds: number, message: string): void {
@@ -619,7 +1165,7 @@ function assertWorkerIdAndLease(workerId: string, leaseSeconds: number, message:
   }
 }
 
-export class JobStore {
+export class JobStore implements ModelAccessAuthority {
   readonly #trustedJobs = new WeakSet<object>();
   readonly #claimForJob = new WeakMap<object, ClaimedAttempt>();
   readonly #trustedClaims = new WeakSet<object>();
@@ -633,9 +1179,22 @@ export class JobStore {
   readonly #trustedCleanupAuthorities = new WeakSet<object>();
   readonly #activeCleanupByAttempt = new Map<string, CleanupAuthority>();
   readonly #cleanupSecrets = new WeakMap<object, string>();
+  readonly #cleanupAdapters = new WeakMap<object, DiscoveryAdapterId>();
   readonly #trustedCommittedResults = new WeakSet<object>();
   readonly #activeCommittedResults = new WeakSet<object>();
   readonly #activeCommittedByAttempt = new Map<string, CommittedResultCapability>();
+  readonly #modelAccessStates = new WeakMap<object, ModelAccessState>();
+  readonly #trustedModelAccess = new WeakSet<object>();
+  readonly #activeModelAccess = new WeakSet<object>();
+  readonly #activeModelAccessByAttempt = new Map<string, ModelAccessCapability>();
+  readonly #trustedSubscriptionRecovery = new WeakSet<object>();
+  readonly #activeSubscriptionRecovery = new WeakSet<object>();
+  readonly #subscriptionRecoveryStates = new WeakMap<object, SubscriptionRecoveryState>();
+  readonly #cleanupForSubscriptionRecovery = new WeakMap<object, CleanupAuthority>();
+  readonly #trustedSubscriptionReservations = new WeakSet<object>();
+  readonly #activeSubscriptionReservations = new WeakSet<object>();
+  readonly #subscriptionReservationStates =
+    new WeakMap<object, SubscriptionReservationState>();
 
   constructor(private readonly client: ServiceRpcClient) {}
 
@@ -664,18 +1223,22 @@ export class JobStore {
       parsed.job.attempt_id,
       parsed.runtime_slot_id,
     );
+    const subscriptionRecovery = opaqueSubscriptionRecoveryCapability();
     const authority = cleanupAuthority(
       parsed.job.job_id,
       parsed.job.attempt_id,
       runtimeSlot,
       parsed.job.fence_generation,
+      subscriptionRecovery,
     );
+    const modelAccess = opaqueModelAccessCapability();
     const claim: ClaimedAttempt = Object.freeze({
       job: parsed.job,
       adapter_id: parsed.adapter_id,
       runtime_slot: runtimeSlot,
       job_version: parsed.job_version,
       cleanup_authority: authority,
+      model_access: modelAccess,
     });
     this.#trustedJobs.add(claim.job);
     this.#claimForJob.set(claim.job, claim);
@@ -683,8 +1246,24 @@ export class JobStore {
     this.#activeClaims.add(claim);
     this.#claimSecrets.set(claim, parsed.claim_token);
     this.#activeClaimByAttempt.set(claim.job.attempt_id, claim);
+    this.#trustedModelAccess.add(modelAccess);
+    this.#activeModelAccess.add(modelAccess);
+    this.#activeModelAccessByAttempt.set(claim.job.attempt_id, modelAccess);
+    this.#modelAccessStates.set(modelAccess, Object.freeze({
+      tenant_id: parsed.tenant_id,
+      credential_owner_id: parsed.credential_owner_id,
+      credential_generation: parsed.credential_generation,
+      expected_account_hash: parsed.subscription_account_hash,
+      job_id: parsed.job.job_id,
+      attempt_id: parsed.job.attempt_id,
+      fence_generation: parsed.job.fence_generation,
+      runtime_slot_id: parsed.runtime_slot_id,
+      adapter_id: parsed.adapter_id,
+      deadline_at: parsed.job.deadline_at,
+      source_snapshot_count: 0,
+    }));
     this.trustRuntimeSlot(runtimeSlot);
-    this.trustCleanupAuthority(authority, parsed.claim_token);
+    this.trustCleanupAuthority(authority, parsed.claim_token, parsed.adapter_id);
     return claim;
   }
 
@@ -698,6 +1277,11 @@ export class JobStore {
       throw new ContractValidationError("runtime identity already bound for claim");
     }
     const identity = parseRuntimeIdentity(runtimeIdentityValue, "runtime identity");
+    if ((claim.adapter_id === "openclaw" && identity.runtime_kind !== "openclaw_cell") ||
+        (claim.adapter_id === "direct_model" &&
+          identity.runtime_kind !== "direct_model_subscription")) {
+      throw new ContractValidationError("runtime identity kind does not match claimed adapter");
+    }
     const readback = parseRuntimeBindReadback(await rpcOrThrow(
       this.client,
       "bind_company_discovery_runtime",
@@ -709,6 +1293,29 @@ export class JobStore {
       },
     ), claim, identity);
     this.#runtimeBindings.set(claim, readback);
+    const modelState = this.#modelAccessStates.get(claim.model_access);
+    if (modelState === undefined || !this.#activeModelAccess.has(claim.model_access)) {
+      throw new ContractValidationError("active model access capability unavailable");
+    }
+    this.#modelAccessStates.set(claim.model_access, Object.freeze({
+      ...modelState,
+      subscription_socket_path: readback.runtime_identity.subscription_socket_path,
+      runtime_identity_hash: readback.runtime_identity_hash,
+    }));
+    const recoveryState = this.#subscriptionRecoveryStates.get(
+      claim.cleanup_authority.subscription_recovery,
+    );
+    if (recoveryState === undefined) {
+      throw new ContractValidationError("subscription recovery private state unavailable");
+    }
+    this.#subscriptionRecoveryStates.set(
+      claim.cleanup_authority.subscription_recovery,
+      Object.freeze({
+        ...recoveryState,
+        subscription_socket_path: readback.runtime_identity.subscription_socket_path,
+        runtime_kind: readback.runtime_identity.runtime_kind,
+      }),
+    );
     return readback;
   }
 
@@ -721,7 +1328,254 @@ export class JobStore {
     const claim = this.#claimForJob.get(claimedJob)!;
     this.#trustedJobs.add(bound);
     this.#claimForJob.set(bound, claim);
+    const modelState = this.#modelAccessStates.get(claim.model_access);
+    if (modelState === undefined || !this.#activeModelAccess.has(claim.model_access)) {
+      throw new ContractValidationError("active model access capability unavailable");
+    }
+    this.#modelAccessStates.set(claim.model_access, Object.freeze({
+      ...modelState,
+      source_snapshot_count: bound.source_snapshots.length,
+    }));
     return bound;
+  }
+
+  async assertModelAccessCurrent(
+    capability: ModelAccessCapability,
+    expected?: ModelAccessExpectation,
+  ): Promise<Readonly<ModelAccessContext>> {
+    if (!this.#trustedModelAccess.has(capability)) {
+      throw new ContractValidationError("store-issued model access capability required");
+    }
+    if (!this.#activeModelAccess.has(capability)) {
+      throw new ContractValidationError("inactive model access capability");
+    }
+    const state = this.#modelAccessStates.get(capability);
+    if (state === undefined) {
+      this.deactivateModelAccess(capability);
+      throw new ContractValidationError("model access private state unavailable");
+    }
+    if (expected !== undefined && !expectationMatches(state, expected)) {
+      throw new ContractValidationError("model access expectation mismatch");
+    }
+    const claim = this.#activeClaimByAttempt.get(state.attempt_id);
+    if (claim === undefined || claim.model_access !== capability) {
+      this.deactivateModelAccess(capability);
+      throw new ContractValidationError("inactive model access capability");
+    }
+    const claimToken = this.#claimSecrets.get(claim);
+    if (claimToken === undefined) {
+      this.deactivateModelAccess(capability);
+      throw new ContractValidationError("model access claim secret unavailable");
+    }
+    try {
+      return parseModelAccessReadback(await rpcOrThrow(
+        this.client,
+        "read_company_discovery_model_access",
+        {
+          p_attempt_id: state.attempt_id,
+          p_fence_generation: state.fence_generation,
+          p_claim_token: claimToken,
+          p_credential_generation: state.credential_generation,
+        },
+      ), state);
+    } catch (error) {
+      this.deactivateModelAccess(capability);
+      throw error;
+    }
+  }
+
+  async assertSubscriptionRecoveryCurrent(
+    capability: SubscriptionRecoveryCapability,
+  ): Promise<Readonly<SubscriptionRecoveryContext>> {
+    if (!this.#trustedSubscriptionRecovery.has(capability)) {
+      throw new ContractValidationError("store-issued subscription recovery required");
+    }
+    if (!this.#activeSubscriptionRecovery.has(capability)) {
+      throw new ContractValidationError("inactive subscription recovery capability");
+    }
+    const state = this.#subscriptionRecoveryStates.get(capability);
+    const authority = this.#cleanupForSubscriptionRecovery.get(capability);
+    if (state === undefined || authority === undefined ||
+        this.#activeCleanupByAttempt.get(state.attempt_id) !== authority) {
+      this.deactivateSubscriptionRecovery(capability);
+      throw new ContractValidationError("inactive subscription recovery capability");
+    }
+    const token = this.#cleanupSecrets.get(authority);
+    if (token === undefined) {
+      this.deactivateSubscriptionRecovery(capability);
+      throw new ContractValidationError("subscription recovery secret unavailable");
+    }
+    try {
+      return parseSubscriptionRecoveryReadback(await rpcOrThrow(
+        this.client,
+        "read_company_discovery_subscription_recovery",
+        {
+          p_attempt_id: state.attempt_id,
+          p_fence_generation: state.fence_generation,
+          p_claim_token: token,
+        },
+      ), state);
+    } catch (error) {
+      this.deactivateSubscriptionRecovery(capability);
+      throw error;
+    }
+  }
+
+  async reserveSubscriptionRequest(
+    capability: ModelAccessCapability,
+    prospectiveValue: SubscriptionRequestProspective,
+  ): Promise<Readonly<SubscriptionReservationReadback>> {
+    // The object-identity check intentionally happens before parsing caller data
+    // or touching PostgreSQL. A clone or cross-store capability gets no oracle.
+    if (!this.#trustedModelAccess.has(capability) ||
+        !this.#activeModelAccess.has(capability)) {
+      throw new ContractValidationError("active store-issued model access capability required");
+    }
+    const prospectiveRecord = plainRecord(
+      prospectiveValue,
+      "subscription request prospective",
+    );
+    exactKeys(
+      prospectiveRecord,
+      ["input_bytes", "output_bytes", "lease_seconds"],
+      "subscription request prospective",
+    );
+    const prospective = Object.freeze({
+      input_bytes: positiveInteger(
+        prospectiveRecord.input_bytes,
+        "subscription prospective input bytes",
+      ),
+      output_bytes: positiveInteger(
+        prospectiveRecord.output_bytes,
+        "subscription prospective output bytes",
+      ),
+      lease_seconds: positiveInteger(
+        prospectiveRecord.lease_seconds,
+        "subscription prospective lease seconds",
+      ),
+    });
+    if (prospective.input_bytes > 400_000 || prospective.output_bytes > 4_194_304 ||
+        prospective.lease_seconds > 600) {
+      throw new ContractValidationError("subscription request prospective exceeds release caps");
+    }
+    const context = await this.assertModelAccessCurrent(capability);
+    const state = this.#modelAccessStates.get(capability);
+    const claim = state === undefined
+      ? undefined
+      : this.#activeClaimByAttempt.get(state.attempt_id);
+    if (state === undefined || claim === undefined || claim.model_access !== capability) {
+      throw new ContractValidationError("active model access private state unavailable");
+    }
+    const claimToken = this.#claimSecrets.get(claim);
+    if (claimToken === undefined) {
+      throw new ContractValidationError("model access claim secret unavailable");
+    }
+    const parsed = parseSubscriptionReservationReadback(await rpcOrThrow(
+      this.client,
+      "reserve_company_discovery_subscription_request",
+      {
+        p_attempt_id: context.attempt_id,
+        p_fence_generation: context.fence_generation,
+        p_claim_token: claimToken,
+        p_credential_generation: context.credential_generation,
+        p_request_key: randomUUID(),
+        p_input_bytes: prospective.input_bytes,
+        p_output_bytes: prospective.output_bytes,
+        p_lease_seconds: prospective.lease_seconds,
+      },
+    ), prospective, context.deadline_at);
+    const reservation = opaqueSubscriptionReservation();
+    this.#trustedSubscriptionReservations.add(reservation);
+    this.#activeSubscriptionReservations.add(reservation);
+    this.#subscriptionReservationStates.set(reservation, Object.freeze({
+      reservation_id: parsed.reservation_id,
+      reservation_token: parsed.reservation_token,
+      claim_token: claimToken,
+      attempt_id: context.attempt_id,
+      fence_generation: context.fence_generation,
+      prospective_input_bytes: prospective.input_bytes,
+      prospective_output_bytes: prospective.output_bytes,
+    }));
+    return Object.freeze({ reservation, ...parsed.safe });
+  }
+
+  async settleSubscriptionRequest(
+    reservation: SubscriptionRequestReservationCapability,
+    settlementValue: SubscriptionRequestSettlement,
+  ): Promise<Readonly<SubscriptionSettlementReadback>> {
+    // Settlement stays usable after attempt cancellation so an in-flight
+    // request can release its durable reservation. Only this store's live
+    // reservation object can reach the RPC.
+    if (!this.#trustedSubscriptionReservations.has(reservation) ||
+        !this.#activeSubscriptionReservations.has(reservation)) {
+      throw new ContractValidationError(
+        "active store-issued subscription reservation required",
+      );
+    }
+    const state = this.#subscriptionReservationStates.get(reservation);
+    if (state === undefined) {
+      throw new ContractValidationError("subscription reservation private state unavailable");
+    }
+    const row = plainRecord(settlementValue, "subscription request settlement");
+    exactKeys(row, [
+      "input_bytes", "output_bytes", "observed_input_tokens",
+      "observed_output_tokens", "usage_complete", "quota_state",
+      "retry_after_seconds",
+    ], "subscription request settlement");
+    const inputBytes = nonnegativeInteger(
+      row.input_bytes,
+      "subscription settlement input bytes",
+    );
+    const outputBytes = nonnegativeInteger(
+      row.output_bytes,
+      "subscription settlement output bytes",
+    );
+    const observedInputTokens = row.observed_input_tokens === null
+      ? null
+      : nonnegativeInteger(
+        row.observed_input_tokens,
+        "subscription settlement observed input tokens",
+      );
+    const observedOutputTokens = row.observed_output_tokens === null
+      ? null
+      : nonnegativeInteger(
+        row.observed_output_tokens,
+        "subscription settlement observed output tokens",
+      );
+    if (inputBytes > state.prospective_input_bytes ||
+        outputBytes > state.prospective_output_bytes ||
+        typeof row.usage_complete !== "boolean" ||
+        (row.usage_complete &&
+          (observedInputTokens === null || observedOutputTokens === null)) ||
+        (row.quota_state !== "available" && row.quota_state !== "cooldown" &&
+          row.quota_state !== "unknown") ||
+        (row.quota_state === "cooldown" &&
+          (!Number.isSafeInteger(row.retry_after_seconds) ||
+            (row.retry_after_seconds as number) < 1 ||
+            (row.retry_after_seconds as number) > 3_600)) ||
+        (row.quota_state !== "cooldown" && row.retry_after_seconds !== null)) {
+      throw new ContractValidationError("subscription request settlement invalid");
+    }
+    const parsed = parseSubscriptionSettlementReadback(await rpcOrThrow(
+      this.client,
+      "settle_company_discovery_subscription_request",
+      {
+        p_attempt_id: state.attempt_id,
+        p_fence_generation: state.fence_generation,
+        p_claim_token: state.claim_token,
+        p_reservation_id: state.reservation_id,
+        p_reservation_token: state.reservation_token,
+        p_input_bytes: inputBytes,
+        p_output_bytes: outputBytes,
+        p_observed_input_tokens: observedInputTokens,
+        p_observed_output_tokens: observedOutputTokens,
+        p_usage_complete: row.usage_complete,
+        p_quota_state: row.quota_state,
+        p_retry_after_seconds: row.retry_after_seconds,
+      },
+    ));
+    this.#activeSubscriptionReservations.delete(reservation);
+    return parsed;
   }
 
   async commitResult(
@@ -785,6 +1639,7 @@ export class JobStore {
         !/^[a-z][a-z0-9_]{0,99}$/.test(reason)) {
       throw new ContractValidationError("terminal outcome or reason invalid");
     }
+    const subscriptionRecovery = opaqueSubscriptionRecoveryCapability();
     const authority = parseTerminalReadback(await rpcOrThrow(
       this.client,
       "terminalize_company_discovery_attempt",
@@ -795,9 +1650,14 @@ export class JobStore {
         p_outcome: outcome,
         p_reason: reason,
       },
-    ), claim, outcome, binding, claimToken);
+    ), claim, outcome, binding, claimToken, subscriptionRecovery);
     this.deactivateClaim(claim);
-    this.trustCleanupAuthority(authority.authority, authority.claim_token);
+    this.trustCleanupAuthority(
+      authority.authority,
+      authority.claim_token,
+      claim.adapter_id,
+      binding.runtime_identity,
+    );
     return authority.authority;
   }
 
@@ -819,11 +1679,13 @@ export class JobStore {
       parsed.attempt_id,
       parsed.runtime_slot_id,
     );
+    const subscriptionRecovery = opaqueSubscriptionRecoveryCapability();
     const authority = cleanupAuthority(
       parsed.job_id,
       parsed.attempt_id,
       runtimeSlot,
       parsed.fence_generation,
+      subscriptionRecovery,
     );
     const claim: ExpiredCleanupClaim = Object.freeze({
       recovery_outcome: "cleanup_claimed",
@@ -838,7 +1700,12 @@ export class JobStore {
       cleanup_authority: authority,
     });
     this.trustRuntimeSlot(runtimeSlot);
-    this.trustCleanupAuthority(authority, parsed.claim_token);
+    this.trustCleanupAuthority(
+      authority,
+      parsed.claim_token,
+      parsed.adapter_id,
+      parsed.runtime_identity,
+    );
     return claim;
   }
 
@@ -856,14 +1723,19 @@ export class JobStore {
     if (claimToken === undefined) {
       throw new ContractValidationError("cleanup authority secret unavailable");
     }
+    const cleanupAdapter = this.#cleanupAdapters.get(authority);
+    if (cleanupAdapter === undefined) {
+      throw new ContractValidationError("cleanup authority adapter unavailable");
+    }
     const data = await rpcOrThrow(this.client, "record_company_discovery_cleanup", {
       p_attempt_id: authority.attempt_id,
       p_fence_generation: authority.fence_generation,
       p_claim_token: claimToken,
-      p_proof: parseCleanupProof(proof),
+      p_proof: parseCleanupProof(proof, cleanupAdapter),
     });
     const readback = cleanupReadback(data, authority.attempt_id);
     this.#activeCleanupByAttempt.delete(authority.attempt_id);
+    this.deactivateSubscriptionRecovery(authority.subscription_recovery);
     if (readback.cleanup_state === "proved" && readback.slot_updated) {
       this.deactivateRuntimeSlot(authority.runtime_slot);
     }
@@ -894,10 +1766,36 @@ export class JobStore {
     this.deactivateRuntimeSlot(runtimeSlot);
   }
 
-  private trustCleanupAuthority(authority: CleanupAuthority, claimToken: string): void {
+  private trustCleanupAuthority(
+    authority: CleanupAuthority,
+    claimToken: string,
+    adapterId: DiscoveryAdapterId,
+    runtimeIdentity?: RuntimeIdentityBinding,
+  ): void {
+    const previous = this.#activeCleanupByAttempt.get(authority.attempt_id);
+    if (previous !== undefined) {
+      this.#activeSubscriptionRecovery.delete(previous.subscription_recovery);
+    }
     this.#trustedCleanupAuthorities.add(authority);
     this.#activeCleanupByAttempt.set(authority.attempt_id, authority);
     this.#cleanupSecrets.set(authority, claimToken);
+    this.#cleanupAdapters.set(authority, adapterId);
+    this.#trustedSubscriptionRecovery.add(authority.subscription_recovery);
+    this.#activeSubscriptionRecovery.add(authority.subscription_recovery);
+    this.#cleanupForSubscriptionRecovery.set(
+      authority.subscription_recovery,
+      authority,
+    );
+    this.#subscriptionRecoveryStates.set(
+      authority.subscription_recovery,
+      Object.freeze({
+        job_id: authority.job_id,
+        attempt_id: authority.attempt_id,
+        fence_generation: authority.fence_generation,
+        subscription_socket_path: runtimeIdentity?.subscription_socket_path,
+        runtime_kind: runtimeIdentity?.runtime_kind,
+      }),
+    );
   }
 
   private trustRuntimeSlot(runtimeSlot: RuntimeSlotCapability): void {
@@ -925,9 +1823,25 @@ export class JobStore {
 
   private deactivateClaim(claim: ClaimedAttempt): void {
     this.#activeClaims.delete(claim);
+    this.deactivateModelAccess(claim.model_access);
     if (this.#activeClaimByAttempt.get(claim.job.attempt_id) === claim) {
       this.#activeClaimByAttempt.delete(claim.job.attempt_id);
     }
+  }
+
+  private deactivateModelAccess(capability: ModelAccessCapability): void {
+    this.#activeModelAccess.delete(capability);
+    const state = this.#modelAccessStates.get(capability);
+    if (state !== undefined &&
+        this.#activeModelAccessByAttempt.get(state.attempt_id) === capability) {
+      this.#activeModelAccessByAttempt.delete(state.attempt_id);
+    }
+  }
+
+  private deactivateSubscriptionRecovery(
+    capability: SubscriptionRecoveryCapability,
+  ): void {
+    this.#activeSubscriptionRecovery.delete(capability);
   }
 
   private assertActiveCommittedResult(committed: CommittedResultCapability): void {
@@ -943,8 +1857,13 @@ export class JobStore {
   private invalidateAttemptCapabilities(attemptId: string): void {
     const claim = this.#activeClaimByAttempt.get(attemptId);
     if (claim !== undefined) this.deactivateClaim(claim);
+    const modelAccess = this.#activeModelAccessByAttempt.get(attemptId);
+    if (modelAccess !== undefined) this.deactivateModelAccess(modelAccess);
     const cleanup = this.#activeCleanupByAttempt.get(attemptId);
-    if (cleanup !== undefined) this.#activeCleanupByAttempt.delete(attemptId);
+    if (cleanup !== undefined) {
+      this.#activeCleanupByAttempt.delete(attemptId);
+      this.deactivateSubscriptionRecovery(cleanup.subscription_recovery);
+    }
     const runtimeSlot = this.#activeRuntimeSlotByAttempt.get(attemptId);
     if (runtimeSlot !== undefined) this.deactivateRuntimeSlot(runtimeSlot);
     const committed = this.#activeCommittedByAttempt.get(attemptId);

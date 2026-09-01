@@ -25,6 +25,7 @@ import {
 import {
   buildCellLifecyclePlan,
   buildOpenClawConfig,
+  BRIDGE_SUBSCRIPTION_SOCKET_PATH,
 } from "../src/openclaw/cell-runtime";
 import {
   AttemptMcpBridge,
@@ -88,6 +89,84 @@ const PROXY_TOOLS = [{
   },
 }] as const;
 
+const OPENCLAW_INDEX = "sha256:e7849cb6c1ef1ead39ab4be7d85edb2df89611f486e283284c7cf35ce39a20d4";
+const TEST_IMAGES = {
+  cell_image: {
+    reference: `ghcr.io/openclaw/openclaw@${OPENCLAW_INDEX}`,
+    index_digest: OPENCLAW_INDEX,
+    platform: "linux/arm64" as const,
+    selected_manifest_digest: `sha256:${"c".repeat(64)}`,
+    image_id: `sha256:${"d".repeat(64)}`,
+    config_digest: `sha256:${"d".repeat(64)}`,
+  },
+  bridge_image: {
+    reference: `ligou-discovery-bridge@sha256:${"b".repeat(64)}`,
+    index_digest: `sha256:${"b".repeat(64)}`,
+    platform: "linux/arm64" as const,
+    selected_manifest_digest: `sha256:${"6".repeat(64)}`,
+    image_id: `sha256:${"f".repeat(64)}`,
+    config_digest: `sha256:${"f".repeat(64)}`,
+  },
+};
+
+function testJwt(accountId: string, expiresAt: number, marker = false): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: marker ? "HS256" : "RS256", typ: "JWT" })}.${encode({
+    exp: expiresAt,
+    "https://api.openai.com/auth": { chatgpt_account_id: accountId },
+  })}.${marker ? "m".repeat(43) : "synthetic"}`;
+}
+
+const TEST_NOW = Date.parse("2099-09-01T10:00:00.000Z");
+const TEST_DEADLINE = "2099-09-01T10:10:00.000Z";
+const TEST_MARKER = testJwt("ligou-stage0-abcdefghijklmnopqrstuvwx", Math.floor(TEST_NOW / 1_000) + 3_600, true);
+const TEST_ACCOUNT = "acct_test_subscription";
+const TEST_EXPIRY = Math.floor(Date.parse(TEST_DEADLINE) / 1_000) + 180;
+const TEST_GRANT = {
+  access_token: testJwt(TEST_ACCOUNT, TEST_EXPIRY),
+  account_id: TEST_ACCOUNT,
+  expires_at: TEST_EXPIRY,
+  source: "hermes-auth-store" as const,
+};
+
+function proxyBody() {
+  return {
+    model: "gpt-5.6-sol",
+    store: false,
+    stream: true,
+    instructions: "Use only discovery tools.",
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "discover" }] }],
+    tools: PROXY_TOOLS,
+    tool_choice: "auto",
+    parallel_tool_calls: false,
+    reasoning: { effort: "high", summary: "auto" },
+    text: { verbosity: "low" },
+    include: ["reasoning.encrypted_content"],
+  };
+}
+
+function completedSse(): string {
+  return `data: ${JSON.stringify({
+    type: "response.completed",
+    response: {
+      status: "completed",
+      usage: {
+        input_tokens: 10,
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 2,
+        total_tokens: 12,
+      },
+    },
+  })}\n\ndata: [DONE]\n\n`;
+}
+
+function allocateTestIdentity(options: {
+  reserveLoopbackPort: () => Promise<number>;
+  randomBytes: (size: number) => Buffer;
+}) {
+  return allocateRuntimeIdentity({ ...options, image_evidence: TEST_IMAGES });
+}
+
 const job: WorkerJob = {
   job_type: "company_discovery.v1",
   job_id: "11111111-1111-4111-8111-111111111111",
@@ -129,7 +208,7 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
   test("allocates opaque non-colliding identities without using the default profile or port", async () => {
     const ports = [29_101, 29_102];
     const randomValues = [Buffer.alloc(24, 0x11), Buffer.alloc(24, 0x22)];
-    const allocate = () => allocateRuntimeIdentity({
+    const allocate = () => allocateTestIdentity({
       reserveLoopbackPort: async () => ports.shift()!,
       randomBytes: () => randomValues.shift()!,
     });
@@ -159,14 +238,14 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
   });
 
   test("builds a deny-by-default config with only the two discovery MCP tools", async () => {
-    const identity = await allocateRuntimeIdentity({
+    const identity = await allocateTestIdentity({
       reserveLoopbackPort: async () => 29_103,
       randomBytes: () => Buffer.alloc(24, 0x33),
     });
     const config = buildOpenClawConfig({
       identity,
-      proxy_marker: "stage0-proxy-marker",
-      upstream_model: "gpt-5.4-mini",
+      proxy_marker: TEST_MARKER,
+      upstream_model: "gpt-5.6-sol",
     });
 
     expect(config.gateway).toEqual({
@@ -189,25 +268,19 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
     expect(config.models.catalogRefresh).toEqual({ enabled: false });
     expect(config.models.mode).toBe("replace");
     expect(config.models.providers.stage0_bridge).toMatchObject({
-      baseUrl: `http://bridge:${identity.bridge_http_port}/v1`,
-      apiKey: "stage0-proxy-marker",
-      api: "openai-responses",
+      baseUrl: `http://bridge:${identity.bridge_http_port}`,
+      apiKey: TEST_MARKER,
+      api: "openai-chatgpt-responses",
     });
     expect(config.agents.defaults.sandbox).toMatchObject({
-      mode: "all",
-      scope: "session",
+      mode: "off",
       workspaceAccess: "none",
-      docker: {
-        network: "none",
-        readOnlyRoot: true,
-        capDrop: ["ALL"],
-      },
+      browser: { enabled: false, allowHostControl: false },
     });
     expect(config.tools.allow).toEqual([
       "discovery__fetch_discovery_page",
       "discovery__submit_discovery_result",
     ]);
-    expect(config.tools.sandbox.tools.allow).toEqual(config.tools.allow);
     expect(config.tools.elevated).toEqual({ enabled: false });
     expect(config.skills).toEqual({ allowBundled: [], entries: {} });
     expect(config.tools.deny).toEqual(expect.arrayContaining([
@@ -245,12 +318,13 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
   });
 
   test("binds only non-secret opaque Docker identity to Ligou authority", async () => {
-    const identity = await allocateRuntimeIdentity({
+    const identity = await allocateTestIdentity({
       reserveLoopbackPort: async () => 29_109,
       randomBytes: () => Buffer.alloc(24, 0x39),
     });
 
     expect(runtimeIdentityBinding(identity)).toEqual({
+      runtime_kind: "openclaw_cell",
       cell_container_name: identity.cell_container_name,
       bridge_container_name: identity.bridge_container_name,
       internal_network_name: identity.internal_network_name,
@@ -263,6 +337,9 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
       bridge_secret_volume_name: identity.volume_names.bridge_secret,
       profile_name: identity.profile_name,
       loopback_port: 29_109,
+      cell_image: identity.image_evidence.cell_image,
+      bridge_image: identity.image_evidence.bridge_image,
+      subscription_socket_path: identity.subscription_socket_path,
     });
     expect(JSON.stringify(runtimeIdentityBinding(identity))).not.toMatch(
       /token|credential|api_key|config_path|state_path|workspace_path|output_path/i,
@@ -271,7 +348,7 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
 
   test("resolves only the supervisor-bound runtime identity for the exact attempt fence", async () => {
     const registry = new AttemptRuntimeIdentityRegistry();
-    const identity = await allocateRuntimeIdentity({
+    const identity = await allocateTestIdentity({
       reserveLoopbackPort: async () => 29_110,
       randomBytes: () => Buffer.alloc(24, 0x3a),
     });
@@ -285,30 +362,28 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
   });
 
   test("launches the cell on only its internal network with hardened limits and no secret environment", async () => {
-    const identity = await allocateRuntimeIdentity({
+    const identity = await allocateTestIdentity({
       reserveLoopbackPort: async () => 29_104,
       randomBytes: () => Buffer.alloc(24, 0x44),
     });
     const config = buildOpenClawConfig({
       identity,
-      proxy_marker: "stage0-proxy-marker",
-      upstream_model: "gpt-5.4-mini",
+      proxy_marker: TEST_MARKER,
+      upstream_model: "gpt-5.6-sol",
     });
     const plan = buildCellLifecyclePlan({
       identity,
       config,
       gateway_token: "attempt-gateway-secret",
       bridge_secret: {
-        upstream_api_key: "upstream-secret-key",
-        upstream_url: "https://api.openai.com/v1/responses",
-        upstream_model: "gpt-5.4-mini",
-        proxy_marker: "stage0-proxy-marker",
+        upstream_model: "gpt-5.6-sol",
+        proxy_marker: TEST_MARKER,
+        subscription_socket_path: BRIDGE_SUBSCRIPTION_SOCKET_PATH,
         normalized_origin: job.normalized_origin,
         deadline_at: job.deadline_at,
         budget: job.budget,
         source_snapshots: job.source_snapshots,
       },
-      bridge_image: "ligou-discovery-bridge@sha256:" + "b".repeat(64),
     });
     const cell = plan.find((command) => command.label === "start-cell")!;
     const bridge = plan.find((command) => command.label === "start-bridge")!;
@@ -323,16 +398,17 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
       "--cpus=1",
       "--network",
       identity.internal_network_name,
-      OPENCLAW_CELL_IMAGE,
+      `ghcr.io/openclaw/openclaw@${TEST_IMAGES.cell_image.selected_manifest_digest}`,
       "gateway",
       "run",
       "--port",
       String(identity.gateway_port),
     ]));
     expect(cell.argv.filter((value) => value === "--network")).toHaveLength(1);
-    const imageIndex = cell.argv.indexOf(OPENCLAW_CELL_IMAGE);
+    const selectedCellImage = `ghcr.io/openclaw/openclaw@${TEST_IMAGES.cell_image.selected_manifest_digest}`;
+    const imageIndex = cell.argv.indexOf(selectedCellImage);
     expect(cell.argv.slice(imageIndex, imageIndex + 4)).toEqual([
-      OPENCLAW_CELL_IMAGE,
+      selectedCellImage,
       "node",
       "/app/openclaw.mjs",
       "--profile",
@@ -462,97 +538,6 @@ describe("trusted bridge authority", () => {
     ]);
     await expect(bridge.callTool(connection, "submit_discovery_result", { result: hostile }))
       .rejects.toThrow("exact keys");
-  });
-});
-
-describe("fixed model proxy", () => {
-  test("forwards only Responses requests to one fixed upstream with supervisor key injection", async () => {
-    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
-    const proxy = new FixedModelProxy({
-      proxy_marker: "stage0-proxy-marker",
-      upstream_api_key: "upstream-secret-key",
-      upstream_url: "https://api.openai.com/v1/responses",
-      upstream_model: "gpt-5.4-mini",
-      fetch: async (input, init) => {
-        calls.push({ input, init });
-        return new Response(JSON.stringify({ id: "resp_1", status: "completed", output: [] }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      },
-    });
-    const response = await proxy.forward(new Request("http://bridge:4310/v1/responses", {
-      method: "POST",
-      headers: {
-        authorization: "Bearer stage0-proxy-marker",
-        "content-type": "application/json",
-        "x-upstream-url": "https://attacker.invalid/",
-      },
-      body: JSON.stringify({
-        model: "gpt-5.4-mini",
-        input: "bounded discovery",
-        max_output_tokens: 999_999,
-        store: true,
-        background: true,
-        parallel_tool_calls: true,
-        tools: PROXY_TOOLS,
-      }),
-    }));
-
-    expect(response.status).toBe(200);
-    expect(calls).toHaveLength(1);
-    expect(String(calls[0]!.input)).toBe("https://api.openai.com/v1/responses");
-    expect(calls[0]!.init?.method).toBe("POST");
-    const headers = new Headers(calls[0]!.init?.headers);
-    expect(headers.get("authorization")).toBe("Bearer upstream-secret-key");
-    expect(headers.get("x-upstream-url")).toBeNull();
-    expect(JSON.parse(String(calls[0]!.init?.body))).toMatchObject({
-      max_output_tokens: 16_384,
-      store: false,
-      background: false,
-      parallel_tool_calls: false,
-    });
-  });
-
-  test("rejects arbitrary paths, methods, models, credentials, and tool expansion", async () => {
-    const proxy = new FixedModelProxy({
-      proxy_marker: "stage0-proxy-marker",
-      upstream_api_key: "upstream-secret-key",
-      upstream_url: "https://api.openai.com/v1/responses",
-      upstream_model: "gpt-5.4-mini",
-      fetch: async () => { throw new Error("must not reach upstream"); },
-    });
-    const request = (path: string, method: string, marker = "stage0-proxy-marker", body: unknown = {
-      model: "gpt-5.4-mini",
-      input: "bounded discovery",
-      tools: PROXY_TOOLS,
-    }) => new Request(`http://bridge:4310${path}`, {
-      method,
-      headers: { authorization: `Bearer ${marker}`, "content-type": "application/json" },
-      body: method === "POST" ? JSON.stringify(body) : undefined,
-    });
-
-    await expect(proxy.forward(request("/proxy?url=https://attacker.invalid", "POST"))).rejects.toThrow("fixed route");
-    await expect(proxy.forward(request("/v1/responses", "PUT"))).rejects.toThrow("POST");
-    await expect(proxy.forward(request("/v1/responses", "POST", "wrong"))).rejects.toThrow("marker");
-    await expect(proxy.forward(request("/v1/responses", "POST", "stage0-proxy-marker", {
-      model: "attacker-model",
-      input: "bounded discovery",
-      tools: [],
-    }))).rejects.toThrow("fixed model");
-    await expect(proxy.forward(request("/v1/responses", "POST", "stage0-proxy-marker", {
-      model: "gpt-5.4-mini",
-      input: "hostile evidence",
-      tools: [{ type: "function", name: "exec", parameters: {} }],
-    }))).rejects.toThrow("tool authority");
-    await expect(proxy.forward(request("/v1/responses", "POST", "stage0-proxy-marker", {
-      model: "gpt-5.4-mini",
-      input: "hostile evidence",
-      tools: [
-        { type: "function", name: "discovery__fetch_discovery_page", parameters: {} },
-        { type: "function", name: "discovery__submit_discovery_result", parameters: {} },
-      ],
-    }))).rejects.toThrow("tool schema");
   });
 });
 
@@ -759,7 +744,9 @@ describe("supervisor-owned Gateway connection", () => {
 
 describe("trusted bridge sidecar listeners", () => {
   test("serves only the fixed proxy, two MCP tools, and one TCP relay, then closes all three", async () => {
-    const echo = createTcpServer((socket) => socket.pipe(socket));
+    const echo = createTcpServer((socket) => {
+      socket.once("data", (chunk) => socket.write(chunk));
+    });
     await new Promise<void>((resolve, reject) => {
       echo.once("error", reject);
       echo.listen(0, "127.0.0.1", resolve);
@@ -767,7 +754,7 @@ describe("trusted bridge sidecar listeners", () => {
     const echoAddress = echo.address();
     if (echoAddress === null || typeof echoAddress === "string") throw new Error("echo listener missing");
     const mcpBridge = new AttemptMcpBridge({
-      proxy_marker: "stage0-proxy-marker",
+      proxy_marker: TEST_MARKER,
       expected_remote_address: "127.0.0.1",
       fetch_context: attemptContext(),
       source_snapshots: [snapshot],
@@ -775,13 +762,16 @@ describe("trusted bridge sidecar listeners", () => {
       submit_result: async () => undefined,
     });
     const proxy = new FixedModelProxy({
-      proxy_marker: "stage0-proxy-marker",
-      upstream_api_key: "upstream-secret-key",
-      upstream_url: "https://api.openai.com/v1/responses",
-      upstream_model: "gpt-5.4-mini",
-      fetch: async () => new Response(JSON.stringify({ id: "resp_1", status: "completed", output: [] }), {
+      proxy_marker: TEST_MARKER,
+      adapter_id: "openclaw",
+      codex_access_grant: TEST_GRANT,
+      upstream_model: "gpt-5.6-sol",
+      deadline_at: TEST_DEADLINE,
+      lease_session_id: "stage0_session_abcdefghijklmnop",
+      now: () => TEST_NOW,
+      fetch: async () => new Response(completedSse(), {
         status: 200,
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "text/event-stream" },
       }),
     });
     const server = new TrustedBridgeServer({
@@ -795,7 +785,7 @@ describe("trusted bridge sidecar listeners", () => {
     const address = await server.start();
     const client = new McpClient({ name: "task4-test", version: "1.0.0" });
     const transport = new StreamableHTTPClientTransport(new URL(`${address.http_url}/mcp`), {
-      requestInit: { headers: { authorization: "Bearer stage0-proxy-marker" } },
+      requestInit: { headers: { authorization: `Bearer ${TEST_MARKER}` } },
     });
 
     try {
@@ -811,17 +801,13 @@ describe("trusted bridge sidecar listeners", () => {
       expect(fetched.isError).not.toBe(true);
       expect(JSON.stringify(fetched)).toContain(snapshot.content_hash);
 
-      const proxied = await fetch(`${address.http_url}/v1/responses`, {
+      const proxied = await fetch(`${address.http_url}/codex/responses`, {
         method: "POST",
         headers: {
-          authorization: "Bearer stage0-proxy-marker",
+          authorization: `Bearer ${TEST_MARKER}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({
-          model: "gpt-5.4-mini",
-          input: "bounded discovery",
-          tools: PROXY_TOOLS,
-        }),
+        body: JSON.stringify(proxyBody()),
       });
       expect(proxied.status).toBe(200);
       expect((await fetch(`${address.http_url}/anything`)).status).toBe(404);
@@ -843,7 +829,7 @@ describe("trusted bridge sidecar listeners", () => {
       await new Promise<void>((resolve) => echo.close(() => resolve()));
     }
 
-    await expect(fetch(`${address.http_url}/v1/responses`)).rejects.toThrow();
+    await expect(fetch(`${address.http_url}/codex/responses`)).rejects.toThrow();
     await expect(new Promise<void>((resolve, reject) => {
       const socket = connectTcp(address.relay_port, "127.0.0.1");
       socket.once("connect", () => { socket.destroy(); resolve(); });

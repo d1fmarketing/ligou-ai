@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import type {
   DiscoveryAdapterId,
   DiscoverySourceSnapshot,
+  ModelAccessCapability,
+  SubscriptionGateway,
+  SubscriptionRevocationReadback,
   WorkerHandle,
   WorkerJob,
   WorkerResult,
@@ -10,8 +13,10 @@ import type {
 import type {
   ClaimedAttempt,
   CleanupAuthority,
+  CleanupProof,
   CleanupReadback,
   CommittedResultCapability,
+  DirectModelCleanupProof,
   ExpiredCleanupClaim,
   ExpiredCleanupRecovery,
   JobStore,
@@ -21,11 +26,11 @@ import type {
 } from "./job-store";
 import {
   storeCleanupProof,
-  type DetailedCleanupProof,
-  type RuntimeCleanupProof,
+  type LocalOpenClawCleanupProof,
 } from "./openclaw/cell-runtime";
 import {
   runtimeIdentityBinding,
+  type AttemptRuntimeIdentity,
   type AttemptRuntimeIdentityRegistry,
   type RuntimeIdentity,
   type RuntimeIdentityBinding,
@@ -67,8 +72,18 @@ export interface SupervisorStore {
   ): Promise<SupervisorCleanupAuthority>;
   recordCleanup(
     authority: SupervisorCleanupAuthority,
-    proof: DetailedCleanupProof,
+    proof: CleanupProof,
   ): Promise<CleanupReadback>;
+  assertSubscriptionRecoveryCurrent(
+    capability: SupervisorCleanupAuthority["subscription_recovery"],
+  ): Promise<{
+    readonly job_id: string;
+    readonly attempt_id: string;
+    readonly fence_generation: number;
+    readonly subscription_socket_path: string;
+    readonly runtime_kind: "openclaw_cell" | "direct_model_subscription";
+    readonly late_result_rejected: true;
+  }>;
   quarantineSlot(
     runtimeSlot: RuntimeSlotCapability,
     reason: string,
@@ -80,7 +95,11 @@ type AssertTrue<T extends true> = T;
 type ConcreteJobStoreMatchesSupervisor = AssertTrue<JobStore extends SupervisorStore ? true : false>;
 
 export interface SupervisorBroker {
-  submit(adapterId: DiscoveryAdapterId, job: WorkerJob): Promise<WorkerHandle>;
+  submit(
+    adapterId: DiscoveryAdapterId,
+    job: WorkerJob,
+    modelAccess: ModelAccessCapability,
+  ): Promise<WorkerHandle>;
   cancel(handle: WorkerHandle): Promise<void>;
   status(handle: WorkerHandle): Promise<WorkerStatus>;
   result(handle: WorkerHandle): Promise<WorkerResult>;
@@ -98,15 +117,30 @@ export interface DiscoverySupervisorOptions {
   readonly broker: SupervisorBroker;
   readonly fetch_gateway: SupervisorFetchGateway;
   readonly select_adapter: () => DiscoveryAdapterId;
-  readonly allocate_runtime_identity: () => Promise<RuntimeIdentity>;
+  readonly allocate_runtime_identity: (
+    adapterId: DiscoveryAdapterId,
+  ) => Promise<AttemptRuntimeIdentity>;
   readonly runtime_identities: AttemptRuntimeIdentityRegistry;
-  readonly retire_worker: (handle: WorkerHandle) => Promise<RuntimeCleanupProof>;
+  readonly subscription_gateway: SubscriptionGateway;
+  readonly retire_worker: (
+    handle: WorkerHandle,
+  ) => Promise<LocalOpenClawCleanupProof | DirectModelRetirementReadback>;
   readonly cleanup_bound_runtime: (
     runtimeIdentity: RuntimeIdentityBinding,
-  ) => Promise<RuntimeCleanupProof>;
+  ) => Promise<LocalOpenClawCleanupProof | DirectModelLocalCleanupProof>;
   readonly now?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly lease_seconds?: number;
+}
+
+export interface DirectModelLocalCleanupProof {
+  readonly runtime_kind: "direct_model_subscription";
+  readonly identity_process_absent: boolean;
+}
+
+export interface DirectModelRetirementReadback extends DirectModelLocalCleanupProof {
+  /** Retained for diagnostics only; DB proof always comes from recover(). */
+  readonly revocation: SubscriptionRevocationReadback;
 }
 
 export type SupervisorRunOutcome =
@@ -152,11 +186,17 @@ function assertUuid(value: string, message: string): void {
   }
 }
 
-function cleanupHash(proof: RuntimeCleanupProof): string {
+type SupervisorCleanupProof = CleanupProof;
+type SupervisorLocalCleanupProof =
+  | LocalOpenClawCleanupProof
+  | DirectModelLocalCleanupProof
+  | DirectModelRetirementReadback;
+
+function cleanupHash(proof: SupervisorCleanupProof): string {
   return createHash("sha256").update(JSON.stringify(proof), "utf8").digest("hex");
 }
 
-function cleanupIsProved(proof: RuntimeCleanupProof): boolean {
+function cleanupIsProved(proof: SupervisorCleanupProof): boolean {
   return Object.values(proof).every((value) => value === true);
 }
 
@@ -264,7 +304,7 @@ export class DiscoverySupervisor {
     }
   }
 
-  async runOnce(signal?: AbortSignal): Promise<SupervisorRunOutcome> {
+  async recoverExpiredCleanup(): Promise<SupervisorRunOutcome | null> {
     const expired = await this.#options.store.claimExpiredCleanup(
       this.#options.worker_id,
       this.#leaseSeconds,
@@ -276,10 +316,21 @@ export class DiscoverySupervisor {
         runtime_slot_id: expired.runtime_slot_id,
       });
     }
-    if (expired !== null) return this.#recoverExpiredCleanup(expired);
+    if (expired !== null) return this.#recoverClaimedExpiredCleanup(expired);
+    return null;
+  }
+
+  async runOnce(
+    signal?: AbortSignal,
+    options: { readonly recover_expired_cleanup?: boolean } = {},
+  ): Promise<SupervisorRunOutcome> {
+    if (options.recover_expired_cleanup !== false) {
+      const recovered = await this.recoverExpiredCleanup();
+      if (recovered !== null) return recovered;
+    }
 
     const adapterId = this.#options.select_adapter();
-    let runtimeIdentity = await this.#options.allocate_runtime_identity();
+    let runtimeIdentity = await this.#options.allocate_runtime_identity(adapterId);
     const claimed = await this.#options.store.claimAttempt(
       this.#options.worker_id,
       adapterId,
@@ -300,7 +351,7 @@ export class DiscoverySupervisor {
     let fetchContext: object | undefined;
     let fetchRetired = false;
     let handle: WorkerHandle | undefined;
-    let runtimeProof: RuntimeCleanupProof | undefined;
+    let localProof: SupervisorLocalCleanupProof | undefined;
     let cleanupAuthority = claimed.cleanup_authority;
     let outcome: SupervisorRunOutcome | undefined;
     let primaryError: unknown;
@@ -313,7 +364,7 @@ export class DiscoverySupervisor {
           break;
         } catch (error) {
           if (!runtimeIdentityConflict(error) || attempt === 3) throw error;
-          runtimeIdentity = await this.#options.allocate_runtime_identity();
+          runtimeIdentity = await this.#options.allocate_runtime_identity(adapterId);
           binding = runtimeIdentityBinding(runtimeIdentity);
         }
       }
@@ -336,7 +387,11 @@ export class DiscoverySupervisor {
       this.#options.runtime_identities.bind(bound, runtimeIdentity);
 
       phase = "adapter_submit";
-      handle = await this.#options.broker.submit(adapterId, bound);
+      handle = await this.#options.broker.submit(
+        adapterId,
+        bound,
+        claimed.model_access,
+      );
       phase = "worker_wait";
       const status = await this.#waitForTerminal(claimed.job, handle, signal);
       if (status.state !== "succeeded") {
@@ -393,34 +448,25 @@ export class DiscoverySupervisor {
       }
       if (runtimeBound) {
         try {
-          runtimeProof = handle === undefined
+          localProof = handle === undefined
             ? await this.#options.cleanup_bound_runtime(binding)
             : await this.#options.retire_worker(handle);
         } catch {
-          runtimeProof = undefined;
+          localProof = undefined;
         }
         this.#options.runtime_identities.retire(claimed.job);
-        if (runtimeProof !== undefined) {
-          try {
-            await this.#recordCleanup(cleanupAuthority, runtimeProof);
-          } catch (cleanupError) {
-            if (primaryError === undefined) primaryError = cleanupError;
-          }
-        } else {
-          const missingProof = this.#missingCleanupProof();
-          try {
-            await this.#quarantine(
-              cleanupAuthority.runtime_slot,
-              "cleanup_record_failed",
-              missingProof,
-            );
-          } catch {
-            // Preserve the primary failure while leaving the slot fail-closed in database authority.
-          }
-          if (primaryError === undefined) primaryError = new Error("runtime cleanup proof missing");
+        const runtimeProof = await this.#authoritativeCleanupProof(
+          binding.runtime_kind,
+          cleanupAuthority,
+          localProof,
+        );
+        try {
+          await this.#recordCleanup(cleanupAuthority, runtimeProof);
+        } catch (cleanupError) {
+          if (primaryError === undefined) primaryError = cleanupError;
         }
       } else {
-        const missingProof = this.#missingCleanupProof();
+        const missingProof = this.#missingCleanupProof(binding.runtime_kind);
         try {
           await this.#quarantine(claimed.runtime_slot, "runtime_bind_failed", missingProof);
         } catch {
@@ -433,7 +479,7 @@ export class DiscoverySupervisor {
     return outcome;
   }
 
-  async #recoverExpiredCleanup(
+  async #recoverClaimedExpiredCleanup(
     claim: SupervisorExpiredCleanupClaim,
   ): Promise<SupervisorRunOutcome> {
     assertUuid(
@@ -442,12 +488,17 @@ export class DiscoverySupervisor {
     );
     assertCleanupAuthority(claim.cleanup_authority, claim);
     const authority = claim.cleanup_authority;
-    let proof: RuntimeCleanupProof;
+    let localProof: SupervisorLocalCleanupProof | undefined;
     try {
-      proof = await this.#options.cleanup_bound_runtime(claim.runtime_identity);
+      localProof = await this.#options.cleanup_bound_runtime(claim.runtime_identity);
     } catch {
-      proof = this.#missingCleanupProof();
+      localProof = undefined;
     }
+    const proof = await this.#authoritativeCleanupProof(
+      claim.runtime_identity.runtime_kind,
+      authority,
+      localProof,
+    );
     await this.#recordCleanup(authority, proof);
     return Object.freeze({
       state: "cleanup_recovered",
@@ -458,24 +509,137 @@ export class DiscoverySupervisor {
 
   async #recordCleanup(
     authority: SupervisorCleanupAuthority,
-    proof: RuntimeCleanupProof,
+    proof: SupervisorCleanupProof,
   ): Promise<void> {
-    const readback = await this.#options.store.recordCleanup(authority, storeCleanupProof(proof));
+    const readback = await this.#options.store.recordCleanup(authority, proof);
     if (!cleanupIsProved(proof) || readback.cleanup_state !== "proved" || !readback.slot_updated) {
       await this.#quarantine(authority.runtime_slot, "cleanup_unresolved", proof);
       throw new Error("runtime cleanup unresolved");
     }
   }
 
+  async #authoritativeCleanupProof(
+    runtimeKind: RuntimeIdentityBinding["runtime_kind"],
+    authority: SupervisorCleanupAuthority,
+    localProof?: SupervisorLocalCleanupProof,
+  ): Promise<SupervisorCleanupProof> {
+    let subscription: SubscriptionRevocationReadback | undefined;
+    let lateResultRejected = false;
+    try {
+      const context = await this.#options.store.assertSubscriptionRecoveryCurrent(
+        authority.subscription_recovery,
+      );
+      const contextMatches = context.job_id === authority.job_id &&
+          context.attempt_id === authority.attempt_id &&
+          context.fence_generation === authority.fence_generation &&
+          context.runtime_kind === runtimeKind &&
+          context.late_result_rejected === true;
+      lateResultRejected = contextMatches;
+      // Recovery consumes only the opaque capability and therefore remains
+      // safe and necessary even if our independent comparison detects a bad
+      // readback. A mismatch affects proof acceptance, not revocation effort.
+      const recovered = await this.#options.subscription_gateway.recover(
+        authority.subscription_recovery,
+      );
+      if (!contextMatches) {
+        throw new Error("subscription recovery context mismatched cleanup authority");
+      }
+      if (recovered.generation !== authority.fence_generation ||
+          recovered.subscription_lease_revoked !== true ||
+          recovered.subscription_requests_drained !== true ||
+          recovered.subscription_listener_closed !== true ||
+          recovered.subscription_socket_absent !== true) {
+        throw new Error("subscription recovery readback mismatched cleanup authority");
+      }
+      subscription = recovered;
+    } catch {
+      // Missing or ambiguous subscription evidence remains false below. Local
+      // teardown cannot manufacture central lease or DB fencing authority.
+    }
+
+    if (runtimeKind === "direct_model_subscription") {
+      const direct = localProof !== undefined && "runtime_kind" in localProof &&
+          localProof.runtime_kind === "direct_model_subscription"
+        ? localProof
+        : undefined;
+      return Object.freeze({
+        subscription_lease_revoked: subscription?.subscription_lease_revoked === true,
+        subscription_requests_drained: subscription?.subscription_requests_drained === true,
+        subscription_listener_closed: subscription?.subscription_listener_closed === true,
+        subscription_socket_absent: subscription?.subscription_socket_absent === true,
+        identity_process_absent: direct?.identity_process_absent === true,
+        late_result_rejected: lateResultRejected,
+      }) satisfies DirectModelCleanupProof;
+    }
+
+    const openClaw = localProof !== undefined && "gateway_exited" in localProof
+      ? localProof
+      : this.#missingLocalOpenClawProof();
+    if (subscription === undefined || !lateResultRejected) {
+      return Object.freeze({
+        gateway_exited: openClaw.gateway_exited,
+        container_removed: openClaw.cell_removed,
+        bridge_removed: openClaw.bridge_removed,
+        config_removed: openClaw.config_removed,
+        state_removed: openClaw.state_removed,
+        workspace_removed: openClaw.workspace_removed,
+        output_removed: openClaw.output_removed,
+        network_removed: openClaw.network_removed,
+        credential_material_removed: openClaw.credential_material_removed,
+        subscription_lease_revoked: false,
+        subscription_requests_drained: false,
+        subscription_listener_closed: false,
+        subscription_socket_absent: false,
+        listener_closed: openClaw.listener_closed,
+        identity_process_absent: openClaw.no_identity_process,
+        late_result_rejected: lateResultRejected,
+      });
+    }
+    return storeCleanupProof(openClaw, subscription, true);
+  }
+
   async #quarantine(
     runtimeSlot: RuntimeSlotCapability,
     reason: string,
-    proof: RuntimeCleanupProof,
+    proof: SupervisorCleanupProof,
   ): Promise<void> {
     await this.#options.store.quarantineSlot(runtimeSlot, reason, cleanupHash(proof));
   }
 
-  #missingCleanupProof(): RuntimeCleanupProof {
+  #missingCleanupProof(
+    runtimeKind: RuntimeIdentityBinding["runtime_kind"],
+  ): SupervisorCleanupProof {
+    if (runtimeKind === "direct_model_subscription") {
+      return Object.freeze({
+        subscription_lease_revoked: false,
+        subscription_requests_drained: false,
+        subscription_listener_closed: false,
+        subscription_socket_absent: false,
+        identity_process_absent: false,
+        late_result_rejected: false,
+      });
+    }
+    return Object.freeze({
+      gateway_exited: false,
+      container_removed: false,
+      bridge_removed: false,
+      config_removed: false,
+      state_removed: false,
+      workspace_removed: false,
+      output_removed: false,
+      network_removed: false,
+      credential_material_removed: false,
+      subscription_lease_revoked: false,
+      subscription_requests_drained: false,
+      subscription_listener_closed: false,
+      subscription_socket_absent: false,
+      listener_closed: false,
+      identity_process_absent: false,
+      late_result_rejected: false,
+    });
+  }
+
+  #missingLocalOpenClawProof(): LocalOpenClawCleanupProof {
     return Object.freeze({
       gateway_exited: false,
       cell_removed: false,
@@ -485,10 +649,9 @@ export class DiscoverySupervisor {
       workspace_removed: false,
       output_removed: false,
       network_removed: false,
-      credential_revoked: false,
+      credential_material_removed: false,
       listener_closed: false,
       no_identity_process: false,
-      late_result_rejected: false,
     });
   }
 

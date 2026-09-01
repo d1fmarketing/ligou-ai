@@ -1,0 +1,50 @@
+[Unit]
+Description=Ligou Stage 0 Company Discovery Supervisor
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+SupplementaryGroups=docker
+WorkingDirectory=/opt/ligou/current/discovery-supervisor
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+LoadCredential=supervisor_config:/etc/ligou/discovery-supervisor.json
+LoadCredential=supabase_service_key:/etc/ligou/credentials/discovery-supabase-service-key
+RuntimeDirectory=ligou-discovery
+RuntimeDirectoryMode=0710
+StateDirectory=ligou-discovery-supervisor
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/bun /opt/ligou/current/discovery-supervisor/src/main.ts --config ${CREDENTIALS_DIRECTORY}/supervisor_config
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+KillMode=mixed
+MemoryMax=1G
+TasksMax=256
+LimitNOFILE=1024
+CPUQuota=100%
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+ReadWritePaths=/run/ligou-discovery /var/lib/ligou-discovery-supervisor
+
+[Install]
+WantedBy=multi-user.target
