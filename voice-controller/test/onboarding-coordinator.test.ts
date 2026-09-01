@@ -9,6 +9,7 @@ import {
   type CoverageSnapshot,
 } from "../src/onboarding-coverage.ts";
 import {
+  bindVerifiedOnboardingToolArgs,
   createOnboardingLifecycle,
   hashOnboardingToolArgs,
   onboardingOutputRequestEventId,
@@ -23,6 +24,84 @@ const callId = "7f58ee06-6a13-4d45-a2d5-c60244dc92a3";
 const businessName = "Rocha Plumbing";
 const budgetPauseSentence =
   "Estamos chegando ao limite desta sessão. Suas informações foram salvas. Vou encerrar esta sessão agora.";
+
+test("verified caller transcript narrowly binds emergency boolean without contradiction guessing", () => {
+  const providerArgs = {
+    topic: "emergencia",
+    field: "service.emergency_eligibility",
+    subject: "conserto_vazamento",
+    disposition: "answered",
+    rule_text: "Evidência de emergência.",
+    structured: { value: "Descrição livre do modelo." },
+    owner_words: "Texto não confiável do modelo.",
+  };
+  for (const [transcript, expected] of [
+    [
+      "Pode sim, mas só em situação de risco, tipo vazamento incontrolável que pode causar dano grande fora do horário normal, só com aprovação explícita minha. Não tem taxa automática.",
+      true,
+    ],
+    ["Não, esse serviço não pode ser tratado como emergência.", false],
+    ["Não tem taxa automática, mas pode sim em situação de risco.", true],
+    ["Não tem taxa automática e pode sim em situação de risco.", true],
+    [
+      "Não tem taxa automática, mas esse serviço não pode ser tratado como emergência.",
+      false,
+    ],
+    [
+      "Não tem taxa automática e esse serviço não pode ser tratado como emergência.",
+      false,
+    ],
+    ["Este serviço pode ser tratado como emergência?", "Descrição livre do modelo."],
+    ["Pode sim?", "Descrição livre do modelo."],
+    ["Será que pode sim?", "Descrição livre do modelo."],
+    ["Vou verificar se pode sim.", "Descrição livre do modelo."],
+    [
+      "Acho que pode sim, mas preciso falar com meu sócio.",
+      "Descrição livre do modelo.",
+    ],
+    ["Provavelmente pode sim.", "Descrição livre do modelo."],
+    ["Sim e não.", "Descrição livre do modelo."],
+    ["Pode sim ou não.", "Descrição livre do modelo."],
+    ["Não pode ou pode sim.", "Descrição livre do modelo."],
+    ["Pode sim, ou talvez não.", "Descrição livre do modelo."],
+    ["Não pode, ou talvez possa.", "Descrição livre do modelo."],
+    ["Não sei se pode ser tratado como emergência.", "Descrição livre do modelo."],
+    [
+      "Pode sim, mas pensando melhor não pode ser tratado como emergência.",
+      "Descrição livre do modelo.",
+    ],
+  ] as const) {
+    const bound = bindVerifiedOnboardingToolArgs(
+      "record_interview_answer",
+      providerArgs,
+      transcript,
+    );
+    expect(bound.owner_words).toBe(transcript);
+    expect((bound.structured as any).value).toBe(expected);
+  }
+  expect((bindVerifiedOnboardingToolArgs(
+    "record_interview_answer",
+    { ...providerArgs, structured: { value: true } },
+    "Não, esse serviço não pode ser tratado como emergência.",
+  ).structured as any).value).toBe(false);
+  expect((bindVerifiedOnboardingToolArgs(
+    "record_interview_answer",
+    { ...providerArgs, structured: { value: true } },
+    "Olha, não sei se pode sim ou não.",
+  ).structured as any).value).toBe("Olha, não sei se pode sim ou não.");
+  expect(bindVerifiedOnboardingToolArgs(
+    "record_interview_answer",
+    { ...providerArgs, structured: { value: true } },
+  )).toMatchObject({
+    owner_words: "",
+    structured: { value: "" },
+  });
+  expect((bindVerifiedOnboardingToolArgs(
+    "record_interview_answer",
+    { ...providerArgs, structured: { value: true } },
+    "Preciso confirmar se pode sim.",
+  ).structured as any).value).toBe("Preciso confirmar se pode sim.");
+});
 
 function step(
   lifecycle: OnboardingLifecycle,
@@ -708,11 +787,19 @@ describe("onboarding lifecycle forbidden transitions", () => {
     });
     expect(terminating.lifecycle.phase)
       .toBe("budget_pause_provider_terminating" as any);
-    const confirmed = step(terminating.lifecycle, {
+    const latePlayback = step(terminating.lifecycle, {
+      type: "output_audio_buffer.stopped",
+      responseId: "response-budget-pause",
+      socketGeneration: 1,
+      elapsedMs: 432_010,
+    });
+    expect(latePlayback.lifecycle).toBe(terminating.lifecycle);
+    expect(latePlayback.commands).toEqual([]);
+    const confirmed = step(latePlayback.lifecycle, {
       type: "provider.termination_confirmed",
       intentKey: `budget-hangup:${callId}`,
       terminalPersisted: true,
-      elapsedMs: 432_010,
+      elapsedMs: 432_011,
     });
     expect(confirmed.lifecycle.phase).toBe("closed");
     expect(confirmed.lifecycle.providerTerminationConfirmed).toBe(true);
@@ -991,7 +1078,7 @@ describe("onboarding lifecycle forbidden transitions", () => {
     ).toHaveLength(0);
   });
 
-  test("a prior-generation sent intent without response acknowledgement blocks reattach for every application speech purpose", () => {
+  test("a prior-generation sent intent without response acknowledgement requests one transport-error termination", () => {
     for (const [purpose, intentKey, phase] of [
       ["greeting", `greeting:${callId}`, "greeting"],
       ["summary", "summary:digest-sent", "summary_speaking"],
@@ -1029,7 +1116,8 @@ describe("onboarding lifecycle forbidden transitions", () => {
         elapsedMs: 2,
       });
 
-      expect(reattached.lifecycle.phase).toBe("blocked");
+      expect(reattached.lifecycle.phase)
+        .toBe("transport_error_ready_to_terminate" as any);
       expect(reattached.commands.filter((command) => command.type === "block"))
         .toEqual([
           expect.objectContaining({
@@ -1040,7 +1128,161 @@ describe("onboarding lifecycle forbidden transitions", () => {
       expect(reattached.commands.some((command) =>
         command.type === "request_response"
       )).toBe(false);
+      expect(reattached.commands.filter((command) =>
+        command.type === "request_transport_error_hangup"
+      )).toEqual([
+        expect.objectContaining({
+          intentKey: `transport-error-hangup:${callId}`,
+          reason: "response_intent_ack_indeterminate",
+        }),
+      ]);
     }
+  });
+
+  test("transport-error termination closes only after provider and error persistence are confirmed", () => {
+    let lifecycle = createOnboardingLifecycle(callId, businessName);
+    ({ lifecycle } = step(lifecycle, {
+      type: "socket.attached",
+      socketGeneration: 1,
+      elapsedMs: 0,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.intent_sent",
+      intentKey: `greeting:${callId}`,
+      socketGeneration: 1,
+      elapsedMs: 1,
+    }));
+    const ambiguous = step(lifecycle, {
+      type: "socket.attached",
+      socketGeneration: 2,
+      elapsedMs: 2,
+    });
+    const intentKey = `transport-error-hangup:${callId}`;
+    const terminating = step(ambiguous.lifecycle, {
+      type: "provider.termination_requested",
+      intentKey,
+      elapsedMs: 3,
+    });
+    expect(terminating.lifecycle.phase)
+      .toBe("transport_error_provider_terminating" as any);
+    const confirmed = step(terminating.lifecycle, {
+      type: "provider.termination_confirmed",
+      intentKey,
+      terminalPersisted: true,
+      elapsedMs: 4,
+    });
+    expect(confirmed.lifecycle.phase).toBe("closed");
+    expect(confirmed.commands).toContainEqual(expect.objectContaining({
+      type: "telemetry",
+      name: "onboarding.closed",
+      outcome: "durable_transport_error",
+    }));
+  });
+
+  test("an unpaired blocked lifecycle requests one generic fatal termination and closes only after durable confirmation", () => {
+    const blocked = step(startCollecting(), {
+      type: "adapter.invariant_failed",
+      code: "response_not_completed",
+      safeDetail: "provider response was not completed",
+      elapsedMs: 1,
+    });
+    expect(blocked.lifecycle.phase).toBe("blocked");
+
+    const fatal = step(blocked.lifecycle, {
+      type: "fatal.termination_required",
+      code: "response_not_completed",
+      elapsedMs: 2,
+    } as any);
+    expect(fatal.lifecycle.phase).toBe("fatal_error_ready_to_terminate" as any);
+    expect(fatal.commands.filter((command) =>
+      command.type === "request_fatal_error_hangup"
+    )).toEqual([
+      expect.objectContaining({
+        intentKey: `fatal-error-hangup:${callId}`,
+        reason: "response_not_completed",
+      }),
+    ]);
+
+    const duplicate = step(fatal.lifecycle, {
+      type: "fatal.termination_required",
+      code: "response_not_completed",
+      elapsedMs: 3,
+    } as any);
+    expect(duplicate.commands.some((command) =>
+      command.type === "request_fatal_error_hangup"
+    )).toBe(false);
+
+    const terminating = step(fatal.lifecycle, {
+      type: "provider.termination_requested",
+      intentKey: `fatal-error-hangup:${callId}`,
+      elapsedMs: 4,
+    });
+    expect(terminating.lifecycle.phase)
+      .toBe("fatal_error_provider_terminating" as any);
+    const confirmed = step(terminating.lifecycle, {
+      type: "provider.termination_confirmed",
+      intentKey: `fatal-error-hangup:${callId}`,
+      terminalPersisted: true,
+      elapsedMs: 5,
+    });
+    expect(confirmed.lifecycle.phase).toBe("closed");
+    expect(confirmed.commands).toContainEqual(expect.objectContaining({
+      type: "telemetry",
+      name: "onboarding.closed",
+      outcome: "durable_fatal_error",
+    }));
+  });
+
+  test("reattach reissues a ready fatal or transport termination command without replaying speech or persistence", () => {
+    const blocked = step(startCollecting(), {
+      type: "adapter.invariant_failed",
+      code: "response_not_completed",
+      safeDetail: "provider response was not completed",
+      elapsedMs: 1,
+    });
+    const fatal = step(blocked.lifecycle, {
+      type: "fatal.termination_required",
+      code: "response_not_completed",
+      elapsedMs: 2,
+    } as any);
+    const fatalAttach = step(fatal.lifecycle, {
+      type: "socket.attached",
+      socketGeneration: 2,
+      elapsedMs: 3,
+    });
+    expect(fatalAttach.commands).toContainEqual({
+      type: "request_fatal_error_hangup",
+      intentKey: `fatal-error-hangup:${callId}`,
+      reason: "response_not_completed",
+    });
+    expect(fatalAttach.commands.some((command) =>
+      command.type === "request_response" ||
+      command.type === "persist_fact" ||
+      command.type === "resend_output"
+    )).toBe(false);
+
+    const transport = step(startCollecting(), {
+      type: "adapter.invariant_failed",
+      code: "tool_output_ack_timeout",
+      safeDetail: "provider output ACK was absent",
+      toolCallId: "tool-already-persisted",
+      elapsedMs: 4,
+    });
+    const transportAttach = step(transport.lifecycle, {
+      type: "socket.attached",
+      socketGeneration: 2,
+      elapsedMs: 5,
+    });
+    expect(transportAttach.commands).toContainEqual({
+      type: "request_transport_error_hangup",
+      intentKey: `transport-error-hangup:${callId}`,
+      reason: "tool_output_ack_timeout",
+    });
+    expect(transportAttach.commands.some((command) =>
+      command.type === "request_response" ||
+      command.type === "persist_fact" ||
+      command.type === "resend_output"
+    )).toBe(false);
   });
 
   test("an acknowledged sent intent may reattach, but a second response identity for the same intent blocks", () => {
@@ -1218,6 +1460,7 @@ describe("onboarding lifecycle forbidden transitions", () => {
     ]) {
       let lifecycle = createOnboardingLifecycle(callId, businessName);
       const intentKey = `greeting:${callId}`;
+      let lastCommands: OnboardingCommand[] = [];
       for (const event of [
         {
           type: "socket.attached" as const,
@@ -1262,8 +1505,161 @@ describe("onboarding lifecycle forbidden transitions", () => {
           socketGeneration: 1,
           elapsedMs: 6,
         },
-      ]) ({ lifecycle } = step(lifecycle, event));
+      ]) {
+        const result = step(lifecycle, event);
+        lifecycle = result.lifecycle;
+        lastCommands = result.commands;
+      }
       expect(lifecycle.phase).toBe("greeting");
+      expect(lastCommands).toContainEqual(expect.objectContaining({
+        type: "request_response",
+        intentKey: `greeting:${callId}:retry:1`,
+      }));
+    }
+  });
+
+  test("fully terminal invalid greeting and summary content retry once, then emit one fatal block", () => {
+    for (const kind of ["greeting", "summary"] as const) {
+      const started = beginAuthoritySpeech(kind);
+      let lifecycle = started.lifecycle;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const intentKey = attempt === 0 ? started.intentKey : started.retryKey;
+        const responseId = attempt === 0
+          ? started.responseId
+          : `response-${kind}-content-retry`;
+        if (attempt === 1) {
+          ({ lifecycle } = step(lifecycle, {
+            type: "response.intent_sent",
+            intentKey,
+            socketGeneration: 1,
+            elapsedMs: 10,
+          }));
+          ({ lifecycle } = step(lifecycle, {
+            type: "response.created",
+            responseId,
+            intentKey,
+            socketGeneration: 1,
+            elapsedMs: 11,
+          }));
+        }
+        ({ lifecycle } = step(lifecycle, {
+          type: "response.transcript.done",
+          responseId,
+          transcript: kind === "greeting"
+            ? "Oi, identidade errada."
+            : "Resumo sem fatos nem confirmação.",
+          socketGeneration: 1,
+          elapsedMs: 12,
+        }));
+        ({ lifecycle } = step(lifecycle, {
+          type: "response.output_audio.done",
+          responseId,
+          socketGeneration: 1,
+          elapsedMs: 13,
+        }));
+        ({ lifecycle } = step(lifecycle, {
+          type: "response.done",
+          responseId,
+          socketGeneration: 1,
+          elapsedMs: 14,
+        }));
+        const playback = step(lifecycle, {
+          type: "output_audio_buffer.stopped",
+          responseId,
+          socketGeneration: 1,
+          elapsedMs: 15,
+        });
+        lifecycle = playback.lifecycle;
+        if (attempt === 0)
+          expect(playback.commands).toContainEqual(expect.objectContaining({
+            type: "request_response",
+            intentKey: started.retryKey,
+          }));
+        else {
+          expect(lifecycle.phase).toBe("blocked");
+          expect(playback.commands).toContainEqual(expect.objectContaining({
+            type: "block",
+            code: "authority_speech_retry_exhausted",
+          }));
+          expect(playback.commands.some((command) =>
+            command.type === "request_response"
+          )).toBe(false);
+        }
+      }
+    }
+  });
+
+  test("terminal authority audio without a final transcript waits for playback, retries once, then fails closed", () => {
+    for (const kind of ["greeting", "summary", "budget_pause"] as const) {
+      const started = kind === "budget_pause"
+        ? {
+            lifecycle: budgetPauseQueued(),
+            responseId: "response-budget-missing-transcript",
+            intentKey: `budget-pause:${callId}`,
+            retryKey: `budget-pause:${callId}:retry:1`,
+          }
+        : beginAuthoritySpeech(kind);
+      let lifecycle = started.lifecycle;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const intentKey = attempt === 0 ? started.intentKey : started.retryKey;
+        const responseId = attempt === 0
+          ? started.responseId
+          : `response-${kind}-missing-transcript-retry`;
+        if (attempt === 1 || kind === "budget_pause") {
+          ({ lifecycle } = step(lifecycle, {
+            type: "response.intent_sent",
+            intentKey,
+            socketGeneration: 1,
+            elapsedMs: 20,
+          }));
+          ({ lifecycle } = step(lifecycle, {
+            type: "response.created",
+            responseId,
+            intentKey,
+            socketGeneration: 1,
+            elapsedMs: 21,
+          }));
+        }
+        ({ lifecycle } = step(lifecycle, {
+          type: "response.output_audio.done",
+          responseId,
+          socketGeneration: 1,
+          elapsedMs: 22,
+        }));
+        const terminal = step(lifecycle, {
+          type: "response.done",
+          responseId,
+          socketGeneration: 1,
+          elapsedMs: 23,
+        });
+        lifecycle = terminal.lifecycle;
+        expect(terminal.commands.some((command) =>
+          command.type === "request_response" || command.type === "block"
+        )).toBe(false);
+
+        const playback = step(lifecycle, {
+          type: "output_audio_buffer.stopped",
+          responseId,
+          socketGeneration: 1,
+          elapsedMs: 24,
+        });
+        lifecycle = playback.lifecycle;
+        if (attempt === 0)
+          expect(playback.commands).toContainEqual(expect.objectContaining({
+            type: "request_response",
+            intentKey: started.retryKey,
+          }));
+        else {
+          expect(lifecycle.phase).toBe("blocked");
+          expect(playback.commands).toContainEqual(expect.objectContaining({
+            type: "block",
+            code: "authority_speech_retry_exhausted",
+          }));
+          expect(playback.commands.some((command) =>
+            command.type === "request_response"
+          )).toBe(false);
+        }
+      }
     }
   });
 
@@ -1512,6 +1908,7 @@ describe("onboarding lifecycle forbidden transitions", () => {
     ];
     for (const transcript of invalidTranscripts) {
       let lifecycle = beginSummary();
+      let lastCommands: OnboardingCommand[] = [];
       for (const event of [
         {
           type: "response.transcript.done",
@@ -1538,9 +1935,17 @@ describe("onboarding lifecycle forbidden transitions", () => {
           socketGeneration: 1,
           elapsedMs: 63,
         },
-      ] as OnboardingEvent[]) ({ lifecycle } = step(lifecycle, event));
+      ] as OnboardingEvent[]) {
+        const result = step(lifecycle, event);
+        lifecycle = result.lifecycle;
+        lastCommands = result.commands;
+      }
       expect(lifecycle.phase).toBe("summary_speaking");
-      expect(lifecycle.summary?.validated).toBe(false);
+      expect(lastCommands).toContainEqual(expect.objectContaining({
+        type: "request_response",
+        intentKey: "summary:digest-41:retry:1",
+      }));
+      expect(lifecycle.summary?.attempt).toBe(1);
     }
   });
 
@@ -1909,7 +2314,7 @@ describe("onboarding lifecycle forbidden transitions", () => {
     ).toHaveLength(1);
   });
 
-  test("missing, empty, foreign, extra, or wrong final signoff transcript blocks with zero hangup", () => {
+  test("missing, empty, foreign, extra, or wrong final signoff transcript retries with zero hangup", () => {
     const exact =
       "A confirmação por voz foi salva e as regras sugeridas continuam aguardando revisão na Memória.";
     const cases: Array<{
@@ -1970,18 +2375,81 @@ describe("onboarding lifecycle forbidden transitions", () => {
         elapsedMs: 82,
       });
 
-      expect(playback.lifecycle.phase, testCase.name).toBe("blocked");
+      expect(playback.lifecycle.phase, testCase.name)
+        .toBe("final_signoff_speaking");
       expect(playback.commands.some((command) =>
         command.type === "request_hangup"
       ), testCase.name).toBe(false);
       expect(playback.commands).toContainEqual(expect.objectContaining({
-        type: "block",
-        code: "signoff_content_invalid",
+        type: "request_response",
+        intentKey: "final-signoff:approval-receipt-1:retry:1",
       }));
     }
   });
 
-  test("reattach before an interrupted authority response is terminal blocks for greeting, summary, and signoff", () => {
+  test("text-only signoff and budget pause retry once, then fail closed without success or budget mislabeling", () => {
+    for (const kind of ["signoff", "budget_pause"] as const) {
+      let lifecycle: OnboardingLifecycle;
+      let baseIntentKey: string;
+      if (kind === "signoff") {
+        lifecycle = signoffSpeaking();
+        baseIntentKey = "final-signoff:approval-receipt-1";
+      } else {
+        lifecycle = budgetPauseQueued();
+        baseIntentKey = `budget-pause:${callId}`;
+      }
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const intentKey = attempt === 0
+          ? baseIntentKey
+          : `${baseIntentKey}:retry:1`;
+        const responseId = `response-${kind}-text-only-${attempt}`;
+        ({ lifecycle } = step(lifecycle, {
+          type: "response.intent_sent",
+          intentKey,
+          socketGeneration: 1,
+          elapsedMs: 100 + attempt * 3,
+        }));
+        ({ lifecycle } = step(lifecycle, {
+          type: "response.created",
+          responseId,
+          intentKey,
+          socketGeneration: 1,
+          elapsedMs: 101 + attempt * 3,
+        }));
+        const terminal = step(lifecycle, {
+          type: "response.done",
+          responseId,
+          socketGeneration: 1,
+          elapsedMs: 102 + attempt * 3,
+        });
+        lifecycle = terminal.lifecycle;
+        if (attempt === 0) {
+          expect(terminal.commands).toContainEqual(expect.objectContaining({
+            type: "request_response",
+            intentKey: `${baseIntentKey}:retry:1`,
+          }));
+          expect(lifecycle.phase).toBe(
+            kind === "signoff"
+              ? "final_signoff_speaking"
+              : "budget_pause_speaking",
+          );
+        } else {
+          expect(lifecycle.phase).toBe("blocked");
+          expect(terminal.commands).toContainEqual(expect.objectContaining({
+            type: "block",
+            code: "authority_speech_retry_exhausted",
+          }));
+          expect(terminal.commands.some((command) =>
+            command.type === "request_hangup" ||
+            command.type === "request_budget_hangup"
+          )).toBe(false);
+        }
+      }
+    }
+  });
+
+  test("reattach before interrupted authority speech is terminal requests transport-error termination", () => {
     for (const kind of ["greeting", "summary", "signoff"] as const) {
       const started = beginAuthoritySpeech(kind);
       const interrupted = step(started.lifecycle, {
@@ -1998,7 +2466,8 @@ describe("onboarding lifecycle forbidden transitions", () => {
         socketGeneration: 2,
         elapsedMs: 91,
       });
-      expect(reattached.lifecycle.phase, kind).toBe("blocked");
+      expect(reattached.lifecycle.phase, kind)
+        .toBe("transport_error_ready_to_terminate" as any);
       expect(reattached.commands).toContainEqual(expect.objectContaining({
         type: "block",
         code: "authority_speech_terminal_indeterminate",
@@ -2006,6 +2475,41 @@ describe("onboarding lifecycle forbidden transitions", () => {
       expect(reattached.commands.some((command) =>
         command.type === "request_response"
       ), kind).toBe(false);
+      expect(reattached.commands).toContainEqual(expect.objectContaining({
+        type: "request_transport_error_hangup",
+        intentKey: `transport-error-hangup:${callId}`,
+        reason: "authority_speech_terminal_indeterminate",
+      }));
+    }
+  });
+
+  test("correlated terminal output acknowledgement ambiguity requests transport-error termination", () => {
+    for (const code of [
+      "tool_output_created_invalid",
+      "tool_output_retrieved_invalid",
+      "tool_output_retrieve_failed",
+      "response_create_active_conflict",
+      "response_create_ack_timeout",
+      "tool_output_ack_timeout",
+      "application_opening_reactivation_indeterminate",
+    ] as const) {
+      const lifecycle = startCollecting();
+      const ambiguous = step(lifecycle, {
+        type: "adapter.invariant_failed",
+        code,
+        safeDetail: "provider acknowledgement is indeterminate",
+        elapsedMs: 1,
+      } as any);
+      expect(ambiguous.lifecycle.phase, code)
+        .toBe("transport_error_ready_to_terminate" as any);
+      expect(ambiguous.commands).toContainEqual(expect.objectContaining({
+        type: "request_transport_error_hangup",
+        reason: code,
+      }));
+      expect(ambiguous.commands.some((command) =>
+        command.type === "request_response" ||
+        command.type === "resend_output"
+      ), code).toBe(false);
     }
   });
 
@@ -2960,14 +3464,16 @@ describe("Task 4 review fixes", () => {
       "Preço público: 1200. Área: São José. Você confirma que está correto?",
     );
     expect(numericSubstring.phase).toBe("summary_speaking");
-    expect(numericSubstring.summary?.validated).toBe(false);
+    expect(numericSubstring.summary).toMatchObject({ attempt: 1 });
+    expect(numericSubstring.responseIntents["summary:digest-41:retry:1"])
+      .toMatchObject({ state: "queued" });
 
     const locationSubstring = proveSummaryTranscript(
       beginSummaryWithAnchors(anchors),
       "Preço público: 120. Área: São Joséville. Você confirma que está correto?",
     );
     expect(locationSubstring.phase).toBe("summary_speaking");
-    expect(locationSubstring.summary?.validated).toBe(false);
+    expect(locationSubstring.summary).toMatchObject({ attempt: 1 });
 
     const punctuationAccentCaseVariant = proveSummaryTranscript(
       beginSummaryWithAnchors(anchors),
@@ -2987,7 +3493,7 @@ describe("Task 4 review fixes", () => {
       ]),
       "Preço público (drain cleaning): 149. Você confirma que está correto?",
     );
-    expect(lifecycle.summary?.validated).toBe(false);
+    expect(lifecycle.summary).toMatchObject({ attempt: 1 });
     expect(lifecycle.phase).toBe("summary_speaking");
   });
 
@@ -3261,6 +3767,8 @@ test("response coordinator sends keyed metadata and retries an unsent key withou
   expect(JSON.parse(frames[0]!)).toEqual({
     type: "response.create",
     response: {
+      tool_choice: "none",
+      output_modalities: ["audio"],
       instructions: request.instructions,
       metadata: {
         intent_key: "summary:digest-41",
@@ -3289,6 +3797,13 @@ test("response coordinator sends keyed metadata and retries an unsent key withou
       { intentKey: "tool-batch:response-1:hash-1", purpose: "tool_continuation" },
     ),
   ).toBe(true);
+  expect(JSON.parse(frames.at(-1)!)).toMatchObject({
+    response: {
+      tool_choice: "none",
+      output_modalities: ["audio"],
+      metadata: { purpose: "tool_continuation" },
+    },
+  });
 });
 
 test("a failed admitted tool execution queues one truthful recovery with sanitized identity", () => {
@@ -3486,6 +4001,284 @@ test("owner-turn recovery invariant is deduplicated by its causal key", () => {
   expect(replay.lifecycle.phase).toBe("follow_up");
   expect(replay.commands.some((command) => command.type === "request_response"))
     .toBe(false);
+});
+
+test("truthful recovery requires exact audible playback and text-only output retries once", () => {
+  let lifecycle = startCollecting();
+  let result = step(lifecycle, {
+    type: "recovery.required",
+    reason: "owner_turn_completed_without_tool",
+    recoveryKey: "recovery-proof",
+    socketGeneration: 1,
+    elapsedMs: 1,
+  });
+  lifecycle = result.lifecycle;
+  const baseIntent =
+    "recovery:owner_turn_completed_without_tool:recovery-proof";
+  expect(result.commands).toContainEqual(expect.objectContaining({
+    type: "request_response",
+    intentKey: baseIntent,
+    purpose: "recovery",
+  }));
+
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.intent_sent",
+    intentKey: baseIntent,
+    socketGeneration: 1,
+    elapsedMs: 2,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.created",
+    responseId: "response-recovery-text-only",
+    intentKey: baseIntent,
+    socketGeneration: 1,
+    elapsedMs: 3,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.transcript.done",
+    responseId: "response-recovery-text-only",
+    transcript: "Não consegui confirmar.",
+    socketGeneration: 1,
+    elapsedMs: 4,
+  }));
+  result = step(lifecycle, {
+    type: "response.done",
+    responseId: "response-recovery-text-only",
+    socketGeneration: 1,
+    elapsedMs: 5,
+  });
+  lifecycle = result.lifecycle;
+  expect(lifecycle.phase).toBe("follow_up");
+  expect(result.commands).toContainEqual(expect.objectContaining({
+    type: "request_response",
+    intentKey: `${baseIntent}:retry:1`,
+    purpose: "recovery",
+  }));
+
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.intent_sent",
+    intentKey: `${baseIntent}:retry:1`,
+    socketGeneration: 1,
+    elapsedMs: 6,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.created",
+    responseId: "response-recovery-audible",
+    intentKey: `${baseIntent}:retry:1`,
+    socketGeneration: 1,
+    elapsedMs: 7,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.transcript.done",
+    responseId: "response-recovery-audible",
+    transcript:
+      "Não consegui confirmar o salvamento da sua resposta. Por favor, repita as informações.",
+    socketGeneration: 1,
+    elapsedMs: 8,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.output_audio.done",
+    responseId: "response-recovery-audible",
+    socketGeneration: 1,
+    elapsedMs: 9,
+  }));
+  ({ lifecycle } = step(lifecycle, {
+    type: "response.done",
+    responseId: "response-recovery-audible",
+    socketGeneration: 1,
+    elapsedMs: 10,
+  }));
+  result = step(lifecycle, {
+    type: "output_audio_buffer.stopped",
+    responseId: "response-recovery-audible",
+    socketGeneration: 1,
+    elapsedMs: 11,
+  });
+  expect(result.lifecycle.phase).toBe("collecting");
+  expect(result.lifecycle.recoverySpeech).toBeUndefined();
+  expect(result.commands.some((command) => command.type === "block"))
+    .toBe(false);
+  const repeated = step(result.lifecycle, {
+    type: "tool.called",
+    socketGeneration: 1,
+    toolCallId: "tool-after-recovery",
+    name: "record_interview_answer",
+    args: {
+      topic: "servicos",
+      field: "service.catalog_closure",
+      disposition: "answered",
+      rule_text: "Catálogo encerrado.",
+      structured: { value: true },
+      owner_words: "Não há outros serviços.",
+    },
+    providerResponseId: "response-after-recovery",
+    batchHash: "batch-after-recovery",
+    elapsedMs: 12,
+  });
+  expect(repeated.commands).toContainEqual(expect.objectContaining({
+    type: "persist_fact",
+    toolCallId: "tool-after-recovery",
+  }));
+});
+
+test("followup and recovery wait for audible playback before retrying a missing final transcript", () => {
+  for (const kind of ["followup", "recovery"] as const) {
+    const lifecycle = startCollecting();
+    const intentKey = `${kind}:event-order`;
+    const responseId = `response-${kind}-event-order`;
+    lifecycle.phase = "follow_up";
+    lifecycle.responseIntents[intentKey] = {
+      intentKey,
+      purpose: kind === "followup" ? "tool_continuation" : "recovery",
+      state: "acknowledged",
+      responseId,
+      sentSocketGeneration: 1,
+    };
+    lifecycle.activeResponseId = responseId;
+    if (kind === "followup")
+      lifecycle.followupSpeech = {
+        intentKey,
+        questionPt: "Quais cidades vocês atendem?",
+        responseId,
+        transcript: "",
+        transcriptFinal: false,
+        audioDone: false,
+        responseDone: false,
+        playbackStopped: false,
+        interrupted: false,
+        attempt: 0,
+      };
+    else
+      lifecycle.recoverySpeech = {
+        intentKey,
+        expectedTranscript:
+          "Não consegui confirmar o salvamento da sua resposta. Por favor, repita as informações.",
+        terminalAfterPlayback: false,
+        responseId,
+        transcript: "",
+        transcriptFinal: false,
+        audioDone: false,
+        responseDone: false,
+        playbackStopped: false,
+        interrupted: false,
+        attempt: 0,
+      };
+
+    let result = step(lifecycle, {
+      type: "response.output_audio.done",
+      responseId,
+      socketGeneration: 1,
+      elapsedMs: 1,
+    });
+    result = step(result.lifecycle, {
+      type: "response.done",
+      responseId,
+      socketGeneration: 1,
+      elapsedMs: 2,
+    });
+    expect(result.commands.some((command) =>
+      command.type === "request_response" || command.type === "block"
+    )).toBe(false);
+
+    result = step(result.lifecycle, {
+      type: "output_audio_buffer.stopped",
+      responseId,
+      socketGeneration: 1,
+      elapsedMs: 3,
+    });
+    expect(result.commands).toContainEqual(expect.objectContaining({
+      type: "request_response",
+      intentKey: `${intentKey}:retry:1`,
+    }));
+  }
+});
+
+test("two inaudible recovery attempts request one durable non-budget error termination", () => {
+  let lifecycle = startCollecting();
+  let result = step(lifecycle, {
+    type: "recovery.required",
+    reason: "owner_turn_completed_without_tool",
+    recoveryKey: "recovery-terminal-error",
+    socketGeneration: 1,
+    elapsedMs: 1,
+  });
+  lifecycle = result.lifecycle;
+  const baseIntent =
+    "recovery:owner_turn_completed_without_tool:recovery-terminal-error";
+
+  for (const [attempt, intentKey] of [
+    [0, baseIntent],
+    [1, `${baseIntent}:retry:1`],
+  ] as const) {
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.intent_sent",
+      intentKey,
+      socketGeneration: 1,
+      elapsedMs: 2 + attempt * 3,
+    }));
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.created",
+      responseId: `response-recovery-inaudible-${attempt}`,
+      intentKey,
+      socketGeneration: 1,
+      elapsedMs: 3 + attempt * 3,
+    }));
+    result = step(lifecycle, {
+      type: "response.done",
+      responseId: `response-recovery-inaudible-${attempt}`,
+      socketGeneration: 1,
+      elapsedMs: 4 + attempt * 3,
+    });
+    lifecycle = result.lifecycle;
+  }
+
+  const terminationIntent = `recovery-error-hangup:${callId}`;
+  expect(lifecycle.phase).toBe("recovery_error_ready_to_terminate" as any);
+  expect(result.commands.filter((command) =>
+    command.type === "request_recovery_error_hangup"
+  )).toEqual([
+    expect.objectContaining({
+      intentKey: terminationIntent,
+      reason: "recovery_delivery_failed",
+    }),
+  ]);
+  expect(result.commands.some((command) =>
+    command.type === "request_budget_hangup" ||
+    command.type === "request_budget_error_hangup" ||
+    command.type === "request_hangup"
+  )).toBe(false);
+
+  const terminating = step(lifecycle, {
+    type: "provider.termination_requested",
+    intentKey: terminationIntent,
+    elapsedMs: 9,
+  });
+  expect(terminating.lifecycle.phase)
+    .toBe("recovery_error_provider_terminating" as any);
+  const repeatedTerminal = step(terminating.lifecycle, {
+    type: "response.done",
+    responseId: "response-recovery-inaudible-1",
+    socketGeneration: 1,
+    elapsedMs: 10,
+  });
+  expect(repeatedTerminal.lifecycle.phase)
+    .toBe("recovery_error_provider_terminating" as any);
+  expect(repeatedTerminal.commands.some((command) =>
+    command.type === "request_recovery_error_hangup"
+  )).toBe(false);
+  const confirmed = step(repeatedTerminal.lifecycle, {
+    type: "provider.termination_confirmed",
+    intentKey: terminationIntent,
+    terminalPersisted: true,
+    elapsedMs: 11,
+  });
+  expect(confirmed.lifecycle.phase).toBe("closed");
+  expect(confirmed.lifecycle.providerTerminationConfirmed).toBe(true);
+  expect(confirmed.commands).toContainEqual(expect.objectContaining({
+    type: "telemetry",
+    name: "onboarding.closed",
+    outcome: "durable_recovery_error",
+  }));
 });
 
 test("metadata-less owner response during greeting emits invariant only and preserves its queued retry", () => {
@@ -3939,7 +4732,7 @@ test("terminal response registry prunes only unreferenced identities and blocks 
     .toBe(false);
 });
 
-test("blocked attach and durable tool completion preserve bookkeeping without response authority", () => {
+test("blocked attach terminates while an already-running tool may finish bookkeeping without response authority", () => {
   const attachedLifecycle = createOnboardingLifecycle(callId, businessName);
   attachedLifecycle.phase = "blocked";
   attachedLifecycle.socketGeneration = 1;
@@ -3960,19 +4753,21 @@ test("blocked attach and durable tool completion preserve bookkeeping without re
     socketGeneration: 2,
     elapsedMs: 1,
   });
-  expect(attached.lifecycle.phase).toBe("blocked");
+  expect(attached.lifecycle.phase).toBe("fatal_error_ready_to_terminate");
   expect(attached.lifecycle.socketGeneration).toBe(2);
-  expect(attached.commands.filter((command) => command.type === "resend_output"))
+  expect(attached.commands.filter((command) =>
+    command.type === "request_fatal_error_hangup"
+  ))
     .toEqual([
       expect.objectContaining({
-        type: "resend_output",
-        toolCallId: "blocked-pending",
-        outputItemId: providerOutputItemId("blocked-pending"),
-        replay: true,
-        socketGeneration: 2,
+        type: "request_fatal_error_hangup",
+        intentKey: `fatal-error-hangup:${callId}`,
+        reason: "blocked_lifecycle_reattached",
       }),
     ]);
-  expect(attached.commands.some((command) => command.type === "request_response"))
+  expect(attached.commands.some((command) =>
+    command.type === "request_response" || command.type === "resend_output"
+  ))
     .toBe(false);
 
   const executionLifecycle = createOnboardingLifecycle(callId, businessName);
@@ -4370,9 +5165,136 @@ describe("durable directed follow-up ownership", () => {
       purpose: "tool_continuation",
       instructions: "Quais cidades vocês atendem?",
     });
+
+    let textOnly = step(persisted.lifecycle, {
+      type: "response.intent_sent",
+      intentKey: "tool-batch:response-followup:batch-followup",
+      socketGeneration: 1,
+      elapsedMs: 2,
+    });
+    textOnly = step(textOnly.lifecycle, {
+      type: "response.created",
+      responseId: "response-followup-text-only",
+      intentKey: "tool-batch:response-followup:batch-followup",
+      socketGeneration: 1,
+      elapsedMs: 2,
+    });
+    textOnly = step(textOnly.lifecycle, {
+      type: "response.transcript.done",
+      responseId: "response-followup-text-only",
+      transcript: "Quais cidades vocês atendem?",
+      socketGeneration: 1,
+      elapsedMs: 2,
+    });
+    textOnly = step(textOnly.lifecycle, {
+      type: "response.done",
+      responseId: "response-followup-text-only",
+      socketGeneration: 1,
+      elapsedMs: 2,
+    });
+    expect(textOnly.lifecycle.phase).toBe("follow_up");
+    expect(textOnly.commands).toContainEqual(expect.objectContaining({
+      type: "request_response",
+      intentKey: "tool-batch:response-followup:batch-followup:retry:1",
+    }));
+
+    let spoken = step(persisted.lifecycle, {
+      type: "response.intent_sent",
+      intentKey: "tool-batch:response-followup:batch-followup",
+      socketGeneration: 1,
+      elapsedMs: 3,
+    });
+    spoken = step(spoken.lifecycle, {
+      type: "response.created",
+      responseId: "response-followup-wrong",
+      intentKey: "tool-batch:response-followup:batch-followup",
+      socketGeneration: 1,
+      elapsedMs: 4,
+    });
+    spoken = step(spoken.lifecycle, {
+      type: "response.transcript.done",
+      responseId: "response-followup-wrong",
+      transcript: "Perfeito, está registrado e seguimos.",
+      socketGeneration: 1,
+      elapsedMs: 5,
+    });
+    spoken = step(spoken.lifecycle, {
+      type: "response.output_audio.done",
+      responseId: "response-followup-wrong",
+      socketGeneration: 1,
+      elapsedMs: 6,
+    });
+    spoken = step(spoken.lifecycle, {
+      type: "response.done",
+      responseId: "response-followup-wrong",
+      socketGeneration: 1,
+      elapsedMs: 7,
+    });
+    spoken = step(spoken.lifecycle, {
+      type: "output_audio_buffer.stopped",
+      responseId: "response-followup-wrong",
+      socketGeneration: 1,
+      elapsedMs: 8,
+    });
+
+    expect(spoken.lifecycle.phase).toBe("follow_up");
+    expect(spoken.commands.filter((command) =>
+      command.type === "request_response" &&
+      command.purpose === "tool_continuation"
+    )).toEqual([
+      expect.objectContaining({
+        intentKey:
+          "tool-batch:response-followup:batch-followup:retry:1",
+        instructions: "Quais cidades vocês atendem?",
+      }),
+    ]);
+    expect(spoken.commands.some((command) =>
+      command.type === "persist_followup"
+    )).toBe(false);
+
+    let retried = step(spoken.lifecycle, {
+      type: "response.intent_sent",
+      intentKey: "tool-batch:response-followup:batch-followup:retry:1",
+      socketGeneration: 1,
+      elapsedMs: 9,
+    });
+    retried = step(retried.lifecycle, {
+      type: "response.created",
+      responseId: "response-followup-correct",
+      intentKey: "tool-batch:response-followup:batch-followup:retry:1",
+      socketGeneration: 1,
+      elapsedMs: 10,
+    });
+    retried = step(retried.lifecycle, {
+      type: "response.transcript.done",
+      responseId: "response-followup-correct",
+      transcript: "Quais cidades vocês atendem?",
+      socketGeneration: 1,
+      elapsedMs: 11,
+    });
+    retried = step(retried.lifecycle, {
+      type: "response.output_audio.done",
+      responseId: "response-followup-correct",
+      socketGeneration: 1,
+      elapsedMs: 12,
+    });
+    retried = step(retried.lifecycle, {
+      type: "response.done",
+      responseId: "response-followup-correct",
+      socketGeneration: 1,
+      elapsedMs: 13,
+    });
+    retried = step(retried.lifecycle, {
+      type: "output_audio_buffer.stopped",
+      responseId: "response-followup-correct",
+      socketGeneration: 1,
+      elapsedMs: 14,
+    });
+    expect(retried.lifecycle.phase).toBe("collecting");
+    expect(retried.lifecycle.followupSpeech).toBeUndefined();
   });
 
-  test("incomplete exhausted coverage blocks explicitly and emits no instructionless continuation", () => {
+  test("incomplete exhausted coverage speaks one truthful error instead of becoming silently blocked", () => {
     const exhausted = step(collectingWithReadyAnswerBatch(), {
       type: "coverage.changed",
       revision: 12,
@@ -4383,12 +5305,113 @@ describe("durable directed follow-up ownership", () => {
       elapsedMs: 12,
     });
 
-    expect(exhausted.lifecycle.phase).toBe("blocked");
-    expect(exhausted.commands).toContainEqual(expect.objectContaining({
-      type: "block",
-      code: "follow_up_exhausted",
-    }));
-    expect(exhausted.commands.some((command) => command.type === "request_response"))
+    expect(exhausted.lifecycle.phase).toBe("follow_up");
+    expect(exhausted.commands.some((command) => command.type === "block"))
       .toBe(false);
+    expect(exhausted.commands.filter((command) =>
+      command.type === "request_response" && command.purpose === "recovery"
+    )).toEqual([
+      expect.objectContaining({
+        instructions: expect.stringContaining(
+          "Sua resposta foi salva, mas não consegui preparar a próxima pergunta",
+        ),
+      }),
+    ]);
+  });
+
+  test("a failed directed-follow-up persistence speaks exactly one truthful error", () => {
+    const lifecycle = collectingWithReadyAnswerBatch();
+    lifecycle.phase = "follow_up";
+    lifecycle.coverage = {
+      revision: 5,
+      digest: "f".repeat(64),
+      complete: false,
+      missing: [],
+      ambiguous: [{
+        field: "service.emergency_eligibility",
+        subject: "conserto_vazamento",
+      }],
+      nextQuestion: {
+        field: "service.emergency_eligibility",
+        subject: "conserto_vazamento",
+        questionPt: "Este serviço pode ser tratado como emergência?",
+      },
+    };
+    lifecycle.pendingFollowup = {
+      sourceRevision: 5,
+      sourceDigest: "f".repeat(64),
+      field: "service.emergency_eligibility",
+      subject: "conserto_vazamento",
+      questionPt: "Este serviço pode ser tratado como emergência?",
+      intentKey: "tool-batch:response-answer:batch-answer",
+    };
+
+    const failed = step(lifecycle, {
+      type: "followup.persistence_failed",
+      sourceRevision: 5,
+      field: "service.emergency_eligibility",
+      subject: "conserto_vazamento",
+      code: "coverage_incomplete",
+      safeDetail: "onboarding follow-up limit is exhausted",
+      elapsedMs: 20,
+    });
+
+    expect(failed.lifecycle.phase).toBe("follow_up");
+    expect(failed.lifecycle.pendingFollowup).toBeUndefined();
+    expect(failed.commands.some((command) => command.type === "block"))
+      .toBe(false);
+    expect(failed.commands.filter((command) =>
+      command.type === "request_response" && command.purpose === "recovery"
+    )).toHaveLength(1);
+    expect(JSON.stringify(failed.commands)).toContain(
+      "Sua resposta foi salva, mas não consegui preparar a próxima pergunta",
+    );
+    const recoveryIntent = Object.values(failed.lifecycle.responseIntents)
+      .find((intent) => intent.purpose === "recovery")!.intentKey;
+    let spoken = step(failed.lifecycle, {
+      type: "response.intent_sent",
+      intentKey: recoveryIntent,
+      socketGeneration: 1,
+      elapsedMs: 21,
+    });
+    spoken = step(spoken.lifecycle, {
+      type: "response.created",
+      responseId: "response-terminal-recovery",
+      intentKey: recoveryIntent,
+      socketGeneration: 1,
+      elapsedMs: 22,
+    });
+    spoken = step(spoken.lifecycle, {
+      type: "response.transcript.done",
+      responseId: "response-terminal-recovery",
+      transcript:
+        "Sua resposta foi salva, mas não consegui preparar a próxima pergunta. Encerre este teste e tente novamente.",
+      socketGeneration: 1,
+      elapsedMs: 23,
+    });
+    spoken = step(spoken.lifecycle, {
+      type: "response.output_audio.done",
+      responseId: "response-terminal-recovery",
+      socketGeneration: 1,
+      elapsedMs: 24,
+    });
+    spoken = step(spoken.lifecycle, {
+      type: "response.done",
+      responseId: "response-terminal-recovery",
+      socketGeneration: 1,
+      elapsedMs: 25,
+    });
+    spoken = step(spoken.lifecycle, {
+      type: "output_audio_buffer.stopped",
+      responseId: "response-terminal-recovery",
+      socketGeneration: 1,
+      elapsedMs: 26,
+    });
+    expect(spoken.lifecycle.phase).toBe("blocked");
+    expect(spoken.commands).toContainEqual(expect.objectContaining({
+      type: "block",
+      code: "recovery_spoken",
+      recoverable: false,
+    }));
   });
 });

@@ -23,10 +23,12 @@ import {
   type SessionLedger,
 } from "../src/sideband.ts";
 import { hashOnboardingToolArgs } from "../src/onboarding-coordinator.ts";
+import { requestResponse } from "../src/response-coordinator.ts";
 import { makeCapability, runTool, type Capability } from "../src/tools.ts";
 import {
   TEST10_SYNTHETIC_THRESHOLD_EQUIVALENCE,
 } from "./fixtures/test10-budget.ts";
+import { TEST11_EMERGENCY_STALL } from "./fixtures/test11-emergency-stall.ts";
 
 const ownerId = "owner-1";
 const onboardingOptions = {
@@ -90,6 +92,21 @@ function functionOutputs(ws: { sent: string[] }): any[] {
     (frame) => frame.type === "conversation.item.create" &&
       frame.item?.type === "function_call_output",
   );
+}
+
+function expectFatalOnboardingTermination(
+  cap: Capability,
+  l: SessionLedger,
+  ws: { closed: number },
+) {
+  expect(l.status).toBe("error");
+  expect(l.onboarding!.lifecycle.phase)
+    .toBe("fatal_error_provider_terminating" as any);
+  expect(l.onboarding!.pendingHangupIntentKey)
+    .toBe(`fatal-error-hangup:${cap.callId}`);
+  expect(l.onboarding!.lifecycle.requestedFatalHangupKeys)
+    .toEqual([`fatal-error-hangup:${cap.callId}`]);
+  expect(ws.closed).toBeGreaterThanOrEqual(1);
 }
 
 function responseCreated(responseId: string, intentKey?: string) {
@@ -254,6 +271,24 @@ async function completeGreetingTrace(
   expect(l.onboarding!.lifecycle.phase).toBe("collecting");
 }
 
+async function completeOwnerTurnTrace(
+  cap: Capability,
+  l: SessionLedger,
+  ws: ReturnType<typeof socket>,
+  turnId: string,
+  transcript: string,
+) {
+  await handleEvent(cap, l, ws as any, {
+    type: "input_audio_buffer.speech_started",
+    item_id: turnId,
+  });
+  await handleEvent(cap, l, ws as any, {
+    type: "conversation.item.input_audio_transcription.completed",
+    item_id: turnId,
+    transcript,
+  });
+}
+
 async function flushAsync() {
   await Promise.resolve();
   await Promise.resolve();
@@ -395,7 +430,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
           ...(status ? { status } : {}),
         },
       });
-      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expectFatalOnboardingTermination(cap, l, ws);
       expect(l.toolLog).toEqual([]);
       expect(functionOutputs(ws)).toEqual([]);
       expect(Object.keys(l.onboarding!.lifecycle.toolOutbox)).toEqual([]);
@@ -480,7 +515,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
         type: "response.done",
         response: { id: "resp-empty-invalid", status },
       });
-      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expectFatalOnboardingTermination(cap, l, ws);
       expect(l.toolLog).toEqual([]);
       expect(functionOutputs(ws)).toEqual([]);
     }
@@ -499,7 +534,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       if (status === undefined) delete (item.item as any).status;
       await handleEvent(cap, l, ws as any, item);
       await handleEvent(cap, l, ws as any, responseDone("resp-item-status"));
-      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expectFatalOnboardingTermination(cap, l, ws);
       expect(l.toolLog).toEqual([]);
       expect(functionOutputs(ws)).toEqual([]);
     }
@@ -516,7 +551,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       (item as any).output_index = outputIndex;
       await handleEvent(cap, l, ws as any, item);
       await handleEvent(cap, l, ws as any, responseDone("resp-index"));
-      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expectFatalOnboardingTermination(cap, l, ws);
       expect(l.toolLog).toEqual([]);
       expect(functionOutputs(ws)).toEqual([]);
     }
@@ -530,7 +565,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     await handleEvent(cap, l, ws as any,
       functionCallDone("resp-index-duplicate", "fc-index-b", "end_session", "{}", 3));
     await handleEvent(cap, l, ws as any, responseDone("resp-index-duplicate"));
-    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expectFatalOnboardingTermination(cap, l, ws);
     expect(l.toolLog).toEqual([]);
     expect(functionOutputs(ws)).toEqual([]);
   });
@@ -578,7 +613,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     ));
     await handleEvent(cap, l, ws as any, responseDone("resp-atomic"));
 
-    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expectFatalOnboardingTermination(cap, l, ws);
     expect(boundary.rpcFacts).toEqual([]);
     expect(l.toolLog).toEqual([]);
     expect(functionOutputs(ws)).toEqual([]);
@@ -647,7 +682,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       ));
       await handleEvent(cap, l, ws as any, responseDone(responseId));
 
-      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expectFatalOnboardingTermination(cap, l, ws);
       expect(boundary.rpcFacts).toEqual([]);
       expect(l.toolLog).toEqual([]);
       expect(functionOutputs(ws)).toEqual([]);
@@ -704,7 +739,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       ));
       await handleEvent(cap, l, ws as any, responseDone(responseId));
 
-      expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+      expectFatalOnboardingTermination(cap, l, ws);
       expect(boundary.rpcFacts).toEqual([]);
       expect(l.toolLog).toEqual([]);
       expect(functionOutputs(ws)).toEqual([]);
@@ -728,6 +763,106 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     );
     expect(l.onboarding!.lifecycle.responseIntents[`greeting:${cap.callId}`])
       .toMatchObject({ state: "acknowledged", responseId: "resp-greeting" });
+  });
+
+  test("exact terminal response.created replay is a no-op while divergent identity terminates", async () => {
+    const cap = onboardingCap("call-terminal-created-replay");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws, "resp-terminal-replay");
+    expect(l.responseActive).toBe(false);
+
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated(
+        "resp-terminal-replay",
+        `greeting:${cap.callId}`,
+      ),
+    );
+    await handleEvent(cap, l, ws as any, responseDone("resp-terminal-replay"));
+    expect(l.status).toBe("active");
+    expect(l.responseActive).toBe(false);
+    expect(l.onboarding!.lifecycle.phase).toBe("collecting");
+    expect(requestResponse(l, ws, {
+      intentKey: "recovery:after-terminal-replay",
+      purpose: "recovery",
+      instructions: "Mensagem de controle.",
+    })).toBe(true);
+
+    const divergentCap = onboardingCap("call-terminal-created-divergent");
+    const divergent = ledger(divergentCap.callId);
+    const divergentSocket = socket();
+    await completeGreetingTrace(
+      divergentCap,
+      divergent,
+      divergentSocket,
+      "resp-terminal-divergent",
+    );
+    await handleEvent(
+      divergentCap,
+      divergent,
+      divergentSocket as any,
+      responseCreated("resp-terminal-divergent", "summary:wrong-identity"),
+    );
+    expectFatalOnboardingTermination(
+      divergentCap,
+      divergent,
+      divergentSocket,
+    );
+  });
+
+  test("active-response rejection terminates only one correlated sent application intent", async () => {
+    const cap = onboardingCap("call-active-response-conflict");
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, { type: "session.created" });
+    const greetingIntent = l.onboarding!.lifecycle.responseIntents[
+      `greeting:${cap.callId}`
+    ]!;
+    greetingIntent.state = "sent";
+    greetingIntent.sentSocketGeneration = 1;
+    l.requestedResponseIntentKeys = [greetingIntent.intentKey];
+    l.responseActive = true;
+    expect(l.onboarding!.lifecycle.responseIntents[`greeting:${cap.callId}`])
+      .toMatchObject({ state: "sent" });
+    expect(greetingIntent.responseId).toBeUndefined();
+
+    await handleEvent(cap, l, ws as any, {
+      type: "error",
+      error: {
+        code: "conversation_already_has_active_response",
+        event_id: "provider-response-create-conflict",
+        message: "Conversation already has an active response",
+      },
+    });
+
+    expect(l.status).toBe("error");
+    expect(l.onboarding!.lifecycle.phase)
+      .toBe("transport_error_provider_terminating" as any);
+    expect(l.onboarding!.pendingHangupIntentKey)
+      .toBe(`transport-error-hangup:${cap.callId}`);
+    expect(l.onboarding!.lifecycle.requestedTransportHangupKeys)
+      .toEqual([`transport-error-hangup:${cap.callId}`]);
+    expect(framesOfType(ws, "response.create")).toHaveLength(0);
+    expect(ws.closed).toBeGreaterThanOrEqual(1);
+
+    const unrelated = onboardingCap("call-unrelated-active-response");
+    const unrelatedLedger = ledger(unrelated.callId);
+    const unrelatedSocket = socket();
+    await completeGreetingTrace(unrelated, unrelatedLedger, unrelatedSocket);
+    await handleEvent(unrelated, unrelatedLedger, unrelatedSocket as any, {
+      type: "error",
+      error: {
+        code: "conversation_already_has_active_response",
+        message: "Conversation already has an active response",
+      },
+    });
+    expect(unrelatedLedger.status).toBe("active");
+    expect(unrelatedLedger.responseActive).toBe(true);
+    expect(unrelatedLedger.onboarding!.lifecycle.phase).toBe("collecting");
+    expect(unrelatedSocket.closed).toBe(0);
   });
 
   test("ordered membership has a stable hash and exact send-to-ack state", async () => {
@@ -874,7 +1009,12 @@ describe("onboarding raw correlation and durable tool outbox", () => {
         type: "conversation.item.done",
       },
     );
-    expect(mismatch.adapter.lifecycle.phase).toBe("blocked");
+    expect(mismatch.l.status).toBe("error");
+    expect(mismatch.adapter.lifecycle.phase)
+      .toBe("transport_error_provider_terminating" as any);
+    expect(mismatch.adapter.pendingHangupIntentKey)
+      .toBe(`transport-error-hangup:${mismatch.cap.callId}`);
+    expect(mismatch.ws.closed).toBeGreaterThanOrEqual(1);
     expect(mismatch.adapter.lifecycle.toolOutbox["call_0123456789abcdef"]?.state)
       .toBe("output_pending");
 
@@ -917,6 +1057,9 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       rule_text: "SECOND authoritative correction.",
       structured: { value: "owner_review" }, owner_words: "Depois revisão.",
     };
+    await completeOwnerTurnTrace(
+      cap, l, ws, "turn-index-order", "Primeiro Irvine. Depois revisão.",
+    );
     await handleEvent(cap, l, ws as any, responseCreated("resp-index-order"));
     await handleEvent(cap, l, ws as any, functionCallDone(
       "resp-index-order", "fc-second", "record_interview_answer",
@@ -966,6 +1109,9 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       rule_text: "Serve Irvine.", structured: { value: { localities: [{ display_name: "Irvine", country_code: "US", region_code: "CA" }] } },
       owner_words: "Atendemos Irvine.",
     };
+    await completeOwnerTurnTrace(
+      cap, l, ws, "turn-reused", "Atendemos Irvine.",
+    );
     await handleEvent(cap, l, ws as any, responseCreated("resp-reused"));
     await handleEvent(cap, l, ws as any, functionCallDone(
       "resp-reused", "fc-reused-new-provider-id", "record_interview_answer",
@@ -982,6 +1128,9 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     expect(l.onboarding!.lifecycle.toolOutbox["fc-reused-new-provider-id"]?.state)
       .toBe("output_acked");
 
+    await completeOwnerTurnTrace(
+      cap, l, ws, "turn-advance", "Atendemos Irvine e Anaheim.",
+    );
     await handleEvent(cap, l, ws as any, responseCreated("resp-advance"));
     await handleEvent(cap, l, ws as any, functionCallDone(
       "resp-advance", "fc-real-advance", "record_interview_answer",
@@ -1036,6 +1185,9 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       ambiguous: [],
       nextQuestion,
     };
+    await completeOwnerTurnTrace(
+      cap, l, ws, "turn-neg-repair", "O preço não é negociável.",
+    );
     await handleEvent(cap, l, ws as any, responseCreated("resp-neg-repair"));
     await handleEvent(cap, l, ws as any, functionCallDone(
       "resp-neg-repair",
@@ -1118,6 +1270,9 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       instructions: "Fechamento A.",
     };
 
+    await completeOwnerTurnTrace(
+      cap, l, ws, "turn-correction-B", "Agora Anaheim.",
+    );
     await handleEvent(cap, l, ws as any, responseCreated("resp-correction-B"));
     await handleEvent(cap, l, ws as any, functionCallDone(
       "resp-correction-B",
@@ -1181,7 +1336,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       functionCallDone("resp-mismatch", "fc-mismatch", "end_session", JSON.stringify({ value: 2 })));
     await handleEvent(cap, l, ws as any, responseDone("resp-mismatch"));
 
-    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expectFatalOnboardingTermination(cap, l, ws);
     expect(l.toolLog).toEqual([]);
     expect(functionOutputs(ws)).toEqual([]);
     expect(Object.values(l.onboarding!.lifecycle.toolOutbox)).toEqual([]);
@@ -1221,7 +1376,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
         4,
       ));
     await handleEvent(cap, l, ws as any, responseDone("resp-changed"));
-    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expectFatalOnboardingTermination(cap, l, ws);
     expect(l.toolLog).toHaveLength(toolsBefore);
     expect(functionOutputs(ws)).toHaveLength(outputsBefore);
     expect(l.onboarding!.lifecycle.toolOutbox["fc-sibling"]).toBeUndefined();
@@ -1306,7 +1461,7 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     ));
     await handleEvent(cap, l, ws as any, responseDone(responseId));
 
-    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expectFatalOnboardingTermination(cap, l, ws);
     expect(boundary.rpcFacts).toEqual([]);
     expect(l.toolLog).toEqual([]);
     expect(functionOutputs(ws).filter((frame) =>
@@ -1342,7 +1497,11 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       responseCap, responseLedger, responseSocket as any,
       responseDone("overflow-response"),
     );
-    expect(responseLedger.onboarding!.lifecycle.phase).toBe("blocked");
+    expectFatalOnboardingTermination(
+      responseCap,
+      responseLedger,
+      responseSocket,
+    );
     expect(Object.keys(responseLedger.onboarding!.responses).length)
       .toBeLessThanOrEqual(512);
 
@@ -1395,7 +1554,11 @@ describe("onboarding raw correlation and durable tool outbox", () => {
       responseDone("resp-pending-overflow"));
     await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
       outputAck(pendingLedger, "fc-pending-overflow"));
-    expect(pendingLedger.onboarding!.lifecycle.phase).toBe("blocked");
+    expectFatalOnboardingTermination(
+      pendingCap,
+      pendingLedger,
+      pendingSocket,
+    );
     expect(Object.keys(pendingLedger.onboarding!.pendingResponseCommands))
       .toHaveLength(0);
     expect(framesOfType(pendingSocket, "response.create")).toHaveLength(0);
@@ -1449,6 +1612,13 @@ describe("onboarding raw correlation and durable tool outbox", () => {
   function seedSummary(l: SessionLedger) {
     const lifecycle = l.onboarding!.lifecycle;
     lifecycle.phase = "summary_speaking";
+    lifecycle.coverage = {
+      revision: 1,
+      digest: "digest-1",
+      complete: true,
+      missing: [],
+      ambiguous: [],
+    };
     lifecycle.summary = {
       receiptId: "coverage-1",
       revision: 1,
@@ -1484,9 +1654,15 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     });
     expect(l.onboarding!.lifecycle.phase).toBe("summary_speaking");
     expect(l.onboarding!.lifecycle.summary).toMatchObject({
-      transcriptFinal: false, audioDone: false,
-      responseDone: true, playbackStopped: true,
+      transcriptFinal: false,
+      audioDone: false,
+      responseDone: false,
+      playbackStopped: false,
+      attempt: 1,
     });
+    expect(framesOfType(ws, "response.create").filter((frame) =>
+      frame.response?.metadata?.intent_key === "summary:digest-1:retry:1"
+    )).toHaveLength(1);
   });
 
   test("summary proof accepts transcript/audio/terminal/playback only for the exact response", async () => {
@@ -2226,6 +2402,52 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
     expect(summaryCreates[0].response.metadata).toMatchObject({
       intent_key: `summary:${digest}`, purpose: "summary", snapshot_digest: digest,
     });
+  });
+
+  test("snapshot read failure requests one fatal provider termination instead of leaving an active blocked call", async () => {
+    const cap = onboardingCap("call-summary-load-failed");
+    _setClient({
+      from() {
+        const query: any = {
+          select() { return query; },
+          eq() { return query; },
+          in() { return query; },
+          order() { return query; },
+          limit() { return query; },
+          then(resolve: (value: unknown) => unknown) {
+            return Promise.resolve({
+              data: null,
+              error: { message: "synthetic snapshot read failure" },
+            }).then(resolve);
+          },
+        };
+        return query;
+      },
+      rpc() {
+        return Promise.resolve({
+          data: null,
+          error: { message: "unexpected rpc" },
+        });
+      },
+    } as any);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await handleEvent(cap, l, ws as any, responseCreated("resp-load-failed"));
+    l.onboarding!.lifecycle.phase = "coverage_check";
+    l.onboarding!.lifecycle.coverage = {
+      revision: 1,
+      digest: "a".repeat(64),
+      complete: true,
+      missing: [],
+      ambiguous: [],
+    };
+
+    await handleEvent(cap, l, ws as any, responseDone("resp-load-failed"));
+
+    expectFatalOnboardingTermination(cap, l, ws);
+    expect(framesOfType(ws, "response.create")).toHaveLength(0);
+    expect(l.onboarding!.lifecycle.preparedSnapshotDigests)
+      .toEqual(["a".repeat(64)]);
   });
 
   test("speech ingress during a slow snapshot suppresses summary until the same-socket VAD response is terminal", async () => {
@@ -3023,6 +3245,243 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
     expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
   });
 
+  test("the real emergency answer advances once and can never end in open-session silence", async () => {
+    const fixture = TEST11_EMERGENCY_STALL;
+    const cap = onboardingCap(fixture.callId);
+    const boundary = sequentialAnswerBoundary([{
+      status: "recorded",
+      revision: 6,
+      digest: "6".repeat(64),
+    }], { responseFromProjection: true });
+    _setClient(boundary.client);
+    const subject = fixture.providerFact.subject;
+    const field = fixture.providerFact.field as CoverageField;
+    const coverageKey = `service:${subject}:${field}`;
+    const snapshot: CoverageSnapshot = {
+      ...createCoverage({ tenantId: cap.tenantId, callId: cap.callId }),
+      revision: 5,
+      services: [subject],
+      currentSubject: subject,
+      cells: {
+        [coverageKey]: {
+          state: "ambiguous",
+          attempts: 1,
+          reason: "emergency_eligibility_must_be_boolean",
+        },
+      },
+      followUps: 2,
+      followUpGroups: { [coverageKey]: 2 },
+    };
+    const currentQuestion = {
+      field,
+      subject,
+      questionPt: "Este serviço pode ser tratado como emergência?",
+    };
+    boundary.seedSnapshot(cap, snapshot, "5".repeat(64), currentQuestion);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+    l.onboarding!.lifecycle.coverage = {
+      revision: 5,
+      digest: "5".repeat(64),
+      complete: false,
+      missing: [],
+      ambiguous: [{ field, subject }],
+      nextQuestion: currentQuestion,
+    };
+
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-test11-emergency",
+    });
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-test11-emergency",
+      transcript: fixture.ownerWords,
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-test11-emergency"),
+    );
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "response-test11-emergency",
+      "tool-test11-emergency",
+      "record_interview_answer",
+      JSON.stringify({
+        ...fixture.providerFact,
+        owner_words: fixture.ownerWords,
+      }),
+      0,
+    ));
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-test11-emergency"),
+    );
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      outputAck(l, "tool-test11-emergency"),
+    );
+
+    expect(boundary.rpcFacts).toHaveLength(1);
+    expect(boundary.rpcFacts[0]).toMatchObject({
+      field: "service.emergency_eligibility",
+      subject: "conserto_vazamento",
+      structured: { value: true },
+    });
+    expect((boundary.rpcCoverages[0] as any).snapshot.cells[coverageKey])
+      .toEqual({ state: "answered", attempts: 2, value: true });
+    expect(boundary.followupRpcCalls).toBe(1);
+    const continuations = framesOfType(ws, "response.create").filter(
+      (frame) => frame.response?.metadata?.purpose === "tool_continuation",
+    );
+    expect(continuations).toHaveLength(1);
+    expect(JSON.stringify(continuations[0])).not.toContain(
+      "Este serviço pode ser tratado como emergência?",
+    );
+    expect(l.onboarding!.lifecycle.phase).not.toBe("blocked");
+  });
+
+  test("a tool batch waits for its late caller transcript before binding emergency eligibility", async () => {
+    const cap = onboardingCap("call-late-owner-transcript-binding");
+    const boundary = sequentialAnswerBoundary([{
+      status: "recorded",
+      revision: 1,
+      digest: "1".repeat(64),
+    }], { responseFromProjection: true });
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started",
+      item_id: "turn-late-binding",
+    });
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseCreated("response-late-binding"),
+    );
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "response-late-binding",
+      "tool-late-binding",
+      "record_interview_answer",
+      JSON.stringify({
+        topic: "emergencia",
+        field: "service.emergency_eligibility",
+        subject: "conserto_vazamento",
+        disposition: "answered",
+        rule_text: "Elegibilidade de emergência sugerida.",
+        structured: { value: "Descrição livre do modelo." },
+        owner_words: "Não confiável: o modelo disse não.",
+      }),
+      0,
+    ));
+    await handleEvent(
+      cap,
+      l,
+      ws as any,
+      responseDone("response-late-binding"),
+    );
+    expect(boundary.rpcFacts).toHaveLength(0);
+    expect(functionOutputs(ws)).toHaveLength(0);
+
+    const verifiedTranscript =
+      "Pode sim, mas só em situação de risco e sem taxa automática.";
+    await handleEvent(cap, l, ws as any, {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "turn-late-binding",
+      transcript: verifiedTranscript,
+    });
+
+    expect(boundary.rpcFacts).toHaveLength(1);
+    expect(boundary.rpcFacts[0]).toMatchObject({
+      owner_words: verifiedTranscript,
+      structured: { value: true },
+    });
+    expect(functionOutputs(ws)).toHaveLength(1);
+  });
+
+  test("failed caller transcription rejects tools with one output before one audible recovery", async () => {
+    for (const failureBeforeDone of [true, false]) {
+      const suffix = failureBeforeDone ? "before" : "after";
+      const cap = onboardingCap(`call-transcription-failed-${suffix}`);
+      const boundary = sequentialAnswerBoundary([{
+        status: "recorded",
+        revision: 1,
+        digest: "1".repeat(64),
+      }]);
+      _setClient(boundary.client);
+      const l = ledger(cap.callId);
+      const ws = socket();
+      await completeGreetingTrace(cap, l, ws);
+      await handleEvent(cap, l, ws as any, {
+        type: "input_audio_buffer.speech_started",
+        item_id: `turn-transcription-failed-${suffix}`,
+      });
+      await handleEvent(
+        cap,
+        l,
+        ws as any,
+        responseCreated(`response-transcription-failed-${suffix}`),
+      );
+      await handleEvent(cap, l, ws as any, functionCallDone(
+        `response-transcription-failed-${suffix}`,
+        `tool-transcription-failed-${suffix}`,
+        "record_interview_answer",
+        JSON.stringify({
+          topic: "emergencia",
+          field: "service.emergency_eligibility",
+          subject: "conserto_vazamento",
+          disposition: "answered",
+          rule_text: "Modelo propôs elegibilidade.",
+          structured: { value: true },
+          owner_words: "Modelo alegou que o dono disse sim.",
+        }),
+        0,
+      ));
+      const failure = {
+        type: "conversation.item.input_audio_transcription.failed",
+        item_id: `turn-transcription-failed-${suffix}`,
+      };
+      if (failureBeforeDone)
+        await handleEvent(cap, l, ws as any, failure);
+      await handleEvent(
+        cap,
+        l,
+        ws as any,
+        responseDone(`response-transcription-failed-${suffix}`),
+      );
+      if (!failureBeforeDone)
+        await handleEvent(cap, l, ws as any, failure);
+
+      expect(boundary.rpcFacts).toHaveLength(0);
+      expect(functionOutputs(ws)).toHaveLength(1);
+      expect(JSON.parse(functionOutputs(ws)[0].item.output)).toEqual({
+        status: "error",
+        error: "persistence_failed",
+        retry_safe: true,
+      });
+      await handleEvent(
+        cap,
+        l,
+        ws as any,
+        outputAck(l, `tool-transcription-failed-${suffix}`),
+      );
+      expect(framesOfType(ws, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "recovery",
+      )).toHaveLength(1);
+      expect(l.onboarding!.deferredResponseDone).toEqual({});
+      expect(l.onboarding!.deferredResponseTimers).toEqual({});
+    }
+  });
+
   test("ambiguous transcript without item_id fails closed on authority and speaks one recovery", async () => {
     const cap = onboardingCap("call-transcript-correlation-ambiguous");
     const l = ledger(cap.callId);
@@ -3302,9 +3761,10 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       });
 
     expect(l.onboarding!.pendingCallerTurns).toHaveLength(512);
-    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
-    expect(l.transcript.at(-1)?.text)
-      .toBe("onboarding blocked: adapter_capacity_exceeded");
+    expectFatalOnboardingTermination(cap, l, ws);
+    expect(l.transcript).toContainEqual(expect.objectContaining({
+      text: "onboarding blocked: adapter_capacity_exceeded",
+    }));
   });
 
   test("an indeterminate approval reconciles once on the same socket and emits one output", async () => {
@@ -3389,7 +3849,7 @@ describe("snapshot, approval, signoff and hangup command execution", () => {
       name === "record_onboarding_voice_approval"
     )).toHaveLength(4);
     expect(functionOutputs(ws)).toHaveLength(0);
-    expect(l.onboarding!.lifecycle.phase).toBe("blocked");
+    expectFatalOnboardingTermination(cap, l, ws);
     expect(l.onboarding!.lifecycle.toolOutbox[
       "fc-approval-indeterminate-exhausted"
     ]).toBeUndefined();
@@ -3536,6 +3996,23 @@ describe("physical socket attach and reconnect", () => {
     ws.message({ type: "response.output_audio.done", response_id: responseId });
     ws.message(responseDone(responseId));
     ws.message({ type: "output_audio_buffer.stopped", response_id: responseId });
+    await flushAsync();
+  }
+
+  async function completePhysicalOwnerTurn(
+    ws: SyntheticWebSocket,
+    turnId: string,
+    transcript: string,
+  ) {
+    ws.message({
+      type: "input_audio_buffer.speech_started",
+      item_id: turnId,
+    });
+    ws.message({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: turnId,
+      transcript,
+    });
     await flushAsync();
   }
 
@@ -3690,6 +4167,7 @@ describe("physical socket attach and reconnect", () => {
   const activeSessionUpdated = {
     type: "session.updated",
     session: {
+      output_modalities: ["text"],
       audio: {
         input: {
           turn_detection: {
@@ -3761,6 +4239,7 @@ describe("physical socket attach and reconnect", () => {
         role: "agent",
         text: applicationOpeningPayload.text,
       }));
+      expect(framesOfType(ws, "response.create")).toHaveLength(0);
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
@@ -3799,7 +4278,7 @@ describe("physical socket attach and reconnect", () => {
     }
   });
 
-  test("wrong application opening or any model response before activation blocks instead of speaking a model greeting", async () => {
+  test("wrong application opening or any model response before activation terminates instead of speaking a model greeting", async () => {
     const original = globalThis.WebSocket;
     globalThis.WebSocket = SyntheticWebSocket as any;
     try {
@@ -3823,7 +4302,7 @@ describe("physical socket attach and reconnect", () => {
         await control.opened;
         ws.message(event);
         await flushAsync();
-        expect(control.ledger.onboarding!.lifecycle.phase).toBe("blocked");
+        expectFatalOnboardingTermination(cap, control.ledger, ws);
         expect(framesOfType(ws, "response.create")).toHaveLength(0);
         expect(framesOfType(ws, "session.update")).toHaveLength(1);
         control.cancel("test_cleanup");
@@ -3883,7 +4362,7 @@ describe("physical socket attach and reconnect", () => {
       ));
       toolSocket.message(responseDone("resp-forbidden-tool"));
       await flushAsync();
-      expect(tool.ledger.onboarding!.lifecycle.phase).toBe("blocked");
+      expectFatalOnboardingTermination(toolCap, tool.ledger, toolSocket);
       expect(functionOutputs(toolSocket)).toHaveLength(0);
       expect(tool.ledger.toolLog).toHaveLength(0);
       tool.cancel("test_cleanup");
@@ -3903,7 +4382,13 @@ describe("physical socket attach and reconnect", () => {
         cap,
         "rtc-test-10-opening-reattach",
         "gpt-realtime-2.1",
-        applicationOptions,
+        {
+          ...applicationOptions,
+          onboarding: {
+            ...applicationOptions.onboarding,
+            reactivationTimeoutMs: 100,
+          },
+        } as any,
       );
       const first = SyntheticWebSocket.instances[0]!;
       first.emit("open");
@@ -3935,12 +4420,140 @@ describe("physical socket attach and reconnect", () => {
       expect(framesOfType(second, "session.update")).toHaveLength(2);
       second.message(activeSessionUpdated);
       await flushAsync();
+      await new Promise((resolve) => setTimeout(resolve, 120));
       expect(control.ledger.onboarding!.lifecycle.phase).toBe("collecting");
+      expect(control.ledger.status).toBe("active");
       expect(framesOfType(second, "response.create")).toHaveLength(0);
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
       globalThis.WebSocket = original;
+    }
+  });
+
+  test("application opening reattach with no exact item and active-session proof terminates at a bounded transport deadline", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-opening-reactivation-timeout");
+    const timeoutOptions = {
+      ...applicationOptions,
+      onboarding: {
+        ...applicationOptions.onboarding,
+        reactivationTimeoutMs: 20,
+      },
+    } as any;
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-opening-reactivation-timeout",
+        "gpt-realtime-2.1",
+        timeoutOptions,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      first.message(applicationOpeningCreated());
+      first.message(activeSessionUpdated);
+      await flushAsync();
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("collecting");
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      expect(framesOfType(second, "conversation.item.retrieve")).toEqual([
+        expect.objectContaining({
+          item_id: applicationOpeningPayload.item_id,
+          event_id: expect.any(String),
+        }),
+      ]);
+      expect(framesOfType(second, "response.create")).toHaveLength(0);
+      expect(control.ledger.status).toBe("error");
+      expect(control.ledger.onboarding!.lifecycle.phase)
+        .toBe("transport_error_provider_terminating" as any);
+      expect(control.ledger.onboarding!.pendingHangupIntentKey)
+        .toBe(`transport-error-hangup:${cap.callId}`);
+      expect(control.ledger.onboarding!.lifecycle.requestedTransportHangupKeys)
+        .toEqual([`transport-error-hangup:${cap.callId}`]);
+      expect(second.closed).toBeGreaterThanOrEqual(1);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(SyntheticWebSocket.instances).toHaveLength(2);
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("transport reattach rejects a transcript-deferred tool before one recovery", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-deferred-transcript-reattach");
+    const boundary = sequentialAnswerBoundary([{
+      status: "recorded",
+      revision: 1,
+      digest: "1".repeat(64),
+    }]);
+    _setClient(boundary.client);
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-deferred-transcript-reattach",
+        "gpt-realtime-2.1",
+        onboardingOptions,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      await completePhysicalGreeting(first, cap);
+      first.message({
+        type: "input_audio_buffer.speech_started",
+        item_id: "turn-deferred-reattach",
+      });
+      first.message(responseCreated("response-deferred-reattach"));
+      first.message(functionCallDone(
+        "response-deferred-reattach",
+        "tool-deferred-reattach",
+        "record_interview_answer",
+        JSON.stringify({
+          topic: "emergencia",
+          field: "service.emergency_eligibility",
+          subject: "conserto_vazamento",
+          disposition: "answered",
+          rule_text: "Modelo propôs elegibilidade.",
+          structured: { value: true },
+          owner_words: "Modelo alegou que o dono disse sim.",
+        }),
+        0,
+      ));
+      first.message(responseDone("response-deferred-reattach"));
+      await flushAsync();
+      expect(boundary.rpcFacts).toHaveLength(0);
+      expect(functionOutputs(first)).toHaveLength(0);
+      expect(Object.keys(control.ledger.onboarding!.deferredResponseDone))
+        .toEqual(["response-deferred-reattach"]);
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(boundary.rpcFacts).toHaveLength(0);
+      expect(functionOutputs(second)).toHaveLength(1);
+      expect(control.ledger.onboarding!.deferredResponseDone).toEqual({});
+      second.message(outputAck(control.ledger, "tool-deferred-reattach"));
+      await flushAsync();
+      expect(framesOfType(second, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "recovery",
+      )).toHaveLength(1);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+      _setClient(null);
     }
   });
 
@@ -4025,7 +4638,7 @@ describe("physical socket attach and reconnect", () => {
     }
   });
 
-  test("reattach retrieve errors stay unactivated without depending on provider error codes, then later item.created can activate", async () => {
+  test("a correlated reattach retrieve error terminates without accepting later opening evidence", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
     globalThis.WebSocket = SyntheticWebSocket as any;
@@ -4064,19 +4677,22 @@ describe("physical socket attach and reconnect", () => {
         },
       });
       await flushAsync();
-      expect(control.ledger.status).toBe("active");
-      expect(control.ledger.onboarding!.lifecycle.phase).toBe("greeting");
-      expect(second.closed).toBe(0);
+      expect(control.ledger.status).toBe("error");
+      expect(control.ledger.onboarding!.lifecycle.phase)
+        .toBe("transport_error_provider_terminating" as any);
+      expect(control.ledger.onboarding!.pendingHangupIntentKey)
+        .toBe(`transport-error-hangup:${cap.callId}`);
+      expect(second.closed).toBeGreaterThanOrEqual(1);
       expect(framesOfType(second, "response.create")).toEqual([]);
 
       second.message(applicationOpeningCreated());
       await flushAsync();
-      expect(framesOfType(second, "session.update")).toHaveLength(2);
+      expect(framesOfType(second, "session.update")).toHaveLength(1);
       second.message(activeSessionUpdated);
       await flushAsync();
-      expect(control.ledger.onboarding!.lifecycle.phase).toBe("collecting");
+      expect(control.ledger.onboarding!.lifecycle.phase)
+        .toBe("transport_error_provider_terminating" as any);
       expect(framesOfType(second, "response.create")).toEqual([]);
-      control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
       globalThis.WebSocket = original;
@@ -4207,7 +4823,7 @@ describe("physical socket attach and reconnect", () => {
     };
   }
 
-  test("a sent greeting without response.created blocks reattach instead of creating a duplicate response", async () => {
+  test("a sent greeting without response.created terminates reattach without replay", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
     globalThis.WebSocket = SyntheticWebSocket as any;
@@ -4230,19 +4846,212 @@ describe("physical socket attach and reconnect", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(framesOfType(second, "response.create")).toHaveLength(0);
       expect(control.ledger.onboarding!.lifecycle.socketGeneration).toBe(2);
-      expect(control.ledger.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(control.ledger.status).toBe("error");
+      expect(control.ledger.onboarding!.lifecycle.phase)
+        .toBe("transport_error_provider_terminating" as any);
+      expect(control.ledger.onboarding!.pendingHangupIntentKey)
+        .toBe(`transport-error-hangup:${cap.callId}`);
+      expect(second.closed).toBeGreaterThanOrEqual(1);
       expect(control.ledger.transcript).toContainEqual(expect.objectContaining({
         role: "system",
-        text: "onboarding blocked: response_intent_ack_indeterminate",
+        text:
+          "session ended: onboarding transport indeterminate (response_intent_ack_indeterminate)",
       }));
-      control.cancel("test_cleanup");
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(SyntheticWebSocket.instances).toHaveLength(2);
     } finally {
       liveSessions.delete(cap.callId);
       globalThis.WebSocket = original;
     }
   });
 
-  test("transport loss finds nonterminal authority speech awaiting playback and blocks its reattach", async () => {
+  test("a ready fatal termination whose old-socket command could not run is reissued on the new socket", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-fatal-ready-reattach");
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-fatal-ready-reattach",
+        "gpt-realtime-2.1",
+        onboardingOptions,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await control.opened;
+      await completePhysicalGreeting(first, cap);
+      const adapter = control.ledger.onboarding!;
+      adapter.lifecycle.phase = "fatal_error_ready_to_terminate";
+      adapter.lifecycle.fatalTerminationReason =
+        "snapshot_read_failed_after_socket_loss";
+      adapter.lifecycle.requestedFatalHangupKeys = [
+        `fatal-error-hangup:${cap.callId}`,
+      ];
+
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      expect(control.ledger.status).toBe("error");
+      expect(adapter.lifecycle.phase)
+        .toBe("fatal_error_provider_terminating" as any);
+      expect(adapter.pendingHangupIntentKey)
+        .toBe(`fatal-error-hangup:${cap.callId}`);
+      expect(second.closed).toBeGreaterThanOrEqual(1);
+      expect(framesOfType(second, "response.create")).toHaveLength(0);
+      expect(SyntheticWebSocket.instances).toHaveLength(2);
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("a sent application response with no provider ACK terminates on the same socket without replay", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-response-ack-timeout");
+    const timeoutOptions = {
+      onboarding: {
+        ...onboardingOptions.onboarding,
+        transportAckTimeoutMs: 20,
+      },
+    } as any;
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-response-ack-timeout",
+        "gpt-realtime-2.1",
+        timeoutOptions,
+      );
+      const ws = SyntheticWebSocket.instances[0]!;
+      ws.emit("open");
+      await control.opened;
+      expect(framesOfType(ws, "response.create")).toHaveLength(1);
+
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      expect(control.ledger.status).toBe("error");
+      expect(control.ledger.onboarding!.lifecycle.phase)
+        .toBe("transport_error_provider_terminating" as any);
+      expect(control.ledger.onboarding!.pendingHangupIntentKey)
+        .toBe(`transport-error-hangup:${cap.callId}`);
+      expect(framesOfType(ws, "response.create")).toHaveLength(1);
+      expect(ws.closed).toBeGreaterThanOrEqual(1);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(SyntheticWebSocket.instances).toHaveLength(1);
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("create and retrieve output requests with no provider ACK terminate without recreating or rerunning", async () => {
+    const original = globalThis.WebSocket;
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    try {
+      SyntheticWebSocket.instances = [];
+      const createCap = onboardingCap("call-output-create-ack-timeout");
+      const createControl = attachSideband(
+        createCap,
+        "rtc-output-create-ack-timeout",
+        "gpt-realtime-2.1",
+        {
+          onboarding: {
+            ...onboardingOptions.onboarding,
+            transportAckTimeoutMs: 20,
+          },
+        } as any,
+      );
+      const createSocket = SyntheticWebSocket.instances[0]!;
+      createControl.ledger.onboarding!.lifecycle.toolOutbox["create-timeout"] = {
+        toolCallId: "create-timeout",
+        toolName: "record_interview_answer",
+        argsHash: "create-timeout-args",
+        state: "executed",
+        providerResponseId: "create-timeout-response",
+        batchHash: "create-timeout-batch",
+        output: '{"status":"recorded"}',
+        resultHash: "create-timeout-result",
+        outputItemId: "tlo-f164cbaf3a4ead4df36d30dc3ea5",
+      };
+      createSocket.emit("open");
+      await createControl.opened;
+      await completePhysicalGreeting(createSocket, createCap);
+      const toolLogBeforeCreate = [...createControl.ledger.toolLog];
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      expect(createControl.ledger.status).toBe("error");
+      expect(createControl.ledger.onboarding!.lifecycle.phase)
+        .toBe("transport_error_provider_terminating" as any);
+      expect(functionOutputs(createSocket)).toHaveLength(1);
+      expect(createControl.ledger.toolLog).toEqual(toolLogBeforeCreate);
+      expect(createControl.ledger.onboarding!.lifecycle.toolOutbox[
+        "create-timeout"
+      ]?.state).toBe("output_pending");
+
+      SyntheticWebSocket.instances = [];
+      const retrieveCap = onboardingCap("call-output-retrieve-ack-timeout");
+      const retrieveControl = attachSideband(
+        retrieveCap,
+        "rtc-output-retrieve-ack-timeout",
+        "gpt-realtime-2.1",
+        {
+          onboarding: {
+            ...onboardingOptions.onboarding,
+            transportAckTimeoutMs: 20,
+          },
+        } as any,
+      );
+      const first = SyntheticWebSocket.instances[0]!;
+      first.emit("open");
+      await retrieveControl.opened;
+      await completePhysicalGreeting(first, retrieveCap);
+      const retrieveAdapter = retrieveControl.ledger.onboarding!;
+      retrieveAdapter.lifecycle.toolOutbox["retrieve-timeout"] = {
+        toolCallId: "retrieve-timeout",
+        toolName: "record_interview_answer",
+        argsHash: "retrieve-timeout-args",
+        state: "output_pending",
+        providerResponseId: "retrieve-timeout-response",
+        batchHash: "retrieve-timeout-batch",
+        output: '{"status":"recorded"}',
+        resultHash: "retrieve-timeout-result",
+        outputItemId: "tlo-ea8f6bd0b7e46b554325f4d3c216",
+        socketGeneration: 1,
+        outputRequest: {
+          delivery: "create",
+          eventId: "ligou-create-before-retrieve-timeout",
+          socketGeneration: 1,
+        },
+      };
+      const toolLogBeforeRetrieve = [...retrieveControl.ledger.toolLog];
+      first.emit("close", { code: 1006 });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const second = SyntheticWebSocket.instances[1]!;
+      second.emit("open");
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      expect(framesOfType(second, "conversation.item.retrieve")).toHaveLength(1);
+      expect(functionOutputs(second)).toHaveLength(0);
+      expect(retrieveControl.ledger.status).toBe("error");
+      expect(retrieveAdapter.lifecycle.phase)
+        .toBe("transport_error_provider_terminating" as any);
+      expect(retrieveControl.ledger.toolLog).toEqual(toolLogBeforeRetrieve);
+      expect(retrieveAdapter.lifecycle.toolOutbox["retrieve-timeout"]?.state)
+        .toBe("output_pending");
+      expect(SyntheticWebSocket.instances).toHaveLength(2);
+    } finally {
+      liveSessions.delete("call-output-create-ack-timeout");
+      liveSessions.delete("call-output-retrieve-ack-timeout");
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("transport loss during nonterminal authority speech terminates reattach", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
     globalThis.WebSocket = SyntheticWebSocket as any;
@@ -4291,12 +5100,19 @@ describe("physical socket attach and reconnect", () => {
       second.emit("open");
       await new Promise((resolve) => setTimeout(resolve, 30));
 
-      expect(adapter.lifecycle.phase).toBe("blocked");
+      expect(control.ledger.status).toBe("error");
+      expect(adapter.lifecycle.phase)
+        .toBe("transport_error_provider_terminating" as any);
+      expect(control.ledger.onboarding!.pendingHangupIntentKey)
+        .toBe(`transport-error-hangup:${cap.callId}`);
+      expect(second.closed).toBeGreaterThanOrEqual(1);
       expect(control.ledger.transcript).toContainEqual(expect.objectContaining({
-        text: "onboarding blocked: authority_speech_terminal_indeterminate",
+        text:
+          "session ended: onboarding transport indeterminate (authority_speech_terminal_indeterminate)",
       }));
       expect(framesOfType(second, "response.create")).toHaveLength(0);
-      control.cancel("test_cleanup");
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(SyntheticWebSocket.instances).toHaveLength(2);
     } finally {
       liveSessions.delete(cap.callId);
       globalThis.WebSocket = original;
@@ -4366,7 +5182,83 @@ describe("physical socket attach and reconnect", () => {
     }
   });
 
-  test("blocked reattach prunes queued authority speech and retrieves only the exact pending output", async () => {
+  test("two inaudible recovery attempts terminate the physical call once as a non-budget error", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-recovery-delivery-failed");
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-recovery-delivery-failed",
+        "gpt-realtime-2.1",
+        onboardingOptions,
+      );
+      const ws = SyntheticWebSocket.instances[0]!;
+      ws.emit("open");
+      await control.opened;
+      await completePhysicalGreeting(ws, cap);
+
+      ws.message({
+        type: "input_audio_buffer.speech_started",
+        item_id: "turn-recovery-delivery-failed",
+      });
+      ws.message({
+        type: "conversation.item.input_audio_transcription.completed",
+        item_id: "turn-recovery-delivery-failed",
+        transcript: "Resposta sem tool persistido.",
+      });
+      ws.message(responseCreated("response-owner-without-tool"));
+      ws.message(responseDone("response-owner-without-tool"));
+      await flushAsync();
+
+      const recoveries = () => framesOfType(ws, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "recovery",
+      );
+      expect(recoveries()).toHaveLength(1);
+      const baseIntent = recoveries()[0]!.response.metadata.intent_key;
+      ws.message(responseCreated("response-recovery-inaudible-0", baseIntent));
+      ws.message(responseDone("response-recovery-inaudible-0"));
+      await flushAsync();
+      expect(recoveries()).toHaveLength(2);
+
+      const retryIntent = recoveries()[1]!.response.metadata.intent_key;
+      ws.suppressCloseEvent = true;
+      ws.message(responseCreated("response-recovery-inaudible-1", retryIntent));
+      ws.message(responseDone("response-recovery-inaudible-1"));
+      await flushAsync();
+
+      expect(control.ledger.status).toBe("error");
+      expect(control.ledger.agentEnded).not.toBe(true);
+      expect(control.ledger.onboarding!.pendingHangupIntentKey)
+        .toBe(`recovery-error-hangup:${cap.callId}`);
+      expect(control.ledger.onboarding!.lifecycle.phase)
+        .toBe("recovery_error_provider_terminating" as any);
+      expect(control.ledger.transcript).toContainEqual(expect.objectContaining({
+        text:
+          "session ended: recovery delivery failed (recovery_delivery_failed)",
+      }));
+      expect(ws.closed).toBeGreaterThanOrEqual(1);
+      expect(control.ledger.onboarding!.lifecycle.requestedRecoveryHangupKeys)
+        .toEqual([`recovery-error-hangup:${cap.callId}`]);
+      expect(recoveries()).toHaveLength(2);
+
+      const closeCount = ws.closed;
+      ws.message(responseDone("response-recovery-inaudible-1"));
+      await flushAsync();
+      expect(ws.closed).toBe(closeCount);
+      expect(control.ledger.onboarding!.pendingHangupIntentKey)
+        .toBe(`recovery-error-hangup:${cap.callId}`);
+      expect(control.ledger.onboarding!.lifecycle.phase)
+        .toBe("recovery_error_provider_terminating" as any);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("blocked reattach terminates without replaying queued speech or pending output", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
     globalThis.WebSocket = SyntheticWebSocket as any;
@@ -4423,16 +5315,16 @@ describe("physical socket attach and reconnect", () => {
       second.emit("open");
       await new Promise((resolve) => setTimeout(resolve, 40));
 
-      expect(adapter.lifecycle.phase).toBe("blocked");
+      expect(adapter.lifecycle.phase)
+        .toBe("fatal_error_provider_terminating" as any);
       expect(adapter.lifecycle.socketGeneration).toBe(2);
+      expect(control.ledger.status).toBe("error");
+      expect(adapter.pendingHangupIntentKey)
+        .toBe(`fatal-error-hangup:${cap.callId}`);
       expect(framesOfType(second, "response.create")).toHaveLength(0);
       expect(functionOutputs(second)).toEqual([]);
-      expect(framesOfType(second, "conversation.item.retrieve")).toEqual([
-        expect.objectContaining({
-          item_id: "tlo-5c6ed66e497e8824a3ec139a93fc",
-          event_id: expect.any(String),
-        }),
-      ]);
+      expect(framesOfType(second, "conversation.item.retrieve")).toEqual([]);
+      expect(second.closed).toBeGreaterThanOrEqual(1);
       second.message(outputRetrieved(
         "tlo-5c6ed66e497e8824a3ec139a93fc",
         "blocked-output",
@@ -4440,9 +5332,8 @@ describe("physical socket attach and reconnect", () => {
       ));
       await flushAsync();
       expect(adapter.lifecycle.toolOutbox["blocked-output"]?.state)
-        .toBe("output_acked");
+        .toBe("output_pending");
       expect(adapter.pendingResponseCommands).toEqual({});
-      control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
       globalThis.WebSocket = original;
@@ -4625,7 +5516,7 @@ describe("physical socket attach and reconnect", () => {
     }
   });
 
-  test("retrieved output mismatch or missing item blocks without recreating the mutation output", async () => {
+  test("retrieved output mismatch or missing item terminates without recreating the mutation output", async () => {
     for (const [index, retrieved] of [
       {
         type: "conversation.item.retrieved",
@@ -4665,14 +5556,19 @@ describe("physical socket attach and reconnect", () => {
 
       await handleEvent(cap, l, ws as any, retrieved);
 
-      expect(adapter.lifecycle.phase).toBe("blocked");
+      expect(l.status).toBe("error");
+      expect(adapter.lifecycle.phase)
+        .toBe("transport_error_provider_terminating" as any);
+      expect(adapter.pendingHangupIntentKey)
+        .toBe(`transport-error-hangup:${cap.callId}`);
+      expect(ws.closed).toBeGreaterThanOrEqual(1);
       expect(adapter.lifecycle.toolOutbox["mismatch-tool"]?.state)
         .toBe("output_pending");
       expect(functionOutputs(ws)).toEqual([]);
     }
   });
 
-  test("correlated duplicate create retrieves the deterministic item while a correlated retrieve error blocks", async () => {
+  test("correlated duplicate create retrieves the deterministic item while a correlated retrieve error terminates", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
     globalThis.WebSocket = SyntheticWebSocket as any;
@@ -4747,9 +5643,13 @@ describe("physical socket attach and reconnect", () => {
         },
       });
       await flushAsync();
-      expect(adapter.lifecycle.phase).toBe("blocked");
+      expect(control.ledger.status).toBe("error");
+      expect(adapter.lifecycle.phase)
+        .toBe("transport_error_provider_terminating" as any);
+      expect(adapter.pendingHangupIntentKey)
+        .toBe(`transport-error-hangup:${cap.callId}`);
+      expect(ws.closed).toBeGreaterThanOrEqual(1);
       expect(functionOutputs(ws)).toHaveLength(1);
-      control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);
       globalThis.WebSocket = original;
@@ -4924,6 +5824,9 @@ describe("physical socket attach and reconnect", () => {
       first.emit("open");
       await control.opened;
       await completePhysicalGreeting(first, cap);
+      await completePhysicalOwnerTurn(
+        first, "turn-mid-persist", "Atendemos Irvine.",
+      );
       first.message(responseCreated("resp-persist"));
       first.message(functionCallDone(
         "resp-persist",
@@ -5005,6 +5908,9 @@ describe("physical socket attach and reconnect", () => {
       first.emit("open");
       await control.opened;
       await completePhysicalGreeting(first, cap);
+      await completePhysicalOwnerTurn(
+        first, "turn-indeterminate", "Atendemos Irvine.",
+      );
       first.message(responseCreated("resp-indeterminate"));
       first.message(functionCallDone(
         "resp-indeterminate",
@@ -5065,6 +5971,11 @@ describe("physical socket attach and reconnect", () => {
       ws.emit("open");
       await control.opened;
       await completePhysicalGreeting(ws, cap);
+      await completePhysicalOwnerTurn(
+        ws,
+        "turn-indeterminate-exhausted",
+        "Atendemos clientes residenciais.",
+      );
       ws.message(responseCreated("resp-indeterminate-exhausted"));
       ws.message(functionCallDone(
         "resp-indeterminate-exhausted",
@@ -5143,6 +6054,11 @@ describe("physical socket attach and reconnect", () => {
       ws.emit("open");
       await control.opened;
       await completePhysicalGreeting(ws, cap);
+      await completePhysicalOwnerTurn(
+        ws,
+        "turn-followup-same-socket",
+        "Atendemos clientes residenciais.",
+      );
       ws.message(responseCreated("resp-followup-same-socket"));
       ws.message(functionCallDone(
         "resp-followup-same-socket",
@@ -5184,7 +6100,7 @@ describe("physical socket attach and reconnect", () => {
     }
   });
 
-  test("a twice-indeterminate directed follow-up blocks without another output or running receipt", async () => {
+  test("a twice-indeterminate directed follow-up speaks one error without another output or running receipt", async () => {
     const original = globalThis.WebSocket;
     SyntheticWebSocket.instances = [];
     globalThis.WebSocket = SyntheticWebSocket as any;
@@ -5209,6 +6125,11 @@ describe("physical socket attach and reconnect", () => {
       ws.emit("open");
       await control.opened;
       await completePhysicalGreeting(ws, cap);
+      await completePhysicalOwnerTurn(
+        ws,
+        "turn-followup-exhausted",
+        "Atendemos clientes residenciais.",
+      );
       ws.message(responseCreated("resp-followup-exhausted"));
       ws.message(functionCallDone(
         "resp-followup-exhausted",
@@ -5234,7 +6155,14 @@ describe("physical socket attach and reconnect", () => {
       expect(boundary.followupRpcCalls).toBe(4);
       expect(SyntheticWebSocket.instances).toHaveLength(1);
       expect(functionOutputs(ws)).toHaveLength(1);
-      expect(control.ledger.onboarding!.lifecycle.phase).toBe("blocked");
+      expect(control.ledger.onboarding!.lifecycle.phase).toBe("follow_up");
+      const recoveries = framesOfType(ws, "response.create").filter(
+        (frame) => frame.response?.metadata?.purpose === "recovery",
+      );
+      expect(recoveries).toHaveLength(1);
+      expect(recoveries[0].response.instructions).toContain(
+        "Sua resposta foi salva, mas não consegui preparar a próxima pergunta",
+      );
       expect(Object.values(control.ledger.onboarding!.lifecycle.toolOutbox)
         .some((receipt) => receipt.state === "running")).toBe(false);
       expect(control.ledger.onboarding!.pendingMutationCommands).toEqual({});

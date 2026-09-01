@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { IconShieldCheck, IconShieldOff } from "@tabler/icons-react";
 import { supabase } from "../lib/supabase.js";
+import { scopePowersQuery } from "../data/gateway-rule-mapping.js";
 
 // Powers ledger: the owner GRANTS powers, not per-action approvals. Colors are derived language over granular grants.
 const COLOR = (p) => {
@@ -9,18 +10,19 @@ const COLOR = (p) => {
   return { tag: "AZUL", cls: "power-azul" };
 };
 
-export function PowersView({ onToast }) {
+export function PowersView({ onToast, tenantId, generation = 0 }) {
   const [powers, setPowers] = useState(null);
   const [busy, setBusy] = useState(null);
 
   const load = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("powers")
-      .select("*")
-      .order("granted_at", { ascending: true });
+    let query = scopePowersQuery(
+      supabase.from("powers").select("*"),
+      { tenantId, generation },
+    );
+    const { data, error } = await query.order("granted_at", { ascending: true });
     if (error) onToast?.({ kind: "warning", text: error.message });
     setPowers(data ?? []);
-  }, [onToast]);
+  }, [onToast, tenantId, generation]);
 
   useEffect(() => { load(); }, [load]);
 

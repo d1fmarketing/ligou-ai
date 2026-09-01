@@ -1,7 +1,114 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mapRuleGroups } from "../src/data/gateway-rule-mapping.js";
+import * as gatewayProjection from "../src/data/gateway-rule-mapping.js";
+
+const { mapRuleGroups } = gatewayProjection;
+
+test("a reset boundary projects a truly fresh test without deleting audit history", () => {
+  assert.equal(typeof gatewayProjection.projectRowsAfterTestReset, "function");
+  assert.equal(typeof gatewayProjection.isFreshTestResetReadback, "function");
+  const resetAt = "2026-09-01T01:00:00.000Z";
+  const projected = gatewayProjection.projectRowsAfterTestReset({
+    generation: 7,
+    rules: [
+      { id: "before", test_memory_generation: 6 },
+      { id: "after", test_memory_generation: 7 },
+    ],
+    calls: [
+      { id: "before", test_memory_generation: 6 },
+      { id: "after", test_memory_generation: 7 },
+    ],
+    cases: [
+      { id: "before", test_memory_generation: 6 },
+      { id: "after", test_memory_generation: 7 },
+    ],
+    notifications: [
+      { id: "before-summary", kind: "summary_ready", test_memory_generation: 6 },
+      { id: "before-usage-70", kind: "usage_70", test_memory_generation: 6 },
+      { id: "before-usage-90", kind: "usage_90", test_memory_generation: 6 },
+      { id: "after", kind: "summary_ready", test_memory_generation: 7 },
+    ],
+    powers: [
+      { id: "before", test_memory_generation: 6 },
+      { id: "after", test_memory_generation: 7 },
+    ],
+  });
+
+  assert.deepEqual(projected.rules.map((row) => row.id), ["after"]);
+  assert.deepEqual(projected.calls.map((row) => row.id), ["after"]);
+  assert.deepEqual(projected.cases.map((row) => row.id), ["after"]);
+  assert.deepEqual(projected.notifications.map((row) => row.id), [
+    "before-usage-70",
+    "before-usage-90",
+    "after",
+  ]);
+  assert.deepEqual(projected.powers.map((row) => row.id), ["after"]);
+  assert.equal(gatewayProjection.isFreshTestResetReadback({
+    rpcResetAt: resetAt,
+    rpcGeneration: 7,
+    state: {
+      testResetAt: resetAt,
+      testGeneration: 7,
+      testState: { calls: 0, approvals: 0, memory: 0, powers: 0 },
+    },
+  }), true);
+  assert.equal(gatewayProjection.isFreshTestResetReadback({
+    rpcResetAt: resetAt,
+    rpcGeneration: 7,
+    state: {
+      testResetAt: resetAt,
+      testGeneration: 7,
+      testState: { calls: 1, approvals: 0, memory: 0, powers: 0 },
+    },
+  }), false);
+});
+
+test("the powers ledger is scoped to the active tenant and current test generation", () => {
+  assert.equal(typeof gatewayProjection.scopePowersQuery, "function");
+  const filters = [];
+  const query = {
+    eq(column, value) {
+      filters.push([column, value]);
+      return this;
+    },
+  };
+
+  assert.equal(gatewayProjection.scopePowersQuery(query, {
+    tenantId: "tenant-active",
+    generation: 9,
+  }), query);
+  assert.deepEqual(filters, [
+    ["tenant_id", "tenant-active"],
+    ["test_memory_generation", 9],
+  ]);
+  assert.throws(
+    () => gatewayProjection.scopePowersQuery(query, { tenantId: "", generation: 9 }),
+    /active_tenant_required/,
+  );
+});
+
+test("usage alerts are fetched independently of the recent test-notification window", () => {
+  assert.equal(typeof gatewayProjection.scopeUsageAlertQuery, "function");
+  const operations = [];
+  const query = Object.fromEntries(["eq", "in", "order", "limit"].map((name) => [
+    name,
+    (...args) => {
+      operations.push([name, ...args]);
+      return query;
+    },
+  ]));
+
+  assert.equal(gatewayProjection.scopeUsageAlertQuery(query, {
+    tenantId: "tenant-active",
+  }), query);
+  assert.deepEqual(operations, [
+    ["eq", "tenant_id", "tenant-active"],
+    ["in", "kind", ["usage_70", "usage_90"]],
+    ["order", "created_at", { ascending: false }],
+    ["limit", 20],
+  ]);
+});
 
 const serviceStructured = (serviceType, overrides = {}) => ({
   schema: "ligou.rule.service.v2",

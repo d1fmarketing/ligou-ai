@@ -119,6 +119,7 @@ function openingResponseV2({ resumeContext = null, ...overrides } = {}) {
 const LIVE_VAD_EVENT = {
   type: "session.updated",
   session: {
+    output_modalities: ["text"],
     audio: {
       input: {
         turn_detection: {

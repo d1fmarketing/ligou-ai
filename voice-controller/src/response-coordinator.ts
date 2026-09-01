@@ -82,9 +82,8 @@ export function requestResponse(ledger: CoordinatedLedger, ws: WsLike, intent: R
     ? {
         type: "response.create",
         response: {
-          ...(["recovery", "budget_pause"].includes(applicationIntent.purpose)
-            ? { tool_choice: "none" }
-            : {}),
+          tool_choice: "none",
+          output_modalities: ["audio"],
           ...(applicationIntent.instructions
             ? { instructions: applicationIntent.instructions }
             : {}),

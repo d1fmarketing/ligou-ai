@@ -2054,12 +2054,14 @@ describe("application-owned Test 10 opening", () => {
       create_response: false,
       interrupt_response: false,
     });
+    expect(application.output_modalities).toEqual(["text"]);
     expect(provider.audio.input.turn_detection).toEqual({
       type: "semantic_vad",
       eagerness: "low",
       create_response: true,
       interrupt_response: true,
     });
+    expect(provider.output_modalities).toEqual(["audio"]);
   });
 });
 

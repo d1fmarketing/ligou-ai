@@ -5,6 +5,66 @@ const STATUS_FROM_DB = {
   rejeitado: "rejeitada",
 };
 
+function inTestGeneration(row, generation) {
+  return Number.isSafeInteger(generation) && generation >= 0 &&
+    Number(row?.test_memory_generation) === generation;
+}
+
+export function scopePowersQuery(query, { tenantId, generation } = {}) {
+  if (typeof tenantId !== "string" || tenantId.length === 0)
+    throw new Error("active_tenant_required");
+  if (!Number.isSafeInteger(generation) || generation < 0)
+    throw new Error("test_generation_required");
+  return query
+    .eq("tenant_id", tenantId)
+    .eq("test_memory_generation", generation);
+}
+
+export function scopeUsageAlertQuery(query, { tenantId } = {}) {
+  if (typeof tenantId !== "string" || tenantId.length === 0)
+    throw new Error("active_tenant_required");
+  return query
+    .eq("tenant_id", tenantId)
+    .in("kind", ["usage_70", "usage_90"])
+    .order("created_at", { ascending: false })
+    .limit(20);
+}
+
+export function projectRowsAfterTestReset({
+  generation = 0,
+  rules = [],
+  calls = [],
+  cases = [],
+  notifications = [],
+  powers = [],
+} = {}) {
+  return {
+    rules: rules.filter((row) => inTestGeneration(row, generation)),
+    calls: calls.filter((row) => inTestGeneration(row, generation)),
+    cases: cases.filter((row) => inTestGeneration(row, generation)),
+    notifications: notifications.filter((row) =>
+      row?.kind === "usage_70" || row?.kind === "usage_90" ||
+      inTestGeneration(row, generation)
+    ),
+    powers: powers.filter((row) => inTestGeneration(row, generation)),
+  };
+}
+
+export function isFreshTestResetReadback({
+  rpcResetAt,
+  rpcGeneration,
+  state,
+} = {}) {
+  const rpcTime = Date.parse(rpcResetAt);
+  const stateTime = Date.parse(state?.testResetAt);
+  const counts = state?.testState;
+  return Number.isFinite(rpcTime) && rpcTime === stateTime &&
+    Number.isSafeInteger(rpcGeneration) &&
+    rpcGeneration === state?.testGeneration &&
+    counts?.calls === 0 && counts?.approvals === 0 &&
+    counts?.memory === 0 && counts?.powers === 0;
+}
+
 function materializationIntent(rule) {
   if (!/^ligou[.]rule[.][a-z_]+[.]v2$/.test(String(rule?.structured?.schema ?? "")))
     return null;

@@ -19,6 +19,7 @@ import { finalizeTerminalBudget, type BudgetOutcome } from "./budget.ts";
 import { requestProviderTermination, type FetchLike } from "./provider-termination.ts";
 import { admitToolCall, evt, requestResponse, setPhase } from "./response-coordinator.ts";
 import {
+  bindVerifiedOnboardingToolArgs,
   createOnboardingLifecycle,
   hashOnboardingToolArgs,
   reduceOnboarding,
@@ -74,6 +75,8 @@ interface PendingCallerTurn {
   turnId: string;
   responseId?: string;
   transcriptCompleted: boolean;
+  transcript?: string;
+  transcriptionFailed?: boolean;
   responseTerminal?: boolean;
 }
 
@@ -95,6 +98,11 @@ type OnboardingAdapterInvariantCode =
   | "tool_output_created_invalid"
   | "tool_output_retrieved_invalid"
   | "tool_output_retrieve_failed"
+  | "response_create_active_conflict"
+  | "response_create_ack_timeout"
+  | "tool_output_ack_timeout"
+  | "terminal_response_replay_mismatch"
+  | "application_opening_reactivation_indeterminate"
   | "application_opening_item_invalid"
   | "application_opening_response_forbidden"
   | "application_opening_tool_forbidden"
@@ -127,6 +135,8 @@ interface BufferedOnboardingResponse {
   tools: BufferedOnboardingTool[];
   terminal: boolean;
   callerTurnId?: string;
+  callerTranscript?: string;
+  usageRecorded?: boolean;
   invariant?: {
     code: OnboardingAdapterInvariantCode;
     safeDetail: string;
@@ -137,6 +147,8 @@ export interface OnboardingAdapterState {
   lifecycle: OnboardingLifecycle;
   queue: Promise<void>;
   responses: Record<string, BufferedOnboardingResponse>;
+  deferredResponseDone: Record<string, any>;
+  deferredResponseTimers: Record<string, ReturnType<typeof setTimeout>>;
   terminalResponseBatchHashes: Record<string, string | null>;
   activeCallerTurnId?: string;
   pendingCallerTurns: PendingCallerTurn[];
@@ -152,6 +164,12 @@ export interface OnboardingAdapterState {
   >;
   speechGeneration: number;
   speechPending: boolean;
+  applicationReactivationTimeoutMs: number;
+  applicationReactivationTimer?: ReturnType<typeof setTimeout>;
+  applicationReactivationGeneration?: number;
+  transportAckTimeoutMs: number;
+  responseIntentAckTimers: Record<string, ReturnType<typeof setTimeout>>;
+  outputAckTimers: Record<string, ReturnType<typeof setTimeout>>;
 }
 
 const MAX_ADAPTER_RESPONSES = 512;
@@ -163,6 +181,7 @@ const MAX_PENDING_MUTATION_COMMANDS = 512;
 const MAX_ADAPTER_TOOL_RECEIPTS = 512;
 const MAX_ADAPTER_TOOL_BATCHES = 512;
 const MUTATION_RECONCILIATION_DELAY_MS = 0;
+const CALLER_TRANSCRIPT_CORRELATION_TIMEOUT_MS = 5_000;
 
 export interface SessionLedger {
   callId: string;
@@ -244,6 +263,8 @@ export interface SidebandOptions {
     openingMode?: OnboardingOpeningMode;
     openingPayload?: OnboardingOpeningPayload;
     resume?: OnboardingResumeSuccess;
+    reactivationTimeoutMs?: number;
+    transportAckTimeoutMs?: number;
   };
   externalCostUsd?: number;
   fetchImpl?: FetchLike;
@@ -262,6 +283,9 @@ function onboardingProviderTerminationPhase(phase: string): boolean {
     "provider_terminating",
     "budget_pause_provider_terminating",
     "budget_error_provider_terminating",
+    "recovery_error_provider_terminating",
+    "transport_error_provider_terminating",
+    "fatal_error_provider_terminating",
   ].includes(phase);
 }
 
@@ -270,6 +294,8 @@ function createOnboardingAdapter(
   expectedBusinessName: string,
   openingMode: OnboardingOpeningMode = "provider_model_v1",
   initialCoverage?: CoverageLifecycleState,
+  applicationReactivationTimeoutMs = 5_000,
+  transportAckTimeoutMs = 5_000,
 ): OnboardingAdapterState {
   return {
     lifecycle: createOnboardingLifecycle(
@@ -280,6 +306,8 @@ function createOnboardingAdapter(
     ),
     queue: Promise.resolve(),
     responses: {},
+    deferredResponseDone: {},
+    deferredResponseTimers: {},
     terminalResponseBatchHashes: {},
     pendingCallerTurns: [],
     retiredCallerTurnIds: [],
@@ -290,6 +318,10 @@ function createOnboardingAdapter(
     pendingMutationRetryTimers: {},
     speechGeneration: 0,
     speechPending: false,
+    applicationReactivationTimeoutMs,
+    transportAckTimeoutMs,
+    responseIntentAckTimers: {},
+    outputAckTimers: {},
   };
 }
 
@@ -419,6 +451,15 @@ function applicationOpeningRetrieveEventId(
   return `ligou-opening-retrieve-${digest}`;
 }
 
+function clearApplicationReactivationTimer(
+  adapter: OnboardingAdapterState,
+): void {
+  if (adapter.applicationReactivationTimer)
+    clearTimeout(adapter.applicationReactivationTimer);
+  delete adapter.applicationReactivationTimer;
+  delete adapter.applicationReactivationGeneration;
+}
+
 function openingTurnDetection(active: boolean) {
   return {
     type: "semantic_vad",
@@ -441,6 +482,7 @@ function sendApplicationOpeningActivation(
     event_id: `ligou-opening-activate-${generation}-${ledger.callId}`,
     session: {
       type: "realtime",
+      output_modalities: ["text"],
       audio: {
         input: {
           transcription: { model: "gpt-live-transcribe" },
@@ -455,7 +497,10 @@ function sendApplicationOpeningActivation(
 function exactOpeningSessionUpdate(value: unknown, active: boolean): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const detection = (value as any)?.audio?.input?.turn_detection;
-  return detection?.type === "semantic_vad" &&
+  return Array.isArray((value as any)?.output_modalities) &&
+    (value as any).output_modalities.length === 1 &&
+    (value as any).output_modalities[0] === "text" &&
+    detection?.type === "semantic_vad" &&
     detection?.eagerness === "low" &&
     detection?.create_response === active &&
     detection?.interrupt_response === active;
@@ -488,7 +533,10 @@ function rememberRetiredCallerTurns(
 function ensureResponseCapacity(adapter: OnboardingAdapterState): boolean {
   if (Object.keys(adapter.responses).length < MAX_ADAPTER_RESPONSES) return true;
   const pruneKey = Object.keys(adapter.responses)
-    .find((key) => adapter.responses[key]?.terminal === true);
+    .find((key) =>
+      adapter.responses[key]?.terminal === true &&
+      !adapter.deferredResponseDone[key]
+    );
   if (!pruneKey) return false;
   delete adapter.responses[pruneKey];
   return true;
@@ -614,6 +662,121 @@ interface OnboardingCommandContext {
   isCurrent: () => boolean;
 }
 
+function responseIntentAckTimerKey(
+  intentKey: string,
+  socketGeneration: number,
+): string {
+  return `${socketGeneration}:${intentKey}`;
+}
+
+function outputAckTimerKey(
+  eventId: string,
+  socketGeneration: number,
+): string {
+  return `${socketGeneration}:${eventId}`;
+}
+
+function clearResponseIntentAckTimer(
+  adapter: OnboardingAdapterState,
+  intentKey: string,
+  socketGeneration: number,
+): void {
+  const key = responseIntentAckTimerKey(intentKey, socketGeneration);
+  const timer = adapter.responseIntentAckTimers[key];
+  if (timer) clearTimeout(timer);
+  delete adapter.responseIntentAckTimers[key];
+}
+
+function clearOutputAckTimer(
+  adapter: OnboardingAdapterState,
+  eventId: string,
+  socketGeneration: number,
+): void {
+  const key = outputAckTimerKey(eventId, socketGeneration);
+  const timer = adapter.outputAckTimers[key];
+  if (timer) clearTimeout(timer);
+  delete adapter.outputAckTimers[key];
+}
+
+function clearTransportAckTimers(adapter: OnboardingAdapterState): void {
+  for (const timer of Object.values(adapter.responseIntentAckTimers))
+    clearTimeout(timer);
+  for (const timer of Object.values(adapter.outputAckTimers))
+    clearTimeout(timer);
+  adapter.responseIntentAckTimers = {};
+  adapter.outputAckTimers = {};
+}
+
+function scheduleResponseIntentAckDeadline(
+  context: OnboardingCommandContext,
+  intentKey: string,
+  socketGeneration: number,
+): void {
+  const adapter = ensureOnboardingAdapter(context.ledger);
+  const key = responseIntentAckTimerKey(intentKey, socketGeneration);
+  clearResponseIntentAckTimer(adapter, intentKey, socketGeneration);
+  adapter.responseIntentAckTimers[key] = setTimeout(() => {
+    delete adapter.responseIntentAckTimers[key];
+    const task = adapter.queue.then(async () => {
+      const receipt = adapter.lifecycle.responseIntents[intentKey];
+      if (
+        !context.isCurrent() || context.ledger.status !== "active" ||
+        adapter.lifecycle.socketGeneration !== socketGeneration ||
+        !receipt || receipt.state !== "sent" || receipt.responseId ||
+        receipt.sentSocketGeneration !== socketGeneration
+      ) return;
+      await dispatchOnboardingEvent(context, {
+        type: "adapter.invariant_failed",
+        code: "response_create_ack_timeout",
+        safeDetail:
+          "sent application response received no correlated provider acknowledgement before the deadline",
+        intentKey,
+        elapsedMs: adapter.transportAckTimeoutMs,
+      });
+    });
+    adapter.queue = task.catch(() => {
+      adapter.interrupted = true;
+      context.ledger.status = "error";
+    });
+  }, adapter.transportAckTimeoutMs);
+}
+
+function scheduleOutputAckDeadline(
+  context: OnboardingCommandContext,
+  toolCallId: string,
+  eventId: string,
+  socketGeneration: number,
+): void {
+  const adapter = ensureOnboardingAdapter(context.ledger);
+  const key = outputAckTimerKey(eventId, socketGeneration);
+  clearOutputAckTimer(adapter, eventId, socketGeneration);
+  adapter.outputAckTimers[key] = setTimeout(() => {
+    delete adapter.outputAckTimers[key];
+    const task = adapter.queue.then(async () => {
+      const receipt = adapter.lifecycle.toolOutbox[toolCallId];
+      if (
+        !context.isCurrent() || context.ledger.status !== "active" ||
+        adapter.lifecycle.socketGeneration !== socketGeneration ||
+        !receipt || receipt.state !== "output_pending" ||
+        receipt.outputRequest?.eventId !== eventId ||
+        receipt.outputRequest.socketGeneration !== socketGeneration
+      ) return;
+      await dispatchOnboardingEvent(context, {
+        type: "adapter.invariant_failed",
+        code: "tool_output_ack_timeout",
+        safeDetail:
+          "deterministic tool output received no correlated provider acknowledgement before the deadline",
+        toolCallId,
+        elapsedMs: adapter.transportAckTimeoutMs,
+      });
+    });
+    adapter.queue = task.catch(() => {
+      adapter.interrupted = true;
+      context.ledger.status = "error";
+    });
+  }, adapter.transportAckTimeoutMs);
+}
+
 function pendingResponseCommandIsCurrent(
   adapter: OnboardingAdapterState,
   command: RequestResponseCommand,
@@ -634,6 +797,15 @@ function pendingResponseCommandIsCurrent(
         adapter.lifecycle.signoff?.approvalReceiptId &&
       adapter.lifecycle.phase === "final_signoff_speaking",
     );
+  if (
+    command.purpose === "tool_continuation" &&
+    adapter.lifecycle.followupSpeech
+  )
+    return command.intentKey === adapter.lifecycle.followupSpeech.intentKey &&
+      adapter.lifecycle.phase === "follow_up";
+  if (command.purpose === "recovery" && adapter.lifecycle.recoverySpeech)
+    return command.intentKey === adapter.lifecycle.recoverySpeech.intentKey &&
+      adapter.lifecycle.phase === "follow_up";
   return adapter.lifecycle.phase !== "blocked" &&
     adapter.lifecycle.phase !== "closed" &&
     !onboardingProviderTerminationPhase(adapter.lifecycle.phase);
@@ -861,6 +1033,14 @@ async function executeOnboardingCommands(
   const retainsCallAuthority = () =>
     isCurrent() ||
     (ledger.status === "active" && live.get(cap.callId) === ledger);
+  const specificTerminationInBatch = commands.some((command) =>
+    command.type === "request_hangup" ||
+    command.type === "request_budget_hangup" ||
+    command.type === "request_budget_error_hangup" ||
+    command.type === "request_recovery_error_hangup" ||
+    command.type === "request_transport_error_hangup" ||
+    command.type === "request_fatal_error_hangup"
+  );
   for (const command of commands) {
     if (!retainsCallAuthority() && command.type !== "telemetry") return;
     const adapter = ensureOnboardingAdapter(ledger);
@@ -930,7 +1110,10 @@ async function executeOnboardingCommands(
         command.type === "resend_output" ||
         command.type === "request_hangup" ||
         command.type === "request_budget_hangup" ||
-        command.type === "request_budget_error_hangup")
+        command.type === "request_budget_error_hangup" ||
+        command.type === "request_recovery_error_hangup" ||
+        command.type === "request_transport_error_hangup" ||
+        command.type === "request_fatal_error_hangup")
     )
       continue;
     if (command.type === "request_response" && adapter.speechPending)
@@ -953,6 +1136,12 @@ async function executeOnboardingCommands(
           text: `onboarding blocked: ${command.code}`,
           at: new Date().toISOString(),
         });
+        if (!specificTerminationInBatch && !adapter.pendingHangupIntentKey)
+          await dispatchOnboardingEvent(context, {
+            type: "fatal.termination_required",
+            code: command.code,
+            elapsedMs: 0,
+          });
         break;
       case "prepare_summary": {
         const result = await loadOnboardingSnapshot(cap);
@@ -995,6 +1184,15 @@ async function executeOnboardingCommands(
             intentKey: command.intentKey,
             elapsedMs: 0,
           });
+          if (
+            adapter.lifecycle.responseIntents[command.intentKey]?.state ===
+              "sent"
+          )
+            scheduleResponseIntentAckDeadline(
+              context,
+              command.intentKey,
+              generation,
+            );
         }
         break;
       }
@@ -1286,10 +1484,23 @@ async function executeOnboardingCommands(
           eventId: command.eventId,
           elapsedMs: 0,
         });
+        const pendingReceipt = adapter.lifecycle.toolOutbox[command.toolCallId];
+        if (
+          pendingReceipt?.state === "output_pending" &&
+          pendingReceipt.outputRequest?.eventId === command.eventId &&
+          pendingReceipt.outputRequest.socketGeneration === generation
+        ) scheduleOutputAckDeadline(
+          context,
+          command.toolCallId,
+          command.eventId,
+          generation,
+        );
         break;
       }
       case "request_hangup": {
         if (adapter.pendingHangupIntentKey) break;
+        clearApplicationReactivationTimer(adapter);
+        clearTransportAckTimers(adapter);
         await dispatchOnboardingEvent(context, {
           type: "provider.termination_requested",
           intentKey: command.intentKey,
@@ -1309,6 +1520,8 @@ async function executeOnboardingCommands(
       }
       case "request_budget_hangup": {
         if (adapter.pendingHangupIntentKey) break;
+        clearApplicationReactivationTimer(adapter);
+        clearTransportAckTimers(adapter);
         await dispatchOnboardingEvent(context, {
           type: "provider.termination_requested",
           intentKey: command.intentKey,
@@ -1329,6 +1542,8 @@ async function executeOnboardingCommands(
       }
       case "request_budget_error_hangup": {
         if (adapter.pendingHangupIntentKey) break;
+        clearApplicationReactivationTimer(adapter);
+        clearTransportAckTimers(adapter);
         await dispatchOnboardingEvent(context, {
           type: "provider.termination_requested",
           intentKey: command.intentKey,
@@ -1341,6 +1556,70 @@ async function executeOnboardingCommands(
         ledger.transcript.push({
           role: "system",
           text: `session ended: budget pause delivery indeterminate (${command.reason})`,
+          at: new Date().toISOString(),
+        });
+        try { ws.close(); } catch {}
+        break;
+      }
+      case "request_recovery_error_hangup": {
+        if (adapter.pendingHangupIntentKey) break;
+        clearApplicationReactivationTimer(adapter);
+        clearTransportAckTimers(adapter);
+        await dispatchOnboardingEvent(context, {
+          type: "provider.termination_requested",
+          intentKey: command.intentKey,
+          elapsedMs: 0,
+        });
+        if (adapter.lifecycle.phase !== "recovery_error_provider_terminating")
+          break;
+        adapter.pendingHangupIntentKey = command.intentKey;
+        ledger.status = "error";
+        ledger.transcript.push({
+          role: "system",
+          text: `session ended: recovery delivery failed (${command.reason})`,
+          at: new Date().toISOString(),
+        });
+        try { ws.close(); } catch {}
+        break;
+      }
+      case "request_transport_error_hangup": {
+        if (adapter.pendingHangupIntentKey) break;
+        clearApplicationReactivationTimer(adapter);
+        clearTransportAckTimers(adapter);
+        await dispatchOnboardingEvent(context, {
+          type: "provider.termination_requested",
+          intentKey: command.intentKey,
+          elapsedMs: 0,
+        });
+        if (adapter.lifecycle.phase !== "transport_error_provider_terminating")
+          break;
+        adapter.pendingHangupIntentKey = command.intentKey;
+        ledger.status = "error";
+        ledger.transcript.push({
+          role: "system",
+          text:
+            `session ended: onboarding transport indeterminate (${command.reason})`,
+          at: new Date().toISOString(),
+        });
+        try { ws.close(); } catch {}
+        break;
+      }
+      case "request_fatal_error_hangup": {
+        if (adapter.pendingHangupIntentKey) break;
+        clearApplicationReactivationTimer(adapter);
+        clearTransportAckTimers(adapter);
+        await dispatchOnboardingEvent(context, {
+          type: "provider.termination_requested",
+          intentKey: command.intentKey,
+          elapsedMs: 0,
+        });
+        if (adapter.lifecycle.phase !== "fatal_error_provider_terminating")
+          break;
+        adapter.pendingHangupIntentKey = command.intentKey;
+        ledger.status = "error";
+        ledger.transcript.push({
+          role: "system",
+          text: `session ended: onboarding fatal error (${command.reason})`,
           at: new Date().toISOString(),
         });
         try { ws.close(); } catch {}
@@ -1401,6 +1680,8 @@ async function attachOnboardingSocket(
   context: OnboardingCommandContext,
 ): Promise<void> {
   const adapter = ensureOnboardingAdapter(context.ledger);
+  clearApplicationReactivationTimer(adapter);
+  clearTransportAckTimers(adapter);
   const pendingBeforeAttach = Object.values(adapter.pendingResponseCommands)
     .map((command) => structuredClone(command));
   const pendingMutationKeysBeforeAttach = Object.keys(
@@ -1413,6 +1694,13 @@ async function attachOnboardingSocket(
     elapsedMs: 0,
   });
   const applicationOpening = context.ledger.applicationOpening;
+  if (!applicationOpening)
+    for (const responseId of Object.keys(adapter.deferredResponseDone))
+      await failDeferredCallerTranscript(
+        context,
+        responseId,
+        "sideband reattached before caller transcription completed",
+      );
   if (
     applicationOpening && generation > 1 &&
     adapter.lifecycle.phase !== "blocked" &&
@@ -1429,6 +1717,32 @@ async function attachOnboardingSocket(
       event_id: eventId,
       item_id: applicationOpening.payload.item_id,
     }));
+    adapter.applicationReactivationGeneration = generation;
+    adapter.applicationReactivationTimer = setTimeout(() => {
+      delete adapter.applicationReactivationTimer;
+      const task = adapter.queue.then(async () => {
+        if (
+          !context.isCurrent() ||
+          adapter.applicationReactivationGeneration !== generation ||
+          adapter.lifecycle.socketGeneration !== generation ||
+          applicationOpening.activatedGeneration === generation ||
+          adapter.lifecycle.phase === "closed" ||
+          onboardingProviderTerminationPhase(adapter.lifecycle.phase)
+        ) return;
+        delete adapter.applicationReactivationGeneration;
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "application_opening_reactivation_indeterminate",
+          safeDetail:
+            "exact application opening and active session update were not proven before the reactivation deadline",
+          elapsedMs: adapter.applicationReactivationTimeoutMs,
+        });
+      });
+      adapter.queue = task.catch(() => {
+        adapter.interrupted = true;
+        context.ledger.status = "error";
+      });
+    }, adapter.applicationReactivationTimeoutMs);
   }
   if (applicationOpening) return;
   if (
@@ -1504,7 +1818,10 @@ async function onboardingTerminationIsDurable(
   if (!intentKey) return false;
   const expectedStatus = intentKey.startsWith("budget-hangup:")
     ? "killed_budget"
-    : intentKey.startsWith("budget-error-hangup:")
+    : intentKey.startsWith("budget-error-hangup:") ||
+        intentKey.startsWith("recovery-error-hangup:") ||
+        intentKey.startsWith("transport-error-hangup:") ||
+        intentKey.startsWith("fatal-error-hangup:")
       ? "error"
       : "ended";
   try {
@@ -1548,6 +1865,8 @@ function authoritySpeechResponseAwaitingPlayback(
     lifecycle.signoff,
     lifecycle.summary,
     lifecycle.greeting,
+    lifecycle.followupSpeech,
+    lifecycle.recoverySpeech,
   ])
     if (
       proof?.responseId &&
@@ -1599,6 +1918,108 @@ function enqueueOnboardingTransportInterruption(
   });
 }
 
+async function failDeferredCallerTranscript(
+  context: OnboardingCommandContext,
+  responseId: string,
+  safeDetail: string,
+): Promise<void> {
+  const adapter = ensureOnboardingAdapter(context.ledger);
+  const deferred = adapter.deferredResponseDone[responseId];
+  if (!deferred) return;
+  const timer = adapter.deferredResponseTimers[responseId];
+  if (timer) clearTimeout(timer);
+  delete adapter.deferredResponseTimers[responseId];
+  delete adapter.deferredResponseDone[responseId];
+  const buffered = adapter.responses[responseId];
+  const turnId = buffered?.callerTurnId;
+  if (buffered) buffered.terminal = true;
+  const sortedTools = buffered?.tools.length
+    ? [...buffered.tools].sort(
+        (left, right) => left.outputIndex - right.outputIndex,
+      )
+    : [];
+  const batchHash = sortedTools.length > 0
+    ? onboardingBatchHash(sortedTools)
+    : null;
+  adapter.terminalResponseBatchHashes[responseId] = batchHash;
+  if (turnId) {
+    rememberRetiredCallerTurns(adapter, [turnId]);
+    adapter.pendingCallerTurns = adapter.pendingCallerTurns.filter(
+      (turn) => turn.turnId !== turnId,
+    );
+    if (adapter.activeCallerTurnId === turnId)
+      delete adapter.activeCallerTurnId;
+  }
+  adapter.speechPending = adapter.pendingCallerTurns.some(
+    (turn) => turn.responseTerminal !== true,
+  );
+  context.ledger.responseActive = false;
+  if (batchHash)
+    for (const tool of sortedTools)
+      await dispatchOnboardingEvent(context, {
+        type: "tool.rejected",
+        socketGeneration: adapter.lifecycle.socketGeneration,
+        toolCallId: tool.toolCallId,
+        name: tool.name,
+        argsHash: tool.argsHash,
+        providerResponseId: responseId,
+        batchHash,
+        code: "caller_transcript_unavailable",
+        elapsedMs: 0,
+      });
+  if (batchHash)
+    await dispatchOnboardingEvent(context, {
+      type: "tool.batch_closed",
+      providerResponseId: responseId,
+      batchHash,
+      toolCallIds: sortedTools.map((tool) => tool.toolCallId),
+      elapsedMs: 0,
+    });
+  await dispatchOnboardingEvent(context, {
+    type: "response.done",
+    socketGeneration: adapter.lifecycle.socketGeneration,
+    responseId,
+    elapsedMs: 0,
+  });
+  if (!batchHash)
+    await dispatchOnboardingEvent(context, {
+      type: "recovery.required",
+      reason: "caller_turn_correlation_mismatch",
+      recoveryKey: callerCorrelationRecoveryKey(turnId ?? null, turnId
+        ? [turnId]
+        : []),
+      responseId,
+      socketGeneration: adapter.lifecycle.socketGeneration,
+      ...(turnId ? { retiredTurnIds: [turnId] } : {}),
+      elapsedMs: 0,
+    });
+  context.ledger.transcript.push({
+    role: "system",
+    text: `caller transcript unavailable: ${safeDetail}`,
+    at: new Date().toISOString(),
+  });
+}
+
+function scheduleDeferredCallerTranscriptFailure(
+  context: OnboardingCommandContext,
+  responseId: string,
+): void {
+  const adapter = ensureOnboardingAdapter(context.ledger);
+  if (adapter.deferredResponseTimers[responseId]) return;
+  adapter.deferredResponseTimers[responseId] = setTimeout(() => {
+    delete adapter.deferredResponseTimers[responseId];
+    const task = adapter.queue.then(() => failDeferredCallerTranscript(
+      context,
+      responseId,
+      "bounded transcription correlation window elapsed",
+    ));
+    adapter.queue = task.catch(() => {
+      adapter.interrupted = true;
+      context.ledger.status = "error";
+    });
+  }, CALLER_TRANSCRIPT_CORRELATION_TIMEOUT_MS);
+}
+
 async function interruptOnboardingAudio(
   context: OnboardingCommandContext,
   responseId: string | null,
@@ -1620,6 +2041,14 @@ async function handleOnboardingRawEvent(
 ): Promise<void> {
   const { cap, ledger, ws, isCurrent } = context;
   const adapter = ensureOnboardingAdapter(ledger);
+  if (
+    msg?.type !== "session.ended" &&
+    (
+      ledger.status !== "active" ||
+      adapter.lifecycle.phase === "closed" ||
+      onboardingProviderTerminationPhase(adapter.lifecycle.phase)
+    )
+  ) return;
   const generation = adapter.lifecycle.socketGeneration;
   const applicationOpening = ledger.applicationOpening;
   const applicationOpeningActive = !applicationOpening ||
@@ -1666,8 +2095,38 @@ async function handleOnboardingRawEvent(
     case "response.created": {
       const responseId = exactString(msg.response?.id);
       if (!responseId) break;
-      ledger.responseActive = true;
       const intentKey = exactString(msg.response?.metadata?.intent_key);
+      const terminalIdentity =
+        adapter.lifecycle.terminalResponseIds.includes(responseId) ||
+        adapter.responses[responseId]?.terminal === true ||
+        Object.prototype.hasOwnProperty.call(
+          adapter.terminalResponseBatchHashes,
+          responseId,
+        );
+      if (terminalIdentity) {
+        const boundIntents = Object.values(
+          adapter.lifecycle.responseIntents,
+        ).filter((intent) => intent.responseId === responseId);
+        const exactReplay = intentKey
+          ? boundIntents.some((intent) => intent.intentKey === intentKey)
+          : boundIntents.length === 0;
+        if (exactReplay) {
+          if (intentKey)
+            clearResponseIntentAckTimer(adapter, intentKey, generation);
+          break;
+        }
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "terminal_response_replay_mismatch",
+          safeDetail:
+            "terminal provider response identity replay changed its intent binding",
+          elapsedMs: 0,
+        });
+        break;
+      }
+      ledger.responseActive = true;
+      if (intentKey)
+        clearResponseIntentAckTimer(adapter, intentKey, generation);
       const pendingCallerTurn = !intentKey && adapter.speechPending
         ? adapter.pendingCallerTurns.find((turn) => !turn.responseId)
         : undefined;
@@ -1707,6 +2166,8 @@ async function handleOnboardingRawEvent(
           break;
         }
         buffered.callerTurnId = callerTurnId;
+        if (pendingCallerTurn?.transcript)
+          buffered.callerTranscript = pendingCallerTurn.transcript;
       }
       await dispatchOnboardingEvent(context, {
         type: "response.created",
@@ -1890,6 +2351,11 @@ async function handleOnboardingRawEvent(
         receipt.outputRequest?.delivery !== "create" ||
         receipt.outputRequest.socketGeneration !== generation
       ) break;
+      clearOutputAckTimer(
+        adapter,
+        receipt.outputRequest.eventId,
+        generation,
+      );
       if (
         msg.item?.type !== "function_call_output" ||
         msg.item?.call_id !== receipt.toolCallId ||
@@ -1900,6 +2366,7 @@ async function handleOnboardingRawEvent(
           type: "adapter.invariant_failed",
           code: "tool_output_created_invalid",
           safeDetail: "created provider output did not match the pending receipt",
+          toolCallId: receipt.toolCallId,
           elapsedMs: 0,
         });
         break;
@@ -1956,15 +2423,36 @@ async function handleOnboardingRawEvent(
         msg.item?.call_id !== receipt.toolCallId ||
         msg.item?.output !== receipt.output
       ) {
+        const correlatedReceipt = receipt ??
+          (pendingRetrievals.length === 1 ? pendingRetrievals[0] : undefined);
+        if (!correlatedReceipt) {
+          evt("invariant.violation", {
+            call: ledger.callId.slice(0, 8),
+            kind: "tool_output_retrieval_uncorrelated",
+            pending_count: pendingRetrievals.length,
+          });
+          break;
+        }
+        clearOutputAckTimer(
+          adapter,
+          correlatedReceipt.outputRequest!.eventId,
+          generation,
+        );
         adapter.interrupted = true;
         await dispatchOnboardingEvent(context, {
           type: "adapter.invariant_failed",
           code: "tool_output_retrieved_invalid",
           safeDetail: "retrieved provider output did not match the pending receipt",
+          toolCallId: correlatedReceipt.toolCallId,
           elapsedMs: 0,
         });
         break;
       }
+      clearOutputAckTimer(
+        adapter,
+        receipt.outputRequest.eventId,
+        generation,
+      );
       await dispatchOnboardingEvent(context, {
         type: "tool.output_acked",
         socketGeneration: generation,
@@ -1981,6 +2469,7 @@ async function handleOnboardingRawEvent(
         applicationOpening.activationUpdateSentGeneration === generation &&
         exactOpeningSessionUpdate(msg.session, true)
       ) {
+        clearApplicationReactivationTimer(adapter);
         if (adapter.lifecycle.phase === "greeting")
           await dispatchOnboardingEvent(context, {
             type: "application.greeting_activated",
@@ -1989,6 +2478,15 @@ async function handleOnboardingRawEvent(
           });
         if (adapter.lifecycle.phase === "collecting")
           applicationOpening.activatedGeneration = generation;
+        if (applicationOpening.activatedGeneration === generation)
+          for (const responseId of Object.keys(
+            adapter.deferredResponseDone,
+          ))
+            await failDeferredCallerTranscript(
+              context,
+              responseId,
+              "sideband reattached before caller transcription completed",
+            );
         if (applicationOpening.activatedGeneration === generation)
           await resumeApplicationOnboardingTransport(context);
         break;
@@ -2136,13 +2634,41 @@ async function handleOnboardingRawEvent(
         break;
       }
       pendingTurn.transcriptCompleted = true;
-      await dispatchOnboardingEvent(context, {
-        type: "caller.transcript.completed",
-        socketGeneration: generation,
-        turnId,
-        transcript,
-        elapsedMs: 0,
-      });
+      pendingTurn.transcriptionFailed = !transcript.trim();
+      if (transcript.trim()) {
+        pendingTurn.transcript = transcript;
+        for (const buffered of Object.values(adapter.responses))
+          if (buffered.callerTurnId === turnId)
+            buffered.callerTranscript = transcript;
+        await dispatchOnboardingEvent(context, {
+          type: "caller.transcript.completed",
+          socketGeneration: generation,
+          turnId,
+          transcript,
+          elapsedMs: 0,
+        });
+      }
+      const deferredResponses = Object.entries(adapter.deferredResponseDone)
+        .filter(([responseId]) =>
+          adapter.responses[responseId]?.callerTurnId === turnId
+        );
+      for (const [responseId, deferred] of deferredResponses) {
+        if (!transcript.trim()) {
+          await failDeferredCallerTranscript(
+            context,
+            responseId,
+            "provider returned an empty caller transcript",
+          );
+          continue;
+        }
+        const timer = adapter.deferredResponseTimers[responseId];
+        if (timer) clearTimeout(timer);
+        delete adapter.deferredResponseTimers[responseId];
+        delete adapter.deferredResponseDone[responseId];
+        if (adapter.responses[responseId])
+          adapter.responses[responseId]!.terminal = false;
+        await handleOnboardingRawEvent(context, deferred);
+      }
       if (pendingTurn.responseTerminal === true) {
         const completedTurnIndex = adapter.pendingCallerTurns.findIndex(
           (turn) => turn.turnId === turnId,
@@ -2160,6 +2686,33 @@ async function handleOnboardingRawEvent(
         delete adapter.activeCallerTurnId;
       break;
     }
+    case "conversation.item.input_audio_transcription.failed": {
+      const turnId = exactString(msg.item_id);
+      const pendingTurn = turnId
+        ? adapter.pendingCallerTurns.find((turn) => turn.turnId === turnId)
+        : undefined;
+      if (pendingTurn) {
+        pendingTurn.transcriptCompleted = true;
+        pendingTurn.transcriptionFailed = true;
+      }
+      const deferredIds = Object.keys(adapter.deferredResponseDone).filter(
+        (responseId) =>
+          !turnId || adapter.responses[responseId]?.callerTurnId === turnId,
+      );
+      for (const responseId of deferredIds)
+        await failDeferredCallerTranscript(
+          context,
+          responseId,
+          "provider caller transcription failed",
+        );
+      if (deferredIds.length === 0 && !pendingTurn)
+        await recoverUnmatchedCallerTranscript(
+          context,
+          turnId ?? null,
+          "provider caller transcription failed",
+        );
+      break;
+    }
     case "response.cancelled":
     case "output_audio_buffer.cleared": {
       const responseId = exactString(msg.response_id);
@@ -2169,8 +2722,34 @@ async function handleOnboardingRawEvent(
     case "response.done": {
       const responseId = exactString(msg.response?.id);
       if (!responseId) break;
+      const terminalIntentKey = exactString(
+        msg.response?.metadata?.intent_key,
+      );
+      const terminalIntent = terminalIntentKey
+        ? adapter.lifecycle.responseIntents[terminalIntentKey]
+        : undefined;
+      if (
+        terminalIntentKey && terminalIntent?.state === "sent" &&
+        !terminalIntent.responseId
+      ) {
+        clearResponseIntentAckTimer(
+          adapter,
+          terminalIntentKey,
+          terminalIntent.sentSocketGeneration ?? generation,
+        );
+        await dispatchOnboardingEvent(context, {
+          type: "response.created",
+          socketGeneration: generation,
+          responseId,
+          intentKey: terminalIntentKey,
+          elapsedMs: 0,
+        });
+      }
       if (adapter.responses[responseId]?.terminal) break;
-      const usage = validatedProviderUsage(msg.response?.usage);
+      const preTerminal = adapter.responses[responseId];
+      const usage = preTerminal?.usageRecorded
+        ? null
+        : validatedProviderUsage(msg.response?.usage);
       if (usage) {
         ledger.usage.textIn += usage.textIn;
         ledger.usage.audioIn += usage.audioIn;
@@ -2181,6 +2760,54 @@ async function handleOnboardingRawEvent(
         ledger.providerUsageEvidence.eventCount += 1;
         ledger.providerUsageEvidence.lastResponseId = responseId;
         ledger.providerUsageEvidence.lastReceivedAt = new Date().toISOString();
+      }
+      if (preTerminal) preTerminal.usageRecorded = true;
+      const recordTools = preTerminal?.tools.filter(
+        (tool) => tool.name === "record_interview_answer",
+      ) ?? [];
+      if (
+        msg.response?.status === "completed" &&
+        recordTools.length > 0 &&
+        preTerminal?.callerTurnId &&
+        !preTerminal.callerTranscript
+      ) {
+        const pendingTurn = adapter.pendingCallerTurns.find(
+          (turn) => turn.turnId === preTerminal.callerTurnId,
+        );
+        if (
+          pendingTurn &&
+          (!pendingTurn.transcriptCompleted || pendingTurn.transcriptionFailed)
+        ) {
+          adapter.deferredResponseDone[responseId] = structuredClone(msg);
+          preTerminal.terminal = true;
+          pendingTurn.responseTerminal = true;
+          ledger.responseActive = false;
+          const envelope = ledger.budgetEnvelope ??
+            sessionBudgetEnvelope(cap.sessionType);
+          const spent = totalSessionCostUsd(ledger);
+          if (spent >= envelope.hardLimitUsd) {
+            ledger.status = "killed_budget";
+            ledger.transcript.push({
+              role: "system",
+              text:
+                `session ended: hard cost cap reached ($${spent.toFixed(2)} >= $${envelope.hardLimitUsd.toFixed(2)})`,
+              at: new Date().toISOString(),
+            });
+            try { ws.close(); } catch {}
+          } else if (pendingTurn.transcriptionFailed)
+            await failDeferredCallerTranscript(
+              context,
+              responseId,
+              "provider caller transcription was unavailable",
+            );
+          else scheduleDeferredCallerTranscriptFailure(context, responseId);
+          break;
+        }
+        preTerminal.invariant = {
+          code: "caller_turn_correlation_mismatch",
+          safeDetail:
+            "recorded onboarding facts lacked a verified caller transcript",
+        };
       }
       const responseStatus = msg.response?.status;
       const cancelled = responseStatus === "cancelled" ||
@@ -2223,6 +2850,19 @@ async function handleOnboardingRawEvent(
       const sortedTools = buffered.tools.length > 0
         ? [...buffered.tools]
           .sort((left, right) => left.outputIndex - right.outputIndex)
+          .map((tool) => {
+            if (!tool.args) return tool;
+            const args = bindVerifiedOnboardingToolArgs(
+              tool.name,
+              tool.args,
+              buffered.callerTranscript,
+            );
+            return {
+              ...tool,
+              args,
+              argsHash: hashOnboardingToolArgs(args),
+            };
+          })
         : [];
       const batchHash = sortedTools.length > 0
         ? onboardingBatchHash(sortedTools)
@@ -2244,11 +2884,13 @@ async function handleOnboardingRawEvent(
       };
       if (buffered.invariant) {
         adapter.interrupted = true;
+        ledger.responseActive = false;
         await dispatchOnboardingEvent(context, {
           type: "adapter.invariant_failed",
           ...buffered.invariant,
           elapsedMs: 0,
         });
+        break;
       } else if (sortedTools.length > 0 && batchHash) {
         const preflight = preflightOnboardingBatch(
           cap,
@@ -2260,11 +2902,13 @@ async function handleOnboardingRawEvent(
         );
         if (preflight) {
           adapter.interrupted = true;
+          ledger.responseActive = false;
           await dispatchOnboardingEvent(context, {
             type: "adapter.invariant_failed",
             ...preflight,
             elapsedMs: 0,
           });
+          break;
         } else {
           if (!knownTerminalIdentity)
             adapter.terminalResponseBatchHashes[responseId] = batchHash;
@@ -2386,6 +3030,8 @@ async function handleOnboardingRawEvent(
       break;
     }
     case "session.ended": {
+      clearApplicationReactivationTimer(adapter);
+      clearTransportAckTimers(adapter);
       ledger.providerTerminalEvidence = {
         observed: true,
         reason: "provider_session_ended",
@@ -2402,6 +3048,9 @@ async function handleOnboardingRawEvent(
       } else if (
         adapter.lifecycle.phase === "budget_pause_provider_terminating" ||
         adapter.lifecycle.phase === "budget_error_provider_terminating" ||
+        adapter.lifecycle.phase === "recovery_error_provider_terminating" ||
+        adapter.lifecycle.phase === "transport_error_provider_terminating" ||
+        adapter.lifecycle.phase === "fatal_error_provider_terminating" ||
         adapter.lifecycle.phase === "closed"
       ) {
         if (ledger.status === "active") ledger.status = "ended";
@@ -2426,9 +3075,13 @@ async function handleOnboardingRawEvent(
         applicationOpening &&
         causingEventId === applicationOpening.retrieveEventId
       ) {
-        evt("voice.application_opening.retrieve_unconfirmed", {
-          call: ledger.callId.slice(0, 8),
-          socket_generation: generation,
+        clearApplicationReactivationTimer(adapter);
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "application_opening_reactivation_indeterminate",
+          safeDetail:
+            "provider could not prove the exact application opening after reattach",
+          elapsedMs: 0,
         });
         break;
       }
@@ -2440,11 +3093,17 @@ async function handleOnboardingRawEvent(
           )
         : undefined;
       if (outputReceipt?.outputRequest?.delivery === "retrieve") {
+        clearOutputAckTimer(
+          adapter,
+          outputReceipt.outputRequest.eventId,
+          generation,
+        );
         adapter.interrupted = true;
         await dispatchOnboardingEvent(context, {
           type: "adapter.invariant_failed",
           code: "tool_output_retrieve_failed",
           safeDetail: "provider could not retrieve the pending deterministic output",
+          toolCallId: outputReceipt.toolCallId,
           elapsedMs: 0,
         });
         break;
@@ -2457,6 +3116,11 @@ async function handleOnboardingRawEvent(
           /(?:item|conversation item).*(?:already exists|duplicate)/i.test(message)
         );
       if (duplicateOutputCreate) {
+        clearOutputAckTimer(
+          adapter,
+          outputReceipt.outputRequest!.eventId,
+          generation,
+        );
         await dispatchOnboardingEvent(context, {
           type: "tool.output_create_duplicate",
           socketGeneration: generation,
@@ -2466,12 +3130,59 @@ async function handleOnboardingRawEvent(
         });
         break;
       }
+      if (outputReceipt?.outputRequest?.delivery === "create") {
+        clearOutputAckTimer(
+          adapter,
+          outputReceipt.outputRequest.eventId,
+          generation,
+        );
+        await dispatchOnboardingEvent(context, {
+          type: "adapter.invariant_failed",
+          code: "tool_output_created_invalid",
+          safeDetail:
+            "provider rejected the correlated deterministic output create",
+          toolCallId: outputReceipt.toolCallId,
+          elapsedMs: 0,
+        });
+        break;
+      }
       if (code === "conversation_already_has_active_response" ||
         /already has an active response/i.test(message)) {
+        const sentUnacknowledged = Object.values(
+          adapter.lifecycle.responseIntents,
+        ).filter((intent) => intent.state === "sent" && !intent.responseId);
+        const providerIntentKey = exactString(
+          msg.error?.intent_key ?? msg.error?.metadata?.intent_key,
+        );
+        const correlatedIntent = providerIntentKey
+          ? sentUnacknowledged.find((intent) =>
+              intent.intentKey === providerIntentKey
+            )
+          : sentUnacknowledged.length === 1
+            ? sentUnacknowledged[0]
+            : undefined;
+        if (correlatedIntent) {
+          clearResponseIntentAckTimer(
+            adapter,
+            correlatedIntent.intentKey,
+            correlatedIntent.sentSocketGeneration ?? generation,
+          );
+          await dispatchOnboardingEvent(context, {
+            type: "adapter.invariant_failed",
+            code: "response_create_active_conflict",
+            safeDetail:
+              "provider rejected the only sent application response before acknowledgement",
+            intentKey: correlatedIntent.intentKey,
+            elapsedMs: 0,
+          });
+          break;
+        }
         ledger.responseActive = true;
         break;
       }
       adapter.interrupted = true;
+      clearApplicationReactivationTimer(adapter);
+      clearTransportAckTimers(adapter);
       await interruptOnboardingAudio(context, adapter.lifecycle.activeResponseId ?? null);
       ledger.transcript.push({
         role: "system",
@@ -2503,6 +3214,19 @@ export function attachSideband(
     ? options.onboarding?.openingMode ?? "provider_model_v1"
     : "provider_model_v1";
   const openingPayload = options.onboarding?.openingPayload;
+  const applicationReactivationTimeoutMs =
+    options.onboarding?.reactivationTimeoutMs ?? 5_000;
+  if (
+    !Number.isSafeInteger(applicationReactivationTimeoutMs) ||
+    applicationReactivationTimeoutMs < 1 ||
+    applicationReactivationTimeoutMs > 30_000
+  ) throw new Error("application_reactivation_timeout_invalid");
+  const transportAckTimeoutMs =
+    options.onboarding?.transportAckTimeoutMs ?? 5_000;
+  if (
+    !Number.isSafeInteger(transportAckTimeoutMs) ||
+    transportAckTimeoutMs < 1 || transportAckTimeoutMs > 30_000
+  ) throw new Error("onboarding_transport_ack_timeout_invalid");
   const resumeState = resumeRuntimeState(
     cap,
     options.onboarding?.resume,
@@ -2557,6 +3281,8 @@ export function attachSideband(
             expectedOnboardingBusinessName!,
             openingMode,
             resumeState.coverage,
+            applicationReactivationTimeoutMs,
+            transportAckTimeoutMs,
           ),
         }
       : {}),
@@ -2610,10 +3336,17 @@ export function attachSideband(
     for (const timer of retryTimers) clearTimeout(timer);
     retryTimers.clear();
     if (ledger.onboarding) {
+      clearApplicationReactivationTimer(ledger.onboarding);
+      clearTransportAckTimers(ledger.onboarding);
       for (const timer of Object.values(
         ledger.onboarding.pendingMutationRetryTimers,
       )) clearTimeout(timer);
+      for (const timer of Object.values(
+        ledger.onboarding.deferredResponseTimers,
+      )) clearTimeout(timer);
       ledger.onboarding.pendingMutationRetryTimers = {};
+      ledger.onboarding.deferredResponseTimers = {};
+      ledger.onboarding.deferredResponseDone = {};
       ledger.onboarding.pendingMutationCommands = {};
     }
   };
@@ -2727,6 +3460,9 @@ export function attachSideband(
       // audio.input objects are not merge-guaranteed — both sites carry the same config.
       session: {
         type: "realtime",
+        ...(ledger.applicationOpening
+          ? { output_modalities: ["text"] }
+          : {}),
         audio: {
           input: {
             transcription: { model: "gpt-live-transcribe" },
@@ -2819,8 +3555,12 @@ export function attachSideband(
       const wasCurrent = ws === sock;
       if (wasCurrent) ws = null;
       if (cancelled || !wasCurrent || live.get(cap.callId) !== ledger) return;
-      if (cap.sessionType === "onboarding")
+      if (cap.sessionType === "onboarding") {
+        const adapter = ensureOnboardingAdapter(ledger);
+        clearApplicationReactivationTimer(adapter);
+        clearTransportAckTimers(adapter);
         enqueueOnboardingTransportInterruption(ledger);
+      }
       console.log(`sideband CLOSE call=${cap.callId.slice(0, 8)} code=${ev?.code} attempt=${attempt} opened=${openedThisAttempt} terminal=${terminal}`);
       if (terminal || ledger.status !== "active") { clearTimeout(deadline); void finalize("terminal_close"); return; }
       ledger.providerUsageEvidence.continuous = false;

@@ -494,6 +494,73 @@ function completeV2Snapshot(): CoverageSnapshot {
 }
 
 describe("recordOnboardingAnswer", () => {
+  test("never coerces provider-authored owner_words without verified transport evidence", async () => {
+    const fake = new SupabaseBoundaryFake();
+    fake.rpcResult = {
+      data: {
+        status: "recorded",
+        rule_id: "rule-emergency-eligibility",
+        rule_group_id: "group-emergency-eligibility",
+        coverage_receipt_id: "receipt-emergency-eligibility",
+        revision: 1,
+        snapshot_digest: "e".repeat(64),
+        complete: false,
+        missing: [],
+        ambiguous: [{
+          field: "service.emergency_eligibility",
+          subject: "conserto_vazamento",
+        }],
+        next_action: {
+          type: "ask",
+          field: "service.name_synonyms",
+          subject: "conserto_vazamento",
+          question_pt: "Quais nomes os clientes usam para conserto de vazamento?",
+        },
+        coverage: {},
+      },
+      error: null,
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 10,
+      timeoutMs: 100,
+    });
+
+    await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-test11-emergency-eligibility",
+      {
+        topic: "emergencia",
+        field: "service.emergency_eligibility",
+        subject: "conserto_vazamento",
+        disposition: "answered",
+        rule_text:
+          "Elegível como emergência apenas em situação de risco.",
+        structured: {
+          value:
+            "Elegível como emergência apenas em situação de risco.",
+        },
+        owner_words:
+          "Pode sim, mas só em situação de risco, tipo vazamento incontrolável que pode causar dano grande fora do horário normal, só com aprovação explícita minha. Não tem taxa automática.",
+      },
+    );
+
+    expect(fake.rpcCalls).toHaveLength(1);
+    expect(fake.rpcCalls[0]?.args.p_fact).toMatchObject({
+      field: "service.emergency_eligibility",
+      structured: {
+        value: "Elegível como emergência apenas em situação de risco.",
+      },
+    });
+    expect((fake.rpcCalls[0]?.args.p_coverage as any).snapshot.cells[
+      "service:conserto_vazamento:service.emergency_eligibility"
+    ]).toEqual({
+      state: "ambiguous",
+      attempts: 1,
+      reason: "emergency_eligibility_must_be_boolean",
+    });
+  });
+
   test("keeps rule_text as evidence when answered structured.value is missing and never projects hostile prompt authority", async () => {
     let priorSnapshot = createCoverage({ tenantId: TENANT_ID, callId: CALL_ID });
     priorSnapshot = applyCoverageFact(priorSnapshot, {

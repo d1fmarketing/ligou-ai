@@ -56,7 +56,7 @@ function DestinationLink({ destination, active, pendingCount }) {
 }
 
 export function AppShell({ route, pendingCount, business, onReset, children, inspector, prototype = true }) {
-  const resetLabel = prototype ? "Restaurar demonstração" : "Zerar memória de teste";
+  const resetLabel = prototype ? "Restaurar demonstração" : "Zerar teste completo";
   const [profileOpen, setProfileOpen] = useState(false);
   const profileRef = useRef(null);
 
@@ -98,7 +98,7 @@ export function AppShell({ route, pendingCount, business, onReset, children, ins
           {profileOpen ? (
             <div className="profile-menu-panel" id="profile-menu-panel">
               <strong>{business?.name || "Costa Home Services"}</strong>
-              <span>{prototype ? "Dados salvos somente neste navegador." : "Zera regras e aprovações do ambiente de teste."}</span>
+              <span>{prototype ? "Dados salvos somente neste navegador." : "Zera conversa, onboarding, memória, aprovações e poderes de teste."}</span>
               <button type="button" onClick={() => { setProfileOpen(false); onReset(); }}>
                 <IconRefresh aria-hidden="true" /> {resetLabel}
               </button>

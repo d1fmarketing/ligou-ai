@@ -369,7 +369,11 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
         ) : null}
         {route === "poderes" ? (
           supabaseConfigured ? (
-            <PowersView onToast={setToast} />
+            <PowersView
+              onToast={setToast}
+              tenantId={tenant?.id}
+              generation={state.testGeneration}
+            />
           ) : (
             <LockedView
               title="Poderes"
@@ -416,7 +420,7 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
             if (supabaseConfigured && result?.warning) throw new Error(result.warning);
             return result;
           },
-          supabaseConfigured ? "Memória de teste zerada — pode começar do zero." : "Dados de exemplo restaurados.",
+          supabaseConfigured ? "Teste zerado por completo — a próxima entrevista começa do zero." : "Dados de exemplo restaurados.",
         )}
       />
 
@@ -599,17 +603,17 @@ function DashboardDialog({
         open
         title={real ? "Zerar memória de teste" : "Restaurar demonstração"}
         description={real
-          ? "Todas as regras da Memória serão descartadas e as aprovações pendentes expiram, para testar do zero. Disponível apenas em modo de simulação."
+          ? "Conversas do painel, retomada do onboarding, regras, aprovações e poderes de teste serão zerados. Disponível apenas em modo de simulação."
           : "Todas as mudanças feitas neste navegador serão substituídas pelos dados originais de exemplo."}
         onClose={onClose}
       >
         <div className="confirmation-block">
           <p>{real
-            ? "O histórico de versões fica registrado — nada é apagado do banco, as regras saem da memória de trabalho."
+            ? "O histórico auditável fica preservado no banco, mas nenhum estado anterior participa do próximo teste. Login, Google/Calendar e custos não são apagados."
             : "Esta ação reinicia conversas, regras e aprovações do protótipo."}</p>
           <div className="dialog-actions">
             <button className="button button--ghost" type="button" onClick={onClose}>Cancelar</button>
-            <button className="button button--primary" type="button" disabled={busy} onClick={() => run(onReset)}><IconRefresh aria-hidden="true" /> {real ? "Zerar memória" : "Restaurar"}</button>
+            <button className="button button--primary" type="button" disabled={busy} onClick={() => run(onReset)}><IconRefresh aria-hidden="true" /> {real ? "Zerar teste completo" : "Restaurar"}</button>
           </div>
         </div>
       </Dialog>

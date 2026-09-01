@@ -137,6 +137,64 @@ describe("durable onboarding resume migration contract", () => {
   });
 });
 
+describe("complete owner test reset boundary", () => {
+  test("fences every pre-reset onboarding call while preserving immutable audit rows", () => {
+    const sql = migrationSql("onboarding_test_reset_boundary");
+    expect(sql).toContain(
+      "add column if not exists test_memory_reset_at timestamp with time zone",
+    );
+    expect(sql).not.toContain("max(r.created_at)");
+    expect(sql).toContain(
+      "add column if not exists test_memory_generation bigint not null default 0",
+    );
+    expect(sql).toContain("function public.stamp_test_memory_generation()");
+    expect(sql).toContain("for update");
+    expect(sql).toContain("new.test_memory_generation := v_generation");
+    expect(sql).toContain(
+      "test_memory_generation = test_memory_generation + 1",
+    );
+    const resetBody = sql.slice(sql.indexOf(
+      "create or replace function public.reset_owner_test_memory()",
+    ));
+    const firstRuleTombstone = resetBody.indexOf("insert into public.rules (");
+    const powersNeutralized = resetBody.indexOf("update public.powers");
+    const generationAdvanced = resetBody.indexOf("update public.tenants");
+    expect(firstRuleTombstone).toBeGreaterThan(-1);
+    expect(powersNeutralized).toBeGreaterThan(firstRuleTombstone);
+    expect(generationAdvanced).toBeGreaterThan(powersNeutralized);
+    expect(sql).toContain("function public.reset_owner_test_memory()");
+    expect(sql).toContain("'ligou.v0_2.onboarding_resume:' || v_tenant.id::text");
+    expect(sql).toContain("test_memory_reset_at = v_reset_at");
+    expect(sql).toContain("'reset_at', v_reset_at");
+    expect(sql).toContain(
+      "alter function public.initialize_onboarding_resume(uuid,uuid,uuid) rename to initialize_onboarding_resume_v1",
+    );
+    expect(sql).toContain("v_target_generation <> v_generation");
+    expect(sql).toContain("v_target_request_generation <> v_generation");
+    expect(sql).toContain("message = 'onboarding_resume_source_missing'");
+    expect(sql).toContain("v_source_call_generation <> v_generation");
+    expect(sql).toContain("order by c.started_at desc, c.id desc");
+    expect(sql).toContain("create or replace function public.decide_rule(");
+    expect(sql).toContain("create or replace function public.revoke_rule(");
+    expect(sql).toContain("create or replace function public.decide_case(");
+    expect(sql).toContain("create or replace function public.revoke_power(");
+    expect(sql).toContain("create or replace function public.adjust_case(");
+    expect(sql).toContain("for update of t");
+    expect(sql).toContain("message = 'stale_rule_version'");
+    expect(sql).toContain(
+      "alter function public.get_onboarding_resume_status(uuid) rename to get_onboarding_resume_status_v1",
+    );
+    expect(sql).toContain("v_call_generation <> v_generation");
+    expect(sql).toContain("'status', 'blocked'");
+    expect(sql).toContain(
+      "revoke all on function public.initialize_onboarding_resume_v1(uuid,uuid,uuid) from public, anon, authenticated, service_role",
+    );
+    expect(sql).toContain(
+      "revoke all on function public.get_onboarding_resume_status_v1(uuid) from public, anon, authenticated, service_role",
+    );
+  });
+});
+
 describe("OAuth connector hardening migration contract", () => {
   test("state consumption is atomic, short-lived, fully bound, and service-role-only", () => {
     const sql = migrationSql("connector_oauth_hardening");

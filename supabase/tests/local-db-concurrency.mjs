@@ -801,6 +801,21 @@ async function waitForOnboardingAdvisoryBlock(connection, home, queryMarker) {
   throw new Error(`onboarding RPC did not block on advisory lock: ${queryMarker}`);
 }
 
+async function waitForQueryLock(connection, home, queryMarker) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const waiting = scalar(await runSql(connection, home, `
+      select count(*)::text
+      from pg_stat_activity
+      where datname = current_database()
+        and query like '%${queryMarker}%'
+        and wait_event_type = 'Lock';
+    `), "query lock wait probe");
+    if (waiting === "1") return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`RPC did not block on the expected lock: ${queryMarker}`);
+}
+
 const slot = {
   tenant: "20000000-0000-4000-8000-000000000001",
   power: "20000000-0000-4000-8000-000000000010",
@@ -4290,6 +4305,400 @@ async function onboardingLocalityFollowupAuthority(connection, home) {
   );
 }
 
+async function ownerResetMutatorLockOrdering(connection, home) {
+  const ids = {
+    owner: "87000000-0000-4000-8000-000000000001",
+    tenant: "87000000-0000-4000-8000-000000000010",
+    suggestedRule: "87000000-0000-4000-8000-000000000020",
+    suggestedGroup: "87000000-0000-4000-8000-000000000021",
+    approvedRule: "87000000-0000-4000-8000-000000000030",
+    approvedGroup: "87000000-0000-4000-8000-000000000031",
+    approvalCase: "87000000-0000-4000-8000-000000000040",
+    adjustCase: "87000000-0000-4000-8000-000000000041",
+    power: "87000000-0000-4000-8000-000000000050",
+  };
+
+  requireSuccess(await runSql(connection, home, `
+    insert into auth.users (id, email)
+    values ('${ids.owner}', 'reset-mutator-locks@example.invalid');
+    insert into public.tenants (
+      id, slug, name, owner_user_id, status, operational_mode,
+      daily_budget_usd, session_max_minutes, bootstrap_origin
+    ) values (
+      '${ids.tenant}', 'synthetic-reset-mutator-locks',
+      'Synthetic Reset Mutator Locks', '${ids.owner}',
+      'onboarding', 'simulation_only', 15, 15, 'v0_2_google'
+    );
+  `), "reset mutator lock fixture");
+
+  const ruleRace = async ({ label, fixtureSql, mutationSql }) => {
+    requireSuccess(await runSql(connection, home, fixtureSql), `${label} fixture`);
+    const blockerMarker = `${label.toUpperCase()}_RULES_BLOCKER`;
+    const mutationMarker = `reset-mutator-${label}-mutation`;
+    const resetMarker = `reset-mutator-${label}-reset`;
+    const rulesBlocker = startSql(connection, home, `
+      begin;
+      select pg_advisory_xact_lock(hashtextextended(
+        'ligou.v0_2.rules_versioning:${ids.tenant}', 0
+      ));
+      select '${blockerMarker}';
+      select pg_sleep(2);
+      commit;
+    `);
+    await rulesBlocker.waitFor(blockerMarker);
+    const mutation = startSql(
+      connection,
+      home,
+      authenticatedTransaction(ids.owner, `
+        /* ${mutationMarker} */
+        ${mutationSql}
+      `),
+    );
+    await waitForOnboardingAdvisoryBlock(
+      connection,
+      home,
+      mutationMarker,
+    );
+    const reset = startSql(
+      connection,
+      home,
+      authenticatedTransaction(ids.owner, `
+        /* ${resetMarker} */
+        select public.reset_owner_test_memory()::text;
+      `),
+    );
+    const [blockerResult, mutationResult, resetResult] = await Promise.all([
+      rulesBlocker.done,
+      mutation.done,
+      reset.done,
+    ]);
+    requireSuccess(blockerResult, `${label} rules blocker`);
+    requireSuccess(mutationResult, `${label} mutation`);
+    const resetReadback = JSON.parse(scalar(resetResult, `${label} reset`));
+    assert.doesNotMatch(mutationResult.stderr, /deadlock detected/i);
+    assert.doesNotMatch(resetResult.stderr, /deadlock detected/i);
+    assert.ok(resetReadback.generation >= 1);
+  };
+
+  await ruleRace({
+    label: "decide-rule",
+    fixtureSql: `
+      insert into public.rules (
+        id, tenant_id, rule_group_id, origem, escopo, status,
+        category, text, structured
+      ) values (
+        '${ids.suggestedRule}', '${ids.tenant}', '${ids.suggestedGroup}',
+        'aprendizado', 'geral', 'sugerido', 'synthetic',
+        'Suggested reset race rule', '{}'::jsonb
+      );
+    `,
+    mutationSql:
+      `select public.decide_rule('${ids.suggestedRule}', 'rejeitado');`,
+  });
+
+  await ruleRace({
+    label: "revoke-rule",
+    fixtureSql: `
+      insert into public.rules (
+        id, tenant_id, rule_group_id, origem, escopo, status,
+        category, text, structured, approved_by, approved_at
+      ) values (
+        '${ids.approvedRule}', '${ids.tenant}', '${ids.approvedGroup}',
+        'edicao_manual', 'geral', 'aprovado', 'synthetic',
+        'Approved reset race rule', '{}'::jsonb,
+        '${ids.owner}', clock_timestamp()
+      );
+    `,
+    mutationSql:
+      `select public.revoke_rule('${ids.approvedRule}', 'synthetic reset race');`,
+  });
+
+  requireSuccess(await runSql(connection, home, `
+    insert into public.approval_cases (
+      id, tenant_id, request, idempotency_key
+    ) values (
+      '${ids.approvalCase}', '${ids.tenant}',
+      'Synthetic reset case race', 'reset-case-race-${ids.tenant}'
+    );
+  `), "decide-case fixture");
+  const caseBlockerMarker = "DECIDE_CASE_RULES_BLOCKER";
+  const caseResetMarker = "reset-mutator-decide-case-reset";
+  const caseMutationMarker = "reset-mutator-decide-case-mutation";
+  const caseRulesBlocker = startSql(connection, home, `
+    begin;
+    select pg_advisory_xact_lock(hashtextextended(
+      'ligou.v0_2.rules_versioning:${ids.tenant}', 0
+    ));
+    select '${caseBlockerMarker}';
+    select pg_sleep(3);
+    commit;
+  `);
+  await caseRulesBlocker.waitFor(caseBlockerMarker);
+  const caseReset = startSql(
+    connection,
+    home,
+    authenticatedTransaction(ids.owner, `
+      /* ${caseResetMarker} */
+      select public.reset_owner_test_memory()::text;
+    `),
+  );
+  await waitForOnboardingAdvisoryBlock(
+    connection,
+    home,
+    caseResetMarker,
+  );
+  const caseMutation = startSql(
+    connection,
+    home,
+    authenticatedTransaction(ids.owner, `
+      /* ${caseMutationMarker} */
+      select public.decide_case(
+        '${ids.approvalCase}', 'aprovada', 'rule',
+        'Synthetic case-derived rule',
+        jsonb_build_object('category', 'synthetic'),
+        'geral', 'permanente'
+      );
+    `),
+  );
+  await waitForQueryLock(connection, home, caseMutationMarker);
+  const [caseBlockerResult, caseResetResult, caseMutationResult] =
+    await Promise.all([
+      caseRulesBlocker.done,
+      caseReset.done,
+      caseMutation.done,
+    ]);
+  requireSuccess(caseBlockerResult, "decide-case rules blocker");
+  const caseResetReadback = JSON.parse(scalar(
+    caseResetResult,
+    "decide-case reset",
+  ));
+  assert.notEqual(caseMutationResult.code, 0);
+  assert.match(caseMutationResult.stderr, /case_already_decided/);
+  assert.doesNotMatch(caseMutationResult.stderr, /deadlock detected/i);
+  assert.doesNotMatch(caseResetResult.stderr, /deadlock detected/i);
+  assert.equal(caseResetReadback.generation, 3);
+
+  requireSuccess(await runSql(connection, home, `
+    insert into public.powers (
+      id, tenant_id, subject, capability, resource, granted_by
+    ) values (
+      '${ids.power}', '${ids.tenant}', 'voice_agent',
+      'quote', '*', '${ids.owner}'
+    );
+  `), "revoke-power fixture");
+  const powerBlockerMarker = "REVOKE_POWER_RULES_BLOCKER";
+  const powerResetMarker = "reset-mutator-revoke-power-reset";
+  const powerMutationMarker = "reset-mutator-revoke-power-mutation";
+  const powerRulesBlocker = startSql(connection, home, `
+    begin;
+    select pg_advisory_xact_lock(hashtextextended(
+      'ligou.v0_2.rules_versioning:${ids.tenant}', 0
+    ));
+    select '${powerBlockerMarker}';
+    select pg_sleep(3);
+    commit;
+  `);
+  await powerRulesBlocker.waitFor(powerBlockerMarker);
+  const powerReset = startSql(
+    connection,
+    home,
+    authenticatedTransaction(ids.owner, `
+      /* ${powerResetMarker} */
+      select public.reset_owner_test_memory()::text;
+    `),
+  );
+  await waitForOnboardingAdvisoryBlock(
+    connection,
+    home,
+    powerResetMarker,
+  );
+  const powerMutation = startSql(
+    connection,
+    home,
+    authenticatedTransaction(ids.owner, `
+      /* ${powerMutationMarker} */
+      select public.revoke_power('${ids.power}');
+    `),
+  );
+  await waitForQueryLock(connection, home, powerMutationMarker);
+  const [powerBlockerResult, powerResetResult, powerMutationResult] =
+    await Promise.all([
+      powerRulesBlocker.done,
+      powerReset.done,
+      powerMutation.done,
+    ]);
+  requireSuccess(powerBlockerResult, "revoke-power rules blocker");
+  const powerResetReadback = JSON.parse(scalar(
+    powerResetResult,
+    "revoke-power reset",
+  ));
+  assert.notEqual(powerMutationResult.code, 0);
+  assert.match(powerMutationResult.stderr, /power_not_found_or_not_owner/);
+  assert.doesNotMatch(powerMutationResult.stderr, /deadlock detected/i);
+  assert.doesNotMatch(powerResetResult.stderr, /deadlock detected/i);
+  assert.equal(powerResetReadback.generation, 4);
+  assert.equal(powerResetReadback.powers_revoked, 1);
+
+  requireSuccess(await runSql(connection, home, `
+    insert into public.approval_cases (
+      id, tenant_id, request, proposed_action, idempotency_key
+    ) values (
+      '${ids.adjustCase}', '${ids.tenant}',
+      'Synthetic reset adjustment race', 'Original proposal',
+      'reset-adjust-race-${ids.tenant}'
+    );
+  `), "adjust-case fixture");
+  const adjustBlockerMarker = "ADJUST_CASE_RULES_BLOCKER";
+  const adjustResetMarker = "reset-mutator-adjust-case-reset";
+  const adjustMutationMarker = "reset-mutator-adjust-case-mutation";
+  const adjustRulesBlocker = startSql(connection, home, `
+    begin;
+    select pg_advisory_xact_lock(hashtextextended(
+      'ligou.v0_2.rules_versioning:${ids.tenant}', 0
+    ));
+    select '${adjustBlockerMarker}';
+    select pg_sleep(3);
+    commit;
+  `);
+  await adjustRulesBlocker.waitFor(adjustBlockerMarker);
+  const adjustReset = startSql(
+    connection,
+    home,
+    authenticatedTransaction(ids.owner, `
+      /* ${adjustResetMarker} */
+      select public.reset_owner_test_memory()::text;
+    `),
+  );
+  await waitForOnboardingAdvisoryBlock(
+    connection,
+    home,
+    adjustResetMarker,
+  );
+  const adjustMutation = startSql(
+    connection,
+    home,
+    authenticatedTransaction(ids.owner, `
+      /* ${adjustMutationMarker} */
+      select public.adjust_case('${ids.adjustCase}', 'Adjusted proposal');
+    `),
+  );
+  await waitForQueryLock(connection, home, adjustMutationMarker);
+  const [adjustBlockerResult, adjustResetResult, adjustMutationResult] =
+    await Promise.all([
+      adjustRulesBlocker.done,
+      adjustReset.done,
+      adjustMutation.done,
+    ]);
+  requireSuccess(adjustBlockerResult, "adjust-case rules blocker");
+  const adjustResetReadback = JSON.parse(scalar(
+    adjustResetResult,
+    "adjust-case reset",
+  ));
+  assert.notEqual(adjustMutationResult.code, 0);
+  assert.match(adjustMutationResult.stderr, /case_already_decided/);
+  assert.doesNotMatch(adjustMutationResult.stderr, /deadlock detected/i);
+  assert.doesNotMatch(adjustResetResult.stderr, /deadlock detected/i);
+  assert.equal(adjustResetReadback.generation, 5);
+}
+
+async function onboardingResumeGenerationCandidateSelection(connection, home) {
+  const ids = {
+    owner: "88000000-0000-4000-8000-000000000001",
+    tenant: "88000000-0000-4000-8000-000000000010",
+    oldCall: "88000000-0000-4000-8000-000000000020",
+    currentCall: "88000000-0000-4000-8000-000000000021",
+    targetCall: "88000000-0000-4000-8000-000000000022",
+    oldRequest: "88000000-0000-4000-8000-000000000030",
+    currentRequest: "88000000-0000-4000-8000-000000000031",
+    targetRequest: "88000000-0000-4000-8000-000000000032",
+  };
+  requireSuccess(await runSql(connection, home, `
+    insert into auth.users (id, email)
+    values ('${ids.owner}', 'resume-generation-candidate@example.invalid');
+    insert into public.tenants (
+      id, slug, name, owner_user_id, status, operational_mode,
+      daily_budget_usd, session_max_minutes, bootstrap_origin
+    ) values (
+      '${ids.tenant}', 'synthetic-resume-generation-candidate',
+      'Synthetic Resume Generation Candidate', '${ids.owner}',
+      'onboarding', 'simulation_only', 15, 15, 'v0_2_google'
+    );
+    insert into public.calls (
+      id, tenant_id, channel, session_type, status, started_at,
+      ended_at, duration_seconds, provider_termination_state,
+      provider_termination_reason, provider_usage_state
+    ) values (
+      '${ids.oldCall}', '${ids.tenant}', 'browser', 'onboarding', 'error',
+      clock_timestamp() + interval '20 minutes',
+      clock_timestamp() + interval '20 minutes 1 second', 1,
+      'not_required', 'synthetic_old_generation_candidate', 'not_applicable'
+    );
+    insert into public.browser_session_requests (
+      id, tenant_id, user_id, session_type, offer_sdp, status,
+      call_id, opening_mode_requested, error
+    ) values (
+      '${ids.oldRequest}', '${ids.tenant}', '${ids.owner}', 'onboarding',
+      'old-generation-offer', 'error', '${ids.oldCall}',
+      'application_tts_v1', 'synthetic_old_generation_candidate'
+    );
+  `), "old-generation resume candidate fixture");
+  const reset = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    authenticatedTransaction(ids.owner, `
+      select public.reset_owner_test_memory()::text;
+    `),
+  ), "resume candidate reset"));
+  assert.equal(reset.generation, 1);
+  requireSuccess(await runSql(connection, home, `
+    insert into public.calls (
+      id, tenant_id, channel, session_type, status, started_at,
+      ended_at, duration_seconds, provider_termination_state,
+      provider_termination_reason, provider_usage_state
+    ) values (
+      '${ids.currentCall}', '${ids.tenant}', 'browser', 'onboarding', 'error',
+      clock_timestamp() + interval '10 minutes',
+      clock_timestamp() + interval '10 minutes 1 second', 1,
+      'not_required', 'synthetic_current_generation_candidate',
+      'not_applicable'
+    );
+    insert into public.browser_session_requests (
+      id, tenant_id, user_id, session_type, offer_sdp, status,
+      call_id, opening_mode_requested, error
+    ) values (
+      '${ids.currentRequest}', '${ids.tenant}', '${ids.owner}', 'onboarding',
+      'current-generation-offer', 'error', '${ids.currentCall}',
+      'application_tts_v1', 'synthetic_current_generation_candidate'
+    );
+    insert into public.browser_session_requests (
+      id, tenant_id, user_id, session_type, offer_sdp, status,
+      call_id, opening_mode_requested
+    ) values (
+      '${ids.targetRequest}', '${ids.tenant}', '${ids.owner}', 'onboarding',
+      'target-generation-offer', 'processing', '${ids.targetCall}',
+      'application_tts_v1'
+    );
+    insert into public.calls (
+      id, tenant_id, channel, session_type, status, started_at
+    ) values (
+      '${ids.targetCall}', '${ids.tenant}', 'browser', 'onboarding', 'active',
+      clock_timestamp() + interval '30 minutes'
+    );
+  `), "mixed-generation resume candidates fixture");
+  const resume = await runSql(
+    connection,
+    home,
+    serviceRollback(`
+      select public.initialize_onboarding_resume(
+        '${ids.tenant}', '${ids.targetCall}', '${ids.owner}'
+      );
+    `),
+  );
+  assert.notEqual(resume.code, 0);
+  assert.match(resume.stderr, /onboarding_resume_source_missing/);
+  assert.doesNotMatch(resume.stderr, /onboarding_resume_latest_ineligible/);
+}
+
 async function onboardingResumeCheckpointConcurrency(connection, home) {
   const ids = {
     owner: "86000000-0000-4000-8000-000000000001",
@@ -4298,11 +4707,16 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     targetCall: "86000000-0000-4000-8000-000000000021",
     laterTargetCall: "86000000-0000-4000-8000-000000000022",
     recoveredTargetCall: "86000000-0000-4000-8000-000000000023",
+    postResetTargetCall: "86000000-0000-4000-8000-000000000024",
     sourceRequest: "86000000-0000-4000-8000-000000000030",
     targetRequest: "86000000-0000-4000-8000-000000000031",
     laterTargetRequest: "86000000-0000-4000-8000-000000000032",
     recoveredTargetRequest: "86000000-0000-4000-8000-000000000033",
+    postResetTargetRequest: "86000000-0000-4000-8000-000000000034",
     sourceReceipt: "86000000-0000-4000-8000-000000000040",
+    resetRule: "86000000-0000-4000-8000-000000000050",
+    resetRuleGroup: "86000000-0000-4000-8000-000000000051",
+    postResetRule: "86000000-0000-4000-8000-000000000052",
   };
 
   requireSuccess(await runSql(connection, home, `
@@ -4310,11 +4724,11 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     values ('${ids.owner}', 'onboarding-resume@example.invalid');
     insert into public.tenants (
       id, slug, name, owner_user_id, status, operational_mode,
-      daily_budget_usd, session_max_minutes
+      daily_budget_usd, session_max_minutes, bootstrap_origin
     ) values (
       '${ids.tenant}', 'synthetic-onboarding-resume',
       'Synthetic Onboarding Resume', '${ids.owner}',
-      'onboarding', 'simulation_only', 15, 15
+      'onboarding', 'simulation_only', 15, 15, 'v0_2_google'
     );
     insert into public.calls (
       id, tenant_id, channel, session_type, status, started_at,
@@ -4915,6 +5329,223 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
     select count(*)::text from public.onboarding_resume_consumptions
     where tenant_id = '${ids.tenant}';
   `), "resume source single-consumption invariant"), "2");
+
+  const answerLock = startSql(connection, home, `
+    begin;
+    select id from public.tenants where id = '${ids.tenant}' for update;
+    select 'ANSWER_TENANT_LOCKED';
+    select pg_sleep(0.75);
+    select pg_advisory_xact_lock(hashtextextended(
+      'ligou.v0_2.rules_versioning:${ids.tenant}', 0
+    ));
+    commit;
+  `);
+  await answerLock.waitFor("ANSWER_TENANT_LOCKED");
+  const resetStartedAt = Date.now();
+  const concurrentReset = runSql(
+    connection,
+    home,
+    authenticatedTransaction(ids.owner, `
+      select public.reset_owner_test_memory();
+    `),
+  );
+  const [answerLockResult, concurrentResetResult] = await Promise.all([
+    answerLock.done,
+    concurrentReset,
+  ]);
+  requireSuccess(answerLockResult, "answer-like tenant then rules lock order");
+  assert.ok(Date.now() - resetStartedAt >= 500);
+  assert.notEqual(concurrentResetResult.code, 0);
+  assert.match(
+    concurrentResetResult.stderr,
+    /test_reset_active_onboarding_session/,
+  );
+  assert.doesNotMatch(concurrentResetResult.stderr, /deadlock detected/i);
+
+  requireSuccess(await runSql(connection, home, `
+    update public.browser_session_requests
+    set status = 'error', error = 'synthetic_pre_reset_cleanup'
+    where id = '${ids.laterTargetRequest}' and status = 'processing';
+    update public.calls
+    set status = 'error', ended_at = clock_timestamp(), duration_seconds = 0,
+        provider_termination_state = 'not_required',
+        provider_termination_reason = 'synthetic_pre_reset_cleanup',
+        provider_usage_state = 'not_applicable'
+    where id = '${ids.laterTargetCall}' and status = 'active';
+    insert into public.powers (
+      tenant_id, subject, capability, resource, granted_by
+    ) values (
+      '${ids.tenant}', 'voice_agent', 'create_booking', '*', '${ids.owner}'
+    );
+    insert into public.approval_cases (
+      tenant_id, request, idempotency_key
+    ) values (
+      '${ids.tenant}', 'Synthetic reset approval',
+      'synthetic-reset-approval-${ids.tenant}'
+    );
+    insert into public.rules (
+      id, tenant_id, rule_group_id, version, origem, escopo, status,
+      category, text, structured, approved_by, approved_at
+    ) values (
+      '${ids.resetRule}', '${ids.tenant}', '${ids.resetRuleGroup}', 1,
+      'onboarding', 'servico', 'aprovado', 'servico',
+      'PRE_RESET_RULE_TEXT_MUST_NOT_LEAK',
+      '{"materialization_key":"service:desentupimento"}'::jsonb,
+      '${ids.owner}', clock_timestamp()
+    );
+  `), "complete reset precondition fixture");
+
+  const rulesBlocker = startSql(connection, home, `
+    begin;
+    select pg_advisory_xact_lock(hashtextextended(
+      'ligou.v0_2.rules_versioning:${ids.tenant}', 0
+    ));
+    select 'RESET_RULES_LOCK_HELD';
+    select pg_sleep(0.75);
+    commit;
+  `);
+  await rulesBlocker.waitFor("RESET_RULES_LOCK_HELD");
+  const resetAttempt = startSql(
+    connection,
+    home,
+    authenticatedTransaction(ids.owner, `
+      select public.reset_owner_test_memory()::text;
+    `),
+  );
+  await waitForOnboardingAdvisoryBlock(
+    connection,
+    home,
+    "reset_owner_test_memory",
+  );
+  const concurrentWriter = runSql(connection, home, `
+    begin;
+    insert into public.powers (
+      tenant_id, subject, capability, resource, granted_by
+    ) values (
+      '${ids.tenant}', 'voice_agent', 'quote', '*', '${ids.owner}'
+    ) returning test_memory_generation;
+    insert into public.approval_cases (
+      tenant_id, request, idempotency_key
+    ) values (
+      '${ids.tenant}', 'Concurrent reset approval',
+      'concurrent-reset-approval-${ids.tenant}'
+    ) returning test_memory_generation;
+    rollback;
+  `);
+  const [rulesBlockerResult, resetResult, writerResult] = await Promise.all([
+    rulesBlocker.done,
+    resetAttempt.done,
+    concurrentWriter,
+  ]);
+  requireSuccess(rulesBlockerResult, "reset rules blocker");
+  const reset = JSON.parse(scalar(resetResult, "complete owner test reset"));
+  const writerGenerations = requireSuccess(
+    writerResult,
+    "concurrent reset writer generation",
+  ).split("\n").filter((line) => /^\d+$/.test(line));
+  assert.deepEqual(writerGenerations, ["1", "1"]);
+  assert.match(reset.reset_at, /^20\d{2}-\d{2}-\d{2}/);
+  assert.equal(reset.generation, 1);
+  assert.equal(reset.powers_revoked, 1);
+  assert.equal(reset.cases_expired, 1);
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (t.test_memory_reset_at = '${reset.reset_at}'::timestamptz)::text || ':' ||
+      (t.test_memory_generation = 1)::text || ':' ||
+      (not exists (select 1 from public.effective_rules er
+        where er.tenant_id = t.id))::text || ':' ||
+      (not exists (select 1 from public.approval_cases ac
+        where ac.tenant_id = t.id and ac.status = 'pendente'))::text || ':' ||
+      (not exists (select 1 from public.powers p
+        where p.tenant_id = t.id and p.revoked_at is null))::text
+    from public.tenants t where t.id = '${ids.tenant}';
+  `), "complete reset effective-state readback"),
+  "true:true:true:true:true");
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      (readback->>'reset_at' = '${reset.reset_at}')::text || ':' ||
+      (detail->>'mode' = 'test_reset')::text
+    from public.receipts
+    where tenant_id = '${ids.tenant}' and kind = 'rule_change'
+      and detail->>'mode' = 'test_reset'
+    order by created_at desc, id desc limit 1;
+  `), "complete reset immutable marker"), "true:true");
+  assert.deepEqual(JSON.parse(scalar(await runSql(connection, home, `
+    select readback::text from public.receipts
+    where id = '${ids.sourceReceipt}';
+  `), "pre-reset coverage remains immutable")), sourceCoverage);
+  assert.equal(
+    (await ownerResumeStatus(
+      ids.sourceCall,
+      "pre-reset source is no longer resumable",
+    )).status,
+    "blocked",
+  );
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      count(*)::text || ':' ||
+      min(test_memory_generation)::text || ':' ||
+      max(test_memory_generation)::text
+    from public.rules
+    where tenant_id = '${ids.tenant}'
+      and rule_group_id = '${ids.resetRuleGroup}';
+  `), "reset tombstones remain in old generation"), "3:0:0");
+  requireSuccess(await runSql(connection, home, `
+    insert into public.rules (
+      id, tenant_id, rule_group_id, version, origem, escopo, status,
+      category, text, structured
+    ) values (
+      '${ids.postResetRule}', '${ids.tenant}', '${ids.resetRuleGroup}', 4,
+      'onboarding', 'servico', 'sugerido', 'servico',
+      'Fresh rule from the new test.',
+      '{"materialization_key":"service:desentupimento"}'::jsonb
+    );
+  `), "post-reset same-group suggestion");
+  assert.equal(scalar(await runSql(connection, home, `
+    select
+      count(*)::text || ':' ||
+      bool_and(text = 'Fresh rule from the new test.')::text || ':' ||
+      bool_and(text not like '%PRE_RESET_RULE_TEXT_MUST_NOT_LEAK%')::text
+    from public.rules
+    where tenant_id = '${ids.tenant}'
+      and rule_group_id = '${ids.resetRuleGroup}'
+      and test_memory_generation = 1;
+  `), "new generation excludes reset tombstone text"), "1:true:true");
+
+  requireSuccess(await runSql(connection, home, `
+    insert into public.browser_session_requests (
+      id, tenant_id, user_id, session_type, offer_sdp, status,
+      call_id, opening_mode_requested
+    ) values (
+      '${ids.postResetTargetRequest}', '${ids.tenant}', '${ids.owner}',
+      'onboarding', 'post-reset-target-offer', 'processing',
+      '${ids.postResetTargetCall}', 'application_tts_v1'
+    );
+    insert into public.calls (
+      id, tenant_id, channel, session_type, status, started_at
+    ) values (
+      '${ids.postResetTargetCall}', '${ids.tenant}', 'browser', 'onboarding',
+      'active', clock_timestamp()
+    );
+  `), "post-reset fresh target fixture");
+  const postResetResume = await runSql(
+    connection,
+    home,
+    serviceRollback(`
+      select public.initialize_onboarding_resume(
+        '${ids.tenant}', '${ids.postResetTargetCall}', '${ids.owner}'
+      );
+    `),
+  );
+  assert.notEqual(postResetResume.code, 0);
+  assert.match(postResetResume.stderr, /onboarding_resume_source_missing/);
+  assert.equal(scalar(await runSql(connection, home, `
+    select c.test_memory_generation::text || ':' ||
+      br.test_memory_generation::text
+    from public.calls c
+    join public.browser_session_requests br on br.call_id = c.id
+    where c.id = '${ids.postResetTargetCall}';
+  `), "post-reset generation binding"), "1:1");
 }
 
 export async function runConcurrencySuite(env = process.env) {
@@ -4937,6 +5568,8 @@ export async function runConcurrencySuite(env = process.env) {
     ["V2 current-relative materialization and followups", onboardingV2CurrentRelativeMaterialization],
     ["concurrent onboarding answer and followup", concurrentOnboardingAnswerAndFollowup],
     ["owner-evidence locality followup authority", onboardingLocalityFollowupAuthority],
+    ["owner reset mutator lock ordering", ownerResetMutatorLockOrdering],
+    ["onboarding resume exact generation candidate", onboardingResumeGenerationCandidateSelection],
     ["onboarding resume checkpoint concurrency", onboardingResumeCheckpointConcurrency],
   ];
   try {

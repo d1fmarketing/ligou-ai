@@ -529,13 +529,12 @@ function assertExpectedLegacyLint(functions) {
   const actual = functions.flatMap((entry) => (entry.issues ?? []).map((issue) => (
     `${entry.function}|${String(issue.level).split(/\s+/)[0]}|${issue.message}`
   ))).sort();
-  // Exactly the two legacy hygiene warnings the migration runbook documents:
-  // decide_case keeps an unused variable, and the applied budget-reconciliation
-  // revisions (20260822053000/20260822060500) reintroduced the compatibility
-  // parameter without a read. Anything beyond these two is a regression.
+  // Exactly the remaining legacy hygiene warning documented by the migration
+  // runbook. The reset-boundary migration now uses decide_case.v_tenant to lock
+  // the tenant first; retaining its old warning here would make a real fix fail
+  // the gate. Anything beyond the compatibility parameter below is a regression.
   const expected = [
     'public.claim_budget_reconciliation|warning|unused parameter "p_worker"',
-    'public.decide_case|warning|unused variable "v_tenant"',
   ].sort();
   assert.deepEqual(actual, expected, "database lint introduced a new or changed warning/error");
   return lintCounts(functions);

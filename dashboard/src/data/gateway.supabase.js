@@ -2,7 +2,12 @@
 // The prototype's model.js remains the vocabulary; here every decision flows through server RPCs.
 import { supabase } from "../lib/supabase.js";
 import { decideMemoryVia } from "./memory-decisions.js";
-import { mapRuleGroups } from "./gateway-rule-mapping.js";
+import {
+  isFreshTestResetReadback,
+  mapRuleGroups,
+  projectRowsAfterTestReset,
+  scopeUsageAlertQuery,
+} from "./gateway-rule-mapping.js";
 
 const SCOPE_TO_DB = {
   service: "servico", "serviço": "servico", servico: "servico",
@@ -42,22 +47,42 @@ let activeTenantId = null;
 
 async function fetchAll() {
   if (!activeTenantId) return { state: null, warning: "Sua conta ainda não terminou de carregar. Recarregue a página." };
-  const [{ data: tenants, error: te }, { data: rules }, { data: cases }, { data: calls }, { data: notifications }] = await Promise.all([
+  const [tenantResult, rulesResult, casesResult, callsResult, notificationsResult, powersResult] = await Promise.all([
     supabase.from("tenants").select("*").eq("id", activeTenantId),
     supabase.from("rules").select("*").eq("tenant_id", activeTenantId).order("created_at", { ascending: true }),
     supabase.from("approval_cases").select("*").eq("tenant_id", activeTenantId).order("created_at", { ascending: false }).limit(50),
-    supabase.from("calls").select("id,channel,session_type,started_at,ended_at,duration_seconds,summary_pt,summary_status,cost_estimate_usd,model,status").eq("tenant_id", activeTenantId).order("started_at", { ascending: false }).limit(20),
-    supabase.from("notifications").select("*").eq("tenant_id", activeTenantId).order("created_at", { ascending: false }).limit(20),
+    supabase.from("calls").select("id,channel,session_type,started_at,ended_at,duration_seconds,summary_pt,summary_status,cost_estimate_usd,model,status,test_memory_generation").eq("tenant_id", activeTenantId).order("started_at", { ascending: false }).limit(20),
+    scopeUsageAlertQuery(
+      supabase.from("notifications").select("*"),
+      { tenantId: activeTenantId },
+    ),
+    supabase.from("powers").select("id,granted_at,revoked_at,test_memory_generation").eq("tenant_id", activeTenantId).order("granted_at", { ascending: false }),
   ]);
-  if (te) throw new Error(te.message);
+  for (const result of [
+    tenantResult, rulesResult, casesResult, callsResult,
+    notificationsResult, powersResult,
+  ])
+    if (result.error) throw new Error(result.error.message);
+  const tenants = tenantResult.data;
+  const rules = rulesResult.data;
   const tenant = tenants?.[0];
   if (!tenant) return { state: null, warning: "Não foi possível carregar a sua empresa. Saia e entre novamente." };
+  const resetAt = tenant.test_memory_reset_at ?? null;
+  const generation = Number(tenant.test_memory_generation ?? 0);
+  const current = projectRowsAfterTestReset({
+    generation,
+    rules: rules ?? [],
+    cases: casesResult.data ?? [],
+    calls: callsResult.data ?? [],
+    notifications: notificationsResult.data ?? [],
+    powers: powersResult.data ?? [],
+  });
 
-  const approvals = (cases ?? []).map(mapCase);
-  const memory = mapRuleGroups(rules ?? []);
+  const approvals = current.cases.map(mapCase);
+  const memory = mapRuleGroups(current.rules);
 
   const messages = [];
-  for (const call of (calls ?? []).slice(0, 8).reverse()) {
+  for (const call of current.calls.slice(0, 8).reverse()) {
     if (call.session_type === "eval") continue;
     messages.push({
       id: `call-${call.id}`,
@@ -72,7 +97,7 @@ async function fetchAll() {
       timestamp: call.started_at,
     });
   }
-  for (const n of (notifications ?? []).slice(0, 6).reverse()) {
+  for (const n of current.notifications.slice(0, 6).reverse()) {
     if (n.kind === "usage_70" || n.kind === "usage_90") {
       messages.push({
         id: `notif-${n.id}`, role: "system",
@@ -89,6 +114,14 @@ async function fetchAll() {
     revision: Date.now(),
     fixtureDate: new Date().toISOString().slice(0, 10),
     updatedAt: new Date().toISOString(),
+    testResetAt: resetAt,
+    testGeneration: generation,
+    testState: {
+      calls: current.calls.length,
+      approvals: approvals.length,
+      memory: memory.length,
+      powers: current.powers.length,
+    },
     pendingApprovalCount: pending.length,
     business: {
       id: tenant.id,
@@ -150,11 +183,21 @@ export function createSupabaseGateway() {
       // Real mode: reset the simulation-only tenant's working memory through the
       // append-only path (every rule group gets a terminal rejected version, pending
       // cases expire). The server refuses outside simulation_only.
-      const { error } = await supabase.rpc("reset_owner_test_memory");
+      const { data, error } = await supabase.rpc("reset_owner_test_memory");
       const { state } = await fetchAll();
       if (error) {
         return { state, warning: `Não deu para zerar a memória de teste: ${error.message}` };
       }
+      if (!isFreshTestResetReadback({
+        rpcResetAt: data?.reset_at,
+        rpcGeneration: Number(data?.generation),
+        state,
+      }))
+        return {
+          state,
+          warning:
+            "O servidor não confirmou um teste totalmente zerado. Nada foi anunciado como concluído.",
+        };
       return { state };
     },
 

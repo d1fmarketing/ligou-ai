@@ -959,6 +959,7 @@ export function buildRealtimeSessionConfig(args: {
     instructions: args.instructions,
     tools: args.tools,
     tool_choice: "auto",
+    output_modalities: applicationOwned ? ["text"] : ["audio"],
     audio: {
       input: {
         turn_detection: {

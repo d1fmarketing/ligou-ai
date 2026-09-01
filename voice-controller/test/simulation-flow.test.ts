@@ -366,6 +366,15 @@ test("serialized sideband passes exact provider call_id and acknowledges simulat
   });
   expect(ledger.onboarding!.lifecycle.phase).toBe("collecting");
   await handleEvent(cap, ledger, ws as any, {
+    type: "input_audio_buffer.speech_started",
+    item_id: "turn-sideband-answer",
+  });
+  await handleEvent(cap, ledger, ws as any, {
+    type: "conversation.item.input_audio_transcription.completed",
+    item_id: "turn-sideband-answer",
+    transcript: "A visita básica custa duzentos dólares.",
+  });
+  await handleEvent(cap, ledger, ws as any, {
     type: "response.created",
     response: { id: "resp-sideband-answer", metadata: {} },
   });

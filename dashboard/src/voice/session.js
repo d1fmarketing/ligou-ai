@@ -559,7 +559,10 @@ function openingItemMatches(item, payload) {
 
 function hasLiveTurnDetection(event) {
   const turnDetection = event?.session?.audio?.input?.turn_detection;
-  return isObject(turnDetection)
+  return Array.isArray(event?.session?.output_modalities)
+    && event.session.output_modalities.length === 1
+    && event.session.output_modalities[0] === "text"
+    && isObject(turnDetection)
     && turnDetection.type === "semantic_vad"
     && turnDetection.eagerness === "low"
     && turnDetection.create_response === true

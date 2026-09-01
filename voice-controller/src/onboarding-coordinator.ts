@@ -26,6 +26,12 @@ export type OnboardingPhase =
   | "budget_pause_provider_terminating"
   | "budget_pause_error_ready_to_terminate"
   | "budget_error_provider_terminating"
+  | "recovery_error_ready_to_terminate"
+  | "recovery_error_provider_terminating"
+  | "transport_error_ready_to_terminate"
+  | "transport_error_provider_terminating"
+  | "fatal_error_ready_to_terminate"
+  | "fatal_error_provider_terminating"
   | "ready_to_terminate"
   | "provider_terminating"
   | "closed"
@@ -169,6 +175,37 @@ export interface PendingFollowup {
   intentKey: string;
 }
 
+export interface FollowupSpeechProof {
+  intentKey: string;
+  questionPt: string;
+  responseId?: string;
+  transcript: string;
+  transcriptFinal: boolean;
+  audioDone: boolean;
+  responseDone: boolean;
+  playbackStopped: boolean;
+  interrupted: boolean;
+  attempt: number;
+  interruptedResponseId?: string;
+  validated?: boolean;
+}
+
+export interface RecoverySpeechProof {
+  intentKey: string;
+  expectedTranscript: string;
+  terminalAfterPlayback: boolean;
+  responseId?: string;
+  transcript: string;
+  transcriptFinal: boolean;
+  audioDone: boolean;
+  responseDone: boolean;
+  playbackStopped: boolean;
+  interrupted: boolean;
+  attempt: number;
+  interruptedResponseId?: string;
+  validated?: boolean;
+}
+
 export interface ResponseIntentReceipt {
   intentKey: string;
   purpose: ResponsePurpose;
@@ -197,6 +234,8 @@ export interface OnboardingLifecycle {
   approval?: PersistedApproval;
   snapshotRefresh?: SnapshotRefreshRequest;
   pendingFollowup?: PendingFollowup;
+  followupSpeech?: FollowupSpeechProof;
+  recoverySpeech?: RecoverySpeechProof;
   greeting?: GreetingProof;
   summary?: SummaryProof;
   signoff?: SignoffProof;
@@ -204,6 +243,13 @@ export interface OnboardingLifecycle {
   invalidatedSummaryRevision?: number;
   requestedHangupKeys: string[];
   requestedBudgetHangupKeys: string[];
+  requestedRecoveryHangupKeys: string[];
+  requestedTransportHangupKeys: string[];
+  requestedFatalHangupKeys: string[];
+  budgetErrorTerminationReason?: string;
+  recoveryTerminationReason?: string;
+  transportTerminationReason?: string;
+  fatalTerminationReason?: string;
   providerTerminationConfirmed: boolean;
 }
 
@@ -222,6 +268,10 @@ export type TelemetryName =
   | "onboarding.field.missing"
   | "onboarding.field.ambiguous"
   | "onboarding.followup.selected"
+  | "onboarding.followup.validated"
+  | "onboarding.followup.invalid"
+  | "onboarding.recovery.validated"
+  | "onboarding.recovery.invalid"
   | "onboarding.snapshot.prepare_started"
   | "onboarding.snapshot.ready"
   | "onboarding.snapshot.blocked"
@@ -265,10 +315,30 @@ export const FINAL_SIGNOFF_SENTENCE_PT =
   "A confirmação por voz foi salva e as regras sugeridas continuam aguardando revisão na Memória.";
 export const BUDGET_PAUSE_SENTENCE_PT =
   "Estamos chegando ao limite desta sessão. Suas informações foram salvas. Vou encerrar esta sessão agora.";
+const TRUTHFUL_RECOVERY_SENTENCE_PT =
+  "Não consegui confirmar o salvamento da sua resposta. Por favor, repita as informações.";
+const INDETERMINATE_RECOVERY_SENTENCE_PT =
+  "Não consegui confirmar o salvamento com segurança. Encerre este teste e tente novamente.";
+const FOLLOWUP_RECOVERY_SENTENCE_PT =
+  "Sua resposta foi salva, mas não consegui preparar a próxima pergunta. Encerre este teste e tente novamente.";
+const exactRecoveryInstructions = (sentence: string) =>
+  `Diga exatamente uma vez: "${sentence}"`;
 const TRUTHFUL_RECOVERY_RESPONSE_INSTRUCTIONS_PT =
-  'Diga exatamente uma vez: "Não consegui confirmar o salvamento da sua resposta. Por favor, repita as informações."';
+  exactRecoveryInstructions(TRUTHFUL_RECOVERY_SENTENCE_PT);
 const INDETERMINATE_RECOVERY_RESPONSE_INSTRUCTIONS_PT =
-  'Diga exatamente uma vez: "Não consegui confirmar o salvamento com segurança. Encerre este teste e tente novamente."';
+  exactRecoveryInstructions(INDETERMINATE_RECOVERY_SENTENCE_PT);
+const FOLLOWUP_RECOVERY_RESPONSE_INSTRUCTIONS_PT =
+  exactRecoveryInstructions(FOLLOWUP_RECOVERY_SENTENCE_PT);
+
+function recoveryExpectedTranscript(instructions: string): string | null {
+  if (instructions === TRUTHFUL_RECOVERY_RESPONSE_INSTRUCTIONS_PT)
+    return TRUTHFUL_RECOVERY_SENTENCE_PT;
+  if (instructions === INDETERMINATE_RECOVERY_RESPONSE_INSTRUCTIONS_PT)
+    return INDETERMINATE_RECOVERY_SENTENCE_PT;
+  if (instructions === FOLLOWUP_RECOVERY_RESPONSE_INSTRUCTIONS_PT)
+    return FOLLOWUP_RECOVERY_SENTENCE_PT;
+  return null;
+}
 
 interface TelemetryCommand {
   type: "telemetry";
@@ -383,6 +453,21 @@ export type OnboardingCommand =
       reason: string;
     }
   | {
+      type: "request_recovery_error_hangup";
+      intentKey: string;
+      reason: string;
+    }
+  | {
+      type: "request_transport_error_hangup";
+      intentKey: string;
+      reason: string;
+    }
+  | {
+      type: "request_fatal_error_hangup";
+      intentKey: string;
+      reason: string;
+    }
+  | {
       type: "refuse_end_session";
       toolCallId: string;
       output: string;
@@ -430,11 +515,22 @@ export type OnboardingEvent =
         | "tool_output_created_invalid"
         | "tool_output_retrieved_invalid"
         | "tool_output_retrieve_failed"
+        | "response_create_active_conflict"
+        | "response_create_ack_timeout"
+        | "tool_output_ack_timeout"
+        | "terminal_response_replay_mismatch"
+        | "application_opening_reactivation_indeterminate"
         | "application_opening_item_invalid"
         | "application_opening_response_forbidden"
         | "application_opening_tool_forbidden"
         | "application_opening_session_update_invalid";
       safeDetail: string;
+      intentKey?: string;
+      toolCallId?: string;
+    })
+  | (TimedEvent & {
+      type: "fatal.termination_required";
+      code: string;
     })
   | (SocketEvent & { type: "response.intent_sent"; intentKey: string })
   | (SocketEvent & {
@@ -542,6 +638,15 @@ export type OnboardingEvent =
       batchHash: string;
       callerTurnId?: string;
     })
+  | (SocketEvent & {
+      type: "tool.rejected";
+      toolCallId: string;
+      name: string;
+      argsHash: string;
+      providerResponseId: string;
+      batchHash: string;
+      code: "caller_transcript_unavailable";
+    })
   | (TimedEvent & {
       type: "tool.executed";
       toolCallId: string;
@@ -627,6 +732,84 @@ export function hashOnboardingToolArgs(args: Record<string, unknown>): string {
   return createHash("sha256")
     .update(JSON.stringify(canonicalValue(args)), "utf8")
     .digest("hex");
+}
+
+function explicitEmergencyEligibility(
+  verifiedOwnerWords: string,
+): boolean | null {
+  const normalized = verifiedOwnerWords
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("pt-BR")
+    .replace(/\s+/g, " ");
+  if (
+    normalized.includes("?") ||
+    /^(?:sera que|seria|por acaso|voce acha)\b/.test(normalized) ||
+    /\b(?:sim\s+(?:e|ou)\s+nao|nao\s+(?:e|ou)\s+sim|pode\s+sim\s+(?:e|ou)\s+nao(?:\s+pode)?|nao\s+pode\s+(?:e|ou)\s+pode\s+sim)\b/.test(
+      normalized,
+    ) ||
+    /\b(?:nao sei|nao tenho certeza|talvez|depende|pensando melhor|acho(?: que)?|creio(?: que)?|acredito(?: que)?|provavelmente|possivelmente|preciso (?:confirmar|verificar|avaliar|consultar)|vou (?:confirmar|verificar|avaliar|consultar))\b/.test(
+      normalized,
+    )
+  )
+    return null;
+  const clauses = normalized
+    .split(
+      /(?:[.!?;:,]+|\b(?:mas|porem|contudo|entretanto|ou)\b|\be\s+(?=(?:(?:esse|este|o)\s+servico\s+)?(?:pode\s+sim|nao\s+pode)\b))/,
+    )
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+  const polarities = new Set<boolean>();
+  for (const clause of clauses) {
+    if (
+      /^(?:sim\b|pode\s+sim\b|(?:esse|este|o)\s+servico\s+pode\s+sim\b|(?:esse|este|o)\s+servico\s+(?:e|eh)\s+elegivel\b|(?:e|eh)\s+elegivel\b)/
+        .test(clause)
+    ) polarities.add(true);
+    if (
+      /^(?:nao$|nao\s+pode\b|(?:esse|este|o)\s+servico\s+nao\s+pode\b|(?:esse|este|o)\s+servico\s+nao\s+(?:e|eh)\s+elegivel\b|nao\s+(?:e|eh)\s+elegivel\b)/
+        .test(clause)
+    ) polarities.add(false);
+  }
+  return polarities.size === 1 ? [...polarities][0]! : null;
+}
+
+export function bindVerifiedOnboardingToolArgs(
+  name: string,
+  args: Record<string, unknown>,
+  verifiedOwnerWords?: string,
+): Record<string, unknown> {
+  const ownerWords = verifiedOwnerWords?.trim();
+  if (name !== "record_interview_answer")
+    return structuredClone(args);
+  if (!ownerWords)
+    return {
+      ...structuredClone(args),
+      owner_words: "",
+      ...(args.field === "service.emergency_eligibility"
+        ? { structured: { value: "" } }
+        : {}),
+    };
+  const bound = {
+    ...structuredClone(args),
+    owner_words: ownerWords,
+  };
+  if (
+    bound.field !== "service.emergency_eligibility" ||
+    bound.disposition !== "answered" ||
+    !bound.structured || typeof bound.structured !== "object" ||
+    Array.isArray(bound.structured)
+  ) return bound;
+  const eligibility = explicitEmergencyEligibility(ownerWords);
+  if (eligibility === null)
+    return typeof (bound.structured as Record<string, unknown>).value ===
+        "boolean"
+      ? { ...bound, structured: { value: ownerWords } }
+      : bound;
+  return {
+    ...bound,
+    structured: { value: eligibility },
+  };
 }
 
 const batchKey = (providerResponseId: string, batchHash: string) =>
@@ -724,6 +907,27 @@ function block(
   );
 }
 
+function terminalBlock(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+  code: string,
+  safeDetail: string,
+): void {
+  lifecycle.phase = "blocked";
+  terminalizeAuthorityResponseIntents(lifecycle);
+  delete lifecycle.activeResponseId;
+  commands.push({
+    type: "block",
+    code,
+    safeDetail,
+    recoverable: false,
+  });
+  commands.push(
+    telemetry(lifecycle, "invariant.violation", event, { outcome: code }),
+  );
+}
+
 function terminateIndeterminateBudgetPause(
   lifecycle: OnboardingLifecycle,
   commands: OnboardingCommand[],
@@ -735,6 +939,7 @@ function terminateIndeterminateBudgetPause(
   terminalizeAuthorityResponseIntents(lifecycle);
   delete lifecycle.activeResponseId;
   lifecycle.phase = "budget_pause_error_ready_to_terminate";
+  lifecycle.budgetErrorTerminationReason = reason;
   commands.push({
     type: "block",
     code,
@@ -749,6 +954,101 @@ function terminateIndeterminateBudgetPause(
   lifecycle.requestedBudgetHangupKeys.push(intentKey);
   commands.push({
     type: "request_budget_error_hangup",
+    intentKey,
+    reason,
+  });
+}
+
+function terminateFailedRecoveryDelivery(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+  safeDetail: string,
+): void {
+  terminalizeAuthorityResponseIntents(lifecycle);
+  delete lifecycle.activeResponseId;
+  lifecycle.phase = "recovery_error_ready_to_terminate";
+  lifecycle.recoveryTerminationReason = "recovery_delivery_failed";
+  commands.push({
+    type: "block",
+    code: "recovery_delivery_failed",
+    safeDetail,
+    recoverable: false,
+  });
+  commands.push(
+    telemetry(lifecycle, "invariant.violation", event, {
+      outcome: "recovery_delivery_failed",
+    }),
+  );
+  const intentKey = `recovery-error-hangup:${lifecycle.callId}`;
+  if (lifecycle.requestedRecoveryHangupKeys.includes(intentKey)) return;
+  lifecycle.requestedRecoveryHangupKeys.push(intentKey);
+  commands.push({
+    type: "request_recovery_error_hangup",
+    intentKey,
+    reason: "recovery_delivery_failed",
+  });
+}
+
+function terminateIndeterminateTransport(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+  code: string,
+  safeDetail: string,
+  reason: string,
+  fields: { intentKey?: string; toolCallId?: string } = {},
+): void {
+  terminalizeAuthorityResponseIntents(lifecycle);
+  delete lifecycle.activeResponseId;
+  lifecycle.phase = "transport_error_ready_to_terminate";
+  lifecycle.transportTerminationReason = reason;
+  commands.push({
+    type: "block",
+    code,
+    safeDetail,
+    ...(fields.toolCallId ? { toolCallId: fields.toolCallId } : {}),
+    recoverable: false,
+  });
+  commands.push(
+    telemetry(lifecycle, "invariant.violation", event, {
+      outcome: code,
+      ...(fields.intentKey ? { intentKey: fields.intentKey } : {}),
+      ...(fields.toolCallId ? { toolCallId: fields.toolCallId } : {}),
+    }),
+  );
+  const intentKey = `transport-error-hangup:${lifecycle.callId}`;
+  if (lifecycle.requestedTransportHangupKeys.includes(intentKey)) return;
+  lifecycle.requestedTransportHangupKeys.push(intentKey);
+  commands.push({
+    type: "request_transport_error_hangup",
+    intentKey,
+    reason,
+  });
+}
+
+function terminateFatalError(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+  reason: string,
+): void {
+  terminalizeAuthorityResponseIntents(lifecycle);
+  delete lifecycle.activeResponseId;
+  lifecycle.phase = "fatal_error_ready_to_terminate";
+  lifecycle.fatalTerminationReason = reason;
+  const intentKey = `fatal-error-hangup:${lifecycle.callId}`;
+  if (lifecycle.requestedFatalHangupKeys.includes(intentKey)) return;
+  lifecycle.requestedFatalHangupKeys.push(intentKey);
+  commands.push(
+    telemetry(lifecycle, "closing.provider_requested", event, {
+      intentKey,
+      outcome: "fatal_error",
+      errorCode: reason,
+    }),
+  );
+  commands.push({
+    type: "request_fatal_error_hangup",
     intentKey,
     reason,
   });
@@ -793,7 +1093,8 @@ function queueTruthfulRecovery(
   reason:
     | "caller_turn_correlation_mismatch"
     | "owner_turn_completed_without_tool"
-    | "tool_persistence_failed",
+    | "tool_persistence_failed"
+    | "next_question_unavailable",
   recoveryKey: string,
   fields: { responseId?: string; toolCallId?: string; outcome?: string } = {},
   instructions = TRUTHFUL_RECOVERY_RESPONSE_INSTRUCTIONS_PT,
@@ -813,7 +1114,31 @@ function queueTruthfulRecovery(
     (intent) => intent.purpose === "recovery" && intent.state !== "terminal",
   );
   if (recoveryAlreadyOwed) return;
+  const expectedTranscript = recoveryExpectedTranscript(instructions);
+  if (!expectedTranscript) {
+    terminalBlock(
+      lifecycle,
+      commands,
+      event,
+      "recovery_contract_invalid",
+      "recovery response did not have an application-owned transcript",
+    );
+    return;
+  }
   lifecycle.phase = "follow_up";
+  lifecycle.recoverySpeech = {
+    intentKey,
+    expectedTranscript,
+    terminalAfterPlayback:
+      expectedTranscript !== TRUTHFUL_RECOVERY_SENTENCE_PT,
+    transcript: "",
+    transcriptFinal: false,
+    audioDone: false,
+    responseDone: false,
+    playbackStopped: false,
+    interrupted: false,
+    attempt: 0,
+  };
   queueResponse(lifecycle, commands, event, {
     intentKey,
     purpose: "recovery",
@@ -929,12 +1254,15 @@ function maybeAdvanceCoverage(
     return;
   }
   if (readyBatches.length > 0 && !lifecycle.coverage.nextQuestion) {
-    block(
+    for (const batch of readyBatches) batch.continuationRequested = true;
+    queueTruthfulRecovery(
       lifecycle,
       commands,
       event,
-      "follow_up_exhausted",
-      "incomplete coverage has no legal directed follow-up",
+      "next_question_unavailable",
+      `${lifecycle.coverage.revision}:${lifecycle.coverage.digest}`,
+      { outcome: "follow_up_exhausted" },
+      FOLLOWUP_RECOVERY_RESPONSE_INSTRUCTIONS_PT,
     );
     return;
   }
@@ -1088,20 +1416,132 @@ function greetingTranscriptValid(
     questionStart + question.length === transcript.length;
 }
 
+type RetriableAuthoritySpeechKind =
+  | "greeting"
+  | "summary"
+  | "signoff"
+  | "budget_pause";
+
+function terminalAuthorityProofFailure(proof: {
+  transcriptFinal: boolean;
+  audioDone: boolean;
+  responseDone: boolean;
+  playbackStopped: boolean;
+}): string | null {
+  if (!proof.responseDone) return null;
+  if (!proof.audioDone)
+    return "response_terminal_without_audible_evidence";
+  if (proof.playbackStopped && !proof.transcriptFinal)
+    return "playback_terminal_without_final_transcript";
+  return null;
+}
+
+function retryOrTerminateAuthoritySpeech(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+  kind: RetriableAuthoritySpeechKind,
+): void {
+  const proof = kind === "greeting"
+    ? lifecycle.greeting
+    : kind === "summary"
+      ? lifecycle.summary
+      : kind === "signoff"
+        ? lifecycle.signoff
+        : lifecycle.budgetPause;
+  if (!proof) return;
+  if (proof.attempt >= 1) {
+    block(
+      lifecycle,
+      commands,
+      event,
+      "authority_speech_retry_exhausted",
+      `${kind} exhausted its single exact-audible retry`,
+    );
+    return;
+  }
+
+  proof.attempt = 1;
+  delete proof.responseId;
+  delete proof.interruptedResponseId;
+  delete proof.validated;
+  proof.transcript = "";
+  proof.transcriptFinal = false;
+  proof.audioDone = false;
+  proof.responseDone = false;
+  proof.playbackStopped = false;
+  proof.interrupted = false;
+
+  if (kind === "greeting") {
+    lifecycle.phase = "greeting";
+    queueResponse(lifecycle, commands, event, {
+      intentKey: `greeting:${lifecycle.callId}:retry:1`,
+      purpose: "greeting",
+      instructions: INITIAL_GREETING_RESPONSE_INSTRUCTIONS_PT,
+    });
+    return;
+  }
+  if (kind === "summary") {
+    const summary = lifecycle.summary!;
+    delete lifecycle.approvalCandidate;
+    lifecycle.freshCallerTurnIds = [];
+    lifecycle.phase = "summary_speaking";
+    queueResponse(lifecycle, commands, event, {
+      intentKey: `summary:${summary.digest}:retry:1`,
+      purpose: "summary",
+      snapshotDigest: summary.digest,
+      instructions: summaryResponseInstructions(summary),
+    });
+    return;
+  }
+  if (kind === "signoff") {
+    const signoff = lifecycle.signoff!;
+    lifecycle.phase = "final_signoff_speaking";
+    queueResponse(lifecycle, commands, event, {
+      intentKey:
+        `final-signoff:${signoff.approvalReceiptId}:retry:1`,
+      purpose: "final_signoff",
+      instructions: `Diga exatamente: "${FINAL_SIGNOFF_SENTENCE_PT}"`,
+      approvalReceiptId: signoff.approvalReceiptId,
+    });
+    return;
+  }
+  lifecycle.phase = "budget_pause_speaking";
+  queueResponse(lifecycle, commands, event, {
+    intentKey: `budget-pause:${lifecycle.callId}:retry:1`,
+    purpose: "budget_pause",
+    instructions: `Diga exatamente uma vez: "${BUDGET_PAUSE_SENTENCE_PT}"`,
+  });
+}
+
 function maybeValidateGreeting(
   lifecycle: OnboardingLifecycle,
   commands: OnboardingCommand[],
   event: TimedEvent,
 ): void {
   const greeting = lifecycle.greeting;
+  if (!greeting || greeting.validated !== undefined || greeting.interrupted)
+    return;
+  const terminalFailure = terminalAuthorityProofFailure(greeting);
+  if (terminalFailure) {
+    commands.push(
+      telemetry(lifecycle, "onboarding.greeting.invalid", event, {
+        responseId: greeting.responseId,
+        intentKey: `greeting:${lifecycle.callId}`,
+        outcome: terminalFailure,
+      }),
+    );
+    retryOrTerminateAuthoritySpeech(
+      lifecycle,
+      commands,
+      event,
+      "greeting",
+    );
+    return;
+  }
   if (
-    !greeting ||
-    greeting.validated !== undefined ||
-    !greeting.transcriptFinal ||
-    !greeting.audioDone ||
-    !greeting.responseDone ||
-    !greeting.playbackStopped ||
-    greeting.interrupted
+    !greeting.transcriptFinal || !greeting.audioDone ||
+    !greeting.responseDone || !greeting.playbackStopped
   ) return;
   greeting.validated = greetingTranscriptValid(lifecycle, greeting);
   if (!greeting.validated) {
@@ -1111,6 +1551,12 @@ function maybeValidateGreeting(
         intentKey: `greeting:${lifecycle.callId}`,
         outcome: "identity_or_question_proof_invalid",
       }),
+    );
+    retryOrTerminateAuthoritySpeech(
+      lifecycle,
+      commands,
+      event,
+      "greeting",
     );
     return;
   }
@@ -1166,16 +1612,29 @@ function maybeValidateSummary(
   event: TimedEvent,
 ): void {
   const summary = lifecycle.summary;
-  if (
-    !summary ||
-    summary.validated !== undefined ||
-    !summary.transcriptFinal ||
-    !summary.audioDone ||
-    !summary.responseDone ||
-    !summary.playbackStopped ||
-    summary.interrupted
-  )
+  if (!summary || summary.validated !== undefined || summary.interrupted)
     return;
+  const terminalFailure = terminalAuthorityProofFailure(summary);
+  if (terminalFailure) {
+    commands.push(
+      telemetry(lifecycle, "onboarding.summary.invalid", event, {
+        responseId: summary.responseId,
+        intentKey: `summary:${summary.digest}`,
+        outcome: terminalFailure,
+      }),
+    );
+    retryOrTerminateAuthoritySpeech(
+      lifecycle,
+      commands,
+      event,
+      "summary",
+    );
+    return;
+  }
+  if (
+    !summary.transcriptFinal || !summary.audioDone ||
+    !summary.responseDone || !summary.playbackStopped
+  ) return;
   summary.validated = summaryTranscriptValid(summary);
   if (!summary.validated) {
     commands.push(
@@ -1184,6 +1643,12 @@ function maybeValidateSummary(
         intentKey: `summary:${summary.digest}`,
         outcome: "factual_or_audio_proof_invalid",
       }),
+    );
+    retryOrTerminateAuthoritySpeech(
+      lifecycle,
+      commands,
+      event,
+      "summary",
     );
     return;
   }
@@ -1207,23 +1672,230 @@ function budgetPauseTranscriptValid(transcript: string): boolean {
     JSON.stringify(normalizedBoundaryTokens(BUDGET_PAUSE_SENTENCE_PT));
 }
 
+function followupTranscriptValid(
+  transcript: string,
+  questionPt: string,
+): boolean {
+  return JSON.stringify(normalizedBoundaryTokens(transcript)) ===
+    JSON.stringify(normalizedBoundaryTokens(questionPt));
+}
+
+function retryOrRecoverFollowupSpeech(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+  outcome: string,
+): void {
+  const proof = lifecycle.followupSpeech;
+  if (!proof) return;
+  commands.push(
+    telemetry(lifecycle, "onboarding.followup.invalid", event, {
+      responseId: proof.responseId,
+      intentKey: proof.intentKey,
+      outcome,
+    }),
+  );
+  if (proof.attempt >= 1) {
+    const recoveryKey = `${proof.intentKey}:content-invalid`;
+    delete lifecycle.followupSpeech;
+    queueTruthfulRecovery(
+      lifecycle,
+      commands,
+      event,
+      "next_question_unavailable",
+      recoveryKey,
+      { outcome: "followup_content_invalid" },
+      FOLLOWUP_RECOVERY_RESPONSE_INSTRUCTIONS_PT,
+    );
+    return;
+  }
+  const retryIntentKey = `${proof.intentKey}:retry:1`;
+  proof.intentKey = retryIntentKey;
+  proof.attempt = 1;
+  delete proof.responseId;
+  delete proof.validated;
+  proof.transcript = "";
+  proof.transcriptFinal = false;
+  proof.audioDone = false;
+  proof.responseDone = false;
+  proof.playbackStopped = false;
+  proof.interrupted = false;
+  lifecycle.phase = "follow_up";
+  queueResponse(lifecycle, commands, event, {
+    intentKey: retryIntentKey,
+    purpose: "tool_continuation",
+    instructions: proof.questionPt,
+  });
+}
+
+function maybeFinishFollowupSpeech(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+): void {
+  const proof = lifecycle.followupSpeech;
+  if (!proof || proof.interrupted) return;
+  const terminalFailure = terminalAuthorityProofFailure(proof);
+  if (terminalFailure) {
+    retryOrRecoverFollowupSpeech(
+      lifecycle,
+      commands,
+      event,
+      terminalFailure,
+    );
+    return;
+  }
+  if (
+    !proof.transcriptFinal || !proof.audioDone ||
+    !proof.responseDone || !proof.playbackStopped
+  ) return;
+  proof.validated = followupTranscriptValid(
+    proof.transcript,
+    proof.questionPt,
+  );
+  if (!proof.validated) {
+    retryOrRecoverFollowupSpeech(
+      lifecycle,
+      commands,
+      event,
+      "expected_question_not_spoken",
+    );
+    return;
+  }
+  lifecycle.phase = "collecting";
+  commands.push(
+    telemetry(lifecycle, "onboarding.followup.validated", event, {
+      responseId: proof.responseId,
+      intentKey: proof.intentKey,
+      outcome: "spoken_question_proven",
+    }),
+  );
+  delete lifecycle.followupSpeech;
+}
+
+function retryOrFinishRecoverySpeech(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+  outcome: string,
+): void {
+  const proof = lifecycle.recoverySpeech;
+  if (!proof) return;
+  commands.push(
+    telemetry(lifecycle, "onboarding.recovery.invalid", event, {
+      responseId: proof.responseId,
+      intentKey: proof.intentKey,
+      outcome,
+    }),
+  );
+  if (proof.attempt >= 1) {
+    terminateFailedRecoveryDelivery(
+      lifecycle,
+      commands,
+      event,
+      "truthful recovery did not produce exact audible playback",
+    );
+    return;
+  }
+  const baseIntentKey = proof.intentKey.replace(/:retry:1$/, "");
+  proof.intentKey = `${baseIntentKey}:retry:1`;
+  proof.attempt = 1;
+  delete proof.responseId;
+  delete proof.validated;
+  proof.transcript = "";
+  proof.transcriptFinal = false;
+  proof.audioDone = false;
+  proof.responseDone = false;
+  proof.playbackStopped = false;
+  proof.interrupted = false;
+  delete proof.interruptedResponseId;
+  lifecycle.phase = "follow_up";
+  queueResponse(lifecycle, commands, event, {
+    intentKey: proof.intentKey,
+    purpose: "recovery",
+    instructions: exactRecoveryInstructions(proof.expectedTranscript),
+  });
+}
+
+function maybeFinishRecoverySpeech(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+  event: TimedEvent,
+): void {
+  const proof = lifecycle.recoverySpeech;
+  if (!proof || proof.interrupted) return;
+  const terminalFailure = terminalAuthorityProofFailure(proof);
+  if (terminalFailure) {
+    retryOrFinishRecoverySpeech(
+      lifecycle,
+      commands,
+      event,
+      terminalFailure,
+    );
+    return;
+  }
+  if (
+    !proof.transcriptFinal || !proof.audioDone ||
+    !proof.responseDone || !proof.playbackStopped
+  ) return;
+  proof.validated =
+    JSON.stringify(normalizedBoundaryTokens(proof.transcript)) ===
+      JSON.stringify(normalizedBoundaryTokens(proof.expectedTranscript));
+  if (!proof.validated) {
+    retryOrFinishRecoverySpeech(
+      lifecycle,
+      commands,
+      event,
+      "recovery_content_invalid",
+    );
+    return;
+  }
+  commands.push(
+    telemetry(lifecycle, "onboarding.recovery.validated", event, {
+      responseId: proof.responseId,
+      intentKey: proof.intentKey,
+      outcome: "truthful_error_playback_proven",
+    }),
+  );
+  if (proof.terminalAfterPlayback)
+    terminalBlock(
+      lifecycle,
+      commands,
+      event,
+      "recovery_spoken",
+      "truthful terminal recovery playback was proven",
+    );
+  else {
+    lifecycle.phase = "collecting";
+    delete lifecycle.recoverySpeech;
+  }
+}
+
 function maybeFinishBudgetPause(
   lifecycle: OnboardingLifecycle,
   commands: OnboardingCommand[],
   event: TimedEvent,
 ): void {
   const pause = lifecycle.budgetPause;
-  if (!pause || pause.interrupted || !pause.transcriptFinal ||
-    !pause.audioDone || !pause.responseDone || !pause.playbackStopped)
-    return;
-  pause.validated = budgetPauseTranscriptValid(pause.transcript);
-  if (!pause.validated) {
-    block(
+  if (!pause || pause.interrupted) return;
+  if (terminalAuthorityProofFailure(pause)) {
+    retryOrTerminateAuthoritySpeech(
       lifecycle,
       commands,
       event,
-      "budget_pause_content_invalid",
-      "budget pause did not match the application-owned sentence",
+      "budget_pause",
+    );
+    return;
+  }
+  if (!pause.transcriptFinal || !pause.audioDone ||
+    !pause.responseDone || !pause.playbackStopped) return;
+  pause.validated = budgetPauseTranscriptValid(pause.transcript);
+  if (!pause.validated) {
+    retryOrTerminateAuthoritySpeech(
+      lifecycle,
+      commands,
+      event,
+      "budget_pause",
     );
     return;
   }
@@ -1266,6 +1938,10 @@ function maybeQueueInterruptedSpeechRecovery(
         ? "signoff"
         : lifecycle.budgetPause?.interrupted
           ? "budget_pause"
+          : lifecycle.followupSpeech?.interrupted
+            ? "followup"
+            : lifecycle.recoverySpeech?.interrupted
+              ? "recovery"
           : null;
   if (!kind) return false;
   const proof = kind === "greeting"
@@ -1273,14 +1949,41 @@ function maybeQueueInterruptedSpeechRecovery(
     : kind === "summary"
       ? lifecycle.summary!
       : kind === "signoff"
-        ? lifecycle.signoff!
-        : lifecycle.budgetPause!;
+      ? lifecycle.signoff!
+        : kind === "budget_pause"
+          ? lifecycle.budgetPause!
+          : kind === "followup"
+            ? lifecycle.followupSpeech!
+            : lifecycle.recoverySpeech!;
   const interruptedResponseId = proof.interruptedResponseId;
   if (
     !interruptedResponseId ||
     !lifecycle.terminalResponseIds.includes(interruptedResponseId)
   ) return false;
   if ((proof.attempt ?? 0) >= 1) {
+    if (kind === "followup") {
+      const recoveryKey = `${proof.intentKey}:interrupted`;
+      delete lifecycle.followupSpeech;
+      queueTruthfulRecovery(
+        lifecycle,
+        commands,
+        event,
+        "next_question_unavailable",
+        recoveryKey,
+        { outcome: "followup_speech_retry_exhausted" },
+        FOLLOWUP_RECOVERY_RESPONSE_INSTRUCTIONS_PT,
+      );
+      return true;
+    }
+    if (kind === "recovery") {
+      terminateFailedRecoveryDelivery(
+        lifecycle,
+        commands,
+        event,
+        "truthful recovery exhausted its single speech retry",
+      );
+      return false;
+    }
     block(
       lifecycle,
       commands,
@@ -1329,6 +2032,28 @@ function maybeQueueInterruptedSpeechRecovery(
       instructions: `Diga exatamente uma vez: "${BUDGET_PAUSE_SENTENCE_PT}"`,
     });
   }
+  if (kind === "followup") {
+    const followup = lifecycle.followupSpeech!;
+    const baseIntentKey = followup.intentKey.replace(/:retry:1$/, "");
+    followup.intentKey = `${baseIntentKey}:retry:1`;
+    lifecycle.phase = "follow_up";
+    return queueResponse(lifecycle, commands, event, {
+      intentKey: followup.intentKey,
+      purpose: "tool_continuation",
+      instructions: followup.questionPt,
+    });
+  }
+  if (kind === "recovery") {
+    const recovery = lifecycle.recoverySpeech!;
+    const baseIntentKey = recovery.intentKey.replace(/:retry:1$/, "");
+    recovery.intentKey = `${baseIntentKey}:retry:1`;
+    lifecycle.phase = "follow_up";
+    return queueResponse(lifecycle, commands, event, {
+      intentKey: recovery.intentKey,
+      purpose: "recovery",
+      instructions: exactRecoveryInstructions(recovery.expectedTranscript),
+    });
+  }
   const signoff = lifecycle.signoff!;
   lifecycle.phase = "final_signoff_speaking";
   return queueResponse(lifecycle, commands, event, {
@@ -1349,19 +2074,26 @@ function maybeFinishSignoff(
   if (
     !signoff ||
     !approval ||
-    signoff.interrupted ||
-    !signoff.audioDone ||
-    !signoff.responseDone ||
-    !signoff.playbackStopped
+    signoff.interrupted
   )
     return;
-  if (!signoff.transcriptFinal || signoff.validated !== true) {
-    block(
+  if (terminalAuthorityProofFailure(signoff)) {
+    retryOrTerminateAuthoritySpeech(
       lifecycle,
       commands,
       event,
-      "signoff_content_invalid",
-      "final signoff did not match the application-owned sentence",
+      "signoff",
+    );
+    return;
+  }
+  if (!signoff.audioDone || !signoff.responseDone ||
+    !signoff.playbackStopped) return;
+  if (!signoff.transcriptFinal || signoff.validated !== true) {
+    retryOrTerminateAuthoritySpeech(
+      lifecycle,
+      commands,
+      event,
+      "signoff",
     );
     return;
   }
@@ -1430,6 +2162,10 @@ function maybeStartSignoffForReadyBatch(
     batchKey(receipt.providerResponseId, receipt.batchHash)
   ];
   if (!batch || !batchIsReady(lifecycle, batch)) return false;
+  // The approval-bound signoff is the one continuation for this batch.
+  // Mark it consumed before speech so a failed/inaudible signoff cannot queue
+  // an unrelated model continuation after its terminal response.
+  batch.continuationRequested = true;
   startSignoff(lifecycle, commands, event);
   return true;
 }
@@ -1519,24 +2255,129 @@ function validSocketGeneration(
   );
 }
 
-function isRepeatedLateSignoffProof(
+function reissuePendingTerminationAfterAttach(
+  lifecycle: OnboardingLifecycle,
+  commands: OnboardingCommand[],
+): boolean {
+  const approvalIntentKey = lifecycle.approval
+    ? `hangup:${lifecycle.approval.approvalReceiptId}`
+    : "";
+  if (
+    lifecycle.phase === "ready_to_terminate" && approvalIntentKey &&
+    lifecycle.requestedHangupKeys.includes(approvalIntentKey)
+  ) {
+    commands.push({
+      type: "request_hangup",
+      intentKey: approvalIntentKey,
+      approvalReceiptId: lifecycle.approval!.approvalReceiptId,
+    });
+    return true;
+  }
+  const budgetIntentKey = `budget-hangup:${lifecycle.callId}`;
+  if (
+    lifecycle.phase === "budget_pause_ready_to_terminate" &&
+    lifecycle.budgetPause &&
+    lifecycle.requestedBudgetHangupKeys.includes(budgetIntentKey)
+  ) {
+    commands.push({
+      type: "request_budget_hangup",
+      intentKey: budgetIntentKey,
+      costUsd: lifecycle.budgetPause.costUsd,
+      softLimitUsd: lifecycle.budgetPause.softLimitUsd,
+      hardLimitUsd: lifecycle.budgetPause.hardLimitUsd,
+    });
+    return true;
+  }
+  const budgetErrorIntentKey = `budget-error-hangup:${lifecycle.callId}`;
+  if (
+    lifecycle.phase === "budget_pause_error_ready_to_terminate" &&
+    lifecycle.requestedBudgetHangupKeys.includes(budgetErrorIntentKey)
+  ) {
+    commands.push({
+      type: "request_budget_error_hangup",
+      intentKey: budgetErrorIntentKey,
+      reason: lifecycle.budgetErrorTerminationReason ??
+        "budget_pause_response_ack_indeterminate",
+    });
+    return true;
+  }
+  const recoveryIntentKey = `recovery-error-hangup:${lifecycle.callId}`;
+  if (
+    lifecycle.phase === "recovery_error_ready_to_terminate" &&
+    lifecycle.requestedRecoveryHangupKeys.includes(recoveryIntentKey)
+  ) {
+    commands.push({
+      type: "request_recovery_error_hangup",
+      intentKey: recoveryIntentKey,
+      reason: lifecycle.recoveryTerminationReason ?? "recovery_delivery_failed",
+    });
+    return true;
+  }
+  const transportIntentKey = `transport-error-hangup:${lifecycle.callId}`;
+  if (
+    lifecycle.phase === "transport_error_ready_to_terminate" &&
+    lifecycle.requestedTransportHangupKeys.includes(transportIntentKey)
+  ) {
+    commands.push({
+      type: "request_transport_error_hangup",
+      intentKey: transportIntentKey,
+      reason: lifecycle.transportTerminationReason ??
+        "transport_indeterminate_after_reattach",
+    });
+    return true;
+  }
+  const fatalIntentKey = `fatal-error-hangup:${lifecycle.callId}`;
+  if (
+    lifecycle.phase === "fatal_error_ready_to_terminate" &&
+    lifecycle.requestedFatalHangupKeys.includes(fatalIntentKey)
+  ) {
+    commands.push({
+      type: "request_fatal_error_hangup",
+      intentKey: fatalIntentKey,
+      reason: lifecycle.fatalTerminationReason ??
+        "fatal_error_after_reattach",
+    });
+    return true;
+  }
+  return false;
+}
+
+function isRepeatedLateTerminationProof(
   lifecycle: OnboardingLifecycle,
   event: OnboardingEvent,
 ): boolean {
-  if (lifecycle.phase !== "provider_terminating") return false;
-  const signoff = lifecycle.signoff;
-  const approval = lifecycle.approval;
-  if (!signoff?.responseId || !approval) return false;
-  if (!lifecycle.requestedHangupKeys.includes(
-    `hangup:${approval.approvalReceiptId}`,
-  )) return false;
+  let responseId: string | undefined;
+  let authorized = false;
+  if (lifecycle.phase === "provider_terminating") {
+    responseId = lifecycle.signoff?.responseId;
+    authorized = Boolean(lifecycle.approval &&
+      lifecycle.requestedHangupKeys.includes(
+        `hangup:${lifecycle.approval.approvalReceiptId}`,
+      ));
+  } else if (lifecycle.phase === "budget_pause_provider_terminating") {
+    responseId = lifecycle.budgetPause?.responseId;
+    authorized = lifecycle.requestedBudgetHangupKeys.includes(
+      `budget-hangup:${lifecycle.callId}`,
+    );
+  } else if (lifecycle.phase === "budget_error_provider_terminating") {
+    responseId = lifecycle.budgetPause?.responseId;
+    authorized = lifecycle.requestedBudgetHangupKeys.includes(
+      `budget-error-hangup:${lifecycle.callId}`,
+    );
+  } else if (lifecycle.phase === "recovery_error_provider_terminating") {
+    responseId = lifecycle.recoverySpeech?.responseId;
+    authorized = lifecycle.requestedRecoveryHangupKeys.includes(
+      `recovery-error-hangup:${lifecycle.callId}`,
+    );
+  }
+  if (!responseId || !authorized) return false;
   return (
     event.type === "response.transcript.delta" ||
     event.type === "response.transcript.done" ||
     event.type === "response.output_audio.done" ||
     event.type === "response.done" ||
     event.type === "output_audio_buffer.stopped"
-  ) && event.responseId === signoff.responseId;
+  ) && event.responseId === responseId;
 }
 
 function recordTerminalResponseId(
@@ -1553,6 +2394,12 @@ function recordTerminalResponseId(
       ...(lifecycle.activeResponseId ? [lifecycle.activeResponseId] : []),
       ...(lifecycle.summary?.responseId ? [lifecycle.summary.responseId] : []),
       ...(lifecycle.signoff?.responseId ? [lifecycle.signoff.responseId] : []),
+      ...(lifecycle.followupSpeech?.responseId
+        ? [lifecycle.followupSpeech.responseId]
+        : []),
+      ...(lifecycle.recoverySpeech?.responseId
+        ? [lifecycle.recoverySpeech.responseId]
+        : []),
       ...Object.values(lifecycle.responseIntents)
         .filter((intent) => intent.state !== "terminal" && intent.responseId)
         .map((intent) => intent.responseId!),
@@ -1580,6 +2427,13 @@ function reduceBlockedBookkeeping(
   current: OnboardingLifecycle,
   event: OnboardingEvent,
 ): { lifecycle: OnboardingLifecycle; commands: OnboardingCommand[] } {
+  if (event.type === "fatal.termination_required") {
+    const lifecycle = cloneLifecycle(current);
+    lifecycle.lifecycleRevision += 1;
+    const commands: OnboardingCommand[] = [];
+    terminateFatalError(lifecycle, commands, event, event.code);
+    return { lifecycle, commands };
+  }
   if (event.type === "socket.attached") {
     if (event.socketGeneration < current.socketGeneration)
       return {
@@ -1594,9 +2448,12 @@ function reduceBlockedBookkeeping(
     terminalizeAuthorityResponseIntents(lifecycle);
     delete lifecycle.activeResponseId;
     const commands: OnboardingCommand[] = [];
-    for (const receipt of Object.values(lifecycle.toolOutbox))
-      if (receipt.state === "executed" || receipt.state === "output_pending")
-        resendOutput(lifecycle, commands, event, receipt, true);
+    terminateFatalError(
+      lifecycle,
+      commands,
+      event,
+      "blocked_lifecycle_reattached",
+    );
     return { lifecycle, commands };
   }
   if (event.type === "tool.executed") {
@@ -1843,6 +2700,9 @@ export function createOnboardingLifecycle(
     consumedCallerTurnIds: [],
     requestedHangupKeys: [],
     requestedBudgetHangupKeys: [],
+    requestedRecoveryHangupKeys: [],
+    requestedTransportHangupKeys: [],
+    requestedFatalHangupKeys: [],
     providerTerminationConfirmed: false,
   };
 }
@@ -1856,7 +2716,7 @@ export function reduceOnboarding(
     current.budgetPause.softLimitUsd === event.softLimitUsd &&
     current.budgetPause.hardLimitUsd === event.hardLimitUsd)
     return { lifecycle: current, commands: [] };
-  if (isRepeatedLateSignoffProof(current, event))
+  if (isRepeatedLateTerminationProof(current, event))
     return { lifecycle: current, commands: [] };
 
   if (
@@ -1934,13 +2794,35 @@ export function reduceOnboarding(
 
   switch (event.type) {
     case "adapter.invariant_failed": {
-      block(
-        lifecycle,
-        commands,
-        event,
-        event.code,
-        event.safeDetail,
-      );
+      if ([
+        "tool_output_created_invalid",
+        "tool_output_retrieved_invalid",
+        "tool_output_retrieve_failed",
+        "response_create_active_conflict",
+        "response_create_ack_timeout",
+        "tool_output_ack_timeout",
+        "application_opening_reactivation_indeterminate",
+      ].includes(event.code))
+        terminateIndeterminateTransport(
+          lifecycle,
+          commands,
+          event,
+          event.code,
+          event.safeDetail,
+          event.code,
+          {
+            ...(event.intentKey ? { intentKey: event.intentKey } : {}),
+            ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}),
+          },
+        );
+      else
+        block(
+          lifecycle,
+          commands,
+          event,
+          event.code,
+          event.safeDetail,
+        );
       break;
     }
     case "socket.attached": {
@@ -1956,6 +2838,7 @@ export function reduceOnboarding(
         break;
       }
       lifecycle.socketGeneration = event.socketGeneration;
+      if (reissuePendingTerminationAfterAttach(lifecycle, commands)) break;
       const indeterminateIntent = Object.values(lifecycle.responseIntents)
         .find((intent) =>
           intent.state === "sent" &&
@@ -1976,12 +2859,14 @@ export function reduceOnboarding(
             "budget_pause_response_ack_indeterminate",
           );
         else
-          block(
+          terminateIndeterminateTransport(
             lifecycle,
             commands,
             event,
             "response_intent_ack_indeterminate",
             "sent response intent has no provider acknowledgement after socket replacement",
+            "response_intent_ack_indeterminate",
+            { intentKey: indeterminateIntent.intentKey },
           );
         break;
       }
@@ -1993,6 +2878,10 @@ export function reduceOnboarding(
             ? lifecycle.signoff
             : lifecycle.budgetPause?.interrupted
               ? lifecycle.budgetPause
+              : lifecycle.followupSpeech?.interrupted
+                ? lifecycle.followupSpeech
+                : lifecycle.recoverySpeech?.interrupted
+                  ? lifecycle.recoverySpeech
               : null;
       if (interruptedProof) {
         if (interruptedProof === lifecycle.budgetPause) {
@@ -2012,12 +2901,13 @@ export function reduceOnboarding(
             interruptedProof.interruptedResponseId,
           )
         ) {
-          block(
+          terminateIndeterminateTransport(
             lifecycle,
             commands,
             event,
             "authority_speech_terminal_indeterminate",
             "interrupted authority response was not terminal before socket replacement",
+            "authority_speech_terminal_indeterminate",
           );
           break;
         }
@@ -2218,6 +3108,14 @@ export function reduceOnboarding(
           lifecycle.signoff.responseId = event.responseId;
         if (intent.purpose === "budget_pause" && lifecycle.budgetPause)
           lifecycle.budgetPause.responseId = event.responseId;
+        if (
+          intent.purpose === "tool_continuation" &&
+          lifecycle.followupSpeech?.intentKey === event.intentKey
+        ) lifecycle.followupSpeech.responseId = event.responseId;
+        if (
+          intent.purpose === "recovery" &&
+          lifecycle.recoverySpeech?.intentKey === event.intentKey
+        ) lifecycle.recoverySpeech.responseId = event.responseId;
         commands.push(
           telemetry(lifecycle, "voice.response.acknowledged", event, {
             responseId: event.responseId,
@@ -2246,6 +3144,14 @@ export function reduceOnboarding(
         lifecycle.budgetPause?.responseId === event.responseId &&
         !lifecycle.budgetPause.transcriptFinal
       ) lifecycle.budgetPause.transcript += event.delta;
+      if (
+        lifecycle.followupSpeech?.responseId === event.responseId &&
+        !lifecycle.followupSpeech.transcriptFinal
+      ) lifecycle.followupSpeech.transcript += event.delta;
+      if (
+        lifecycle.recoverySpeech?.responseId === event.responseId &&
+        !lifecycle.recoverySpeech.transcriptFinal
+      ) lifecycle.recoverySpeech.transcript += event.delta;
       break;
     }
     case "response.transcript.done": {
@@ -2269,6 +3175,16 @@ export function reduceOnboarding(
         lifecycle.budgetPause.transcript = event.transcript;
         lifecycle.budgetPause.transcriptFinal = true;
         maybeFinishBudgetPause(lifecycle, commands, event);
+      }
+      if (lifecycle.followupSpeech?.responseId === event.responseId) {
+        lifecycle.followupSpeech.transcript = event.transcript;
+        lifecycle.followupSpeech.transcriptFinal = true;
+        maybeFinishFollowupSpeech(lifecycle, commands, event);
+      }
+      if (lifecycle.recoverySpeech?.responseId === event.responseId) {
+        lifecycle.recoverySpeech.transcript = event.transcript;
+        lifecycle.recoverySpeech.transcriptFinal = true;
+        maybeFinishRecoverySpeech(lifecycle, commands, event);
       }
       break;
     }
@@ -2310,9 +3226,25 @@ export function reduceOnboarding(
         );
         maybeFinishBudgetPause(lifecycle, commands, event);
       }
+      if (lifecycle.followupSpeech?.responseId === event.responseId) {
+        lifecycle.followupSpeech.audioDone = true;
+        maybeFinishFollowupSpeech(lifecycle, commands, event);
+      }
+      if (lifecycle.recoverySpeech?.responseId === event.responseId) {
+        lifecycle.recoverySpeech.audioDone = true;
+        maybeFinishRecoverySpeech(lifecycle, commands, event);
+      }
       break;
     }
     case "response.done": {
+      const authorityResponseDone = [
+        lifecycle.greeting?.responseId,
+        lifecycle.summary?.responseId,
+        lifecycle.signoff?.responseId,
+        lifecycle.budgetPause?.responseId,
+        lifecycle.followupSpeech?.responseId,
+        lifecycle.recoverySpeech?.responseId,
+      ].includes(event.responseId);
       if (!recordTerminalResponseId(
         lifecycle,
         event.responseId,
@@ -2339,7 +3271,17 @@ export function reduceOnboarding(
         lifecycle.budgetPause.responseDone = true;
         maybeFinishBudgetPause(lifecycle, commands, event);
       }
-      if (lifecycle.phase === "follow_up") lifecycle.phase = "collecting";
+      if (lifecycle.followupSpeech?.responseId === event.responseId) {
+        lifecycle.followupSpeech.responseDone = true;
+        maybeFinishFollowupSpeech(lifecycle, commands, event);
+      }
+      if (lifecycle.recoverySpeech?.responseId === event.responseId) {
+        lifecycle.recoverySpeech.responseDone = true;
+        maybeFinishRecoverySpeech(lifecycle, commands, event);
+      } else if (
+        !lifecycle.followupSpeech && !lifecycle.recoverySpeech &&
+        lifecycle.phase === "follow_up"
+      ) lifecycle.phase = "collecting";
       commands.push(
         telemetry(lifecycle, "voice.response.terminal", event, {
           responseId: event.responseId,
@@ -2347,7 +3289,8 @@ export function reduceOnboarding(
         }),
       );
       maybeQueueInterruptedSpeechRecovery(lifecycle, commands, event);
-      maybeAdvanceCoverage(lifecycle, commands, event);
+      if (!authorityResponseDone)
+        maybeAdvanceCoverage(lifecycle, commands, event);
       break;
     }
     case "output_audio_buffer.stopped": {
@@ -2387,6 +3330,14 @@ export function reduceOnboarding(
           }),
         );
         maybeFinishBudgetPause(lifecycle, commands, event);
+      }
+      if (lifecycle.followupSpeech?.responseId === event.responseId) {
+        lifecycle.followupSpeech.playbackStopped = true;
+        maybeFinishFollowupSpeech(lifecycle, commands, event);
+      }
+      if (lifecycle.recoverySpeech?.responseId === event.responseId) {
+        lifecycle.recoverySpeech.playbackStopped = true;
+        maybeFinishRecoverySpeech(lifecycle, commands, event);
       }
       break;
     }
@@ -2475,6 +3426,46 @@ export function reduceOnboarding(
         delete lifecycle.budgetPause.validated;
         lifecycle.phase = "budget_pause_speaking";
       }
+      if (lifecycle.followupSpeech?.responseId === event.responseId) {
+        if (lifecycle.followupSpeech.attempt >= 1) {
+          const recoveryKey =
+            `${lifecycle.followupSpeech.intentKey}:interrupted`;
+          delete lifecycle.followupSpeech;
+          queueTruthfulRecovery(
+            lifecycle,
+            commands,
+            event,
+            "next_question_unavailable",
+            recoveryKey,
+            { outcome: "followup_speech_retry_exhausted" },
+            FOLLOWUP_RECOVERY_RESPONSE_INSTRUCTIONS_PT,
+          );
+          break;
+        }
+        lifecycle.followupSpeech.audioDone = false;
+        lifecycle.followupSpeech.playbackStopped = false;
+        lifecycle.followupSpeech.interrupted = true;
+        lifecycle.followupSpeech.interruptedResponseId = event.responseId;
+        delete lifecycle.followupSpeech.validated;
+        lifecycle.phase = "follow_up";
+      }
+      if (lifecycle.recoverySpeech?.responseId === event.responseId) {
+        if (lifecycle.recoverySpeech.attempt >= 1) {
+          terminateFailedRecoveryDelivery(
+            lifecycle,
+            commands,
+            event,
+            "truthful recovery exhausted its single speech retry",
+          );
+          break;
+        }
+        lifecycle.recoverySpeech.audioDone = false;
+        lifecycle.recoverySpeech.playbackStopped = false;
+        lifecycle.recoverySpeech.interrupted = true;
+        lifecycle.recoverySpeech.interruptedResponseId = event.responseId;
+        delete lifecycle.recoverySpeech.validated;
+        lifecycle.phase = "follow_up";
+      }
       maybeQueueInterruptedSpeechRecovery(lifecycle, commands, event);
       break;
     }
@@ -2495,11 +3486,15 @@ export function reduceOnboarding(
       }
       if (lifecycle.summary)
         lifecycle.invalidatedSummaryRevision = lifecycle.summary.revision;
+      const invalidatedFollowupIntentKey =
+        lifecycle.followupSpeech?.intentKey;
       delete lifecycle.pendingFollowup;
+      delete lifecycle.followupSpeech;
       terminalizeAuthorityResponseIntents(
         lifecycle,
         (intent) =>
           intent.purpose === "final_signoff" ||
+          intent.intentKey === invalidatedFollowupIntentKey ||
           (
             intent.purpose === "summary" &&
             intent.intentKey !== `summary:${event.digest}`
@@ -2584,6 +3579,17 @@ export function reduceOnboarding(
       lifecycle.coverage.digest = event.digest;
       delete lifecycle.pendingFollowup;
       lifecycle.phase = "follow_up";
+      lifecycle.followupSpeech = {
+        intentKey: event.intentKey,
+        questionPt: event.questionPt,
+        transcript: "",
+        transcriptFinal: false,
+        audioDone: false,
+        responseDone: false,
+        playbackStopped: false,
+        interrupted: false,
+        attempt: 0,
+      };
       commands.push({
         type: "ask_follow_up",
         field: event.field,
@@ -2622,12 +3628,21 @@ export function reduceOnboarding(
         );
         break;
       }
-      block(
+      delete lifecycle.pendingFollowup;
+      const parentBatch = Object.values(lifecycle.toolBatches).find(
+        (candidate) =>
+          `tool-batch:${candidate.providerResponseId}:${candidate.batchHash}` ===
+            pending.intentKey,
+      );
+      if (parentBatch) parentBatch.continuationRequested = true;
+      queueTruthfulRecovery(
         lifecycle,
         commands,
         event,
-        event.code,
-        event.safeDetail,
+        "next_question_unavailable",
+        `${event.sourceRevision}:${event.field}:${event.subject ?? ""}`,
+        { outcome: event.code },
+        FOLLOWUP_RECOVERY_RESPONSE_INSTRUCTIONS_PT,
       );
       break;
     }
@@ -3142,6 +4157,72 @@ export function reduceOnboarding(
       });
       break;
     }
+    case "tool.rejected": {
+      const existing = lifecycle.toolOutbox[event.toolCallId];
+      if (existing) {
+        if (
+          existing.argsHash !== event.argsHash ||
+          existing.toolName !== event.name ||
+          existing.providerResponseId !== event.providerResponseId ||
+          existing.batchHash !== event.batchHash
+        ) {
+          block(
+            lifecycle,
+            commands,
+            event,
+            "tool_args_mismatch",
+            "rejected provider tool replay changed its identity",
+            event.toolCallId,
+          );
+          break;
+        }
+        if (existing.state === "executed" || existing.state === "output_pending")
+          resendOutput(lifecycle, commands, event, existing, true);
+        break;
+      }
+      if (Object.keys(lifecycle.toolOutbox).length >= MAX_TOOL_OUTBOX_RECEIPTS) {
+        block(
+          lifecycle,
+          commands,
+          event,
+          "tool_outbox_capacity_exceeded",
+          "tool replay registry reached its deterministic bound",
+          event.toolCallId,
+        );
+        break;
+      }
+      const output = JSON.stringify({
+        status: "error",
+        error: "persistence_failed",
+        retry_safe: true,
+      });
+      const receipt: ToolReceipt = {
+        toolCallId: event.toolCallId,
+        toolName: event.name,
+        argsHash: event.argsHash,
+        state: "executed",
+        providerResponseId: event.providerResponseId,
+        batchHash: event.batchHash,
+        output,
+        resultHash: hashOnboardingToolArgs({ output }),
+        outputItemId: outputItemId(event.toolCallId),
+        socketGeneration: event.socketGeneration,
+        failureKind: "deterministic",
+      };
+      lifecycle.toolOutbox[event.toolCallId] = receipt;
+      commands.push(
+        telemetry(lifecycle, "voice.tool.admitted", event, {
+          toolCallId: event.toolCallId,
+          outcome: event.name,
+        }),
+        telemetry(lifecycle, "invariant.violation", event, {
+          toolCallId: event.toolCallId,
+          outcome: event.code,
+        }),
+      );
+      resendOutput(lifecycle, commands, event, receipt, false);
+      break;
+    }
     case "tool.executed": {
       const receipt = lifecycle.toolOutbox[event.toolCallId];
       if (!receipt || receipt.state !== "running") {
@@ -3539,6 +4620,11 @@ export function reduceOnboarding(
         : "";
       const budgetExpected = `budget-hangup:${lifecycle.callId}`;
       const budgetErrorExpected = `budget-error-hangup:${lifecycle.callId}`;
+      const recoveryErrorExpected =
+        `recovery-error-hangup:${lifecycle.callId}`;
+      const transportErrorExpected =
+        `transport-error-hangup:${lifecycle.callId}`;
+      const fatalErrorExpected = `fatal-error-hangup:${lifecycle.callId}`;
       if (lifecycle.phase === "ready_to_terminate" &&
         event.intentKey === approvalExpected &&
         lifecycle.requestedHangupKeys.includes(approvalExpected)) {
@@ -3557,6 +4643,28 @@ export function reduceOnboarding(
         lifecycle.phase = "budget_error_provider_terminating";
         break;
       }
+      if (lifecycle.phase === "recovery_error_ready_to_terminate" &&
+        event.intentKey === recoveryErrorExpected &&
+        lifecycle.requestedRecoveryHangupKeys.includes(
+          recoveryErrorExpected,
+        )) {
+        lifecycle.phase = "recovery_error_provider_terminating";
+        break;
+      }
+      if (lifecycle.phase === "transport_error_ready_to_terminate" &&
+        event.intentKey === transportErrorExpected &&
+        lifecycle.requestedTransportHangupKeys.includes(
+          transportErrorExpected,
+        )) {
+        lifecycle.phase = "transport_error_provider_terminating";
+        break;
+      }
+      if (lifecycle.phase === "fatal_error_ready_to_terminate" &&
+        event.intentKey === fatalErrorExpected &&
+        lifecycle.requestedFatalHangupKeys.includes(fatalErrorExpected)) {
+        lifecycle.phase = "fatal_error_provider_terminating";
+        break;
+      }
       block(
         lifecycle,
         commands,
@@ -3572,6 +4680,11 @@ export function reduceOnboarding(
         : "";
       const budgetExpected = `budget-hangup:${lifecycle.callId}`;
       const budgetErrorExpected = `budget-error-hangup:${lifecycle.callId}`;
+      const recoveryErrorExpected =
+        `recovery-error-hangup:${lifecycle.callId}`;
+      const transportErrorExpected =
+        `transport-error-hangup:${lifecycle.callId}`;
+      const fatalErrorExpected = `fatal-error-hangup:${lifecycle.callId}`;
       const approvalClose = lifecycle.phase === "provider_terminating" &&
         event.intentKey === approvalExpected;
       const budgetClose = lifecycle.phase ===
@@ -3580,7 +4693,19 @@ export function reduceOnboarding(
       const budgetErrorClose = lifecycle.phase ===
           "budget_error_provider_terminating" &&
         event.intentKey === budgetErrorExpected;
-      if ((!approvalClose && !budgetClose && !budgetErrorClose) ||
+      const recoveryErrorClose = lifecycle.phase ===
+          "recovery_error_provider_terminating" &&
+        event.intentKey === recoveryErrorExpected;
+      const transportErrorClose = lifecycle.phase ===
+          "transport_error_provider_terminating" &&
+        event.intentKey === transportErrorExpected;
+      const fatalErrorClose = lifecycle.phase ===
+          "fatal_error_provider_terminating" &&
+        event.intentKey === fatalErrorExpected;
+      if ((
+        !approvalClose && !budgetClose && !budgetErrorClose &&
+        !recoveryErrorClose && !transportErrorClose && !fatalErrorClose
+      ) ||
         !event.terminalPersisted) {
         block(
           lifecycle,
@@ -3606,7 +4731,13 @@ export function reduceOnboarding(
             ? "durable_completion"
             : budgetClose
               ? "durable_budget_pause"
-              : "durable_budget_pause_error",
+              : budgetErrorClose
+                ? "durable_budget_pause_error"
+                : recoveryErrorClose
+                  ? "durable_recovery_error"
+                  : transportErrorClose
+                    ? "durable_transport_error"
+                    : "durable_fatal_error",
         }),
       );
       break;
