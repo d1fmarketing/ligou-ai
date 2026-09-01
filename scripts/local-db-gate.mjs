@@ -569,6 +569,7 @@ async function runBunTestFile(file, expectedPasses, environment, cwd) {
   const output = successful(result, `Bun integration test ${path.basename(file)}`, [
     environment.SUPABASE_SECRET_KEY,
     environment.SUPABASE_PUBLISHABLE_KEY,
+    environment.PGPASSWORD,
   ]);
   const passCount = Number(/\b(\d+) pass\b/.exec(`${output}\n${result.stderr}`)?.[1]);
   assert.equal(passCount, expectedPasses, `${path.basename(file)} did not execute every required test`);
@@ -834,6 +835,13 @@ export async function runLocalDatabaseGate() {
       LIGOU_TEST_PRESEEDED_TENANT_ID: fixture.tenantId,
       LIGOU_TEST_PRESEEDED_TENANT_SLUG: fixture.slug,
       LIGOU_LOCAL_DB_TEST: "1",
+      LIGOU_LOCAL_PROJECT_ID: LOCAL_PROJECT_ID,
+      LIGOU_PSQL_BIN: psqlBin,
+      PGHOST: connection.hostname,
+      PGPORT: connection.port,
+      PGDATABASE: connection.pathname.slice(1),
+      PGUSER: decodeURIComponent(connection.username),
+      PGPASSWORD: databaseSecret,
     };
     await mkdir(applicationEnv.HOME, { recursive: true });
     const applicationIntegrationTests = await runBunTestFile(
@@ -843,7 +851,7 @@ export async function runLocalDatabaseGate() {
       path.join(repoRoot, "voice-controller/test/onboarding-policy.local.integration.test.ts"), 1, applicationEnv, runnerRoot,
     );
     const companyDiscoveryIntegrationTests = await runBunTestFile(
-      path.join(repoRoot, "voice-controller/test/company-discovery-migration.test.ts"), 18, applicationEnv, runnerRoot,
+      path.join(repoRoot, "voice-controller/test/company-discovery-migration.test.ts"), 19, applicationEnv, runnerRoot,
     );
     const budgetRuntimeTests = await runBunTestFile(
       path.join(repoRoot, "voice-controller/test/budget.local.integration.test.ts"), 2, applicationEnv, runnerRoot,

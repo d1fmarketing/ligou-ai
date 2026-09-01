@@ -1,12 +1,52 @@
 import { describe, expect, test } from "bun:test";
 import { createClient } from "@supabase/supabase-js";
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const migrationsDir = path.join(repoRoot, "supabase/migrations");
+const execFileAsync = promisify(execFile);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function localSqlUuid(value: string): string {
+  if (!UUID_PATTERN.test(value)) throw new Error("local SQL fixture requires a UUID");
+  return `'${value}'::uuid`;
+}
+
+async function runDisposableLocalSql(sql: string): Promise<string> {
+  if (process.env.LIGOU_LOCAL_DB_TEST !== "1" ||
+      process.env.LIGOU_LOCAL_PROJECT_ID !== "ligou-v0-1-rc1" ||
+      process.env.PGHOST !== "127.0.0.1" ||
+      process.env.PGPORT !== "54322" ||
+      process.env.PGDATABASE !== "postgres" ||
+      process.env.PGUSER !== "postgres" ||
+      !process.env.PGPASSWORD || !process.env.LIGOU_PSQL_BIN) {
+    throw new Error("recovery tests require the exact disposable local database");
+  }
+  const { stdout } = await execFileAsync(process.env.LIGOU_PSQL_BIN, [
+    "-X", "--set=ON_ERROR_STOP=1", "--no-align", "--tuples-only", "--quiet",
+    "--command", sql,
+  ], {
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      LANG: "C",
+      PGAPPNAME: "ligou_discovery_recovery_test",
+      PGCONNECT_TIMEOUT: "5",
+      PGHOST: process.env.PGHOST,
+      PGPORT: process.env.PGPORT,
+      PGDATABASE: process.env.PGDATABASE,
+      PGUSER: process.env.PGUSER,
+      PGPASSWORD: process.env.PGPASSWORD,
+    },
+    maxBuffer: 1024 * 1024,
+  });
+  return stdout.trim();
+}
 
 function migrationSql(): string {
   const names = readdirSync(migrationsDir).filter((name) =>
@@ -209,17 +249,18 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
     ]) expect(terminalize).toContain(`'${field}'`);
   });
 
-  test("reclaims expired bound attempts with rotated cleanup authority and exact slot quarantine", () => {
+  test("reclaims expired bound and terminal cleanup with rotated authority and exact quarantine", () => {
     const sql = migrationSql();
     const expired = functionBody(
       sql,
       "claim_expired_company_discovery_cleanup(text,integer)",
       "revoke all on function public.claim_expired_company_discovery_cleanup(text,integer)",
     );
-    expect(expired).toContain("for update skip locked");
+    expect(expired).toContain("for update of a skip locked");
     expect(expired).toContain("a.lease_until <= clock_timestamp()");
-    expect(expired).toContain("a.runtime_identity <> '{}'::jsonb");
-    expect(expired).toContain("status = 'failed'");
+    expect(expired).toContain("v_runtime_bound := v_attempt.runtime_identity <> '{}'::jsonb");
+    expect(expired).toContain("v_attempt.status in ('failed', 'cancelled', 'superseded')");
+    expect(expired).toContain("status = case when status = 'running' then 'failed' else status end");
     expect(expired).toContain("fence_generation = v_new_fence");
     expect(expired).toContain("claim_token_hash = extensions.digest(v_cleanup_token, 'sha256')");
     expect(expired).toContain("quarantine_reason = 'expired_lease_cleanup'");
@@ -1548,5 +1589,884 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         current_attempt_id: null,
         quarantine_reason: "cleanup_unresolved",
       });
+  },
+);
+
+test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
+  "real Postgres recovers every cleanup authority race without reusing runtime resources",
+  async () => {
+    const apiUrl = process.env.SUPABASE_URL!;
+    const serviceKey = process.env.SUPABASE_SECRET_KEY!;
+    const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY!;
+    const serviceA = createClient(apiUrl, serviceKey, { auth: { persistSession: false } });
+    const serviceB = createClient(apiUrl, serviceKey, { auth: { persistSession: false } });
+    const owner = createClient(apiUrl, publishableKey, { auth: { persistSession: false } });
+    const ambiguousOwner = createClient(apiUrl, publishableKey, {
+      auth: { persistSession: false },
+    });
+    const ownerEmail = `discovery-recovery-${randomUUID()}@example.invalid`;
+    const ownerPassword = `Recovery-${randomUUID()}-Aa1!`;
+    const ambiguousEmail = `discovery-ambiguous-${randomUUID()}@example.invalid`;
+    const ambiguousPassword = `Ambiguous-${randomUUID()}-Aa1!`;
+    const ownerTenant = randomUUID();
+    const ambiguousTenantA = randomUUID();
+    const ambiguousTenantB = randomUUID();
+
+    const ownerCreated = await serviceA.auth.admin.createUser({
+      email: ownerEmail,
+      password: ownerPassword,
+      email_confirm: true,
+    });
+    const ambiguousCreated = await serviceA.auth.admin.createUser({
+      email: ambiguousEmail,
+      password: ambiguousPassword,
+      email_confirm: true,
+    });
+    expect(ownerCreated.error).toBeNull();
+    expect(ambiguousCreated.error).toBeNull();
+    const ownerId = ownerCreated.data.user!.id;
+    const ambiguousId = ambiguousCreated.data.user!.id;
+    expect((await serviceA.from("tenants").insert([{
+      id: ownerTenant,
+      slug: `discovery-recovery-${ownerTenant.slice(0, 8)}`,
+      name: "Discovery Recovery Owner",
+      owner_user_id: ownerId,
+      status: "onboarding",
+      operational_mode: "simulation_only",
+    }, {
+      id: ambiguousTenantA,
+      slug: `discovery-ambiguous-a-${ambiguousTenantA.slice(0, 8)}`,
+      name: "Discovery Ambiguous A",
+      owner_user_id: ambiguousId,
+      status: "onboarding",
+      operational_mode: "simulation_only",
+    }, {
+      id: ambiguousTenantB,
+      slug: `discovery-ambiguous-b-${ambiguousTenantB.slice(0, 8)}`,
+      name: "Discovery Ambiguous B",
+      owner_user_id: ambiguousId,
+      status: "onboarding",
+      operational_mode: "simulation_only",
+    }])).error).toBeNull();
+    expect((await serviceA.from("company_discovery_controls")
+      .update({ enabled: true }).eq("singleton", true)).error).toBeNull();
+    expect((await serviceA.from("company_discovery_allowlist").insert({
+      tenant_id: ownerTenant,
+      active: true,
+    })).error).toBeNull();
+    expect((await owner.auth.signInWithPassword({
+      email: ownerEmail,
+      password: ownerPassword,
+    })).error).toBeNull();
+    expect((await ambiguousOwner.auth.signInWithPassword({
+      email: ambiguousEmail,
+      password: ambiguousPassword,
+    })).error).toBeNull();
+
+    await runDisposableLocalSql(`
+      update public.company_discovery_allowlist
+      set created_at = clock_timestamp() - interval '2 hours',
+          expires_at = clock_timestamp() - interval '1 hour'
+      where tenant_id = ${localSqlUuid(ownerTenant)};
+    `);
+    const expiredStatus = await owner.rpc("company_discovery_owner_status");
+    expect(expiredStatus.error).toBeNull();
+    expect(expiredStatus.data).toMatchObject({
+      enabled: true,
+      allowlisted: true,
+      available: false,
+    });
+    expect(expiredStatus.data.expires_at).not.toBeNull();
+    const ambiguousStatus = await ambiguousOwner.rpc("company_discovery_owner_status");
+    expect(ambiguousStatus.error?.message).toContain(
+      "company_discovery_owner_tenant_ambiguous",
+    );
+    expect((await serviceA.from("company_discovery_allowlist")
+      .update({ expires_at: null }).eq("tenant_id", ownerTenant)).error).toBeNull();
+
+    const completeCleanupProof = {
+      gateway_exited: true,
+      container_removed: true,
+      bridge_removed: true,
+      config_removed: true,
+      state_removed: true,
+      workspace_removed: true,
+      output_removed: true,
+      network_removed: true,
+      credential_revoked: true,
+      listener_closed: true,
+      identity_process_absent: true,
+      late_result_rejected: true,
+    };
+    let identitySequence = 0;
+    const nextIdentity = (label: string, port?: number) => {
+      identitySequence += 1;
+      return runtimeIdentity(
+        `${label}-${randomUUID()}`,
+        port ?? 40_000 + identitySequence,
+      );
+    };
+    const resultPayload = (origin: string) => ({
+      schema_version: "company_discovery.result.v1",
+      source_snapshots: [{
+        url: origin,
+        retrieved_at: "2026-09-01T10:00:00.000Z",
+        http_status: 200,
+        mime_type: "text/html",
+        byte_length: 64,
+        content_hash: "b".repeat(64),
+        excerpt: "Recovery-safe discovery evidence.",
+        crawl_order: 0,
+        crawl_depth: 0,
+      }],
+      candidate_facts: [{
+        claim_class: "descriptive",
+        claim_type: "business_name",
+        normalized_value: "Recovery Safe Company",
+        evidence_refs: [0],
+        contradictions: [],
+        uncertainty: [],
+      }],
+      missing_questions: [],
+      contradictions: [],
+      uncertainty: [],
+    });
+    const submit = async (label: string, host = "recovery.example.com") => {
+      const response = await owner.rpc("submit_company_discovery", {
+        p_url: `https://${host}/${label}`,
+        p_idempotency_key: `${label}-${randomUUID()}`,
+      });
+      expect(response.error).toBeNull();
+      return String(response.data);
+    };
+    const claim = async (
+      workerId: string,
+      adapter: "openclaw" | "direct_model" = "openclaw",
+      client = serviceA,
+    ) => {
+      const response = await client.rpc("claim_company_discovery_attempt", {
+        p_worker_id: workerId,
+        p_adapter_id: adapter,
+        p_lease_seconds: 300,
+      });
+      expect(response.error).toBeNull();
+      expect(response.data).toHaveLength(1);
+      return response.data![0] as ClaimedAttempt;
+    };
+    const bind = async (
+      claimed: ClaimedAttempt,
+      identity: ReturnType<typeof runtimeIdentity>,
+      client = serviceA,
+    ) => client.rpc("bind_company_discovery_runtime", {
+      p_attempt_id: claimed.attempt_id,
+      p_fence_generation: claimed.fence_generation,
+      p_claim_token: claimed.claim_token,
+      p_runtime_identity: identity,
+    });
+    const expireLease = (attemptId: string) => runDisposableLocalSql(`
+      update public.worker_attempts
+      set claimed_at = clock_timestamp() - interval '2 seconds',
+          lease_until = clock_timestamp() - interval '1 second'
+      where id = ${localSqlUuid(attemptId)};
+    `);
+    const concurrentRpc = async (
+      calls: Array<() => Promise<{ data: any; error: any }>>,
+    ) => {
+      const settled = await Promise.allSettled(calls.map((call) => call()));
+      expect(settled.every((item) => item.status === "fulfilled")).toBe(true);
+      return settled.map((item) => {
+        if (item.status !== "fulfilled") throw item.reason;
+        return item.value;
+      });
+    };
+    const oneCleanupClaim = (responses: Array<{ data: any; error: any }>) => {
+      for (const response of responses) expect(response.error).toBeNull();
+      const rows = responses.flatMap((response) => response.data ?? []);
+      expect(rows).toHaveLength(1);
+      return rows[0] as {
+        job_id: string;
+        attempt_id: string;
+        adapter_id: string;
+        runtime_slot_id: string;
+        runtime_identity: Record<string, unknown>;
+        fence_generation: number;
+        claim_token: string;
+        job_version: number;
+      };
+    };
+
+    // A claim crash before bind is database-proven resource absence. It needs no
+    // worker cleanup token and can immediately free only its exact logical slot.
+    const unboundJob = await submit("unbound-requeue");
+    const unboundWorker = `stage0-unbound-${randomUUID()}`;
+    const unboundClaim = await claim(unboundWorker);
+    expect(unboundClaim.job_id).toBe(unboundJob);
+    const unboundTerminalize = await serviceA.rpc(
+      "terminalize_company_discovery_attempt",
+      {
+        p_attempt_id: unboundClaim.attempt_id,
+        p_fence_generation: unboundClaim.fence_generation,
+        p_claim_token: unboundClaim.claim_token,
+        p_outcome: "failed",
+        p_reason: "bind_failed",
+      },
+    );
+    expect(unboundTerminalize.error?.message).toContain(
+      "company_discovery_runtime_not_bound",
+    );
+    await expireLease(unboundClaim.attempt_id);
+    const unboundRecovery = await serviceA.rpc(
+      "claim_expired_company_discovery_cleanup",
+      { p_worker_id: `stage0-reaper-${randomUUID()}`, p_lease_seconds: 300 },
+    );
+    expect(unboundRecovery.error).toBeNull();
+    expect(unboundRecovery.data).toEqual([]);
+    const unboundAttempt = await serviceA.from("worker_attempts")
+      .select("status,fence_generation,runtime_identity,runtime_identity_hash,terminal_reason,cleanup_state,cleanup_outcome,cleanup_proof")
+      .eq("id", unboundClaim.attempt_id)
+      .single();
+    expect(unboundAttempt.error).toBeNull();
+    expect(unboundAttempt.data).toEqual({
+      status: "failed",
+      fence_generation: unboundClaim.fence_generation + 1,
+      runtime_identity: {},
+      runtime_identity_hash: null,
+      terminal_reason: "runtime_not_bound",
+      cleanup_state: "proved",
+      cleanup_outcome: "runtime_not_bound",
+      cleanup_proof: {
+        outcome: "runtime_not_bound",
+        database_proven: true,
+        runtime_identity_bound: false,
+      },
+    });
+    expect((await serviceA.from("worker_jobs")
+      .select("status,version,fence_generation,current_attempt_id")
+      .eq("id", unboundJob).single()).data).toEqual({
+      status: "queued",
+      version: unboundClaim.job_version + 1,
+      fence_generation: unboundClaim.fence_generation + 1,
+      current_attempt_id: null,
+    });
+    expect((await serviceA.from("worker_runtime_slots")
+      .select("status,tenant_id,current_attempt_id")
+      .eq("id", unboundClaim.runtime_slot_id).single()).data).toEqual({
+      status: "available",
+      tenant_id: null,
+      current_attempt_id: null,
+    });
+    const staleUnboundBind = await bind(
+      unboundClaim,
+      nextIdentity("stale-unbound"),
+    );
+    expect(staleUnboundBind.error).not.toBeNull();
+    const staleUnboundPayload = resultPayload(unboundClaim.normalized_origin);
+    const staleUnboundCommit = await serviceA.rpc("commit_company_discovery_result", {
+      p_attempt_id: unboundClaim.attempt_id,
+      p_fence_generation: unboundClaim.fence_generation,
+      p_claim_token: unboundClaim.claim_token,
+      p_result: staleUnboundPayload,
+      p_result_hash: postgresJsonbHash(staleUnboundPayload),
+    });
+    expect(staleUnboundCommit.error).not.toBeNull();
+    const staleUnboundTerminalize = await serviceA.rpc(
+      "terminalize_company_discovery_attempt",
+      {
+        p_attempt_id: unboundClaim.attempt_id,
+        p_fence_generation: unboundClaim.fence_generation,
+        p_claim_token: unboundClaim.claim_token,
+        p_outcome: "failed",
+        p_reason: "stale_worker",
+      },
+    );
+    expect(staleUnboundTerminalize.error).not.toBeNull();
+
+    const reboundClaim = await claim(unboundWorker);
+    expect(reboundClaim.job_id).toBe(unboundJob);
+    expect(reboundClaim.attempt_id).not.toBe(unboundClaim.attempt_id);
+    expect(reboundClaim.runtime_slot_id).toBe(unboundClaim.runtime_slot_id);
+    const firstIdentity = nextIdentity("first-bound");
+    expect((await bind(reboundClaim, firstIdentity)).error).toBeNull();
+    const terminalized = await serviceA.rpc("terminalize_company_discovery_attempt", {
+      p_attempt_id: reboundClaim.attempt_id,
+      p_fence_generation: reboundClaim.fence_generation,
+      p_claim_token: reboundClaim.claim_token,
+      p_outcome: "failed",
+      p_reason: "adapter_failed",
+    });
+    expect(terminalized.error).toBeNull();
+    const terminalAuthority = terminalized.data as {
+      fence_generation: number;
+      claim_token: string;
+      job_version: number;
+    };
+
+    // Two independent clients race for one expired cleanup lease. SKIP LOCKED
+    // gives exactly one rotated authority; losing plaintext is recoverable by
+    // another lease expiry and another rotation.
+    await expireLease(reboundClaim.attempt_id);
+    const firstReaperRace = await concurrentRpc([
+      () => serviceA.rpc("claim_expired_company_discovery_cleanup", {
+        p_worker_id: `stage0-reaper-a-${randomUUID()}`,
+        p_lease_seconds: 300,
+      }),
+      () => serviceB.rpc("claim_expired_company_discovery_cleanup", {
+        p_worker_id: `stage0-reaper-b-${randomUUID()}`,
+        p_lease_seconds: 300,
+      }),
+    ]);
+    const firstReaper = oneCleanupClaim(firstReaperRace);
+    expect(firstReaper).toMatchObject({
+      job_id: unboundJob,
+      attempt_id: reboundClaim.attempt_id,
+      adapter_id: "openclaw",
+      runtime_slot_id: reboundClaim.runtime_slot_id,
+      runtime_identity: firstIdentity,
+      fence_generation: terminalAuthority.fence_generation + 1,
+      job_version: terminalAuthority.job_version,
+    });
+    expect(firstReaper.claim_token).not.toBe(terminalAuthority.claim_token);
+    expect((await serviceA.from("worker_runtime_slots")
+      .select("status,current_attempt_id")
+      .eq("id", reboundClaim.runtime_slot_id).single()).data).toEqual({
+      status: "quarantined",
+      current_attempt_id: reboundClaim.attempt_id,
+    });
+    const staleTerminalCleanup = await serviceA.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: reboundClaim.attempt_id,
+      p_fence_generation: terminalAuthority.fence_generation,
+      p_claim_token: terminalAuthority.claim_token,
+      p_proof: completeCleanupProof,
+    });
+    expect(staleTerminalCleanup.error?.message).toContain(
+      "company_discovery_stale_fence",
+    );
+    const malformedCleanup = await serviceA.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: reboundClaim.attempt_id,
+      p_fence_generation: firstReaper.fence_generation,
+      p_claim_token: firstReaper.claim_token,
+      p_proof: { ...completeCleanupProof, unexpected: true },
+    });
+    expect(malformedCleanup.error?.message).toContain(
+      "company_discovery_cleanup_proof_invalid",
+    );
+    expect((await serviceA.from("worker_attempts")
+      .select("cleanup_state,cleanup_outcome")
+      .eq("id", reboundClaim.attempt_id).single()).data).toEqual({
+      cleanup_state: "pending",
+      cleanup_outcome: "pending",
+    });
+
+    await expireLease(reboundClaim.attempt_id);
+    const secondReaperRace = await concurrentRpc([
+      () => serviceA.rpc("claim_expired_company_discovery_cleanup", {
+        p_worker_id: `stage0-reaper-c-${randomUUID()}`,
+        p_lease_seconds: 300,
+      }),
+      () => serviceB.rpc("claim_expired_company_discovery_cleanup", {
+        p_worker_id: `stage0-reaper-d-${randomUUID()}`,
+        p_lease_seconds: 300,
+      }),
+    ]);
+    const secondReaper = oneCleanupClaim(secondReaperRace);
+    expect(secondReaper.fence_generation).toBe(firstReaper.fence_generation + 1);
+    expect(secondReaper.job_version).toBe(firstReaper.job_version);
+    expect(secondReaper.claim_token).not.toBe(firstReaper.claim_token);
+    expect(secondReaper.runtime_identity).toEqual(firstIdentity);
+    const firstReaperStale = await serviceA.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: reboundClaim.attempt_id,
+      p_fence_generation: firstReaper.fence_generation,
+      p_claim_token: firstReaper.claim_token,
+      p_proof: completeCleanupProof,
+    });
+    expect(firstReaperStale.error?.message).toContain("company_discovery_stale_fence");
+    const provedCleanup = await serviceA.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: reboundClaim.attempt_id,
+      p_fence_generation: secondReaper.fence_generation,
+      p_claim_token: secondReaper.claim_token,
+      p_proof: completeCleanupProof,
+    });
+    expect(provedCleanup.error).toBeNull();
+    expect(provedCleanup.data).toMatchObject({
+      cleanup_state: "proved",
+      slot_updated: true,
+    });
+    expect((await serviceA.from("worker_attempts")
+      .select("adapter_id,runtime_identity,runtime_identity_hash,cleanup_outcome")
+      .eq("id", reboundClaim.attempt_id).single()).data).toMatchObject({
+      adapter_id: "openclaw",
+      runtime_identity: firstIdentity,
+      runtime_identity_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      cleanup_outcome: "runtime_cleanup_proved",
+    });
+    const reservationKinds = await runDisposableLocalSql(`
+      select string_agg(resource_kind, ',' order by resource_kind)
+      from public.worker_runtime_resource_reservations
+      where attempt_id = ${localSqlUuid(reboundClaim.attempt_id)};
+    `);
+    expect(reservationKinds).toBe([
+      "bridge_container", "bridge_secret_volume", "bundle_hash", "cell_container",
+      "config_identifier", "config_volume", "egress_network", "gateway_secret_volume",
+      "internal_network", "loopback_port", "output_identifier", "output_volume",
+      "profile", "socket_identifier", "state_volume", "workspace_volume",
+    ].sort().join(","));
+
+    const provedRetry = await owner.rpc("retry_company_discovery", {
+      p_job: unboundJob,
+      p_expected_version: secondReaper.job_version,
+    });
+    expect(provedRetry.error).toBeNull();
+    const reusedSlotClaim = await claim(unboundWorker);
+    expect(reusedSlotClaim.runtime_slot_id).toBe(reboundClaim.runtime_slot_id);
+    expect(reusedSlotClaim.attempt_id).not.toBe(reboundClaim.attempt_id);
+    const exactBundleReuse = await bind(reusedSlotClaim, firstIdentity);
+    expect(exactBundleReuse.error?.message).toContain(
+      "company_discovery_runtime_identity_conflict",
+    );
+    const containerCollisionBase = nextIdentity("container-collision");
+    const containerCollision = await bind(reusedSlotClaim, {
+      ...containerCollisionBase,
+      cell_container_name: firstIdentity.bridge_container_name,
+    });
+    expect(containerCollision.error?.message).toContain(
+      "company_discovery_runtime_identity_conflict",
+    );
+    const volumeCollisionBase = nextIdentity("volume-collision");
+    const volumeCollision = await bind(reusedSlotClaim, {
+      ...volumeCollisionBase,
+      output_volume_name: firstIdentity.config_volume_name,
+    });
+    expect(volumeCollision.error?.message).toContain(
+      "company_discovery_runtime_identity_conflict",
+    );
+    const portCollisionBase = nextIdentity("port-collision");
+    const portCollision = await bind(reusedSlotClaim, {
+      ...portCollisionBase,
+      loopback_port: firstIdentity.loopback_port,
+    });
+    expect(portCollision.error?.message).toContain(
+      "company_discovery_runtime_identity_conflict",
+    );
+    const secondIdentity = nextIdentity("second-bound");
+    expect((await bind(reusedSlotClaim, secondIdentity)).error).toBeNull();
+
+    // Commit and terminalization contend on the same attempt lock. Exactly one
+    // state transition and, at most, one immutable result can become authority.
+    const racePayload = resultPayload(reusedSlotClaim.normalized_origin);
+    const terminalCommitRace = await concurrentRpc([
+      () => serviceA.rpc("terminalize_company_discovery_attempt", {
+        p_attempt_id: reusedSlotClaim.attempt_id,
+        p_fence_generation: reusedSlotClaim.fence_generation,
+        p_claim_token: reusedSlotClaim.claim_token,
+        p_outcome: "failed",
+        p_reason: "race_failed",
+      }),
+      () => serviceB.rpc("commit_company_discovery_result", {
+        p_attempt_id: reusedSlotClaim.attempt_id,
+        p_fence_generation: reusedSlotClaim.fence_generation,
+        p_claim_token: reusedSlotClaim.claim_token,
+        p_result: racePayload,
+        p_result_hash: postgresJsonbHash(racePayload),
+      }),
+    ]);
+    expect(terminalCommitRace.filter((response) => response.error === null)).toHaveLength(1);
+    const terminalWon = terminalCommitRace[0]!.error === null;
+    const raceAttempt = await serviceA.from("worker_attempts")
+      .select("status,fence_generation")
+      .eq("id", reusedSlotClaim.attempt_id).single();
+    expect(raceAttempt.error).toBeNull();
+    const raceResults = await serviceA.from("worker_results")
+      .select("id").eq("attempt_id", reusedSlotClaim.attempt_id);
+    expect(raceResults.error).toBeNull();
+    if (terminalWon) {
+      expect(raceAttempt.data?.status).toBe("failed");
+      expect(raceResults.data).toEqual([]);
+      const authority = terminalCommitRace[0]!.data as {
+        fence_generation: number;
+        claim_token: string;
+      };
+      expect((await serviceA.rpc("record_company_discovery_cleanup", {
+        p_attempt_id: reusedSlotClaim.attempt_id,
+        p_fence_generation: authority.fence_generation,
+        p_claim_token: authority.claim_token,
+        p_proof: completeCleanupProof,
+      })).error).toBeNull();
+    } else {
+      expect(raceAttempt.data?.status).toBe("validated");
+      expect(raceResults.data).toHaveLength(1);
+      expect((await serviceA.rpc("record_company_discovery_cleanup", {
+        p_attempt_id: reusedSlotClaim.attempt_id,
+        p_fence_generation: reusedSlotClaim.fence_generation,
+        p_claim_token: reusedSlotClaim.claim_token,
+        p_proof: completeCleanupProof,
+      })).error).toBeNull();
+    }
+
+    // The safe unbound policy fails instead of requeueing while the global gate
+    // is disabled, while still proving no runtime and releasing the exact slot.
+    const disabledUnboundJob = await submit("unbound-disabled");
+    const disabledWorker = `stage0-unbound-disabled-${randomUUID()}`;
+    const disabledUnboundClaim = await claim(disabledWorker);
+    await expireLease(disabledUnboundClaim.attempt_id);
+    expect((await serviceA.from("company_discovery_controls")
+      .update({ enabled: false }).eq("singleton", true)).error).toBeNull();
+    const disabledRecovery = await serviceA.rpc(
+      "claim_expired_company_discovery_cleanup",
+      { p_worker_id: `stage0-disabled-reaper-${randomUUID()}`, p_lease_seconds: 300 },
+    );
+    expect(disabledRecovery.error).toBeNull();
+    expect(disabledRecovery.data).toEqual([]);
+    expect((await serviceA.from("worker_jobs")
+      .select("status,current_attempt_id")
+      .eq("id", disabledUnboundJob).single()).data).toEqual({
+      status: "failed",
+      current_attempt_id: disabledUnboundClaim.attempt_id,
+    });
+    expect((await serviceA.from("worker_runtime_slots")
+      .select("status,current_attempt_id")
+      .eq("id", disabledUnboundClaim.runtime_slot_id).single()).data).toEqual({
+      status: "available",
+      current_attempt_id: null,
+    });
+    expect((await serviceA.from("company_discovery_controls")
+      .update({ enabled: true }).eq("singleton", true)).error).toBeNull();
+
+    // An expired worker can never beat the reaper even when both requests hit
+    // PostgreSQL concurrently: the reaper rotates authority and the commit is stale.
+    const staleCommitJob = await submit("reaper-stale-commit");
+    const staleCommitClaim = await claim(`stage0-stale-commit-${randomUUID()}`);
+    const staleCommitIdentity = nextIdentity("stale-commit");
+    expect((await bind(staleCommitClaim, staleCommitIdentity)).error).toBeNull();
+    await expireLease(staleCommitClaim.attempt_id);
+    const stalePayload = resultPayload(staleCommitClaim.normalized_origin);
+    const reclaimCommitRace = await concurrentRpc([
+      () => serviceA.rpc("claim_expired_company_discovery_cleanup", {
+        p_worker_id: `stage0-reclaim-${randomUUID()}`,
+        p_lease_seconds: 300,
+      }),
+      () => serviceB.rpc("commit_company_discovery_result", {
+        p_attempt_id: staleCommitClaim.attempt_id,
+        p_fence_generation: staleCommitClaim.fence_generation,
+        p_claim_token: staleCommitClaim.claim_token,
+        p_result: stalePayload,
+        p_result_hash: postgresJsonbHash(stalePayload),
+      }),
+    ]);
+    const reclaimResponse = reclaimCommitRace[0]!;
+    const staleCommitResponse = reclaimCommitRace[1]!;
+    expect(reclaimResponse.error).toBeNull();
+    expect(staleCommitResponse.error).not.toBeNull();
+    expect(reclaimResponse.data.length).toBeLessThanOrEqual(1);
+    const eventualReclaim = reclaimResponse.data.length === 1
+      ? reclaimResponse
+      : await serviceA.rpc("claim_expired_company_discovery_cleanup", {
+        p_worker_id: `stage0-reclaim-followup-${randomUUID()}`,
+        p_lease_seconds: 300,
+      });
+    expect(eventualReclaim.error).toBeNull();
+    expect(eventualReclaim.data).toHaveLength(1);
+    const reclaimed = eventualReclaim.data![0] as {
+      attempt_id: string;
+      fence_generation: number;
+      claim_token: string;
+    };
+    expect(reclaimed.attempt_id).toBe(staleCommitClaim.attempt_id);
+    expect((await serviceA.from("worker_results")
+      .select("id").eq("attempt_id", staleCommitClaim.attempt_id)).data).toEqual([]);
+    expect((await serviceA.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: staleCommitClaim.attempt_id,
+      p_fence_generation: reclaimed.fence_generation,
+      p_claim_token: reclaimed.claim_token,
+      p_proof: completeCleanupProof,
+    })).error).toBeNull();
+
+    // Cancelled terminal cleanup gets the same repeatable rotation path without
+    // changing its terminal outcome or its bound adapter/runtime identity.
+    const cancelledJob = await submit("cancelled-cleanup");
+    const cancelledClaim = await claim(`stage0-cancelled-${randomUUID()}`);
+    const cancelledIdentity = nextIdentity("cancelled");
+    expect((await bind(cancelledClaim, cancelledIdentity)).error).toBeNull();
+    const cancelledTerminal = await serviceA.rpc(
+      "terminalize_company_discovery_attempt",
+      {
+        p_attempt_id: cancelledClaim.attempt_id,
+        p_fence_generation: cancelledClaim.fence_generation,
+        p_claim_token: cancelledClaim.claim_token,
+        p_outcome: "cancelled",
+        p_reason: "worker_cancelled",
+      },
+    );
+    expect(cancelledTerminal.error).toBeNull();
+    await expireLease(cancelledClaim.attempt_id);
+    const cancelledReclaim = await serviceA.rpc(
+      "claim_expired_company_discovery_cleanup",
+      { p_worker_id: `stage0-cancel-reaper-${randomUUID()}`, p_lease_seconds: 300 },
+    );
+    expect(cancelledReclaim.error).toBeNull();
+    expect(cancelledReclaim.data).toHaveLength(1);
+    const cancelledAuthority = cancelledReclaim.data![0] as {
+      attempt_id: string;
+      adapter_id: string;
+      runtime_identity: Record<string, unknown>;
+      fence_generation: number;
+      claim_token: string;
+    };
+    expect(cancelledAuthority).toMatchObject({
+      attempt_id: cancelledClaim.attempt_id,
+      adapter_id: "openclaw",
+      runtime_identity: cancelledIdentity,
+    });
+    expect((await serviceA.from("worker_attempts")
+      .select("status").eq("id", cancelledClaim.attempt_id).single()).data?.status)
+      .toBe("cancelled");
+    expect((await serviceA.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: cancelledClaim.attempt_id,
+      p_fence_generation: cancelledAuthority.fence_generation,
+      p_claim_token: cancelledAuthority.claim_token,
+      p_proof: completeCleanupProof,
+    })).error).toBeNull();
+
+    // A retry may move job.current_attempt_id before the old terminal slot is
+    // cleaned. Reclaim must stay attempt/slot-local and cannot fence or mutate
+    // the live replacement attempt.
+    const detachedCleanupJob = await submit("detached-terminal-cleanup");
+    const detachedOldWorker = `stage0-detached-old-${randomUUID()}`;
+    const detachedOldClaim = await claim(detachedOldWorker);
+    const detachedOldIdentity = nextIdentity("detached-old");
+    expect((await bind(detachedOldClaim, detachedOldIdentity)).error).toBeNull();
+    const detachedTerminal = await serviceA.rpc(
+      "terminalize_company_discovery_attempt",
+      {
+        p_attempt_id: detachedOldClaim.attempt_id,
+        p_fence_generation: detachedOldClaim.fence_generation,
+        p_claim_token: detachedOldClaim.claim_token,
+        p_outcome: "failed",
+        p_reason: "detached_failed",
+      },
+    );
+    expect(detachedTerminal.error).toBeNull();
+    expect((await owner.rpc("retry_company_discovery", {
+      p_job: detachedCleanupJob,
+      p_expected_version: detachedTerminal.data.job_version,
+    })).error).toBeNull();
+    const detachedReplacement = await claim(`stage0-detached-new-${randomUUID()}`);
+    expect(detachedReplacement.job_id).toBe(detachedCleanupJob);
+    expect(detachedReplacement.runtime_slot_id).not.toBe(detachedOldClaim.runtime_slot_id);
+    expect((await bind(detachedReplacement, nextIdentity("detached-new"))).error)
+      .toBeNull();
+    const replacementBeforeReclaim = await serviceA.from("worker_jobs")
+      .select("status,version,fence_generation,current_attempt_id")
+      .eq("id", detachedCleanupJob).single();
+    expect(replacementBeforeReclaim.error).toBeNull();
+    await expireLease(detachedOldClaim.attempt_id);
+    const detachedReclaim = await serviceA.rpc(
+      "claim_expired_company_discovery_cleanup",
+      { p_worker_id: `stage0-detached-reaper-${randomUUID()}`, p_lease_seconds: 300 },
+    );
+    expect(detachedReclaim.error).toBeNull();
+    expect(detachedReclaim.data).toHaveLength(1);
+    const detachedAuthority = detachedReclaim.data![0] as {
+      attempt_id: string;
+      runtime_slot_id: string;
+      runtime_identity: Record<string, unknown>;
+      fence_generation: number;
+      claim_token: string;
+      job_version: number;
+    };
+    expect(detachedAuthority).toMatchObject({
+      attempt_id: detachedOldClaim.attempt_id,
+      runtime_slot_id: detachedOldClaim.runtime_slot_id,
+      runtime_identity: detachedOldIdentity,
+      job_version: replacementBeforeReclaim.data!.version,
+    });
+    expect((await serviceA.from("worker_jobs")
+      .select("status,version,fence_generation,current_attempt_id")
+      .eq("id", detachedCleanupJob).single()).data).toEqual(
+      replacementBeforeReclaim.data,
+    );
+    expect((await serviceA.from("worker_attempts")
+      .select("status,fence_generation")
+      .eq("id", detachedReplacement.attempt_id).single()).data).toEqual({
+      status: "running",
+      fence_generation: detachedReplacement.fence_generation,
+    });
+    expect((await serviceA.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: detachedOldClaim.attempt_id,
+      p_fence_generation: detachedAuthority.fence_generation,
+      p_claim_token: detachedAuthority.claim_token,
+      p_proof: completeCleanupProof,
+    })).error).toBeNull();
+    const detachedReplacementTerminal = await serviceA.rpc(
+      "terminalize_company_discovery_attempt",
+      {
+        p_attempt_id: detachedReplacement.attempt_id,
+        p_fence_generation: detachedReplacement.fence_generation,
+        p_claim_token: detachedReplacement.claim_token,
+        p_outcome: "failed",
+        p_reason: "replacement_cleanup",
+      },
+    );
+    expect(detachedReplacementTerminal.error).toBeNull();
+    expect((await serviceA.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: detachedReplacement.attempt_id,
+      p_fence_generation: detachedReplacementTerminal.data.fence_generation,
+      p_claim_token: detachedReplacementTerminal.data.claim_token,
+      p_proof: completeCleanupProof,
+    })).error).toBeNull();
+
+    // A prior selected result/nonce cannot cross a retry whose replacement is
+    // terminalized; both stale selection and nonce paths remain fail-closed.
+    const staleBoundaryJob = await submit("stale-select-nonce");
+    const staleBoundaryWorker = `stage0-stale-boundary-${randomUUID()}`;
+    const oldBoundaryClaim = await claim(staleBoundaryWorker);
+    expect((await bind(oldBoundaryClaim, nextIdentity("stale-boundary-old"))).error)
+      .toBeNull();
+    const boundaryPayload = resultPayload(oldBoundaryClaim.normalized_origin);
+    const boundaryCommit = await serviceA.rpc("commit_company_discovery_result", {
+      p_attempt_id: oldBoundaryClaim.attempt_id,
+      p_fence_generation: oldBoundaryClaim.fence_generation,
+      p_claim_token: oldBoundaryClaim.claim_token,
+      p_result: boundaryPayload,
+      p_result_hash: postgresJsonbHash(boundaryPayload),
+    });
+    expect(boundaryCommit.error).toBeNull();
+    const boundaryResult = String(boundaryCommit.data);
+    const boundarySelect = await serviceA.rpc("select_company_discovery_result", {
+      p_job_id: staleBoundaryJob,
+      p_attempt_id: oldBoundaryClaim.attempt_id,
+      p_expected_version: oldBoundaryClaim.job_version + 1,
+    });
+    expect(boundarySelect.error).toBeNull();
+    const boundaryClaims = await owner.from("discovery_claims")
+      .select("id").eq("result_id", boundaryResult);
+    expect(boundaryClaims.error).toBeNull();
+    const boundaryNonce = await owner.rpc("create_company_discovery_review_nonce", {
+      p_job: staleBoundaryJob,
+      p_result: boundaryResult,
+      p_claim_ids: boundaryClaims.data!.map((row) => row.id),
+    });
+    expect(boundaryNonce.error).toBeNull();
+    const boundaryCancel = await owner.rpc("cancel_company_discovery", {
+      p_job: staleBoundaryJob,
+      p_expected_version: boundarySelect.data.version,
+    });
+    expect(boundaryCancel.error).toBeNull();
+    expect((await serviceA.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: oldBoundaryClaim.attempt_id,
+      p_fence_generation: oldBoundaryClaim.fence_generation,
+      p_claim_token: oldBoundaryClaim.claim_token,
+      p_proof: completeCleanupProof,
+    })).error).toBeNull();
+    const boundaryRetry = await owner.rpc("retry_company_discovery", {
+      p_job: staleBoundaryJob,
+      p_expected_version: boundaryCancel.data.version,
+    });
+    expect(boundaryRetry.error).toBeNull();
+    const replacementBoundary = await claim(staleBoundaryWorker);
+    expect((await bind(replacementBoundary, nextIdentity("stale-boundary-new"))).error)
+      .toBeNull();
+    const replacementTerminal = await serviceA.rpc(
+      "terminalize_company_discovery_attempt",
+      {
+        p_attempt_id: replacementBoundary.attempt_id,
+        p_fence_generation: replacementBoundary.fence_generation,
+        p_claim_token: replacementBoundary.claim_token,
+        p_outcome: "failed",
+        p_reason: "replacement_failed",
+      },
+    );
+    expect(replacementTerminal.error).toBeNull();
+    const staleSelect = await serviceA.rpc("select_company_discovery_result", {
+      p_job_id: staleBoundaryJob,
+      p_attempt_id: oldBoundaryClaim.attempt_id,
+      p_expected_version: replacementTerminal.data.job_version,
+    });
+    expect(staleSelect.error?.message).toContain("company_discovery_attempt_not_current");
+    const staleNonce = await owner.rpc("create_company_discovery_review_nonce", {
+      p_job: staleBoundaryJob,
+      p_result: boundaryResult,
+      p_claim_ids: boundaryClaims.data!.map((row) => row.id),
+    });
+    expect(staleNonce.error?.message).toContain(
+      "company_discovery_review_result_not_owner",
+    );
+    const staleReview = await owner.rpc("review_company_discovery_claims", {
+      p_job: staleBoundaryJob,
+      p_result: boundaryResult,
+      p_expected_version: replacementTerminal.data.job_version,
+      p_decisions: [],
+      p_confirmation_nonce: String(boundaryNonce.data),
+    });
+    expect(staleReview.error?.message).toContain("company_discovery_review_not_awaiting");
+    expect((await serviceA.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: replacementBoundary.attempt_id,
+      p_fence_generation: replacementTerminal.data.fence_generation,
+      p_claim_token: replacementTerminal.data.claim_token,
+      p_proof: completeCleanupProof,
+    })).error).toBeNull();
+
+    // Concurrent claims for one logical slot have one winner. An unresolved
+    // proof quarantines that slot, so queued work cannot reuse it.
+    const slotRaceJobA = await submit("slot-race-a");
+    const slotRaceJobB = await submit("slot-race-b");
+    const slotRaceWorker = `stage0-slot-race-${randomUUID()}`;
+    const slotRace = await concurrentRpc([
+      () => serviceA.rpc("claim_company_discovery_attempt", {
+        p_worker_id: slotRaceWorker,
+        p_adapter_id: "openclaw",
+        p_lease_seconds: 300,
+      }),
+      () => serviceB.rpc("claim_company_discovery_attempt", {
+        p_worker_id: slotRaceWorker,
+        p_adapter_id: "openclaw",
+        p_lease_seconds: 300,
+      }),
+    ]);
+    for (const response of slotRace) expect(response.error).toBeNull();
+    const slotClaims = slotRace.flatMap((response) => response.data ?? []);
+    expect(slotClaims).toHaveLength(1);
+    const slotClaim = slotClaims[0] as ClaimedAttempt;
+    expect([slotRaceJobA, slotRaceJobB]).toContain(slotClaim.job_id);
+    expect((await serviceA.from("worker_runtime_slots")
+      .select("id,current_attempt_id").eq("slot_name", slotRaceWorker)).data)
+      .toEqual([{ id: slotClaim.runtime_slot_id, current_attempt_id: slotClaim.attempt_id }]);
+    expect((await bind(slotClaim, nextIdentity("slot-race"))).error).toBeNull();
+    const slotTerminal = await serviceA.rpc("terminalize_company_discovery_attempt", {
+      p_attempt_id: slotClaim.attempt_id,
+      p_fence_generation: slotClaim.fence_generation,
+      p_claim_token: slotClaim.claim_token,
+      p_outcome: "failed",
+      p_reason: "cleanup_unproved",
+    });
+    expect(slotTerminal.error).toBeNull();
+    const unresolved = await serviceA.rpc("record_company_discovery_cleanup", {
+      p_attempt_id: slotClaim.attempt_id,
+      p_fence_generation: slotTerminal.data.fence_generation,
+      p_claim_token: slotTerminal.data.claim_token,
+      p_proof: { ...completeCleanupProof, listener_closed: false },
+    });
+    expect(unresolved.error).toBeNull();
+    expect(unresolved.data).toMatchObject({
+      cleanup_state: "cleanup_unresolved",
+      slot_updated: true,
+    });
+    expect((await owner.rpc("retry_company_discovery", {
+      p_job: slotClaim.job_id,
+      p_expected_version: slotTerminal.data.job_version,
+    })).error).toBeNull();
+    const quarantinedClaim = await serviceA.rpc("claim_company_discovery_attempt", {
+      p_worker_id: slotRaceWorker,
+      p_adapter_id: "openclaw",
+      p_lease_seconds: 300,
+    });
+    expect(quarantinedClaim.error).toBeNull();
+    expect(quarantinedClaim.data).toEqual([]);
+    expect((await serviceA.from("worker_runtime_slots")
+      .select("status,current_attempt_id,quarantine_reason")
+      .eq("id", slotClaim.runtime_slot_id).single()).data).toEqual({
+      status: "quarantined",
+      current_attempt_id: null,
+      quarantine_reason: "cleanup_unresolved",
+    });
   },
 );

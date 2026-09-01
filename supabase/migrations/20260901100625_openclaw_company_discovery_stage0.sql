@@ -94,6 +94,10 @@ create table public.worker_runtime_slots (
   )
 );
 
+create unique index worker_runtime_slots_one_current_attempt
+  on public.worker_runtime_slots (current_attempt_id)
+  where current_attempt_id is not null;
+
 create table public.worker_attempts (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null references public.tenants (id),
@@ -117,6 +121,11 @@ create table public.worker_attempts (
   terminal_reason text,
   cleanup_state text not null default 'pending'
     check (cleanup_state in ('pending', 'proved', 'cleanup_unresolved')),
+  cleanup_outcome text not null default 'pending'
+    check (cleanup_outcome in (
+      'pending', 'runtime_not_bound',
+      'runtime_cleanup_proved', 'runtime_cleanup_unresolved'
+    )),
   cleanup_proof jsonb,
   created_at timestamp with time zone not null default now(),
   unique (job_id, attempt_number),
@@ -128,8 +137,35 @@ create table public.worker_attempts (
     runtime_identity_hash is null or
     runtime_identity_hash ~ '^[0-9a-f]{64}$'
   ),
-  check (jsonb_typeof(provider_metadata) = 'object')
+  check (jsonb_typeof(provider_metadata) = 'object'),
+  check (
+    (cleanup_state = 'pending'
+      and cleanup_outcome = 'pending'
+      and cleanup_proof is null)
+    or (cleanup_state = 'proved'
+      and cleanup_outcome in ('runtime_not_bound', 'runtime_cleanup_proved')
+      and cleanup_proof is not null)
+    or (cleanup_state = 'cleanup_unresolved'
+      and cleanup_outcome = 'runtime_cleanup_unresolved'
+      and cleanup_proof is not null)
+  ),
+  check (
+    cleanup_outcome <> 'runtime_not_bound'
+    or (
+      runtime_identity = '{}'::jsonb
+      and runtime_identity_hash is null
+      and cleanup_proof = '{
+        "outcome": "runtime_not_bound",
+        "database_proven": true,
+        "runtime_identity_bound": false
+      }'::jsonb
+    )
+  )
 );
+
+create unique index worker_attempts_one_pending_attempt_per_runtime_slot
+  on public.worker_attempts (runtime_slot_id)
+  where runtime_slot_id is not null and cleanup_state = 'pending';
 
 alter table public.worker_jobs
   add constraint worker_jobs_current_attempt_fk
@@ -140,6 +176,47 @@ alter table public.worker_jobs
 alter table public.worker_runtime_slots
   add constraint worker_runtime_slots_current_attempt_fk
   foreign key (current_attempt_id) references public.worker_attempts (id);
+
+-- Runtime resource names live longer than a process. These immutable
+-- reservations prevent an old cleanup receipt from ever naming a resource
+-- owned by a later attempt, including after the original slot is reusable.
+create table public.worker_runtime_resource_reservations (
+  attempt_id uuid not null references public.worker_attempts (id),
+  resource_namespace text not null check (resource_namespace in (
+    'bundle', 'container', 'network', 'volume', 'profile',
+    'loopback_port', 'socket', 'config', 'output'
+  )),
+  resource_kind text not null check (resource_kind in (
+    'bundle_hash',
+    'cell_container', 'bridge_container',
+    'internal_network', 'egress_network',
+    'config_volume', 'state_volume', 'workspace_volume', 'output_volume',
+    'gateway_secret_volume', 'bridge_secret_volume',
+    'profile', 'loopback_port', 'socket_identifier',
+    'config_identifier', 'output_identifier'
+  )),
+  resource_identifier text not null
+    check (length(resource_identifier) between 1 and 256),
+  created_at timestamp with time zone not null default now(),
+  primary key (attempt_id, resource_kind),
+  unique (resource_namespace, resource_identifier),
+  check (
+    (resource_kind = 'bundle_hash' and resource_namespace = 'bundle')
+    or (resource_kind in ('cell_container', 'bridge_container')
+      and resource_namespace = 'container')
+    or (resource_kind in ('internal_network', 'egress_network')
+      and resource_namespace = 'network')
+    or (resource_kind in (
+        'config_volume', 'state_volume', 'workspace_volume', 'output_volume',
+        'gateway_secret_volume', 'bridge_secret_volume'
+      ) and resource_namespace = 'volume')
+    or (resource_kind = 'profile' and resource_namespace = 'profile')
+    or (resource_kind = 'loopback_port' and resource_namespace = 'loopback_port')
+    or (resource_kind = 'socket_identifier' and resource_namespace = 'socket')
+    or (resource_kind = 'config_identifier' and resource_namespace = 'config')
+    or (resource_kind = 'output_identifier' and resource_namespace = 'output')
+  )
+);
 
 -- ---------------------------------------------------------------- immutable candidates and evidence
 create table public.worker_results (
@@ -307,6 +384,9 @@ create trigger worker_jobs_identity_immutable
 create trigger worker_results_append_only
   before update or delete on public.worker_results
   for each row execute function public.block_mutation();
+create trigger worker_runtime_resource_reservations_append_only
+  before update or delete on public.worker_runtime_resource_reservations
+  for each row execute function public.block_mutation();
 create trigger discovery_source_snapshots_append_only
   before update or delete on public.discovery_source_snapshots
   for each row execute function public.block_mutation();
@@ -375,6 +455,8 @@ alter table public.worker_runtime_slots enable row level security;
 alter table public.worker_runtime_slots force row level security;
 alter table public.worker_attempts enable row level security;
 alter table public.worker_attempts force row level security;
+alter table public.worker_runtime_resource_reservations enable row level security;
+alter table public.worker_runtime_resource_reservations force row level security;
 alter table public.worker_results enable row level security;
 alter table public.worker_results force row level security;
 alter table public.discovery_source_snapshots enable row level security;
@@ -445,7 +527,8 @@ create policy discovery_decisions_owner_select
 
 revoke all on table public.company_discovery_controls,
   public.company_discovery_allowlist, public.worker_jobs,
-  public.worker_runtime_slots, public.worker_attempts, public.worker_results,
+  public.worker_runtime_slots, public.worker_attempts,
+  public.worker_runtime_resource_reservations, public.worker_results,
   public.discovery_source_snapshots, public.discovery_claims,
   public.company_discovery_review_nonces, public.business_profile_versions,
   public.discovery_decisions
@@ -1437,6 +1520,35 @@ begin
   end loop;
   v_runtime_hash := encode(extensions.digest(convert_to(p_runtime_identity::text, 'utf8'), 'sha256'
   ), 'hex');
+  begin
+    insert into public.worker_runtime_resource_reservations (
+      attempt_id, resource_namespace, resource_kind, resource_identifier
+    )
+    select v_attempt.id, reservation.resource_namespace,
+      reservation.resource_kind, reservation.resource_identifier
+    from (values
+      ('bundle', 'bundle_hash', v_runtime_hash),
+      ('container', 'cell_container', lower(p_runtime_identity->>'cell_container_name')),
+      ('container', 'bridge_container', lower(p_runtime_identity->>'bridge_container_name')),
+      ('network', 'internal_network', lower(p_runtime_identity->>'internal_network_name')),
+      ('network', 'egress_network', lower(p_runtime_identity->>'egress_network_name')),
+      ('volume', 'config_volume', lower(p_runtime_identity->>'config_volume_name')),
+      ('volume', 'state_volume', lower(p_runtime_identity->>'state_volume_name')),
+      ('volume', 'workspace_volume', lower(p_runtime_identity->>'workspace_volume_name')),
+      ('volume', 'output_volume', lower(p_runtime_identity->>'output_volume_name')),
+      ('volume', 'gateway_secret_volume', lower(p_runtime_identity->>'gateway_secret_volume_name')),
+      ('volume', 'bridge_secret_volume', lower(p_runtime_identity->>'bridge_secret_volume_name')),
+      ('profile', 'profile', lower(p_runtime_identity->>'profile_name')),
+      ('loopback_port', 'loopback_port', p_runtime_identity->>'loopback_port'),
+      ('socket', 'socket_identifier',
+        '127.0.0.1:' || (p_runtime_identity->>'loopback_port')),
+      ('config', 'config_identifier', lower(p_runtime_identity->>'config_volume_name')),
+      ('output', 'output_identifier', lower(p_runtime_identity->>'output_volume_name'))
+    ) as reservation(resource_namespace, resource_kind, resource_identifier);
+  exception when unique_violation then
+    raise exception using errcode = '23505',
+      message = 'company_discovery_runtime_identity_conflict';
+  end;
   update public.worker_attempts
   set runtime_identity = p_runtime_identity,
       runtime_identity_hash = v_runtime_hash
@@ -1539,6 +1651,7 @@ begin
       terminal_at = clock_timestamp(),
       terminal_reason = p_reason,
       cleanup_state = 'pending',
+      cleanup_outcome = 'pending',
       cleanup_proof = null
   where id = v_attempt.id;
   update public.worker_jobs
@@ -2033,6 +2146,9 @@ declare
   v_job public.worker_jobs;
   v_new_fence bigint;
   v_cleanup_token text := encode(extensions.gen_random_bytes(32), 'hex');
+  v_runtime_bound boolean;
+  v_requeue boolean := false;
+  v_now timestamp with time zone;
 begin
   if p_worker_id is null or btrim(p_worker_id) = ''
      or p_lease_seconds not between 1 and 600 then
@@ -2042,61 +2158,153 @@ begin
   select a.* into v_attempt
   from public.worker_attempts a
   join public.worker_jobs j on j.id = a.job_id
-  where a.status = 'running'
-    and a.cleanup_state = 'pending'
+  join public.worker_runtime_slots s on s.id = a.runtime_slot_id
+  where a.cleanup_state = 'pending'
     and a.lease_until <= clock_timestamp()
-    and a.runtime_identity <> '{}'::jsonb
-    and a.runtime_identity_hash is not null
-    and j.status = 'running'
-    and j.current_attempt_id = a.id
+    and s.current_attempt_id = a.id
+    and s.status in ('busy', 'quarantined')
+    and (
+      (a.status = 'running'
+        and j.status = 'running'
+        and j.current_attempt_id = a.id)
+      or a.status in ('failed', 'cancelled', 'superseded')
+    )
   order by a.lease_until, a.created_at, a.id
   limit 1
-  for update skip locked;
+  for update of a skip locked;
   if v_attempt.id is null then return; end if;
   select j.* into v_job
   from public.worker_jobs j
   where j.id = v_attempt.job_id
   for update;
-  if v_job.status <> 'running'
-     or v_job.current_attempt_id is distinct from v_attempt.id then
+  if v_attempt.cleanup_state <> 'pending'
+     or v_attempt.lease_until > clock_timestamp()
+     or not (
+       (v_attempt.status = 'running'
+         and v_job.status = 'running'
+         and v_job.current_attempt_id = v_attempt.id)
+       or v_attempt.status in ('failed', 'cancelled', 'superseded')
+     ) then
     raise exception using errcode = '40001',
       message = 'company_discovery_expired_cleanup_race_lost';
   end if;
+  v_now := clock_timestamp();
+  v_runtime_bound := v_attempt.runtime_identity <> '{}'::jsonb
+    and v_attempt.runtime_identity_hash is not null;
   v_new_fence := greatest(
     v_job.fence_generation,
     v_attempt.fence_generation
   ) + 1;
+
+  if not v_runtime_bound then
+    if v_attempt.runtime_identity <> '{}'::jsonb
+       or v_attempt.runtime_identity_hash is not null then
+      raise exception using errcode = '55000',
+        message = 'company_discovery_runtime_identity_incomplete';
+    end if;
+    v_requeue := v_attempt.status = 'running'
+      and v_job.status = 'running'
+      and v_job.deadline_at > v_now
+      and exists (
+        select 1 from public.company_discovery_controls c
+        where c.singleton and c.enabled
+      )
+      and exists (
+        select 1 from public.company_discovery_allowlist allowed
+        where allowed.tenant_id = v_job.tenant_id
+          and allowed.active
+          and (allowed.expires_at is null or allowed.expires_at > v_now)
+      );
+    update public.worker_attempts
+    set status = case when status = 'running' then 'failed' else status end,
+        fence_generation = v_new_fence,
+        claim_token_hash = extensions.digest(v_cleanup_token, 'sha256'),
+        claimed_by = btrim(p_worker_id),
+        claimed_at = v_now,
+        lease_until = v_now + interval '1 second',
+        terminal_at = coalesce(terminal_at, v_now),
+        terminal_reason = case when status = 'running'
+          then 'runtime_not_bound'
+          else coalesce(terminal_reason, 'runtime_not_bound')
+        end,
+        cleanup_state = 'proved',
+        cleanup_outcome = 'runtime_not_bound',
+        cleanup_proof = jsonb_build_object(
+          'outcome', 'runtime_not_bound',
+          'database_proven', true,
+          'runtime_identity_bound', false
+        )
+    where id = v_attempt.id;
+    if v_attempt.status = 'running' then
+      update public.worker_jobs
+      set status = case when v_requeue then 'queued' else 'failed' end,
+          current_attempt_id = case when v_requeue then null else v_attempt.id end,
+          fence_generation = v_new_fence,
+          version = version + 1,
+          selected_attempt_id = null,
+          fallback_state = 'existing_onboarding',
+          updated_at = v_now
+      where id = v_job.id;
+      update public.company_discovery_review_nonces as n
+      set invalidated_at = v_now,
+          invalidation_reason = 'attempt_runtime_not_bound'
+      where n.job_id = v_job.id
+        and n.consumed_at is null
+        and n.invalidated_at is null;
+    end if;
+    update public.worker_runtime_slots as s
+    set status = 'available',
+        tenant_id = null,
+        current_attempt_id = null,
+        quarantine_reason = null,
+        quarantine_proof_hash = null,
+        updated_at = v_now
+    where s.id = v_attempt.runtime_slot_id
+      and s.current_attempt_id = v_attempt.id;
+    if not found then
+      raise exception using errcode = '55000',
+        message = 'company_discovery_runtime_slot_not_current';
+    end if;
+    return;
+  end if;
+
   update public.worker_attempts
-  set status = 'failed',
+  set status = case when status = 'running' then 'failed' else status end,
       fence_generation = v_new_fence,
       claim_token_hash = extensions.digest(v_cleanup_token, 'sha256'),
       claimed_by = btrim(p_worker_id),
-      claimed_at = clock_timestamp(),
-      lease_until = clock_timestamp() + make_interval(secs => p_lease_seconds),
-      terminal_at = clock_timestamp(),
-      terminal_reason = 'expired_lease',
+      claimed_at = v_now,
+      lease_until = v_now + make_interval(secs => p_lease_seconds),
+      terminal_at = coalesce(terminal_at, v_now),
+      terminal_reason = case when status = 'running'
+        then 'expired_lease'
+        else terminal_reason
+      end,
       cleanup_state = 'pending',
+      cleanup_outcome = 'pending',
       cleanup_proof = null
   where id = v_attempt.id;
-  update public.worker_jobs
-  set status = 'failed',
-      fence_generation = v_new_fence,
-      version = version + 1,
-      selected_attempt_id = null,
-      fallback_state = 'existing_onboarding',
-      updated_at = clock_timestamp()
-  where id = v_job.id;
-  update public.company_discovery_review_nonces as n
-  set invalidated_at = clock_timestamp(),
-      invalidation_reason = 'attempt_expired'
-  where n.job_id = v_job.id
-    and n.consumed_at is null
-    and n.invalidated_at is null;
+  if v_attempt.status = 'running' then
+    update public.worker_jobs
+    set status = 'failed',
+        fence_generation = v_new_fence,
+        version = version + 1,
+        selected_attempt_id = null,
+        fallback_state = 'existing_onboarding',
+        updated_at = v_now
+    where id = v_job.id;
+    update public.company_discovery_review_nonces as n
+    set invalidated_at = v_now,
+        invalidation_reason = 'attempt_expired'
+    where n.job_id = v_job.id
+      and n.consumed_at is null
+      and n.invalidated_at is null;
+  end if;
   update public.worker_runtime_slots as s
   set status = 'quarantined',
       quarantine_reason = 'expired_lease_cleanup',
       quarantine_proof_hash = null,
-      updated_at = clock_timestamp()
+      updated_at = v_now
   where s.id = v_attempt.runtime_slot_id
     and s.current_attempt_id = v_attempt.id;
   if not found then
@@ -2106,7 +2314,8 @@ begin
   return query select
     v_job.id, v_attempt.id, v_attempt.adapter_id,
     v_attempt.runtime_slot_id, v_attempt.runtime_identity,
-    v_new_fence, v_cleanup_token, v_job.version + 1;
+    v_new_fence, v_cleanup_token,
+    v_job.version + case when v_attempt.status = 'running' then 1 else 0 end;
 end;
 $$;
 
@@ -2149,6 +2358,11 @@ begin
   if v_attempt.cleanup_state <> 'pending' then
     raise exception using errcode = '55000', message = 'company_discovery_cleanup_already_recorded';
   end if;
+  if v_attempt.runtime_identity = '{}'::jsonb
+     or v_attempt.runtime_identity_hash is null then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_cleanup_runtime_not_bound';
+  end if;
   if jsonb_typeof(p_proof) <> 'object'
      or not (p_proof ?& array[
        'gateway_exited', 'container_removed', 'bridge_removed',
@@ -2183,6 +2397,10 @@ begin
     and p_proof->'late_result_rejected' = 'true'::jsonb;
   update public.worker_attempts
   set cleanup_state = case when v_proved then 'proved' else 'cleanup_unresolved' end,
+      cleanup_outcome = case when v_proved
+        then 'runtime_cleanup_proved'
+        else 'runtime_cleanup_unresolved'
+      end,
       cleanup_proof = p_proof
   where id = v_attempt.id;
   update public.worker_runtime_slots
