@@ -1,0 +1,54 @@
+{
+  "schema": "ligou.deployed-baseline-record",
+  "version": 1,
+  "captured_at": "2026-09-01T09:54:47Z",
+  "source": {
+    "branch": "codex/v0.2-browser-pilot",
+    "remote_tip_before_reconciliation": "ffd611878e81c88f85ecc846446527e8ab5a9d42",
+    "first_unpushed_commit": "7eb119208a58a068efeca26634ab86a3a7f9dbd6",
+    "unpushed_commit_count": 92,
+    "merge_commit_count": 0
+  },
+  "runtime": {
+    "commit_sha": "0ab07f8d708f87fc6d236681353c6deaa33f66aa",
+    "tree_sha": "2679ee690b4cb2ee3381109849df253ecd046498",
+    "artifact_sha256": "56bfed6faa2abef4041a4094fef8e40b952f19135d0ecd8a94341ac219ac4b87",
+    "artifact_size_bytes": 307343,
+    "packaged_file_count": 143,
+    "release_id": "0ab07f8d708f87fc6d236681353c6deaa33f66aa-56bfed6faa2abef4041a4094fef8e40b952f19135d0ecd8a94341ac219ac4b87"
+  },
+  "dashboard": {
+    "commit_sha": "2df576e2ebe93a06e18468c229ceb994b8e9c052",
+    "tree_sha": "e55b9d2474fa405c62030d05cc4ee93d71c3d095",
+    "deployment_id": "dpl_3uU9FQWQ3hG7G3n4gHGxcDHWcbVY"
+  },
+  "deployed_readback": {
+    "instance_id": "i-0de12212f9a17dcfc",
+    "controller": "ready",
+    "supabase": "ready",
+    "hermes": "ready",
+    "systemd": "active/running",
+    "database_migrations": "61/61",
+    "edge_browser_session_version": 8,
+    "reset_generation": 1,
+    "operational_state_zeroed": true
+  },
+  "qualification": {
+    "onboarding_coordinator": "83/83",
+    "sideband": "103/103",
+    "dashboard": "109/109",
+    "sites": "6/6",
+    "deploy_release": "21/21",
+    "independent_review": "0 Critical / 0 Important"
+  },
+  "evidence": {
+    "rollout_thread_id": "01a03a32-6345-77f0-83d0-8b89ca99acdb",
+    "rollout_event_ordinal": 33303,
+    "health_ssm_command_id": "337baa3e-b7bb-4518-af54-479e38ab4e24",
+    "package_reproduced_locally": true
+  },
+  "limits": {
+    "fresh_post_fix_human_portuguese_voice_e2e": "not_run",
+    "stage1_allowed": false
+  }
+}
