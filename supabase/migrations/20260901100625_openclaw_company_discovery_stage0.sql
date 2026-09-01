@@ -40,7 +40,8 @@ create table public.worker_jobs (
   job_type text not null default 'company_discovery.v1'
     check (job_type = 'company_discovery.v1'),
   normalized_origin text not null,
-  registrable_domain text not null,
+  origin_host text not null,
+  registrable_domain text,
   idempotency_key text not null check (length(idempotency_key) between 1 and 200),
   request_hash text not null check (request_hash ~ '^[0-9a-f]{64}$'),
   version bigint not null default 1 check (version > 0),
@@ -60,6 +61,11 @@ create table public.worker_jobs (
   unique (tenant_id, idempotency_key),
   unique (id, tenant_id),
   check (normalized_origin ~ '^https://[^/@:#?]+([/?].*)?$'),
+  check (origin_host ~ '^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$'),
+  check (
+    registrable_domain is null or
+    registrable_domain ~ '^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$'
+  ),
   check (deadline_at > created_at),
   check (jsonb_typeof(budget) = 'object')
 );
@@ -211,6 +217,8 @@ create table public.company_discovery_review_nonces (
   nonce_hash bytea not null unique,
   expires_at timestamp with time zone not null,
   consumed_at timestamp with time zone,
+  invalidated_at timestamp with time zone,
+  invalidation_reason text,
   created_by uuid not null,
   created_at timestamp with time zone not null default now(),
   foreign key (job_id, tenant_id) references public.worker_jobs (id, tenant_id),
@@ -272,7 +280,7 @@ begin
      or new.tenant_id is distinct from old.tenant_id
      or new.job_type is distinct from old.job_type
      or new.normalized_origin is distinct from old.normalized_origin
-     or new.registrable_domain is distinct from old.registrable_domain
+     or new.origin_host is distinct from old.origin_host
      or new.idempotency_key is distinct from old.idempotency_key
      or new.request_hash is distinct from old.request_hash
      or new.created_at is distinct from old.created_at then
@@ -305,6 +313,50 @@ create trigger discovery_decisions_append_only
 create trigger business_profile_versions_append_only
   before update or delete on public.business_profile_versions
   for each row execute function public.block_mutation();
+
+create or replace function public.company_discovery_json_has_forbidden_keys(
+  p_value jsonb
+) returns boolean
+language plpgsql
+immutable
+set search_path = ''
+as $$
+declare
+  v_key text;
+  v_child jsonb;
+  v_forbidden constant text[] := array[
+    'tenant_id', 'canonical_id', 'policy_group', 'approval', 'approved',
+    'approved_by', 'approved_at', 'status', 'effective', 'active',
+    'enabled', 'policy_hash', 'action_completion', 'rule_id',
+    'rule_group_id', 'power', 'powers', 'capability', 'grant', 'authority',
+    'materialization_key', 'materialization_eligible', 'review_ready',
+    'operational_state', 'source_kind', 'source_call_id', 'source_job_id',
+    'source_result_id', 'source_claim_id', 'source_decision_id',
+    'coverage_revision'
+  ];
+begin
+  if jsonb_typeof(p_value) = 'object' then
+    for v_key, v_child in select key, value from jsonb_each(p_value)
+    loop
+      if v_key = any(v_forbidden)
+         or public.company_discovery_json_has_forbidden_keys(v_child) then
+        return true;
+      end if;
+    end loop;
+  elsif jsonb_typeof(p_value) = 'array' then
+    for v_child in select value from jsonb_array_elements(p_value)
+    loop
+      if public.company_discovery_json_has_forbidden_keys(v_child) then
+        return true;
+      end if;
+    end loop;
+  end if;
+  return false;
+end;
+$$;
+
+revoke all on function public.company_discovery_json_has_forbidden_keys(jsonb)
+  from public, anon, authenticated, service_role;
 
 -- ---------------------------------------------------------------- RLS and direct grants
 alter table public.company_discovery_controls enable row level security;
@@ -500,10 +552,10 @@ begin
       message = 'company_discovery_tenant_not_allowlisted';
   end if;
   insert into public.worker_jobs (
-    tenant_id, normalized_origin, registrable_domain, idempotency_key,
+    tenant_id, normalized_origin, origin_host, registrable_domain, idempotency_key,
     request_hash, deadline_at, budget
   ) values (
-    v_tenant, v_origin, v_host, btrim(p_idempotency_key), v_request_hash,
+    v_tenant, v_origin, v_host, null, btrim(p_idempotency_key), v_request_hash,
     clock_timestamp() + interval '10 minutes',
     jsonb_build_object(
       'max_pages', 25, 'max_depth', 2, 'max_page_bytes', 1048576,
@@ -551,16 +603,25 @@ begin
   end if;
   update public.worker_jobs
   set status = 'cancelled', version = version + 1,
-      fence_generation = fence_generation + 1, updated_at = clock_timestamp()
+      fence_generation = fence_generation + 1,
+      selected_attempt_id = null,
+      fallback_state = 'existing_onboarding',
+      updated_at = clock_timestamp()
   where id = v_job.id;
   update public.worker_attempts
-  set status = 'cancelled', terminal_at = clock_timestamp()
-  where id = v_job.current_attempt_id and status = 'running';
-  update public.worker_runtime_slots
-  set status = 'available', current_attempt_id = null,
-      tenant_id = null, updated_at = clock_timestamp()
-  where current_attempt_id = v_job.current_attempt_id
-    and status <> 'quarantined';
+  set status = case
+        when status in ('validated', 'selected') then 'superseded'
+        else 'cancelled'
+      end,
+      terminal_at = coalesce(terminal_at, clock_timestamp())
+  where id = v_job.current_attempt_id
+    and status in ('running', 'validated', 'selected');
+  update public.company_discovery_review_nonces
+  set invalidated_at = clock_timestamp(),
+      invalidation_reason = 'job_cancelled'
+  where job_id = v_job.id
+    and consumed_at is null
+    and invalidated_at is null;
   return jsonb_build_object(
     'job_id', v_job.id, 'status', 'cancelled',
     'version', v_job.version + 1,
@@ -609,9 +670,22 @@ begin
   end if;
   update public.worker_jobs
   set status = 'queued', current_attempt_id = null,
+      selected_attempt_id = null,
+      fallback_state = 'existing_onboarding',
       version = version + 1, fence_generation = fence_generation + 1,
       updated_at = clock_timestamp()
   where id = v_job.id;
+  update public.worker_attempts
+  set status = 'superseded',
+      terminal_at = coalesce(terminal_at, clock_timestamp())
+  where id = v_job.current_attempt_id
+    and status in ('running', 'validated', 'selected');
+  update public.company_discovery_review_nonces
+  set invalidated_at = clock_timestamp(),
+      invalidation_reason = 'job_retried'
+  where job_id = v_job.id
+    and consumed_at is null
+    and invalidated_at is null;
   return jsonb_build_object(
     'job_id', v_job.id, 'status', 'queued',
     'version', v_job.version + 1,
@@ -649,7 +723,9 @@ begin
     and t.owner_user_id = v_owner
   join public.worker_results wr on wr.job_id = j.id
     and wr.id = p_result and wr.validation_state = 'validated'
-  where j.id = p_job and j.selected_attempt_id = wr.attempt_id;
+  where j.id = p_job
+    and j.status = 'awaiting_review'
+    and j.selected_attempt_id = wr.attempt_id;
   if v_job.id is null then
     raise exception using errcode = '42501',
       message = 'company_discovery_review_result_not_owner';
@@ -713,9 +789,19 @@ declare
   v_decision_id uuid;
   v_decision_kind text;
   v_value jsonb;
-  v_materialization jsonb;
+  v_derived_category text;
+  v_derived_scope text;
+  v_derived_schema text;
+  v_derived_text text;
+  v_derived_structured jsonb;
+  v_materialization_key text;
   v_structured jsonb;
   v_rule_id uuid;
+  v_rule_group_ids uuid[];
+  v_rule_group_id uuid;
+  v_rule_version integer;
+  v_group_hex text;
+  v_service_type text;
   v_profile_id uuid;
   v_profile_version bigint;
   v_profile jsonb;
@@ -724,24 +810,35 @@ begin
   if v_owner is null then
     raise exception using errcode = '42501', message = 'authentication_required';
   end if;
-  if jsonb_typeof(p_decisions) <> 'array' or jsonb_array_length(p_decisions) = 0 then
-    raise exception using errcode = '22023',
-      message = 'company_discovery_review_decisions_invalid';
-  end if;
   select j.* into v_job
   from public.worker_jobs j
   join public.tenants t on t.id = j.tenant_id
     and t.owner_user_id = v_owner
   join public.worker_results wr on wr.job_id = j.id
     and wr.id = p_result and wr.validation_state = 'validated'
-  where j.id = p_job and j.selected_attempt_id = wr.attempt_id
+  where j.id = p_job
+    and j.status = 'awaiting_review'
+    and j.selected_attempt_id = wr.attempt_id
   for update of j;
   if v_job.id is null then
+    if exists (
+      select 1 from public.worker_jobs j
+      join public.tenants t on t.id = j.tenant_id
+        and t.owner_user_id = v_owner
+      where j.id = p_job and j.status <> 'awaiting_review'
+    ) then
+      raise exception using errcode = '55000',
+        message = 'company_discovery_review_not_awaiting';
+    end if;
     raise exception using errcode = '42501',
       message = 'company_discovery_review_result_not_owner';
   end if;
   if v_job.version is distinct from p_expected_version then
     raise exception using errcode = '40001', message = 'company_discovery_stale_version';
+  end if;
+  if jsonb_typeof(p_decisions) <> 'array' or jsonb_array_length(p_decisions) = 0 then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_review_decisions_invalid';
   end if;
   select n.* into v_nonce
   from public.company_discovery_review_nonces n
@@ -750,6 +847,7 @@ begin
     and n.nonce_hash = extensions.digest(p_confirmation_nonce, 'sha256')
   for update;
   if v_nonce.id is null or v_nonce.consumed_at is not null
+     or v_nonce.invalidated_at is not null
      or v_nonce.expires_at <= clock_timestamp() then
     raise exception using errcode = '42501',
       message = 'company_discovery_review_nonce_invalid';
@@ -767,8 +865,21 @@ begin
       message = 'company_discovery_review_claim_set_mismatch';
   end if;
 
+  perform pg_advisory_xact_lock(hashtextextended(
+    'ligou.v0_2.rules_versioning:' || v_job.tenant_id::text,
+    0
+  ));
+
   for v_decision in select value from jsonb_array_elements(p_decisions)
   loop
+    if jsonb_typeof(v_decision) <> 'object'
+       or (v_decision - array[
+         'claim_id', 'decision', 'value', 'group_confirmed',
+         'evidence_acknowledged', 'acknowledged_evidence_refs'
+       ]::text[]) <> '{}'::jsonb then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_review_decision_schema_invalid';
+    end if;
     select c.* into v_claim
     from public.discovery_claims c
     where c.id = (v_decision->>'claim_id')::uuid
@@ -793,11 +904,25 @@ begin
     end if;
     v_value := case when v_decision_kind = 'edit'
       then v_decision->'value' else v_claim.normalized_value end;
+    if v_decision_kind <> 'reject'
+       and public.company_discovery_json_has_forbidden_keys(v_value) then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_forbidden_result_field';
+    end if;
     v_decision_id := gen_random_uuid();
     v_rule_id := null;
     v_profile_id := null;
 
     if v_decision_kind <> 'reject' and v_claim.claim_class = 'descriptive' then
+      if v_claim.claim_type not in (
+           'business_name', 'business_description', 'public_phone',
+           'public_email', 'public_address', 'public_website'
+         )
+         or jsonb_typeof(v_value) <> 'string'
+         or length(v_value #>> '{}') not between 1 and 2000 then
+        raise exception using errcode = '22023',
+          message = 'company_discovery_descriptive_value_invalid';
+      end if;
       select bp.version, bp.profile into v_profile_version, v_profile
       from public.business_profile_versions bp
       where bp.tenant_id = v_job.tenant_id
@@ -827,19 +952,123 @@ begin
         raise exception using errcode = '22023',
           message = 'company_discovery_safety_evidence_ack_required';
       end if;
-      v_materialization := v_decision->'materialization';
-      if jsonb_typeof(v_materialization) <> 'object'
-         or coalesce(v_materialization->>'category', '') = ''
-         or (v_materialization->>'scope') not in ('geral','servico','localizacao','cliente')
-         or coalesce(v_materialization->>'text', '') = ''
-         or jsonb_typeof(v_materialization->'structured') <> 'object'
-         or v_materialization->'structured'->>'materialization_key' is null
-         or v_materialization->'structured'->'materialization_eligible' is distinct from 'true'::jsonb
-         or v_materialization->'structured'->'review_ready' is distinct from 'true'::jsonb then
+
+      if v_claim.claim_class = 'operational' and v_claim.claim_type = 'service' then
+        if jsonb_typeof(v_value) <> 'object'
+           or (v_value - array[
+             'service_type', 'service_names', 'price_mode',
+             'negotiation_mode', 'price_target', 'price_min', 'duration_min'
+           ]::text[]) <> '{}'::jsonb
+           or coalesce(v_value->>'service_type', '') !~ '^[a-z0-9][a-z0-9_]{0,199}$'
+           or jsonb_typeof(v_value->'service_names') <> 'array'
+           or jsonb_array_length(v_value->'service_names') not between 1 and 20
+           or exists (
+             select 1 from jsonb_array_elements(v_value->'service_names') name
+             where jsonb_typeof(name) <> 'string'
+               or length(name #>> '{}') not between 1 and 200
+           )
+           or v_value->>'price_mode' not in ('fixed', 'starting_at')
+           or v_value->>'negotiation_mode' not in ('negotiable', 'non_negotiable')
+           or jsonb_typeof(v_value->'price_target') <> 'number'
+           or jsonb_typeof(v_value->'price_min') <> 'number'
+           or jsonb_typeof(v_value->'duration_min') <> 'number'
+           or (v_value->>'price_target')::numeric < 0
+           or (v_value->>'price_min')::numeric < 0
+           or (v_value->>'price_min')::numeric > (v_value->>'price_target')::numeric
+           or (v_value->>'duration_min')::numeric <= 0
+           or (
+             v_value->>'negotiation_mode' = 'non_negotiable'
+             and (v_value->>'price_min')::numeric is distinct from
+               (v_value->>'price_target')::numeric
+           ) then
+          raise exception using errcode = '22023',
+            message = 'company_discovery_service_value_invalid';
+        end if;
+        v_service_type := v_value->>'service_type';
+        v_derived_category := 'preco';
+        v_derived_scope := 'servico';
+        v_derived_schema := 'ligou.rule.service.v2';
+        v_materialization_key := 'service:' || v_service_type;
+        v_derived_text := format(
+          'Serviço %s: preço público %s; duração %s minutos.',
+          v_service_type, v_value->>'price_target', v_value->>'duration_min'
+        );
+        v_derived_structured := jsonb_build_object(
+          'schema', v_derived_schema,
+          'materialization_key', v_materialization_key,
+          'materialization_eligible', true,
+          'review_ready', true,
+          'operational_state', 'active',
+          'service_type', v_service_type,
+          'service_names', v_value->'service_names',
+          'price_mode', v_value->>'price_mode',
+          'negotiation_mode', v_value->>'negotiation_mode',
+          'quoteable', true,
+          'negotiable', v_value->>'negotiation_mode' = 'negotiable',
+          'price_target', v_value->'price_target',
+          'price_min', v_value->'price_min',
+          'duration_min', v_value->'duration_min',
+          'owner_review_fields', '[]'::jsonb
+        );
+      elsif v_claim.claim_class = 'safety_critical'
+            and v_claim.claim_type = 'emergency' then
+        if jsonb_typeof(v_value) <> 'object'
+           or (v_value - array['guidance']::text[]) <> '{}'::jsonb
+           or jsonb_typeof(v_value->'guidance') <> 'string'
+           or length(v_value->>'guidance') not between 1 and 2000 then
+          raise exception using errcode = '22023',
+            message = 'company_discovery_emergency_value_invalid';
+        end if;
+        v_derived_category := 'emergencia';
+        v_derived_scope := 'geral';
+        v_derived_schema := 'ligou.rule.emergency.v2';
+        v_materialization_key := 'domain:emergency';
+        v_derived_text := v_value->>'guidance';
+        v_derived_structured := jsonb_build_object(
+          'schema', v_derived_schema,
+          'materialization_key', v_materialization_key,
+          'materialization_eligible', true,
+          'review_ready', true,
+          'operational_state', 'active',
+          'owner_review_fields', '[]'::jsonb,
+          'fields', jsonb_build_object(
+            'safety_escalation', v_value->>'guidance'
+          )
+        );
+      else
         raise exception using errcode = '22023',
-          message = 'company_discovery_materialization_invalid';
+          message = 'company_discovery_claim_materialization_type_invalid';
       end if;
-      v_structured := v_materialization->'structured' || jsonb_build_object(
+
+      select array_agg(distinct r.rule_group_id order by r.rule_group_id)
+        into v_rule_group_ids
+      from public.rules r
+      where r.tenant_id = v_job.tenant_id
+        and r.structured->>'materialization_key' = v_materialization_key;
+      if coalesce(cardinality(v_rule_group_ids), 0) > 1 then
+        raise exception using errcode = '55000',
+          message = 'company_discovery_materialization_group_ambiguous';
+      end if;
+      if cardinality(v_rule_group_ids) = 1 then
+        v_rule_group_id := v_rule_group_ids[1];
+      else
+        v_group_hex := md5(
+          v_job.tenant_id::text || '|company_discovery|' || v_materialization_key
+        );
+        v_rule_group_id := (
+          substr(v_group_hex, 1, 8) || '-' ||
+          substr(v_group_hex, 9, 4) || '-' ||
+          substr(v_group_hex, 13, 4) || '-' ||
+          substr(v_group_hex, 17, 4) || '-' ||
+          substr(v_group_hex, 21, 12)
+        )::uuid;
+      end if;
+      select coalesce(max(r.version), 0) + 1 into v_rule_version
+      from public.rules r
+      where r.tenant_id = v_job.tenant_id
+        and r.rule_group_id = v_rule_group_id;
+
+      v_structured := v_derived_structured || jsonb_build_object(
         'source_kind', 'company_discovery',
         'source_job_id', v_job.id,
         'source_result_id', p_result,
@@ -850,20 +1079,22 @@ begin
       v_structured := v_structured || jsonb_build_object(
         'materialization_hash', encode(extensions.digest(
           convert_to((jsonb_build_object(
-            'category', v_materialization->>'category',
-            'scope', v_materialization->>'scope',
-            'text', v_materialization->>'text',
+            'category', v_derived_category,
+            'scope', v_derived_scope,
+            'text', v_derived_text,
             'structured', v_structured - 'materialization_hash'
           ))::text, 'utf8'), 'sha256'
         ), 'hex')
       );
       insert into public.rules (
-        tenant_id, origem, escopo, status, category, text, structured,
+        tenant_id, rule_group_id, version, origem, escopo, status,
+        category, text, structured,
         evidence_quote, related_call_id, approved_by, approved_at
       ) values (
-        v_job.tenant_id, 'company_discovery', v_materialization->>'scope',
-        'aprovado', v_materialization->>'category',
-        v_materialization->>'text', v_structured,
+        v_job.tenant_id, v_rule_group_id, v_rule_version,
+        'company_discovery', v_derived_scope,
+        'aprovado', v_derived_category,
+        v_derived_text, v_structured,
         (
           select string_agg(s.excerpt, E'\n' order by s.crawl_order)
           from public.discovery_source_snapshots s
@@ -889,7 +1120,9 @@ begin
 
   update public.company_discovery_review_nonces
   set consumed_at = clock_timestamp()
-  where id = v_nonce.id and consumed_at is null;
+  where id = v_nonce.id
+    and consumed_at is null
+    and invalidated_at is null;
   if not found then
     raise exception using errcode = '40001',
       message = 'company_discovery_review_nonce_race_lost';
@@ -1058,24 +1291,31 @@ begin
     raise exception using errcode = '55000', message = 'company_discovery_attempt_lease_expired';
   end if;
   if jsonb_typeof(p_result) <> 'object'
-     or p_result->>'schema_version' <> 'company_discovery.result.v1'
+     or not (p_result ?& array[
+       'schema_version', 'source_snapshots', 'candidate_facts',
+       'missing_questions', 'contradictions', 'uncertainty'
+     ])
+     or (p_result - array[
+       'schema_version', 'source_snapshots', 'candidate_facts',
+       'missing_questions', 'contradictions', 'uncertainty'
+     ]::text[]) <> '{}'::jsonb then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_result_top_level_invalid';
+  end if;
+  if octet_length(p_result::text) > 10485760 then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_result_payload_too_large';
+  end if;
+  if p_result->>'schema_version' <> 'company_discovery.result.v1'
      or jsonb_typeof(p_result->'source_snapshots') <> 'array'
      or jsonb_typeof(p_result->'candidate_facts') <> 'array'
-     or jsonb_typeof(coalesce(p_result->'missing_questions', '[]'::jsonb)) <> 'array'
-     or jsonb_typeof(coalesce(p_result->'contradictions', '[]'::jsonb)) <> 'array'
-     or jsonb_typeof(coalesce(p_result->'uncertainty', '{}'::jsonb)) <> 'object' then
-    raise exception using errcode = '22023', message = 'company_discovery_result_schema_invalid';
+     or jsonb_typeof(p_result->'missing_questions') <> 'array'
+     or jsonb_typeof(p_result->'contradictions') <> 'array'
+     or jsonb_typeof(p_result->'uncertainty') <> 'object' then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_result_schema_invalid';
   end if;
-  if p_result ?| array[
-       'tenant_id','canonical_id','policy_group','approval','status','effective',
-       'policy_hash','action_completion'
-     ] or exists (
-       select 1 from jsonb_array_elements(p_result->'candidate_facts') fact
-       where fact ?| array[
-         'tenant_id','canonical_id','policy_group','approval','status','effective',
-         'policy_hash','action_completion'
-       ]
-     ) then
+  if public.company_discovery_json_has_forbidden_keys(p_result) then
     raise exception using errcode = '22023',
       message = 'company_discovery_forbidden_result_field';
   end if;
@@ -1086,9 +1326,145 @@ begin
     raise exception using errcode = '22023',
       message = 'company_discovery_owner_private_fact_forbidden';
   end if;
-  if jsonb_array_length(p_result->'source_snapshots') > 25 then
+  if jsonb_array_length(p_result->'source_snapshots') not between 1 and 25 then
     raise exception using errcode = '22023', message = 'company_discovery_source_limit_exceeded';
   end if;
+  if jsonb_array_length(p_result->'candidate_facts') > 100
+     or jsonb_array_length(p_result->'missing_questions') > 50
+     or jsonb_array_length(p_result->'contradictions') > 50
+     or octet_length((p_result->'uncertainty')::text) > 4096 then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_result_collection_limit_exceeded';
+  end if;
+  if exists (
+    select 1 from jsonb_array_elements(p_result->'missing_questions') item
+    where jsonb_typeof(item) <> 'string'
+      or length(item #>> '{}') not between 1 and 1000
+  ) or exists (
+    select 1 from jsonb_array_elements(p_result->'contradictions') item
+    where jsonb_typeof(item) <> 'string'
+      or length(item #>> '{}') not between 1 and 2000
+  ) then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_result_collection_item_invalid';
+  end if;
+
+  -- Validate the complete candidate envelope before the immutable result row exists.
+  for v_snapshot in select value from jsonb_array_elements(p_result->'source_snapshots')
+  loop
+    if jsonb_typeof(v_snapshot) <> 'object'
+       or not (v_snapshot ?& array[
+         'url','retrieved_at','http_status','mime_type','byte_length','content_hash',
+         'excerpt','crawl_order','crawl_depth'
+       ])
+       or (v_snapshot - array[
+         'url','retrieved_at','http_status','mime_type','byte_length','content_hash',
+         'excerpt','crawl_order','crawl_depth'
+       ]::text[]) <> '{}'::jsonb
+       or jsonb_typeof(v_snapshot->'url') <> 'string'
+       or length(v_snapshot->>'url') not between 9 and 2048
+       or v_snapshot->>'url' !~ '^https://'
+       or jsonb_typeof(v_snapshot->'retrieved_at') <> 'string'
+       or v_snapshot->>'retrieved_at' !~*
+         '^[0-9]{4}-[0-9]{2}-[0-9]{2}t[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,6})?z$'
+       or jsonb_typeof(v_snapshot->'http_status') <> 'number'
+       or (v_snapshot->>'http_status') !~ '^[1-5][0-9]{2}$'
+       or jsonb_typeof(v_snapshot->'mime_type') <> 'string'
+       or lower(v_snapshot->>'mime_type') <> 'text/html'
+       or jsonb_typeof(v_snapshot->'byte_length') <> 'number'
+       or (v_snapshot->>'byte_length') !~ '^[0-9]+$'
+       or (v_snapshot->>'byte_length')::integer > 1048576
+       or jsonb_typeof(v_snapshot->'content_hash') <> 'string'
+       or (v_snapshot->>'content_hash') !~ '^[0-9a-f]{64}$'
+       or jsonb_typeof(v_snapshot->'excerpt') <> 'string'
+       or octet_length(v_snapshot->>'excerpt') > 16384
+       or jsonb_typeof(v_snapshot->'crawl_order') <> 'number'
+       or (v_snapshot->>'crawl_order') !~ '^[0-9]+$'
+       or (v_snapshot->>'crawl_order')::integer not between 0 and 24
+       or jsonb_typeof(v_snapshot->'crawl_depth') <> 'number'
+       or (v_snapshot->>'crawl_depth') !~ '^[0-9]+$'
+       or (v_snapshot->>'crawl_depth')::integer not between 0 and 2 then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_source_schema_invalid';
+    end if;
+  end loop;
+  if (
+    select coalesce(sum((snapshot->>'byte_length')::bigint), 0) > 10485760
+    from jsonb_array_elements(p_result->'source_snapshots') snapshot
+  ) then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_job_byte_limit_exceeded';
+  end if;
+  for v_claim in select value from jsonb_array_elements(p_result->'candidate_facts')
+  loop
+    if jsonb_typeof(v_claim) <> 'object'
+       or not (v_claim ?& array[
+         'claim_class','claim_type','normalized_value','evidence_refs',
+         'contradictions','uncertainty'
+       ])
+       or (v_claim - array[
+         'claim_class','claim_type','normalized_value','evidence_refs',
+         'contradictions','uncertainty'
+       ]::text[]) <> '{}'::jsonb
+       or v_claim->>'claim_class' not in ('descriptive','operational','safety_critical')
+       or jsonb_typeof(v_claim->'claim_type') <> 'string'
+       or length(v_claim->>'claim_type') not between 1 and 200
+       or jsonb_typeof(v_claim->'evidence_refs') <> 'array'
+       or jsonb_array_length(v_claim->'evidence_refs') not between 1 and 25
+       or exists (
+         select 1 from jsonb_array_elements(v_claim->'evidence_refs') ref
+         where jsonb_typeof(ref) <> 'number' or (ref #>> '{}') !~ '^[0-9]+$'
+       )
+       or jsonb_typeof(v_claim->'contradictions') <> 'array'
+       or jsonb_array_length(v_claim->'contradictions') > 20
+       or exists (
+         select 1 from jsonb_array_elements(v_claim->'contradictions') item
+         where jsonb_typeof(item) <> 'string'
+           or length(item #>> '{}') not between 1 and 2000
+       )
+       or jsonb_typeof(v_claim->'uncertainty') <> 'object'
+       or octet_length((v_claim->'uncertainty')::text) > 4096 then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_claim_schema_invalid';
+    end if;
+    if octet_length((v_claim->'normalized_value')::text) > 65536 then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_claim_value_too_large';
+    end if;
+    if not (
+      (
+        v_claim->>'claim_class' = 'descriptive'
+        and v_claim->>'claim_type' in (
+          'business_name', 'business_description', 'public_phone',
+          'public_email', 'public_address', 'public_website'
+        )
+        and jsonb_typeof(v_claim->'normalized_value') = 'string'
+        and length(v_claim->'normalized_value' #>> '{}') between 1 and 2000
+      ) or (
+        v_claim->>'claim_class' = 'operational'
+        and v_claim->>'claim_type' = 'service'
+        and jsonb_typeof(v_claim->'normalized_value') = 'object'
+        and (v_claim->'normalized_value' ?& array[
+          'service_type', 'service_names', 'price_mode', 'negotiation_mode',
+          'price_target', 'price_min', 'duration_min'
+        ])
+        and ((v_claim->'normalized_value') - array[
+          'service_type', 'service_names', 'price_mode', 'negotiation_mode',
+          'price_target', 'price_min', 'duration_min'
+        ]::text[]) = '{}'::jsonb
+      ) or (
+        v_claim->>'claim_class' = 'safety_critical'
+        and v_claim->>'claim_type' = 'emergency'
+        and jsonb_typeof(v_claim->'normalized_value') = 'object'
+        and ((v_claim->'normalized_value') - array['guidance']::text[]) = '{}'::jsonb
+        and jsonb_typeof(v_claim->'normalized_value'->'guidance') = 'string'
+        and length(v_claim->'normalized_value'->>'guidance') between 1 and 2000
+      )
+    ) then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_claim_materialization_type_invalid';
+    end if;
+  end loop;
   v_actual_hash := encode(extensions.digest(convert_to(p_result::text, 'utf8'), 'sha256'), 'hex');
   if p_result_hash is distinct from v_actual_hash then
     raise exception using errcode = '22000', message = 'company_discovery_result_hash_mismatch';
@@ -1259,6 +1635,8 @@ as $$
 declare
   v_attempt public.worker_attempts;
   v_proved boolean;
+  v_slot_rows integer := 0;
+  v_slot_updated boolean := false;
 begin
   select a.* into v_attempt from public.worker_attempts a
   where a.id = p_attempt_id for update;
@@ -1270,6 +1648,10 @@ begin
   end if;
   if v_attempt.claim_token_hash is distinct from extensions.digest(p_claim_token, 'sha256') then
     raise exception using errcode = '42501', message = 'company_discovery_claim_token_invalid';
+  end if;
+  if v_attempt.status not in ('validated', 'selected', 'cancelled', 'failed', 'superseded') then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_cleanup_attempt_not_terminal';
   end if;
   if v_attempt.cleanup_state <> 'pending' then
     raise exception using errcode = '55000', message = 'company_discovery_cleanup_already_recorded';
@@ -1297,10 +1679,14 @@ begin
         convert_to(coalesce(p_proof, '{}'::jsonb)::text, 'utf8'), 'sha256'
       ), 'hex') end,
       updated_at = clock_timestamp()
-  where id = v_attempt.runtime_slot_id;
+  where id = v_attempt.runtime_slot_id
+    and current_attempt_id = v_attempt.id;
+  get diagnostics v_slot_rows = row_count;
+  v_slot_updated := v_slot_rows = 1;
   return jsonb_build_object(
     'attempt_id', v_attempt.id,
-    'cleanup_state', case when v_proved then 'proved' else 'cleanup_unresolved' end
+    'cleanup_state', case when v_proved then 'proved' else 'cleanup_unresolved' end,
+    'slot_updated', v_slot_updated
   );
 end;
 $$;
@@ -1327,7 +1713,7 @@ begin
   end if;
   update public.worker_runtime_slots
   set status = 'quarantined', quarantine_reason = btrim(p_reason),
-      quarantine_proof_hash = p_proof_hash, current_attempt_id = null,
+      quarantine_proof_hash = p_proof_hash,
       updated_at = clock_timestamp()
   where id = p_slot_id;
   if not found then

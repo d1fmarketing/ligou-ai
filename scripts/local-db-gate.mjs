@@ -843,7 +843,7 @@ export async function runLocalDatabaseGate() {
       path.join(repoRoot, "voice-controller/test/onboarding-policy.local.integration.test.ts"), 1, applicationEnv, runnerRoot,
     );
     const companyDiscoveryIntegrationTests = await runBunTestFile(
-      path.join(repoRoot, "voice-controller/test/company-discovery-migration.test.ts"), 11, applicationEnv, runnerRoot,
+      path.join(repoRoot, "voice-controller/test/company-discovery-migration.test.ts"), 13, applicationEnv, runnerRoot,
     );
     const budgetRuntimeTests = await runBunTestFile(
       path.join(repoRoot, "voice-controller/test/budget.local.integration.test.ts"), 2, applicationEnv, runnerRoot,
