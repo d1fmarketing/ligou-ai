@@ -35,12 +35,17 @@ export interface RuntimeIdentityBinding {
   readonly loopback_port: number;
 }
 
-export interface CleanupAuthority {
+export interface RuntimeSlotCapability {
   readonly job_id: string;
   readonly attempt_id: string;
   readonly runtime_slot_id: string;
+}
+
+export interface CleanupAuthority {
+  readonly job_id: string;
+  readonly attempt_id: string;
+  readonly runtime_slot: RuntimeSlotCapability;
   readonly fence_generation: number;
-  readonly claim_token: string;
 }
 
 export interface TerminalCleanupAuthority extends CleanupAuthority {
@@ -54,7 +59,7 @@ export interface TerminalCleanupAuthority extends CleanupAuthority {
 export interface ClaimedAttempt {
   readonly job: WorkerJob;
   readonly adapter_id: DiscoveryAdapterId;
-  readonly runtime_slot_id: string;
+  readonly runtime_slot: RuntimeSlotCapability;
   readonly job_version: number;
   readonly cleanup_authority: CleanupAuthority;
 }
@@ -70,16 +75,36 @@ export interface RuntimeBindReadback {
 }
 
 export interface ExpiredCleanupClaim {
+  readonly recovery_outcome: "cleanup_claimed";
+  readonly job_id: string;
+  readonly attempt_id: string;
+  readonly adapter_id: DiscoveryAdapterId;
+  readonly runtime_slot: RuntimeSlotCapability;
+  readonly runtime_identity: RuntimeIdentityBinding;
+  readonly runtime_identity_hash: string;
+  readonly fence_generation: number;
+  readonly job_version: number;
+  readonly cleanup_authority: CleanupAuthority;
+}
+
+export interface RuntimeNotBoundRecovery {
+  readonly recovery_outcome: "runtime_not_bound";
   readonly job_id: string;
   readonly attempt_id: string;
   readonly adapter_id: DiscoveryAdapterId;
   readonly runtime_slot_id: string;
-  readonly runtime_identity: RuntimeIdentityBinding;
-  readonly runtime_identity_hash: string;
   readonly fence_generation: number;
-  readonly claim_token: string;
   readonly job_version: number;
-  readonly cleanup_authority: CleanupAuthority;
+}
+
+export type ExpiredCleanupRecovery = ExpiredCleanupClaim | RuntimeNotBoundRecovery;
+
+export interface CommittedResultCapability {
+  readonly job_id: string;
+  readonly attempt_id: string;
+  readonly result_id: string;
+  readonly job_version: number;
+  readonly fence_generation: number;
 }
 
 export interface CleanupProof {
@@ -166,6 +191,14 @@ const EXPIRED_CLEANUP_KEYS = [
   "fence_generation",
   "claim_token",
   "job_version",
+  "recovery_outcome",
+] as const;
+const COMMIT_KEYS = [
+  "job_id",
+  "attempt_id",
+  "result_id",
+  "job_version",
+  "fence_generation",
 ] as const;
 const CLEANUP_PROOF_KEYS = [
   "gateway_exited",
@@ -302,26 +335,44 @@ function parseRuntimeIdentity(value: unknown, message: string): RuntimeIdentityB
   return Object.freeze(parsed as unknown as RuntimeIdentityBinding);
 }
 
-function cleanupAuthority(
+function runtimeSlotCapability(
   jobId: string,
   attemptId: string,
   runtimeSlotId: string,
-  fenceGeneration: number,
-  claimToken: string,
-): CleanupAuthority {
+): RuntimeSlotCapability {
   return Object.freeze({
     job_id: jobId,
     attempt_id: attemptId,
     runtime_slot_id: runtimeSlotId,
-    fence_generation: fenceGeneration,
-    claim_token: claimToken,
   });
+}
+
+function cleanupAuthority(
+  jobId: string,
+  attemptId: string,
+  runtimeSlot: RuntimeSlotCapability,
+  fenceGeneration: number,
+): CleanupAuthority {
+  return Object.freeze({
+    job_id: jobId,
+    attempt_id: attemptId,
+    runtime_slot: runtimeSlot,
+    fence_generation: fenceGeneration,
+  });
+}
+
+interface ParsedClaimReadback {
+  readonly job: WorkerJob;
+  readonly adapter_id: DiscoveryAdapterId;
+  readonly runtime_slot_id: string;
+  readonly job_version: number;
+  readonly claim_token: string;
 }
 
 function parseClaimReadback(
   value: unknown,
   requestedAdapter: DiscoveryAdapterId,
-): Omit<ClaimedAttempt, "cleanup_authority"> | null {
+): ParsedClaimReadback | null {
   const row = oneRow(value, "claim readback");
   if (row === null) return null;
   exactKeys(row, CLAIM_KEYS, "claim readback");
@@ -329,6 +380,7 @@ function parseClaimReadback(
     throw new ContractValidationError("claim readback: adapter mismatch");
   }
   const runtimeSlotId = uuid(row.runtime_slot_id, "claim readback.runtime_slot_id");
+  const claimToken = nonemptyString(row.claim_token, "claim readback.claim_token");
   return {
     job: parseWorkerJob({
       job_type: "company_discovery.v1",
@@ -336,7 +388,6 @@ function parseClaimReadback(
       attempt_id: row.attempt_id,
       attempt_number: row.attempt_number,
       fence_generation: row.fence_generation,
-      claim_token: row.claim_token,
       normalized_origin: row.normalized_origin,
       deadline_at: row.deadline_at,
       budget: row.budget,
@@ -345,6 +396,7 @@ function parseClaimReadback(
     adapter_id: row.adapter_id,
     runtime_slot_id: runtimeSlotId,
     job_version: positiveInteger(row.job_version, "claim readback.job_version"),
+    claim_token: claimToken,
   };
 }
 
@@ -372,7 +424,7 @@ function parseRuntimeBindReadback(
     ),
   };
   if (parsed.job_id !== claim.job.job_id || parsed.attempt_id !== claim.job.attempt_id ||
-      parsed.runtime_slot_id !== claim.runtime_slot_id ||
+      parsed.runtime_slot_id !== claim.runtime_slot.runtime_slot_id ||
       parsed.job_version !== claim.job_version ||
       parsed.fence_generation !== claim.job.fence_generation ||
       JSON.stringify(parsed.runtime_identity) !== JSON.stringify(expectedIdentity) ||
@@ -382,12 +434,18 @@ function parseRuntimeBindReadback(
   return Object.freeze(parsed);
 }
 
+interface ParsedTerminalReadback {
+  readonly authority: TerminalCleanupAuthority;
+  readonly claim_token: string;
+}
+
 function parseTerminalReadback(
   value: unknown,
   claim: ClaimedAttempt,
   outcome: "failed" | "cancelled",
   binding: RuntimeBindReadback,
-): TerminalCleanupAuthority {
+  previousClaimToken: string,
+): ParsedTerminalReadback {
   const row = plainRecord(value, "terminal readback");
   exactKeys(row, TERMINAL_KEYS, "terminal readback");
   const jobId = uuid(row.job_id, "terminal readback.job_id");
@@ -397,52 +455,114 @@ function parseTerminalReadback(
   const fence = positiveInteger(row.fence_generation, "terminal readback.fence_generation");
   const token = nonemptyString(row.claim_token, "terminal readback.claim_token");
   if (jobId !== claim.job.job_id || attemptId !== claim.job.attempt_id ||
-      runtimeSlotId !== claim.runtime_slot_id || version !== claim.job_version + 1 ||
-      fence !== claim.job.fence_generation + 1 || token === claim.job.claim_token ||
+      runtimeSlotId !== claim.runtime_slot.runtime_slot_id || version !== claim.job_version + 1 ||
+      fence !== claim.job.fence_generation + 1 || token === previousClaimToken ||
       row.status !== outcome || row.cleanup_state !== "pending") {
     throw new ContractValidationError("terminal readback: mismatched rotated authority");
   }
-  return Object.freeze({
-    ...cleanupAuthority(jobId, attemptId, runtimeSlotId, fence, token),
-    job_version: version,
-    runtime_identity: binding.runtime_identity,
-    runtime_identity_hash: binding.runtime_identity_hash,
-    status: outcome,
-    cleanup_state: "pending",
-  });
+  return {
+    authority: Object.freeze({
+      ...cleanupAuthority(jobId, attemptId, claim.runtime_slot, fence),
+      job_version: version,
+      runtime_identity: binding.runtime_identity,
+      runtime_identity_hash: binding.runtime_identity_hash,
+      status: outcome,
+      cleanup_state: "pending",
+    }),
+    claim_token: token,
+  };
 }
 
-function parseExpiredCleanupReadback(value: unknown): Omit<ExpiredCleanupClaim, "cleanup_authority"> | null {
+interface ParsedExpiredCleanupClaim {
+  readonly recovery_outcome: "cleanup_claimed";
+  readonly job_id: string;
+  readonly attempt_id: string;
+  readonly adapter_id: DiscoveryAdapterId;
+  readonly runtime_slot_id: string;
+  readonly runtime_identity: RuntimeIdentityBinding;
+  readonly runtime_identity_hash: string;
+  readonly fence_generation: number;
+  readonly claim_token: string;
+  readonly job_version: number;
+}
+
+type ParsedExpiredCleanupRecovery = ParsedExpiredCleanupClaim | RuntimeNotBoundRecovery;
+
+function parseExpiredCleanupReadback(value: unknown): ParsedExpiredCleanupRecovery | null {
   const row = oneRow(value, "expired cleanup readback");
   if (row === null) return null;
   exactKeys(row, EXPIRED_CLEANUP_KEYS, "expired cleanup readback");
   if (!isDiscoveryAdapterId(row.adapter_id)) {
     throw new ContractValidationError("expired cleanup readback: invalid adapter");
   }
+  const base = {
+    job_id: uuid(row.job_id, "expired cleanup readback.job_id"),
+    attempt_id: uuid(row.attempt_id, "expired cleanup readback.attempt_id"),
+    adapter_id: row.adapter_id,
+    runtime_slot_id: uuid(row.runtime_slot_id, "expired cleanup readback.runtime_slot_id"),
+    fence_generation: positiveInteger(
+      row.fence_generation,
+      "expired cleanup readback.fence_generation",
+    ),
+    job_version: positiveInteger(row.job_version, "expired cleanup readback.job_version"),
+  };
+  if (row.recovery_outcome === "runtime_not_bound") {
+    const identity = plainRecord(
+      row.runtime_identity,
+      "expired cleanup readback.runtime_identity",
+    );
+    exactKeys(identity, [], "expired cleanup readback.runtime_identity");
+    if (row.claim_token !== null) {
+      throw new ContractValidationError(
+        "expired cleanup readback: runtime_not_bound must not return a claim token",
+      );
+    }
+    return Object.freeze({ ...base, recovery_outcome: "runtime_not_bound" });
+  }
+  if (row.recovery_outcome !== "cleanup_claimed") {
+    throw new ContractValidationError("expired cleanup readback: invalid recovery outcome");
+  }
   const identity = parseRuntimeIdentity(
     row.runtime_identity,
     "expired cleanup readback.runtime_identity",
   );
   return {
-    job_id: uuid(row.job_id, "expired cleanup readback.job_id"),
-    attempt_id: uuid(row.attempt_id, "expired cleanup readback.attempt_id"),
-    adapter_id: row.adapter_id,
-    runtime_slot_id: uuid(row.runtime_slot_id, "expired cleanup readback.runtime_slot_id"),
+    ...base,
+    recovery_outcome: "cleanup_claimed",
     runtime_identity: identity,
     runtime_identity_hash: jsonbHash(identity),
-    fence_generation: positiveInteger(
-      row.fence_generation,
-      "expired cleanup readback.fence_generation",
-    ),
     claim_token: nonemptyString(row.claim_token, "expired cleanup readback.claim_token"),
-    job_version: positiveInteger(row.job_version, "expired cleanup readback.job_version"),
   };
+}
+
+function committedResultReadback(
+  value: unknown,
+  job: WorkerJob,
+  claimedVersion: number,
+): CommittedResultCapability {
+  const candidate = plainRecord(value, "commit readback");
+  exactKeys(candidate, COMMIT_KEYS, "commit readback");
+  const parsed: CommittedResultCapability = {
+    job_id: uuid(candidate.job_id, "commit readback.job_id"),
+    attempt_id: uuid(candidate.attempt_id, "commit readback.attempt_id"),
+    result_id: uuid(candidate.result_id, "commit readback.result_id"),
+    job_version: positiveInteger(candidate.job_version, "commit readback.job_version"),
+    fence_generation: positiveInteger(
+      candidate.fence_generation,
+      "commit readback.fence_generation",
+    ),
+  };
+  if (parsed.job_id !== job.job_id || parsed.attempt_id !== job.attempt_id ||
+      parsed.job_version !== claimedVersion + 1 ||
+      parsed.fence_generation !== job.fence_generation) {
+    throw new ContractValidationError("commit readback: mismatched trusted identity or version");
+  }
+  return Object.freeze(parsed);
 }
 
 function selectionReadback(
   value: unknown,
-  job: WorkerJob,
-  expectedVersion: number,
+  committed: CommittedResultCapability,
 ): SelectionReadback {
   const candidate = plainRecord(value, "selection readback");
   const keys = ["job_id", "attempt_id", "result_id", "version", "fence_generation"] as const;
@@ -457,9 +577,10 @@ function selectionReadback(
       "selection readback.fence_generation",
     ),
   };
-  if (parsed.job_id !== job.job_id || parsed.attempt_id !== job.attempt_id ||
-      parsed.version !== expectedVersion + 1 ||
-      parsed.fence_generation !== job.fence_generation + 1) {
+  if (parsed.job_id !== committed.job_id || parsed.attempt_id !== committed.attempt_id ||
+      parsed.result_id !== committed.result_id ||
+      parsed.version !== committed.job_version + 1 ||
+      parsed.fence_generation !== committed.fence_generation + 1) {
     throw new ContractValidationError("selection readback: mismatched trusted identity or version");
   }
   return Object.freeze(parsed);
@@ -503,9 +624,18 @@ export class JobStore {
   readonly #claimForJob = new WeakMap<object, ClaimedAttempt>();
   readonly #trustedClaims = new WeakSet<object>();
   readonly #activeClaims = new WeakSet<object>();
+  readonly #claimSecrets = new WeakMap<object, string>();
+  readonly #activeClaimByAttempt = new Map<string, ClaimedAttempt>();
   readonly #runtimeBindings = new WeakMap<object, RuntimeBindReadback>();
+  readonly #trustedRuntimeSlots = new WeakSet<object>();
+  readonly #activeRuntimeSlots = new WeakSet<object>();
+  readonly #activeRuntimeSlotByAttempt = new Map<string, RuntimeSlotCapability>();
   readonly #trustedCleanupAuthorities = new WeakSet<object>();
   readonly #activeCleanupByAttempt = new Map<string, CleanupAuthority>();
+  readonly #cleanupSecrets = new WeakMap<object, string>();
+  readonly #trustedCommittedResults = new WeakSet<object>();
+  readonly #activeCommittedResults = new WeakSet<object>();
+  readonly #activeCommittedByAttempt = new Map<string, CommittedResultCapability>();
 
   constructor(private readonly client: ServiceRpcClient) {}
 
@@ -528,19 +658,33 @@ export class JobStore {
       },
     ), adapterId);
     if (parsed === null) return null;
-    const authority = cleanupAuthority(
+    this.invalidateAttemptCapabilities(parsed.job.attempt_id);
+    const runtimeSlot = runtimeSlotCapability(
       parsed.job.job_id,
       parsed.job.attempt_id,
       parsed.runtime_slot_id,
-      parsed.job.fence_generation,
-      parsed.job.claim_token,
     );
-    const claim: ClaimedAttempt = Object.freeze({ ...parsed, cleanup_authority: authority });
+    const authority = cleanupAuthority(
+      parsed.job.job_id,
+      parsed.job.attempt_id,
+      runtimeSlot,
+      parsed.job.fence_generation,
+    );
+    const claim: ClaimedAttempt = Object.freeze({
+      job: parsed.job,
+      adapter_id: parsed.adapter_id,
+      runtime_slot: runtimeSlot,
+      job_version: parsed.job_version,
+      cleanup_authority: authority,
+    });
     this.#trustedJobs.add(claim.job);
     this.#claimForJob.set(claim.job, claim);
     this.#trustedClaims.add(claim);
     this.#activeClaims.add(claim);
-    this.trustCleanupAuthority(authority);
+    this.#claimSecrets.set(claim, parsed.claim_token);
+    this.#activeClaimByAttempt.set(claim.job.attempt_id, claim);
+    this.trustRuntimeSlot(runtimeSlot);
+    this.trustCleanupAuthority(authority, parsed.claim_token);
     return claim;
   }
 
@@ -549,6 +693,7 @@ export class JobStore {
     runtimeIdentityValue: RuntimeIdentityBinding,
   ): Promise<RuntimeBindReadback> {
     this.assertActiveClaim(claim);
+    const claimToken = this.claimToken(claim);
     if (this.#runtimeBindings.has(claim)) {
       throw new ContractValidationError("runtime identity already bound for claim");
     }
@@ -559,7 +704,7 @@ export class JobStore {
       {
         p_attempt_id: claim.job.attempt_id,
         p_fence_generation: claim.job.fence_generation,
-        p_claim_token: claim.job.claim_token,
+        p_claim_token: claimToken,
         p_runtime_identity: identity,
       },
     ), claim, identity);
@@ -579,7 +724,10 @@ export class JobStore {
     return bound;
   }
 
-  async commitResult(job: WorkerJob, candidate: WorkerResult): Promise<string> {
+  async commitResult(
+    job: WorkerJob,
+    candidate: WorkerResult,
+  ): Promise<CommittedResultCapability> {
     const trustedJob = this.trustedJob(job);
     const result = parseWorkerResult(candidate);
     if (JSON.stringify(result.source_snapshots) !== JSON.stringify(trustedJob.source_snapshots)) {
@@ -589,29 +737,37 @@ export class JobStore {
     if (!this.#runtimeBindings.has(claim)) {
       throw new ContractValidationError("runtime identity must be bound before result commit");
     }
+    const claimToken = this.claimToken(claim);
     const data = await rpcOrThrow(this.client, "commit_company_discovery_result", {
       p_attempt_id: trustedJob.attempt_id,
       p_fence_generation: trustedJob.fence_generation,
-      p_claim_token: trustedJob.claim_token,
+      p_claim_token: claimToken,
       p_result: result,
       p_result_hash: jsonbHash(result),
     });
-    return uuid(data, "commit readback");
+    const committed = committedResultReadback(data, trustedJob, claim.job_version);
+    this.deactivateClaim(claim);
+    const previous = this.#activeCommittedByAttempt.get(committed.attempt_id);
+    if (previous !== undefined) this.#activeCommittedResults.delete(previous);
+    this.#trustedCommittedResults.add(committed);
+    this.#activeCommittedResults.add(committed);
+    this.#activeCommittedByAttempt.set(committed.attempt_id, committed);
+    return committed;
   }
 
-  async selectResult(job: WorkerJob, expectedVersion: number): Promise<SelectionReadback> {
-    const trustedJob = this.trustedJob(job);
-    const claim = this.#claimForJob.get(job)!;
-    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1 ||
-        expectedVersion !== claim.job_version) {
-      throw new ContractValidationError("expected_version: stale claim version");
-    }
+  async selectResult(committed: CommittedResultCapability): Promise<SelectionReadback> {
+    this.assertActiveCommittedResult(committed);
     const data = await rpcOrThrow(this.client, "select_company_discovery_result", {
-      p_job_id: trustedJob.job_id,
-      p_attempt_id: trustedJob.attempt_id,
-      p_expected_version: expectedVersion,
+      p_job_id: committed.job_id,
+      p_attempt_id: committed.attempt_id,
+      p_expected_version: committed.job_version,
     });
-    return selectionReadback(data, trustedJob, expectedVersion);
+    const selected = selectionReadback(data, committed);
+    this.#activeCommittedResults.delete(committed);
+    if (this.#activeCommittedByAttempt.get(committed.attempt_id) === committed) {
+      this.#activeCommittedByAttempt.delete(committed.attempt_id);
+    }
+    return selected;
   }
 
   async terminalizeAttempt(
@@ -620,6 +776,7 @@ export class JobStore {
     reason: string,
   ): Promise<TerminalCleanupAuthority> {
     this.assertActiveClaim(claim);
+    const claimToken = this.claimToken(claim);
     const binding = this.#runtimeBindings.get(claim);
     if (binding === undefined) {
       throw new ContractValidationError("runtime identity must be bound before terminalization");
@@ -634,20 +791,20 @@ export class JobStore {
       {
         p_attempt_id: claim.job.attempt_id,
         p_fence_generation: claim.job.fence_generation,
-        p_claim_token: claim.job.claim_token,
+        p_claim_token: claimToken,
         p_outcome: outcome,
         p_reason: reason,
       },
-    ), claim, outcome, binding);
-    this.#activeClaims.delete(claim);
-    this.trustCleanupAuthority(authority);
-    return authority;
+    ), claim, outcome, binding, claimToken);
+    this.deactivateClaim(claim);
+    this.trustCleanupAuthority(authority.authority, authority.claim_token);
+    return authority.authority;
   }
 
   async claimExpiredCleanup(
     workerId: string,
     leaseSeconds: number,
-  ): Promise<ExpiredCleanupClaim | null> {
+  ): Promise<ExpiredCleanupRecovery | null> {
     assertWorkerIdAndLease(workerId, leaseSeconds, "expired cleanup claim");
     const parsed = parseExpiredCleanupReadback(await rpcOrThrow(
       this.client,
@@ -655,18 +812,33 @@ export class JobStore {
       { p_worker_id: workerId, p_lease_seconds: leaseSeconds },
     ));
     if (parsed === null) return null;
-    const authority = cleanupAuthority(
+    this.invalidateAttemptCapabilities(parsed.attempt_id);
+    if (parsed.recovery_outcome === "runtime_not_bound") return parsed;
+    const runtimeSlot = runtimeSlotCapability(
       parsed.job_id,
       parsed.attempt_id,
       parsed.runtime_slot_id,
+    );
+    const authority = cleanupAuthority(
+      parsed.job_id,
+      parsed.attempt_id,
+      runtimeSlot,
       parsed.fence_generation,
-      parsed.claim_token,
     );
     const claim: ExpiredCleanupClaim = Object.freeze({
-      ...parsed,
+      recovery_outcome: "cleanup_claimed",
+      job_id: parsed.job_id,
+      attempt_id: parsed.attempt_id,
+      adapter_id: parsed.adapter_id,
+      runtime_slot: runtimeSlot,
+      runtime_identity: parsed.runtime_identity,
+      runtime_identity_hash: parsed.runtime_identity_hash,
+      fence_generation: parsed.fence_generation,
+      job_version: parsed.job_version,
       cleanup_authority: authority,
     });
-    this.trustCleanupAuthority(authority);
+    this.trustRuntimeSlot(runtimeSlot);
+    this.trustCleanupAuthority(authority, parsed.claim_token);
     return claim;
   }
 
@@ -680,32 +852,106 @@ export class JobStore {
     if (this.#activeCleanupByAttempt.get(authority.attempt_id) !== authority) {
       throw new ContractValidationError("stale cleanup authority object");
     }
+    const claimToken = this.#cleanupSecrets.get(authority);
+    if (claimToken === undefined) {
+      throw new ContractValidationError("cleanup authority secret unavailable");
+    }
     const data = await rpcOrThrow(this.client, "record_company_discovery_cleanup", {
       p_attempt_id: authority.attempt_id,
       p_fence_generation: authority.fence_generation,
-      p_claim_token: authority.claim_token,
+      p_claim_token: claimToken,
       p_proof: parseCleanupProof(proof),
     });
     const readback = cleanupReadback(data, authority.attempt_id);
     this.#activeCleanupByAttempt.delete(authority.attempt_id);
+    if (readback.cleanup_state === "proved" && readback.slot_updated) {
+      this.deactivateRuntimeSlot(authority.runtime_slot);
+    }
     return readback;
   }
 
-  async quarantineSlot(slotId: string, reason: string, proofHash: string): Promise<void> {
-    if (!UUID_PATTERN.test(slotId) || reason.trim() === "" || !HASH_PATTERN.test(proofHash)) {
+  async quarantineSlot(
+    runtimeSlot: RuntimeSlotCapability,
+    reason: string,
+    proofHash: string,
+  ): Promise<void> {
+    if (!this.#trustedRuntimeSlots.has(runtimeSlot)) {
+      throw new ContractValidationError("trusted runtime slot capability object required");
+    }
+    if (!this.#activeRuntimeSlots.has(runtimeSlot) ||
+        this.#activeRuntimeSlotByAttempt.get(runtimeSlot.attempt_id) !== runtimeSlot) {
+      throw new ContractValidationError("stale runtime slot capability object");
+    }
+    if (reason.trim() === "" || !HASH_PATTERN.test(proofHash)) {
       throw new ContractValidationError("quarantine: invalid slot, reason, or proof hash");
     }
     const data = await rpcOrThrow(this.client, "quarantine_company_discovery_slot", {
-      p_slot_id: slotId,
+      p_slot_id: runtimeSlot.runtime_slot_id,
       p_reason: reason,
       p_proof_hash: proofHash,
     });
     if (data !== null) throw new ContractValidationError("quarantine readback: expected null");
+    this.deactivateRuntimeSlot(runtimeSlot);
   }
 
-  private trustCleanupAuthority(authority: CleanupAuthority): void {
+  private trustCleanupAuthority(authority: CleanupAuthority, claimToken: string): void {
     this.#trustedCleanupAuthorities.add(authority);
     this.#activeCleanupByAttempt.set(authority.attempt_id, authority);
+    this.#cleanupSecrets.set(authority, claimToken);
+  }
+
+  private trustRuntimeSlot(runtimeSlot: RuntimeSlotCapability): void {
+    const previous = this.#activeRuntimeSlotByAttempt.get(runtimeSlot.attempt_id);
+    if (previous !== undefined) this.#activeRuntimeSlots.delete(previous);
+    this.#trustedRuntimeSlots.add(runtimeSlot);
+    this.#activeRuntimeSlots.add(runtimeSlot);
+    this.#activeRuntimeSlotByAttempt.set(runtimeSlot.attempt_id, runtimeSlot);
+  }
+
+  private deactivateRuntimeSlot(runtimeSlot: RuntimeSlotCapability): void {
+    this.#activeRuntimeSlots.delete(runtimeSlot);
+    if (this.#activeRuntimeSlotByAttempt.get(runtimeSlot.attempt_id) === runtimeSlot) {
+      this.#activeRuntimeSlotByAttempt.delete(runtimeSlot.attempt_id);
+    }
+  }
+
+  private claimToken(claim: ClaimedAttempt): string {
+    const claimToken = this.#claimSecrets.get(claim);
+    if (claimToken === undefined) {
+      throw new ContractValidationError("claimed attempt secret unavailable");
+    }
+    return claimToken;
+  }
+
+  private deactivateClaim(claim: ClaimedAttempt): void {
+    this.#activeClaims.delete(claim);
+    if (this.#activeClaimByAttempt.get(claim.job.attempt_id) === claim) {
+      this.#activeClaimByAttempt.delete(claim.job.attempt_id);
+    }
+  }
+
+  private assertActiveCommittedResult(committed: CommittedResultCapability): void {
+    if (!this.#trustedCommittedResults.has(committed)) {
+      throw new ContractValidationError("trusted committed result capability object required");
+    }
+    if (!this.#activeCommittedResults.has(committed) ||
+        this.#activeCommittedByAttempt.get(committed.attempt_id) !== committed) {
+      throw new ContractValidationError("stale committed result capability object");
+    }
+  }
+
+  private invalidateAttemptCapabilities(attemptId: string): void {
+    const claim = this.#activeClaimByAttempt.get(attemptId);
+    if (claim !== undefined) this.deactivateClaim(claim);
+    const cleanup = this.#activeCleanupByAttempt.get(attemptId);
+    if (cleanup !== undefined) this.#activeCleanupByAttempt.delete(attemptId);
+    const runtimeSlot = this.#activeRuntimeSlotByAttempt.get(attemptId);
+    if (runtimeSlot !== undefined) this.deactivateRuntimeSlot(runtimeSlot);
+    const committed = this.#activeCommittedByAttempt.get(attemptId);
+    if (committed !== undefined) {
+      this.#activeCommittedResults.delete(committed);
+      this.#activeCommittedByAttempt.delete(attemptId);
+    }
   }
 
   private assertActiveClaim(claim: ClaimedAttempt): void {

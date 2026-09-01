@@ -166,7 +166,6 @@ const job: WorkerJob = {
   attempt_id: "22222222-2222-4222-8222-222222222222",
   attempt_number: 1,
   fence_generation: 7,
-  claim_token: "secret-claim-token",
   normalized_origin: "https://example.com/",
   deadline_at: "2026-09-01T10:10:00.000Z",
   budget: {
@@ -328,7 +327,7 @@ describe("DirectModelDiscoveryAdapter provider boundary", () => {
     });
     expect((requests[0]!.init?.signal as AbortSignal).aborted).toBe(false);
     expect(JSON.stringify(requests[0]!.init?.body)).not.toContain(job.job_id);
-    expect(JSON.stringify(requests[0]!.init?.body)).not.toContain(job.claim_token);
+    expect(JSON.stringify(requests[0]!.init?.body)).not.toContain("claim_token");
   });
 
   test("supports exactly company_discovery.v1", () => {

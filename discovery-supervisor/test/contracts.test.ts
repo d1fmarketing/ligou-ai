@@ -256,7 +256,6 @@ describe("company_discovery.result.v1 exact contract", () => {
       attempt_id: "22222222-2222-4222-8222-222222222222",
       attempt_number: 1,
       fence_generation: 3,
-      claim_token: "claim-token",
       normalized_origin: "https://example.com/",
       deadline_at: "2026-09-01T10:10:00.000Z",
       budget: {
@@ -298,7 +297,6 @@ describe("company_discovery.result.v1 exact contract", () => {
       attempt_id: "22222222-2222-4222-8222-222222222222",
       attempt_number: 1,
       fence_generation: 3,
-      claim_token: "claim-token",
       normalized_origin: "https://example.com/",
       deadline_at: "2026-09-01T10:10:00.123456Z",
       budget: {

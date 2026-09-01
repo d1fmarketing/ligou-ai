@@ -30,7 +30,6 @@ export interface WorkerJob {
   readonly attempt_id: string;
   readonly attempt_number: number;
   readonly fence_generation: number;
-  readonly claim_token: string;
   readonly normalized_origin: string;
   readonly deadline_at: string;
   readonly budget: DiscoveryBudget;
@@ -120,7 +119,6 @@ const JOB_KEYS = [
   "attempt_id",
   "attempt_number",
   "fence_generation",
-  "claim_token",
   "normalized_origin",
   "deadline_at",
   "budget",
@@ -455,7 +453,6 @@ export function parseWorkerJob(
       fail(`job.${key}`, "invalid UUID");
     }
   }
-  const claimToken = boundedString(candidate.claim_token, "job.claim_token", 1, 512);
   const normalizedOrigin = boundedString(candidate.normalized_origin, "job.normalized_origin", 9, 2_048);
   let origin: URL;
   try {
@@ -485,7 +482,6 @@ export function parseWorkerJob(
     attempt_id: candidate.attempt_id as string,
     attempt_number: integer(candidate.attempt_number, "job.attempt_number", 1, Number.MAX_SAFE_INTEGER),
     fence_generation: integer(candidate.fence_generation, "job.fence_generation", 1, Number.MAX_SAFE_INTEGER),
-    claim_token: claimToken,
     normalized_origin: normalizedOrigin,
     deadline_at: deadlineAt,
     budget: deepFreeze(parsedBudget),
