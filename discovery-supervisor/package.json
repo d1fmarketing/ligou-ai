@@ -6,7 +6,7 @@
   "packageManager": "bun@1.2.13",
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --types bun src/contracts.ts src/job-store.ts src/worker-broker.ts src/adapters/direct-model.ts src/fetch/url-policy.ts src/fetch/address-policy.ts src/fetch/https-client.ts src/fetch/html-page.ts src/fetch/discovery-fetch-gateway.ts test/contracts.test.ts test/worker-broker.test.ts test/direct-model.test.ts test/fetch-gateway.test.ts"
+    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --types bun src/contracts.ts src/job-store.ts src/worker-broker.ts src/adapters/direct-model.ts src/fetch/url-policy.ts src/fetch/address-policy.ts src/fetch/https-client.ts src/fetch/html-page.ts src/fetch/html-parser-worker.ts src/fetch/discovery-fetch-gateway.ts test/contracts.test.ts test/worker-broker.test.ts test/direct-model.test.ts test/fetch-gateway.test.ts"
   },
   "devDependencies": {
     "@types/bun": "1.2.13",

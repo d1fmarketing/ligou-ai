@@ -7,6 +7,7 @@ export interface DnsLookup {
   resolveCname(hostname: string): Promise<readonly string[]>;
   resolve4(hostname: string): Promise<readonly string[]>;
   resolve6(hostname: string): Promise<readonly string[]>;
+  cancel?(): void;
 }
 
 export interface ResolvedAddress {
@@ -15,7 +16,11 @@ export interface ResolvedAddress {
 }
 
 export interface PublicAddressResolver {
-  resolvePublicAddresses(hostname: string, signal?: AbortSignal): Promise<readonly ResolvedAddress[]>;
+  resolvePublicAddresses(
+    hostname: string,
+    signal?: AbortSignal,
+    deadlineAt?: number,
+  ): Promise<readonly ResolvedAddress[]>;
 }
 
 export class AddressPolicyError extends Error {
@@ -73,28 +78,44 @@ async function noRecordAsEmpty(operation: () => Promise<string[]>): Promise<read
   }
 }
 
-const nodeDnsLookup: DnsLookup = {
-  resolveCname: (hostname) => noRecordAsEmpty(() => dns.resolveCname(hostname)),
-  resolve4: (hostname) => noRecordAsEmpty(() => dns.resolve4(hostname)),
-  resolve6: (hostname) => noRecordAsEmpty(() => dns.resolve6(hostname)),
-};
+function nodeDnsLookup(): DnsLookup {
+  const resolver = new dns.Resolver();
+  return {
+    resolveCname: (hostname) => noRecordAsEmpty(() => resolver.resolveCname(hostname)),
+    resolve4: (hostname) => noRecordAsEmpty(() => resolver.resolve4(hostname)),
+    resolve6: (hostname) => noRecordAsEmpty(() => resolver.resolve6(hostname)),
+    cancel: () => resolver.cancel(),
+  };
+}
 
 export class AddressPolicy implements PublicAddressResolver {
-  constructor(private readonly lookup: DnsLookup = nodeDnsLookup) {}
+  constructor(private readonly injectedLookup?: DnsLookup) {}
 
-  async resolvePublicAddresses(hostname: string): Promise<readonly ResolvedAddress[]> {
+  async resolvePublicAddresses(
+    hostname: string,
+    signal?: AbortSignal,
+    deadlineAt?: number,
+  ): Promise<readonly ResolvedAddress[]> {
     let current = normalizeHost(hostname);
     const literalFamily = isIP(current);
     if (literalFamily !== 0) {
+      if (signal?.aborted || (deadlineAt !== undefined && deadlineAt <= Date.now())) {
+        throw new AddressPolicyError("DNS resolution aborted");
+      }
       assertPublicAddress(current);
       return Object.freeze([Object.freeze({ address: normalizedAddress(current), family: literalFamily as 4 | 6 })]);
     }
 
+    const lookup = this.injectedLookup ?? nodeDnsLookup();
+    return this.cancellableResolution(this.resolveDns(current, lookup), lookup, signal, deadlineAt);
+  }
+
+  private async resolveDns(current: string, lookup: DnsLookup): Promise<readonly ResolvedAddress[]> {
     const visited = new Set<string>();
     for (let depth = 0; ; depth += 1) {
       if (visited.has(current)) throw new AddressPolicyError("CNAME loop detected");
       visited.add(current);
-      const cnames = [...await this.lookup.resolveCname(current)].map(normalizeHost);
+      const cnames = [...await lookup.resolveCname(current)].map(normalizeHost);
       if (cnames.length > 1) throw new AddressPolicyError("multiple CNAME targets are forbidden");
       if (cnames.length === 0) break;
       if (depth >= 8) throw new AddressPolicyError("CNAME depth exceeds 8");
@@ -102,8 +123,8 @@ export class AddressPolicy implements PublicAddressResolver {
     }
 
     const [ipv4, ipv6] = await Promise.all([
-      this.lookup.resolve4(current),
-      this.lookup.resolve6(current),
+      lookup.resolve4(current),
+      lookup.resolve6(current),
     ]);
     const addresses: ResolvedAddress[] = [];
     for (const [address, family] of [
@@ -118,5 +139,53 @@ export class AddressPolicy implements PublicAddressResolver {
     }
     if (addresses.length === 0) throw new AddressPolicyError("hostname resolved to no A or AAAA records");
     return Object.freeze(addresses);
+  }
+
+  private cancellableResolution<T>(
+    promise: Promise<T>,
+    lookup: DnsLookup,
+    signal: AbortSignal | undefined,
+    deadlineAt: number | undefined,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        signal?.removeEventListener("abort", cancelled);
+      };
+      const cancelled = (): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        try {
+          lookup.cancel?.();
+        } catch {
+          // Cancellation remains terminal even if the resolver reports its own cleanup error.
+        }
+        reject(new AddressPolicyError("DNS resolution aborted"));
+      };
+      if (signal?.aborted || (deadlineAt !== undefined && deadlineAt <= Date.now())) {
+        cancelled();
+        promise.catch(() => undefined);
+        return;
+      }
+      signal?.addEventListener("abort", cancelled, { once: true });
+      if (deadlineAt !== undefined) timer = setTimeout(cancelled, deadlineAt - Date.now());
+      promise.then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(value);
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        },
+      );
+    });
   }
 }

@@ -119,7 +119,7 @@ const nodeTransport: PinnedHttpsTransport = {
         const headers = normalizeHeaders(response.headers);
         const bufferBody = shouldBufferResponseBody(response.statusCode ?? 0, headers);
         const declaredLength = Number(response.headers["content-length"]);
-        if (bufferBody && Number.isFinite(declaredLength) && declaredLength > input.maxBytes) {
+        if (Number.isFinite(declaredLength) && declaredLength > input.maxBytes) {
           response.destroy();
           finishReject(new ResponseByteLimitError());
           return;
@@ -136,7 +136,7 @@ const nodeTransport: PinnedHttpsTransport = {
             finishReject(error instanceof Error ? error : new Error(String(error)));
             return;
           }
-          if (bufferBody && byteLength > input.maxBytes) {
+          if (byteLength > input.maxBytes) {
             response.destroy();
             finishReject(new ResponseByteLimitError());
             return;
@@ -188,6 +188,7 @@ export class HttpsClient {
     if (response.bodyBytesConsumed !== meteredBytes || response.body.byteLength > meteredBytes) {
       throw new HttpsPolicyError("transport body metering mismatch");
     }
+    if (response.bodyBytesConsumed > input.maxBytes) throw new ResponseByteLimitError();
     if (!peerAddressMatches(input.address.address, response.remoteAddress)) {
       throw new HttpsPolicyError("peer address mismatch");
     }

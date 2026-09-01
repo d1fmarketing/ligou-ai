@@ -4,7 +4,11 @@ import {
   HttpsClient,
   type HttpsResponse,
 } from "./https-client";
-import { parseStaticHtml } from "./html-page";
+import {
+  parseStaticHtml,
+  WorkerHtmlPageParser,
+  type HtmlPageParser,
+} from "./html-page";
 import {
   assertWithinRegistrableDomain,
   normalizeDiscoveryUrl,
@@ -30,11 +34,13 @@ export interface DiscoveryFetchGatewayDependencies {
   readonly now?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly parseHtml?: typeof parseStaticHtml;
+  readonly htmlParser?: HtmlPageParser;
   readonly governor?: RequestGovernor;
   readonly maxGlobalConcurrency?: number;
   readonly maxPerOriginConcurrency?: number;
   readonly maxTrackedOrigins?: number;
   readonly originStateTtlMs?: number;
+  readonly maxGovernorQueued?: number;
 }
 
 interface RunState {
@@ -69,8 +75,11 @@ interface AttemptLedger {
   pagesReserved: number;
   requestsReserved: number;
   bytesConsumed: number;
+  exhausted: boolean;
   retired: boolean;
   readonly activeControllers: Set<AbortController>;
+  readonly fetchedPages: Map<string, FetchedPage>;
+  readonly inFlightPages: Map<string, Promise<FetchedPage>>;
 }
 
 const ATTEMPT_LEDGERS = new WeakMap<object, AttemptLedger>();
@@ -90,8 +99,11 @@ export function createDiscoveryAttemptContext(
     pagesReserved: 0,
     requestsReserved: 0,
     bytesConsumed: 0,
+    exhausted: false,
     retired: false,
     activeControllers: new Set(),
+    fetchedPages: new Map(),
+    inFlightPages: new Map(),
   });
   return context;
 }
@@ -106,6 +118,7 @@ function attemptLedger(context: DiscoveryAttemptContext): AttemptLedger {
 }
 
 function assertLiveAttempt(ledger: AttemptLedger): void {
+  if (ledger.exhausted) throw new DiscoveryFetchPolicyError("attempt byte budget is exhausted");
   if (ledger.retired) throw new DiscoveryFetchPolicyError("attempt is retired");
 }
 
@@ -139,8 +152,27 @@ function consumeBodyBytes(state: RunState, byteLength: number): void {
   }
   state.ledger.bytesConsumed += byteLength;
   if (state.ledger.bytesConsumed > state.ledger.budget.max_job_bytes) {
+    state.ledger.exhausted = true;
+    state.ledger.retired = true;
+    for (const controller of state.ledger.activeControllers) {
+      if (controller !== state.operation.controller) controller.abort();
+    }
     throw new DiscoveryFetchPolicyError("attempt byte limit exceeded (job byte limit)");
   }
+}
+
+function remainingAttemptBytes(state: RunState): number {
+  assertActiveOperation(state);
+  const remaining = state.ledger.budget.max_job_bytes - state.ledger.bytesConsumed;
+  if (remaining <= 0) {
+    state.ledger.exhausted = true;
+    state.ledger.retired = true;
+    for (const controller of state.ledger.activeControllers) {
+      if (controller !== state.operation.controller) controller.abort();
+    }
+    throw new DiscoveryFetchPolicyError("attempt byte budget is exhausted");
+  }
+  return remaining;
 }
 
 function header(response: HttpsResponse, name: string): string | undefined {
@@ -300,16 +332,6 @@ export class RequestGovernor {
 
   async acquire(origin: string, deadlineAt: number, signal: AbortSignal): Promise<() => void> {
     const state = this.originState(origin);
-    const now = this.now();
-    const reservedStart = Math.max(now, state.nextStartAt);
-    if (reservedStart >= deadlineAt) {
-      throw new DiscoveryFetchPolicyError("attempt deadline exceeded while rate limiting");
-    }
-    state.nextStartAt = reservedStart + 1_000;
-    state.lastUsedAt = now;
-    if (reservedStart > now) {
-      await this.abortable(this.sleep(reservedStart - now), signal);
-    }
     const releaseOrigin = await state.semaphore.acquire(signal);
     if (signal.aborted) {
       releaseOrigin();
@@ -321,6 +343,22 @@ export class RequestGovernor {
       if (signal.aborted) throw new DiscoveryFetchPolicyError("request governor aborted");
     } catch (error) {
       releaseGlobal?.();
+      releaseOrigin();
+      throw error;
+    }
+    try {
+      const now = this.now();
+      const reservedStart = Math.max(now, state.nextStartAt);
+      if (reservedStart >= deadlineAt) {
+        throw new DiscoveryFetchPolicyError("attempt deadline exceeded while rate limiting");
+      }
+      state.nextStartAt = reservedStart + 1_000;
+      state.lastUsedAt = now;
+      if (reservedStart > now) {
+        await this.abortable(this.sleep(reservedStart - now), signal);
+      }
+    } catch (error) {
+      releaseGlobal();
       releaseOrigin();
       throw error;
     }
@@ -408,6 +446,7 @@ function sharedGovernor(
     maxPerOriginConcurrency: dependencies.maxPerOriginConcurrency,
     maxTrackedOrigins: dependencies.maxTrackedOrigins,
     originStateTtlMs: dependencies.originStateTtlMs,
+    maxQueued: dependencies.maxGovernorQueued,
   });
   SHARED_GOVERNORS.set(now, created);
   return created;
@@ -418,7 +457,7 @@ export class DiscoveryFetchGateway {
   private readonly httpsClient: HttpsClient;
   private readonly now: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
-  private readonly parseHtml: typeof parseStaticHtml;
+  private readonly htmlParser: HtmlPageParser;
   private readonly governor: RequestGovernor;
 
   constructor(dependencies: DiscoveryFetchGatewayDependencies = {}) {
@@ -426,7 +465,9 @@ export class DiscoveryFetchGateway {
     this.httpsClient = dependencies.httpsClient ?? new HttpsClient();
     this.now = dependencies.now ?? Date.now;
     this.sleep = dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
-    this.parseHtml = dependencies.parseHtml ?? parseStaticHtml;
+    this.htmlParser = dependencies.htmlParser ?? (dependencies.parseHtml === undefined
+      ? new WorkerHtmlPageParser(undefined, this.now)
+      : { parse: async (bytes) => dependencies.parseHtml!(bytes) });
     this.governor = sharedGovernor(dependencies, this.now, this.sleep);
   }
 
@@ -435,7 +476,6 @@ export class DiscoveryFetchGateway {
     url: string,
   ): Promise<DiscoverySourceSnapshot> {
     return this.runAttemptOperation(attemptContext, async (state) => {
-      reservePage(state);
       return (await this.fetchContainedPage(state, url, 0, 0, state.budget.max_page_bytes)).snapshot;
     });
   }
@@ -461,7 +501,6 @@ export class DiscoveryFetchGateway {
     while (queue.length > 0 && snapshots.length < state.budget.max_pages) {
       const next = queue.shift()!;
       if (completed.has(next.url)) continue;
-      reservePage(state);
       const fetched = await this.fetchContainedPage(
         state,
         next.url,
@@ -470,6 +509,9 @@ export class DiscoveryFetchGateway {
         state.budget.max_page_bytes,
       );
       if (completed.has(fetched.snapshot.url)) continue;
+      if (fetched.snapshot.crawl_order !== snapshots.length || fetched.snapshot.crawl_depth !== next.depth) {
+        throw new DiscoveryFetchPolicyError("cached canonical snapshot has a conflicting crawl position");
+      }
       completed.add(fetched.snapshot.url);
       snapshots.push(fetched.snapshot);
       scheduled.add(fetched.snapshot.url);
@@ -574,68 +616,145 @@ export class DiscoveryFetchGateway {
     crawlDepth: number,
     maxBytes: number,
   ): Promise<FetchedPage> {
-    let current = normalizeDiscoveryUrl(input);
+    return this.fetchAttemptPage(
+      state,
+      normalizeDiscoveryUrl(input),
+      crawlOrder,
+      crawlDepth,
+      maxBytes,
+      true,
+      0,
+      new Set(),
+    );
+  }
+
+  private async fetchAttemptPage(
+    state: RunState,
+    current: URL,
+    crawlOrder: number,
+    crawlDepth: number,
+    maxBytes: number,
+    reservePageSlot: boolean,
+    redirects: number,
+    visited: ReadonlySet<string>,
+  ): Promise<FetchedPage> {
+    assertActiveOperation(state);
     assertWithinRegistrableDomain(state.origin, current);
-
-    for (let redirects = 0; ; redirects += 1) {
-      if (this.now() >= state.deadlineAt) throw new DiscoveryFetchPolicyError("attempt deadline exceeded");
-      assertWithinRegistrableDomain(state.origin, current);
-      reserveRequest(state);
-      const releaseGovernor = await this.awaitOperation(this.governor.acquire(
-        current.origin,
-        state.deadlineAt,
-        state.operation.controller.signal,
-      ), state);
-      let response: HttpsResponse;
-      try {
-        const addresses = await this.awaitOperation(
-          this.addressPolicy.resolvePublicAddresses(current.hostname, state.operation.controller.signal),
-          state,
-        );
-        const address = addresses[0];
-        if (address === undefined) throw new DiscoveryFetchPolicyError("DNS produced no validated address");
-        response = await this.httpsClient.request({
-          url: current,
-          address,
-          maxBytes,
-          deadlineAt: state.deadlineAt,
-          onBodyBytes: (byteLength) => consumeBodyBytes(state, byteLength),
-          signal: state.operation.controller.signal,
-        });
-      } finally {
-        releaseGovernor();
-      }
+    if (visited.has(current.href)) throw new DiscoveryFetchPolicyError("redirect loop detected");
+    const cached = state.ledger.fetchedPages.get(current.href);
+    if (cached !== undefined) return cached;
+    const inFlight = state.ledger.inFlightPages.get(current.href);
+    if (inFlight !== undefined) return this.awaitOperation(inFlight, state);
+    if (redirects > 5) throw new DiscoveryFetchPolicyError("redirect limit exceeded");
+    if (reservePageSlot) reservePage(state);
+    const nextVisited = new Set(visited);
+    nextVisited.add(current.href);
+    const request = this.fetchCanonicalNetwork(
+      state,
+      current,
+      crawlOrder,
+      crawlDepth,
+      maxBytes,
+      redirects,
+      nextVisited,
+    );
+    state.ledger.inFlightPages.set(current.href, request);
+    try {
+      const fetched = await this.awaitOperation(request, state);
       assertActiveOperation(state);
-      if (this.now() >= state.deadlineAt) throw new DiscoveryFetchPolicyError("attempt deadline exceeded");
-
-      if (REDIRECT_STATUSES.has(response.statusCode)) {
-        if (redirects >= 5) throw new DiscoveryFetchPolicyError("redirect limit exceeded");
-        const location = header(response, "location");
-        if (location === undefined || location === "") {
-          throw new DiscoveryFetchPolicyError("redirect response is missing Location");
-        }
-        const redirected = normalizeDiscoveryUrl(location, current);
-        current = redirected;
-        continue;
+      state.ledger.fetchedPages.set(current.href, fetched);
+      state.ledger.fetchedPages.set(fetched.snapshot.url, fetched);
+      return fetched;
+    } finally {
+      if (state.ledger.inFlightPages.get(current.href) === request) {
+        state.ledger.inFlightPages.delete(current.href);
       }
-
-      validateHtmlResponse(response);
-      const parsed = this.parseHtml(response.body);
-      const retrievedAt = this.now();
-      if (retrievedAt >= state.deadlineAt) throw new DiscoveryFetchPolicyError("attempt deadline exceeded");
-      assertActiveOperation(state);
-      const snapshot: DiscoverySourceSnapshot = Object.freeze({
-        url: current.href,
-        retrieved_at: new Date(retrievedAt).toISOString(),
-        http_status: response.statusCode,
-        mime_type: "text/html",
-        byte_length: response.body.byteLength,
-        content_hash: parsed.contentHash,
-        excerpt: untrustedEvidenceExcerpt(parsed.excerpt),
-        crawl_order: crawlOrder,
-        crawl_depth: crawlDepth,
-      });
-      return Object.freeze({ snapshot, links: parsed.links });
     }
+  }
+
+  private async fetchCanonicalNetwork(
+    state: RunState,
+    current: URL,
+    crawlOrder: number,
+    crawlDepth: number,
+    maxBytes: number,
+    redirects: number,
+    visited: ReadonlySet<string>,
+  ): Promise<FetchedPage> {
+    if (this.now() >= state.deadlineAt) throw new DiscoveryFetchPolicyError("attempt deadline exceeded");
+    assertWithinRegistrableDomain(state.origin, current);
+    reserveRequest(state);
+    const releaseGovernor = await this.awaitOperation(this.governor.acquire(
+      current.origin,
+      state.deadlineAt,
+      state.operation.controller.signal,
+    ), state);
+    let response: HttpsResponse;
+    try {
+      const addresses = await this.awaitOperation(
+        this.addressPolicy.resolvePublicAddresses(
+          current.hostname,
+          state.operation.controller.signal,
+          state.deadlineAt,
+        ),
+        state,
+      );
+      const address = addresses[0];
+      if (address === undefined) throw new DiscoveryFetchPolicyError("DNS produced no validated address");
+      const responseByteLimit = Math.min(maxBytes, remainingAttemptBytes(state));
+      response = await this.httpsClient.request({
+        url: current,
+        address,
+        maxBytes: responseByteLimit,
+        deadlineAt: state.deadlineAt,
+        onBodyBytes: (byteLength) => consumeBodyBytes(state, byteLength),
+        signal: state.operation.controller.signal,
+      });
+    } finally {
+      releaseGovernor();
+    }
+    assertActiveOperation(state);
+    if (this.now() >= state.deadlineAt) throw new DiscoveryFetchPolicyError("attempt deadline exceeded");
+
+    if (REDIRECT_STATUSES.has(response.statusCode)) {
+      if (redirects >= 5) throw new DiscoveryFetchPolicyError("redirect limit exceeded");
+      const location = header(response, "location");
+      if (location === undefined || location === "") {
+        throw new DiscoveryFetchPolicyError("redirect response is missing Location");
+      }
+      const redirected = normalizeDiscoveryUrl(location, current);
+      return this.fetchAttemptPage(
+        state,
+        redirected,
+        crawlOrder,
+        crawlDepth,
+        maxBytes,
+        false,
+        redirects + 1,
+        visited,
+      );
+    }
+
+    validateHtmlResponse(response);
+    const parsed = await this.awaitOperation(this.htmlParser.parse(
+      response.body,
+      state.operation.controller.signal,
+      state.deadlineAt,
+    ), state);
+    const retrievedAt = this.now();
+    if (retrievedAt >= state.deadlineAt) throw new DiscoveryFetchPolicyError("attempt deadline exceeded");
+    assertActiveOperation(state);
+    const snapshot: DiscoverySourceSnapshot = Object.freeze({
+      url: current.href,
+      retrieved_at: new Date(retrievedAt).toISOString(),
+      http_status: response.statusCode,
+      mime_type: "text/html",
+      byte_length: response.body.byteLength,
+      content_hash: parsed.contentHash,
+      excerpt: untrustedEvidenceExcerpt(parsed.excerpt),
+      crawl_order: crawlOrder,
+      crawl_depth: crawlDepth,
+    });
+    return Object.freeze({ snapshot, links: parsed.links });
   }
 }

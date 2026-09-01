@@ -33,7 +33,12 @@ export interface SiteResponse {
 }
 
 export class ScriptedTransport implements PinnedHttpsTransport {
-  readonly calls: Array<{ readonly url: string; readonly address: string; readonly at: number }> = [];
+  readonly calls: Array<{
+    readonly url: string;
+    readonly address: string;
+    readonly at: number;
+    readonly maxBytes: number;
+  }> = [];
 
   constructor(
     private readonly sites: Readonly<Record<string, SiteResponse | readonly SiteResponse[]>>,
@@ -41,7 +46,12 @@ export class ScriptedTransport implements PinnedHttpsTransport {
   ) {}
 
   async request(input: HttpsRequest): Promise<HttpsResponse> {
-    this.calls.push({ url: input.url.href, address: input.address.address, at: this.now() });
+    this.calls.push({
+      url: input.url.href,
+      address: input.address.address,
+      at: this.now(),
+      maxBytes: input.maxBytes,
+    });
     const configured = this.sites[input.url.href];
     if (configured === undefined) throw new Error(`unexpected request: ${input.url.href}`);
     const selected = Array.isArray(configured)

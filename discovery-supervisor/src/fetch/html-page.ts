@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { Worker } from "node:worker_threads";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 
 type Node = DefaultTreeAdapterMap["node"];
@@ -10,10 +11,95 @@ export interface ParsedHtmlPage {
   readonly contentHash: string;
 }
 
+export interface HtmlPageParser {
+  parse(bytes: Buffer, signal: AbortSignal, deadlineAt: number): Promise<ParsedHtmlPage>;
+}
+
+interface ParserWorker {
+  on(event: "message" | "error" | "exit", listener: (...arguments_: any[]) => void): unknown;
+  off(event: "message" | "error" | "exit", listener: (...arguments_: any[]) => void): unknown;
+  postMessage(value: unknown): void;
+  terminate(): Promise<number> | number;
+}
+
+interface ParserWorkerResult {
+  readonly ok: boolean;
+  readonly page?: ParsedHtmlPage;
+  readonly error?: string;
+}
+
 export class HtmlPolicyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "HtmlPolicyError";
+  }
+}
+
+export class WorkerHtmlPageParser implements HtmlPageParser {
+  constructor(
+    private readonly workerFactory: () => ParserWorker = () =>
+      new Worker(new URL("./html-parser-worker.ts", import.meta.url)),
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  parse(bytes: Buffer, signal: AbortSignal, deadlineAt: number): Promise<ParsedHtmlPage> {
+    if (signal.aborted || deadlineAt <= this.now()) {
+      return Promise.reject(new HtmlPolicyError("HTML parsing aborted"));
+    }
+    const worker = this.workerFactory();
+    return new Promise<ParsedHtmlPage>((resolve, reject) => {
+      let settled = false;
+      const stopWorker = async (): Promise<void> => {
+        try {
+          await worker.terminate();
+        } catch {
+          // The parse outcome remains authoritative if termination reports an error.
+        }
+      };
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", aborted);
+        worker.off("message", messaged);
+        worker.off("error", errored);
+        worker.off("exit", exited);
+      };
+      const fail = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        void stopWorker().then(() => reject(error));
+      };
+      const aborted = (): void => fail(new HtmlPolicyError("HTML parsing aborted"));
+      const messaged = (message: ParserWorkerResult): void => {
+        if (!message.ok || message.page === undefined) {
+          fail(new HtmlPolicyError(message.error ?? "HTML parser worker failed"));
+          return;
+        }
+        if (settled) return;
+        settled = true;
+        cleanup();
+        const result = Object.freeze({
+          excerpt: message.page.excerpt,
+          links: Object.freeze([...message.page.links]),
+          contentHash: message.page.contentHash,
+        });
+        void stopWorker().then(() => resolve(result));
+      };
+      const errored = (error: Error): void => fail(error);
+      const exited = (code: number): void => {
+        if (!settled) fail(new HtmlPolicyError(`HTML parser worker exited before result: ${code}`));
+      };
+      const timer = setTimeout(aborted, Math.max(0, deadlineAt - this.now()));
+      signal.addEventListener("abort", aborted, { once: true });
+      worker.on("message", messaged);
+      worker.on("error", errored);
+      worker.on("exit", exited);
+      try {
+        worker.postMessage(Buffer.from(bytes));
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
   }
 }
 

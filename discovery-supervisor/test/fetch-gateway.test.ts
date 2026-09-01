@@ -17,6 +17,7 @@ import {
   isWithinRegistrableDomain,
   normalizeDiscoveryUrl,
 } from "../src/fetch/url-policy";
+import * as htmlPageModule from "../src/fetch/html-page";
 import {
   BASIC_HTML,
   FakeClock,
@@ -90,6 +91,49 @@ class HoldingTransport {
   }
 }
 
+class CoordinatedBodyTransport {
+  private readonly held: Array<{
+    input: any;
+    resolve: (value: any) => void;
+    reject: (error: Error) => void;
+  }> = [];
+
+  request(input: any): Promise<any> {
+    return new Promise((resolve, reject) => this.held.push({ input, resolve, reject }));
+  }
+
+  get pending(): number {
+    return this.held.length;
+  }
+
+  flush(byteLength: number): void {
+    const meteringErrors: Array<Error | undefined> = [];
+    for (const held of this.held) {
+      try {
+        held.input.onBodyBytes(byteLength);
+        meteringErrors.push(undefined);
+      } catch (error) {
+        meteringErrors.push(error as Error);
+      }
+    }
+    this.held.forEach((held, index) => {
+      const error = meteringErrors[index];
+      if (error !== undefined) {
+        held.reject(error);
+        return;
+      }
+      held.resolve({
+        statusCode: 200,
+        headers: { "content-type": "text/html" },
+        body: BASIC_HTML,
+        remoteAddress: held.input.address.address,
+        bodyBytesConsumed: byteLength,
+        bodyDiscarded: false,
+      });
+    });
+  }
+}
+
 class StaticResolver {
   constructor(
     private readonly sequence: Array<readonly ResolvedAddress[] | Error> = [[{
@@ -120,6 +164,7 @@ function gateway(
       httpsClient: new HttpsClient(transport),
       now: clock.now,
       sleep: clock.sleep,
+      parseHtml: htmlPageModule.parseStaticHtml,
     }),
   };
 }
@@ -161,6 +206,49 @@ describe("URL containment", () => {
 });
 
 describe("DNS and address policy", () => {
+  test("cancels an outstanding resolver on abort instead of only abandoning its promise", async () => {
+    const controller = new AbortController();
+    let cancelled = 0;
+    const dns: DnsLookup = {
+      resolveCname: () => new Promise<never>(() => {}),
+      resolve4: async () => [],
+      resolve6: async () => [],
+      cancel: () => {
+        cancelled += 1;
+      },
+    } as DnsLookup;
+    const pending = new AddressPolicy(dns).resolvePublicAddresses(
+      "www.example.com",
+      controller.signal,
+      Date.now() + 1_000,
+    );
+
+    await Promise.resolve();
+    controller.abort();
+    expect(await settleWithin(pending)).toBe("rejected");
+    expect(cancelled).toBe(1);
+  });
+
+  test("cancels an outstanding resolver at the DNS deadline", async () => {
+    let cancelled = 0;
+    const dns: DnsLookup = {
+      resolveCname: () => new Promise<never>(() => {}),
+      resolve4: async () => [],
+      resolve6: async () => [],
+      cancel: () => {
+        cancelled += 1;
+      },
+    } as DnsLookup;
+    const pending = new AddressPolicy(dns).resolvePublicAddresses(
+      "www.example.com",
+      undefined,
+      Date.now() + 20,
+    );
+
+    expect(await settleWithin(pending, 150)).toBe("rejected");
+    expect(cancelled).toBe(1);
+  });
+
   test("allows only globally routable IPv4 and IPv6 addresses", () => {
     expect(() => assertPublicAddress(PUBLIC_V4)).not.toThrow();
     expect(() => assertPublicAddress("2606:4700:4700::1111")).not.toThrow();
@@ -239,6 +327,32 @@ describe("DNS and address policy", () => {
 });
 
 describe("pinned HTTPS request", () => {
+  test("applies the per-response byte cap to discarded responses", async () => {
+    const discardedResponses: SiteResponse[] = [{
+      status: 302,
+      headers: { location: "/next" },
+      body: Buffer.alloc(101, 65),
+    }, {
+      headers: { "content-type": "text/plain" },
+      body: Buffer.alloc(101, 65),
+    }, {
+      headers: { "content-type": "text/html", "content-disposition": "attachment" },
+      body: Buffer.alloc(101, 65),
+    }, {
+      headers: { "content-type": "text/html", "content-encoding": "gzip" },
+      body: Buffer.alloc(101, 65),
+    }];
+    for (const configured of discardedResponses) {
+      const transport = new ScriptedTransport({ "https://www.example.com/": configured });
+      expect(new HttpsClient(transport).request({
+        url: new URL("https://www.example.com/"),
+        address: { address: PUBLIC_V4, family: 4 },
+        maxBytes: 100,
+        deadlineAt: Date.now() + 10_000,
+      })).rejects.toThrow("response byte limit");
+    }
+  });
+
   test("builds the production TLS boundary with Host, SNI, pinned lookup, verification, and abort", () => {
     const buildOptions = (httpsClientModule as unknown as {
       buildPinnedHttpsRequestOptions?: (input: any) => any;
@@ -470,7 +584,7 @@ describe("fetch and redirect containment", () => {
 
   test("returns an immutable snapshot for the final same-domain HTML response", async () => {
     const clock = new FakeClock();
-    const { gateway: fetchGateway } = gateway(clock, {
+    const { gateway: fetchGateway, transport } = gateway(clock, {
       "https://www.example.com/": {
         status: 301,
         headers: { location: "https://help.example.com/about" },
@@ -514,6 +628,113 @@ describe("fetch and redirect containment", () => {
 });
 
 describe("static HTML response policy", () => {
+  test("terminates a slow parser worker on abort", async () => {
+    const Parser = (htmlPageModule as unknown as {
+      WorkerHtmlPageParser?: new (factory?: () => any) => {
+        parse(bytes: Buffer, signal: AbortSignal, deadlineAt: number): Promise<any>;
+      };
+    }).WorkerHtmlPageParser;
+    expect(typeof Parser).toBe("function");
+    if (Parser === undefined) return;
+    const listeners = new Map<string, Set<(...args: any[]) => void>>();
+    let terminated = 0;
+    const worker = {
+      on(event: string, listener: (...args: any[]) => void) {
+        const bucket = listeners.get(event) ?? new Set();
+        bucket.add(listener);
+        listeners.set(event, bucket);
+        return this;
+      },
+      off(event: string, listener: (...args: any[]) => void) {
+        listeners.get(event)?.delete(listener);
+        return this;
+      },
+      postMessage() {},
+      terminate() {
+        terminated += 1;
+        return Promise.resolve(0);
+      },
+    };
+    const controller = new AbortController();
+    const pending = new Parser(() => worker).parse(BASIC_HTML, controller.signal, Date.now() + 1_000);
+
+    controller.abort();
+    expect(await settleWithin(pending)).toBe("rejected");
+    expect(terminated).toBe(1);
+  });
+
+  test("does not report parser cancellation before worker termination completes", async () => {
+    const Parser = (htmlPageModule as unknown as {
+      WorkerHtmlPageParser: new (factory?: () => any) => {
+        parse(bytes: Buffer, signal: AbortSignal, deadlineAt: number): Promise<any>;
+      };
+    }).WorkerHtmlPageParser;
+    let finishTermination!: (code: number) => void;
+    const worker = {
+      on() { return this; },
+      off() { return this; },
+      postMessage() {},
+      terminate: () => new Promise<number>((resolve) => {
+        finishTermination = resolve;
+      }),
+    };
+    const controller = new AbortController();
+    const pending = new Parser(() => worker).parse(BASIC_HTML, controller.signal, Date.now() + 1_000);
+
+    controller.abort();
+    expect(await settleWithin(pending, 20)).toBe("timeout");
+    finishTermination(0);
+    expect(await settleWithin(pending)).toBe("rejected");
+  });
+
+
+  test("terminates a slow parser worker at its deadline", async () => {
+    const Parser = (htmlPageModule as unknown as {
+      WorkerHtmlPageParser?: new (factory?: () => any) => {
+        parse(bytes: Buffer, signal: AbortSignal, deadlineAt: number): Promise<any>;
+      };
+    }).WorkerHtmlPageParser;
+    expect(typeof Parser).toBe("function");
+    if (Parser === undefined) return;
+    let terminated = 0;
+    const worker = {
+      on() { return this; },
+      off() { return this; },
+      postMessage() {},
+      terminate() {
+        terminated += 1;
+        return Promise.resolve(0);
+      },
+    };
+    const pending = new Parser(() => worker).parse(
+      BASIC_HTML,
+      new AbortController().signal,
+      Date.now() + 20,
+    );
+
+    expect(await settleWithin(pending, 150)).toBe("rejected");
+    expect(terminated).toBe(1);
+  });
+
+  test("the production parser worker returns immutable static HTML evidence", async () => {
+    const Parser = (htmlPageModule as unknown as {
+      WorkerHtmlPageParser?: new () => {
+        parse(bytes: Buffer, signal: AbortSignal, deadlineAt: number): Promise<any>;
+      };
+    }).WorkerHtmlPageParser;
+    expect(typeof Parser).toBe("function");
+    if (Parser === undefined) return;
+
+    const parsed = await new Parser().parse(
+      BASIC_HTML,
+      new AbortController().signal,
+      Date.now() + 2_000,
+    );
+    expect(parsed).toMatchObject({ excerpt: "Example Plumbing Drain cleaning.", links: [] });
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(Object.isFrozen(parsed.links)).toBe(true);
+  });
+
   test("rejects PDF and image polyglots even when an HTML tag follows the binary prefix", async () => {
     const polyglots = [
       Buffer.from("GIF89a-not-an-image<html><body>fake</body></html>", "latin1"),
@@ -599,7 +820,7 @@ describe("bounded crawl", () => {
   test("does not emit duplicate snapshots when queued aliases redirect to one final URL", async () => {
     const clock = new FakeClock();
     const root = Buffer.from("<!doctype html><html><body><a href='/a'>A</a><a href='/b'>B</a></body></html>");
-    const { gateway: fetchGateway } = gateway(clock, {
+    const { gateway: fetchGateway, transport } = gateway(clock, {
       "https://www.example.com/": { body: root },
       "https://www.example.com/a": {
         status: 302,
@@ -620,6 +841,7 @@ describe("bounded crawl", () => {
       "https://www.example.com/final",
     ]);
     expect(snapshots.map((snapshot) => snapshot.crawl_order)).toEqual([0, 1]);
+    expect(transport.calls.filter((call) => call.url === "https://www.example.com/final")).toHaveLength(1);
   });
 
   test("shares the per-origin rate gate across separate fetchPage calls", async () => {
@@ -713,6 +935,121 @@ describe("bounded crawl", () => {
 });
 
 describe("attempt-scoped accounting", () => {
+  test("reuses one immutable snapshot across repeated fetchPage calls without another request", async () => {
+    const clock = new FakeClock();
+    const { gateway: fetchGateway, transport } = gateway(clock, {
+      "https://www.example.com/": { body: BASIC_HTML },
+    });
+    const attempt = context(clock, { max_pages: 1 });
+
+    const first = await fetchGateway.fetchPage(attempt, "https://www.example.com/");
+    const second = await fetchGateway.fetchPage(attempt, "https://www.example.com/");
+    expect(second).toBe(first);
+    expect(transport.calls).toHaveLength(1);
+  });
+
+  test("shares an in-flight canonical fetch across concurrent callers", async () => {
+    const clock = new FakeClock();
+    const transport = new HoldingTransport();
+    const fetchGateway = new DiscoveryFetchGateway({
+      addressPolicy: new StaticResolver(),
+      httpsClient: new HttpsClient(transport),
+      now: clock.now,
+      sleep: clock.sleep,
+      parseHtml: htmlPageModule.parseStaticHtml,
+    });
+    const attempt = context(clock, { max_pages: 1 });
+    const first = fetchGateway.fetchPage(attempt, "https://www.example.com/");
+    const second = fetchGateway.fetchPage(attempt, "https://www.example.com/");
+    await spinUntil(() => transport.active === 1);
+    transport.releaseOne();
+
+    const snapshots = await Promise.all([first, second]);
+    expect(snapshots[1]).toBe(snapshots[0]);
+    expect(transport.maxActive).toBe(1);
+  });
+
+  test("reuses attempt-wide crawl pages across repeated crawl calls", async () => {
+    const clock = new FakeClock();
+    const root = Buffer.from("<!doctype html><html><body><a href='/about'>About</a></body></html>");
+    const { gateway: fetchGateway, transport } = gateway(clock, {
+      "https://www.example.com/": { body: root },
+      "https://www.example.com/about": { body: BASIC_HTML },
+    });
+    const attempt = context(clock, { max_pages: 2 });
+
+    const first = await fetchGateway.crawl(attempt, "https://www.example.com/");
+    const second = await fetchGateway.crawl(attempt, "https://www.example.com/");
+    expect(second).toEqual(first);
+    expect(transport.calls).toHaveLength(2);
+  });
+
+  test("rejects cached snapshot reuse at a conflicting crawl position without refetching", async () => {
+    const clock = new FakeClock();
+    const root = Buffer.from("<!doctype html><html><body><a href='/about'>About</a></body></html>");
+    const { gateway: fetchGateway, transport } = gateway(clock, {
+      "https://www.example.com/": { body: root },
+      "https://www.example.com/about": { body: BASIC_HTML },
+    });
+    const attempt = context(clock, { max_pages: 2 });
+
+    await fetchGateway.fetchPage(attempt, "https://www.example.com/about");
+    await expect(fetchGateway.crawl(attempt, "https://www.example.com/")).rejects.toThrow("crawl position");
+    expect(transport.calls.map((call) => call.url)).toEqual([
+      "https://www.example.com/about",
+      "https://www.example.com/",
+    ]);
+  });
+
+
+  test("shares one redirect-final snapshot across concurrent alias calls", async () => {
+    const clock = new FakeClock();
+    const { gateway: fetchGateway, transport } = gateway(clock, {
+      "https://www.example.com/a": {
+        status: 302,
+        headers: { location: "/final" },
+        body: Buffer.alloc(0),
+      },
+      "https://www.example.com/b": {
+        status: 302,
+        headers: { location: "/final" },
+        body: Buffer.alloc(0),
+      },
+      "https://www.example.com/final": { body: BASIC_HTML },
+    });
+    const attempt = context(clock, { max_pages: 2 });
+
+    const snapshots = await Promise.all([
+      fetchGateway.fetchPage(attempt, "https://www.example.com/a"),
+      fetchGateway.fetchPage(attempt, "https://www.example.com/b"),
+    ]);
+    expect(snapshots[1]).toBe(snapshots[0]);
+    expect(transport.calls.filter((call) => call.url === "https://www.example.com/final")).toHaveLength(1);
+  });
+
+  test("passes each response the smaller remaining attempt-byte cap", async () => {
+    const clock = new FakeClock();
+    const transport = new ScriptedTransport({
+      "https://a.example.com/": { body: BASIC_HTML },
+      "https://b.example.com/": {
+        status: 302,
+        headers: { location: "/next" },
+        body: Buffer.alloc(50, 65),
+      },
+    }, clock.now);
+    const fetchGateway = new DiscoveryFetchGateway({
+      addressPolicy: new StaticResolver(),
+      httpsClient: new HttpsClient(transport),
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+    const attempt = context(clock, { max_pages: 2, max_job_bytes: 150 });
+
+    await fetchGateway.fetchPage(attempt, "https://a.example.com/");
+    await expect(fetchGateway.fetchPage(attempt, "https://b.example.com/")).rejects.toThrow();
+    expect(transport.calls.map((call) => call.maxBytes)).toEqual([150, 49]);
+  });
+
   test("accepts only an immutable supervisor-created attempt context", async () => {
     const clock = new FakeClock();
     const trusted = context(clock);
@@ -758,35 +1095,38 @@ describe("attempt-scoped accounting", () => {
     expect(transport.calls).toHaveLength(1);
   });
 
-  test("atomically meters the final job bytes across concurrent calls", async () => {
+  test("terminal byte exhaustion rejects every concurrent sibling and all future calls", async () => {
     const clock = new FakeClock();
-    const body = Buffer.from(`<!doctype html><html><body>${"x".repeat(60)}</body></html>`);
-    expect(body.byteLength).toBe(101);
-    const { gateway: fetchGateway } = gateway(clock, {
-      "https://a.example.com/": { body },
-      "https://b.example.com/": { body },
+    const transport = new CoordinatedBodyTransport();
+    const fetchGateway = new DiscoveryFetchGateway({
+      addressPolicy: new StaticResolver(),
+      httpsClient: new HttpsClient(transport),
+      now: clock.now,
+      sleep: clock.sleep,
     });
     const attempt = context(clock, { max_pages: 2, max_job_bytes: 150 });
-
-    const outcomes = await Promise.allSettled([
+    const pending = [
       fetchGateway.fetchPage(attempt, "https://a.example.com/"),
       fetchGateway.fetchPage(attempt, "https://b.example.com/"),
-    ]);
-    expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(["fulfilled", "rejected"]);
-    expect((outcomes.find((outcome) => outcome.status === "rejected") as PromiseRejectedResult).reason.message).toContain(
-      "attempt byte limit",
-    );
+    ];
+    await spinUntil(() => transport.pending === 2);
+    transport.flush(101);
+
+    const outcomes = await Promise.allSettled(pending);
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(["rejected", "rejected"]);
+    expect(fetchGateway.fetchPage(attempt, "https://c.example.com/")).rejects.toThrow(/retired|exhausted/);
   });
 
   test("does not reset the page ledger across repeated crawl calls", async () => {
     const clock = new FakeClock();
     const { gateway: fetchGateway } = gateway(clock, {
       "https://www.example.com/": { body: BASIC_HTML },
+      "https://www.example.com/about": { body: BASIC_HTML },
     });
     const attempt = context(clock, { max_pages: 1 });
 
     expect(await fetchGateway.crawl(attempt, "https://www.example.com/")).toHaveLength(1);
-    expect(fetchGateway.crawl(attempt, "https://www.example.com/")).rejects.toThrow("attempt page limit");
+    expect(fetchGateway.crawl(attempt, "https://www.example.com/about")).rejects.toThrow("attempt page limit");
   });
 
   test("retirement fences late calls for the same attempt identity", async () => {
@@ -896,7 +1236,7 @@ describe("attempt cancellation and deadlines", () => {
     await fetchGateway.fetchPage(attempt, "https://www.example.com/");
     const pending = fetchGateway.fetchPage(attempt, "https://www.example.com/about");
 
-    await Promise.resolve();
+    await spinUntil(() => sleepStarted);
     expect(sleepStarted).toBe(true);
     controller.abort();
     expect(await settleWithin(pending)).toBe("rejected");
@@ -937,6 +1277,73 @@ describe("attempt cancellation and deadlines", () => {
 });
 
 describe("bounded shared request governor", () => {
+  test("bounds queued callers before additional pacing waits are created", async () => {
+    const clock = new FakeClock();
+    const controller = new AbortController();
+    const transport = new HoldingTransport();
+    let pacingSleeps = 0;
+    const fetchGateway = new DiscoveryFetchGateway({
+      addressPolicy: new StaticResolver(),
+      httpsClient: new HttpsClient(transport),
+      now: clock.now,
+      sleep: async (milliseconds: number) => {
+        pacingSleeps += 1;
+        await clock.sleep(milliseconds);
+      },
+      maxGlobalConcurrency: 1,
+      maxPerOriginConcurrency: 1,
+      maxGovernorQueued: 1,
+    } as any);
+    const attempt = context(clock, { max_pages: 3 }, controller.signal);
+    const first = fetchGateway.fetchPage(attempt, "https://www.example.com/one");
+    await spinUntil(() => transport.active === 1);
+    const second = fetchGateway.fetchPage(attempt, "https://www.example.com/two");
+    await Promise.resolve();
+    const third = fetchGateway.fetchPage(attempt, "https://www.example.com/three");
+    const thirdOutcome = await settleWithin(third, 50);
+
+    controller.abort();
+    await Promise.allSettled([first, second, third]);
+    expect(thirdOutcome).toBe("rejected");
+    expect(pacingSleeps).toBe(0);
+  });
+
+  test("does not evict an origin while one of its callers is pacing", async () => {
+    const clock = new FakeClock();
+    const controller = new AbortController();
+    let pacingStarted = false;
+    const transport = new ScriptedTransport({
+      "https://a.example.com/one": { body: BASIC_HTML },
+      "https://a.example.com/two": { body: BASIC_HTML },
+      "https://b.example.com/": { body: BASIC_HTML },
+    }, clock.now);
+    const fetchGateway = new DiscoveryFetchGateway({
+      addressPolicy: new StaticResolver(),
+      httpsClient: new HttpsClient(transport),
+      now: clock.now,
+      sleep: () => {
+        pacingStarted = true;
+        return new Promise<never>(() => {});
+      },
+      maxGlobalConcurrency: 2,
+      maxPerOriginConcurrency: 2,
+      maxTrackedOrigins: 1,
+    } as any);
+    const attemptA = context(clock, { max_pages: 2 }, controller.signal);
+    await fetchGateway.fetchPage(attemptA, "https://a.example.com/one");
+    const pacing = fetchGateway.fetchPage(attemptA, "https://a.example.com/two");
+    await spinUntil(() => pacingStarted);
+
+    const pressureOutcome = await settleWithin(
+      fetchGateway.fetchPage(context(clock), "https://b.example.com/"),
+      50,
+    );
+    controller.abort();
+    await Promise.allSettled([pacing]);
+    expect(pressureOutcome).toBe("rejected");
+    expect(transport.calls.map((call) => call.url)).toEqual(["https://a.example.com/one"]);
+  });
+
   test("limits slow overlap per origin", async () => {
     const clock = new FakeClock();
     const transport = new HoldingTransport();
