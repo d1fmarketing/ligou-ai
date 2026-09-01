@@ -327,6 +327,20 @@ function GroupConfirmation({ group, checked, onChange }) {
   );
 }
 
+export function DiscoveryReviewReadiness({ message }) {
+  return (
+    <p
+      className={`discovery-review-readiness${message ? " is-blocked" : " is-ready"}`}
+      id="discovery-review-readiness"
+      role="status"
+      aria-live="polite"
+    >
+      {message ? <IconAlertTriangle aria-hidden="true" /> : <IconCheck aria-hidden="true" />}
+      <span>{message || "Revisão pronta para confirmação em um lote."}</span>
+    </p>
+  );
+}
+
 export function DiscoveryReviewView({
   discovery = { phase: "loading" },
   onDiscover,
@@ -371,7 +385,7 @@ export function DiscoveryReviewView({
           <p>{claimCount} {claimCount === 1 ? "candidato público" : "candidatos públicos"}. Nada muda até sua confirmação atômica.</p>
         </div>
         <div className="discovery-review-meta">
-          {discovery.lateSuggestion ? <strong>Chegou depois da entrevista · apenas sugestão</strong> : <strong>Sugestão pública · sem efeito automático</strong>}
+          <strong>Sugestão pública · sem efeito automático</strong>
           <small>job v{discovery.job.version} · resultado {discovery.result.hash?.slice(0, 12)}</small>
           <span className="discovery-review-toggle">Abrir revisão</span>
         </div>
@@ -439,8 +453,9 @@ export function DiscoveryReviewView({
 
         {error ? <p className="discovery-submit-error" role="alert">{error}</p> : null}
         <footer className="discovery-review-actions">
+          <DiscoveryReviewReadiness message={reviewError} />
           <p><IconLock aria-hidden="true" /> Um nonce curto vincula exatamente este job, resultado e conjunto de claims.</p>
-          <button className="button button--primary" type="submit" disabled={busy || Boolean(reviewError)} title={reviewError || undefined}>
+          <button className="button button--primary" type="submit" disabled={busy || Boolean(reviewError)} aria-describedby="discovery-review-readiness">
             {busy ? "Confirmando o lote…" : "Confirmar revisão em um lote"}
           </button>
         </footer>

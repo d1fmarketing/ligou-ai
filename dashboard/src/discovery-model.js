@@ -250,7 +250,6 @@ export function mapDiscoveryRead({
     phase: job.status === "reviewed" || mappedClaims.length === 0 ? "complete" : "review",
     interviewAvailable: true,
     authorityEffect: "suggestion_only",
-    lateSuggestion: job.fallback_state === "existing_onboarding",
     job: {
       id: job.id,
       version: Number(job.version),

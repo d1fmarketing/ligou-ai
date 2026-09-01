@@ -4013,6 +4013,31 @@ button:disabled {
   line-height: var(--leading-compact);
 }
 
+.discovery-review-actions .discovery-review-readiness {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  grid-column: 1 / -1;
+  align-items: start;
+  gap: 8px;
+  padding: 10px 11px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-900);
+  background: var(--orange-soft);
+  font-weight: 700;
+}
+
+.discovery-review-actions .discovery-review-readiness.is-ready {
+  background: var(--teal-soft);
+}
+
+.discovery-review-readiness.is-blocked > svg {
+  color: var(--orange-dark);
+}
+
+.discovery-review-readiness.is-ready > svg {
+  color: var(--teal);
+}
+
 .discovery-review-actions p svg {
   flex: 0 0 auto;
 }

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -28,7 +29,45 @@ const IDS = {
   evidenceB: "10000000-0000-4000-8000-000000000022",
 };
 
-const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+async function resolveBrowserExecutable({
+  env = process.env,
+  platform = process.platform,
+  accessFn = access,
+} = {}) {
+  const configured = [
+    env.LIGOU_TEST_BROWSER_PATH,
+    env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    env.CHROME_BIN,
+  ].filter(Boolean);
+  const known = platform === "darwin"
+    ? [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium",
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    ]
+    : platform === "win32"
+      ? [
+        env["PROGRAMFILES"] && join(env["PROGRAMFILES"], "Google", "Chrome", "Application", "chrome.exe"),
+        env["PROGRAMFILES(X86)"] && join(env["PROGRAMFILES(X86)"], "Microsoft", "Edge", "Application", "msedge.exe"),
+      ].filter(Boolean)
+      : [
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+      ];
+  for (const candidate of [...configured, ...known]) {
+    try {
+      await accessFn(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // Continue through portable known locations. Absence is a capability
+      // result, not a dashboard test failure.
+    }
+  }
+  return null;
+}
 
 function interactionModuleSource() {
   const rows = discoveryRows();
@@ -84,7 +123,7 @@ function interactionModuleSource() {
   `;
 }
 
-async function startInteractionBrowser() {
+async function startInteractionBrowser(browserExecutable) {
   const virtualId = "/__virtual_discovery_interaction.jsx";
   const resolvedId = virtualId;
   const profile = await mkdtemp(join(tmpdir(), "ligou-discovery-browser-"));
@@ -109,7 +148,10 @@ async function startInteractionBrowser() {
     appType: "custom",
     server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false, ws: false },
     resolve: { dedupe: ["react", "react-dom"] },
-    optimizeDeps: { noDiscovery: true, include: ["react", "react-dom/client", "@tabler/icons-react"] },
+    optimizeDeps: {
+      noDiscovery: true,
+      include: ["react", "react-dom/client", "@tabler/icons-react", "@supabase/supabase-js"],
+    },
     plugins: [react(), harnessPlugin],
   });
   await vite.listen();
@@ -117,7 +159,7 @@ async function startInteractionBrowser() {
   const port = typeof address === "object" ? address.port : null;
   assert.ok(port);
 
-  const chrome = spawn(CHROME_PATH, [
+  const chrome = spawn(browserExecutable, [
     "--headless=new",
     "--disable-background-networking",
     "--disable-component-update",
@@ -182,6 +224,7 @@ async function startInteractionBrowser() {
     chrome.kill("SIGTERM");
     await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 2000))]);
     if (chrome.exitCode == null) chrome.kill("SIGKILL");
+    await vite.waitForRequestsIdle();
     await vite.close();
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   };
@@ -491,17 +534,40 @@ test("failed, expired, disabled, and non-allowlisted discovery fail open to the 
   })).reason, "allowlist_expired");
 });
 
-test("late labeling comes only from authoritative fallback state and every result remains a neutral suggestion", () => {
+test("discovery never fabricates late timing without a durable timing receipt", () => {
   const neutral = mapDiscoveryRead(discoveryRows({ hasOwnerAnswers: true }));
-  const late = mapDiscoveryRead(discoveryRows({
+  const impossibleLegacyCombination = mapDiscoveryRead(discoveryRows({
     job: { ...discoveryRows().job, fallback_state: "existing_onboarding" },
   }));
-  assert.equal(neutral.lateSuggestion, false);
-  assert.equal(late.lateSuggestion, true);
-  for (const review of [neutral, late]) {
+  for (const review of [neutral, impossibleLegacyCombination]) {
+    assert.equal(Object.hasOwn(review, "lateSuggestion"), false);
     assert.equal(review.authorityEffect, "suggestion_only");
     assert.equal(review.groups.flatMap((group) => group.claims).every((claim) => claim.decision === null), true);
   }
+});
+
+test("browser capability resolution is portable and returns null when no executable exists", async () => {
+  const checked = [];
+  const resolved = await resolveBrowserExecutable({
+    env: {},
+    platform: "linux",
+    accessFn: async (candidate) => {
+      checked.push(candidate);
+      if (candidate !== "/usr/bin/chromium") throw new Error("missing");
+    },
+  });
+  assert.equal(resolved, "/usr/bin/chromium");
+  assert.equal(checked.includes("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), false);
+  assert.equal(await resolveBrowserExecutable({
+    env: { CHROME_BIN: "/custom/chrome" },
+    platform: "linux",
+    accessFn: async (candidate) => { if (candidate !== "/custom/chrome") throw new Error("missing"); },
+  }), "/custom/chrome");
+  assert.equal(await resolveBrowserExecutable({
+    env: {},
+    platform: "linux",
+    accessFn: async () => { throw new Error("missing"); },
+  }), null);
 });
 
 test("owner discovery gateway emits exact Task 1 RPC names and payloads", async () => {
@@ -711,7 +777,7 @@ test("owner discovery reads stay tenant, job, attempt, and result pinned through
       now: rows.now,
     });
     assert.equal(projected.phase, "review");
-    assert.equal(projected.lateSuggestion, false);
+    assert.equal(Object.hasOwn(projected, "lateSuggestion"), false);
   } finally {
     await vite.close();
   }
@@ -828,6 +894,38 @@ test("the real review component renders evidence-to-authority rail, boundaries, 
   assert.doesNotMatch(privateSection, /Evidência do site|Candidato|Perfil da empresa|Regra da Ligou/);
 });
 
+test("review readiness is visible, live, and connected to submit for every blocking reason", async () => {
+  const vite = await createServer({
+    configFile: false,
+    root: process.cwd(),
+    appType: "custom",
+    server: { middlewareMode: true, hmr: false, ws: false },
+    optimizeDeps: { noDiscovery: true },
+    plugins: [react()],
+  });
+  try {
+    const { DiscoveryReviewReadiness, DiscoveryReviewView } = await vite.ssrLoadModule("/src/views/DiscoveryReviewView.jsx");
+    assert.equal(typeof DiscoveryReviewReadiness, "function");
+    for (const message of [
+      "Corrija os campos visíveis antes de confirmar a revisão.",
+      "Confirme o grupo operacional antes de criar regras.",
+      "Confirme a evidência exata de cada item de segurança.",
+      "A descoberta mudou enquanto você revisava. Recarregue antes de confirmar.",
+    ]) {
+      const status = renderToStaticMarkup(React.createElement(DiscoveryReviewReadiness, { message }));
+      assert.match(status, /id="discovery-review-readiness"/);
+      assert.match(status, /role="status"/);
+      assert.match(status, /aria-live="polite"/);
+      assert.match(status, new RegExp(message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    }
+    const html = renderToStaticMarkup(React.createElement(DiscoveryReviewView, { discovery: mapDiscoveryRead(discoveryRows()) }));
+    assert.match(html, /aria-describedby="discovery-review-readiness"/);
+    assert.match(html, /Escolha aprovar, editar ou rejeitar para cada sugestão/);
+  } finally {
+    await vite.close();
+  }
+});
+
 test("loading and failure discovery copy never replaces the existing Portuguese interview CTA", async () => {
   const [loading, fallback, disabled, refused, expired, chat] = await Promise.all([
     renderModule("/src/views/DiscoveryReviewView.jsx", "DiscoveryReviewView", { discovery: { phase: "loading" } }),
@@ -851,8 +949,13 @@ test("loading and failure discovery copy never replaces the existing Portuguese 
   assert.match(chat, /Começar a entrevista de onboarding \(voz\)/);
 });
 
-test("real component interactions block invalid structured edits, submit visible values, and keep mobile voice", { timeout: 25000 }, async () => {
-  const browser = await startInteractionBrowser();
+test("real component interactions block invalid structured edits, submit visible values, and keep mobile voice", { timeout: 25000 }, async (context) => {
+  const browserExecutable = await resolveBrowserExecutable();
+  if (!browserExecutable) {
+    context.skip("browser QA skipped: set LIGOU_TEST_BROWSER_PATH or install Chrome/Chromium");
+    return;
+  }
+  const browser = await startInteractionBrowser(browserExecutable);
   const setField = (selector, value) => `(() => {
     const element = document.querySelector(${JSON.stringify(selector)});
     if (!element) return false;
@@ -904,15 +1007,29 @@ test("real component interactions block invalid structured edits, submit visible
     await browser.evaluate(`[...document.querySelectorAll('.discovery-claim button')].find((button) => button.textContent.includes('Editar')).click()`);
     await new Promise((resolve) => setTimeout(resolve, 60));
     assert.equal(await browser.evaluate("Boolean(document.querySelector('[name=serviceNames]') && document.querySelector('[name=publicAmount]') && document.querySelector('[name=durationMinutes]'))"), true);
+    const missingConfirmation = JSON.parse(await browser.evaluate(`JSON.stringify({
+      text: document.getElementById('discovery-review-readiness').textContent,
+      role: document.getElementById('discovery-review-readiness').getAttribute('role'),
+      live: document.getElementById('discovery-review-readiness').getAttribute('aria-live'),
+      describedBy: document.querySelector('.discovery-review-actions button').getAttribute('aria-describedby')
+    })`));
+    assert.deepEqual(missingConfirmation, {
+      text: "Confirme o grupo operacional antes de criar regras.",
+      role: "status",
+      live: "polite",
+      describedBy: "discovery-review-readiness",
+    });
     assert.equal(await browser.evaluate(setField("[name=publicAmount]", "139")), true);
     await new Promise((resolve) => setTimeout(resolve, 60));
     const invalidService = JSON.parse(await browser.evaluate(`JSON.stringify({
       disabled: document.querySelector('.discovery-review-actions button').disabled,
       error: document.querySelector('.discovery-edit-field [role=alert]')?.textContent || '',
+      readiness: document.getElementById('discovery-review-readiness').textContent,
       rpcCalls: window.__rpcCalls
     })`));
     assert.equal(invalidService.disabled, true);
     assert.match(invalidService.error, /0\.00/);
+    assert.match(invalidService.readiness, /Corrija os campos visíveis/);
     assert.equal(invalidService.rpcCalls, 0);
 
     for (const [selector, value] of [
@@ -943,7 +1060,19 @@ test("real component interactions block invalid structured edits, submit visible
     assert.equal(await browser.evaluate("Boolean(document.querySelector('[name=emergencyGuidance]'))"), true);
     assert.equal(await browser.evaluate(setField("[name=emergencyGuidance]", "")), true);
     await browser.evaluate("document.querySelector('.discovery-group-confirmation input').click()");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.match(
+      await browser.evaluate("document.getElementById('discovery-review-readiness').textContent"),
+      /Corrija os campos visíveis/,
+    );
+    assert.equal(await browser.evaluate(setField("[name=emergencyGuidance]", "Orientação temporária válida.")), true);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.match(
+      await browser.evaluate("document.getElementById('discovery-review-readiness').textContent"),
+      /Confirme a evidência exata de cada item de segurança/,
+    );
     await browser.evaluate("document.querySelector('.discovery-evidence-ack input').click()");
+    assert.equal(await browser.evaluate(setField("[name=emergencyGuidance]", "")), true);
     await new Promise((resolve) => setTimeout(resolve, 60));
     const invalidSafety = JSON.parse(await browser.evaluate(`JSON.stringify({
       disabled: document.querySelector('.discovery-review-actions button').disabled,
