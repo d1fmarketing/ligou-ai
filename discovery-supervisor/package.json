@@ -1,0 +1,16 @@
+{
+  "name": "@ligou/discovery-supervisor",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.2.13",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --types bun src/contracts.ts src/job-store.ts src/worker-broker.ts src/adapters/direct-model.ts test/contracts.test.ts test/worker-broker.test.ts test/direct-model.test.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.2.13",
+    "@types/node": "22.15.3",
+    "typescript": "5.8.3"
+  }
+}
