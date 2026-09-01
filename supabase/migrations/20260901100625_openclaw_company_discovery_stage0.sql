@@ -196,7 +196,7 @@ create table public.discovery_claims (
   normalized_value jsonb not null,
   evidence_refs uuid[] not null,
   contradictions jsonb not null default '[]'::jsonb,
-  uncertainty jsonb not null default '{}'::jsonb,
+  uncertainty jsonb not null default '[]'::jsonb,
   claim_version integer not null default 1 check (claim_version = 1),
   created_at timestamp with time zone not null default now(),
   unique (id, result_id),
@@ -205,7 +205,7 @@ create table public.discovery_claims (
   foreign key (result_id, tenant_id) references public.worker_results (id, tenant_id),
   check (cardinality(evidence_refs) > 0),
   check (jsonb_typeof(contradictions) = 'array'),
-  check (jsonb_typeof(uncertainty) = 'object')
+  check (jsonb_typeof(uncertainty) = 'array')
 );
 
 create table public.company_discovery_review_nonces (
@@ -955,9 +955,11 @@ begin
 
       if v_claim.claim_class = 'operational' and v_claim.claim_type = 'service' then
         if jsonb_typeof(v_value) <> 'object'
+           or not (v_value ?& array[
+             'service_type', 'service_names', 'public_price', 'duration_minutes'
+           ])
            or (v_value - array[
-             'service_type', 'service_names', 'price_mode',
-             'negotiation_mode', 'price_target', 'price_min', 'duration_min'
+             'service_type', 'service_names', 'public_price', 'duration_minutes'
            ]::text[]) <> '{}'::jsonb
            or coalesce(v_value->>'service_type', '') !~ '^[a-z0-9][a-z0-9_]{0,199}$'
            or jsonb_typeof(v_value->'service_names') <> 'array'
@@ -967,19 +969,30 @@ begin
              where jsonb_typeof(name) <> 'string'
                or length(name #>> '{}') not between 1 and 200
            )
-           or v_value->>'price_mode' not in ('fixed', 'starting_at')
-           or v_value->>'negotiation_mode' not in ('negotiable', 'non_negotiable')
-           or jsonb_typeof(v_value->'price_target') <> 'number'
-           or jsonb_typeof(v_value->'price_min') <> 'number'
-           or jsonb_typeof(v_value->'duration_min') <> 'number'
-           or (v_value->>'price_target')::numeric < 0
-           or (v_value->>'price_min')::numeric < 0
-           or (v_value->>'price_min')::numeric > (v_value->>'price_target')::numeric
-           or (v_value->>'duration_min')::numeric <= 0
            or (
-             v_value->>'negotiation_mode' = 'non_negotiable'
-             and (v_value->>'price_min')::numeric is distinct from
-               (v_value->>'price_target')::numeric
+             v_value->'public_price' <> 'null'::jsonb
+             and (
+               jsonb_typeof(v_value->'public_price') <> 'object'
+               or ((v_value->'public_price') - array[
+                 'amount', 'currency', 'qualifier'
+               ]::text[]) <> '{}'::jsonb
+               or jsonb_typeof(v_value->'public_price'->'amount') <> 'string'
+               or length(v_value->'public_price'->>'amount') not between 4 and 12
+               or v_value->'public_price'->>'amount' !~
+                 '^(0|[1-9][0-9]{0,8})[.][0-9]{2}$'
+               or jsonb_typeof(v_value->'public_price'->'currency') <> 'string'
+               or v_value->'public_price'->>'currency' !~ '^[A-Z]{3}$'
+               or v_value->'public_price'->>'qualifier'
+                 not in ('exact', 'starting_at')
+             )
+           )
+           or (
+             v_value->'duration_minutes' <> 'null'::jsonb
+             and (
+               jsonb_typeof(v_value->'duration_minutes') <> 'number'
+               or (v_value->>'duration_minutes') !~ '^[0-9]+$'
+               or (v_value->>'duration_minutes')::integer not between 1 and 10080
+             )
            ) then
           raise exception using errcode = '22023',
             message = 'company_discovery_service_value_invalid';
@@ -990,29 +1003,48 @@ begin
         v_derived_schema := 'ligou.rule.service.v2';
         v_materialization_key := 'service:' || v_service_type;
         v_derived_text := format(
-          'Serviço %s: preço público %s; duração %s minutos.',
-          v_service_type, v_value->>'price_target', v_value->>'duration_min'
+          'Serviço %s. Preço público do site: %s. Duração pública: %s.',
+          v_service_type,
+          case when v_value->'public_price' = 'null'::jsonb
+            then 'não informado'
+            else concat_ws(' ',
+              v_value->'public_price'->>'currency',
+              v_value->'public_price'->>'amount',
+              '(' || (v_value->'public_price'->>'qualifier') || ')'
+            )
+          end,
+          case when v_value->'duration_minutes' = 'null'::jsonb
+            then 'não informada'
+            else (v_value->>'duration_minutes') || ' minutos'
+          end
         );
         v_derived_structured := jsonb_build_object(
           'schema', v_derived_schema,
           'materialization_key', v_materialization_key,
           'materialization_eligible', true,
           'review_ready', true,
-          'operational_state', 'active',
+          'operational_state', 'owner_review_required',
           'service_type', v_service_type,
           'service_names', v_value->'service_names',
-          'price_mode', v_value->>'price_mode',
-          'negotiation_mode', v_value->>'negotiation_mode',
-          'quoteable', true,
-          'negotiable', v_value->>'negotiation_mode' = 'negotiable',
-          'price_target', v_value->'price_target',
-          'price_min', v_value->'price_min',
-          'duration_min', v_value->'duration_min',
-          'owner_review_fields', '[]'::jsonb
+          'price_mode', 'owner_review',
+          'quoteable', false,
+          'negotiable', false,
+          'public_price', v_value->'public_price',
+          'owner_review_fields', jsonb_build_array(
+            'service.negotiation',
+            'service.price_mode',
+            'service.private_pricing'
+          )
         );
+        if v_value->'duration_minutes' <> 'null'::jsonb then
+          v_derived_structured := v_derived_structured || jsonb_build_object(
+            'duration_min', v_value->'duration_minutes'
+          );
+        end if;
       elsif v_claim.claim_class = 'safety_critical'
             and v_claim.claim_type = 'emergency' then
         if jsonb_typeof(v_value) <> 'object'
+           or not (v_value ? 'guidance')
            or (v_value - array['guidance']::text[]) <> '{}'::jsonb
            or jsonb_typeof(v_value->'guidance') <> 'string'
            or length(v_value->>'guidance') not between 1 and 2000 then
@@ -1311,7 +1343,7 @@ begin
      or jsonb_typeof(p_result->'candidate_facts') <> 'array'
      or jsonb_typeof(p_result->'missing_questions') <> 'array'
      or jsonb_typeof(p_result->'contradictions') <> 'array'
-     or jsonb_typeof(p_result->'uncertainty') <> 'object' then
+     or jsonb_typeof(p_result->'uncertainty') <> 'array' then
     raise exception using errcode = '22023',
       message = 'company_discovery_result_schema_invalid';
   end if;
@@ -1332,7 +1364,7 @@ begin
   if jsonb_array_length(p_result->'candidate_facts') > 100
      or jsonb_array_length(p_result->'missing_questions') > 50
      or jsonb_array_length(p_result->'contradictions') > 50
-     or octet_length((p_result->'uncertainty')::text) > 4096 then
+     or jsonb_array_length(p_result->'uncertainty') > 50 then
     raise exception using errcode = '22023',
       message = 'company_discovery_result_collection_limit_exceeded';
   end if;
@@ -1344,6 +1376,10 @@ begin
     select 1 from jsonb_array_elements(p_result->'contradictions') item
     where jsonb_typeof(item) <> 'string'
       or length(item #>> '{}') not between 1 and 2000
+  ) or exists (
+    select 1 from jsonb_array_elements(p_result->'uncertainty') item
+    where jsonb_typeof(item) <> 'string'
+      or length(item #>> '{}') not between 1 and 1000
   ) then
     raise exception using errcode = '22023',
       message = 'company_discovery_result_collection_item_invalid';
@@ -1422,8 +1458,13 @@ begin
          where jsonb_typeof(item) <> 'string'
            or length(item #>> '{}') not between 1 and 2000
        )
-       or jsonb_typeof(v_claim->'uncertainty') <> 'object'
-       or octet_length((v_claim->'uncertainty')::text) > 4096 then
+       or jsonb_typeof(v_claim->'uncertainty') <> 'array'
+       or jsonb_array_length(v_claim->'uncertainty') > 20
+       or exists (
+         select 1 from jsonb_array_elements(v_claim->'uncertainty') item
+         where jsonb_typeof(item) <> 'string'
+           or length(item #>> '{}') not between 1 and 1000
+       ) then
       raise exception using errcode = '22023',
         message = 'company_discovery_claim_schema_invalid';
     end if;
@@ -1445,13 +1486,47 @@ begin
         and v_claim->>'claim_type' = 'service'
         and jsonb_typeof(v_claim->'normalized_value') = 'object'
         and (v_claim->'normalized_value' ?& array[
-          'service_type', 'service_names', 'price_mode', 'negotiation_mode',
-          'price_target', 'price_min', 'duration_min'
+          'service_type', 'service_names', 'public_price', 'duration_minutes'
         ])
         and ((v_claim->'normalized_value') - array[
-          'service_type', 'service_names', 'price_mode', 'negotiation_mode',
-          'price_target', 'price_min', 'duration_min'
+          'service_type', 'service_names', 'public_price', 'duration_minutes'
         ]::text[]) = '{}'::jsonb
+        and coalesce(v_claim->'normalized_value'->>'service_type', '') ~
+          '^[a-z0-9][a-z0-9_]{0,199}$'
+        and jsonb_typeof(v_claim->'normalized_value'->'service_names') = 'array'
+        and jsonb_array_length(v_claim->'normalized_value'->'service_names') between 1 and 20
+        and not exists (
+          select 1
+          from jsonb_array_elements(v_claim->'normalized_value'->'service_names') name
+          where jsonb_typeof(name) <> 'string'
+            or length(name #>> '{}') not between 1 and 200
+        )
+        and (
+          v_claim->'normalized_value'->'public_price' = 'null'::jsonb
+          or (
+            jsonb_typeof(v_claim->'normalized_value'->'public_price') = 'object'
+            and ((v_claim->'normalized_value'->'public_price') - array[
+              'amount', 'currency', 'qualifier'
+            ]::text[]) = '{}'::jsonb
+            and jsonb_typeof(v_claim->'normalized_value'->'public_price'->'amount') = 'string'
+            and length(v_claim->'normalized_value'->'public_price'->>'amount') between 4 and 12
+            and v_claim->'normalized_value'->'public_price'->>'amount' ~
+              '^(0|[1-9][0-9]{0,8})[.][0-9]{2}$'
+            and jsonb_typeof(v_claim->'normalized_value'->'public_price'->'currency') = 'string'
+            and v_claim->'normalized_value'->'public_price'->>'currency' ~ '^[A-Z]{3}$'
+            and v_claim->'normalized_value'->'public_price'->>'qualifier'
+              in ('exact', 'starting_at')
+          )
+        )
+        and (
+          v_claim->'normalized_value'->'duration_minutes' = 'null'::jsonb
+          or (
+            jsonb_typeof(v_claim->'normalized_value'->'duration_minutes') = 'number'
+            and (v_claim->'normalized_value'->>'duration_minutes') ~ '^[0-9]+$'
+            and (v_claim->'normalized_value'->>'duration_minutes')::integer
+              between 1 and 10080
+          )
+        )
       ) or (
         v_claim->>'claim_class' = 'safety_critical'
         and v_claim->>'claim_type' = 'emergency'
@@ -1542,7 +1617,7 @@ begin
       v_claim->>'claim_class', v_claim->>'claim_type',
       v_claim->'normalized_value', v_evidence_ids,
       coalesce(v_claim->'contradictions', '[]'::jsonb),
-      coalesce(v_claim->'uncertainty', '{}'::jsonb)
+      coalesce(v_claim->'uncertainty', '[]'::jsonb)
     );
   end loop;
   update public.worker_attempts

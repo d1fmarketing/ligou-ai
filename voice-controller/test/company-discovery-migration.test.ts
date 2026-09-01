@@ -172,6 +172,11 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
 
   test("makes candidate results and evidence immutable and rejects authority-shaped worker output", () => {
     const sql = migrationSql();
+    const commit = functionBody(
+      sql,
+      "commit_company_discovery_result(uuid,bigint,text,jsonb,text)",
+      "revoke all on function public.commit_company_discovery_result(uuid,bigint,text,jsonb,text)",
+    );
     for (const table of [
       "worker_results",
       "discovery_source_snapshots",
@@ -207,6 +212,34 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
     expect(sql).toContain("jsonb_array_length(p_result->'candidate_facts') > 100");
     expect(sql).toContain("octet_length((v_claim->'normalized_value')::text) > 65536");
     expect(sql).toContain("company_discovery_claim_materialization_type_invalid");
+    expect(sql).toContain("uncertainty jsonb not null default '[]'::jsonb");
+    expect(sql).toContain("check (jsonb_typeof(uncertainty) = 'array')");
+    expect(commit).toContain("jsonb_typeof(p_result->'uncertainty') <> 'array'");
+    expect(commit).toContain("jsonb_array_length(p_result->'uncertainty') > 50");
+    expect(commit).toContain("jsonb_typeof(v_claim->'uncertainty') <> 'array'");
+    expect(commit).toContain("jsonb_array_length(v_claim->'uncertainty') > 20");
+    expect(commit).toContain("length(item #>> '{}') not between 1 and 1000");
+    for (const privateWorkerField of [
+      "price_mode",
+      "negotiation_mode",
+      "price_target",
+      "price_min",
+      "duration_min",
+    ]) expect(commit).not.toContain(`'${privateWorkerField}'`);
+    for (const publicWorkerField of [
+      "service_type",
+      "service_names",
+      "public_price",
+      "duration_minutes",
+    ]) expect(commit).toContain(`'${publicWorkerField}'`);
+    expect(commit).toContain(
+      "(v_claim->'normalized_value'->'public_price') - array[ 'amount', 'currency', 'qualifier' ]::text[]",
+    );
+    expect(commit).toContain("public_price' = 'null'::jsonb");
+    expect(commit).toContain("duration_minutes' = 'null'::jsonb");
+    expect(commit).toContain("'^(0|[1-9][0-9]{0,8})[.][0-9]{2}$'");
+    expect(commit).toContain("'^[a-z]{3}$'");
+    expect(commit).toContain("in ('exact', 'starting_at')");
   });
 
   test("allows exactly one selected validated result and rejects late or superseded attempts", () => {
@@ -245,6 +278,16 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
     expect(review).toContain("'ligou.rule.service.v2'");
     expect(review).toContain("'ligou.rule.emergency.v2'");
     expect(review).not.toContain("v_decision->'materialization'");
+    expect(review).toContain("'price_mode', 'owner_review'");
+    expect(review).toContain("'quoteable', false");
+    expect(review).toContain("'negotiable', false");
+    expect(review).toContain("'operational_state', 'owner_review_required'");
+    expect(review).toContain("'public_price', v_value->'public_price'");
+    expect(review).toContain("'service.private_pricing'");
+    expect(review).toContain("'duration_min', v_value->'duration_minutes'");
+    expect(review).not.toContain("'price_target'");
+    expect(review).not.toContain("'price_min'");
+    expect(review).not.toContain("'negotiation_mode'");
     expect(review).toContain("'ligou.v0_2.rules_versioning:' || v_job.tenant_id::text");
     expect(review).toContain("v_rule_group_id");
     expect(review).toContain("v_rule_version");
@@ -335,6 +378,7 @@ function postgresJsonbHash(value: unknown): string {
 test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
   "real Postgres keeps discovery fenced, owner-bound, atomic, and non-effective before review",
   async () => {
+    const { priceRules, servicePolicies } = await import("../src/rules.ts");
     const apiUrl = process.env.SUPABASE_URL!;
     const serviceKey = process.env.SUPABASE_SECRET_KEY!;
     const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY!;
@@ -486,22 +530,23 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         normalized_value: "Example Plumbing",
         evidence_refs: [0],
         contradictions: [],
-        uncertainty: {},
+        uncertainty: [],
       }, {
         claim_class: "operational",
         claim_type: "service",
         normalized_value: {
           service_type: "drain_cleaning",
           service_names: ["Drain cleaning"],
-          price_mode: "fixed",
-          negotiation_mode: "non_negotiable",
-          price_target: 149,
-          price_min: 149,
-          duration_min: 90,
+          public_price: {
+            amount: "149.00",
+            currency: "USD",
+            qualifier: "exact",
+          },
+          duration_minutes: 90,
         },
         evidence_refs: [0],
         contradictions: [],
-        uncertainty: {},
+        uncertainty: [],
       }, {
         claim_class: "safety_critical",
         claim_type: "emergency",
@@ -510,11 +555,11 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         },
         evidence_refs: [0],
         contradictions: [],
-        uncertainty: {},
+        uncertainty: [],
       }],
       missing_questions: ["Qual é o preço mínimo privado autorizado?"],
       contradictions: [],
-      uncertainty: {},
+      uncertainty: [],
     };
     const tryCandidate = (candidate: unknown) =>
       service.rpc("commit_company_discovery_result", {
@@ -542,6 +587,28 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     const operationalEmergencyResult = await tryCandidate(operationalEmergency);
     expect(operationalEmergencyResult.error?.message).toContain(
       "company_discovery_claim_materialization_type_invalid",
+    );
+    const legacyPrivatePrice = structuredClone(resultPayload);
+    legacyPrivatePrice.candidate_facts[1]!.normalized_value = {
+      ...legacyPrivatePrice.candidate_facts[1]!.normalized_value as Record<string, unknown>,
+      price_min: "120.00",
+    };
+    const legacyPrivatePriceResult = await tryCandidate(legacyPrivatePrice);
+    expect(legacyPrivatePriceResult.error?.message).toContain(
+      "company_discovery_claim_materialization_type_invalid",
+    );
+    const invalidTopUncertainty = await tryCandidate({
+      ...resultPayload,
+      uncertainty: {},
+    });
+    expect(invalidTopUncertainty.error?.message).toContain(
+      "company_discovery_result_schema_invalid",
+    );
+    const invalidClaimUncertainty = structuredClone(resultPayload);
+    invalidClaimUncertainty.candidate_facts[1]!.uncertainty = {} as never;
+    const invalidClaimUncertaintyResult = await tryCandidate(invalidClaimUncertainty);
+    expect(invalidClaimUncertaintyResult.error?.message).toContain(
+      "company_discovery_claim_schema_invalid",
     );
     const authorityMasquerade = structuredClone(resultPayload);
     authorityMasquerade.candidate_facts[1]!.claim_type = "authority";
@@ -660,7 +727,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     expect((await owner.from("business_profile_versions").select("id").eq("tenant_id", ownerTenant)).data)
       .toHaveLength(1);
     const effective = await owner.from("effective_rules")
-      .select("rule_group_id,version,category,structured")
+      .select("id,rule_group_id,version,category,escopo,text,structured")
       .eq("tenant_id", ownerTenant);
     expect(effective.error).toBeNull();
     expect(effective.data).toHaveLength(2);
@@ -671,9 +738,36 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         source_job_id: firstJob,
         source_result_id: resultId,
         service_type: "drain_cleaning",
-        price_target: 149,
+        price_mode: "owner_review",
+        quoteable: false,
+        negotiable: false,
+        operational_state: "owner_review_required",
+        public_price: {
+          amount: "149.00",
+          currency: "USD",
+          qualifier: "exact",
+        },
         duration_min: 90,
       });
+    expect(firstServiceRule.structured).not.toHaveProperty("price_target");
+    expect(firstServiceRule.structured).not.toHaveProperty("price_min");
+    expect(firstServiceRule.structured).not.toHaveProperty("negotiation_mode");
+    const projectedPublicPrice = servicePolicies(effective.data as any);
+    expect(projectedPublicPrice).toEqual([
+      expect.objectContaining({
+        rule_id: firstServiceRule.id,
+        price_mode: "owner_review",
+        quoteable: false,
+        negotiable: false,
+        public_price: {
+          amount: "149.00",
+          currency: "USD",
+          qualifier: "exact",
+        },
+        duration_min: 90,
+      }),
+    ]);
+    expect(priceRules(effective.data as any)).toEqual([]);
     expect(effective.data!.some((row) => "source_call_id" in row.structured)).toBe(false);
 
     const duplicateSubmit = await owner.rpc("submit_company_discovery", {
@@ -718,8 +812,11 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     expect(duplicateNonce.error).toBeNull();
     const duplicateEditedService = {
       ...(resultPayload.candidate_facts[1]!.normalized_value as Record<string, unknown>),
-      price_target: 175,
-      price_min: 175,
+      public_price: {
+        amount: "175.00",
+        currency: "USD",
+        qualifier: "starting_at",
+      },
     };
     const duplicateReview = await owner.rpc("review_company_discovery_claims", {
       p_job: duplicateJob,
@@ -755,8 +852,14 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       structured: {
         source_job_id: duplicateJob,
         source_result_id: duplicateResult,
-        price_target: 175,
-        price_min: 175,
+        price_mode: "owner_review",
+        quoteable: false,
+        negotiable: false,
+        public_price: {
+          amount: "175.00",
+          currency: "USD",
+          qualifier: "starting_at",
+        },
       },
     });
 
@@ -938,12 +1041,18 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         status: "busy",
         current_attempt_id: newAttempt.attempt_id,
       });
+    const noPublicPriceResult = structuredClone(resultPayload);
+    noPublicPriceResult.candidate_facts[1]!.normalized_value = {
+      ...(noPublicPriceResult.candidate_facts[1]!.normalized_value as Record<string, unknown>),
+      public_price: null,
+      duration_minutes: null,
+    };
     const newCommit = await service.rpc("commit_company_discovery_result", {
       p_attempt_id: newAttempt.attempt_id,
       p_fence_generation: newAttempt.fence_generation,
       p_claim_token: newAttempt.claim_token,
-      p_result: resultPayload,
-      p_result_hash: postgresJsonbHash(resultPayload),
+      p_result: noPublicPriceResult,
+      p_result_hash: postgresJsonbHash(noPublicPriceResult),
     });
     expect(newCommit.error).toBeNull();
     const replacementSelect = await service.rpc("select_company_discovery_result", {
