@@ -163,6 +163,78 @@ describe("V2 service policy projection", () => {
     ]);
   });
 
+  test("accepts exact discovery provenance without a fabricated onboarding call", () => {
+    const discovery = rule("discovery-v2", {
+      schema: "ligou.rule.service.v2",
+      materialization_key: "service:drain_cleaning",
+      materialization_hash: "9".repeat(64),
+      materialization_eligible: true,
+      review_ready: true,
+      operational_state: "active",
+      service_type: "drain_cleaning",
+      service_names: ["Drain cleaning"],
+      price_mode: "fixed",
+      negotiation_mode: "non_negotiable",
+      quoteable: true,
+      negotiable: false,
+      price_target: 149,
+      price_min: 149,
+      duration_min: 90,
+      owner_review_fields: [],
+      source_kind: "company_discovery",
+      source_job_id: "11111111-1111-4111-8111-111111111111",
+      source_result_id: "22222222-2222-4222-8222-222222222222",
+      source_claim_id: "33333333-3333-4333-8333-333333333333",
+      source_decision_id: "44444444-4444-4444-8444-444444444444",
+      source_refs: ["55555555-5555-4555-8555-555555555555"],
+    });
+
+    expect(servicePolicies([discovery])).toEqual([
+      expect.objectContaining({
+        rule_id: "discovery-v2",
+        service_type: "drain_cleaning",
+        quoteable: true,
+        price_target: 149,
+      }),
+    ]);
+    expect(discovery.structured).not.toHaveProperty("source_call_id");
+  });
+
+  test("rejects incomplete discovery provenance even when the policy fields look executable", () => {
+    const legacy = rule("legacy-discovery-shadow", {
+      service_type: "drain_cleaning",
+      price_target: 999,
+      price_min: 999,
+      duration_min: 10,
+    });
+    const malformed = rule("malformed-discovery-v2", {
+      schema: "ligou.rule.service.v2",
+      materialization_key: "service:drain_cleaning",
+      materialization_hash: "8".repeat(64),
+      materialization_eligible: true,
+      review_ready: true,
+      operational_state: "active",
+      service_type: "drain_cleaning",
+      service_names: ["Drain cleaning"],
+      price_mode: "fixed",
+      negotiation_mode: "non_negotiable",
+      quoteable: true,
+      negotiable: false,
+      price_target: 149,
+      price_min: 149,
+      duration_min: 90,
+      owner_review_fields: [],
+      source_kind: "company_discovery",
+      source_job_id: "11111111-1111-4111-8111-111111111111",
+      source_result_id: "22222222-2222-4222-8222-222222222222",
+      source_claim_id: "33333333-3333-4333-8333-333333333333",
+      source_refs: ["55555555-5555-4555-8555-555555555555"],
+    });
+
+    expect(servicePolicies([legacy, malformed])).toEqual([]);
+    expect(priceRules([legacy, malformed])).toEqual([]);
+  });
+
   test("lists estimate and owner-review services while excluding them from autonomous pricing", () => {
     const estimate = rule("estimate", {
       schema: "ligou.rule.service.v2",

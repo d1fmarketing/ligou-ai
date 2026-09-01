@@ -6,6 +6,7 @@ import {
   isExecutableBusinessHours,
   type CanonicalLocality,
 } from "./onboarding-coverage.ts";
+import { materializationProvenance } from "./onboarding-materialization.ts";
 
 export interface VerifiedLocality extends CanonicalLocality {
   aliases: string[];
@@ -209,8 +210,7 @@ function parseV2Service(rule: Rule): ServicePolicy | null {
     structured.materialization_eligible !== true ||
     structured.review_ready !== true ||
     !/^[0-9a-f]{64}$/.test(String(structured.materialization_hash ?? "")) ||
-    !Number.isSafeInteger(structured.coverage_revision) ||
-    typeof structured.source_call_id !== "string" ||
+    materializationProvenance(structured) === null ||
     names.length === 0 ||
     !["fixed", "starting_at", "estimate", "owner_review"].includes(String(mode)) ||
     !["active", "owner_review_required", "disabled"].includes(String(state))
@@ -407,6 +407,10 @@ function canonicalV2DomainRule(
       String(structured.operational_state),
     ) ||
     !/^[0-9a-f]{64}$/.test(String(structured.materialization_hash ?? ""))
+  ) return false;
+  if (
+    Object.prototype.hasOwnProperty.call(structured, "source_kind") &&
+    materializationProvenance(structured) === null
   ) return false;
   if (
     structured.operational_state === "active" && key === "domain:area"

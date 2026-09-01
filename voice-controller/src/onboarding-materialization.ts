@@ -67,6 +67,72 @@ export interface OnboardingMaterialization {
   summary: CoverageSummaryProjectionV2 | null;
 }
 
+export type MaterializationProvenance =
+  | {
+    kind: "onboarding_call";
+    callId: string;
+    coverageRevision: number;
+  }
+  | {
+    kind: "company_discovery";
+    jobId: string;
+    resultId: string;
+    claimId: string;
+    decisionId: string;
+    sourceRefs: string[];
+  };
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Normalizes provenance without changing the established onboarding payload.
+ * Discovery is accepted only through its complete database-issued identity;
+ * it cannot borrow a synthetic call id to look like owner interview evidence.
+ */
+export function materializationProvenance(
+  structured: Record<string, unknown>,
+): MaterializationProvenance | null {
+  if (
+    !Object.prototype.hasOwnProperty.call(structured, "source_kind") &&
+    typeof structured.source_call_id === "string" &&
+    structured.source_call_id.length > 0 &&
+    Number.isSafeInteger(structured.coverage_revision)
+  ) {
+    return {
+      kind: "onboarding_call",
+      callId: structured.source_call_id,
+      coverageRevision: structured.coverage_revision as number,
+    };
+  }
+  const sourceRefs = structured.source_refs;
+  if (
+    structured.source_kind !== "company_discovery" ||
+    Object.prototype.hasOwnProperty.call(structured, "source_call_id") ||
+    typeof structured.source_job_id !== "string" ||
+    typeof structured.source_result_id !== "string" ||
+    typeof structured.source_claim_id !== "string" ||
+    typeof structured.source_decision_id !== "string" ||
+    !UUID_PATTERN.test(structured.source_job_id) ||
+    !UUID_PATTERN.test(structured.source_result_id) ||
+    !UUID_PATTERN.test(structured.source_claim_id) ||
+    !UUID_PATTERN.test(structured.source_decision_id) ||
+    !Array.isArray(sourceRefs) ||
+    sourceRefs.length === 0 ||
+    !sourceRefs.every((sourceRef) =>
+      typeof sourceRef === "string" && UUID_PATTERN.test(sourceRef)
+    )
+  ) return null;
+  return {
+    kind: "company_discovery",
+    jobId: structured.source_job_id,
+    resultId: structured.source_result_id,
+    claimId: structured.source_claim_id,
+    decisionId: structured.source_decision_id,
+    sourceRefs: [...sourceRefs] as string[],
+  };
+}
+
 const FIELD_LABELS: Record<CoverageField, string> = {
   "business.customer_types": "Tipos de clientes",
   "business.excluded_work": "Serviços excluídos",

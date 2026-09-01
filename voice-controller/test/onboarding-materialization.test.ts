@@ -9,7 +9,10 @@ import {
   type CoverageField,
   type CoverageSnapshot,
 } from "../src/onboarding-coverage.ts";
-import { materializeCoverage } from "../src/onboarding-materialization.ts";
+import {
+  materializationProvenance,
+  materializeCoverage,
+} from "../src/onboarding-materialization.ts";
 
 const TENANT_ID = "11111111-1111-4111-8111-111111111111";
 const CALL_ID = "22222222-2222-4222-8222-222222222222";
@@ -202,6 +205,33 @@ function readySnapshot(
 }
 
 describe("deterministic onboarding materialization", () => {
+  test("represents the existing call source through the source-neutral provenance boundary", () => {
+    const snapshot = readySnapshot("fixed");
+    const service = materializeCoverage(snapshot, evaluateCoverage(snapshot)).rules.find(
+      (rule) => rule.key === `service:${SERVICE}`,
+    )!;
+
+    expect(materializationProvenance(service.structured)).toEqual({
+      kind: "onboarding_call",
+      callId: CALL_ID,
+      coverageRevision: snapshot.revision,
+    });
+    expect(service.structured).not.toHaveProperty("source_kind");
+  });
+
+  test("discovery provenance cannot borrow an onboarding call identity", () => {
+    expect(materializationProvenance({
+      source_kind: "company_discovery",
+      source_call_id: CALL_ID,
+      coverage_revision: 1,
+      source_job_id: "11111111-1111-4111-8111-111111111111",
+      source_result_id: "22222222-2222-4222-8222-222222222222",
+      source_claim_id: "33333333-3333-4333-8333-333333333333",
+      source_decision_id: "44444444-4444-4444-8444-444444444444",
+      source_refs: ["55555555-5555-4555-8555-555555555555"],
+    })).toBeNull();
+  });
+
   test("projects one legacy-compatible fixed service without accepting model rule text", () => {
     const snapshot = readySnapshot("fixed");
     const progress = evaluateCoverage(snapshot);

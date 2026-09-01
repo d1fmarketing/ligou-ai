@@ -19,6 +19,7 @@ test("unit runner uses only synthetic configuration and excludes live integratio
   expect(unitTestFiles).toContain("test/unit-runner.test.ts");
   expect(unitTestFiles).toContain("test/oauth-security.test.ts");
   expect(unitTestFiles).toContain("test/privacy.test.ts");
+  expect(unitTestFiles).toContain("test/company-discovery-migration.test.ts");
   expect(environment.CONTACT_HASH_KEY).toBe("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=");
 });
 

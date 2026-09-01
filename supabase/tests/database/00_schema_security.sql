@@ -60,6 +60,8 @@ select extensions.ok(
     select signature from (values
       ('adjust_case(uuid,text)'),
       ('begin_connector_handoff(uuid,text,text)'),
+      ('cancel_company_discovery(uuid,bigint)'),
+      ('create_company_discovery_review_nonce(uuid,uuid,uuid[])'),
       ('decide_case(uuid,text,text,text,jsonb,text,text)'),
       ('decide_rule(uuid,text)'),
       ('edit_rule(uuid,text)'),
@@ -69,8 +71,11 @@ select extensions.ok(
       ('get_onboarding_resume_status(uuid)'),
       ('grant_power(uuid,text,text,text,jsonb,numeric,timestamp with time zone)'),
       ('reset_owner_test_memory()'),
+      ('retry_company_discovery(uuid,bigint)'),
+      ('review_company_discovery_claims(uuid,uuid,bigint,jsonb,text)'),
       ('revoke_power(uuid)'),
-      ('revoke_rule(uuid,text)')
+      ('revoke_rule(uuid,text)'),
+      ('submit_company_discovery(text,text)')
     ) expected(signature)
     order by signature
   ),
@@ -95,11 +100,13 @@ select extensions.ok(
       ('begin_phone_termination(uuid,uuid,text,text,text)'),
       ('begin_provider_termination_attempt(uuid,text,text,text)'),
       ('claim_budget_reconciliation(text)'),
+      ('claim_company_discovery_attempt(text,integer)'),
       ('claim_phone_event(uuid,text)'),
       ('claim_phone_lifecycle_reconciliation(text)'),
       ('claim_provider_termination_reconciliation(text)'),
       ('complete_phone_termination(uuid,uuid,boolean,text)'),
       ('complete_provider_termination_attempt(uuid,uuid,boolean,text)'),
+      ('commit_company_discovery_result(uuid,bigint,text,jsonb,text)'),
       ('confirm_phone_provider_accept(uuid,uuid)'),
       ('confirm_phone_sideband(uuid,uuid)'),
       ('claim_intent(text)'),
@@ -117,9 +124,11 @@ select extensions.ok(
       ('defer_phone_sideband_finalization(uuid,uuid,text)'),
       ('provision_tenant_owner(uuid,uuid)'),
       ('purge_ephemeral_call_data(timestamp with time zone,timestamp with time zone)'),
+      ('quarantine_company_discovery_slot(uuid,text,text)'),
       ('reap_abandoned_calls(integer)'),
       ('record_booking_delivery(uuid,uuid,text,text,text,jsonb,text,jsonb,jsonb)'),
       ('record_calendar_test_result(uuid,text,text,jsonb,text)'),
+      ('record_company_discovery_cleanup(uuid,bigint,text,jsonb)'),
       ('record_onboarding_answer(uuid,uuid,uuid,text,text,text,integer,jsonb,uuid,jsonb)'),
       ('record_onboarding_followup(uuid,uuid,uuid,text,integer,text,text,jsonb)'),
       ('record_onboarding_voice_approval(uuid,uuid,uuid,text,text,integer,text,text)'),
@@ -128,6 +137,7 @@ select extensions.ok(
       ('reserve_call_budget(uuid,uuid,numeric,numeric)'),
       ('reserve_phone_call_budget(uuid,uuid,numeric)'),
       ('repair_legacy_phone_links()'),
+      ('select_company_discovery_result(uuid,uuid,bigint)'),
       ('settle_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
       ('settle_unresolved_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
       ('transition_claimed_intent(uuid,uuid,text,text,integer)')
@@ -178,9 +188,15 @@ select extensions.ok(
       ('approval_cases'),
       ('bookings'),
       ('budget_reservations'),
+      ('business_profile_versions'),
       ('calls'),
+      ('company_discovery_allowlist'),
+      ('company_discovery_review_nonces'),
       ('communications'),
       ('contact_opt_outs'),
+      ('discovery_claims'),
+      ('discovery_decisions'),
+      ('discovery_source_snapshots'),
       ('effective_rules'),
       ('notifications'),
       ('owner_profiles'),
@@ -191,7 +207,10 @@ select extensions.ok(
       ('skill_pipeline_events'),
       ('tenant_provisioning_receipts'),
       ('tenants'),
-      ('usage_ledger')
+      ('usage_ledger'),
+      ('worker_attempts'),
+      ('worker_jobs'),
+      ('worker_results')
     ) expected(relation)
     order by relation
   ),
@@ -452,7 +471,23 @@ select extensions.ok(
       ('phone_lifecycle_legacy_conflicts', 'select'), ('phone_lifecycle_legacy_conflicts', 'insert'), ('phone_lifecycle_legacy_conflicts', 'update'),
       ('receipts', 'select'),
       ('onboarding_locality_registry', 'select'),
-      ('onboarding_locality_aliases', 'select')
+      ('onboarding_locality_aliases', 'select'),
+      ('company_discovery_controls', 'select'),
+      ('company_discovery_controls', 'insert'),
+      ('company_discovery_controls', 'update'),
+      ('company_discovery_allowlist', 'select'),
+      ('company_discovery_allowlist', 'insert'),
+      ('company_discovery_allowlist', 'update'),
+      ('company_discovery_review_nonces', 'select'),
+      ('business_profile_versions', 'select'),
+      ('discovery_claims', 'select'),
+      ('discovery_decisions', 'select'),
+      ('discovery_source_snapshots', 'select'),
+      ('worker_attempts', 'select'),
+      ('worker_jobs', 'select'),
+      ('worker_results', 'select'),
+      ('worker_runtime_slots', 'select'),
+      ('worker_runtime_slots', 'insert')
     ) required(relation, privilege)
     where not has_table_privilege('service_role', format('public.%I', relation), privilege)
   ),
