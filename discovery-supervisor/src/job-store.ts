@@ -1588,11 +1588,18 @@ export class JobStore implements ModelAccessAuthority {
       throw new ContractValidationError("result evidence must equal trusted fetched evidence");
     }
     const claim = this.#claimForJob.get(job)!;
+    if (result.schema_version === "company_discovery.result.v2" &&
+        claim.adapter_id !== "direct_model") {
+      throw new ContractValidationError("Stage 0B result requires DirectModel authority");
+    }
     if (!this.#runtimeBindings.has(claim)) {
       throw new ContractValidationError("runtime identity must be bound before result commit");
     }
     const claimToken = this.claimToken(claim);
-    const data = await rpcOrThrow(this.client, "commit_company_discovery_result", {
+    const commitRpc = result.schema_version === "company_discovery.result.v2"
+      ? "commit_company_discovery_result_v2"
+      : "commit_company_discovery_result";
+    const data = await rpcOrThrow(this.client, commitRpc, {
       p_attempt_id: trustedJob.attempt_id,
       p_fence_generation: trustedJob.fence_generation,
       p_claim_token: claimToken,

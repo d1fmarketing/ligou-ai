@@ -63,6 +63,27 @@ const result: WorkerResult = {
   uncertainty: [],
 };
 
+const stage0bResult: WorkerResult = {
+  schema_version: "company_discovery.result.v2",
+  source_snapshots: [snapshot],
+  candidate_facts: [{
+    claim_class: "descriptive",
+    claim_type: "business_name",
+    normalized_value: "Example Plumbing",
+    evidence_refs: [0],
+    confidence: "high",
+    contradiction_status: "none",
+    contradictions: [],
+    missing_fields: [],
+    ambiguous_fields: [],
+    uncertainty: [],
+    claim_schema_version: "company_discovery.claim.v2",
+  }],
+  missing_questions: [],
+  contradictions: [],
+  uncertainty: [],
+};
+
 const runtimeSlotId = "44444444-4444-4444-8444-444444444444";
 const tenantId = "55555555-5555-4555-8555-555555555555";
 const credentialOwnerId = "66666666-6666-4666-8666-666666666666";
@@ -1131,6 +1152,52 @@ describe("JobStore recovery authority seam", () => {
 });
 
 describe("JobStore service RPC boundary", () => {
+  test("routes a validated DirectModel v2 result only to the versioned commit RPC", async () => {
+    const calls: string[] = [];
+    const store = new JobStore({
+      async rpc(name) {
+        calls.push(name);
+        if (name === "claim_company_discovery_attempt") {
+          return { data: [directClaimRow], error: null };
+        }
+        if (name === "bind_company_discovery_runtime") {
+          return {
+            data: {
+              attempt_id: job.attempt_id,
+              runtime_slot_id: runtimeSlotId,
+              job_id: job.job_id,
+              job_version: 2,
+              fence_generation: 3,
+              runtime_identity: directRuntimeIdentity,
+              runtime_identity_hash: directRuntimeIdentityHash,
+            },
+            error: null,
+          };
+        }
+        if (name === "commit_company_discovery_result_v2") {
+          return {
+            data: {
+              job_id: job.job_id,
+              attempt_id: job.attempt_id,
+              result_id: "33333333-3333-4333-8333-333333333333",
+              job_version: 3,
+              fence_generation: 3,
+            },
+            error: null,
+          };
+        }
+        return { data: null, error: { message: `unexpected ${name}` } };
+      },
+    });
+    const claimed = await store.claimAttempt("direct-v2-commit", "direct_model", 300);
+    await store.bindRuntime(claimed!, directRuntimeIdentity);
+    const trustedJob = store.bindSourceSnapshots(claimed!.job, [snapshot]);
+
+    await expect(store.commitResult(trustedJob, stage0bResult)).resolves.toBeDefined();
+    expect(calls).toContain("commit_company_discovery_result_v2");
+    expect(calls).not.toContain("commit_company_discovery_result");
+  });
+
   test("rejects caller-authored job and fence identity that did not come from claim readback", async () => {
     const store = new JobStore({
       async rpc() {

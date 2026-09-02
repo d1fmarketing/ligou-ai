@@ -330,3 +330,203 @@ describe("company_discovery.result.v1 exact contract", () => {
     }
   });
 });
+
+describe("company_discovery.result.v2 Stage 0B contract", () => {
+  const stage0bFact = {
+    claim_class: "operational",
+    evidence_refs: [0],
+    confidence: "high",
+    contradiction_status: "none",
+    contradictions: [],
+    missing_fields: [],
+    ambiguous_fields: [],
+    uncertainty: [],
+    claim_schema_version: "company_discovery.claim.v2",
+  } as const;
+
+  test("accepts the four typed website-onboarding claim values without authority fields", () => {
+    const candidate = {
+      schema_version: "company_discovery.result.v2",
+      source_snapshots: [snapshot],
+      candidate_facts: [{
+        ...stage0bFact,
+        claim_type: "service_territory",
+        normalized_value: {
+          service_type: null,
+          included_areas: [{
+            kind: "city",
+            name: "Novato",
+            region_state: "CA",
+            country_code: "US",
+          }],
+          excluded_areas: [],
+          radius: null,
+        },
+      }, {
+        ...stage0bFact,
+        claim_type: "business_hours",
+        normalized_value: {
+          timezone: "America/Los_Angeles",
+          ordinary_intervals: [{
+            days: ["mon", "tue", "wed", "thu", "fri", "sat"],
+            opens: "08:00",
+            closes: "18:00",
+          }],
+          closed_days: ["sun"],
+          ordinary_24_7: false,
+          emergency_24_7: true,
+          after_hours: "emergency_only",
+          holiday_policy: null,
+        },
+        missing_fields: ["holiday_policy"],
+      }, {
+        ...stage0bFact,
+        claim_type: "guarantee",
+        normalized_value: {
+          guarantee_kind: "company_guarantee",
+          service_type: "leak_repair",
+          coverage: ["labor"],
+          duration: { amount: 90, unit: "days" },
+          conditions: ["Applies to labor performed by the company"],
+          exclusions: [],
+        },
+      }, {
+        ...stage0bFact,
+        claim_type: "booking_restriction",
+        normalized_value: {
+          restriction_type: "sunday",
+          service_type: null,
+          rule: "not_allowed",
+          notice_minutes: null,
+          public_fee: null,
+          conditions: ["Sunday appointments are unavailable"],
+        },
+      }],
+      missing_questions: ["Como devemos agir em feriados?"],
+      contradictions: [],
+      uncertainty: [],
+    };
+
+    const parsed = parseWorkerResult(candidate);
+
+    expect(parsed).toEqual(candidate as unknown as WorkerResult);
+    expect(parsed.schema_version).toBe("company_discovery.result.v2");
+    expect(parsed.candidate_facts.map((fact) => fact.claim_type)).toEqual([
+      "service_territory",
+      "business_hours",
+      "guarantee",
+      "booking_restriction",
+    ]);
+    expect(Object.isFrozen(parsed.candidate_facts[0]!.normalized_value)).toBe(true);
+  });
+
+  test("keeps existing facts in v2 and represents every public price qualifier without private pricing", () => {
+    const priceCases = [
+      { amount: "250.00", currency: "USD", qualifier: "fixed", condition: null },
+      { amount: "175.00", currency: "USD", qualifier: "starting_at", condition: null },
+      { amount: null, currency: null, qualifier: "estimate", condition: "Free estimate after inspection" },
+      { amount: "99.00", currency: "USD", qualifier: "promotional", condition: "New-customer promotion" },
+      { amount: "250.00", currency: "USD", qualifier: "conditional", condition: "Up to two hours" },
+      { amount: null, currency: null, qualifier: "unknown", condition: null },
+    ] as const;
+    const facts = [{
+      ...stage0bFact,
+      claim_class: "descriptive",
+      claim_type: "business_name",
+      normalized_value: "Example Plumbing",
+    }, ...priceCases.map((publicPrice, index) => ({
+      ...stage0bFact,
+      claim_type: "service",
+      normalized_value: {
+        service_type: `service_${index + 1}`,
+        service_names: [`Service ${index + 1}`],
+        public_price: publicPrice,
+        duration_minutes: 60,
+      },
+    })), {
+      ...stage0bFact,
+      claim_class: "safety_critical",
+      claim_type: "emergency",
+      normalized_value: { guidance: "Leave the property and call 911 if carbon monoxide is suspected." },
+    }, {
+      ...stage0bFact,
+      claim_type: "booking_restriction",
+      normalized_value: {
+        restriction_type: "cancellation",
+        service_type: null,
+        rule: "fee_applies",
+        notice_minutes: 1440,
+        public_fee: {
+          amount: "75.00",
+          currency: "USD",
+          qualifier: "fixed",
+          condition: "Less than 24 hours notice",
+        },
+        conditions: ["A cancellation fee applies with less than 24 hours notice"],
+      },
+    }];
+
+    const parsed = parseWorkerResult({
+      schema_version: "company_discovery.result.v2",
+      source_snapshots: [snapshot],
+      candidate_facts: facts,
+      missing_questions: ["Qual é o preço mínimo privado?"],
+      contradictions: [],
+      uncertainty: [],
+    });
+
+    expect(parsed.candidate_facts).toHaveLength(9);
+    expect((parsed.candidate_facts[5]!.normalized_value as any).public_price).toEqual({
+      amount: "250.00",
+      currency: "USD",
+      qualifier: "conditional",
+      condition: "Up to two hours",
+    });
+    expect(JSON.stringify(parsed)).not.toContain("price_min");
+  });
+
+  test("rejects silent ambiguity and empty discovery that would suppress required owner questions", () => {
+    const resultWith = (fact: unknown, missingQuestions: string[] = ["Pergunta pendente?"]) => ({
+      schema_version: "company_discovery.result.v2",
+      source_snapshots: [snapshot],
+      candidate_facts: fact === null ? [] : [fact],
+      missing_questions: missingQuestions,
+      contradictions: [],
+      uncertainty: [],
+    });
+    const ambiguousConcord = {
+      ...stage0bFact,
+      claim_type: "service_territory",
+      normalized_value: {
+        service_type: null,
+        included_areas: [{
+          kind: "city",
+          name: "Concord",
+          region_state: null,
+          country_code: "US",
+        }],
+        excluded_areas: [],
+        radius: null,
+      },
+      ambiguous_fields: [],
+    };
+    const hoursWithoutDeclaredGaps = {
+      ...stage0bFact,
+      claim_type: "business_hours",
+      normalized_value: {
+        timezone: null,
+        ordinary_intervals: [{ days: ["mon"], opens: "08:00", closes: "18:00" }],
+        closed_days: [],
+        ordinary_24_7: false,
+        emergency_24_7: false,
+        after_hours: "not_stated",
+        holiday_policy: null,
+      },
+      missing_fields: [],
+    };
+
+    expect(() => parseWorkerResult(resultWith(ambiguousConcord))).toThrow("ambiguous_fields");
+    expect(() => parseWorkerResult(resultWith(hoursWithoutDeclaredGaps))).toThrow("missing_fields");
+    expect(() => parseWorkerResult(resultWith(null, []))).toThrow("missing_questions");
+  });
+});

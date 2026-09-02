@@ -52,10 +52,44 @@ const candidate = {
     claim_type: "business_name",
     normalized_value: "Example Plumbing",
     evidence_refs: [0],
+    confidence: "high",
+    contradiction_status: "none",
     contradictions: [],
+    missing_fields: [],
+    ambiguous_fields: [],
     uncertainty: [],
+    claim_schema_version: "company_discovery.claim.v2",
   }],
   missing_questions: ["Qual é o preço mínimo privado autorizado?"],
+  contradictions: [],
+  uncertainty: [],
+};
+
+const stage0bCandidate = {
+  candidate_facts: [{
+    claim_class: "operational",
+    claim_type: "service_territory",
+    normalized_value: {
+      service_type: null,
+      included_areas: [{
+        kind: "city",
+        name: "Novato",
+        region_state: "CA",
+        country_code: "US",
+      }],
+      excluded_areas: [],
+      radius: null,
+    },
+    evidence_refs: [0],
+    confidence: "high",
+    contradiction_status: "none",
+    contradictions: [],
+    missing_fields: [],
+    ambiguous_fields: [],
+    uncertainty: [],
+    claim_schema_version: "company_discovery.claim.v2",
+  }],
+  missing_questions: ["Qual é a política para feriados?"],
   contradictions: [],
   uncertainty: [],
 };
@@ -248,6 +282,31 @@ function controlledClock(now = Date.parse("2026-09-01T10:00:00.000Z")) {
 }
 
 describe("DirectModelDiscoveryAdapter subscription boundary", () => {
+  test("requests and returns the Stage 0B v2 contract through one subscription call", async () => {
+    const gateway = new FakeSubscriptionGateway();
+    gateway.response = subscriptionResponse(stage0bCandidate);
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: controlledClock().clock,
+    });
+
+    const handle = await adapter.submit(job, capability);
+    const result = await adapter.result(handle);
+    const body = await gateway.requests[0]!.clone().json() as any;
+    const evidenceEnvelope = JSON.parse(body.input[0].content[0].text);
+    const serializedContract = JSON.stringify(evidenceEnvelope.output_contract);
+
+    expect(result.schema_version).toBe("company_discovery.result.v2");
+    expect(result.candidate_facts[0]!.claim_type).toBe("service_territory");
+    expect(evidenceEnvelope.schema_version).toBe("company_discovery.evidence.v2");
+    expect(serializedContract).toContain("business_hours");
+    expect(serializedContract).toContain("guarantee");
+    expect(serializedContract).toContain("booking_restriction");
+    expect(gateway.requests).toHaveLength(1);
+    expect(gateway.usageValue.billing_basis).toBe("chatgpt_subscription");
+    expect(gateway.usageValue.marginal_api_charge_usd).toBe(0);
+  });
+
   test("uses only the injected gpt-5.6-sol subscription gateway", async () => {
     const gateway = new FakeSubscriptionGateway();
     const timer = controlledClock();
@@ -277,7 +336,7 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
     expect(JSON.stringify(body)).not.toContain("tenant_id");
     expect(JSON.stringify(body)).not.toContain(job.job_id);
     expect(result).toEqual({
-      schema_version: "company_discovery.result.v1",
+      schema_version: "company_discovery.result.v2",
       source_snapshots: [sourceSnapshot],
       ...candidate,
     } as WorkerResult);
@@ -306,7 +365,7 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
     });
     const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
     expect(await adapter.result(handle)).toMatchObject({
-      schema_version: "company_discovery.result.v1",
+      schema_version: "company_discovery.result.v2",
     });
   });
 
@@ -320,7 +379,7 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
 
     const handle = await adapter.submit(job, capability);
     expect(await adapter.result(handle)).toEqual({
-      schema_version: "company_discovery.result.v1",
+      schema_version: "company_discovery.result.v2",
       source_snapshots: job.source_snapshots,
       ...candidate,
     } as WorkerResult);
@@ -337,7 +396,7 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
 
     const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
     expect(await adapter.result(handle)).toEqual({
-      schema_version: "company_discovery.result.v1",
+      schema_version: "company_discovery.result.v2",
       source_snapshots: job.source_snapshots,
       ...candidate,
     } as WorkerResult);
@@ -452,7 +511,7 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
       });
       const handle = await adapter.submit(job, capability);
       expect(await adapter.result(handle)).toMatchObject({
-        schema_version: "company_discovery.result.v1",
+        schema_version: "company_discovery.result.v2",
       });
       expect(globalFetchCalls).toBe(0);
       expect(gateway.requests[0]!.url).not.toContain("api.openai.com");

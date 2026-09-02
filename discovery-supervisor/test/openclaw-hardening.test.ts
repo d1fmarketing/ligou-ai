@@ -603,6 +603,27 @@ const adapterResult: WorkerResult = {
   uncertainty: [],
 };
 
+const directAdapterResult: WorkerResult = {
+  schema_version: "company_discovery.result.v2",
+  source_snapshots: [adapterSnapshot],
+  candidate_facts: [{
+    claim_class: "descriptive",
+    claim_type: "business_name",
+    normalized_value: "Example Plumbing",
+    evidence_refs: [0],
+    confidence: "high",
+    contradiction_status: "none",
+    contradictions: [],
+    missing_fields: [],
+    ambiguous_fields: [],
+    uncertainty: [],
+    claim_schema_version: "company_discovery.claim.v2",
+  }],
+  missing_questions: [],
+  contradictions: [],
+  uncertainty: [],
+};
+
 function subscriptionUsage(overrides: Partial<SubscriptionUsage> = {}): SubscriptionUsage {
   return {
     schema_version: "ligou.subscription_usage.v1",
@@ -1786,10 +1807,10 @@ describe("central multi-lease subscription gateway", () => {
         content: [{
           type: "output_text",
           text: JSON.stringify({
-            candidate_facts: adapterResult.candidate_facts,
-            missing_questions: adapterResult.missing_questions,
-            contradictions: adapterResult.contradictions,
-            uncertainty: adapterResult.uncertainty,
+            candidate_facts: directAdapterResult.candidate_facts,
+            missing_questions: directAdapterResult.missing_questions,
+            contradictions: directAdapterResult.contradictions,
+            uncertainty: directAdapterResult.uncertainty,
           }),
         }],
       }],
@@ -1848,7 +1869,7 @@ describe("central multi-lease subscription gateway", () => {
     });
 
     const handle = await adapter.submit(adapterJob, capability);
-    expect(await adapter.result(handle)).toEqual(adapterResult);
+    expect(await adapter.result(handle)).toEqual(directAdapterResult);
     expect(upstreamCalls).toBe(1);
     await expect(adapter.retire(handle)).resolves.toMatchObject({
       subscription_lease_revoked: true,

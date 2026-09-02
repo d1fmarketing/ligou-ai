@@ -488,6 +488,29 @@ function serviceType(value: unknown): string | undefined {
   return typeof service.service_type === "string" ? service.service_type : undefined;
 }
 
+function legacyComparableFact(fact: CandidateFact): CandidateFact {
+  if (fact.claim_type !== "service" || fact.normalized_value === null ||
+      typeof fact.normalized_value !== "object" || Array.isArray(fact.normalized_value)) {
+    return fact;
+  }
+  const service = fact.normalized_value as Record<string, unknown>;
+  if (service.public_price === null || typeof service.public_price !== "object" ||
+      Array.isArray(service.public_price)) return fact;
+  const price = service.public_price as Record<string, unknown>;
+  const qualifier = price.qualifier === "fixed" ? "exact" : price.qualifier;
+  return {
+    ...fact,
+    normalized_value: {
+      ...service,
+      public_price: {
+        amount: price.amount,
+        currency: price.currency,
+        qualifier,
+      },
+    },
+  };
+}
+
 function weightedQuality(components: readonly [number | null, number][]): number {
   let weighted = 0;
   let weights = 0;
@@ -508,10 +531,17 @@ export function scoreBenchmarkResult(
     failure("result.source_snapshots", "source snapshots differ from immutable benchmark evidence");
   }
 
+  const legacyClaimTypes = new Set(
+    benchmarkCase.oracle.expected_facts.map((fact) => fact.claim_type),
+  );
+  const scoredFacts = result.candidate_facts
+    .filter((fact) => legacyClaimTypes.has(fact.claim_type))
+    .map(legacyComparableFact);
+
   const unmatchedExpected = new Set(benchmarkCase.oracle.expected_facts.map((_, index) => index));
   const matchedFacts: Array<{ expected: ExpectedBenchmarkFact; actual: CandidateFact }> = [];
   let falsePositive = 0;
-  for (const actual of result.candidate_facts) {
+  for (const actual of scoredFacts) {
     const signature = factSignature(actual);
     const match = [...unmatchedExpected].find((index) =>
       factSignature(benchmarkCase.oracle.expected_facts[index]!) === signature
@@ -539,7 +569,7 @@ export function scoreBenchmarkResult(
   );
   let classCorrect = 0;
   let classEvaluated = 0;
-  for (const actual of result.candidate_facts) {
+  for (const actual of scoredFacts) {
     const identity = factIdentityWithoutClass(actual);
     const match = [...unmatchedClassExpectations].find((index) =>
       factIdentityWithoutClass(benchmarkCase.oracle.expected_facts[index]!) === identity
@@ -556,7 +586,7 @@ export function scoreBenchmarkResult(
   const expectedPrices = benchmarkCase.oracle.expected_facts.filter((fact) =>
     fact.claim_class === "operational" && publicPrice(fact.normalized_value) !== undefined
   );
-  const reportedPrices = result.candidate_facts.filter((fact) =>
+  const reportedPrices = scoredFacts.filter((fact) =>
     fact.claim_class === "operational" && publicPrice(fact.normalized_value) !== undefined
   );
   const unmatchedReportedPrices = new Set(reportedPrices.map((_, index) => index));

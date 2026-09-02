@@ -50,7 +50,7 @@ export interface WorkerStatus {
   readonly state: WorkerState;
 }
 
-export interface CandidateFact {
+export interface CandidateFactV1 {
   readonly claim_class: ClaimClass;
   readonly claim_type: string;
   readonly normalized_value: unknown;
@@ -59,8 +59,18 @@ export interface CandidateFact {
   readonly uncertainty: readonly string[];
 }
 
+export interface CandidateFactV2 extends CandidateFactV1 {
+  readonly confidence: "high" | "medium" | "low";
+  readonly contradiction_status: "none" | "possible" | "confirmed";
+  readonly missing_fields: readonly string[];
+  readonly ambiguous_fields: readonly string[];
+  readonly claim_schema_version: "company_discovery.claim.v2";
+}
+
+export type CandidateFact = CandidateFactV1 | CandidateFactV2;
+
 export interface WorkerResult {
-  readonly schema_version: "company_discovery.result.v1";
+  readonly schema_version: "company_discovery.result.v1" | "company_discovery.result.v2";
   readonly source_snapshots: readonly DiscoverySourceSnapshot[];
   readonly candidate_facts: readonly CandidateFact[];
   readonly missing_questions: readonly string[];
@@ -303,6 +313,20 @@ const FACT_KEYS = [
   "evidence_refs",
   "contradictions",
   "uncertainty",
+] as const;
+
+const FACT_V2_KEYS = [
+  "claim_class",
+  "claim_type",
+  "normalized_value",
+  "evidence_refs",
+  "confidence",
+  "contradiction_status",
+  "contradictions",
+  "missing_fields",
+  "ambiguous_fields",
+  "uncertainty",
+  "claim_schema_version",
 ] as const;
 
 const JOB_KEYS = [
@@ -571,10 +595,321 @@ function parseNormalizedValue(
   return deepFreeze({ guidance: boundedString(emergency.guidance, `${path}.guidance`, 1, 2_000) });
 }
 
-function parseFact(value: unknown, index: number, snapshotCount: number): CandidateFact {
+function nullableServiceType(value: unknown, path: string): string | null {
+  if (value === null) return null;
+  const serviceType = boundedString(value, path, 1, 200);
+  if (!SERVICE_TYPE_PATTERN.test(serviceType)) fail(path, "invalid service type");
+  return serviceType;
+}
+
+function nullableBoundedString(
+  value: unknown,
+  path: string,
+  maximum: number,
+): string | null {
+  return value === null ? null : boundedString(value, path, 1, maximum);
+}
+
+function parseTerritoryEntry(
+  value: unknown,
+  path: string,
+): Readonly<Record<string, unknown>> {
+  const entry = record(value, path);
+  exactKeys(entry, ["kind", "name", "region_state", "country_code"], path);
+  if (!["city", "county", "region_state", "postal_code", "marketing_region"].includes(
+    String(entry.kind),
+  )) fail(`${path}.kind`, "invalid territory kind");
+  const countryCode = nullableBoundedString(entry.country_code, `${path}.country_code`, 2);
+  if (countryCode !== null && !/^[A-Z]{2}$/.test(countryCode)) {
+    fail(`${path}.country_code`, "invalid country code");
+  }
+  return deepFreeze({
+    kind: entry.kind,
+    name: boundedString(entry.name, `${path}.name`, 1, 200),
+    region_state: nullableBoundedString(entry.region_state, `${path}.region_state`, 100),
+    country_code: countryCode,
+  });
+}
+
+function parseTerritoryEntries(value: unknown, path: string): readonly Readonly<Record<string, unknown>>[] {
+  if (!Array.isArray(value) || value.length > 50) fail(path, "expected at most 50 areas");
+  const entries = value.map((entry, index) => parseTerritoryEntry(entry, `${path}[${index}]`));
+  if (new Set(entries.map((entry) => JSON.stringify(entry))).size !== entries.length) {
+    fail(path, "duplicate territory area");
+  }
+  return deepFreeze(entries);
+}
+
+function parseTerritoryValue(value: unknown, path: string): Readonly<Record<string, unknown>> {
+  const territory = record(value, path);
+  exactKeys(
+    territory,
+    ["service_type", "included_areas", "excluded_areas", "radius"],
+    path,
+  );
+  const included = parseTerritoryEntries(territory.included_areas, `${path}.included_areas`);
+  const excluded = parseTerritoryEntries(territory.excluded_areas, `${path}.excluded_areas`);
+  if (included.length === 0 && excluded.length === 0 && territory.radius === null) {
+    fail(path, "territory needs explicit included, excluded, or radius evidence");
+  }
+  let radius: Readonly<Record<string, unknown>> | null = null;
+  if (territory.radius !== null) {
+    const candidate = record(territory.radius, `${path}.radius`);
+    exactKeys(candidate, ["distance", "unit", "center"], `${path}.radius`);
+    const distance = boundedString(candidate.distance, `${path}.radius.distance`, 1, 12);
+    if (!/^(?:0[.][0-9]*[1-9]|[1-9][0-9]{0,6}(?:[.][0-9]{1,3})?)$/.test(distance)) {
+      fail(`${path}.radius.distance`, "positive decimal string required");
+    }
+    if (candidate.unit !== "miles" && candidate.unit !== "kilometers") {
+      fail(`${path}.radius.unit`, "invalid radius unit");
+    }
+    radius = deepFreeze({
+      distance,
+      unit: candidate.unit,
+      center: nullableBoundedString(candidate.center, `${path}.radius.center`, 200),
+    });
+  }
+  return deepFreeze({
+    service_type: nullableServiceType(territory.service_type, `${path}.service_type`),
+    included_areas: included,
+    excluded_areas: excluded,
+    radius,
+  });
+}
+
+const WEEKDAYS = new Set(["sun", "mon", "tue", "wed", "thu", "fri", "sat"]);
+
+function parseWeekdays(value: unknown, path: string, allowEmpty: boolean): readonly string[] {
+  const days = parseStringArray(value, path, 7, 3);
+  if ((!allowEmpty && days.length === 0) || days.some((day) => !WEEKDAYS.has(day)) ||
+      new Set(days).size !== days.length) {
+    fail(path, "invalid unique weekdays");
+  }
+  return deepFreeze(days);
+}
+
+function parseHoursValue(value: unknown, path: string): Readonly<Record<string, unknown>> {
+  const hours = record(value, path);
+  exactKeys(hours, [
+    "timezone", "ordinary_intervals", "closed_days", "ordinary_24_7",
+    "emergency_24_7", "after_hours", "holiday_policy",
+  ], path);
+  if (!Array.isArray(hours.ordinary_intervals) || hours.ordinary_intervals.length > 14) {
+    fail(`${path}.ordinary_intervals`, "expected at most 14 intervals");
+  }
+  const intervals = hours.ordinary_intervals.map((value, index) => {
+    const intervalPath = `${path}.ordinary_intervals[${index}]`;
+    const interval = record(value, intervalPath);
+    exactKeys(interval, ["days", "opens", "closes"], intervalPath);
+    const opens = boundedString(interval.opens, `${intervalPath}.opens`, 5, 5);
+    const closes = boundedString(interval.closes, `${intervalPath}.closes`, 5, 5);
+    if (!/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(opens) ||
+        !/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(closes) || opens === closes) {
+      fail(intervalPath, "invalid ordinary interval");
+    }
+    return deepFreeze({
+      days: parseWeekdays(interval.days, `${intervalPath}.days`, false),
+      opens,
+      closes,
+    });
+  });
+  const closedDays = parseWeekdays(hours.closed_days, `${path}.closed_days`, true);
+  const intervalDays = new Set(intervals.flatMap((interval) => interval.days as string[]));
+  if (closedDays.some((day) => intervalDays.has(day))) {
+    fail(`${path}.closed_days`, "closed day also has ordinary hours");
+  }
+  if (typeof hours.ordinary_24_7 !== "boolean" || typeof hours.emergency_24_7 !== "boolean") {
+    fail(path, "24/7 flags must be boolean");
+  }
+  if (hours.ordinary_24_7 && (intervals.length !== 0 || closedDays.length !== 0)) {
+    fail(`${path}.ordinary_24_7`, "ordinary 24/7 conflicts with intervals or closed days");
+  }
+  if (!["not_stated", "unavailable", "available", "emergency_only"].includes(
+    String(hours.after_hours),
+  )) fail(`${path}.after_hours`, "invalid after-hours value");
+  if (hours.emergency_24_7 && !["available", "emergency_only"].includes(String(hours.after_hours))) {
+    fail(`${path}.emergency_24_7`, "emergency 24/7 conflicts with after-hours value");
+  }
+  const timezone = nullableBoundedString(hours.timezone, `${path}.timezone`, 100);
+  if (timezone !== null && timezone !== "UTC" && !/^[A-Za-z_]+\/[A-Za-z0-9_+.-]+$/.test(timezone)) {
+    fail(`${path}.timezone`, "invalid explicit timezone");
+  }
+  return deepFreeze({
+    timezone,
+    ordinary_intervals: deepFreeze(intervals),
+    closed_days: closedDays,
+    ordinary_24_7: hours.ordinary_24_7,
+    emergency_24_7: hours.emergency_24_7,
+    after_hours: hours.after_hours,
+    holiday_policy: nullableBoundedString(hours.holiday_policy, `${path}.holiday_policy`, 2_000),
+  });
+}
+
+function parseGuaranteeValue(value: unknown, path: string): Readonly<Record<string, unknown>> {
+  const guarantee = record(value, path);
+  exactKeys(
+    guarantee,
+    ["guarantee_kind", "service_type", "coverage", "duration", "conditions", "exclusions"],
+    path,
+  );
+  if (!["company_guarantee", "manufacturer_warranty", "satisfaction_statement", "case_by_case"].includes(
+    String(guarantee.guarantee_kind),
+  )) fail(`${path}.guarantee_kind`, "invalid guarantee kind");
+  const coverage = parseStringArray(guarantee.coverage, `${path}.coverage`, 5, 20);
+  const allowedCoverage = new Set(["labor", "parts", "product", "service", "satisfaction"]);
+  if (coverage.length === 0 || coverage.some((item) => !allowedCoverage.has(item)) ||
+      new Set(coverage).size !== coverage.length) fail(`${path}.coverage`, "invalid guarantee coverage");
+  let duration: Readonly<Record<string, unknown>> | null = null;
+  if (guarantee.duration !== null) {
+    const candidate = record(guarantee.duration, `${path}.duration`);
+    exactKeys(candidate, ["amount", "unit"], `${path}.duration`);
+    if (candidate.unit !== "days" && candidate.unit !== "months" && candidate.unit !== "years") {
+      fail(`${path}.duration.unit`, "invalid duration unit");
+    }
+    duration = deepFreeze({
+      amount: integer(candidate.amount, `${path}.duration.amount`, 1, 10_000),
+      unit: candidate.unit,
+    });
+  }
+  if ((guarantee.guarantee_kind === "satisfaction_statement" ||
+       guarantee.guarantee_kind === "case_by_case") && duration !== null) {
+    fail(`${path}.duration`, "vague guarantee cannot invent a duration");
+  }
+  return deepFreeze({
+    guarantee_kind: guarantee.guarantee_kind,
+    service_type: nullableServiceType(guarantee.service_type, `${path}.service_type`),
+    coverage: deepFreeze(coverage),
+    duration,
+    conditions: deepFreeze(parseStringArray(guarantee.conditions, `${path}.conditions`, 20, 1_000)),
+    exclusions: deepFreeze(parseStringArray(guarantee.exclusions, `${path}.exclusions`, 20, 1_000)),
+  });
+}
+
+function parseBookingRestrictionValue(value: unknown, path: string): Readonly<Record<string, unknown>> {
+  const restriction = record(value, path);
+  exactKeys(
+    restriction,
+    ["restriction_type", "service_type", "rule", "notice_minutes", "public_fee", "conditions"],
+    path,
+  );
+  const restrictionTypes = new Set([
+    "same_day", "advance_notice", "weekend", "sunday", "emergency_only", "access",
+    "deposit", "cancellation", "no_show_fee", "visit_fee", "customer_presence",
+    "service_specific",
+  ]);
+  if (!restrictionTypes.has(String(restriction.restriction_type))) {
+    fail(`${path}.restriction_type`, "invalid booking restriction type");
+  }
+  if (!["allowed", "not_allowed", "required", "conditional", "fee_applies", "emergency_only"].includes(
+    String(restriction.rule),
+  )) fail(`${path}.rule`, "invalid booking restriction rule");
+  const publicFee = restriction.public_fee === null
+    ? null
+    : parsePublicPriceV2(restriction.public_fee, `${path}.public_fee`);
+  const conditions = parseStringArray(restriction.conditions, `${path}.conditions`, 20, 1_000);
+  if (conditions.length === 0) fail(`${path}.conditions`, "explicit condition required");
+  return deepFreeze({
+    restriction_type: restriction.restriction_type,
+    service_type: nullableServiceType(restriction.service_type, `${path}.service_type`),
+    rule: restriction.rule,
+    notice_minutes: restriction.notice_minutes === null
+      ? null
+      : integer(restriction.notice_minutes, `${path}.notice_minutes`, 1, 525_600),
+    public_fee: publicFee,
+    conditions: deepFreeze(conditions),
+  });
+}
+
+function parsePublicPriceV2(value: unknown, path: string): Readonly<Record<string, unknown>> {
+  const price = record(value, path);
+  exactKeys(price, ["amount", "currency", "qualifier", "condition"], path);
+  const qualifiers = new Set([
+    "fixed", "starting_at", "estimate", "promotional", "conditional", "unknown",
+  ]);
+  if (!qualifiers.has(String(price.qualifier))) fail(`${path}.qualifier`, "invalid public price qualifier");
+  const amount = price.amount === null
+    ? null
+    : boundedString(price.amount, `${path}.amount`, 4, 12);
+  if (amount !== null && !/^(0|[1-9][0-9]{0,8})[.][0-9]{2}$/.test(amount)) {
+    fail(`${path}.amount`, "expected non-exponent decimal string");
+  }
+  const currency = price.currency === null
+    ? null
+    : boundedString(price.currency, `${path}.currency`, 3, 3);
+  if (currency !== null && !/^[A-Z]{3}$/.test(currency)) {
+    fail(`${path}.currency`, "invalid currency");
+  }
+  if ((amount === null) !== (currency === null)) fail(path, "amount and currency must appear together");
+  if (["fixed", "starting_at", "conditional"].includes(String(price.qualifier)) && amount === null) {
+    fail(path, "priced qualifier requires public amount");
+  }
+  if (price.qualifier === "unknown" && amount !== null) fail(path, "unknown price cannot carry an amount");
+  const condition = nullableBoundedString(price.condition, `${path}.condition`, 1_000);
+  if (price.qualifier === "conditional" && condition === null) {
+    fail(`${path}.condition`, "conditional public price requires its condition");
+  }
+  return deepFreeze({ amount, currency, qualifier: price.qualifier, condition });
+}
+
+function parseServiceValueV2(value: unknown, path: string): Readonly<Record<string, unknown>> {
+  const service = record(value, path);
+  exactKeys(service, ["service_type", "service_names", "public_price", "duration_minutes"], path);
+  const serviceType = nullableServiceType(service.service_type, `${path}.service_type`);
+  if (serviceType === null) fail(`${path}.service_type`, "service type required");
+  const names = parseStringArray(service.service_names, `${path}.service_names`, 20, 200);
+  if (names.length === 0 || new Set(names).size !== names.length) {
+    fail(`${path}.service_names`, "unique service names required");
+  }
+  return deepFreeze({
+    service_type: serviceType,
+    service_names: deepFreeze(names),
+    public_price: service.public_price === null
+      ? null
+      : parsePublicPriceV2(service.public_price, `${path}.public_price`),
+    duration_minutes: service.duration_minutes === null
+      ? null
+      : integer(service.duration_minutes, `${path}.duration_minutes`, 1, 10_080),
+  });
+}
+
+function parseNormalizedValueV2(
+  claimClass: ClaimClass,
+  claimType: string,
+  value: unknown,
+  path: string,
+): unknown {
+  byteLength(value, path, 65_536);
+  if (claimClass === "descriptive") {
+    const types = new Set([
+      "business_name", "business_description", "public_phone", "public_email",
+      "public_address", "public_website",
+    ]);
+    if (!types.has(claimType)) fail(path, "unsupported descriptive claim type");
+    return boundedString(value, path, 1, 2_000);
+  }
+  if (claimClass === "safety_critical") {
+    if (claimType !== "emergency") fail(path, "unsupported safety-critical claim type");
+    const emergency = record(value, path);
+    exactKeys(emergency, ["guidance"], path);
+    return deepFreeze({ guidance: boundedString(emergency.guidance, `${path}.guidance`, 1, 2_000) });
+  }
+  if (claimType === "service") return parseServiceValueV2(value, path);
+  if (claimType === "service_territory") return parseTerritoryValue(value, path);
+  if (claimType === "business_hours") return parseHoursValue(value, path);
+  if (claimType === "guarantee") return parseGuaranteeValue(value, path);
+  if (claimType === "booking_restriction") return parseBookingRestrictionValue(value, path);
+  fail(path, "unsupported Stage 0B claim type");
+}
+
+function parseFact(
+  value: unknown,
+  index: number,
+  snapshotCount: number,
+  schemaVersion: WorkerResult["schema_version"],
+): CandidateFact {
   const path = `candidate_facts[${index}]`;
   const fact = record(value, path);
-  exactKeys(fact, FACT_KEYS, path);
+  exactKeys(fact, schemaVersion === "company_discovery.result.v2" ? FACT_V2_KEYS : FACT_KEYS, path);
   if (fact.claim_class === "owner_private") fail(`${path}.claim_class`, "owner_private facts forbidden");
   if (fact.claim_class !== "descriptive" &&
       fact.claim_class !== "operational" &&
@@ -593,37 +928,93 @@ function parseFact(value: unknown, index: number, snapshotCount: number): Candid
     fail(`${path}.evidence_refs`, "duplicate evidence reference");
   }
   const contradictions = parseStringArray(fact.contradictions, `${path}.contradictions`, 20, 2_000);
-  return {
+  const common = {
     claim_class: claimClass,
     claim_type: claimType,
-    normalized_value: parseNormalizedValue(
-      claimClass,
-      claimType,
-      fact.normalized_value,
-      `${path}.normalized_value`,
-    ),
+    normalized_value: schemaVersion === "company_discovery.result.v2"
+      ? parseNormalizedValueV2(claimClass, claimType, fact.normalized_value, `${path}.normalized_value`)
+      : parseNormalizedValue(claimClass, claimType, fact.normalized_value, `${path}.normalized_value`),
     evidence_refs: deepFreeze(evidenceRefs),
     contradictions: deepFreeze(contradictions),
     uncertainty: deepFreeze(parseStringArray(fact.uncertainty, `${path}.uncertainty`, 20, 1_000)),
+  };
+  if (schemaVersion === "company_discovery.result.v1") return common;
+  if (fact.confidence !== "high" && fact.confidence !== "medium" && fact.confidence !== "low") {
+    fail(`${path}.confidence`, "invalid confidence");
+  }
+  if (fact.contradiction_status !== "none" && fact.contradiction_status !== "possible" &&
+      fact.contradiction_status !== "confirmed") {
+    fail(`${path}.contradiction_status`, "invalid contradiction status");
+  }
+  if ((fact.contradiction_status === "none") !== (contradictions.length === 0)) {
+    fail(`${path}.contradiction_status`, "contradiction status does not match evidence");
+  }
+  if (fact.claim_schema_version !== "company_discovery.claim.v2") {
+    fail(`${path}.claim_schema_version`, "company_discovery.claim.v2 required");
+  }
+  const missingFields = parseStringArray(fact.missing_fields, `${path}.missing_fields`, 50, 200);
+  const ambiguousFields = parseStringArray(
+    fact.ambiguous_fields,
+    `${path}.ambiguous_fields`,
+    50,
+    200,
+  );
+  const normalized = common.normalized_value as Record<string, unknown>;
+  if (claimType === "service_territory") {
+    for (const collection of ["included_areas", "excluded_areas"] as const) {
+      for (const [index, area] of (normalized[collection] as readonly Record<string, unknown>[]).entries()) {
+        if (area.kind === "city" && area.region_state === null &&
+            !ambiguousFields.includes(`${collection}[${index}].region_state`)) {
+          fail(`${path}.ambiguous_fields`, "ambiguous city region must remain explicit");
+        }
+      }
+    }
+  }
+  if (claimType === "business_hours") {
+    for (const [field, absent] of [
+      ["timezone", normalized.timezone === null],
+      ["holiday_policy", normalized.holiday_policy === null],
+      ["after_hours", normalized.after_hours === "not_stated"],
+    ] as const) {
+      if (absent && !missingFields.includes(field)) {
+        fail(`${path}.missing_fields`, `${field} must remain missing`);
+      }
+    }
+  }
+  return {
+    ...common,
+    confidence: fact.confidence,
+    contradiction_status: fact.contradiction_status,
+    missing_fields: deepFreeze(missingFields),
+    ambiguous_fields: deepFreeze(ambiguousFields),
+    claim_schema_version: "company_discovery.claim.v2",
   };
 }
 
 export function parseWorkerResult(value: unknown): WorkerResult {
   const candidate = record(value, "result");
   exactKeys(candidate, RESULT_KEYS, "result");
-  if (candidate.schema_version !== "company_discovery.result.v1") {
-    fail("result.schema_version", "company_discovery.result.v1 required");
+  if (candidate.schema_version !== "company_discovery.result.v1" &&
+      candidate.schema_version !== "company_discovery.result.v2") {
+    fail("result.schema_version", "supported company discovery result required");
   }
   const snapshots = parseSourceSnapshots(candidate.source_snapshots);
   if (!Array.isArray(candidate.candidate_facts) || candidate.candidate_facts.length > 100) {
     fail("candidate_facts", "expected at most 100 items");
   }
-  const facts = candidate.candidate_facts.map((fact, index) => parseFact(fact, index, snapshots.length));
+  const schemaVersion = candidate.schema_version;
+  const facts = candidate.candidate_facts.map((fact, index) =>
+    parseFact(fact, index, snapshots.length, schemaVersion)
+  );
+  const missingQuestions = parseStringArray(candidate.missing_questions, "missing_questions", 50, 1_000);
+  if (schemaVersion === "company_discovery.result.v2" && facts.length === 0 && missingQuestions.length === 0) {
+    fail("missing_questions", "empty discovery must preserve owner questions");
+  }
   const result: WorkerResult = {
-    schema_version: "company_discovery.result.v1",
+    schema_version: schemaVersion,
     source_snapshots: snapshots,
     candidate_facts: deepFreeze(facts),
-    missing_questions: deepFreeze(parseStringArray(candidate.missing_questions, "missing_questions", 50, 1_000)),
+    missing_questions: deepFreeze(missingQuestions),
     contradictions: deepFreeze(parseStringArray(candidate.contradictions, "contradictions", 50, 2_000)),
     uncertainty: deepFreeze(parseStringArray(candidate.uncertainty, "uncertainty", 50, 1_000)),
   };

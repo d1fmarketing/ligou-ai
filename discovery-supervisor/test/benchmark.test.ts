@@ -305,6 +305,64 @@ describe("immutable company discovery benchmark corpus", () => {
     });
   });
 
+  test("scores the v2 DirectModel projection comparably while ignoring new typed classes outside the frozen oracle", async () => {
+    const artifact = await corpus("synthetic-plumbing.json");
+    const v2: WorkerResult = {
+      schema_version: "company_discovery.result.v2",
+      source_snapshots: syntheticSnapshots,
+      candidate_facts: [
+        ...perfectSyntheticResult.candidate_facts.map((fact) => ({
+          ...fact,
+          normalized_value: fact.claim_type === "service"
+            ? {
+                ...(fact.normalized_value as Record<string, unknown>),
+                public_price: {
+                  ...((fact.normalized_value as any).public_price),
+                  qualifier: "fixed",
+                  condition: null,
+                },
+              }
+            : fact.normalized_value,
+          confidence: "high" as const,
+          contradiction_status: "none" as const,
+          missing_fields: [],
+          ambiguous_fields: [],
+          claim_schema_version: "company_discovery.claim.v2" as const,
+        })),
+        {
+          claim_class: "operational",
+          claim_type: "service_territory",
+          normalized_value: {
+            service_type: null,
+            included_areas: [{
+              kind: "marketing_region",
+              name: "North Bay",
+              region_state: "CA",
+              country_code: "US",
+            }],
+            excluded_areas: [],
+            radius: null,
+          },
+          evidence_refs: [0],
+          confidence: "medium",
+          contradiction_status: "none",
+          contradictions: [],
+          missing_fields: [],
+          ambiguous_fields: [],
+          uncertainty: [],
+          claim_schema_version: "company_discovery.claim.v2",
+        },
+      ],
+      missing_questions: perfectSyntheticResult.missing_questions,
+      contradictions: [],
+      uncertainty: [],
+    };
+
+    expect(scoreBenchmarkResult(artifact.case, v2)).toEqual(
+      scoreBenchmarkResult(artifact.case, perfectSyntheticResult),
+    );
+  });
+
   test("penalizes a prompted private floor and wrong public price with a hand-derived score", async () => {
     const artifact = await corpus("hostile-injection.json");
     const result: WorkerResult = {
