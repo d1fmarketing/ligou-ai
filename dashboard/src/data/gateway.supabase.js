@@ -72,7 +72,10 @@ export async function reviewCompanyDiscoveryVia(client, review, reviewState) {
     p_result: review.result.id,
     p_claim_ids: claimIds,
   });
-  return discoveryRpc(client, "review_company_discovery_claims", {
+  const reviewRpc = review?.result?.schema === "company_discovery.result.v2"
+    ? "review_company_discovery_claims_v2"
+    : "review_company_discovery_claims";
+  return discoveryRpc(client, reviewRpc, {
     ...payload,
     p_confirmation_nonce: nonce,
   });
@@ -92,7 +95,7 @@ export async function loadCompanyDiscoveryVia(client, tenantId, {
   if (availability.phase === "unavailable") return availability;
   const jobResult = await client
     .from("worker_jobs")
-    .select("id,tenant_id,version,status,current_attempt_id,selected_attempt_id,deadline_at,fallback_state,normalized_origin,updated_at")
+    .select("id,tenant_id,version,status,processing_stage,current_attempt_id,selected_attempt_id,deadline_at,fallback_state,normalized_origin,updated_at")
     .eq("tenant_id", tenantId)
     .order("created_at", { ascending: false })
     .limit(1)
@@ -104,7 +107,7 @@ export async function loadCompanyDiscoveryVia(client, tenantId, {
 
   const result = discoveryData(await client
     .from("worker_results")
-    .select("id,tenant_id,job_id,attempt_id,result_hash,candidate_result,validation_state,validated_at")
+    .select("id,tenant_id,job_id,attempt_id,result_schema,result_hash,candidate_result,validation_state,validated_at")
     .eq("tenant_id", tenantId)
     .eq("job_id", job.id)
     .eq("attempt_id", job.selected_attempt_id)
@@ -115,7 +118,7 @@ export async function loadCompanyDiscoveryVia(client, tenantId, {
   const [claimsResult, sourcesResult, decisionsResult] = await Promise.all([
     client
       .from("discovery_claims")
-      .select("id,tenant_id,job_id,result_id,claim_class,claim_type,normalized_value,evidence_refs,contradictions,uncertainty,claim_version,created_at")
+      .select("id,tenant_id,job_id,result_id,claim_class,claim_type,normalized_value,evidence_refs,adapter_id,provider,model,confidence,contradiction_status,missing_fields,ambiguous_fields,contradictions,uncertainty,claim_schema_version,claim_version,created_at")
       .eq("tenant_id", tenantId)
       .eq("job_id", job.id)
       .eq("result_id", result.id)

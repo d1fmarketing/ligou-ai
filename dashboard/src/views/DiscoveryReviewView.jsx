@@ -26,10 +26,14 @@ const TYPE_LABELS = {
   public_address: "Endereço público",
   public_website: "Site público",
   service: "Serviço publicado",
+  service_territory: "Área atendida publicada",
+  business_hours: "Horário publicado",
+  guarantee: "Garantia publicada",
+  booking_restriction: "Restrição de agendamento",
   emergency: "Orientação de emergência",
 };
 
-function StatusSurface({ phase, reason, onDiscover }) {
+function StatusSurface({ phase, reason, processingStage, onDiscover }) {
   const [url, setUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -44,10 +48,17 @@ function StatusSurface({ phase, reason, onDiscover }) {
   }
 
   if (phase === "working") {
+    const label = processingStage === "queued"
+      ? "Na fila para leitura pública."
+      : processingStage === "fetching"
+        ? "Lendo páginas públicas permitidas."
+        : processingStage === "analyzing"
+          ? "Organizando sugestões para sua revisão."
+          : "Leitura pública em andamento.";
     return (
       <aside className="discovery-status" aria-live="polite">
         <IconFileSearch aria-hidden="true" />
-        <p><strong>Leitura pública em andamento.</strong> Você não precisa esperar. Comece a entrevista agora; qualquer resultado que chegar depois será apenas sugestão.</p>
+        <p><strong>{label}</strong> Você não precisa esperar. A entrevista em português continua disponível agora; qualquer resultado que chegar depois será apenas sugestão.</p>
       </aside>
     );
   }
@@ -124,9 +135,12 @@ function StatusSurface({ phase, reason, onDiscover }) {
   );
 }
 
-function EvidenceRail({ decision, groupId }) {
+function EvidenceRail({ decision, groupId, claim }) {
   const accepted = decision === "approve" || decision === "edit";
-  const finalLabel = groupId === "descriptive" ? "Perfil da empresa" : "Regra da Ligou";
+  const stage0b = claim.claimSchemaVersion === "company_discovery.claim.v2";
+  const finalLabel = stage0b
+    ? "Rascunho de onboarding"
+    : groupId === "descriptive" ? "Perfil da empresa" : "Regra da Ligou";
   return (
     <div className="discovery-authority-rail" aria-label="Evidência até autoridade">
       <div className="discovery-rail-step is-evidence">
@@ -144,7 +158,7 @@ function EvidenceRail({ decision, groupId }) {
       <div className={`discovery-rail-step ${accepted ? "is-rule" : "is-locked"}`}>
         <span>{accepted ? <IconCheck aria-hidden="true" /> : <IconLock aria-hidden="true" />}</span>
         <strong>{finalLabel}</strong>
-        <small>{accepted ? "Só após confirmar" : decision === "reject" ? "Não será criada" : "Bloqueada"}</small>
+        <small>{accepted ? "Só após confirmar" : decision === "reject" ? "Não será incluído" : "Bloqueado"}</small>
       </div>
     </div>
   );
@@ -167,9 +181,17 @@ function EvidenceList({ claim }) {
 }
 
 function ClaimSignals({ claim }) {
-  if (!claim.contradictions.length && !claim.uncertainty.length) return null;
+  const confidence = ({ high: "alta", medium: "média", low: "baixa" })[claim.confidence];
+  if (!confidence && !claim.contradictions.length && !claim.uncertainty.length &&
+      !claim.missingFields?.length && !claim.ambiguousFields?.length) return null;
   return (
     <div className="discovery-signals">
+      {confidence ? (
+        <div className="discovery-signal">
+          <strong>Confiança {confidence}</strong>
+          <p>Extraído por {claim.model || "modelo textual"} via {claim.adapterId || "adapter registrado"}.</p>
+        </div>
+      ) : null}
       {claim.contradictions.length ? (
         <div className="discovery-signal discovery-signal--conflict">
           <strong>Contradições</strong>
@@ -182,13 +204,44 @@ function ClaimSignals({ claim }) {
           <ul>{claim.uncertainty.map((item) => <li key={item}>{item}</li>)}</ul>
         </div>
       ) : null}
+      {claim.missingFields?.length ? (
+        <div className="discovery-signal">
+          <strong>Campos ainda ausentes</strong>
+          <ul>{claim.missingFields.map((item) => <li key={item}>{item}</li>)}</ul>
+        </div>
+      ) : null}
+      {claim.ambiguousFields?.length ? (
+        <div className="discovery-signal discovery-signal--conflict">
+          <strong>Campos ambíguos</strong>
+          <ul>{claim.ambiguousFields.map((item) => <li key={item}>{item}</li>)}</ul>
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function EditValue({ claim, editor, onField }) {
   const error = editor?.error;
-  if (editor?.kind === "service") {
+  if (editor?.kind === "structured") {
+    return (
+      <fieldset className="discovery-edit-field">
+        <legend>Corrigir {TYPE_LABELS[claim.type]?.toLowerCase() || "dado estruturado"}</legend>
+        <label>
+          <span>Estrutura completa que será enviada</span>
+          <textarea
+            name="structuredJson"
+            rows="12"
+            value={editor.draft.json}
+            onChange={(event) => onField("json", event.target.value)}
+            spellCheck="false"
+          />
+          <small>Edite somente o fato público. Autoridade, preço privado e ativação não são aceitos.</small>
+        </label>
+        {error ? <small className="discovery-editor-error" role="alert">{error}</small> : null}
+      </fieldset>
+    );
+  }
+  if (editor?.kind === "service" || editor?.kind === "service_v2") {
     const draft = editor.draft;
     return (
       <fieldset className="discovery-edit-field discovery-service-editor">
@@ -213,10 +266,22 @@ function EditValue({ claim, editor, onField }) {
         <label>
           <span>Como aparece</span>
           <select name="publicQualifier" disabled={!draft.pricePublished} value={draft.qualifier} onChange={(event) => onField("qualifier", event.target.value)}>
-            <option value="exact">Preço exato</option>
+            {editor.kind === "service" ? <option value="exact">Preço exato</option> : <option value="fixed">Preço fixo</option>}
             <option value="starting_at">A partir de</option>
+            {editor.kind === "service_v2" ? <>
+              <option value="estimate">Estimativa</option>
+              <option value="promotional">Promocional</option>
+              <option value="conditional">Condicional</option>
+              <option value="unknown">Valor não informado</option>
+            </> : null}
           </select>
         </label>
+        {editor.kind === "service_v2" ? (
+          <label className="discovery-edit-wide">
+            <span>Condição pública do preço</span>
+            <input name="publicPriceCondition" value={draft.condition} onChange={(event) => onField("condition", event.target.value)} />
+          </label>
+        ) : null}
         <label>
           <span>Duração pública em minutos</span>
           <input name="durationMinutes" type="number" min="1" max="10080" value={draft.durationMinutes} onChange={(event) => onField("durationMinutes", event.target.value)} />
@@ -262,7 +327,7 @@ function ClaimCard({ claim, groupId, reviewState, dispatch }) {
         <span className="discovery-version">claim v{claim.version}</span>
       </header>
 
-      <EvidenceRail decision={selected.decision} groupId={groupId} />
+      <EvidenceRail decision={selected.decision} groupId={groupId} claim={claim} />
       <details className="discovery-evidence-details" open={groupId === "safety"}>
         <summary>Ver URL, trecho e hash da evidência</summary>
         <EvidenceList claim={claim} />
@@ -314,11 +379,13 @@ function ClaimCard({ claim, groupId, reviewState, dispatch }) {
 }
 
 function GroupConfirmation({ group, checked, onChange }) {
-  const copy = group.id === "descriptive"
+  const copy = group.id === "descriptive" || group.id === "company"
     ? "Revisei os dados públicos escolhidos. Eles podem atualizar o perfil da empresa."
     : group.id === "operational"
       ? "Confirmo explicitamente este grupo operacional. Os itens aprovados ou editados podem criar regras de atendimento, sem conceder negociação privada."
-      : "Confirmo explicitamente o grupo de segurança depois de ler cada evidência reconhecida.";
+      : group.id === "safety"
+        ? "Confirmo explicitamente o grupo de segurança depois de ler cada evidência reconhecida."
+        : `Confirmo explicitamente ${group.label.toLowerCase()} como entrada do rascunho de onboarding, sem ativação automática.`;
   return (
     <label className={`discovery-group-confirmation discovery-group-confirmation--${group.id}`}>
       <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
@@ -373,7 +440,7 @@ export function DiscoveryReviewView({
   }, [discovery, reviewState]);
 
   if (discovery.phase !== "review") {
-    return <StatusSurface phase={discovery.phase} reason={discovery.reason} onDiscover={onDiscover} />;
+    return <StatusSurface phase={discovery.phase} reason={discovery.reason} processingStage={discovery.processingStage} onDiscover={onDiscover} />;
   }
 
   return (
@@ -404,7 +471,7 @@ export function DiscoveryReviewView({
         <aside className="discovery-result-caveats">
           <IconAlertTriangle aria-hidden="true" />
           <div>
-            <strong>A leitura encontrou pontos para conferir.</strong>
+            <strong>{discovery.result?.schema === "company_discovery.result.v2" ? "Contradições e pontos para conferir" : "A leitura encontrou pontos para conferir."}</strong>
             {[...discovery.contradictions, ...discovery.uncertainty].map((item) => <p key={item}>{item}</p>)}
           </div>
         </aside>
@@ -444,8 +511,8 @@ export function DiscoveryReviewView({
           <section className="discovery-private" aria-labelledby="discovery-private-title">
             <IconLock aria-hidden="true" />
             <div>
-              <h3 id="discovery-private-title">Perguntas para a entrevista</h3>
-              <p>Assuntos privados aparecem somente como perguntas não respondidas. Nunca são aprovados como fatos.</p>
+              <h3 id="discovery-private-title">{discovery.result?.schema === "company_discovery.result.v2" ? "Perguntas que ainda faltam" : "Perguntas para a entrevista"}</h3>
+              <p>{discovery.result?.schema === "company_discovery.result.v2" ? "A entrevista em português fará somente perguntas ainda ausentes, ambíguas, contraditórias, rejeitadas ou privadas." : "Assuntos privados aparecem somente como perguntas não respondidas. Nunca são aprovados como fatos."}</p>
               <ul>{discovery.privateQuestions.map((item) => <li key={item.id}>{item.question}</li>)}</ul>
             </div>
           </section>

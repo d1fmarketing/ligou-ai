@@ -350,6 +350,158 @@ function discoveryRows(overrides = {}) {
   };
 }
 
+function stage0bRows() {
+  const source = discoveryRows();
+  const claim = (index, claimClass, claimType, value, overrides = {}) => ({
+    id: `20000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    result_id: IDS.result,
+    claim_version: 1,
+    claim_class: claimClass,
+    claim_type: claimType,
+    normalized_value: value,
+    evidence_refs: [IDS.evidenceA],
+    adapter_id: "direct_model",
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    confidence: "high",
+    contradiction_status: "none",
+    missing_fields: [],
+    ambiguous_fields: [],
+    contradictions: [],
+    uncertainty: [],
+    claim_schema_version: "company_discovery.claim.v2",
+    ...overrides,
+  });
+  return {
+    ...source,
+    result: {
+      ...source.result,
+      result_schema: "company_discovery.result.v2",
+      candidate_result: {
+        schema_version: "company_discovery.result.v2",
+        missing_questions: ["Qual é o preço mínimo privado?"],
+        contradictions: ["O rodapé e a página de contato mostram horários diferentes."],
+        uncertainty: [],
+      },
+    },
+    claims: [
+      claim(1, "descriptive", "business_name", "Costa Home Services"),
+      claim(2, "operational", "service", {
+        service_type: "drain_cleaning", service_names: ["Drain cleaning"],
+        public_price: { amount: "149.00", currency: "USD", qualifier: "starting_at", condition: null },
+        duration_minutes: 60,
+      }),
+      claim(3, "operational", "service_territory", {
+        service_type: null,
+        included_areas: [{ kind: "city", name: "Novato", region_state: "CA", country_code: "US" }],
+        excluded_areas: [], radius: null,
+      }),
+      claim(4, "operational", "business_hours", {
+        timezone: "America/Los_Angeles",
+        ordinary_intervals: [{ days: ["mon", "tue", "wed", "thu", "fri"], opens: "08:00", closes: "17:00" }],
+        closed_days: ["sat", "sun"], ordinary_24_7: false,
+        emergency_24_7: false, after_hours: "unavailable", holiday_policy: null,
+      }, { missing_fields: ["holiday_policy"], confidence: "medium" }),
+      claim(5, "operational", "guarantee", {
+        guarantee_kind: "company_guarantee", service_type: "drain_cleaning",
+        coverage: ["labor"], duration: { amount: 90, unit: "days" },
+        conditions: ["Company labor only"], exclusions: [],
+      }),
+      claim(6, "operational", "booking_restriction", {
+        restriction_type: "sunday", service_type: null, rule: "not_allowed",
+        notice_minutes: null, public_fee: null, conditions: ["No Sunday appointments"],
+      }),
+      claim(7, "safety_critical", "emergency", {
+        guidance: "Em caso de vazamento de gás, saia e ligue para 911.",
+      }),
+    ],
+  };
+}
+
+test("maps Stage 0B claims into the seven product groups and retains gap metadata", () => {
+  const review = mapDiscoveryRead(stage0bRows());
+
+  assert.equal(review.phase, "review");
+  assert.deepEqual(review.groups.map((group) => group.label), [
+    "Empresa",
+    "Serviços e preços públicos",
+    "Área atendida",
+    "Horários",
+    "Garantias",
+    "Restrições de agendamento",
+    "Segurança e emergências",
+  ]);
+  const hours = review.groups.find((group) => group.id === "hours").claims[0];
+  assert.equal(hours.confidence, "medium");
+  assert.equal(hours.contradictionStatus, "none");
+  assert.deepEqual(hours.missingFields, ["holiday_policy"]);
+  assert.deepEqual(hours.ambiguousFields, []);
+  assert.equal(hours.adapterId, "direct_model");
+  assert.equal(hours.model, "gpt-5.6-sol");
+  assert.deepEqual(review.questionsStillMissing, ["Qual é o preço mínimo privado?"]);
+  assert.deepEqual(review.contradictions, ["O rodapé e a página de contato mostram horários diferentes."]);
+});
+
+test("Stage 0B requires a scoped confirmation for every accepted group", () => {
+  const review = mapDiscoveryRead(stage0bRows());
+  let state = createDiscoveryReviewState(review);
+  for (const group of review.groups) {
+    for (const claim of group.claims) {
+      state = discoveryReviewReducer(state, {
+        type: "decide", claimId: claim.id, decision: "approve",
+      });
+      if (group.id === "safety") {
+        state = discoveryReviewReducer(state, {
+          type: "ackEvidence", claimId: claim.id, checked: true,
+        });
+      }
+    }
+  }
+  assert.throws(
+    () => buildDiscoveryReviewRequest(review, state, "nonce"),
+    /Confirme/,
+  );
+  for (const group of review.groups) {
+    state = discoveryReviewReducer(state, {
+      type: "confirm", group: group.id, checked: true,
+    });
+  }
+
+  const request = buildDiscoveryReviewRequest(review, state, "nonce");
+
+  const groupByClaim = new Map(review.groups.flatMap((group) =>
+    group.claims.map((claim) => [claim.id, group.id])));
+  for (const decision of request.p_decisions) {
+    assert.equal(
+      decision.group_confirmed,
+      groupByClaim.get(decision.claim_id) === "company" ? false : true,
+    );
+  }
+});
+
+test("Stage 0B service edits keep estimate empty and require a visible conditional qualifier", () => {
+  const review = mapDiscoveryRead(stage0bRows());
+  const service = review.groups.find((group) => group.id === "services").claims[0];
+  let state = createDiscoveryReviewState(review);
+  state = discoveryReviewReducer(state, { type: "decide", claimId: service.id, decision: "edit" });
+  state = discoveryReviewReducer(state, { type: "editField", claimId: service.id, field: "qualifier", value: "estimate" });
+  state = discoveryReviewReducer(state, { type: "editField", claimId: service.id, field: "amount", value: "" });
+  assert.equal(state.decisions[service.id].editor.valid, true);
+  assert.deepEqual(state.decisions[service.id].value.public_price, {
+    amount: null,
+    currency: null,
+    qualifier: "estimate",
+    condition: null,
+  });
+
+  state = discoveryReviewReducer(state, { type: "editField", claimId: service.id, field: "qualifier", value: "conditional" });
+  state = discoveryReviewReducer(state, { type: "editField", claimId: service.id, field: "amount", value: "250.00" });
+  state = discoveryReviewReducer(state, { type: "editField", claimId: service.id, field: "condition", value: "" });
+  assert.equal(state.decisions[service.id].editor.valid, false);
+  assert.equal(state.decisions[service.id].value, null);
+  assert.match(state.decisions[service.id].editor.error, /condição pública/);
+});
+
 function fullyDecided(review) {
   let state = createDiscoveryReviewState(review);
   state = discoveryReviewReducer(state, { type: "decide", claimId: IDS.descriptive, decision: "approve" });
@@ -534,6 +686,26 @@ test("failed, expired, disabled, and non-allowlisted discovery fail open to the 
   })).reason, "allowlist_expired");
 });
 
+test("queued, fetching, and analyzing are projected only from durable job state", () => {
+  const rows = discoveryRows();
+  assert.equal(mapDiscoveryRead({
+    ...rows,
+    job: { ...rows.job, status: "queued", processing_stage: "queued" },
+  }).processingStage, "queued");
+  assert.equal(mapDiscoveryRead({
+    ...rows,
+    job: { ...rows.job, status: "running", processing_stage: "fetching" },
+  }).processingStage, "fetching");
+  assert.equal(mapDiscoveryRead({
+    ...rows,
+    job: { ...rows.job, status: "running", processing_stage: "analyzing" },
+  }).processingStage, "analyzing");
+  assert.equal(mapDiscoveryRead({
+    ...rows,
+    job: { ...rows.job, status: "running", processing_stage: null },
+  }).processingStage, "working");
+});
+
 test("discovery never fabricates late timing without a durable timing receipt", () => {
   const neutral = mapDiscoveryRead(discoveryRows({ hasOwnerAnswers: true }));
   const impossibleLegacyCombination = mapDiscoveryRead(discoveryRows({
@@ -624,6 +796,57 @@ test("owner discovery gateway emits exact Task 1 RPC names and payloads", async 
       p_confirmation_nonce: "nonce-from-owner-rpc",
     }],
   ]);
+});
+
+test("owner gateway routes a Stage 0B review only to the v2 draft RPC", async () => {
+  const vite = await createServer({
+    configFile: false,
+    root: process.cwd(),
+    appType: "custom",
+    server: { middlewareMode: true, hmr: false, ws: false },
+    optimizeDeps: { noDiscovery: true },
+    plugins: [react()],
+  });
+  const { reviewCompanyDiscoveryVia } = await vite.ssrLoadModule("/src/data/gateway.supabase.js");
+  const review = mapDiscoveryRead(stage0bRows());
+  let state = createDiscoveryReviewState(review);
+  for (const group of review.groups) {
+    for (const claim of group.claims) {
+      state = discoveryReviewReducer(state, { type: "decide", claimId: claim.id, decision: "approve" });
+      if (group.id === "safety") {
+        state = discoveryReviewReducer(state, { type: "ackEvidence", claimId: claim.id, checked: true });
+      }
+    }
+    state = discoveryReviewReducer(state, { type: "confirm", group: group.id, checked: true });
+  }
+  const calls = [];
+  const client = {
+    async rpc(name, payload) {
+      calls.push([name, payload]);
+      if (name === "create_company_discovery_review_nonce") {
+        return { data: "stage0b-nonce", error: null };
+      }
+      if (name === "review_company_discovery_claims_v2") {
+        return {
+          data: {
+            reviewed: 7, version: 8,
+            onboarding_draft_id: "30000000-0000-4000-8000-000000000001",
+          },
+          error: null,
+        };
+      }
+      return { data: null, error: { message: `unexpected_${name}` } };
+    },
+  };
+  try {
+    const response = await reviewCompanyDiscoveryVia(client, review, state);
+    assert.equal(response.reviewed, 7);
+  } finally {
+    await vite.close();
+  }
+  assert.equal(calls[0][0], "create_company_discovery_review_nonce");
+  assert.equal(calls[1][0], "review_company_discovery_claims_v2");
+  assert.equal(calls.some(([name]) => name === "review_company_discovery_claims"), false);
 });
 
 test("stale owner review errors become actionable Portuguese copy and never retry a partial loop", async () => {
@@ -894,6 +1117,45 @@ test("the real review component renders evidence-to-authority rail, boundaries, 
   assert.doesNotMatch(privateSection, /Evidência do site|Candidato|Perfil da empresa|Regra da Ligou/);
 });
 
+test("the Stage 0B component renders semantic groups, draft-only authority, contradictions, and missing questions", async () => {
+  const review = mapDiscoveryRead(stage0bRows());
+  const html = await renderModule(
+    "/src/views/DiscoveryReviewView.jsx",
+    "DiscoveryReviewView",
+    { discovery: review },
+  );
+  for (const visible of [
+    "Empresa",
+    "Serviços e preços públicos",
+    "Área atendida",
+    "Horários",
+    "Garantias",
+    "Restrições de agendamento",
+    "Segurança e emergências",
+    "Rascunho de onboarding",
+    "Confiança média",
+    "Campos ainda ausentes",
+    "holiday_policy",
+    "Contradições",
+    "Perguntas que ainda faltam",
+    "Qual é o preço mínimo privado?",
+  ]) assert.match(html, new RegExp(visible.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(html, /Regra da Ligou/);
+  assert.doesNotMatch(html, /Preço mínimo.*Aprovar/);
+
+  const territory = review.groups.find((group) => group.id === "territory").claims[0];
+  let state = createDiscoveryReviewState(review);
+  state = discoveryReviewReducer(state, {
+    type: "decide", claimId: territory.id, decision: "edit",
+  });
+  state = discoveryReviewReducer(state, {
+    type: "editField", claimId: territory.id, field: "json", value: "{",
+  });
+  assert.equal(state.decisions[territory.id].editor.valid, false);
+  assert.equal(state.decisions[territory.id].value, null);
+  assert.match(state.decisions[territory.id].editor.error, /JSON válido/);
+});
+
 test("review readiness is visible, live, and connected to submit for every blocking reason", async () => {
   const vite = await createServer({
     configFile: false,
@@ -947,6 +1209,25 @@ test("loading and failure discovery copy never replaces the existing Portuguese 
   assert.match(refused, /não foi liberada/);
   assert.match(expired, /permissão.*expirou/);
   assert.match(chat, /Começar a entrevista de onboarding \(voz\)/);
+});
+
+test("durable discovery stages render queued, fetching, and analyzing without blocking onboarding", async () => {
+  const rendered = await Promise.all([
+    ["queued", "Na fila"],
+    ["fetching", "Lendo páginas públicas"],
+    ["analyzing", "Organizando sugestões"],
+  ].map(async ([processingStage, expected]) => {
+    const html = await renderModule(
+      "/src/views/DiscoveryReviewView.jsx",
+      "DiscoveryReviewView",
+      { discovery: { phase: "working", processingStage } },
+    );
+    return { html, expected };
+  }));
+  for (const { html, expected } of rendered) {
+    assert.match(html, new RegExp(expected));
+    assert.match(html, /entrevista.*disponível/i);
+  }
 });
 
 test("real component interactions block invalid structured edits, submit visible values, and keep mobile voice", { timeout: 25000 }, async (context) => {

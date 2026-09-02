@@ -1,4 +1,4 @@
-const GROUPS = [
+const LEGACY_GROUPS = [
   {
     id: "descriptive",
     label: "Dados públicos",
@@ -16,11 +16,61 @@ const GROUPS = [
   },
 ];
 
-const CLASS_TO_GROUP = {
+const CLASS_TO_LEGACY_GROUP = {
   descriptive: "descriptive",
   operational: "operational",
   safety_critical: "safety",
 };
+
+const STAGE0B_GROUPS = [
+  {
+    id: "company",
+    label: "Empresa",
+    description: "Identidade e contatos públicos. Continuam como dados de rascunho até a aprovação final do onboarding.",
+  },
+  {
+    id: "services",
+    label: "Serviços e preços públicos",
+    description: "Catálogo, duração e preço publicados. Preço privado e negociação nunca vêm do site.",
+  },
+  {
+    id: "territory",
+    label: "Área atendida",
+    description: "Somente localidades e limites expressamente publicados; regiões amplas permanecem ambíguas.",
+  },
+  {
+    id: "hours",
+    label: "Horários",
+    description: "Horário normal, emergência, depois do expediente e feriados permanecem separados.",
+  },
+  {
+    id: "guarantees",
+    label: "Garantias",
+    description: "Escopo, duração e condições exatamente como publicados, sem ampliar a promessa.",
+  },
+  {
+    id: "booking",
+    label: "Restrições de agendamento",
+    description: "Restrições públicas não concedem poder para confirmar, cancelar ou cobrar.",
+  },
+  {
+    id: "safety",
+    label: "Segurança e emergências",
+    description: "Orientações críticas exigem leitura e reconhecimento da evidência exata.",
+  },
+];
+
+function stage0bGroupId(claim) {
+  if (claim.claim_class === "descriptive") return "company";
+  if (claim.claim_class === "safety_critical") return "safety";
+  return ({
+    service: "services",
+    service_territory: "territory",
+    business_hours: "hours",
+    guarantee: "guarantees",
+    booking_restriction: "booking",
+  })[claim.claim_type] ?? null;
+}
 
 const FALLBACK_ERROR_CODES = new Set([
   "company_discovery_disabled",
@@ -69,15 +119,21 @@ function serviceNames(value) {
 
 function editorFromValue(claim, value = claim.value) {
   if (claim.type === "service") {
+    const stage0b = claim.claimSchemaVersion === "company_discovery.claim.v2" ||
+      value?.public_price?.condition !== undefined ||
+      ["fixed", "estimate", "promotional", "conditional", "unknown"].includes(
+        value?.public_price?.qualifier,
+      );
     return validateEditor({
-      kind: "service",
+      kind: stage0b ? "service_v2" : "service",
       draft: {
         serviceType: value?.service_type ?? claim.value?.service_type ?? "",
         serviceNames: asArray(value?.service_names).join(", "),
         pricePublished: value?.public_price != null,
         amount: value?.public_price?.amount ?? "",
         currency: value?.public_price?.currency ?? "USD",
-        qualifier: value?.public_price?.qualifier ?? "exact",
+        qualifier: value?.public_price?.qualifier ?? (stage0b ? "unknown" : "exact"),
+        condition: value?.public_price?.condition ?? "",
         durationMinutes: value?.duration_minutes == null ? "" : String(value.duration_minutes),
       },
     });
@@ -88,6 +144,13 @@ function editorFromValue(claim, value = claim.value) {
       draft: { guidance: value?.guidance ?? "" },
     });
   }
+  if (["service_territory", "business_hours", "guarantee", "booking_restriction"].includes(claim.type)) {
+    return validateEditor({
+      kind: "structured",
+      claimType: claim.type,
+      draft: { json: JSON.stringify(value, null, 2) },
+    });
+  }
   return validateEditor({
     kind: "descriptive",
     draft: { text: typeof value === "string" ? value : "" },
@@ -96,24 +159,84 @@ function editorFromValue(claim, value = claim.value) {
 
 function validateEditor(editor) {
   const draft = clone(editor.draft);
-  if (editor.kind === "service") {
+  if (editor.kind === "structured") {
+    let value;
+    try {
+      value = JSON.parse(String(draft.json ?? ""));
+    } catch {
+      return {
+        ...editor,
+        draft,
+        valid: false,
+        error: "Informe um JSON válido para este dado estruturado.",
+        value: null,
+      };
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return {
+        ...editor,
+        draft,
+        valid: false,
+        error: "O valor estruturado precisa ser um objeto JSON.",
+        value: null,
+      };
+    }
+    const required = {
+      service_territory: ["service_type", "included_areas", "excluded_areas", "radius"],
+      business_hours: ["timezone", "ordinary_intervals", "closed_days", "ordinary_24_7", "emergency_24_7", "after_hours", "holiday_policy"],
+      guarantee: ["guarantee_kind", "service_type", "coverage", "duration", "conditions", "exclusions"],
+      booking_restriction: ["restriction_type", "service_type", "rule", "notice_minutes", "public_fee", "conditions"],
+    }[editor.claimType] ?? [];
+    if (Object.keys(value).length !== required.length || required.some((key) => !Object.hasOwn(value, key))) {
+      return {
+        ...editor,
+        draft,
+        valid: false,
+        error: "Mantenha exatamente os campos visíveis deste dado estruturado.",
+        value: null,
+      };
+    }
+    return { ...editor, draft, valid: true, error: null, value };
+  }
+  if (editor.kind === "service" || editor.kind === "service_v2") {
     const names = serviceNames(draft.serviceNames);
     if (!names.length || names.length > 20 || names.some((name) => name.length > 200)) {
       return { ...editor, draft, valid: false, error: "Informe de 1 a 20 nomes públicos do serviço.", value: null };
     }
     let publicPrice = null;
     if (draft.pricePublished) {
-      if (!/^(0|[1-9][0-9]{0,8})\.[0-9]{2}$/.test(draft.amount)) {
-        return { ...editor, draft, valid: false, error: "Use o valor público no formato 0.00, sem símbolo.", value: null };
-      }
-      const currency = String(draft.currency ?? "").trim().toUpperCase();
-      if (!/^[A-Z]{3}$/.test(currency)) {
-        return { ...editor, draft, valid: false, error: "Informe a moeda pública com 3 letras, como USD.", value: null };
-      }
-      if (!["exact", "starting_at"].includes(draft.qualifier)) {
+      const qualifiers = editor.kind === "service_v2"
+        ? ["fixed", "starting_at", "estimate", "promotional", "conditional", "unknown"]
+        : ["exact", "starting_at"];
+      if (!qualifiers.includes(draft.qualifier)) {
         return { ...editor, draft, valid: false, error: "Escolha se o preço é exato ou inicial.", value: null };
       }
-      publicPrice = { amount: draft.amount, currency, qualifier: draft.qualifier };
+      const amountRequired = editor.kind === "service" ||
+        ["fixed", "starting_at", "conditional"].includes(draft.qualifier);
+      const amountPresent = String(draft.amount ?? "").trim() !== "";
+      if ((amountRequired && !amountPresent) ||
+          (amountPresent && !/^(0|[1-9][0-9]{0,8})\.[0-9]{2}$/.test(draft.amount))) {
+        return { ...editor, draft, valid: false, error: "Use o valor público no formato 0.00, sem símbolo.", value: null };
+      }
+      if (editor.kind === "service_v2" && draft.qualifier === "unknown" && amountPresent) {
+        return { ...editor, draft, valid: false, error: "Preço desconhecido não pode manter um valor numérico.", value: null };
+      }
+      const currency = String(draft.currency ?? "").trim().toUpperCase();
+      if (amountPresent && !/^[A-Z]{3}$/.test(currency)) {
+        return { ...editor, draft, valid: false, error: "Informe a moeda pública com 3 letras, como USD.", value: null };
+      }
+      const condition = String(draft.condition ?? "").trim();
+      if (editor.kind === "service_v2" && draft.qualifier === "conditional" && !condition) {
+        return { ...editor, draft, valid: false, error: "Informe a condição pública que acompanha este preço.", value: null };
+      }
+      publicPrice = editor.kind === "service_v2"
+        ? {
+            amount: amountPresent ? draft.amount : null,
+            currency: amountPresent ? currency : null,
+            qualifier: draft.qualifier,
+            condition: condition || null,
+          }
+        : { amount: draft.amount, currency, qualifier: draft.qualifier };
     }
     let duration = null;
     if (String(draft.durationMinutes).trim()) {
@@ -184,8 +307,14 @@ export function mapDiscoveryRead({
     };
   }
   if (["queued", "running"].includes(job.status)) {
+    const durableStage = job.status === "queued" && job.processing_stage === "queued"
+      ? "queued"
+      : job.status === "running" && ["fetching", "analyzing"].includes(job.processing_stage)
+        ? job.processing_stage
+        : "working";
     return {
       phase: "working",
+      processingStage: durableStage,
       job: { id: job.id, version: Number(job.version), status: job.status },
       interviewAvailable: true,
     };
@@ -231,19 +360,36 @@ export function mapDiscoveryRead({
         .map(evidenceProjection),
       contradictions: asArray(claim.contradictions).map(String),
       uncertainty: asArray(claim.uncertainty).map(String),
+      confidence: claim.confidence ?? null,
+      contradictionStatus: claim.contradiction_status ?? null,
+      missingFields: asArray(claim.missing_fields).map(String),
+      ambiguousFields: asArray(claim.ambiguous_fields).map(String),
+      adapterId: claim.adapter_id ?? null,
+      provider: claim.provider ?? null,
+      model: claim.model ?? null,
+      claimSchemaVersion: claim.claim_schema_version ?? "company_discovery.claim.v1",
       decision: null,
     }));
 
-  const groups = GROUPS.map((group) => ({
+  const stage0b = exactResult.result_schema === "company_discovery.result.v2" ||
+    exactResult.candidate_result?.schema_version === "company_discovery.result.v2";
+  const groupDefinitions = stage0b ? STAGE0B_GROUPS : LEGACY_GROUPS;
+  const groups = groupDefinitions.map((group) => ({
     ...group,
-    claims: mappedClaims.filter((claim) => CLASS_TO_GROUP[claim.class] === group.id),
+    claims: mappedClaims.filter((claim) => (
+      stage0b
+        ? stage0bGroupId({ claim_class: claim.class, claim_type: claim.type })
+        : CLASS_TO_LEGACY_GROUP[claim.class]
+    ) === group.id),
   })).filter((group) => group.claims.length > 0);
   const privateQuestions = asArray(exactResult.candidate_result?.missing_questions).map((question, index) => ({
     id: `private-question-${index + 1}`,
     question: String(question),
     approvable: false,
   }));
-  const unknownClaims = mappedClaims.filter((claim) => !CLASS_TO_GROUP[claim.class]);
+  const unknownClaims = mappedClaims.filter((claim) => stage0b
+    ? !stage0bGroupId({ claim_class: claim.class, claim_type: claim.type })
+    : !CLASS_TO_LEGACY_GROUP[claim.class]);
   if (unknownClaims.length) groups.push({ id: "private", label: "Assuntos privados", claims: unknownClaims });
 
   return {
@@ -262,16 +408,19 @@ export function mapDiscoveryRead({
       id: exactResult.id,
       attemptId: exactResult.attempt_id,
       hash: exactResult.result_hash,
+      schema: exactResult.result_schema ?? exactResult.candidate_result?.schema_version ?? null,
     },
     groups,
     privateQuestions,
+    questionsStillMissing: privateQuestions.map((item) => item.question),
     contradictions: asArray(exactResult.candidate_result?.contradictions).map(String),
     uncertainty: asArray(exactResult.candidate_result?.uncertainty).map(String),
   };
 }
 
 export function createDiscoveryReviewState(review) {
-  const claims = asArray(review?.groups).flatMap((group) => asArray(group.claims));
+  const groups = asArray(review?.groups);
+  const claims = groups.flatMap((group) => asArray(group.claims));
   return {
     expectedJobVersion: review?.job?.version ?? null,
     expectedResultId: review?.result?.id ?? null,
@@ -284,7 +433,7 @@ export function createDiscoveryReviewState(review) {
         editor,
       }];
     })),
-    confirmations: { descriptive: false, operational: false, safety: false },
+    confirmations: Object.fromEntries(groups.map((group) => [group.id, false])),
     evidenceAcks: {},
   };
 }
@@ -304,9 +453,16 @@ export function discoveryReviewReducer(state, action) {
   if (action.type === "edit") {
     if (!state.decisions[action.claimId]) return state;
     const editor = editorFromValue({
-      type: state.decisions[action.claimId].editor.kind === "emergency"
+      type: state.decisions[action.claimId].editor.kind === "structured"
+        ? state.decisions[action.claimId].editor.claimType
+        : state.decisions[action.claimId].editor.kind === "emergency"
         ? "emergency"
-        : state.decisions[action.claimId].editor.kind === "service" ? "service" : "descriptive",
+        : ["service", "service_v2"].includes(state.decisions[action.claimId].editor.kind)
+          ? "service"
+          : "descriptive",
+      claimSchemaVersion: state.decisions[action.claimId].editor.kind === "service_v2"
+        ? "company_discovery.claim.v2"
+        : undefined,
       value: state.decisions[action.claimId].value,
     }, action.value);
     return {
@@ -383,17 +539,22 @@ export function buildDiscoveryReviewRequest(review, state, nonce) {
     }
   }
 
-  const acceptedIn = (groupId) => groups
-    .find((group) => group.id === groupId)?.claims
-    .some((claim) => state.decisions[claim.id].decision !== "reject");
-  if (acceptedIn("descriptive") && !state.confirmations.descriptive) {
-    throw new Error("Confirme os dados descritivos revisados.");
-  }
-  if (acceptedIn("operational") && !state.confirmations.operational) {
-    throw new Error("Confirme o grupo operacional antes de criar regras.");
-  }
-  if (acceptedIn("safety") && !state.confirmations.safety) {
-    throw new Error("Confirme o grupo de segurança antes de criar regras.");
+  for (const group of groups) {
+    const accepted = group.claims.some((claim) =>
+      state.decisions[claim.id].decision !== "reject"
+    );
+    if (accepted && !state.confirmations?.[group.id]) {
+      if (group.id === "descriptive" || group.id === "company") {
+        throw new Error("Confirme os dados descritivos revisados.");
+      }
+      if (group.id === "operational") {
+        throw new Error("Confirme o grupo operacional antes de criar regras.");
+      }
+      if (group.id === "safety") {
+        throw new Error("Confirme o grupo de segurança antes de continuar.");
+      }
+      throw new Error(`Confirme o grupo ${group.label.toLowerCase()} antes de continuar.`);
+    }
   }
   const safetyClaims = groups.find((group) => group.id === "safety")?.claims ?? [];
   if (safetyClaims.some((claim) => state.decisions[claim.id].decision !== "reject" && !state.evidenceAcks[claim.id])) {
@@ -414,7 +575,9 @@ export function buildDiscoveryReviewRequest(review, state, nonce) {
         claim_id: claim.id,
         decision: selected.decision,
         value: clone(selected.decision === "edit" ? selected.value : claim.value),
-        group_confirmed: ["operational", "safety"].includes(groupByClaim.get(claim.id)) ? accepted : false,
+        group_confirmed: !["descriptive", "company"].includes(groupByClaim.get(claim.id))
+          ? accepted
+          : false,
         evidence_acknowledged: safetyAccepted,
         acknowledged_evidence_refs: safetyAccepted ? claim.evidenceRefs.slice() : [],
       };
@@ -435,10 +598,52 @@ export function formatDiscoveryValue(claim) {
   if (claim?.type === "service" && value) {
     const names = asArray(value.service_names).join(", ");
     const price = value.public_price
-      ? `${value.public_price.currency} ${value.public_price.amount}${value.public_price.qualifier === "starting_at" ? " a partir de" : ""}`
+      ? value.public_price.amount
+        ? `${value.public_price.currency} ${value.public_price.amount}${value.public_price.qualifier === "starting_at" ? " a partir de" : value.public_price.qualifier === "conditional" ? ` · ${value.public_price.condition}` : ""}`
+        : ({ estimate: "estimativa", unknown: "valor não informado" })[value.public_price.qualifier] ?? value.public_price.qualifier
       : "preço não publicado";
     const duration = value.duration_minutes ? `${value.duration_minutes} min` : "duração não publicada";
     return `${names || value.service_type} · ${price} · ${duration}`;
+  }
+  if (claim?.type === "service_territory" && value) {
+    const included = asArray(value.included_areas).map((area) =>
+      [area.name, area.region_state, area.country_code].filter(Boolean).join(", ")
+    );
+    const excluded = asArray(value.excluded_areas).map((area) => area.name);
+    const radius = value.radius
+      ? `${value.radius.distance} ${value.radius.unit}${value.radius.center ? ` de ${value.radius.center}` : ""}`
+      : null;
+    return [
+      included.length ? `Inclui: ${included.join("; ")}` : null,
+      excluded.length ? `Exclui: ${excluded.join("; ")}` : null,
+      radius ? `Raio: ${radius}` : null,
+    ].filter(Boolean).join(" · ");
+  }
+  if (claim?.type === "business_hours" && value) {
+    const intervals = asArray(value.ordinary_intervals).map((interval) =>
+      `${asArray(interval.days).join(", ")} ${interval.opens}–${interval.closes}`
+    );
+    return [
+      value.ordinary_24_7 ? "Atendimento normal 24/7" : intervals.join("; "),
+      value.emergency_24_7 ? "Emergência 24/7" : null,
+      value.timezone || "fuso não confirmado",
+    ].filter(Boolean).join(" · ");
+  }
+  if (claim?.type === "guarantee" && value) {
+    const duration = value.duration ? `${value.duration.amount} ${value.duration.unit}` : "sem duração publicada";
+    return `${String(value.guarantee_kind).replaceAll("_", " ")} · ${asArray(value.coverage).join(", ")} · ${duration}`;
+  }
+  if (claim?.type === "booking_restriction" && value) {
+    const fee = value.public_fee?.amount
+      ? `${value.public_fee.currency} ${value.public_fee.amount}`
+      : null;
+    return [
+      String(value.restriction_type).replaceAll("_", " "),
+      String(value.rule).replaceAll("_", " "),
+      value.notice_minutes ? `${value.notice_minutes} min` : null,
+      fee,
+      ...asArray(value.conditions),
+    ].filter(Boolean).join(" · ");
   }
   if (claim?.type === "emergency" && value?.guidance) return value.guidance;
   return JSON.stringify(value, null, 2);
