@@ -76,7 +76,7 @@ const PROXY_TOOLS = [{
     additionalProperties: false,
     required: ["url"],
     properties: {
-      url: { type: "string", minLength: 9, maxLength: 2_048 },
+      url: { type: "string", format: "uri", minLength: 9, maxLength: 2_048 },
     },
   },
 }, {
@@ -512,14 +512,14 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
 });
 
 describe("trusted bridge authority", () => {
-  test("publishes a Codex-compatible URL schema while Ligou enforces exact URL authority", () => {
+  test("publishes a bounded MCP URL schema while Ligou enforces exact URL authority", () => {
     const schema = DISCOVERY_MCP_TOOL_PARAMETERS.fetch_discovery_page;
     expect(schema.properties.url).toEqual({
       type: "string",
+      format: "uri",
       minLength: 9,
       maxLength: 2_048,
     });
-    expect(schema.properties.url).not.toHaveProperty("format");
   });
 
   test("publishes exactly two tools and rejects forged connection identity", async () => {

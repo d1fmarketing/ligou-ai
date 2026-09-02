@@ -58,6 +58,17 @@ const TOOL_PARAMETERS: Readonly<Record<string, unknown>> = Object.freeze({
   discovery__fetch_discovery_page: DISCOVERY_MCP_TOOL_PARAMETERS.fetch_discovery_page,
   discovery__submit_discovery_result: DISCOVERY_MCP_TOOL_PARAMETERS.submit_discovery_result,
 });
+const CODEX_TOOL_PARAMETERS: Readonly<Record<string, unknown>> = Object.freeze({
+  discovery__fetch_discovery_page: Object.freeze({
+    type: "object",
+    additionalProperties: false,
+    required: Object.freeze(["url"]),
+    properties: Object.freeze({
+      url: Object.freeze({ type: "string", minLength: 9, maxLength: 2_048 }),
+    }),
+  }),
+  discovery__submit_discovery_result: DISCOVERY_MCP_TOOL_PARAMETERS.submit_discovery_result,
+});
 const ALLOWED_TOOLS = new Set(Object.keys(TOOL_PARAMETERS));
 const OPENCLAW_REQUEST_KEYS = new Set([
   "model", "store", "stream", "instructions", "input", "tools", "tool_choice",
@@ -138,7 +149,11 @@ function validateTools(value: unknown): readonly Record<string, unknown>[] {
     if (canonicalJson(tool.parameters) !== canonicalJson(TOOL_PARAMETERS[tool.name])) {
       throw new ModelProxyPolicyError("model request tool schema is invalid");
     }
-    const normalized: Record<string, unknown> = { ...tool, strict: true };
+    const normalized: Record<string, unknown> = {
+      ...tool,
+      parameters: CODEX_TOOL_PARAMETERS[tool.name],
+      strict: true,
+    };
     return Object.freeze(normalized);
   });
   const names = tools.map((tool) => tool.name);

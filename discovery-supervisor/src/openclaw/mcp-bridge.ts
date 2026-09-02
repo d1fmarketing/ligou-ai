@@ -29,7 +29,7 @@ export const DISCOVERY_MCP_TOOL_PARAMETERS = Object.freeze({
     additionalProperties: false,
     required: Object.freeze(["url"]),
     properties: Object.freeze({
-      url: Object.freeze({ type: "string", minLength: 9, maxLength: 2_048 }),
+      url: Object.freeze({ type: "string", format: "uri", minLength: 9, maxLength: 2_048 }),
     }),
   }),
   submit_discovery_result: Object.freeze({

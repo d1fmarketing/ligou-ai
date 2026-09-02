@@ -368,7 +368,14 @@ const codexTools = [{
   type: "function",
   name: "discovery__fetch_discovery_page",
   description: "Fetch one immutable discovery page.",
-  parameters: DISCOVERY_MCP_TOOL_PARAMETERS.fetch_discovery_page,
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    required: ["url"],
+    properties: {
+      url: { type: "string", format: "uri", minLength: 9, maxLength: 2_048 },
+    },
+  },
   strict: true,
 }, {
   type: "function",
@@ -694,6 +701,13 @@ describe("trusted Codex subscription proxy", () => {
     });
     expect(body).not.toHaveProperty("max_output_tokens");
     expect(body).not.toHaveProperty("prompt_cache_key");
+    const forwardedTools = body.tools as Array<Record<string, any>>;
+    expect(forwardedTools[0]!.parameters.properties.url).toEqual({
+      type: "string",
+      minLength: 9,
+      maxLength: 2_048,
+    });
+    expect(forwardedTools[0]!.parameters.properties.url).not.toHaveProperty("format");
     expect(proxy.usage()).toEqual({
       request_count: 1,
       upstream_request_count: 1,
