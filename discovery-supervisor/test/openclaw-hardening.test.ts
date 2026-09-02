@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { PassThrough, Writable } from "node:stream";
 import {
   buildCellLifecyclePlan,
@@ -100,6 +101,14 @@ async function identity() {
 }
 
 describe("outer-cell security boundary", () => {
+  test("updates vulnerable Alpine runtime packages without changing the pinned Bun base", () => {
+    const dockerfile = readFileSync(new URL("../openclaw/Dockerfile.bridge", import.meta.url), "utf8");
+    const pinnedBase = "oven/bun:1.2.13-alpine@sha256:3476c857e7c05a7950b3a8a684ffbc82f5cbeffe1b523ea1a92bdefc4539dc57";
+    expect(dockerfile.match(new RegExp(`FROM ${pinnedBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "g")))
+      .toHaveLength(2);
+    expect(dockerfile.slice(dockerfile.lastIndexOf("FROM "))).toContain("RUN apk upgrade --no-cache");
+  });
+
   test("disables OpenClaw nested Docker sandbox while preserving deny-by-default tools", async () => {
     const runtime = await identity();
     const config = buildOpenClawConfig({

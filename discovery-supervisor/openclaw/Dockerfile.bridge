@@ -11,6 +11,8 @@ RUN bun build src/openclaw/trusted-bridge.ts \
 
 FROM oven/bun:1.2.13-alpine@sha256:3476c857e7c05a7950b3a8a684ffbc82f5cbeffe1b523ea1a92bdefc4539dc57
 
+RUN apk upgrade --no-cache
+
 LABEL org.opencontainers.image.title="Ligou Stage 0 trusted discovery bridge" \
       org.opencontainers.image.description="Secretless per-attempt bridge and volume initializer"
 
