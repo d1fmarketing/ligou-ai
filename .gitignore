@@ -24,3 +24,9 @@ output/
 supabase/.temp/
 supabase/.branches/
 __pycache__/
+
+# Derivable render scratch (brand guide page renders etc.)
+tmp/
+
+# Local Claude Code state (per-machine)
+.claude/settings.local.json
