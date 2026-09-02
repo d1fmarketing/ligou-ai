@@ -883,6 +883,45 @@ describe("supervisor-owned Gateway connection", () => {
     })).run_id).toBe("run-relay-retry");
     expect(attempts).toBe(3);
   });
+
+  test("retries the Bun relay Connection ended form only before hello-ok", async () => {
+    let attempts = 0;
+    const connection: GatewayConnection = {
+      hello: {
+        type: "hello-ok",
+        protocol: 4,
+        server: { version: "2026.8.1", connId: "conn-ended-retry" },
+        features: { methods: ["agent", "agent.wait", "sessions.abort"], events: [] },
+        snapshot: {},
+        auth: { role: "operator", scopes: ["operator.write"] },
+        policy: { maxPayload: 26_214_400, maxBufferedBytes: 52_428_800, tickIntervalMs: 15_000 },
+      },
+      async request(method) {
+        if (method === "agent") return { status: "accepted", runId: "run-ended-retry" };
+        if (method === "agent.wait") return { status: "ok", runId: "run-ended-retry" };
+        return { aborted: true };
+      },
+      close() {},
+    };
+    const client = new OpenClawGatewayClient({
+      connect: async () => {
+        attempts += 1;
+        if (attempts < 3) {
+          throw new Error("Gateway closed before hello-ok: Connection ended");
+        }
+        return connection;
+      },
+      sleep: async () => undefined,
+    });
+
+    expect((await client.run({
+      url: "ws://127.0.0.1:29110",
+      token: "attempt-gateway-secret",
+      prompt: "bounded discovery",
+      deadline_at: new Date(Date.now() + 60_000).toISOString(),
+    })).run_id).toBe("run-ended-retry");
+    expect(attempts).toBe(3);
+  });
 });
 
 describe("trusted bridge sidecar listeners", () => {

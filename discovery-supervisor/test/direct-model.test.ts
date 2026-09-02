@@ -97,12 +97,12 @@ function duplicateTerminalResponse(output: unknown): Response {
   });
 }
 
-function streamedSubscriptionResponse(output: unknown): Response {
+function streamedSubscriptionResponse(output: unknown, outputIndex = 0): Response {
   const text = JSON.stringify(output);
   return new Response([
     `data: ${JSON.stringify({
       type: "response.output_text.delta",
-      output_index: 0,
+      output_index: outputIndex,
       content_index: 0,
       item_id: "msg_streamed",
       delta: text,
@@ -319,6 +319,23 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
     });
 
     const handle = await adapter.submit(job, capability);
+    expect(await adapter.result(handle)).toEqual({
+      schema_version: "company_discovery.result.v1",
+      source_snapshots: job.source_snapshots,
+      ...candidate,
+    } as WorkerResult);
+    await adapter.retire(handle);
+  });
+
+  test("accepts one streamed output_text after preceding reasoning items", async () => {
+    const gateway = new FakeSubscriptionGateway();
+    gateway.response = streamedSubscriptionResponse(candidate, 2);
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: controlledClock().clock,
+    });
+
+    const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
     expect(await adapter.result(handle)).toEqual({
       schema_version: "company_discovery.result.v1",
       source_snapshots: job.source_snapshots,

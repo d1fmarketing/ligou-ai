@@ -277,6 +277,8 @@ function completedOutputTextFromSse(value: string): string {
   const deltas: string[] = [];
   let deltaBytes = 0;
   let deltaItemId: string | undefined;
+  let deltaOutputIndex: number | undefined;
+  let deltaContentIndex: number | undefined;
   for (const line of value.split(/\r?\n/u)) {
     if (!line.startsWith("data:")) continue;
     const data = line.slice(5).trim();
@@ -289,11 +291,27 @@ function completedOutputTextFromSse(value: string): string {
     }
     if (event.type === "response.output_text.delta") {
       if (typeof event.delta !== "string" ||
-          (event.output_index !== undefined && event.output_index !== 0) ||
-          (event.content_index !== undefined && event.content_index !== 0) ||
+          (event.output_index !== undefined &&
+            (typeof event.output_index !== "number" || !Number.isSafeInteger(event.output_index) ||
+              event.output_index < 0)) ||
+          (event.content_index !== undefined &&
+            (typeof event.content_index !== "number" || !Number.isSafeInteger(event.content_index) ||
+              event.content_index < 0)) ||
           (event.item_id !== undefined &&
             (typeof event.item_id !== "string" || event.item_id.length < 1 || event.item_id.length > 200))) {
         throw new Error("direct model subscription output delta is invalid");
+      }
+      if (typeof event.output_index === "number") {
+        if (deltaOutputIndex !== undefined && event.output_index !== deltaOutputIndex) {
+          throw new Error("direct model subscription has multiple output text items");
+        }
+        deltaOutputIndex = event.output_index;
+      }
+      if (typeof event.content_index === "number") {
+        if (deltaContentIndex !== undefined && event.content_index !== deltaContentIndex) {
+          throw new Error("direct model subscription has multiple output text parts");
+        }
+        deltaContentIndex = event.content_index;
       }
       if (typeof event.item_id === "string") {
         if (deltaItemId !== undefined && event.item_id !== deltaItemId) {

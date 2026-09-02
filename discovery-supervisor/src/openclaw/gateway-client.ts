@@ -133,7 +133,8 @@ function retryableConnectError(error: unknown): boolean {
 
 function opaqueRelayStartupError(error: unknown): boolean {
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-  return message === "[object errorevent]";
+  return message === "[object errorevent]" ||
+    message === "gateway closed before hello-ok: connection ended";
 }
 
 async function sleepWithAbort(
