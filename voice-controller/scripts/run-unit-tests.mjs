@@ -38,6 +38,7 @@ export const unitTestFiles = [
   "test/learning.test.ts",
   "test/skills.test.ts",
   "test/onboarding-coverage.test.ts",
+  "test/company-discovery-prefill.test.ts",
   "test/onboarding-materialization.test.ts",
   "test/onboarding-store.test.ts",
   "test/onboarding-coordinator.test.ts",

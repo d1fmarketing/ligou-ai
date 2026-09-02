@@ -89,6 +89,10 @@ class SupabaseBoundaryFake {
   rpcResults: Array<{ data: unknown; error: QueryError | null }> = [];
   rpcNeverResolves = false;
   rpcCommitReceipt: ReceiptRow | null = null;
+  rpcHandler?: (
+    name: string,
+    args: Record<string, unknown>,
+  ) => { data: unknown; error: QueryError | null };
   rpcAbortSignals: AbortSignal[] = [];
   receiptNeverResolves = false;
   ignoreRuleInFilter = false;
@@ -239,9 +243,11 @@ class SupabaseBoundaryFake {
           boundary.eventReceiptRows.set(eventKey, boundary.rpcCommitReceipt);
         }
         let signal: AbortSignal | undefined;
-        const result = boundary.rpcResults.length > 0
-          ? boundary.rpcResults.shift()!
-          : boundary.rpcResult;
+        const result = boundary.rpcHandler
+          ? boundary.rpcHandler(name, args)
+          : boundary.rpcResults.length > 0
+            ? boundary.rpcResults.shift()!
+            : boundary.rpcResult;
         const operation: any = {
           abortSignal(nextSignal: AbortSignal) {
             signal = nextSignal;
@@ -339,6 +345,95 @@ function resumeRpcResult(
 }
 
 describe("initializeOnboardingResume", () => {
+  test("uses the latest approved discovery draft only after no voice resume source exists", async () => {
+    const boundary = new SupabaseBoundaryFake();
+    const draftId = "99999999-9999-4999-8999-999999999999";
+    const draftHash = "d".repeat(64);
+    const sourceJob = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sourceResult = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const claimId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const evidenceId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const draftReadback = {
+      draft_id: draftId,
+      draft_version: 4,
+      draft_hash: draftHash,
+      draft: {
+        schema_version: "company_discovery.onboarding_draft.v1",
+        source_job_id: sourceJob,
+        source_result_id: sourceResult,
+        approved_facts: [{
+          claim_id: claimId,
+          claim_class: "operational",
+          claim_type: "business_hours",
+          value: {
+            timezone: "America/Los_Angeles",
+            ordinary_intervals: [{ days: ["mon", "tue", "wed", "thu", "fri"], opens: "08:00", closes: "17:00" }],
+            closed_days: ["sat", "sun"], ordinary_24_7: false,
+            emergency_24_7: false, after_hours: "unavailable",
+            holiday_policy: "Closed on federal holidays",
+          },
+          decision: "approve", edited_by_owner: false,
+          evidence_refs: [evidenceId], confidence: "high",
+          contradiction_status: "none", adapter_id: "direct_model",
+          provider: "openai-codex", model: "gpt-5.6-sol",
+          claim_schema_version: "company_discovery.claim.v2",
+          missing_fields: [], ambiguous_fields: [], contradictions: [], uncertainty: [],
+        }],
+        rejected_claim_ids: [], unresolved_items: [],
+        authority: { rules_approved: false, powers_granted: false, operational_mode_changed: false },
+      },
+    };
+    boundary.rpcHandler = (name, args) => {
+      if (name === "initialize_onboarding_resume") {
+        return { data: null, error: { code: "P0002", message: "onboarding_resume_source_missing" } };
+      }
+      if (name === "read_company_discovery_onboarding_draft") {
+        return { data: draftReadback, error: null };
+      }
+      if (name === "initialize_company_discovery_onboarding_prefill") {
+        const coverage = args.p_coverage as Record<string, unknown>;
+        return {
+          data: {
+            status: "initialized", draft_id: draftId, draft_hash: draftHash,
+            coverage_receipt_id: TARGET_RECEIPT_ID, revision: 1,
+            snapshot_digest: "e".repeat(64),
+            next_action: coverage.next_action,
+            coverage: { ...coverage, snapshot_digest: "e".repeat(64) },
+          },
+          error: null,
+        };
+      }
+      return { data: null, error: { message: `unexpected ${name}` } };
+    };
+    const store = createOnboardingStore({ client: boundary.client(), now: () => 15 });
+
+    const initialized = await store.initializeOnboardingResume(ownerCapability());
+
+    expect(initialized).toMatchObject({
+      ok: true,
+      status: "discovery_prefill",
+      draftId,
+      draftHash,
+      coverageReceiptId: TARGET_RECEIPT_ID,
+      revision: 1,
+      digest: "e".repeat(64),
+    });
+    expect(boundary.rpcCalls.map((call) => call.name)).toEqual([
+      "initialize_onboarding_resume",
+      "read_company_discovery_onboarding_draft",
+      "initialize_company_discovery_onboarding_prefill",
+    ]);
+    const prefill = boundary.rpcCalls[2]!.args.p_coverage as any;
+    expect(prefill.transition_kind).toBe("discovery_prefill");
+    expect(prefill.snapshot.cells["schedule.business_hours"].state).toBe("answered");
+    expect(prefill.snapshot.cells["authority.book"]).toBeUndefined();
+    expect(prefill.authority).toEqual({
+      rules_approved: false,
+      powers_granted: false,
+      operational_mode_changed: false,
+    });
+  });
+
   test("calls the service RPC with the exact owner-bound target and returns revision one", async () => {
     const boundary = new SupabaseBoundaryFake();
     boundary.rpcResult = { data: resumeRpcResult(), error: null };

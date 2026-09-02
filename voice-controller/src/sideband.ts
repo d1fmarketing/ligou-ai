@@ -367,12 +367,25 @@ function resumeRuntimeState(
       question_pt: nextQuestion?.questionPt ?? "",
     },
   };
+  const discoveryContext = coverage.discovery_context &&
+      typeof coverage.discovery_context === "object" &&
+      !Array.isArray(coverage.discovery_context)
+    ? coverage.discovery_context as Record<string, unknown>
+    : null;
+  const originValid = resume.status === "discovery_prefill"
+    ? coverage.transition_kind === "discovery_prefill" &&
+      discoveryContext?.draft_id === resume.draftId &&
+      discoveryContext?.draft_hash === resume.draftHash &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        resume.draftId,
+      ) && /^[0-9a-f]{64}$/.test(resume.draftHash)
+    : (resume.status === "initialized" || resume.status === "reused") &&
+      coverage.transition_kind === "resume_checkpoint";
   if (
     cap.sessionType !== "onboarding" ||
-    (resume.status !== "initialized" && resume.status !== "reused") ||
+    !originValid ||
     resume.revision !== 1 ||
     coverage.schema_version !== 2 ||
-    coverage.transition_kind !== "resume_checkpoint" ||
     coverage.tenant_id !== cap.tenantId ||
     coverage.call_id !== cap.callId ||
     coverage.revision !== 1 ||

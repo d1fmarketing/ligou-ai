@@ -4126,6 +4126,31 @@ describe("physical socket attach and reconnect", () => {
     } as any;
   }
 
+  function discoveryPrefillApplicationOptions(callId: string) {
+    const options = resumedApplicationOptions(callId);
+    options.onboarding.resume = {
+      ...options.onboarding.resume,
+      status: "discovery_prefill",
+      draftId: "77777777-7777-4777-8777-777777777777",
+      draftHash: "f".repeat(64),
+      sourceCallId: undefined,
+      sourceReceiptId: undefined,
+      coverage: {
+        ...options.onboarding.resume.coverage,
+        transition_kind: "discovery_prefill",
+        resume_context: undefined,
+        discovery_context: {
+          draft_id: "77777777-7777-4777-8777-777777777777",
+          draft_version: 1,
+          draft_hash: "f".repeat(64),
+          source_job_id: "88888888-8888-4888-8888-888888888888",
+          source_result_id: "99999999-9999-4999-8999-999999999999",
+        },
+      },
+    };
+    return options;
+  }
+
   function applicationOpeningCreated(
     overrides: Record<string, unknown> = {},
   ) {
@@ -4631,6 +4656,41 @@ describe("physical socket attach and reconnect", () => {
       )).toHaveLength(1);
       expect(payload.text.split(payload.resume_context.next_action.question_pt))
         .toHaveLength(2);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("website prefill hydrates the same revision-one lifecycle without inventing a prior call", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-stage0b-discovery-prefill");
+    const options = discoveryPrefillApplicationOptions(cap.callId);
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-stage0b-discovery-prefill",
+        "gpt-realtime-2.1",
+        options,
+      );
+      const socket = SyntheticWebSocket.instances[0]!;
+      socket.emit("open");
+      await control.opened;
+      expect(control.ledger.onboarding!.lifecycle.coverage).toMatchObject({
+        revision: 1,
+        digest: "c".repeat(64),
+        complete: false,
+        nextQuestion: {
+          field: "area.coverage",
+          questionPt: "Quais cidades e regiões sua empresa atende?",
+        },
+      });
+      expect(options.onboarding.resume.sourceCallId).toBeUndefined();
+      expect(options.onboarding.resume.coverage.transition_kind).toBe("discovery_prefill");
+      expect(framesOfType(socket, "response.create")).toEqual([]);
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);

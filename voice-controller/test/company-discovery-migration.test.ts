@@ -59,6 +59,17 @@ function migrationSql(): string {
     .toLowerCase();
 }
 
+function stage0bMigrationSql(): string {
+  const names = readdirSync(migrationsDir).filter((name) =>
+    name.endsWith("_company_discovery_directmodel_stage0b.sql")
+  );
+  expect(names, "missing DirectModel company discovery Stage 0B migration").toHaveLength(1);
+  return readFileSync(path.join(migrationsDir, names[0]!), "utf8")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function functionBody(sql: string, signature: string, nextMarker: string): string {
   const functionName = signature.slice(0, signature.indexOf("("));
   const start = sql.indexOf(`function public.${functionName}(`);
@@ -715,6 +726,82 @@ describe("OpenClaw company discovery Stage 0 database authority", () => {
       "capability",
       "grant",
     ]) expect(sql).toContain(`'${forbidden}'`);
+  });
+});
+
+describe("DirectModel company discovery Stage 0B database authority", () => {
+  test("stores v2 provenance in one onboarding draft without activating rules or powers", () => {
+    const sql = stage0bMigrationSql();
+    expect(sql).toContain("company_discovery.result.v2");
+    expect(sql).toContain("company_discovery.claim.v2");
+    for (const column of [
+      "adapter_id", "provider", "model", "confidence", "contradiction_status",
+      "missing_fields", "ambiguous_fields", "claim_schema_version",
+    ]) expect(sql).toContain(`add column ${column}`);
+    expect(sql).toContain("create table public.company_discovery_onboarding_drafts");
+    expect(sql).toContain("unique (tenant_id, version)");
+    expect(sql).toContain("alter table public.company_discovery_onboarding_drafts enable row level security");
+    expect(sql).toContain("alter table public.company_discovery_onboarding_drafts force row level security");
+    expect(sql).toContain("create trigger company_discovery_onboarding_drafts_append_only");
+
+    const commit = functionBody(
+      sql,
+      "commit_company_discovery_result_v2(uuid,bigint,text,jsonb,text)",
+      "revoke all on function public.commit_company_discovery_result_v2(",
+    );
+    expect(commit).toContain("v_attempt.adapter_id = 'direct_model'");
+    expect(commit).toContain("p_result->>'schema_version' <> 'company_discovery.result.v2'");
+    expect(commit).toContain("'provider', 'openai-codex'");
+    expect(commit).toContain("'model', 'gpt-5.6-sol'");
+
+    const review = functionBody(
+      sql,
+      "review_company_discovery_claims_v2(uuid,uuid,bigint,jsonb,text)",
+      "revoke all on function public.review_company_discovery_claims_v2(",
+    );
+    expect(review).toContain("insert into public.company_discovery_onboarding_drafts");
+    expect(review).toContain("insert into public.discovery_decisions");
+    expect(review).toContain("'rules_approved', false");
+    expect(review).toContain("'powers_granted', false");
+    expect(review).toContain("'operational_mode_changed', false");
+    expect(review).toContain("'missing_fields', v_claim.missing_fields");
+    expect(review).toContain("'ambiguous_fields', v_claim.ambiguous_fields");
+    expect(review).toContain("'contradictions', v_claim.contradictions");
+    expect(review).toContain("'uncertainty', v_claim.uncertainty");
+    expect(review).not.toContain("insert into public.rules");
+    expect(review).not.toContain("insert into public.powers");
+    expect(review).not.toContain("insert into public.effective_rules");
+  });
+
+  test("initializes a service-only call-bound prefill and leaves ordinary onboarding available", () => {
+    const sql = stage0bMigrationSql();
+    const signature = "initialize_company_discovery_onboarding_prefill(uuid,uuid,uuid,uuid,jsonb)";
+    const prefill = functionBody(
+      sql,
+      signature,
+      "revoke all on function public.initialize_company_discovery_onboarding_prefill(",
+    );
+    expect(prefill).toContain("security definer");
+    expect(prefill).toContain("set search_path = ''");
+    expect(prefill).toContain("request.jwt.claim.role");
+    expect(prefill).toContain("service_role_required");
+    expect(prefill).toContain("t.owner_user_id = p_owner");
+    expect(prefill).toContain("'transition_kind', 'discovery_prefill'");
+    expect(prefill).toContain("'rules_approved', false");
+    expect(prefill).toContain("'powers_granted', false");
+    expect(prefill).toContain("insert into public.receipts");
+    expect(sql).toContain("revoke all on function public.initialize_company_discovery_onboarding_prefill(");
+    expect(sql).toContain("grant execute on function public.initialize_company_discovery_onboarding_prefill(");
+  });
+
+  test("derives queued, fetching, analyzing, and review stages from durable transitions", () => {
+    const sql = stage0bMigrationSql();
+    expect(sql).toContain("add column processing_stage");
+    expect(sql).toContain("processing_stage in ( 'queued','fetching','analyzing','ready_for_review','reviewed','failed','cancelled' )");
+    expect(sql).toContain("create trigger company_discovery_attempt_fetching_stage");
+    expect(sql).toContain("create trigger company_discovery_subscription_analyzing_stage");
+    expect(sql).toContain("create trigger company_discovery_result_review_stage");
+    expect(sql).toContain("create trigger company_discovery_job_status_stage");
   });
 });
 
@@ -2239,18 +2326,84 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         status: "busy",
         current_attempt_id: newAttempt.attempt_id,
       });
-    const noPublicPriceResult = structuredClone(resultPayload);
-    noPublicPriceResult.candidate_facts[1]!.normalized_value = {
-      ...(noPublicPriceResult.candidate_facts[1]!.normalized_value as Record<string, unknown>),
-      public_price: null,
-      duration_minutes: null,
+    const v2Fact = (
+      claimClass: "descriptive" | "operational" | "safety_critical",
+      claimType: string,
+      value: unknown,
+      overrides: Record<string, unknown> = {},
+    ) => ({
+      claim_class: claimClass,
+      claim_type: claimType,
+      normalized_value: value,
+      evidence_refs: [0],
+      confidence: "high",
+      contradiction_status: "none",
+      contradictions: [],
+      missing_fields: [],
+      ambiguous_fields: [],
+      uncertainty: [],
+      claim_schema_version: "company_discovery.claim.v2",
+      ...overrides,
+    });
+    const directV2Result = {
+      schema_version: "company_discovery.result.v2",
+      source_snapshots: resultPayload.source_snapshots,
+      candidate_facts: [
+        v2Fact("descriptive", "business_name", "Example Plumbing"),
+        v2Fact("operational", "service_territory", {
+          service_type: null,
+          included_areas: [{
+            kind: "marketing_region",
+            name: "the whole Bay Area",
+            region_state: "CA",
+            country_code: "US",
+          }],
+          excluded_areas: [],
+          radius: null,
+        }),
+        v2Fact("operational", "business_hours", {
+          timezone: "America/Los_Angeles",
+          ordinary_intervals: [{
+            days: ["mon", "tue", "wed", "thu", "fri"],
+            opens: "08:00",
+            closes: "17:00",
+          }],
+          closed_days: ["sat", "sun"],
+          ordinary_24_7: false,
+          emergency_24_7: false,
+          after_hours: "unavailable",
+          holiday_policy: null,
+        }, { missing_fields: ["holiday_policy"] }),
+        v2Fact("operational", "guarantee", {
+          guarantee_kind: "satisfaction_statement",
+          service_type: null,
+          coverage: ["satisfaction"],
+          duration: null,
+          conditions: ["Satisfaction guaranteed"],
+          exclusions: [],
+        }),
+        v2Fact("operational", "booking_restriction", {
+          restriction_type: "sunday",
+          service_type: null,
+          rule: "not_allowed",
+          notice_minutes: null,
+          public_fee: null,
+          conditions: ["No Sunday appointments"],
+        }),
+        v2Fact("safety_critical", "emergency", {
+          guidance: "Leave the property and call 911 for a gas emergency.",
+        }),
+      ],
+      missing_questions: ["Qual é o preço mínimo privado autorizado?"],
+      contradictions: [],
+      uncertainty: [],
     };
-    const newCommit = await service.rpc("commit_company_discovery_result", {
+    const newCommit = await service.rpc("commit_company_discovery_result_v2", {
       p_attempt_id: newAttempt.attempt_id,
       p_fence_generation: newAttempt.fence_generation,
       p_claim_token: newAttempt.claim_token,
-      p_result: noPublicPriceResult,
-      p_result_hash: postgresJsonbHash(noPublicPriceResult),
+      p_result: directV2Result,
+      p_result_hash: postgresJsonbHash(directV2Result),
     });
     expect(newCommit.error).toBeNull();
     const newCommitted = newCommit.data as CommittedResult;
@@ -2260,6 +2413,170 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_expected_version: newCommitted.job_version,
     });
     expect(replacementSelect.error).toBeNull();
+    const rulesBeforeV2Review = Number(await runDisposableLocalSql(`
+      select count(*)::text from public.rules
+      where tenant_id = ${localSqlUuid(ownerTenant)};
+    `));
+    const v2Claims = await owner.from("discovery_claims")
+      .select("id,claim_class,claim_type,evidence_refs,adapter_id,provider,model,confidence,contradiction_status,missing_fields,ambiguous_fields,claim_schema_version")
+      .eq("result_id", newCommitted.result_id)
+      .order("claim_type", { ascending: true });
+    expect(v2Claims.error).toBeNull();
+    expect(v2Claims.data).toHaveLength(6);
+    expect(v2Claims.data!.every((row) =>
+      row.adapter_id === "direct_model" && row.provider === "openai-codex" &&
+      row.model === "gpt-5.6-sol" && row.claim_schema_version ===
+        "company_discovery.claim.v2"
+    )).toBe(true);
+    expect((await intruder.from("discovery_claims")
+      .select("id").eq("result_id", newCommitted.result_id)).data).toEqual([]);
+    const v2Nonce = await owner.rpc("create_company_discovery_review_nonce", {
+      p_job: retryJob,
+      p_result: newCommitted.result_id,
+      p_claim_ids: v2Claims.data!.map((row) => row.id),
+    });
+    expect(v2Nonce.error).toBeNull();
+    const v2Review = await owner.rpc("review_company_discovery_claims_v2", {
+      p_job: retryJob,
+      p_result: newCommitted.result_id,
+      p_expected_version: replacementSelect.data.version,
+      p_decisions: v2Claims.data!.map((row) => ({
+        claim_id: row.id,
+        decision: row.claim_type === "booking_restriction" ? "reject" : "approve",
+        value: directV2Result.candidate_facts.find((fact) =>
+          fact.claim_type === row.claim_type
+        )!.normalized_value,
+        group_confirmed: row.claim_class !== "descriptive",
+        evidence_acknowledged: row.claim_class === "safety_critical",
+        acknowledged_evidence_refs: row.claim_class === "safety_critical"
+          ? row.evidence_refs
+          : [],
+      })),
+      p_confirmation_nonce: String(v2Nonce.data),
+    });
+    expect(v2Review.error).toBeNull();
+    const v2DraftId = String(v2Review.data.onboarding_draft_id);
+    const v2DraftHash = String(v2Review.data.onboarding_draft_hash);
+    expect(v2DraftId).toMatch(UUID_PATTERN);
+    expect(v2DraftHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(v2Review.data).toMatchObject({
+      reviewed: 6,
+      authority: {
+        rules_approved: false,
+        powers_granted: false,
+        operational_mode_changed: false,
+      },
+    });
+    expect(Number(await runDisposableLocalSql(`
+      select count(*)::text from public.rules
+      where tenant_id = ${localSqlUuid(ownerTenant)};
+    `))).toBe(rulesBeforeV2Review);
+    expect((await owner.from("effective_rules")
+      .select("id").eq("tenant_id", ownerTenant)).data).toHaveLength(2);
+    const draftRows = await owner.from("company_discovery_onboarding_drafts")
+      .select("id,version,draft_hash,draft,source_job_id,source_result_id")
+      .eq("id", v2DraftId);
+    expect(draftRows.error).toBeNull();
+    expect(draftRows.data).toHaveLength(1);
+    expect(draftRows.data![0]!.draft).toMatchObject({
+      schema_version: "company_discovery.onboarding_draft.v1",
+      source_job_id: retryJob,
+      source_result_id: newCommitted.result_id,
+      authority: {
+        rules_approved: false,
+        powers_granted: false,
+        operational_mode_changed: false,
+      },
+    });
+    expect(draftRows.data![0]!.draft.approved_facts).toHaveLength(5);
+    expect(draftRows.data![0]!.draft.rejected_claim_ids).toHaveLength(1);
+    expect((await intruder.from("company_discovery_onboarding_drafts")
+      .select("id").eq("id", v2DraftId)).data).toEqual([]);
+    const draftReadback = await service.rpc(
+      "read_company_discovery_onboarding_draft",
+      { p_tenant: ownerTenant, p_owner: ownerId },
+    );
+    expect(draftReadback.error).toBeNull();
+    expect(draftReadback.data).toMatchObject({
+      draft_id: v2DraftId,
+      draft_hash: v2DraftHash,
+    });
+    expect((await owner.rpc("read_company_discovery_onboarding_draft", {
+      p_tenant: ownerTenant,
+      p_owner: ownerId,
+    })).error).not.toBeNull();
+
+    const prefillCall = randomUUID();
+    const prefillRequest = randomUUID();
+    expect((await service.from("calls").insert({
+      id: prefillCall,
+      tenant_id: ownerTenant,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").insert({
+      id: prefillRequest,
+      tenant_id: ownerTenant,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `stage0b-offer-${prefillRequest}`,
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "ready",
+      answer_sdp: `stage0b-answer-${prefillRequest}`,
+      call_id: prefillCall,
+      handled_at: new Date().toISOString(),
+    }).eq("id", prefillRequest)).error).toBeNull();
+    const { buildCompanyDiscoveryPrefill } = await import(
+      "../src/company-discovery-prefill.ts"
+    );
+    const prefillProjection = buildCompanyDiscoveryPrefill({
+      tenant_id: ownerTenant,
+      call_id: prefillCall,
+      draft_readback: draftReadback.data,
+      localities: [],
+    });
+    const initializedPrefill = await service.rpc(
+      "initialize_company_discovery_onboarding_prefill",
+      {
+        p_tenant: ownerTenant,
+        p_target_call: prefillCall,
+        p_owner: ownerId,
+        p_draft: prefillProjection.draft_id,
+        p_coverage: prefillProjection.coverage,
+      },
+    );
+    expect(initializedPrefill.error).toBeNull();
+    const prefillReceiptId = String(initializedPrefill.data.coverage_receipt_id);
+    const prefillDigest = String(initializedPrefill.data.snapshot_digest);
+    expect(prefillReceiptId).toMatch(UUID_PATTERN);
+    expect(prefillDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(initializedPrefill.data).toMatchObject({
+      status: "initialized",
+      draft_id: prefillProjection.draft_id,
+      revision: 1,
+    });
+    expect(initializedPrefill.data.coverage).toMatchObject({
+      transition_kind: "discovery_prefill",
+      selected_rule_ids: [],
+      materializations: [],
+      authority: {
+        rules_approved: false,
+        powers_granted: false,
+        operational_mode_changed: false,
+      },
+    });
+    expect((await service.from("receipts")
+      .select("id,readback,detail")
+      .eq("id", prefillReceiptId).single()).data)
+      .toMatchObject({
+        readback: { transition_kind: "discovery_prefill", revision: 1 },
+        detail: {
+          transition_kind: "discovery_prefill",
+          draft_id: prefillProjection.draft_id,
+        },
+      });
     const unresolvedCleanup = await service.rpc("record_company_discovery_cleanup", {
       p_attempt_id: newAttempt.attempt_id,
       p_fence_generation: newAttempt.fence_generation,

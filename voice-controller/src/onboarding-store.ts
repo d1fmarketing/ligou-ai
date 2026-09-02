@@ -24,6 +24,7 @@ import {
   type MaterializedRuleV2,
 } from "./onboarding-materialization.ts";
 import type { Capability } from "./tools.ts";
+import { buildCompanyDiscoveryPrefill } from "./company-discovery-prefill.ts";
 
 const DEFAULT_TIMEOUT_MS = 1_500;
 const MAX_COVERAGE_RECEIPTS = 512;
@@ -140,7 +141,7 @@ export interface FollowupSuccess {
 }
 export type RecordedFollowup = FollowupSuccess | StoreFailure;
 
-export interface OnboardingResumeSuccess {
+export interface OnboardingVoiceResumeSuccess {
   ok: true;
   status: "initialized" | "reused";
   sourceCallId: string;
@@ -152,6 +153,21 @@ export interface OnboardingResumeSuccess {
   coverage: Record<string, unknown>;
   durationMs: number;
 }
+export interface OnboardingDiscoveryPrefillSuccess {
+  ok: true;
+  status: "discovery_prefill";
+  draftId: string;
+  draftHash: string;
+  coverageReceiptId: string;
+  revision: 1;
+  digest: string;
+  nextAction: Record<string, unknown>;
+  coverage: Record<string, unknown>;
+  durationMs: number;
+}
+export type OnboardingResumeSuccess =
+  | OnboardingVoiceResumeSuccess
+  | OnboardingDiscoveryPrefillSuccess;
 export interface OnboardingResumeNone {
   ok: true;
   status: "none";
@@ -1051,6 +1067,147 @@ export function createOnboardingStore(
     };
   };
 
+  const initializeDiscoveryPrefill = async (
+    cap: Capability,
+    started: number,
+  ): Promise<OnboardingResume> => {
+    let draftResult: BoundaryResult<unknown>;
+    try {
+      draftResult = await bounded((signal) =>
+        abortable<BoundaryResult<unknown>>(client.rpc(
+          "read_company_discovery_onboarding_draft",
+          { p_tenant: cap.tenantId, p_owner: cap.ownerUserId! },
+        ), signal)
+      );
+    } catch {
+      return { ok: true, status: "none", durationMs: elapsed(now, started) };
+    }
+    if (draftResult.error || draftResult.data === null) {
+      return { ok: true, status: "none", durationMs: elapsed(now, started) };
+    }
+    let registry: LocalityRegistryEntry[];
+    try {
+      const [registryResult, aliasesResult] = await Promise.all([
+        bounded(localityRegistry),
+        bounded(localityAliases),
+      ]);
+      if (registryResult.error || aliasesResult.error ||
+          !Array.isArray(registryResult.data) || !Array.isArray(aliasesResult.data)) {
+        return { ok: true, status: "none", durationMs: elapsed(now, started) };
+      }
+      const aliasesByLocality = new Map<string, string[]>();
+      for (const alias of aliasesResult.data) {
+        const current = aliasesByLocality.get(alias.locality_id) ?? [];
+        current.push(alias.alias_normalized);
+        aliasesByLocality.set(alias.locality_id, current);
+      }
+      registry = registryResult.data.map((entry) => ({
+        ...entry,
+        aliases: aliasesByLocality.get(entry.locality_id) ?? [],
+      }));
+    } catch {
+      return { ok: true, status: "none", durationMs: elapsed(now, started) };
+    }
+    let projection: ReturnType<typeof buildCompanyDiscoveryPrefill>;
+    try {
+      projection = buildCompanyDiscoveryPrefill({
+        tenant_id: cap.tenantId,
+        call_id: cap.callId,
+        draft_readback: draftResult.data,
+        localities: registry,
+      });
+    } catch {
+      return { ok: true, status: "none", durationMs: elapsed(now, started) };
+    }
+    try {
+      const initialized = await bounded((signal) =>
+        abortable<BoundaryResult<unknown>>(client.rpc(
+          "initialize_company_discovery_onboarding_prefill",
+          {
+            p_tenant: cap.tenantId,
+            p_target_call: cap.callId,
+            p_owner: cap.ownerUserId!,
+            p_draft: projection.draft_id,
+            p_coverage: projection.coverage,
+          },
+        ), signal)
+      );
+      if (initialized.error) {
+        return ambiguousBoundaryFailure(initialized.error)
+          ? failure(
+              "indeterminate",
+              "company discovery onboarding prefill is indeterminate",
+              now,
+              started,
+            )
+          : { ok: true, status: "none", durationMs: elapsed(now, started) };
+      }
+      if (!initialized.data || typeof initialized.data !== "object" ||
+          Array.isArray(initialized.data)) {
+        return failure(
+          "changed",
+          "company discovery onboarding prefill readback is invalid",
+          now,
+          started,
+        );
+      }
+      const data = initialized.data as Record<string, unknown>;
+      const coverage = data.coverage && typeof data.coverage === "object" &&
+          !Array.isArray(data.coverage)
+        ? data.coverage as Record<string, unknown>
+        : null;
+      const receiptId = String(data.coverage_receipt_id ?? "");
+      const digest = String(data.snapshot_digest ?? "");
+      const draftId = String(data.draft_id ?? "");
+      const draftHash = String(data.draft_hash ?? "");
+      const nextAction = data.next_action && typeof data.next_action === "object" &&
+          !Array.isArray(data.next_action)
+        ? data.next_action as Record<string, unknown>
+        : null;
+      if ((data.status !== "initialized" && data.status !== "reused") ||
+          draftId !== projection.draft_id || draftHash !== projection.draft_hash ||
+          !UUID_RE.test(receiptId) || data.revision !== 1 ||
+          !/^[0-9a-f]{64}$/.test(digest) || !coverage || !nextAction ||
+          coverage.snapshot_digest !== digest ||
+          canonicalJson({ ...coverage, snapshot_digest: undefined }) !==
+            canonicalJson(projection.coverage) ||
+          canonicalJson(nextAction) !== canonicalJson(projection.coverage.next_action)) {
+        return failure(
+          "changed",
+          "company discovery onboarding prefill readback is invalid",
+          now,
+          started,
+        );
+      }
+      return {
+        ok: true,
+        status: "discovery_prefill",
+        draftId,
+        draftHash,
+        coverageReceiptId: receiptId,
+        revision: 1,
+        digest,
+        nextAction,
+        coverage,
+        durationMs: elapsed(now, started),
+      };
+    } catch (error) {
+      return ambiguousBoundaryFailure(error)
+        ? failure(
+            "indeterminate",
+            "company discovery onboarding prefill is indeterminate",
+            now,
+            started,
+          )
+        : failure(
+            "query_error",
+            "company discovery onboarding prefill failed",
+            now,
+            started,
+          );
+    }
+  };
+
   const initializeOnboardingResume = async (
     cap: Capability,
   ): Promise<OnboardingResume> => {
@@ -1081,11 +1238,7 @@ export function createOnboardingStore(
       if (result.error) {
         const message = String(result.error.message ?? "").toLowerCase();
         if (message.includes("onboarding_resume_source_missing"))
-          return {
-            ok: true,
-            status: "none",
-            durationMs: elapsed(now, started),
-          };
+          return await initializeDiscoveryPrefill(cap, started);
         if (
           message.includes("onboarding_resume_latest_ineligible") ||
           message.includes("onboarding_resume_source_consumed")
