@@ -259,7 +259,7 @@ function limit(value: number | undefined, fallback: number, maximum: number, nam
 
 const MESSAGE_KEYS = new Set(["type", "role", "content", "status"]);
 const TEXT_PART_KEYS = new Set(["type", "text", "annotations"]);
-const REASONING_KEYS = new Set(["type", "id", "summary", "encrypted_content"]);
+const REASONING_KEYS = new Set(["type", "id", "summary", "encrypted_content", "content"]);
 const SUMMARY_KEYS = new Set(["type", "text"]);
 const FUNCTION_CALL_KEYS = new Set(["type", "id", "call_id", "name", "arguments", "status"]);
 const FUNCTION_OUTPUT_KEYS = new Set(["type", "id", "call_id", "output", "status"]);
@@ -328,6 +328,9 @@ function validateInput(value: unknown): readonly unknown[] {
     }
     if (type === "reasoning") {
       rejectExtras(item, REASONING_KEYS, `model input[${index}]`);
+      if (item.content !== undefined && (!Array.isArray(item.content) || item.content.length !== 0)) {
+        throw new ModelProxyPolicyError("model input reasoning content is invalid");
+      }
       if (item.id !== undefined) boundedCallId(item.id, "model input reasoning id");
       boundedString(item.encrypted_content, "model input encrypted reasoning", 300_000);
       if (item.summary !== undefined) {
@@ -341,7 +344,8 @@ function validateInput(value: unknown): readonly unknown[] {
           boundedString(summary.text, "model input reasoning summary text", 65_536);
         });
       }
-      return Object.freeze({ ...item });
+      const { content: _emptyReplayContent, ...normalized } = item;
+      return Object.freeze(normalized);
     }
     if (type === "function_call") {
       rejectExtras(item, FUNCTION_CALL_KEYS, `model input[${index}]`);

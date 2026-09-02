@@ -850,6 +850,33 @@ describe("trusted Codex subscription proxy", () => {
     expect((forwardedInput[0]!.content as Array<Record<string, unknown>>)[0])
       .not.toHaveProperty("annotations");
 
+    const reasoningReplay = codexRequest(marker);
+    const reasoningBody = await reasoningReplay.json() as Record<string, unknown>;
+    reasoningBody.input = [{
+      type: "reasoning",
+      content: [],
+      summary: [],
+      encrypted_content: "bounded-encrypted-reasoning",
+    }];
+    await proxy.forward(new Request(reasoningReplay.url, {
+      method: "POST", headers: reasoningReplay.headers, body: JSON.stringify(reasoningBody),
+    }));
+    const forwardedReasoning = bodies[1]!.input as Array<Record<string, unknown>>;
+    expect(forwardedReasoning[0]).not.toHaveProperty("content");
+
+    const nonemptyReasoning = codexRequest(marker);
+    const nonemptyReasoningBody = await nonemptyReasoning.json() as Record<string, unknown>;
+    nonemptyReasoningBody.input = [{
+      type: "reasoning",
+      content: [{ type: "reasoning_text", text: "must not pass" }],
+      summary: [],
+      encrypted_content: "bounded-encrypted-reasoning",
+    }];
+    await expect(proxy.forward(new Request(nonemptyReasoning.url, {
+      method: "POST", headers: nonemptyReasoning.headers,
+      body: JSON.stringify(nonemptyReasoningBody),
+    }))).rejects.toThrow("reasoning content");
+
     for (const mutation of [
       { status: "in_progress", annotations: [] },
       { status: "completed", annotations: [{ type: "url_citation", url: "https://evil.invalid" }] },
