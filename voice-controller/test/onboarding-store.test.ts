@@ -88,6 +88,7 @@ class SupabaseBoundaryFake {
   };
   rpcResults: Array<{ data: unknown; error: QueryError | null }> = [];
   rpcNeverResolves = false;
+  rpcNeverResolveNames = new Set<string>();
   rpcCommitReceipt: ReceiptRow | null = null;
   rpcHandler?: (
     name: string,
@@ -238,6 +239,8 @@ class SupabaseBoundaryFake {
       },
       rpc(name: string, args: Record<string, unknown>) {
         boundary.rpcCalls.push({ name, args });
+        const neverResolves = boundary.rpcNeverResolves ||
+          boundary.rpcNeverResolveNames.has(name);
         if (boundary.rpcCommitReceipt) {
           const eventKey = String(args.p_event_key ?? "");
           boundary.eventReceiptRows.set(eventKey, boundary.rpcCommitReceipt);
@@ -255,7 +258,7 @@ class SupabaseBoundaryFake {
             return operation;
           },
           then(resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) {
-            if (boundary.rpcNeverResolves)
+            if (neverResolves)
               return new Promise(() => {}).then(resolve, reject);
             if (signal?.aborted)
               return Promise.reject(new Error("aborted")).then(resolve, reject);
@@ -350,7 +353,9 @@ describe("initializeOnboardingResume", () => {
     const draftId = "99999999-9999-4999-8999-999999999999";
     const draftHash = "d".repeat(64);
     const sourceJob = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sourceAttempt = "abababab-abab-4bab-8bab-abababababab";
     const sourceResult = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const sourceResultHash = "c".repeat(64);
     const claimId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const evidenceId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
     const draftReadback = {
@@ -360,7 +365,10 @@ describe("initializeOnboardingResume", () => {
       draft: {
         schema_version: "company_discovery.onboarding_draft.v1",
         source_job_id: sourceJob,
+        source_attempt_id: sourceAttempt,
         source_result_id: sourceResult,
+        source_result_hash: sourceResultHash,
+        source_result_schema: "company_discovery.result.v2",
         approved_facts: [{
           claim_id: claimId,
           claim_class: "operational",
@@ -434,6 +442,13 @@ describe("initializeOnboardingResume", () => {
       powers_granted: false,
       operational_mode_changed: false,
     });
+    expect(prefill.discovery_context).toMatchObject({
+      source_job_id: sourceJob,
+      source_attempt_id: sourceAttempt,
+      source_result_id: sourceResult,
+      source_result_hash: sourceResultHash,
+      source_result_schema: "company_discovery.result.v2",
+    });
   });
 
   test("reconciles an ambiguous prefill write or proves absence before ordinary fallback", async () => {
@@ -448,13 +463,17 @@ describe("initializeOnboardingResume", () => {
         draft: {
           schema_version: "company_discovery.onboarding_draft.v1",
           source_job_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          source_attempt_id: "abababab-abab-4bab-8bab-abababababab",
           source_result_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          source_result_hash: "c".repeat(64),
+          source_result_schema: "company_discovery.result.v2",
           approved_facts: [],
           rejected_claim_ids: [],
           unresolved_items: [],
           authority: { rules_approved: false, powers_granted: false, operational_mode_changed: false },
         },
       };
+      let coverage: Record<string, unknown> | null = null;
       boundary.rpcHandler = (name, args) => {
         if (name === "initialize_onboarding_resume") {
           return { data: null, error: { code: "P0002", message: "onboarding_resume_source_missing" } };
@@ -463,21 +482,27 @@ describe("initializeOnboardingResume", () => {
           return { data: draftReadback, error: null };
         }
         if (name === "initialize_company_discovery_onboarding_prefill") {
-          if (receiptCommitted) {
-            boundary.receiptRows = [{
-              id: TARGET_RECEIPT_ID,
-              readback: {
-                ...(args.p_coverage as Record<string, unknown>),
-                snapshot_digest: "e".repeat(64),
-              },
-              detail: {
-                transition_kind: "discovery_prefill",
-                draft_id: draftId,
-                draft_hash: draftHash,
-              },
-            }];
-          }
+          coverage = args.p_coverage as Record<string, unknown>;
           return { data: null, error: { message: "network timeout" } };
+        }
+        if (name === "reconcile_company_discovery_onboarding_prefill") {
+          if (!receiptCommitted) return {
+            data: {
+              status: "safe_fallback",
+              reason: "prefill_not_committed_after_locked_reconciliation",
+            },
+            error: null,
+          };
+          return {
+            data: {
+              status: "reused", draft_id: draftId, draft_hash: draftHash,
+              coverage_receipt_id: TARGET_RECEIPT_ID, revision: 1,
+              snapshot_digest: "e".repeat(64),
+              next_action: coverage!.next_action,
+              coverage: { ...coverage!, snapshot_digest: "e".repeat(64) },
+            },
+            error: null,
+          };
         }
         return { data: null, error: { message: `unexpected ${name}` } };
       };
@@ -497,7 +522,189 @@ describe("initializeOnboardingResume", () => {
       } else {
         expect(initialized).toEqual({ ok: true, status: "none", durationMs: 0 });
       }
-      expect(boundary.receiptSetReads).toBe(1);
+      expect(boundary.rpcCalls.map((call) => call.name)).toEqual([
+        "initialize_onboarding_resume",
+        "read_company_discovery_onboarding_draft",
+        "initialize_company_discovery_onboarding_prefill",
+        "reconcile_company_discovery_onboarding_prefill",
+      ]);
+      expect(boundary.receiptSetReads).toBe(0);
+    }
+  });
+
+  test("reconciles a thrown prefill timeout before the generic catch and never repeats external work", async () => {
+    const boundary = new SupabaseBoundaryFake();
+    const draftId = "99999999-9999-4999-8999-999999999999";
+    const draftHash = "d".repeat(64);
+    const sourceJob = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sourceAttempt = "abababab-abab-4bab-8bab-abababababab";
+    const sourceResult = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const sourceResultHash = "c".repeat(64);
+    const draftReadback = {
+      draft_id: draftId,
+      draft_version: 7,
+      draft_hash: draftHash,
+      draft: {
+        schema_version: "company_discovery.onboarding_draft.v1",
+        source_job_id: sourceJob,
+        source_attempt_id: sourceAttempt,
+        source_result_id: sourceResult,
+        source_result_hash: sourceResultHash,
+        source_result_schema: "company_discovery.result.v2",
+        approved_facts: [],
+        rejected_claim_ids: [],
+        unresolved_items: [],
+        authority: { rules_approved: false, powers_granted: false, operational_mode_changed: false },
+      },
+    };
+    let coverage: Record<string, unknown> | null = null;
+    boundary.rpcNeverResolveNames.add("initialize_company_discovery_onboarding_prefill");
+    boundary.rpcHandler = (name, args) => {
+      if (name === "initialize_onboarding_resume") {
+        return { data: null, error: { code: "P0002", message: "onboarding_resume_source_missing" } };
+      }
+      if (name === "read_company_discovery_onboarding_draft") {
+        return { data: draftReadback, error: null };
+      }
+      if (name === "initialize_company_discovery_onboarding_prefill") {
+        coverage = args.p_coverage as Record<string, unknown>;
+        return { data: null, error: null };
+      }
+      if (name === "reconcile_company_discovery_onboarding_prefill") {
+        expect(args).toMatchObject({
+          p_tenant: TENANT_ID,
+          p_target_call: CALL_ID,
+          p_owner: OWNER_ID,
+          p_draft: draftId,
+          p_expected_draft_version: 7,
+          p_expected_draft_hash: draftHash,
+          p_source_job: sourceJob,
+          p_source_attempt: sourceAttempt,
+          p_source_result: sourceResult,
+          p_expected_result_hash: sourceResultHash,
+          p_expected_result_schema: "company_discovery.result.v2",
+        });
+        return {
+          data: {
+            status: "reused", draft_id: draftId, draft_hash: draftHash,
+            coverage_receipt_id: TARGET_RECEIPT_ID, revision: 1,
+            snapshot_digest: "e".repeat(64),
+            next_action: coverage!.next_action,
+            coverage: { ...coverage!, snapshot_digest: "e".repeat(64) },
+          },
+          error: null,
+        };
+      }
+      return { data: null, error: { message: `unexpected ${name}` } };
+    };
+    const store = createOnboardingStore({ client: boundary.client(), timeoutMs: 5 });
+
+    expect(await store.initializeOnboardingResume(ownerCapability())).toMatchObject({
+      ok: true,
+      status: "discovery_prefill",
+      draftId,
+      draftHash,
+      coverageReceiptId: TARGET_RECEIPT_ID,
+    });
+    expect(boundary.rpcCalls.map((call) => call.name)).toEqual([
+      "initialize_onboarding_resume",
+      "read_company_discovery_onboarding_draft",
+      "initialize_company_discovery_onboarding_prefill",
+      "reconcile_company_discovery_onboarding_prefill",
+    ]);
+    expect(boundary.receiptSetReads).toBe(0);
+  });
+
+  test("allows fallback only from the locked safe-fallback classification", async () => {
+    const boundary = new SupabaseBoundaryFake();
+    const draftId = "99999999-9999-4999-8999-999999999999";
+    const draftHash = "d".repeat(64);
+    boundary.rpcHandler = (name) => {
+      if (name === "initialize_onboarding_resume") {
+        return { data: null, error: { code: "P0002", message: "onboarding_resume_source_missing" } };
+      }
+      if (name === "read_company_discovery_onboarding_draft") return {
+        data: {
+          draft_id: draftId, draft_version: 1, draft_hash: draftHash,
+          draft: {
+            schema_version: "company_discovery.onboarding_draft.v1",
+            source_job_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            source_attempt_id: "abababab-abab-4bab-8bab-abababababab",
+            source_result_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            source_result_hash: "c".repeat(64),
+            source_result_schema: "company_discovery.result.v2",
+            approved_facts: [], rejected_claim_ids: [], unresolved_items: [],
+            authority: { rules_approved: false, powers_granted: false, operational_mode_changed: false },
+          },
+        },
+        error: null,
+      };
+      if (name === "initialize_company_discovery_onboarding_prefill") {
+        return { data: null, error: { message: "socket timeout" } };
+      }
+      if (name === "reconcile_company_discovery_onboarding_prefill") return {
+        data: {
+          status: "safe_fallback",
+          reason: "prefill_not_committed_after_locked_reconciliation",
+        },
+        error: null,
+      };
+      return { data: null, error: { message: `unexpected ${name}` } };
+    };
+    const store = createOnboardingStore({ client: boundary.client(), now: () => 19 });
+
+    expect(await store.initializeOnboardingResume(ownerCapability())).toEqual({
+      ok: true,
+      status: "none",
+      durationMs: 0,
+    });
+    expect(boundary.receiptSetReads).toBe(0);
+  });
+
+  test("blocks fallback for mismatched, multiple, stale-revision, or wrong-hash reconciliation", async () => {
+    for (const reason of [
+      "receipt_mismatch",
+      "multiple_receipts",
+      "draft_revision_changed",
+      "result_hash_changed",
+    ]) {
+      const boundary = new SupabaseBoundaryFake();
+      boundary.rpcHandler = (name) => {
+        if (name === "initialize_onboarding_resume") {
+          return { data: null, error: { code: "P0002", message: "onboarding_resume_source_missing" } };
+        }
+        if (name === "read_company_discovery_onboarding_draft") return {
+          data: {
+            draft_id: "99999999-9999-4999-8999-999999999999",
+            draft_version: 1,
+            draft_hash: "d".repeat(64),
+            draft: {
+              schema_version: "company_discovery.onboarding_draft.v1",
+              source_job_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              source_attempt_id: "abababab-abab-4bab-8bab-abababababab",
+              source_result_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              source_result_hash: "c".repeat(64),
+              source_result_schema: "company_discovery.result.v2",
+              approved_facts: [], rejected_claim_ids: [], unresolved_items: [],
+              authority: { rules_approved: false, powers_granted: false, operational_mode_changed: false },
+            },
+          },
+          error: null,
+        };
+        if (name === "initialize_company_discovery_onboarding_prefill") {
+          return { data: null, error: { message: "network timeout" } };
+        }
+        if (name === "reconcile_company_discovery_onboarding_prefill") {
+          return { data: { status: "indeterminate", reason }, error: null };
+        }
+        return { data: null, error: { message: `unexpected ${name}` } };
+      };
+      const store = createOnboardingStore({ client: boundary.client() });
+      expect(await store.initializeOnboardingResume(ownerCapability())).toMatchObject({
+        ok: false,
+        code: "indeterminate",
+      });
+      expect(boundary.receiptSetReads).toBe(0);
     }
   });
 
@@ -886,6 +1093,92 @@ describe("recordOnboardingAnswer", () => {
       expect(fake.receiptSetReads).toBe(0);
       expect(fake.rpcCalls).toHaveLength(0);
     }
+  });
+
+  test("answers a Discovery global question through coverage without creating a materialization", async () => {
+    const field = "discovery.owner_question.99999999999949998999999999999999" as CoverageField;
+    const snapshot = createCoverage({ tenantId: TENANT_ID, callId: CALL_ID });
+    snapshot.revision = 1;
+    snapshot.cells[field] = {
+      state: "ambiguous",
+      attempts: 0,
+      reason: "company_discovery_missing_or_owner_private",
+      questionPt: "Qual é o limite privado?",
+    };
+    const progress = evaluateCoverage(snapshot);
+    const fake = new SupabaseBoundaryFake();
+    fake.receiptRows = [{
+      id: "44444444-4444-4444-8444-444444444440",
+      readback: {
+        schema_version: 2,
+        transition_kind: "discovery_prefill",
+        tenant_id: TENANT_ID,
+        call_id: CALL_ID,
+        revision: 1,
+        complete: false,
+        snapshot,
+        progress,
+        selected_rule_ids: [],
+        next_action: { type: "ask", field, question_pt: "Qual é o limite privado?" },
+        current_answer_hashes: { [field]: "a".repeat(64) },
+        materializations: materializeCoverage(snapshot, progress).rules,
+        summary_projection: null,
+        summary_hash: null,
+        snapshot_digest: "b".repeat(64),
+        authority: {
+          rules_approved: false,
+          powers_granted: false,
+          operational_mode_changed: false,
+        },
+      },
+    }];
+    fake.rpcResult = {
+      data: {
+        status: "recorded",
+        rule_id: null,
+        rule_group_id: null,
+        coverage_receipt_id: "44444444-4444-4444-8444-444444444441",
+        revision: 2,
+        snapshot_digest: "c".repeat(64),
+        complete: false,
+        missing: [],
+        ambiguous: [],
+        next_action: { type: "ask", field: "service.catalog_closure" },
+        coverage: {},
+      },
+      error: null,
+    };
+    const store = createOnboardingStore({
+      client: fake.client() as any,
+      now: () => 20,
+      timeoutMs: 100,
+    });
+
+    const result = await store.recordOnboardingAnswer(
+      ownerCapability(),
+      "provider-global-unresolved-answer",
+      {
+        topic: "outro",
+        field,
+        disposition: "answered",
+        rule_text: "Resposta privada do dono preservada apenas no onboarding.",
+        structured: { value: "Exige sempre minha aprovação." },
+        owner_words: "Isso sempre exige minha aprovação.",
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(fake.rpcCalls).toHaveLength(1);
+    expect(fake.rpcCalls[0]!.name).toBe("record_onboarding_answer");
+    expect(fake.rpcCalls[0]!.args.p_rule_group_id).toBeNull();
+    expect(fake.rpcCalls[0]!.args.p_fact).toMatchObject({ field });
+    const projection = fake.rpcCalls[0]!.args.p_coverage as any;
+    expect(projection.snapshot.cells[field]).toMatchObject({
+      state: "answered",
+      value: "Exige sempre minha aprovação.",
+    });
+    expect(projection.materializations.some((item: any) =>
+      item.source_refs?.includes(field))).toBe(false);
   });
 
   test("sends the exact first-revision RPC shape with controller-derived hashes and pure-engine coverage", async () => {

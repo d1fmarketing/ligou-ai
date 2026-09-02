@@ -133,7 +133,7 @@ export function materializationProvenance(
   };
 }
 
-const FIELD_LABELS: Record<CoverageField, string> = {
+const FIELD_LABELS: Partial<Record<CoverageField, string>> = {
   "business.customer_types": "Tipos de clientes",
   "business.excluded_work": "Serviços excluídos",
   "business.languages_tone": "Idioma e tom",
@@ -360,7 +360,7 @@ function entryFor(
     field: ref.field,
     ...(ref.subject ? { subject: ref.subject } : {}),
     disposition,
-    labelPt: FIELD_LABELS[ref.field],
+    labelPt: FIELD_LABELS[ref.field] ?? "Pergunta do dono",
     valuePt,
   };
 }

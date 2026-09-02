@@ -99,6 +99,19 @@ revoke all on table public.company_discovery_onboarding_drafts
 grant select on table public.company_discovery_onboarding_drafts
   to authenticated, service_role;
 
+alter table public.receipts drop constraint if exists receipts_kind_check;
+alter table public.receipts add constraint receipts_kind_check check (
+  kind in (
+    'booking', 'booking_cancel', 'rule_change', 'power_change', 'notification',
+    'onboarding_coverage', 'onboarding_voice_approval',
+    'onboarding_event_alias', 'onboarding_discovery_fallback'
+  )
+);
+
+create unique index receipts_onboarding_discovery_fallback_call_unique
+  on public.receipts (tenant_id, call_id)
+  where kind = 'onboarding_discovery_fallback';
+
 create or replace function public.company_discovery_v2_price_valid(
   p_value jsonb,
   p_nullable boolean default true
@@ -950,6 +963,7 @@ create or replace function public.review_company_discovery_claims_v2(
   p_result uuid,
   p_expected_version bigint,
   p_decisions jsonb,
+  p_unresolved_decisions jsonb,
   p_confirmation_nonce text
 ) returns jsonb
 language plpgsql
@@ -969,6 +983,21 @@ declare
   v_decision_id uuid;
   v_decision_ids uuid[] := '{}'::uuid[];
   v_decision_kind text;
+  v_unresolved_decision jsonb;
+  v_unresolved_expected integer;
+  v_unresolved_count integer;
+  v_unresolved_distinct integer;
+  v_source_kind text;
+  v_source_index integer;
+  v_source_text text;
+  v_unresolved_decision_kind text;
+  v_owner_response text;
+  v_question text;
+  v_source_claim_ids uuid[];
+  v_evidence_ids uuid[];
+  v_source_claim public.discovery_claims;
+  v_unresolved_id uuid;
+  v_coverage_field text;
   v_value jsonb;
   v_pending jsonb := '[]'::jsonb;
   v_approved jsonb := '[]'::jsonb;
@@ -1076,52 +1105,162 @@ begin
     'ligou.company_discovery.onboarding_draft:' || v_job.tenant_id::text,
     0
   ));
+  select coalesce(max(d.version), 0) + 1 into v_draft_version
+  from public.company_discovery_onboarding_drafts d
+  where d.tenant_id = v_job.tenant_id;
 
-  for v_item in
-    select value from jsonb_array_elements(
-      v_result.candidate_result->'missing_questions'
-    )
+  v_unresolved_expected :=
+    jsonb_array_length(v_result.candidate_result->'missing_questions') +
+    jsonb_array_length(v_result.candidate_result->'contradictions') +
+    jsonb_array_length(v_result.candidate_result->'uncertainty');
+  if jsonb_typeof(p_unresolved_decisions) <> 'array'
+     or jsonb_array_length(p_unresolved_decisions) <> v_unresolved_expected then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_unresolved_decision_set_mismatch';
+  end if;
+  select count(*), count(distinct (
+    item->>'source_kind', item->>'source_index'
+  )) into v_unresolved_count, v_unresolved_distinct
+  from jsonb_array_elements(p_unresolved_decisions) item;
+  if v_unresolved_count <> v_unresolved_expected
+     or v_unresolved_distinct <> v_unresolved_expected then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_unresolved_decision_set_mismatch';
+  end if;
+
+  for v_unresolved_decision in
+    select value from jsonb_array_elements(p_unresolved_decisions)
+    order by case value->>'source_kind'
+      when 'missing_question' then 0
+      when 'contradiction' then 1
+      when 'uncertainty' then 2
+      else 3
+    end, value->>'source_index'
   loop
+    if jsonb_typeof(v_unresolved_decision) <> 'object'
+       or (v_unresolved_decision - array[
+         'source_kind','source_index','source_text','decision','owner_response'
+       ]::text[]) <> '{}'::jsonb then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_unresolved_decision_schema_invalid';
+    end if;
+    v_source_kind := v_unresolved_decision->>'source_kind';
+    if v_source_kind not in (
+      'missing_question','contradiction','uncertainty'
+    ) or jsonb_typeof(v_unresolved_decision->'source_index') <> 'number'
+       or coalesce(v_unresolved_decision->>'source_index', '') !~ '^[0-9]+$'
+    then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_unresolved_decision_set_mismatch';
+    end if;
+    v_source_index := (v_unresolved_decision->>'source_index')::integer;
+    v_source_text := case v_source_kind
+      when 'missing_question' then
+        v_result.candidate_result->'missing_questions'->>v_source_index
+      when 'contradiction' then
+        v_result.candidate_result->'contradictions'->>v_source_index
+      when 'uncertainty' then
+        v_result.candidate_result->'uncertainty'->>v_source_index
+    end;
+    if v_source_text is null or v_unresolved_decision->>'source_text'
+         is distinct from v_source_text then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_unresolved_decision_set_mismatch';
+    end if;
+    v_unresolved_decision_kind := v_unresolved_decision->>'decision';
+    if v_unresolved_decision_kind not in (
+      'ask','answer','reject','not_applicable','defer'
+    ) then
+      raise exception using errcode = '22023',
+        message = 'company_discovery_unresolved_decision_invalid';
+    end if;
+    if v_unresolved_decision_kind = 'answer' then
+      if jsonb_typeof(v_unresolved_decision->'owner_response') <> 'string'
+         or length(regexp_replace(
+           v_unresolved_decision->>'owner_response',
+           '^[[:space:]]+|[[:space:]]+$', '', 'g'
+         )) not between 1 and 2000 then
+        raise exception using errcode = '22023',
+          message = 'company_discovery_unresolved_owner_response_invalid';
+      end if;
+      v_owner_response := v_unresolved_decision->>'owner_response';
+    else
+      if v_unresolved_decision->'owner_response' is distinct from 'null'::jsonb
+      then
+        raise exception using errcode = '22023',
+          message = 'company_discovery_unresolved_owner_response_invalid';
+      end if;
+      v_owner_response := null;
+    end if;
+
+    select coalesce(array_agg(c.id order by c.id), '{}'::uuid[])
+      into v_source_claim_ids
+    from public.discovery_claims c
+    where c.result_id = p_result
+      and c.claim_schema_version = 'company_discovery.claim.v2'
+      and (
+        (v_source_kind = 'contradiction'
+          and c.contradictions @> jsonb_build_array(to_jsonb(v_source_text)))
+        or (v_source_kind = 'uncertainty'
+          and c.uncertainty @> jsonb_build_array(to_jsonb(v_source_text)))
+      );
+    select coalesce(array_agg(distinct evidence_id order by evidence_id),
+        '{}'::uuid[])
+      into v_evidence_ids
+    from public.discovery_claims c
+    cross join unnest(c.evidence_refs) evidence_id
+    where c.id = any(v_source_claim_ids);
+    v_source_claim := null;
+    v_target := null;
+    if cardinality(v_source_claim_ids) = 1 then
+      select c.* into v_source_claim
+      from public.discovery_claims c
+      where c.id = v_source_claim_ids[1];
+      v_target := public.company_discovery_coverage_target_v1(
+        v_source_claim.claim_type, v_source_claim.normalized_value, null
+      );
+    end if;
+    v_unresolved_id := gen_random_uuid();
+    v_coverage_field := coalesce(
+      v_target->>'field',
+      'discovery.owner_question.' || replace(v_unresolved_id::text, '-', '')
+    );
+    v_question := case v_source_kind
+      when 'missing_question' then v_source_text
+      when 'contradiction' then
+        'Confirme esta contradição encontrada no site: ' || v_source_text
+      when 'uncertainty' then
+        'Confirme este ponto que o site deixou incerto: ' || v_source_text
+    end;
     v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
-      'reason', 'missing_or_owner_private',
+      'unresolved_id', v_unresolved_id,
+      'source_kind', v_source_kind,
+      'source_index', v_source_index,
+      'source_claim_ids', to_jsonb(v_source_claim_ids),
+      'evidence_refs', to_jsonb(v_evidence_ids),
+      'source_job_id', v_job.id,
+      'source_attempt_id', v_result.attempt_id,
+      'source_result_id', v_result.id,
+      'draft_revision', v_draft_version,
+      'review_status', case v_unresolved_decision_kind
+        when 'ask' then 'pending_onboarding'
+        when 'answer' then 'answered'
+        when 'reject' then 'rejected'
+        when 'not_applicable' then 'not_applicable'
+        when 'defer' then 'deferred'
+      end,
+      'owner_response', v_owner_response,
+      'reason', case v_source_kind
+        when 'missing_question' then 'missing_or_owner_private'
+        when 'contradiction' then 'contradiction'
+        when 'uncertainty' then 'operationally_incomplete'
+      end,
       'claim_id', null,
       'claim_type', null,
       'field', null,
-      'coverage_field', null,
-      'coverage_subject', null,
-      'question_pt', v_item #>> '{}'
-    ));
-  end loop;
-  for v_item in
-    select value from jsonb_array_elements(
-      v_result.candidate_result->'contradictions'
-    )
-  loop
-    v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
-      'reason', 'contradiction',
-      'claim_id', null,
-      'claim_type', null,
-      'field', null,
-      'coverage_field', null,
-      'coverage_subject', null,
-      'question_pt', 'Confirme esta contradição encontrada no site: ' ||
-        (v_item #>> '{}')
-    ));
-  end loop;
-  for v_item in
-    select value from jsonb_array_elements(
-      v_result.candidate_result->'uncertainty'
-    )
-  loop
-    v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
-      'reason', 'operationally_incomplete',
-      'claim_id', null,
-      'claim_type', null,
-      'field', null,
-      'coverage_field', null,
-      'coverage_subject', null,
-      'question_pt', 'Confirme este ponto que o site deixou incerto: ' ||
-        (v_item #>> '{}')
+      'coverage_field', v_coverage_field,
+      'coverage_subject', v_target->>'subject',
+      'question_pt', v_question
     ));
   end loop;
 
@@ -1275,12 +1414,28 @@ begin
       v_target := public.company_discovery_coverage_target_v1(
         v_claim.claim_type, v_claim.normalized_value, null
       );
+      v_unresolved_id := gen_random_uuid();
+      v_coverage_field := coalesce(
+        v_target->>'field',
+        'discovery.owner_question.' || replace(v_unresolved_id::text, '-', '')
+      );
       v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
+        'unresolved_id', v_unresolved_id,
+        'source_kind', 'claim_rejection',
+        'source_index', null,
+        'source_claim_ids', jsonb_build_array(v_claim.id),
+        'evidence_refs', to_jsonb(v_claim.evidence_refs),
+        'source_job_id', v_job.id,
+        'source_attempt_id', v_result.attempt_id,
+        'source_result_id', v_result.id,
+        'draft_revision', v_draft_version,
+        'review_status', 'pending_onboarding',
+        'owner_response', null,
         'reason', 'rejected',
         'claim_id', v_claim.id,
         'claim_type', v_claim.claim_type,
         'field', null,
-        'coverage_field', v_target->>'field',
+        'coverage_field', v_coverage_field,
         'coverage_subject', v_target->>'subject',
         'question_pt', format(
           'Você rejeitou a sugestão de %s do site. Qual é a informação correta?',
@@ -1318,12 +1473,28 @@ begin
       v_target := public.company_discovery_coverage_target_v1(
         v_claim.claim_type, v_value, v_field
       );
+      v_unresolved_id := gen_random_uuid();
+      v_coverage_field := coalesce(
+        v_target->>'field',
+        'discovery.owner_question.' || replace(v_unresolved_id::text, '-', '')
+      );
       v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
+        'unresolved_id', v_unresolved_id,
+        'source_kind', 'claim_gap',
+        'source_index', null,
+        'source_claim_ids', jsonb_build_array(v_claim.id),
+        'evidence_refs', to_jsonb(v_claim.evidence_refs),
+        'source_job_id', v_job.id,
+        'source_attempt_id', v_result.attempt_id,
+        'source_result_id', v_result.id,
+        'draft_revision', v_draft_version,
+        'review_status', 'pending_onboarding',
+        'owner_response', null,
         'reason', 'missing_field',
         'claim_id', v_claim.id,
         'claim_type', v_claim.claim_type,
         'field', v_field,
-        'coverage_field', v_target->>'field',
+        'coverage_field', v_coverage_field,
         'coverage_subject', v_target->>'subject',
         'question_pt', format(
           'O site não informou %s para %s. Qual é a resposta correta?',
@@ -1337,12 +1508,28 @@ begin
       v_target := public.company_discovery_coverage_target_v1(
         v_claim.claim_type, v_value, v_field
       );
+      v_unresolved_id := gen_random_uuid();
+      v_coverage_field := coalesce(
+        v_target->>'field',
+        'discovery.owner_question.' || replace(v_unresolved_id::text, '-', '')
+      );
       v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
+        'unresolved_id', v_unresolved_id,
+        'source_kind', 'claim_gap',
+        'source_index', null,
+        'source_claim_ids', jsonb_build_array(v_claim.id),
+        'evidence_refs', to_jsonb(v_claim.evidence_refs),
+        'source_job_id', v_job.id,
+        'source_attempt_id', v_result.attempt_id,
+        'source_result_id', v_result.id,
+        'draft_revision', v_draft_version,
+        'review_status', 'pending_onboarding',
+        'owner_response', null,
         'reason', 'ambiguous_field',
         'claim_id', v_claim.id,
         'claim_type', v_claim.claim_type,
         'field', v_field,
-        'coverage_field', v_target->>'field',
+        'coverage_field', v_coverage_field,
         'coverage_subject', v_target->>'subject',
         'question_pt', format(
           'O site deixou %s ambíguo em %s. Como devemos registrar isso?',
@@ -1352,15 +1539,35 @@ begin
     end loop;
     for v_item in select value from jsonb_array_elements(v_effective_contradictions)
     loop
+      if v_result.candidate_result->'contradictions' @>
+           jsonb_build_array(v_item) then
+        continue;
+      end if;
       v_target := public.company_discovery_coverage_target_v1(
         v_claim.claim_type, v_value, null
       );
+      v_unresolved_id := gen_random_uuid();
+      v_coverage_field := coalesce(
+        v_target->>'field',
+        'discovery.owner_question.' || replace(v_unresolved_id::text, '-', '')
+      );
       v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
+        'unresolved_id', v_unresolved_id,
+        'source_kind', 'claim_gap',
+        'source_index', null,
+        'source_claim_ids', jsonb_build_array(v_claim.id),
+        'evidence_refs', to_jsonb(v_claim.evidence_refs),
+        'source_job_id', v_job.id,
+        'source_attempt_id', v_result.attempt_id,
+        'source_result_id', v_result.id,
+        'draft_revision', v_draft_version,
+        'review_status', 'pending_onboarding',
+        'owner_response', null,
         'reason', 'contradiction',
         'claim_id', v_claim.id,
         'claim_type', v_claim.claim_type,
         'field', null,
-        'coverage_field', v_target->>'field',
+        'coverage_field', v_coverage_field,
         'coverage_subject', v_target->>'subject',
         'question_pt', 'Confirme esta contradição encontrada no site: ' ||
           (v_item #>> '{}')
@@ -1368,15 +1575,35 @@ begin
     end loop;
     for v_item in select value from jsonb_array_elements(v_effective_uncertainty)
     loop
+      if v_result.candidate_result->'uncertainty' @>
+           jsonb_build_array(v_item) then
+        continue;
+      end if;
       v_target := public.company_discovery_coverage_target_v1(
         v_claim.claim_type, v_value, null
       );
+      v_unresolved_id := gen_random_uuid();
+      v_coverage_field := coalesce(
+        v_target->>'field',
+        'discovery.owner_question.' || replace(v_unresolved_id::text, '-', '')
+      );
       v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
+        'unresolved_id', v_unresolved_id,
+        'source_kind', 'claim_gap',
+        'source_index', null,
+        'source_claim_ids', jsonb_build_array(v_claim.id),
+        'evidence_refs', to_jsonb(v_claim.evidence_refs),
+        'source_job_id', v_job.id,
+        'source_attempt_id', v_result.attempt_id,
+        'source_result_id', v_result.id,
+        'draft_revision', v_draft_version,
+        'review_status', 'pending_onboarding',
+        'owner_response', null,
         'reason', 'operationally_incomplete',
         'claim_id', v_claim.id,
         'claim_type', v_claim.claim_type,
         'field', null,
-        'coverage_field', v_target->>'field',
+        'coverage_field', v_coverage_field,
         'coverage_subject', v_target->>'subject',
         'question_pt', 'Confirme este ponto que o site deixou incerto: ' ||
           (v_item #>> '{}')
@@ -1385,13 +1612,13 @@ begin
     v_reviewed := v_reviewed + 1;
   end loop;
 
-  select coalesce(max(d.version), 0) + 1 into v_draft_version
-  from public.company_discovery_onboarding_drafts d
-  where d.tenant_id = v_job.tenant_id;
   v_draft := jsonb_build_object(
     'schema_version', 'company_discovery.onboarding_draft.v1',
     'source_job_id', v_job.id,
+    'source_attempt_id', v_result.attempt_id,
     'source_result_id', p_result,
+    'source_result_hash', v_result.result_hash,
+    'source_result_schema', v_result.result_schema,
     'approved_facts', v_approved,
     'rejected_claim_ids', v_rejected,
     'unresolved_items', v_unresolved,
@@ -1462,10 +1689,10 @@ end;
 $$;
 
 revoke all on function public.review_company_discovery_claims_v2(
-  uuid,uuid,bigint,jsonb,text
+  uuid,uuid,bigint,jsonb,jsonb,text
 ) from public, anon, authenticated, service_role;
 grant execute on function public.review_company_discovery_claims_v2(
-  uuid,uuid,bigint,jsonb,text
+  uuid,uuid,bigint,jsonb,jsonb,text
 ) to authenticated;
 
 create or replace function public.read_company_discovery_onboarding_draft(
@@ -1529,7 +1756,10 @@ declare
   v_role text;
   v_request_id uuid;
   v_draft public.company_discovery_onboarding_drafts;
+  v_job public.worker_jobs;
+  v_result public.worker_results;
   v_latest_draft_id uuid;
+  v_fallback public.receipts;
   v_existing public.receipts;
   v_receipt_id uuid;
   v_readback jsonb;
@@ -1598,6 +1828,63 @@ begin
     raise exception using errcode = '40001',
       message = 'company_discovery_onboarding_draft_changed';
   end if;
+  select j.* into v_job
+  from public.worker_jobs j
+  where j.id = v_draft.source_job_id
+    and j.tenant_id = p_tenant
+    and j.status = 'reviewed';
+  if v_job.id is null then
+    raise exception using errcode = '40001',
+      message = 'company_discovery_onboarding_draft_changed';
+  end if;
+  select wr.* into v_result
+  from public.worker_results wr
+  where wr.id = v_draft.source_result_id
+    and wr.job_id = v_job.id
+    and wr.tenant_id = p_tenant
+    and wr.attempt_id = v_job.selected_attempt_id
+    and wr.validation_state = 'validated'
+    and wr.result_schema = 'company_discovery.result.v2';
+  if v_result.id is null then
+    raise exception using errcode = '40001',
+      message = 'company_discovery_onboarding_draft_changed';
+  end if;
+
+  select r.* into v_fallback
+  from public.receipts r
+  where r.tenant_id = p_tenant
+    and r.call_id = p_target_call
+    and r.kind = 'onboarding_discovery_fallback'
+  limit 1;
+  if v_fallback.id is not null then
+    if v_fallback.readback is not distinct from jsonb_build_object(
+      'schema_version', 'company_discovery.onboarding_fallback.v1',
+      'tenant_id', p_tenant,
+      'call_id', p_target_call,
+      'owner_id', p_owner,
+      'draft_id', v_draft.id,
+      'draft_version', v_draft.version,
+      'draft_hash', v_draft.draft_hash,
+      'source_job_id', v_job.id,
+      'source_attempt_id', v_result.attempt_id,
+      'source_result_id', v_result.id,
+      'source_result_hash', v_result.result_hash,
+      'source_result_schema', v_result.result_schema,
+      'reason', 'prefill_not_committed_after_locked_reconciliation',
+      'authority', jsonb_build_object(
+        'rules_approved', false,
+        'powers_granted', false,
+        'operational_mode_changed', false
+      )
+    ) then
+      return jsonb_build_object(
+        'status', 'safe_fallback',
+        'reason', 'prefill_not_committed_after_locked_reconciliation'
+      );
+    end if;
+    raise exception using errcode = '55000',
+      message = 'company_discovery_onboarding_prefill_fallback_mismatch';
+  end if;
 
   select r.* into v_existing
   from public.receipts r
@@ -1613,6 +1900,19 @@ begin
          = p_draft::text
        and v_existing.readback->'discovery_context'->>'draft_hash'
          = v_draft.draft_hash then
+      if v_existing.readback->'discovery_context'->>'source_job_id'
+           is distinct from v_job.id::text
+         or v_existing.readback->'discovery_context'->>'source_attempt_id'
+           is distinct from v_result.attempt_id::text
+         or v_existing.readback->'discovery_context'->>'source_result_id'
+           is distinct from v_result.id::text
+         or v_existing.readback->'discovery_context'->>'source_result_hash'
+           is distinct from v_result.result_hash
+         or v_existing.readback->'discovery_context'->>'source_result_schema'
+           is distinct from v_result.result_schema then
+        raise exception using errcode = '55000',
+          message = 'company_discovery_onboarding_prefill_not_empty';
+      end if;
       return jsonb_build_object(
         'status', 'reused',
         'draft_id', p_draft,
@@ -1681,12 +1981,15 @@ begin
        'powers_granted', false,
        'operational_mode_changed', false
      )
-     or p_coverage->'discovery_context' is distinct from jsonb_build_object(
+    or p_coverage->'discovery_context' is distinct from jsonb_build_object(
        'draft_id', v_draft.id,
        'draft_version', v_draft.version,
        'draft_hash', v_draft.draft_hash,
-       'source_job_id', v_draft.source_job_id,
-       'source_result_id', v_draft.source_result_id
+       'source_job_id', v_job.id,
+       'source_attempt_id', v_result.attempt_id,
+       'source_result_id', v_result.id,
+       'source_result_hash', v_result.result_hash,
+       'source_result_schema', v_result.result_schema
      ) then
     raise exception using errcode = '22023',
       message = 'company_discovery_onboarding_prefill_invalid';
@@ -1727,6 +2030,11 @@ begin
       'draft_id', v_draft.id,
       'draft_version', v_draft.version,
       'draft_hash', v_draft.draft_hash,
+      'source_job_id', v_job.id,
+      'source_attempt_id', v_result.attempt_id,
+      'source_result_id', v_result.id,
+      'source_result_hash', v_result.result_hash,
+      'source_result_schema', v_result.result_schema,
       'browser_request_id', v_request_id,
       'owner_id', p_owner
     )
@@ -1749,6 +2057,315 @@ revoke all on function public.initialize_company_discovery_onboarding_prefill(
 ) from public, anon, authenticated, service_role;
 grant execute on function public.initialize_company_discovery_onboarding_prefill(
   uuid,uuid,uuid,uuid,jsonb
+) to service_role;
+
+create or replace function public.reconcile_company_discovery_onboarding_prefill(
+  p_tenant uuid,
+  p_target_call uuid,
+  p_owner uuid,
+  p_draft uuid,
+  p_expected_draft_version bigint,
+  p_expected_draft_hash text,
+  p_source_job uuid,
+  p_source_attempt uuid,
+  p_source_result uuid,
+  p_expected_result_hash text,
+  p_expected_result_schema text
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_role text;
+  v_request_id uuid;
+  v_draft public.company_discovery_onboarding_drafts;
+  v_latest_draft_id uuid;
+  v_job public.worker_jobs;
+  v_result public.worker_results;
+  v_coverage_count integer;
+  v_fallback_count integer;
+  v_receipt public.receipts;
+  v_fallback public.receipts;
+  v_readback jsonb;
+  v_external_id text;
+  v_payload_hash text;
+begin
+  v_role := coalesce(
+    nullif(current_setting('request.jwt.claim.role', true), ''),
+    nullif(auth.jwt()->>'role', '')
+  );
+  if v_role is distinct from 'service_role' then
+    raise exception using errcode = '42501', message = 'service_role_required';
+  end if;
+  if p_tenant is null or p_target_call is null or p_owner is null
+     or p_draft is null or p_expected_draft_version is null
+     or p_expected_draft_version < 1 or p_source_job is null
+     or p_source_attempt is null or p_source_result is null
+     or coalesce(p_expected_draft_hash ~ '^[0-9a-f]{64}$', false) = false
+     or coalesce(p_expected_result_hash ~ '^[0-9a-f]{64}$', false) = false
+     or p_expected_result_schema <> 'company_discovery.result.v2' then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_onboarding_reconciliation_scope_invalid';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'ligou.company_discovery.onboarding_draft:' || p_tenant::text,
+    0
+  ));
+  perform pg_advisory_xact_lock(hashtextextended(
+    'ligou.company_discovery.onboarding_prefill:' ||
+      p_tenant::text || ':' || p_target_call::text,
+    0
+  ));
+  select br.id into v_request_id
+  from public.calls c
+  join public.tenants t
+    on t.id = c.tenant_id
+   and t.id = p_tenant
+   and t.owner_user_id = p_owner
+   and t.status = 'onboarding'
+   and t.operational_mode = 'simulation_only'
+  join public.browser_session_requests br
+    on br.tenant_id = t.id
+   and br.call_id = c.id
+   and br.user_id = p_owner
+   and br.session_type = 'onboarding'
+   and br.status = 'ready'
+  where c.id = p_target_call
+    and c.tenant_id = p_tenant
+    and c.channel = 'browser'
+    and c.session_type = 'onboarding'
+    and c.status = 'active'
+  order by br.handled_at desc nulls last,
+    br.created_at desc, br.id desc
+  limit 1
+  for update of c, t, br;
+  if v_request_id is null then
+    raise exception using errcode = '42501',
+      message = 'onboarding_call_not_owner_bound';
+  end if;
+
+  select d.* into v_draft
+  from public.company_discovery_onboarding_drafts d
+  where d.id = p_draft and d.tenant_id = p_tenant;
+  select d.id into v_latest_draft_id
+  from public.company_discovery_onboarding_drafts d
+  where d.tenant_id = p_tenant
+  order by d.version desc, d.created_at desc, d.id desc
+  limit 1;
+  if v_draft.id is null or v_latest_draft_id is distinct from v_draft.id
+     or v_draft.version is distinct from p_expected_draft_version then
+    return jsonb_build_object(
+      'status', 'indeterminate', 'reason', 'draft_revision_changed'
+    );
+  end if;
+  if v_draft.draft_hash is distinct from p_expected_draft_hash then
+    return jsonb_build_object(
+      'status', 'indeterminate', 'reason', 'draft_hash_changed'
+    );
+  end if;
+  if v_draft.created_by is distinct from p_owner
+     or v_draft.source_job_id is distinct from p_source_job
+     or v_draft.source_result_id is distinct from p_source_result then
+    return jsonb_build_object(
+      'status', 'indeterminate', 'reason', 'source_identity_changed'
+    );
+  end if;
+  select j.* into v_job
+  from public.worker_jobs j
+  where j.id = p_source_job
+    and j.tenant_id = p_tenant
+    and j.status = 'reviewed'
+    and j.selected_attempt_id = p_source_attempt;
+  if v_job.id is null then
+    return jsonb_build_object(
+      'status', 'indeterminate', 'reason', 'source_identity_changed'
+    );
+  end if;
+  select wr.* into v_result
+  from public.worker_results wr
+  where wr.id = p_source_result
+    and wr.tenant_id = p_tenant
+    and wr.job_id = p_source_job
+    and wr.attempt_id = p_source_attempt
+    and wr.validation_state = 'validated'
+    and wr.result_schema = p_expected_result_schema;
+  if v_result.id is null then
+    return jsonb_build_object(
+      'status', 'indeterminate', 'reason', 'source_identity_changed'
+    );
+  end if;
+  if v_result.result_hash is distinct from p_expected_result_hash then
+    return jsonb_build_object(
+      'status', 'indeterminate', 'reason', 'result_hash_changed'
+    );
+  end if;
+
+  select count(*) into v_coverage_count
+  from public.receipts r
+  where r.tenant_id = p_tenant
+    and r.call_id = p_target_call
+    and r.kind = 'onboarding_coverage';
+  select count(*) into v_fallback_count
+  from public.receipts r
+  where r.tenant_id = p_tenant
+    and r.call_id = p_target_call
+    and r.kind = 'onboarding_discovery_fallback';
+  if v_coverage_count + v_fallback_count > 1 then
+    return jsonb_build_object(
+      'status', 'indeterminate', 'reason', 'multiple_receipts'
+    );
+  end if;
+  if v_coverage_count = 1 then
+    select r.* into v_receipt
+    from public.receipts r
+    where r.tenant_id = p_tenant
+      and r.call_id = p_target_call
+      and r.kind = 'onboarding_coverage'
+    limit 1;
+    if v_receipt.readback->'schema_version' is distinct from '2'::jsonb
+       or v_receipt.readback->>'transition_kind' <> 'discovery_prefill'
+       or v_receipt.readback->>'revision' <> '1'
+       or coalesce(
+         v_receipt.readback->>'snapshot_digest' ~ '^[0-9a-f]{64}$', false
+       ) = false
+       or v_receipt.readback->'discovery_context' is distinct from
+         jsonb_build_object(
+           'draft_id', v_draft.id,
+           'draft_version', v_draft.version,
+           'draft_hash', v_draft.draft_hash,
+           'source_job_id', v_job.id,
+           'source_attempt_id', v_result.attempt_id,
+           'source_result_id', v_result.id,
+           'source_result_hash', v_result.result_hash,
+           'source_result_schema', v_result.result_schema
+         )
+       or v_receipt.detail->>'owner_id' is distinct from p_owner::text
+       or v_receipt.detail->>'draft_id' is distinct from v_draft.id::text
+       or (v_receipt.detail->>'draft_version')::bigint
+         is distinct from v_draft.version
+       or v_receipt.detail->>'draft_hash' is distinct from v_draft.draft_hash
+       or v_receipt.detail->>'source_job_id' is distinct from v_job.id::text
+       or v_receipt.detail->>'source_attempt_id'
+         is distinct from v_result.attempt_id::text
+       or v_receipt.detail->>'source_result_id' is distinct from v_result.id::text
+       or v_receipt.detail->>'source_result_hash'
+         is distinct from v_result.result_hash
+       or v_receipt.detail->>'source_result_schema'
+         is distinct from v_result.result_schema then
+      return jsonb_build_object(
+        'status', 'indeterminate', 'reason', 'receipt_mismatch'
+      );
+    end if;
+    return jsonb_build_object(
+      'status', 'reused',
+      'draft_id', v_draft.id,
+      'draft_hash', v_draft.draft_hash,
+      'coverage_receipt_id', v_receipt.id,
+      'revision', 1,
+      'snapshot_digest', v_receipt.readback->>'snapshot_digest',
+      'next_action', v_receipt.readback->'next_action',
+      'coverage', v_receipt.readback
+    );
+  end if;
+  if v_fallback_count = 1 then
+    select r.* into v_fallback
+    from public.receipts r
+    where r.tenant_id = p_tenant
+      and r.call_id = p_target_call
+      and r.kind = 'onboarding_discovery_fallback'
+    limit 1;
+    if v_fallback.readback is distinct from jsonb_build_object(
+      'schema_version', 'company_discovery.onboarding_fallback.v1',
+      'tenant_id', p_tenant,
+      'call_id', p_target_call,
+      'owner_id', p_owner,
+      'draft_id', v_draft.id,
+      'draft_version', v_draft.version,
+      'draft_hash', v_draft.draft_hash,
+      'source_job_id', v_job.id,
+      'source_attempt_id', v_result.attempt_id,
+      'source_result_id', v_result.id,
+      'source_result_hash', v_result.result_hash,
+      'source_result_schema', v_result.result_schema,
+      'reason', 'prefill_not_committed_after_locked_reconciliation',
+      'authority', jsonb_build_object(
+        'rules_approved', false,
+        'powers_granted', false,
+        'operational_mode_changed', false
+      )
+    ) then
+      return jsonb_build_object(
+        'status', 'indeterminate', 'reason', 'receipt_mismatch'
+      );
+    end if;
+    return jsonb_build_object(
+      'status', 'safe_fallback',
+      'reason', 'prefill_not_committed_after_locked_reconciliation'
+    );
+  end if;
+
+  v_readback := jsonb_build_object(
+    'schema_version', 'company_discovery.onboarding_fallback.v1',
+    'tenant_id', p_tenant,
+    'call_id', p_target_call,
+    'owner_id', p_owner,
+    'draft_id', v_draft.id,
+    'draft_version', v_draft.version,
+    'draft_hash', v_draft.draft_hash,
+    'source_job_id', v_job.id,
+    'source_attempt_id', v_result.attempt_id,
+    'source_result_id', v_result.id,
+    'source_result_hash', v_result.result_hash,
+    'source_result_schema', v_result.result_schema,
+    'reason', 'prefill_not_committed_after_locked_reconciliation',
+    'authority', jsonb_build_object(
+      'rules_approved', false,
+      'powers_granted', false,
+      'operational_mode_changed', false
+    )
+  );
+  v_external_id := encode(extensions.digest(convert_to(
+    'ligou.company_discovery.onboarding_fallback:v1:' ||
+      p_tenant::text || ':' || p_target_call::text || ':' ||
+      v_draft.id::text || ':' || v_draft.draft_hash,
+    'utf8'
+  ), 'sha256'), 'hex');
+  v_payload_hash := encode(extensions.digest(
+    convert_to(v_readback::text, 'utf8'), 'sha256'
+  ), 'hex');
+  insert into public.receipts (
+    tenant_id, call_id, kind, outcome, external_id,
+    readback, payload_hash, detail
+  ) values (
+    p_tenant, p_target_call, 'onboarding_discovery_fallback', 'accepted',
+    v_external_id, v_readback, v_payload_hash,
+    jsonb_build_object(
+      'browser_request_id', v_request_id,
+      'owner_id', p_owner,
+      'draft_id', v_draft.id,
+      'draft_version', v_draft.version,
+      'draft_hash', v_draft.draft_hash,
+      'source_job_id', v_job.id,
+      'source_attempt_id', v_result.attempt_id,
+      'source_result_id', v_result.id,
+      'source_result_hash', v_result.result_hash,
+      'source_result_schema', v_result.result_schema,
+      'reason', 'prefill_not_committed_after_locked_reconciliation'
+    )
+  );
+  return jsonb_build_object(
+    'status', 'safe_fallback',
+    'reason', 'prefill_not_committed_after_locked_reconciliation'
+  );
+end;
+$$;
+
+revoke all on function public.reconcile_company_discovery_onboarding_prefill(
+  uuid,uuid,uuid,uuid,bigint,text,uuid,uuid,uuid,text,text
+) from public, anon, authenticated, service_role;
+grant execute on function public.reconcile_company_discovery_onboarding_prefill(
+  uuid,uuid,uuid,uuid,bigint,text,uuid,uuid,uuid,text,text
 ) to service_role;
 
 alter table public.receipts
@@ -2063,3 +2680,31 @@ create trigger company_discovery_subscription_analyzing_stage
 create trigger company_discovery_result_review_stage
   after insert on public.worker_results
   for each row execute function public.mark_company_discovery_result_review_ready();
+
+alter function public.onboarding_answer_value_valid_v2(text,jsonb)
+  rename to onboarding_answer_value_valid_v2_base;
+
+revoke all on function public.onboarding_answer_value_valid_v2_base(text,jsonb)
+  from public, anon, authenticated, service_role;
+
+create function public.onboarding_answer_value_valid_v2(
+  p_field text,
+  p_value jsonb
+) returns boolean
+language plpgsql
+stable
+set search_path = ''
+as $$
+begin
+  if p_field ~ '^discovery[.]owner_question[.][0-9a-f]{32}$' then
+    return jsonb_typeof(p_value) = 'string'
+      and length(regexp_replace(
+        p_value #>> '{}', '^[[:space:]]+|[[:space:]]+$', '', 'g'
+      )) between 1 and 2000;
+  end if;
+  return public.onboarding_answer_value_valid_v2_base(p_field, p_value);
+end;
+$$;
+
+revoke all on function public.onboarding_answer_value_valid_v2(text,jsonb)
+  from public, anon, authenticated, service_role;

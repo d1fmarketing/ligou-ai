@@ -74,7 +74,7 @@ select extensions.ok(
       ('reset_owner_test_memory()'),
       ('retry_company_discovery(uuid,bigint)'),
       ('review_company_discovery_claims(uuid,uuid,bigint,jsonb,text)'),
-      ('review_company_discovery_claims_v2(uuid,uuid,bigint,jsonb,text)'),
+      ('review_company_discovery_claims_v2(uuid,uuid,bigint,jsonb,jsonb,text)'),
       ('revoke_power(uuid)'),
       ('revoke_rule(uuid,text)'),
       ('submit_company_discovery(text,text)')
@@ -126,6 +126,7 @@ select extensions.ok(
       ('heartbeat_phone_sideband(uuid,uuid)'),
       ('initialize_onboarding_resume(uuid,uuid,uuid)'),
       ('initialize_company_discovery_onboarding_prefill(uuid,uuid,uuid,uuid,jsonb)'),
+      ('reconcile_company_discovery_onboarding_prefill(uuid,uuid,uuid,uuid,bigint,text,uuid,uuid,uuid,text,text)'),
       ('prepare_booking_provider_write(uuid,uuid)'),
       ('persist_phone_call(uuid,uuid,uuid,text)'),
       ('finalize_phone_sideband(uuid,uuid,jsonb)'),

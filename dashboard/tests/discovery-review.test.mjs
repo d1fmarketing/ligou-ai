@@ -440,6 +440,101 @@ test("maps Stage 0B claims into the seven product groups and retains gap metadat
   assert.equal(hours.model, "gpt-5.6-sol");
   assert.deepEqual(review.questionsStillMissing, ["Qual é o preço mínimo privado?"]);
   assert.deepEqual(review.contradictions, ["O rodapé e a página de contato mostram horários diferentes."]);
+  assert.deepEqual(review.globalUnresolved.map((item) => ({
+    sourceKind: item.sourceKind,
+    sourceIndex: item.sourceIndex,
+    sourceText: item.sourceText,
+    question: item.question,
+  })), [
+    {
+      sourceKind: "missing_question",
+      sourceIndex: 0,
+      sourceText: "Qual é o preço mínimo privado?",
+      question: "Qual é o preço mínimo privado?",
+    },
+    {
+      sourceKind: "contradiction",
+      sourceIndex: 0,
+      sourceText: "O rodapé e a página de contato mostram horários diferentes.",
+      question: "Confirme esta contradição encontrada no site: O rodapé e a página de contato mostram horários diferentes.",
+    },
+  ]);
+});
+
+test("Stage 0B sends one complete owner decision for every global unresolved item", () => {
+  const review = mapDiscoveryRead(stage0bRows());
+  let state = createDiscoveryReviewState(review);
+  for (const group of review.groups) {
+    for (const claim of group.claims) {
+      state = discoveryReviewReducer(state, {
+        type: "decide", claimId: claim.id, decision: "approve",
+      });
+      if (group.id === "safety") state = discoveryReviewReducer(state, {
+        type: "ackEvidence", claimId: claim.id, checked: true,
+      });
+    }
+    state = discoveryReviewReducer(state, {
+      type: "confirm", group: group.id, checked: true,
+    });
+  }
+  const [missing, contradiction] = review.globalUnresolved;
+  state = discoveryReviewReducer(state, {
+    type: "decideUnresolved", itemId: missing.id, decision: "answer",
+  });
+  state = discoveryReviewReducer(state, {
+    type: "editUnresolved", itemId: missing.id,
+    value: "O preço mínimo é privado e cada exceção exige minha aprovação.",
+  });
+  state = discoveryReviewReducer(state, {
+    type: "decideUnresolved", itemId: contradiction.id, decision: "reject",
+  });
+
+  const request = buildDiscoveryReviewRequest(review, state, "nonce");
+
+  assert.deepEqual(request.p_unresolved_decisions, [
+    {
+      source_kind: "missing_question",
+      source_index: 0,
+      source_text: "Qual é o preço mínimo privado?",
+      decision: "answer",
+      owner_response: "O preço mínimo é privado e cada exceção exige minha aprovação.",
+    },
+    {
+      source_kind: "contradiction",
+      source_index: 0,
+      source_text: "O rodapé e a página de contato mostram horários diferentes.",
+      decision: "reject",
+      owner_response: null,
+    },
+  ]);
+  assert.equal(request.p_decisions.length, 7);
+});
+
+test("Stage 0B blocks an empty owner resolution before requesting a nonce", () => {
+  const review = mapDiscoveryRead(stage0bRows());
+  let state = createDiscoveryReviewState(review);
+  for (const group of review.groups) {
+    for (const claim of group.claims) {
+      state = discoveryReviewReducer(state, {
+        type: "decide", claimId: claim.id, decision: "approve",
+      });
+      if (group.id === "safety") state = discoveryReviewReducer(state, {
+        type: "ackEvidence", claimId: claim.id, checked: true,
+      });
+    }
+    state = discoveryReviewReducer(state, {
+      type: "confirm", group: group.id, checked: true,
+    });
+  }
+  state = discoveryReviewReducer(state, {
+    type: "decideUnresolved",
+    itemId: review.globalUnresolved[0].id,
+    decision: "answer",
+  });
+  assert.throws(
+    () => buildDiscoveryReviewRequest(review, state, "nonce"),
+    /Escreva a resposta do dono/,
+  );
 });
 
 test("Stage 0B requires a scoped confirmation for every accepted group", () => {
@@ -1139,6 +1234,11 @@ test("the Stage 0B component renders semantic groups, draft-only authority, cont
     "Contradições",
     "Perguntas que ainda faltam",
     "Qual é o preço mínimo privado?",
+    "Levar para a entrevista",
+    "Responder agora",
+    "Rejeitar sugestão",
+    "Não se aplica",
+    "Adiar para revisão do dono",
   ]) assert.match(html, new RegExp(visible.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.doesNotMatch(html, /Regra da Ligou/);
   assert.doesNotMatch(html, /Preço mínimo.*Aprovar/);

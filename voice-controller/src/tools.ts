@@ -235,7 +235,16 @@ const allToolSchemas = [
       additionalProperties: false,
       properties: {
         topic: { type: "string", enum: ["servicos", "area", "precos", "agenda", "emergencia", "outro"] },
-        field: { type: "string", enum: ONBOARDING_COVERAGE_FIELDS },
+        field: {
+          anyOf: [
+            { type: "string", enum: ONBOARDING_COVERAGE_FIELDS },
+            {
+              type: "string",
+              pattern: "^discovery[.]owner_question[.][0-9a-f]{32}$",
+            },
+          ],
+          description: "Application-selected coverage field. Dynamic discovery.owner_question IDs are copied exactly from next_action and never chosen by the model.",
+        },
         subject: { type: "string", description: "Top-level normalized service identifier required for every service.* field; omit for service.catalog_closure and non-service fields." },
         disposition: { type: "string", enum: ["answered", "not_applicable", "owner_review_required"] },
         rule_text: { type: "string", description: "short evidence paraphrase only; the server never uses this model-authored text as operational policy" },

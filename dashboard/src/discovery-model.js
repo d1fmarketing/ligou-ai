@@ -387,6 +387,45 @@ export function mapDiscoveryRead({
     question: String(question),
     approvable: false,
   }));
+  const globalUnresolved = stage0b ? [
+    ...asArray(exactResult.candidate_result?.missing_questions).map((value, index) => ({
+      sourceKind: "missing_question",
+      sourceIndex: index,
+      sourceText: String(value),
+      question: String(value),
+    })),
+    ...asArray(exactResult.candidate_result?.contradictions).map((value, index) => ({
+      sourceKind: "contradiction",
+      sourceIndex: index,
+      sourceText: String(value),
+      question: `Confirme esta contradição encontrada no site: ${String(value)}`,
+    })),
+    ...asArray(exactResult.candidate_result?.uncertainty).map((value, index) => ({
+      sourceKind: "uncertainty",
+      sourceIndex: index,
+      sourceText: String(value),
+      question: `Confirme este ponto que o site deixou incerto: ${String(value)}`,
+    })),
+  ].map((item) => {
+    const relatedClaims = mappedClaims.filter((claim) =>
+      item.sourceKind === "contradiction"
+        ? claim.contradictions.includes(item.sourceText)
+        : item.sourceKind === "uncertainty"
+          ? claim.uncertainty.includes(item.sourceText)
+          : false
+    );
+    const evidenceRefs = [...new Set(relatedClaims.flatMap((claim) => claim.evidenceRefs))]
+      .sort();
+    return {
+      ...item,
+      id: `global-${item.sourceKind}-${item.sourceIndex}`,
+      sourceClaimIds: relatedClaims.map((claim) => claim.id).sort(),
+      evidenceRefs,
+      evidence: evidenceRefs.map((id) => sourceById.get(id)).filter(Boolean)
+        .sort((left, right) => left.crawl_order - right.crawl_order)
+        .map(evidenceProjection),
+    };
+  }) : [];
   const unknownClaims = mappedClaims.filter((claim) => stage0b
     ? !stage0bGroupId({ claim_class: claim.class, claim_type: claim.type })
     : !CLASS_TO_LEGACY_GROUP[claim.class]);
@@ -412,6 +451,7 @@ export function mapDiscoveryRead({
     },
     groups,
     privateQuestions,
+    globalUnresolved,
     questionsStillMissing: privateQuestions.map((item) => item.question),
     contradictions: asArray(exactResult.candidate_result?.contradictions).map(String),
     uncertainty: asArray(exactResult.candidate_result?.uncertainty).map(String),
@@ -433,6 +473,10 @@ export function createDiscoveryReviewState(review) {
         editor,
       }];
     })),
+    unresolvedDecisions: Object.fromEntries(asArray(review?.globalUnresolved).map((item) => [
+      item.id,
+      { decision: "ask", ownerResponse: "" },
+    ])),
     confirmations: Object.fromEntries(groups.map((group) => [group.id, false])),
     evidenceAcks: {},
   };
@@ -503,6 +547,36 @@ export function discoveryReviewReducer(state, action) {
     return {
       ...state,
       evidenceAcks: { ...state.evidenceAcks, [action.claimId]: Boolean(action.checked) },
+    };
+  }
+  if (action.type === "decideUnresolved" && [
+    "ask", "answer", "reject", "not_applicable", "defer",
+  ].includes(action.decision)) {
+    if (!state.unresolvedDecisions?.[action.itemId]) return state;
+    return {
+      ...state,
+      unresolvedDecisions: {
+        ...state.unresolvedDecisions,
+        [action.itemId]: {
+          ...state.unresolvedDecisions[action.itemId],
+          decision: action.decision,
+          ...(action.decision === "answer" ? {} : { ownerResponse: "" }),
+        },
+      },
+    };
+  }
+  if (action.type === "editUnresolved") {
+    if (!state.unresolvedDecisions?.[action.itemId]) return state;
+    return {
+      ...state,
+      unresolvedDecisions: {
+        ...state.unresolvedDecisions,
+        [action.itemId]: {
+          ...state.unresolvedDecisions[action.itemId],
+          decision: "answer",
+          ownerResponse: String(action.value ?? ""),
+        },
+      },
     };
   }
   return state;
@@ -583,13 +657,37 @@ export function buildDiscoveryReviewRequest(review, state, nonce) {
       };
     });
 
-  return {
+  const request = {
     p_job: review.job.id,
     p_result: review.result.id,
     p_expected_version: review.job.version,
     p_decisions,
     p_confirmation_nonce: nonce,
   };
+  if (review.result?.schema === "company_discovery.result.v2") {
+    const globalUnresolved = asArray(review.globalUnresolved);
+    const unresolvedDecisions = globalUnresolved.map((item) => {
+      const selected = state.unresolvedDecisions?.[item.id];
+      if (!selected || ![
+        "ask", "answer", "reject", "not_applicable", "defer",
+      ].includes(selected.decision)) {
+        throw new Error("Escolha como tratar cada pergunta ainda não resolvida.");
+      }
+      const ownerResponse = String(selected.ownerResponse ?? "");
+      if (selected.decision === "answer" && !ownerResponse.trim()) {
+        throw new Error("Escreva a resposta do dono antes de resolver esta pergunta.");
+      }
+      return {
+        source_kind: item.sourceKind,
+        source_index: item.sourceIndex,
+        source_text: item.sourceText,
+        decision: selected.decision,
+        owner_response: selected.decision === "answer" ? ownerResponse : null,
+      };
+    });
+    request.p_unresolved_decisions = unresolvedDecisions;
+  }
+  return request;
 }
 
 export function formatDiscoveryValue(claim) {

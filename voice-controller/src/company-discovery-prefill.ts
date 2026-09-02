@@ -44,6 +44,27 @@ interface ApprovedFact {
 }
 
 interface UnresolvedItem {
+  unresolved_id: string;
+  source_kind:
+    | "missing_question"
+    | "contradiction"
+    | "uncertainty"
+    | "claim_gap"
+    | "claim_rejection";
+  source_index: number | null;
+  source_claim_ids: string[];
+  evidence_refs: string[];
+  source_job_id: string;
+  source_attempt_id: string;
+  source_result_id: string;
+  draft_revision: number;
+  review_status:
+    | "pending_onboarding"
+    | "answered"
+    | "rejected"
+    | "not_applicable"
+    | "deferred";
+  owner_response: string | null;
   reason: string;
   claim_id: string | null;
   claim_type: string | null;
@@ -60,7 +81,10 @@ interface DraftReadback {
   draft: {
     schema_version: "company_discovery.onboarding_draft.v1";
     source_job_id: string;
+    source_attempt_id: string;
     source_result_id: string;
+    source_result_hash: string;
+    source_result_schema: "company_discovery.result.v2";
     approved_facts: ApprovedFact[];
     rejected_claim_ids: string[];
     unresolved_items: UnresolvedItem[];
@@ -83,6 +107,16 @@ export interface CompanyDiscoveryPrefillProjection {
     readonly progress: ReturnType<typeof evaluateCoverage>;
     readonly next_action: Readonly<Record<string, unknown>>;
     readonly authority: typeof FALSE_AUTHORITY;
+    readonly discovery_context: {
+      readonly draft_id: string;
+      readonly draft_version: number;
+      readonly draft_hash: string;
+      readonly source_job_id: string;
+      readonly source_attempt_id: string;
+      readonly source_result_id: string;
+      readonly source_result_hash: string;
+      readonly source_result_schema: "company_discovery.result.v2";
+    };
   };
 }
 
@@ -166,10 +200,39 @@ function parseFact(value: unknown, index: number): ApprovedFact {
 function parseUnresolvedItem(value: unknown, index: number): UnresolvedItem {
   const item = record(value, `unresolved_${index}`);
   exact(item, [
+    "unresolved_id", "source_kind", "source_index", "source_claim_ids",
+    "evidence_refs", "source_job_id", "source_attempt_id",
+    "source_result_id", "draft_revision", "review_status", "owner_response",
     "reason", "claim_id", "claim_type", "field", "coverage_field",
     "coverage_subject", "question_pt",
   ], `unresolved_${index}`);
-  if (typeof item.reason !== "string" || !item.reason || item.reason.length > 100 ||
+  const sourceKinds = new Set([
+    "missing_question", "contradiction", "uncertainty",
+    "claim_gap", "claim_rejection",
+  ]);
+  const reviewStatuses = new Set([
+    "pending_onboarding", "answered", "rejected", "not_applicable", "deferred",
+  ]);
+  const sourceClaims = strings(item.source_claim_ids, `unresolved_${index}_claims`, 100);
+  const evidence = strings(item.evidence_refs, `unresolved_${index}_evidence`, 100);
+  if (typeof item.unresolved_id !== "string" || !UUID.test(item.unresolved_id) ||
+      !sourceKinds.has(String(item.source_kind)) ||
+      !(item.source_index === null ||
+        (Number.isSafeInteger(item.source_index) && Number(item.source_index) >= 0)) ||
+      sourceClaims.some((id) => !UUID.test(id)) || new Set(sourceClaims).size !== sourceClaims.length ||
+      evidence.some((id) => !UUID.test(id)) || new Set(evidence).size !== evidence.length ||
+      typeof item.source_job_id !== "string" || !UUID.test(item.source_job_id) ||
+      typeof item.source_attempt_id !== "string" || !UUID.test(item.source_attempt_id) ||
+      typeof item.source_result_id !== "string" || !UUID.test(item.source_result_id) ||
+      !Number.isSafeInteger(item.draft_revision) || Number(item.draft_revision) < 1 ||
+      !reviewStatuses.has(String(item.review_status)) ||
+      !(
+        item.review_status === "answered"
+          ? typeof item.owner_response === "string" &&
+            item.owner_response.trim().length > 0 && item.owner_response.length <= 2_000
+          : item.owner_response === null
+      ) ||
+      typeof item.reason !== "string" || !item.reason || item.reason.length > 100 ||
       !(item.claim_id === null || (typeof item.claim_id === "string" && UUID.test(item.claim_id))) ||
       !(item.claim_type === null || (typeof item.claim_type === "string" && item.claim_type.length > 0 && item.claim_type.length <= 200)) ||
       !(item.field === null || (typeof item.field === "string" && item.field.length > 0 && item.field.length <= 200)) ||
@@ -178,6 +241,9 @@ function parseUnresolvedItem(value: unknown, index: number): UnresolvedItem {
       typeof item.question_pt !== "string" || !item.question_pt.trim() || item.question_pt.length > 2_000) {
     fail(`unresolved_${index}_shape`);
   }
+  if (item.review_status === "pending_onboarding" && item.coverage_field === null) {
+    fail(`unresolved_${index}_target`);
+  }
   if (item.coverage_field?.startsWith("service.") &&
       item.coverage_field !== "service.catalog_closure" && item.coverage_subject === null) {
     fail(`unresolved_${index}_subject`);
@@ -185,6 +251,17 @@ function parseUnresolvedItem(value: unknown, index: number): UnresolvedItem {
   if (item.coverage_field !== null && !item.coverage_field.startsWith("service.") &&
       item.coverage_subject !== null) fail(`unresolved_${index}_subject`);
   return {
+    unresolved_id: item.unresolved_id,
+    source_kind: item.source_kind as UnresolvedItem["source_kind"],
+    source_index: item.source_index === null ? null : Number(item.source_index),
+    source_claim_ids: sourceClaims,
+    evidence_refs: evidence,
+    source_job_id: item.source_job_id,
+    source_attempt_id: item.source_attempt_id,
+    source_result_id: item.source_result_id,
+    draft_revision: Number(item.draft_revision),
+    review_status: item.review_status as UnresolvedItem["review_status"],
+    owner_response: item.owner_response as string | null,
     reason: item.reason,
     claim_id: item.claim_id,
     claim_type: item.claim_type,
@@ -200,7 +277,8 @@ function parseDraftReadback(value: unknown): DraftReadback {
   exact(readback, ["draft_id", "draft_version", "draft_hash", "draft"], "readback");
   const draft = record(readback.draft, "draft");
   exact(draft, [
-    "schema_version", "source_job_id", "source_result_id", "approved_facts",
+    "schema_version", "source_job_id", "source_attempt_id", "source_result_id",
+    "source_result_hash", "source_result_schema", "approved_facts",
     "rejected_claim_ids", "unresolved_items", "authority",
   ], "draft");
   const authority = record(draft.authority, "authority");
@@ -210,7 +288,10 @@ function parseDraftReadback(value: unknown): DraftReadback {
       typeof readback.draft_hash !== "string" || !HASH.test(readback.draft_hash) ||
       draft.schema_version !== "company_discovery.onboarding_draft.v1" ||
       typeof draft.source_job_id !== "string" || !UUID.test(draft.source_job_id) ||
+      typeof draft.source_attempt_id !== "string" || !UUID.test(draft.source_attempt_id) ||
       typeof draft.source_result_id !== "string" || !UUID.test(draft.source_result_id) ||
+      typeof draft.source_result_hash !== "string" || !HASH.test(draft.source_result_hash) ||
+      draft.source_result_schema !== "company_discovery.result.v2" ||
       authority.rules_approved !== false || authority.powers_granted !== false ||
       authority.operational_mode_changed !== false ||
       !Array.isArray(draft.approved_facts) || draft.approved_facts.length > 100 ||
@@ -219,6 +300,13 @@ function parseDraftReadback(value: unknown): DraftReadback {
   }
   const rejected = strings(draft.rejected_claim_ids, "rejected_claim_ids", 100);
   if (rejected.some((id) => !UUID.test(id))) fail("rejected_claim_ids");
+  const unresolved = draft.unresolved_items.map(parseUnresolvedItem);
+  if (unresolved.some((item) =>
+    item.source_job_id !== draft.source_job_id ||
+    item.source_attempt_id !== draft.source_attempt_id ||
+    item.source_result_id !== draft.source_result_id ||
+    item.draft_revision !== Number(readback.draft_version)
+  )) fail("unresolved_identity");
   return {
     draft_id: readback.draft_id,
     draft_version: Number(readback.draft_version),
@@ -226,10 +314,13 @@ function parseDraftReadback(value: unknown): DraftReadback {
     draft: {
       schema_version: "company_discovery.onboarding_draft.v1",
       source_job_id: draft.source_job_id,
+      source_attempt_id: draft.source_attempt_id,
       source_result_id: draft.source_result_id,
+      source_result_hash: draft.source_result_hash,
+      source_result_schema: "company_discovery.result.v2",
       approved_facts: draft.approved_facts.map(parseFact),
       rejected_claim_ids: rejected,
-      unresolved_items: draft.unresolved_items.map(parseUnresolvedItem),
+      unresolved_items: unresolved,
       authority: FALSE_AUTHORITY,
     },
   };
@@ -445,7 +536,8 @@ function applyService(snapshot: CoverageSnapshot, fact: ApprovedFact): void {
 }
 
 function applyUnresolved(snapshot: CoverageSnapshot, item: UnresolvedItem): void {
-  if (item.coverage_field === null) return;
+  if (item.review_status !== "pending_onboarding") return;
+  if (item.coverage_field === null) fail("unresolved_target");
   const subject = item.coverage_subject ?? undefined;
   if (subject) addService(snapshot, subject);
   setCell(snapshot, item.coverage_field, ambiguous(
@@ -560,7 +652,10 @@ export function buildCompanyDiscoveryPrefill(
       draft_version: readback.draft_version,
       draft_hash: readback.draft_hash,
       source_job_id: readback.draft.source_job_id,
+      source_attempt_id: readback.draft.source_attempt_id,
       source_result_id: readback.draft.source_result_id,
+      source_result_hash: readback.draft.source_result_hash,
+      source_result_schema: readback.draft.source_result_schema,
     }),
   });
   return Object.freeze({

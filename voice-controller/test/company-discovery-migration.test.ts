@@ -756,7 +756,7 @@ describe("DirectModel company discovery Stage 0B database authority", () => {
 
     const review = functionBody(
       sql,
-      "review_company_discovery_claims_v2(uuid,uuid,bigint,jsonb,text)",
+      "review_company_discovery_claims_v2(uuid,uuid,bigint,jsonb,jsonb,text)",
       "revoke all on function public.review_company_discovery_claims_v2(",
     );
     expect(review).toContain("insert into public.company_discovery_onboarding_drafts");
@@ -774,6 +774,14 @@ describe("DirectModel company discovery Stage 0B database authority", () => {
     expect(review).toContain("'website_uncertainty', v_claim.uncertainty");
     expect(review).toContain("v_complete_claim_ids");
     expect(review).toContain("company_discovery_review_claim_set_mismatch");
+    expect(review).toContain("p_unresolved_decisions");
+    expect(review).toContain("company_discovery_unresolved_decision_set_mismatch");
+    for (const field of [
+      "unresolved_id", "source_kind", "source_index", "source_claim_ids",
+      "evidence_refs", "source_job_id", "source_attempt_id",
+      "source_result_id", "draft_revision", "review_status",
+      "owner_response", "coverage_field", "question_pt",
+    ]) expect(review).toContain(`'${field}'`);
     expect(review).not.toContain("insert into public.rules");
     expect(review).not.toContain("insert into public.powers");
     expect(review).not.toContain("insert into public.effective_rules");
@@ -799,6 +807,34 @@ describe("DirectModel company discovery Stage 0B database authority", () => {
     expect(prefill).toContain("insert into public.receipts");
     expect(sql).toContain("revoke all on function public.initialize_company_discovery_onboarding_prefill(");
     expect(sql).toContain("grant execute on function public.initialize_company_discovery_onboarding_prefill(");
+  });
+
+  test("reconciles prefill outcome under the same tenant and call locks and fences safe fallback", () => {
+    const sql = stage0bMigrationSql();
+    const reconciliation = functionBody(
+      sql,
+      "reconcile_company_discovery_onboarding_prefill(uuid,uuid,uuid,uuid,bigint,text,uuid,uuid,uuid,text,text)",
+      "revoke all on function public.reconcile_company_discovery_onboarding_prefill(",
+    );
+    expect(reconciliation).toContain("security definer");
+    expect(reconciliation).toContain("set search_path = ''");
+    expect(reconciliation).toContain(
+      "'ligou.company_discovery.onboarding_draft:' || p_tenant::text",
+    );
+    expect(reconciliation).toContain(
+      "'ligou.company_discovery.onboarding_prefill:' || p_tenant::text || ':' || p_target_call::text",
+    );
+    for (const identity of [
+      "p_expected_draft_version", "p_expected_draft_hash", "p_source_job",
+      "p_source_attempt", "p_source_result", "p_expected_result_hash",
+      "p_expected_result_schema",
+    ]) expect(reconciliation).toContain(identity);
+    expect(reconciliation).toContain("prefill_not_committed_after_locked_reconciliation");
+    expect(reconciliation).toContain("onboarding_discovery_fallback");
+    expect(reconciliation).toContain("receipt_mismatch");
+    expect(reconciliation).toContain("multiple_receipts");
+    expect(sql).toContain("grant execute on function public.reconcile_company_discovery_onboarding_prefill(");
+    expect(sql).toContain("to service_role");
   });
 
   test("derives queued, fetching, analyzing, and review stages from durable transitions", () => {
@@ -2380,7 +2416,11 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
           emergency_24_7: false,
           after_hours: "unavailable",
           holiday_policy: null,
-        }, { missing_fields: ["holiday_policy"] }),
+        }, {
+          missing_fields: ["holiday_policy"],
+          contradiction_status: "possible",
+          contradictions: ["O cabeçalho e o rodapé publicam horários diferentes."],
+        }),
         v2Fact("operational", "guarantee", {
           guarantee_kind: "satisfaction_statement",
           service_type: null,
@@ -2388,6 +2428,8 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
           duration: null,
           conditions: ["Satisfaction guaranteed"],
           exclusions: [],
+        }, {
+          uncertainty: ["A garantia publicada precisa de confirmação do dono."],
         }),
         v2Fact("operational", "booking_restriction", {
           restriction_type: "sunday",
@@ -2396,15 +2438,46 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
           notice_minutes: null,
           public_fee: null,
           conditions: ["No Sunday appointments"],
+        }, {
+          contradiction_status: "possible",
+          contradictions: ["O cabeçalho e o rodapé publicam horários diferentes."],
         }),
         v2Fact("safety_critical", "emergency", {
           guidance: "Leave the property and call 911 for a gas emergency.",
         }),
       ],
       missing_questions: ["Qual é o preço mínimo privado autorizado?"],
-      contradictions: [],
-      uncertainty: [],
+      contradictions: ["O cabeçalho e o rodapé publicam horários diferentes."],
+      uncertainty: [
+        "A garantia publicada precisa de confirmação do dono.",
+        "Quem pode autorizar descontos privados?",
+      ],
     };
+    const v2UnresolvedDecisions = [{
+      source_kind: "missing_question",
+      source_index: 0,
+      source_text: "Qual é o preço mínimo privado autorizado?",
+      decision: "ask",
+      owner_response: null,
+    }, {
+      source_kind: "contradiction",
+      source_index: 0,
+      source_text: "O cabeçalho e o rodapé publicam horários diferentes.",
+      decision: "answer",
+      owner_response: "O horário correto é de segunda a sexta, das 8h às 17h.",
+    }, {
+      source_kind: "uncertainty",
+      source_index: 0,
+      source_text: "A garantia publicada precisa de confirmação do dono.",
+      decision: "ask",
+      owner_response: null,
+    }, {
+      source_kind: "uncertainty",
+      source_index: 1,
+      source_text: "Quem pode autorizar descontos privados?",
+      decision: "reject",
+      owner_response: null,
+    }];
     const newCommit = await service.rpc("commit_company_discovery_result_v2", {
       p_attempt_id: newAttempt.attempt_id,
       p_fence_generation: newAttempt.fence_generation,
@@ -2424,6 +2497,10 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       select count(*)::text from public.rules
       where tenant_id = ${localSqlUuid(ownerTenant)};
     `));
+    const powersBeforeV2Review = Number(await runDisposableLocalSql(`
+      select count(*)::text from public.powers
+      where tenant_id = ${localSqlUuid(ownerTenant)};
+    `));
     const v2Claims = await owner.from("discovery_claims")
       .select("id,claim_class,claim_type,evidence_refs,adapter_id,provider,model,confidence,contradiction_status,missing_fields,ambiguous_fields,claim_schema_version")
       .eq("result_id", newCommitted.result_id)
@@ -2437,6 +2514,25 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     )).toBe(true);
     expect((await intruder.from("discovery_claims")
       .select("id").eq("result_id", newCommitted.result_id)).data).toEqual([]);
+    const v2ClaimDecisions = v2Claims.data!.map((row) => {
+      const original = directV2Result.candidate_facts.find((fact) =>
+        fact.claim_type === row.claim_type
+      )!.normalized_value;
+      return {
+        claim_id: row.id,
+        decision: row.claim_type === "booking_restriction"
+          ? "reject"
+          : row.claim_type === "business_hours" ? "edit" : "approve",
+        value: row.claim_type === "business_hours"
+          ? { ...(original as Record<string, unknown>), holiday_policy: "Closed on federal holidays" }
+          : original,
+        group_confirmed: row.claim_class !== "descriptive",
+        evidence_acknowledged: row.claim_class === "safety_critical",
+        acknowledged_evidence_refs: row.claim_class === "safety_critical"
+          ? row.evidence_refs
+          : [],
+      };
+    });
     const partialClaim = v2Claims.data![0]!;
     const partialNonce = await owner.rpc("create_company_discovery_review_nonce", {
       p_job: retryJob,
@@ -2460,10 +2556,36 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
           ? partialClaim.evidence_refs
           : [],
       }],
+      p_unresolved_decisions: v2UnresolvedDecisions,
       p_confirmation_nonce: String(partialNonce.data),
     });
     expect(partialReview.error?.message).toContain(
       "company_discovery_review_claim_set_mismatch",
+    );
+    expect((await owner.from("company_discovery_onboarding_drafts")
+      .select("id").eq("source_result_id", newCommitted.result_id)).data).toEqual([]);
+    const incompleteUnresolvedNonce = await owner.rpc(
+      "create_company_discovery_review_nonce",
+      {
+        p_job: retryJob,
+        p_result: newCommitted.result_id,
+        p_claim_ids: v2Claims.data!.map((row) => row.id),
+      },
+    );
+    expect(incompleteUnresolvedNonce.error).toBeNull();
+    const incompleteUnresolvedReview = await owner.rpc(
+      "review_company_discovery_claims_v2",
+      {
+        p_job: retryJob,
+        p_result: newCommitted.result_id,
+        p_expected_version: replacementSelect.data.version,
+        p_decisions: v2ClaimDecisions,
+        p_unresolved_decisions: v2UnresolvedDecisions.slice(0, -1),
+        p_confirmation_nonce: String(incompleteUnresolvedNonce.data),
+      },
+    );
+    expect(incompleteUnresolvedReview.error?.message).toContain(
+      "company_discovery_unresolved_decision_set_mismatch",
     );
     expect((await owner.from("company_discovery_onboarding_drafts")
       .select("id").eq("source_result_id", newCommitted.result_id)).data).toEqual([]);
@@ -2477,25 +2599,8 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_job: retryJob,
       p_result: newCommitted.result_id,
       p_expected_version: replacementSelect.data.version,
-      p_decisions: v2Claims.data!.map((row) => {
-        const original = directV2Result.candidate_facts.find((fact) =>
-          fact.claim_type === row.claim_type
-        )!.normalized_value;
-        return {
-          claim_id: row.id,
-          decision: row.claim_type === "booking_restriction"
-            ? "reject"
-            : row.claim_type === "business_hours" ? "edit" : "approve",
-          value: row.claim_type === "business_hours"
-            ? { ...(original as Record<string, unknown>), holiday_policy: "Closed on federal holidays" }
-            : original,
-          group_confirmed: row.claim_class !== "descriptive",
-          evidence_acknowledged: row.claim_class === "safety_critical",
-          acknowledged_evidence_refs: row.claim_class === "safety_critical"
-            ? row.evidence_refs
-            : [],
-        };
-      }),
+      p_decisions: v2ClaimDecisions,
+      p_unresolved_decisions: v2UnresolvedDecisions,
       p_confirmation_nonce: String(v2Nonce.data),
     });
     expect(v2Review.error).toBeNull();
@@ -2515,6 +2620,10 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       select count(*)::text from public.rules
       where tenant_id = ${localSqlUuid(ownerTenant)};
     `))).toBe(rulesBeforeV2Review);
+    expect(Number(await runDisposableLocalSql(`
+      select count(*)::text from public.powers
+      where tenant_id = ${localSqlUuid(ownerTenant)};
+    `))).toBe(powersBeforeV2Review);
     expect((await owner.from("effective_rules")
       .select("id").eq("tenant_id", ownerTenant)).data).toHaveLength(2);
     const draftRows = await owner.from("company_discovery_onboarding_drafts")
@@ -2525,7 +2634,10 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     expect(draftRows.data![0]!.draft).toMatchObject({
       schema_version: "company_discovery.onboarding_draft.v1",
       source_job_id: retryJob,
+      source_attempt_id: newAttempt.attempt_id,
       source_result_id: newCommitted.result_id,
+      source_result_hash: postgresJsonbHash(directV2Result),
+      source_result_schema: "company_discovery.result.v2",
       authority: {
         rules_approved: false,
         powers_granted: false,
@@ -2534,6 +2646,54 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     });
     expect(draftRows.data![0]!.draft.approved_facts).toHaveLength(5);
     expect(draftRows.data![0]!.draft.rejected_claim_ids).toHaveLength(1);
+    const globalItems = draftRows.data![0]!.draft.unresolved_items.filter(
+      (item: Record<string, unknown>) => item.source_index !== null,
+    );
+    expect(globalItems).toHaveLength(4);
+    expect(globalItems.every((item: Record<string, unknown>) =>
+      UUID_PATTERN.test(String(item.unresolved_id)) &&
+      item.source_job_id === retryJob &&
+      item.source_attempt_id === newAttempt.attempt_id &&
+      item.source_result_id === newCommitted.result_id &&
+      item.draft_revision === draftRows.data![0]!.version &&
+      Array.isArray(item.source_claim_ids) && Array.isArray(item.evidence_refs)
+    )).toBe(true);
+    const privateMissing = globalItems.find((item: Record<string, unknown>) =>
+      item.source_kind === "missing_question");
+    expect(privateMissing).toMatchObject({
+      review_status: "pending_onboarding",
+      owner_response: null,
+      source_claim_ids: [],
+      evidence_refs: [],
+    });
+    expect(privateMissing.coverage_field).toMatch(
+      /^discovery[.]owner_question[.][0-9a-f]{32}$/,
+    );
+    const crossClassContradiction = globalItems.find(
+      (item: Record<string, unknown>) => item.source_kind === "contradiction",
+    );
+    expect(crossClassContradiction).toMatchObject({
+      review_status: "answered",
+      owner_response: "O horário correto é de segunda a sexta, das 8h às 17h.",
+    });
+    expect(crossClassContradiction.source_claim_ids).toHaveLength(2);
+    expect(crossClassContradiction.evidence_refs).toEqual(expect.arrayContaining([
+      expect.stringMatching(UUID_PATTERN),
+    ]));
+    const mappedUncertainty = globalItems.find((item: Record<string, unknown>) =>
+      item.source_kind === "uncertainty" && item.source_index === 0);
+    expect(mappedUncertainty).toMatchObject({
+      review_status: "pending_onboarding",
+      coverage_field: "policy.warranty_materials",
+    });
+    const rejectedPrivate = globalItems.find((item: Record<string, unknown>) =>
+      item.source_kind === "uncertainty" && item.source_index === 1);
+    expect(rejectedPrivate).toMatchObject({
+      review_status: "rejected",
+      owner_response: null,
+      source_claim_ids: [],
+      evidence_refs: [],
+    });
     const reviewedHours = draftRows.data![0]!.draft.approved_facts.find(
       (fact: Record<string, unknown>) => fact.claim_type === "business_hours",
     );
@@ -2590,6 +2750,32 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       draft_readback: draftReadback.data,
       localities: [],
     });
+    expect(prefillProjection.coverage.snapshot.cells[
+      String(privateMissing.coverage_field)
+    ]).toMatchObject({
+      state: "ambiguous",
+      questionPt: "Qual é o preço mínimo privado autorizado?",
+    });
+    expect(prefillProjection.coverage.snapshot.cells[
+      String(mappedUncertainty.coverage_field)
+    ]).toMatchObject({ state: "ambiguous" });
+    expect(crossClassContradiction.review_status).toBe("answered");
+    expect(prefillProjection.coverage.snapshot.cells[
+      String(crossClassContradiction.coverage_field)
+    ]).toBeUndefined();
+    expect(prefillProjection.coverage.snapshot.cells[
+      String(rejectedPrivate.coverage_field)
+    ]).toBeUndefined();
+    expect(prefillProjection.coverage.discovery_context).toMatchObject({
+      draft_id: v2DraftId,
+      draft_version: draftRows.data![0]!.version,
+      draft_hash: v2DraftHash,
+      source_job_id: retryJob,
+      source_attempt_id: newAttempt.attempt_id,
+      source_result_id: newCommitted.result_id,
+      source_result_hash: postgresJsonbHash(directV2Result),
+      source_result_schema: "company_discovery.result.v2",
+    });
     const initializedPrefill = await service.rpc(
       "initialize_company_discovery_onboarding_prefill",
       {
@@ -2628,8 +2814,227 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
         detail: {
           transition_kind: "discovery_prefill",
           draft_id: prefillProjection.draft_id,
+          draft_version: draftRows.data![0]!.version,
+          source_job_id: retryJob,
+          source_attempt_id: newAttempt.attempt_id,
+          source_result_id: newCommitted.result_id,
+          source_result_hash: postgresJsonbHash(directV2Result),
+          source_result_schema: "company_discovery.result.v2",
         },
       });
+    const reconciliationArgs = (
+      targetCall: string,
+      projection: typeof prefillProjection,
+      overrides: Record<string, unknown> = {},
+    ) => ({
+      p_tenant: ownerTenant,
+      p_target_call: targetCall,
+      p_owner: ownerId,
+      p_draft: projection.draft_id,
+      p_expected_draft_version: projection.coverage.discovery_context.draft_version,
+      p_expected_draft_hash: projection.draft_hash,
+      p_source_job: projection.coverage.discovery_context.source_job_id,
+      p_source_attempt: projection.coverage.discovery_context.source_attempt_id,
+      p_source_result: projection.coverage.discovery_context.source_result_id,
+      p_expected_result_hash: projection.coverage.discovery_context.source_result_hash,
+      p_expected_result_schema: projection.coverage.discovery_context.source_result_schema,
+      ...overrides,
+    });
+    const recoveredPrefill = await service.rpc(
+      "reconcile_company_discovery_onboarding_prefill",
+      reconciliationArgs(prefillCall, prefillProjection),
+    );
+    expect(recoveredPrefill.error).toBeNull();
+    expect(recoveredPrefill.data).toMatchObject({
+      status: "reused",
+      draft_id: v2DraftId,
+      draft_hash: v2DraftHash,
+      coverage_receipt_id: prefillReceiptId,
+      revision: 1,
+      snapshot_digest: prefillDigest,
+    });
+    const intruderReconciliation = await intruder.rpc(
+      "reconcile_company_discovery_onboarding_prefill",
+      reconciliationArgs(prefillCall, prefillProjection),
+    );
+    expect(intruderReconciliation.error).not.toBeNull();
+    const staleDraftReconciliation = await service.rpc(
+      "reconcile_company_discovery_onboarding_prefill",
+      reconciliationArgs(prefillCall, prefillProjection, {
+        p_expected_draft_version:
+          Number(prefillProjection.coverage.discovery_context.draft_version) + 1,
+      }),
+    );
+    expect(staleDraftReconciliation.error).toBeNull();
+    expect(staleDraftReconciliation.data).toMatchObject({
+      status: "indeterminate",
+      reason: "draft_revision_changed",
+    });
+    const wrongHashReconciliation = await service.rpc(
+      "reconcile_company_discovery_onboarding_prefill",
+      reconciliationArgs(prefillCall, prefillProjection, {
+        p_expected_result_hash: "0".repeat(64),
+      }),
+    );
+    expect(wrongHashReconciliation.error).toBeNull();
+    expect(wrongHashReconciliation.data).toMatchObject({
+      status: "indeterminate",
+      reason: "result_hash_changed",
+    });
+    const { createOnboardingStore } = await import("../src/onboarding-store.ts");
+    const realStore = createOnboardingStore({
+      client: service as any,
+      timeoutMs: 5_000,
+    });
+    const globalAnswer = await realStore.recordOnboardingAnswer({
+      actor: "CALLER",
+      tenantSlug: `discovery-${ownerTenant.slice(0, 8)}`,
+      tenantId: ownerTenant,
+      callId: prefillCall,
+      ownerUserId: ownerId,
+      sessionType: "onboarding",
+      jti: `stage0b-global-${randomUUID()}`,
+      expiresAt: Date.now() + 60_000,
+      allowedTools: [
+        "get_business_info", "record_interview_answer",
+        "approve_onboarding_summary", "end_session",
+      ],
+      authEpoch: 1,
+      policyEpoch: 1,
+      simulation: true,
+    }, `provider-global-${randomUUID()}`, {
+      topic: "outro",
+      field: String(privateMissing.coverage_field),
+      disposition: "answered",
+      rule_text: "Resposta privada preservada somente na cobertura de onboarding.",
+      structured: {
+        value: "Qualquer exceção de preço exige aprovação direta do dono.",
+      },
+      owner_words: "Qualquer exceção de preço precisa da minha aprovação.",
+    });
+    expect(globalAnswer).toMatchObject({
+      ok: true,
+      status: "recorded",
+      ruleId: "",
+      ruleGroupId: "",
+      revision: 2,
+    });
+    expect(Number(await runDisposableLocalSql(`
+      select count(*)::text from public.rules
+      where tenant_id = ${localSqlUuid(ownerTenant)};
+    `))).toBe(rulesBeforeV2Review);
+    expect(Number(await runDisposableLocalSql(`
+      select count(*)::text from public.powers
+      where tenant_id = ${localSqlUuid(ownerTenant)};
+    `))).toBe(powersBeforeV2Review);
+    const multipleReceiptReconciliation = await service.rpc(
+      "reconcile_company_discovery_onboarding_prefill",
+      reconciliationArgs(prefillCall, prefillProjection),
+    );
+    expect(multipleReceiptReconciliation.error).toBeNull();
+    expect(multipleReceiptReconciliation.data).toMatchObject({
+      status: "indeterminate",
+      reason: "multiple_receipts",
+    });
+
+    const fallbackCall = randomUUID();
+    const fallbackRequest = randomUUID();
+    expect((await service.from("calls").insert({
+      id: fallbackCall,
+      tenant_id: ownerTenant,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").insert({
+      id: fallbackRequest,
+      tenant_id: ownerTenant,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `stage0b-fallback-offer-${fallbackRequest}`,
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "ready",
+      answer_sdp: `stage0b-fallback-answer-${fallbackRequest}`,
+      call_id: fallbackCall,
+      handled_at: new Date().toISOString(),
+    }).eq("id", fallbackRequest)).error).toBeNull();
+    const fallbackProjection = buildCompanyDiscoveryPrefill({
+      tenant_id: ownerTenant,
+      call_id: fallbackCall,
+      draft_readback: draftReadback.data,
+      localities: [],
+    });
+    const countsBeforeFallback = JSON.parse(await runDisposableLocalSql(`
+      select json_build_object(
+        'jobs', (select count(*) from public.worker_jobs
+          where id = ${localSqlUuid(retryJob)}),
+        'drafts', (select count(*) from public.company_discovery_onboarding_drafts
+          where id = ${localSqlUuid(v2DraftId)}),
+        'coverage', (select count(*) from public.receipts
+          where call_id = ${localSqlUuid(fallbackCall)}
+            and kind = 'onboarding_coverage')
+      )::text;
+    `));
+    const reviewLock = runDisposableLocalSql(`
+      begin;
+      select pg_advisory_xact_lock(hashtextextended(
+        'ligou.company_discovery.onboarding_draft:' ||
+          ${localSqlUuid(ownerTenant)}::text, 0
+      ));
+      select pg_sleep(0.75);
+      commit;
+    `);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const fallbackStarted = performance.now();
+    const safeFallback = await service.rpc(
+      "reconcile_company_discovery_onboarding_prefill",
+      reconciliationArgs(fallbackCall, fallbackProjection),
+    );
+    const fallbackElapsed = performance.now() - fallbackStarted;
+    await reviewLock;
+    expect(safeFallback.error).toBeNull();
+    expect(safeFallback.data).toMatchObject({
+      status: "safe_fallback",
+      reason: "prefill_not_committed_after_locked_reconciliation",
+    });
+    expect(fallbackElapsed).toBeGreaterThanOrEqual(500);
+    const fencedLatePrefill = await service.rpc(
+      "initialize_company_discovery_onboarding_prefill",
+      {
+        p_tenant: ownerTenant,
+        p_target_call: fallbackCall,
+        p_owner: ownerId,
+        p_draft: fallbackProjection.draft_id,
+        p_coverage: fallbackProjection.coverage,
+      },
+    );
+    expect(fencedLatePrefill.error).toBeNull();
+    expect(fencedLatePrefill.data).toMatchObject({
+      status: "safe_fallback",
+      reason: "prefill_not_committed_after_locked_reconciliation",
+    });
+    const countsAfterFallback = JSON.parse(await runDisposableLocalSql(`
+      select json_build_object(
+        'jobs', (select count(*) from public.worker_jobs
+          where id = ${localSqlUuid(retryJob)}),
+        'drafts', (select count(*) from public.company_discovery_onboarding_drafts
+          where id = ${localSqlUuid(v2DraftId)}),
+        'coverage', (select count(*) from public.receipts
+          where call_id = ${localSqlUuid(fallbackCall)}
+            and kind = 'onboarding_coverage'),
+        'fallbacks', (select count(*) from public.receipts
+          where call_id = ${localSqlUuid(fallbackCall)}
+            and kind = 'onboarding_discovery_fallback')
+      )::text;
+    `));
+    expect(countsBeforeFallback).toEqual({ jobs: 1, drafts: 1, coverage: 0 });
+    expect(countsAfterFallback).toEqual({
+      jobs: 1,
+      drafts: 1,
+      coverage: 0,
+      fallbacks: 1,
+    });
     const unresolvedCleanup = await service.rpc("record_company_discovery_cleanup", {
       p_attempt_id: newAttempt.attempt_id,
       p_fence_generation: newAttempt.fence_generation,

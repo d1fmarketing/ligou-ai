@@ -394,6 +394,62 @@ function GroupConfirmation({ group, checked, onChange }) {
   );
 }
 
+function GlobalUnresolvedCard({ item, state, dispatch }) {
+  const selected = state.unresolvedDecisions?.[item.id] ?? {
+    decision: "ask",
+    ownerResponse: "",
+  };
+  return (
+    <article className="discovery-unresolved-item">
+      <header>
+        <strong>{item.question}</strong>
+        <small>{item.sourceKind === "missing_question" ? "Informação ausente ou privada" : item.sourceKind === "contradiction" ? "Contradição global" : "Incerteza global"}</small>
+      </header>
+      {item.evidence?.length ? (
+        <details>
+          <summary>Ver evidência pública relacionada</summary>
+          {item.evidence.map((evidence) => (
+            <p key={evidence.id}>
+              <a href={evidence.url} target="_blank" rel="noreferrer">{evidence.url}</a>
+              {evidence.excerpt ? ` — ${evidence.excerpt}` : ""}
+            </p>
+          ))}
+        </details>
+      ) : null}
+      <label>
+        <span>Como tratar</span>
+        <select
+          value={selected.decision}
+          onChange={(event) => dispatch({
+            type: "decideUnresolved",
+            itemId: item.id,
+            decision: event.target.value,
+          })}
+        >
+          <option value="ask">Levar para a entrevista</option>
+          <option value="answer">Responder agora</option>
+          <option value="reject">Rejeitar sugestão</option>
+          <option value="not_applicable">Não se aplica</option>
+          <option value="defer">Adiar para revisão do dono</option>
+        </select>
+      </label>
+      {selected.decision === "answer" ? (
+        <label>
+          <span>Resposta confirmada pelo dono</span>
+          <textarea
+            value={selected.ownerResponse}
+            onChange={(event) => dispatch({
+              type: "editUnresolved",
+              itemId: item.id,
+              value: event.target.value,
+            })}
+          />
+        </label>
+      ) : null}
+    </article>
+  );
+}
+
 export function DiscoveryReviewReadiness({ message }) {
   return (
     <p
@@ -507,13 +563,22 @@ export function DiscoveryReviewView({
           </section>
         ))}
 
-        {discovery.privateQuestions.length ? (
+        {(discovery.globalUnresolved?.length || discovery.privateQuestions.length) ? (
           <section className="discovery-private" aria-labelledby="discovery-private-title">
             <IconLock aria-hidden="true" />
             <div>
               <h3 id="discovery-private-title">{discovery.result?.schema === "company_discovery.result.v2" ? "Perguntas que ainda faltam" : "Perguntas para a entrevista"}</h3>
               <p>{discovery.result?.schema === "company_discovery.result.v2" ? "A entrevista em português fará somente perguntas ainda ausentes, ambíguas, contraditórias, rejeitadas ou privadas." : "Assuntos privados aparecem somente como perguntas não respondidas. Nunca são aprovados como fatos."}</p>
-              <ul>{discovery.privateQuestions.map((item) => <li key={item.id}>{item.question}</li>)}</ul>
+              {discovery.result?.schema === "company_discovery.result.v2"
+                ? discovery.globalUnresolved.map((item) => (
+                    <GlobalUnresolvedCard
+                      key={item.id}
+                      item={item}
+                      state={reviewState}
+                      dispatch={dispatch}
+                    />
+                  ))
+                : <ul>{discovery.privateQuestions.map((item) => <li key={item.id}>{item.question}</li>)}</ul>}
             </div>
           </section>
         ) : null}

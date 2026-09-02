@@ -1421,9 +1421,13 @@ describe("session-scoped Realtime tools", () => {
       "structured",
       "topic",
     ]);
-    expect(record.parameters.properties.field.enum).toContain(
+    expect(record.parameters.properties.field.anyOf[0].enum).toContain(
       "authority.book",
     );
+    expect(record.parameters.properties.field.anyOf[1]).toEqual({
+      type: "string",
+      pattern: "^discovery[.]owner_question[.][0-9a-f]{32}$",
+    });
     expect(record.parameters.properties.disposition.enum).toEqual([
       "answered",
       "not_applicable",
@@ -1836,6 +1840,12 @@ describe("instructions builder", () => {
     ]) expect(instructions).toContain(promptExample);
     expect(instructions).toContain(
       "field service.* exceto service.catalog_closure",
+    );
+    expect(instructions).toContain(
+      "discovery.owner_question.<id>",
+    );
+    expect(instructions).toMatch(
+      /pergunta não operacional[^.]*nunca cria regra nem poder/i,
     );
     expect(structured).not.toContain("price_min");
   });

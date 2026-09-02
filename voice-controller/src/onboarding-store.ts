@@ -1119,73 +1119,10 @@ export function createOnboardingStore(
     } catch {
       return { ok: true, status: "none", durationMs: elapsed(now, started) };
     }
-    try {
-      let initialized = await bounded((signal) =>
-        abortable<BoundaryResult<unknown>>(client.rpc(
-          "initialize_company_discovery_onboarding_prefill",
-          {
-            p_tenant: cap.tenantId,
-            p_target_call: cap.callId,
-            p_owner: cap.ownerUserId!,
-            p_draft: projection.draft_id,
-            p_coverage: projection.coverage,
-          },
-        ), signal)
-      );
-      if (initialized.error) {
-        if (!ambiguousBoundaryFailure(initialized.error)) {
-          return { ok: true, status: "none", durationMs: elapsed(now, started) };
-        }
-        const receiptResult = await bounded((signal) => coverageReceipts(cap, signal));
-        if (receiptResult.error || !Array.isArray(receiptResult.data)) {
-          return failure(
-            "indeterminate",
-            "company discovery onboarding prefill is indeterminate",
-            now,
-            started,
-          );
-        }
-        if (receiptResult.data.length === 0) {
-          return { ok: true, status: "none", durationMs: elapsed(now, started) };
-        }
-        const matching = receiptResult.data.filter((row) =>
-          UUID_RE.test(row.id) &&
-          row.readback?.transition_kind === "discovery_prefill" &&
-          row.readback?.discovery_context &&
-          typeof row.readback.discovery_context === "object" &&
-          !Array.isArray(row.readback.discovery_context) &&
-          (row.readback.discovery_context as Record<string, unknown>).draft_id ===
-            projection.draft_id &&
-          (row.readback.discovery_context as Record<string, unknown>).draft_hash ===
-            projection.draft_hash &&
-          typeof row.readback.snapshot_digest === "string" &&
-          /^[0-9a-f]{64}$/.test(row.readback.snapshot_digest)
-        );
-        if (receiptResult.data.length !== 1 || matching.length !== 1) {
-          return failure(
-            "indeterminate",
-            "company discovery onboarding prefill is indeterminate",
-            now,
-            started,
-          );
-        }
-        const recovered = matching[0]!;
-        initialized = {
-          data: {
-            status: "reused",
-            draft_id: projection.draft_id,
-            draft_hash: projection.draft_hash,
-            coverage_receipt_id: recovered.id,
-            revision: 1,
-            snapshot_digest: recovered.readback.snapshot_digest,
-            next_action: recovered.readback.next_action,
-            coverage: recovered.readback,
-          },
-          error: null,
-        };
-      }
-      if (!initialized.data || typeof initialized.data !== "object" ||
-          Array.isArray(initialized.data)) {
+    const completePrefill = (
+      raw: unknown,
+    ): OnboardingResume => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
         return failure(
           "changed",
           "company discovery onboarding prefill readback is invalid",
@@ -1193,7 +1130,7 @@ export function createOnboardingStore(
           started,
         );
       }
-      const data = initialized.data as Record<string, unknown>;
+      const data = raw as Record<string, unknown>;
       const coverage = data.coverage && typeof data.coverage === "object" &&
           !Array.isArray(data.coverage)
         ? data.coverage as Record<string, unknown>
@@ -1233,20 +1170,111 @@ export function createOnboardingStore(
         coverage,
         durationMs: elapsed(now, started),
       };
-    } catch (error) {
-      return ambiguousBoundaryFailure(error)
-        ? failure(
+    };
+    const reconcilePrefill = async (): Promise<OnboardingResume> => {
+      try {
+        const context = projection.coverage.discovery_context;
+        const reconciled = await bounded((signal) =>
+          abortable<BoundaryResult<unknown>>(client.rpc(
+            "reconcile_company_discovery_onboarding_prefill",
+            {
+              p_tenant: cap.tenantId,
+              p_target_call: cap.callId,
+              p_owner: cap.ownerUserId!,
+              p_draft: projection.draft_id,
+              p_expected_draft_version: context.draft_version,
+              p_expected_draft_hash: projection.draft_hash,
+              p_source_job: context.source_job_id,
+              p_source_attempt: context.source_attempt_id,
+              p_source_result: context.source_result_id,
+              p_expected_result_hash: context.source_result_hash,
+              p_expected_result_schema: context.source_result_schema,
+            },
+          ), signal)
+        );
+        if (reconciled.error || !reconciled.data ||
+            typeof reconciled.data !== "object" ||
+            Array.isArray(reconciled.data)) {
+          return failure(
             "indeterminate",
             "company discovery onboarding prefill is indeterminate",
             now,
             started,
-          )
-        : failure(
-            "query_error",
-            "company discovery onboarding prefill failed",
+          );
+        }
+        const data = reconciled.data as Record<string, unknown>;
+        if (data.status === "safe_fallback") {
+          return data.reason ===
+              "prefill_not_committed_after_locked_reconciliation"
+            ? { ok: true, status: "none", durationMs: elapsed(now, started) }
+            : failure(
+                "indeterminate",
+                "company discovery onboarding prefill is indeterminate",
+                now,
+                started,
+              );
+        }
+        if (data.status === "indeterminate") {
+          return failure(
+            "indeterminate",
+            "company discovery onboarding prefill is indeterminate",
             now,
             started,
           );
+        }
+        return completePrefill(data);
+      } catch {
+        return failure(
+          "indeterminate",
+          "company discovery onboarding prefill is indeterminate",
+          now,
+          started,
+        );
+      }
+    };
+    try {
+      const initialized = await bounded((signal) =>
+        abortable<BoundaryResult<unknown>>(client.rpc(
+          "initialize_company_discovery_onboarding_prefill",
+          {
+            p_tenant: cap.tenantId,
+            p_target_call: cap.callId,
+            p_owner: cap.ownerUserId!,
+            p_draft: projection.draft_id,
+            p_coverage: projection.coverage,
+          },
+        ), signal)
+      );
+      if (initialized.error) {
+        if (!ambiguousBoundaryFailure(initialized.error)) {
+          return { ok: true, status: "none", durationMs: elapsed(now, started) };
+        }
+        return await reconcilePrefill();
+      }
+      if (initialized.data && typeof initialized.data === "object" &&
+          !Array.isArray(initialized.data) &&
+          (initialized.data as Record<string, unknown>).status ===
+            "safe_fallback") {
+        return (initialized.data as Record<string, unknown>).reason ===
+            "prefill_not_committed_after_locked_reconciliation"
+          ? { ok: true, status: "none", durationMs: elapsed(now, started) }
+          : failure(
+              "indeterminate",
+              "company discovery onboarding prefill is indeterminate",
+              now,
+              started,
+            );
+      }
+      return completePrefill(initialized.data);
+    } catch (error) {
+      return ambiguousBoundaryFailure(error)
+        ? await reconcilePrefill()
+        : failure(
+          "query_error",
+          "company discovery onboarding prefill failed",
+          now,
+          started,
+        );
     }
   };
 
