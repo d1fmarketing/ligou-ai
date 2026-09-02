@@ -551,6 +551,38 @@ describe("trusted bridge authority", () => {
     await expect(bridge.callTool(connection, "exec", { command: "id" })).rejects.toThrow("unknown MCP tool");
   });
 
+  test("validates a fetched page at its immutable nonzero crawl position", async () => {
+    const context = attemptContext();
+    const laterSnapshot: DiscoverySourceSnapshot = {
+      ...snapshot,
+      url: "https://example.com/emergencies",
+      content_hash: "b".repeat(64),
+      crawl_order: 1,
+      crawl_depth: 1,
+    };
+    const bridge = new AttemptMcpBridge({
+      proxy_marker: "stage0-proxy-marker",
+      expected_remote_address: "172.30.0.2",
+      fetch_context: context,
+      source_snapshots: [snapshot, laterSnapshot],
+      fetch_page: async (_receivedContext, url) => {
+        expect(url).toBe(laterSnapshot.url);
+        return laterSnapshot;
+      },
+      submit_result: async () => undefined,
+    });
+    const connection = bridge.bindConnection({
+      bearer: "stage0-proxy-marker",
+      remote_address: "172.30.0.2",
+    });
+
+    expect(await bridge.callTool(
+      connection,
+      "fetch_discovery_page",
+      { url: laterSnapshot.url },
+    )).toEqual(laterSnapshot);
+  });
+
   test("validates immutable evidence, accepts one result, and rejects every late submission", async () => {
     const accepted: WorkerResult[] = [];
     const bridge = new AttemptMcpBridge({

@@ -498,6 +498,15 @@ describe("ephemeral OpenClaw attempt factory", () => {
     expect(gatewayClosed).toBe(true);
     expect(gatewayInput?.url).toBe(`ws://127.0.0.1:${runtimeIdentity.host_gateway_port}`);
     expect(gatewayInput?.prompt).toContain(snapshot.url);
+    expect(gatewayInput?.prompt).toContain(
+      "Exact top-level keys: schema_version, source_snapshots, candidate_facts, missing_questions, contradictions, uncertainty.",
+    );
+    expect(gatewayInput?.prompt).toContain(
+      "A rejected submit call may be corrected; never call submit again after accepted:true.",
+    );
+    expect(gatewayInput?.prompt).toContain(
+      "claim_class, claim_type, normalized_value, evidence_refs, contradictions, uncertainty",
+    );
     const cellCommand = lifecyclePlan.find((command) => command.label === "start-cell")!;
     const exposed = JSON.stringify({
       prompt: gatewayInput?.prompt,

@@ -169,7 +169,10 @@ export class AttemptMcpBridge {
     if (expected === undefined) {
       throw new ContractValidationError("fetch_discovery_page URL is outside immutable bound evidence");
     }
-    const fetched = parseSourceSnapshots([await this.#fetchPage(this.#fetchContext, candidate.url)])[0]!;
+    const rawFetched = await this.#fetchPage(this.#fetchContext, candidate.url);
+    const fetched = parseSourceSnapshots(this.#sourceSnapshots.map((snapshot, index) =>
+      index === expected.crawl_order ? rawFetched : snapshot
+    ))[expected.crawl_order]!;
     if (!sameSnapshots([fetched], [expected])) {
       throw new ContractValidationError("fetch_discovery_page evidence changed after binding");
     }
