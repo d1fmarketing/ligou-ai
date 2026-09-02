@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import type { DiscoveryBudget } from "../src/contracts";
 import {
   AddressPolicy,
@@ -412,52 +414,538 @@ describe("pinned HTTPS request", () => {
     }
   });
 
-  test("builds the production TLS boundary with Host, SNI, pinned lookup, verification, and abort", () => {
-    const buildOptions = (httpsClientModule as unknown as {
-      buildPinnedHttpsRequestOptions?: (input: any) => any;
-    }).buildPinnedHttpsRequestOptions;
-    expect(typeof buildOptions).toBe("function");
-    if (buildOptions === undefined) return;
-    const controller = new AbortController();
-    const options = buildOptions({
-      url: new URL("https://xn--bcher-kva.com/path?q=1"),
+  test("runs the production TLS request in the Node helper with the validated address pinned", async () => {
+    const helper = await import(
+      new URL("../src/fetch/https-client-node-helper.mjs", import.meta.url).href
+    ).catch(() => null) as null | {
+      performPinnedHttpsRequest(input: unknown, dependencies: unknown): Promise<any>;
+    };
+    expect(helper).not.toBeNull();
+    if (helper === null) return;
+
+    let requestOptions: any;
+    const request = (options: any, onResponse: (response: any) => void) => {
+      requestOptions = options;
+      const outgoing = new EventEmitter() as any;
+      outgoing.setTimeout = () => outgoing;
+      outgoing.destroy = (error?: Error) => {
+        if (error) queueMicrotask(() => outgoing.emit("error", error));
+      };
+      outgoing.end = () => queueMicrotask(() => {
+        const response = new EventEmitter() as any;
+        response.statusCode = 200;
+        response.headers = { "content-type": "text/html", "content-length": String(BASIC_HTML.byteLength) };
+        response.socket = { remoteAddress: PUBLIC_V4 };
+        response.destroy = () => undefined;
+        onResponse(response);
+        response.emit("data", BASIC_HTML);
+        response.emit("end");
+      });
+      return outgoing;
+    };
+
+    const readback = await helper.performPinnedHttpsRequest({
+      url: "https://xn--bcher-kva.com/path?q=1",
       address: { address: PUBLIC_V4, family: 4 },
       maxBytes: 1_048_576,
       deadlineAt: Date.now() + 10_000,
-      signal: controller.signal,
-    });
+    }, { request });
     let lookedUp: readonly unknown[] | undefined;
-    options.lookup("ignored.invalid", {}, (...values: unknown[]) => {
+    requestOptions.lookup("ignored.invalid", {}, (...values: unknown[]) => {
       lookedUp = values;
     });
     let lookedUpAll: readonly unknown[] | undefined;
-    options.lookup("ignored.invalid", { all: true }, (...values: unknown[]) => {
+    requestOptions.lookup("ignored.invalid", { all: true }, (...values: unknown[]) => {
       lookedUpAll = values;
     });
 
     expect({
-      hostname: options.hostname,
-      servername: options.servername,
-      path: options.path,
-      rejectUnauthorized: options.rejectUnauthorized,
-      signal: options.signal,
-      host: options.headers.Host,
-      cookie: options.headers.Cookie,
-      authorization: options.headers.Authorization,
+      hostname: requestOptions.hostname,
+      servername: requestOptions.servername,
+      path: requestOptions.path,
+      rejectUnauthorized: requestOptions.rejectUnauthorized,
+      host: requestOptions.headers.Host,
+      cookie: requestOptions.headers.Cookie,
+      authorization: requestOptions.headers.Authorization,
       lookedUp,
       lookedUpAll,
+      remoteAddress: readback.remoteAddress,
+      body: Buffer.from(readback.bodyBase64, "base64").toString("utf8"),
     }).toEqual({
       hostname: "xn--bcher-kva.com",
       servername: "xn--bcher-kva.com",
       path: "/path?q=1",
       rejectUnauthorized: true,
-      signal: controller.signal,
       host: "xn--bcher-kva.com",
       cookie: undefined,
       authorization: undefined,
       lookedUp: [null, PUBLIC_V4, 4],
       lookedUpAll: [null, [{ address: PUBLIC_V4, family: 4 }]],
+      remoteAddress: PUBLIC_V4,
+      body: BASIC_HTML.toString("utf8"),
     });
+  });
+
+  test("the Node helper rejects a peer that differs from the validated address before reading its body", async () => {
+    const helper = await import(
+      new URL("../src/fetch/https-client-node-helper.mjs", import.meta.url).href
+    ).catch(() => null) as null | {
+      performPinnedHttpsRequest(input: unknown, dependencies: unknown): Promise<any>;
+    };
+    expect(helper).not.toBeNull();
+    if (helper === null) return;
+
+    let bodyRead = false;
+    const request = (_options: any, onResponse: (response: any) => void) => {
+      const outgoing = new EventEmitter() as any;
+      outgoing.setTimeout = () => outgoing;
+      outgoing.destroy = (error?: Error) => {
+        if (error) queueMicrotask(() => outgoing.emit("error", error));
+      };
+      outgoing.end = () => queueMicrotask(() => {
+        const response = new EventEmitter() as any;
+        response.statusCode = 200;
+        response.headers = { "content-type": "text/html" };
+        response.socket = { remoteAddress: SECOND_PUBLIC_V4 };
+        response.destroy = () => undefined;
+        onResponse(response);
+        bodyRead = response.listenerCount("data") > 0;
+        response.emit("end");
+      });
+      return outgoing;
+    };
+
+    await expect(helper.performPinnedHttpsRequest({
+      url: "https://www.example.com/",
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+    }, { request })).rejects.toThrow("peer address mismatch");
+    expect(bodyRead).toBe(false);
+  });
+
+  test("the Node helper rejects an unavailable peer before reading its body", async () => {
+    const helper = await import(
+      new URL("../src/fetch/https-client-node-helper.mjs", import.meta.url).href
+    ) as {
+      performPinnedHttpsRequest(input: unknown, dependencies: unknown): Promise<any>;
+    };
+    let bodyRead = false;
+    const request = (_options: any, onResponse: (response: any) => void) => {
+      const outgoing = new EventEmitter() as any;
+      outgoing.setTimeout = () => outgoing;
+      outgoing.destroy = (error?: Error) => {
+        if (error) queueMicrotask(() => outgoing.emit("error", error));
+      };
+      outgoing.end = () => queueMicrotask(() => {
+        const response = new EventEmitter() as any;
+        response.statusCode = 200;
+        response.headers = { "content-type": "text/html" };
+        response.socket = {};
+        response.destroy = () => undefined;
+        onResponse(response);
+        bodyRead = response.listenerCount("data") > 0;
+      });
+      return outgoing;
+    };
+
+    await expect(helper.performPinnedHttpsRequest({
+      url: "https://www.example.com/",
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+    }, { request })).rejects.toThrow("peer address mismatch");
+    expect(bodyRead).toBe(false);
+  });
+
+  test("the Node helper rejects a private validated-address claim before opening HTTPS", async () => {
+    const helper = await import(
+      new URL("../src/fetch/https-client-node-helper.mjs", import.meta.url).href
+    ) as {
+      performPinnedHttpsRequest(input: unknown, dependencies: unknown): Promise<any>;
+    };
+    let requestCalls = 0;
+    await expect(Promise.resolve().then(() => helper.performPinnedHttpsRequest({
+      url: "https://www.example.com/",
+      address: { address: "127.0.0.1", family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+    }, {
+      request: () => { requestCalls += 1; throw new Error("request must not run"); },
+    }))).rejects.toThrow("validated address is invalid");
+    expect(requestCalls).toBe(0);
+  });
+
+  test("the Node helper rejects conflicting transfer and content-length framing before body", async () => {
+    const helper = await import(
+      new URL("../src/fetch/https-client-node-helper.mjs", import.meta.url).href
+    ) as { performPinnedHttpsRequest(input: unknown, dependencies: unknown): Promise<any> };
+    let bodyRead = false;
+    const request = (_options: any, onResponse: (response: any) => void) => {
+      const outgoing = new EventEmitter() as any;
+      outgoing.setTimeout = () => outgoing;
+      outgoing.destroy = (error?: Error) => {
+        if (error) queueMicrotask(() => outgoing.emit("error", error));
+      };
+      outgoing.end = () => queueMicrotask(() => {
+        const response = new EventEmitter() as any;
+        response.statusCode = 200;
+        response.headers = {
+          "content-type": "text/html",
+          "content-length": "5",
+          "transfer-encoding": "chunked",
+        };
+        response.socket = { remoteAddress: PUBLIC_V4 };
+        response.destroy = () => undefined;
+        onResponse(response);
+        bodyRead = response.listenerCount("data") > 0;
+        response.emit("end");
+      });
+      return outgoing;
+    };
+    await expect(helper.performPinnedHttpsRequest({
+      url: "https://www.example.com/",
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+    }, { request })).rejects.toThrow("response framing is invalid");
+    expect(bodyRead).toBe(false);
+  });
+
+  test("the Node helper rejects a body shorter than its declared content length", async () => {
+    const helper = await import(
+      new URL("../src/fetch/https-client-node-helper.mjs", import.meta.url).href
+    ) as { performPinnedHttpsRequest(input: unknown, dependencies: unknown): Promise<any> };
+    const request = (_options: any, onResponse: (response: any) => void) => {
+      const outgoing = new EventEmitter() as any;
+      outgoing.setTimeout = () => outgoing;
+      outgoing.destroy = (error?: Error) => {
+        if (error) queueMicrotask(() => outgoing.emit("error", error));
+      };
+      outgoing.end = () => queueMicrotask(() => {
+        const response = new EventEmitter() as any;
+        response.statusCode = 200;
+        response.headers = {
+          "content-type": "text/html",
+          "content-length": String(BASIC_HTML.byteLength + 1),
+        };
+        response.socket = { remoteAddress: PUBLIC_V4 };
+        response.destroy = () => undefined;
+        onResponse(response);
+        response.emit("data", BASIC_HTML);
+        response.emit("end");
+      });
+      return outgoing;
+    };
+    await expect(helper.performPinnedHttpsRequest({
+      url: "https://www.example.com/",
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+    }, { request })).rejects.toThrow("content length mismatch");
+  });
+
+  test("meters each streamed Node-helper chunk through the existing transport contract", async () => {
+    const createTransport = (httpsClientModule as unknown as {
+      createPinnedNodeHelperTransport?: (execute: (
+        input: unknown,
+        emit: (event: unknown) => void,
+        signal?: AbortSignal,
+      ) => Promise<void>) => any;
+    }).createPinnedNodeHelperTransport;
+    expect(typeof createTransport).toBe("function");
+    if (createTransport === undefined) return;
+
+    let helperInput: any;
+    const metered: number[] = [];
+    const first = BASIC_HTML.subarray(0, 11);
+    const second = BASIC_HTML.subarray(11);
+    const client = new HttpsClient(createTransport(async (input: unknown, emit: (event: unknown) => void) => {
+      helperInput = input;
+      emit({
+        type: "headers",
+        statusCode: 200,
+        headers: { "content-type": "text/html" },
+        remoteAddress: PUBLIC_V4,
+      });
+      emit({ type: "meter", byteLength: first.byteLength });
+      emit({ type: "data", bodyBase64: first.toString("base64") });
+      emit({ type: "meter", byteLength: second.byteLength });
+      emit({ type: "data", bodyBase64: second.toString("base64") });
+      emit({
+        type: "end",
+        bodyBytesConsumed: BASIC_HTML.byteLength,
+      });
+    }));
+    const response = await client.request({
+      url: new URL("https://www.example.com/path"),
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+      onBodyBytes: (bytes) => { metered.push(bytes); },
+    });
+
+    expect(helperInput).toEqual({
+      url: "https://www.example.com/path",
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: helperInput.deadlineAt,
+    });
+    expect(response.body).toEqual(BASIC_HTML);
+    expect(response.remoteAddress).toBe(PUBLIC_V4);
+    expect(response.bodyBytesConsumed).toBe(BASIC_HTML.byteLength);
+    expect(response.bodyDiscarded).toBe(false);
+    expect(metered).toEqual([first.byteLength, second.byteLength]);
+  });
+
+  test("meters streamed redirect bytes without retaining the discarded body", async () => {
+    const createTransport = (httpsClientModule as any).createPinnedNodeHelperTransport;
+    const metered: number[] = [];
+    const client = new HttpsClient(createTransport(async (_input: unknown, emit: (event: unknown) => void) => {
+      emit({
+        type: "headers",
+        statusCode: 302,
+        headers: { location: "/next" },
+        remoteAddress: PUBLIC_V4,
+      });
+      emit({ type: "meter", byteLength: 13 });
+      emit({ type: "data", bodyBase64: Buffer.from("redirect body").toString("base64") });
+      emit({ type: "end", bodyBytesConsumed: 13 });
+    }));
+
+    const response = await client.request({
+      url: new URL("https://www.example.com/"),
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+      onBodyBytes: (bytes) => { metered.push(bytes); },
+    });
+    expect(response.body).toEqual(Buffer.alloc(0));
+    expect(response.bodyBytesConsumed).toBe(13);
+    expect(response.bodyDiscarded).toBe(true);
+    expect(metered).toEqual([13]);
+  });
+
+  test("stops the helper stream immediately when the attempt byte ledger rejects a chunk", async () => {
+    const createTransport = (httpsClientModule as any).createPinnedNodeHelperTransport;
+    let reachedEnd = false;
+    const client = new HttpsClient(createTransport(async (_input: unknown, emit: (event: unknown) => void) => {
+      emit({
+        type: "headers",
+        statusCode: 200,
+        headers: { "content-type": "text/html" },
+        remoteAddress: PUBLIC_V4,
+      });
+      emit({ type: "meter", byteLength: 5 });
+      emit({ type: "data", bodyBase64: Buffer.from("first").toString("base64") });
+      reachedEnd = true;
+      emit({ type: "end", bodyBytesConsumed: 5 });
+    }));
+
+    await expect(client.request({
+      url: new URL("https://www.example.com/"),
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+      onBodyBytes: () => { throw new Error("attempt byte limit exceeded"); },
+    })).rejects.toThrow("attempt byte limit exceeded");
+    expect(reachedEnd).toBe(false);
+  });
+
+  test("rejects a truncated or count-mismatched helper stream", async () => {
+    const createTransport = (httpsClientModule as any).createPinnedNodeHelperTransport;
+    const baseInput = {
+      url: new URL("https://www.example.com/"),
+      address: { address: PUBLIC_V4, family: 4 as const },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+    };
+    const truncated = new HttpsClient(createTransport(async (_input: unknown, emit: (event: unknown) => void) => {
+      emit({
+        type: "headers",
+        statusCode: 200,
+        headers: { "content-type": "text/html" },
+        remoteAddress: PUBLIC_V4,
+      });
+    }));
+    await expect(truncated.request(baseInput)).rejects.toThrow("helper response is invalid");
+
+    const mismatched = new HttpsClient(createTransport(async (_input: unknown, emit: (event: unknown) => void) => {
+      emit({
+        type: "headers",
+        statusCode: 200,
+        headers: { "content-type": "text/html" },
+        remoteAddress: PUBLIC_V4,
+      });
+      emit({ type: "meter", byteLength: 5 });
+      emit({ type: "data", bodyBase64: Buffer.from("five!").toString("base64") });
+      emit({ type: "end", bodyBytesConsumed: 4 });
+    }));
+    await expect(mismatched.request(baseInput)).rejects.toThrow("helper response is invalid");
+  });
+
+  test("meters the complete network chunk that crosses the response limit before rejecting it", async () => {
+    const createTransport = (httpsClientModule as any).createPinnedNodeHelperTransport;
+    const metered: number[] = [];
+    let reachedBody = false;
+    const client = new HttpsClient(createTransport(async (_input: unknown, emit: (event: unknown) => void) => {
+      emit({
+        type: "headers",
+        statusCode: 200,
+        headers: { "content-type": "text/html" },
+        remoteAddress: PUBLIC_V4,
+      });
+      emit({ type: "meter", byteLength: 101 });
+      reachedBody = true;
+      emit({ type: "data", bodyBase64: Buffer.alloc(101, 65).toString("base64") });
+    }));
+
+    await expect(client.request({
+      url: new URL("https://www.example.com/"),
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 100,
+      deadlineAt: Date.now() + 10_000,
+      onBodyBytes: (bytes) => { metered.push(bytes); },
+    })).rejects.toThrow("response byte limit exceeded");
+    expect(metered).toEqual([101]);
+    expect(reachedBody).toBe(false);
+  });
+
+  test("pauses the Node response until the NDJSON sink drains", async () => {
+    const helper = await import(
+      new URL("../src/fetch/https-client-node-helper.mjs", import.meta.url).href
+    ) as {
+      performPinnedHttpsRequest(input: unknown, dependencies: unknown): Promise<any>;
+    };
+    let response: any;
+    let pauses = 0;
+    let resumes = 0;
+    let drain: (() => void) | undefined;
+    const request = (_options: any, onResponse: (value: any) => void) => {
+      const outgoing = new EventEmitter() as any;
+      outgoing.setTimeout = () => outgoing;
+      outgoing.destroy = (error?: Error) => {
+        if (error) queueMicrotask(() => outgoing.emit("error", error));
+      };
+      outgoing.end = () => queueMicrotask(() => {
+        response = new EventEmitter() as any;
+        response.statusCode = 200;
+        response.headers = { "content-type": "text/html" };
+        response.socket = { remoteAddress: PUBLIC_V4 };
+        response.destroy = () => undefined;
+        response.pause = () => { pauses += 1; };
+        response.resume = () => { resumes += 1; response.emit("end"); };
+        onResponse(response);
+        response.emit("data", BASIC_HTML);
+      });
+      return outgoing;
+    };
+    const pending = helper.performPinnedHttpsRequest({
+      url: "https://www.example.com/",
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+    }, {
+      request,
+      onData: () => false,
+      onDrain: (resume: () => void) => { drain = resume; },
+    });
+    await spinUntil(() => response !== undefined);
+    const beforeDrain = { pauses, resumes, drainRegistered: drain !== undefined };
+    if (drain !== undefined) drain();
+    else response.emit("end");
+    await pending;
+    expect(beforeDrain).toEqual({ pauses: 1, resumes: 0, drainRegistered: true });
+    expect(resumes).toBe(1);
+  });
+
+  test("parses fragmented and coalesced NDJSON from the helper subprocess", async () => {
+    const createExecutor = (httpsClientModule as any).createPinnedNodeHelperExecutor;
+    expect(typeof createExecutor).toBe("function");
+    if (createExecutor === undefined) return;
+    const child = new EventEmitter() as any;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => true;
+    const execute = createExecutor(() => child);
+    const events: unknown[] = [];
+    const pending = execute({
+      url: "https://www.example.com/",
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+    }, (event: unknown) => { events.push(event); });
+    const header = JSON.stringify({
+      type: "headers",
+      statusCode: 200,
+      headers: { "content-type": "text/html" },
+      remoteAddress: PUBLIC_V4,
+    });
+    child.stdout.write(header.slice(0, 17));
+    child.stdout.write(`${header.slice(17)}\n${JSON.stringify({ type: "meter", byteLength: 5 })}\n${JSON.stringify({ type: "end", bodyBytesConsumed: 0 })}\n`);
+    child.emit("close", 0, null);
+    await pending;
+    expect(events).toEqual([
+      {
+        type: "headers",
+        statusCode: 200,
+        headers: { "content-type": "text/html" },
+        remoteAddress: PUBLIC_V4,
+      },
+      { type: "meter", byteLength: 5 },
+      { type: "end", bodyBytesConsumed: 0 },
+    ]);
+  });
+
+  test("does not settle an aborted helper subprocess until its close event proves reap", async () => {
+    const createExecutor = (httpsClientModule as any).createPinnedNodeHelperExecutor;
+    expect(typeof createExecutor).toBe("function");
+    if (createExecutor === undefined) return;
+    const child = new EventEmitter() as any;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    let killedWith: string | undefined;
+    child.kill = (signal: string) => { killedWith = signal; return true; };
+    const execute = createExecutor(() => child);
+    const controller = new AbortController();
+    const pending = execute({
+      url: "https://www.example.com/",
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+    }, () => undefined, controller.signal);
+    controller.abort();
+    expect(killedWith).toBe("SIGKILL");
+    expect(await settleWithin(pending, 20)).toBe("timeout");
+    child.emit("close", null, "SIGKILL");
+    await expect(pending).rejects.toThrow("HTTPS request aborted");
+  });
+
+  test("the public HTTPS client does not surface helper abort before close proves reap", async () => {
+    const createExecutor = (httpsClientModule as any).createPinnedNodeHelperExecutor;
+    const createTransport = (httpsClientModule as any).createPinnedNodeHelperTransport;
+    const child = new EventEmitter() as any;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    let killedWith: string | undefined;
+    child.kill = (signal: string) => { killedWith = signal; return true; };
+    const controller = new AbortController();
+    const client = new HttpsClient(createTransport(createExecutor(() => child)));
+    const pending = client.request({
+      url: new URL("https://www.example.com/"),
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+      signal: controller.signal,
+    });
+    controller.abort();
+    expect(killedWith).toBe("SIGKILL");
+    expect(await settleWithin(pending, 20)).toBe("timeout");
+    child.emit("close", null, "SIGKILL");
+    await expect(pending).rejects.toThrow("HTTPS request aborted");
   });
 
   test("discards redirect bodies while reporting every consumed byte", async () => {
@@ -508,6 +996,28 @@ describe("pinned HTTPS request", () => {
     const client = new HttpsClient(transport);
 
     expect(client.request({
+      url: new URL("https://www.example.com/"),
+      address: { address: PUBLIC_V4, family: 4 },
+      maxBytes: 1_048_576,
+      deadlineAt: Date.now() + 10_000,
+    })).rejects.toThrow("peer address mismatch");
+  });
+
+  test("rejects an unverified transport response when the peer address is unavailable", async () => {
+    const transport = {
+      request: async (input: any) => {
+        input.onBodyBytes(BASIC_HTML.byteLength);
+        return {
+          statusCode: 200,
+          headers: { "content-type": "text/html" },
+          body: BASIC_HTML,
+          remoteAddress: undefined,
+          bodyBytesConsumed: BASIC_HTML.byteLength,
+          bodyDiscarded: false,
+        };
+      },
+    };
+    await expect(new HttpsClient(transport).request({
       url: new URL("https://www.example.com/"),
       address: { address: PUBLIC_V4, family: 4 },
       maxBytes: 1_048_576,
