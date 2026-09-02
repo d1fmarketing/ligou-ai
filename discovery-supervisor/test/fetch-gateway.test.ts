@@ -430,6 +430,10 @@ describe("pinned HTTPS request", () => {
     options.lookup("ignored.invalid", {}, (...values: unknown[]) => {
       lookedUp = values;
     });
+    let lookedUpAll: readonly unknown[] | undefined;
+    options.lookup("ignored.invalid", { all: true }, (...values: unknown[]) => {
+      lookedUpAll = values;
+    });
 
     expect({
       hostname: options.hostname,
@@ -441,6 +445,7 @@ describe("pinned HTTPS request", () => {
       cookie: options.headers.Cookie,
       authorization: options.headers.Authorization,
       lookedUp,
+      lookedUpAll,
     }).toEqual({
       hostname: "xn--bcher-kva.com",
       servername: "xn--bcher-kva.com",
@@ -451,6 +456,7 @@ describe("pinned HTTPS request", () => {
       cookie: undefined,
       authorization: undefined,
       lookedUp: [null, PUBLIC_V4, 4],
+      lookedUpAll: [null, [{ address: PUBLIC_V4, family: 4 }]],
     });
   });
 

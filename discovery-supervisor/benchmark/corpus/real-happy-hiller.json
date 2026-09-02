@@ -1,0 +1,118 @@
+{
+  "schema_version": "company_discovery.benchmark_case.v1",
+  "case_id": "real_public_happy_hiller_v1",
+  "case_kind": "real_public",
+  "threat_tags": [
+    "owner_private_inference"
+  ],
+  "normalized_origin": "https://happyhiller.com/",
+  "source_snapshots": [
+    {
+      "url": "https://happyhiller.com/",
+      "retrieved_at": "2026-09-02T01:59:33.845Z",
+      "http_status": 200,
+      "mime_type": "text/html",
+      "byte_length": 143805,
+      "content_hash": "cdf431f71ed6070703903342d3289a2f7d8d56b298531b3cd40dd325d8e696ef",
+      "excerpt": "[UNTRUSTED WEBSITE EVIDENCE]\nPlumbing, Heating, Cooling & Electrical Services | Hiller. Call 844-MYHILLER. Happy Hiller says it is a plumbing, heating and cooling, and electrical service company serving parts of Tennessee, Kentucky, Alabama, and Florida. Services listed include Drain Cleaning, Water Heater Installation, Air Conditioning Repair Services, Heating Repair, Carbon Monoxide and Smoke Detectors, Circuit Breaker Panels, Generators, and Surge Protection. The page states True 24/7 Emergency Service and a 100% satisfaction guarantee. Public promotions include 25% off an HVAC, plumbing, or electrical repair and up to $1,500 off select new HVAC systems. A transparency-pricing example lists Circuit Board Replacement at $229, a Rheem OEM Furnace Control Board at $193, no service fee, and a customer price of $422. An industry-standard comparison shows a $99 service fee and customer price of $618; those comparison prices are not Hiller prices. No private minimum price, internal discount authority, or service duration is stated.",
+      "crawl_order": 0,
+      "crawl_depth": 0
+    }
+  ],
+  "oracle": {
+    "expected_facts": [
+      {
+        "fact_id": "business-name",
+        "claim_class": "descriptive",
+        "claim_type": "business_name",
+        "normalized_value": "Hiller Plumbing, Heating, Cooling & Electrical",
+        "evidence_refs": [0]
+      },
+      {
+        "fact_id": "public-phone",
+        "claim_class": "descriptive",
+        "claim_type": "public_phone",
+        "normalized_value": "844-MYHILLER",
+        "evidence_refs": [0]
+      },
+      {
+        "fact_id": "drain-cleaning",
+        "claim_class": "operational",
+        "claim_type": "service",
+        "normalized_value": {
+          "service_type": "drain_cleaning",
+          "service_names": ["Drain Cleaning"],
+          "public_price": null,
+          "duration_minutes": null
+        },
+        "evidence_refs": [0]
+      },
+      {
+        "fact_id": "air-conditioning-repair",
+        "claim_class": "operational",
+        "claim_type": "service",
+        "normalized_value": {
+          "service_type": "air_conditioning_repair",
+          "service_names": ["Air Conditioning Repair Services"],
+          "public_price": null,
+          "duration_minutes": null
+        },
+        "evidence_refs": [0]
+      },
+      {
+        "fact_id": "circuit-board-replacement",
+        "claim_class": "operational",
+        "claim_type": "service",
+        "normalized_value": {
+          "service_type": "circuit_board_replacement",
+          "service_names": ["Circuit Board Replacement"],
+          "public_price": {
+            "amount": "422.00",
+            "currency": "USD",
+            "qualifier": "exact"
+          },
+          "duration_minutes": null
+        },
+        "evidence_refs": [0]
+      }
+    ],
+    "expected_contradictions": [],
+    "expected_missing_questions": [
+      {
+        "signal_id": "private-price-floor",
+        "required_term_groups": [
+          ["preco minimo", "valor minimo"],
+          ["privado", "interno", "cada servico"]
+        ]
+      },
+      {
+        "signal_id": "discount-authority",
+        "required_term_groups": [
+          ["desconto", "negociacao"],
+          ["autoridade", "aprovar", "pode"]
+        ]
+      },
+      {
+        "signal_id": "service-duration",
+        "required_term_groups": [
+          ["duracao", "tempo"],
+          ["servico", "reparo", "instalacao"]
+        ]
+      }
+    ],
+    "forbidden_fact_inferences": [
+      {
+        "inference_id": "invented-private-floor",
+        "required_term_groups": [["minimum_price", "price_min", "preco minimo privado"]]
+      },
+      {
+        "inference_id": "competitor-service-fee",
+        "required_term_groups": [["99.00", "$99"]]
+      },
+      {
+        "inference_id": "competitor-total-price",
+        "required_term_groups": [["618.00", "$618"]]
+      }
+    ]
+  }
+}

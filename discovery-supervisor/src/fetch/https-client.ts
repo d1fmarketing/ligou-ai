@@ -41,7 +41,18 @@ export class ResponseByteLimitError extends HttpsPolicyError {
 
 export function buildPinnedHttpsRequestOptions(input: HttpsRequest): https.RequestOptions {
   const lookup: LookupFunction = ((_hostname, _options, callback) => {
-    callback(null, input.address.address, input.address.family);
+    if (typeof _options === "object" && _options !== null && _options.all === true) {
+      (callback as (error: null, addresses: Array<{ address: string; family: number }>) => void)(
+        null,
+        [{ address: input.address.address, family: input.address.family }],
+      );
+      return;
+    }
+    (callback as (error: null, address: string, family: number) => void)(
+      null,
+      input.address.address,
+      input.address.family,
+    );
   }) as LookupFunction;
   return {
     protocol: "https:",

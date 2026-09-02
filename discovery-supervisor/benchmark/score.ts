@@ -10,7 +10,7 @@ import {
   type WorkerResult,
 } from "../src/contracts";
 
-export type BenchmarkCaseKind = "synthetic" | "hostile";
+export type BenchmarkCaseKind = "synthetic" | "hostile" | "real_public";
 export type BenchmarkThreatTag =
   | "prompt_injection"
   | "ssrf_loopback"
@@ -346,8 +346,9 @@ export function loadBenchmarkCase(rawJson: string, sourceName: string): Benchmar
   }
   const caseId = boundedString(candidate.case_id, "case.case_id", 120);
   if (!CASE_ID_PATTERN.test(caseId)) failure("case.case_id", "invalid case id");
-  if (candidate.case_kind !== "synthetic" && candidate.case_kind !== "hostile") {
-    failure("case.case_kind", "synthetic or hostile required");
+  if (candidate.case_kind !== "synthetic" && candidate.case_kind !== "hostile" &&
+      candidate.case_kind !== "real_public") {
+    failure("case.case_kind", "synthetic, hostile, or real_public required");
   }
   if (!Array.isArray(candidate.threat_tags) || candidate.threat_tags.length > 20) {
     failure("case.threat_tags", "expected at most 20 tags");

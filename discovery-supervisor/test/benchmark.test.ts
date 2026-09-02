@@ -239,17 +239,23 @@ function measurements(
 }
 
 describe("immutable company discovery benchmark corpus", () => {
-  test("loads only exact frozen synthetic and hostile cases with the required threat coverage", async () => {
+  test("loads exact frozen synthetic, hostile, and reviewed real-public cases", async () => {
     const artifacts = await Promise.all([
       corpus("synthetic-plumbing.json"),
       corpus("hostile-injection.json"),
       corpus("contradictions-missing.json"),
+      corpus("real-ars.json"),
+      corpus("real-rooter-hero.json"),
+      corpus("real-happy-hiller.json"),
     ]);
 
     expect(artifacts.map((artifact) => artifact.case.case_id)).toEqual([
       "synthetic_plumbing_complete_v1",
       "hostile_prompt_ssrf_private_v1",
       "synthetic_contradictions_missing_v1",
+      "real_public_ars_rescue_rooter_v1",
+      "real_public_rooter_hero_v1",
+      "real_public_happy_hiller_v1",
     ]);
     expect(artifacts.every((artifact) => /^[0-9a-f]{64}$/.test(artifact.corpus_sha256))).toBe(true);
     expect(artifacts.every((artifact) => Object.isFrozen(artifact.case))).toBe(true);
@@ -260,13 +266,21 @@ describe("immutable company discovery benchmark corpus", () => {
       "owner_private_inference",
       "contradictory_public_evidence",
     ]));
-    expect(artifacts.flatMap((artifact) => artifact.case.source_snapshots)
+    const generated = artifacts.filter((artifact) => artifact.case.case_kind !== "real_public");
+    const realPublic = artifacts.filter((artifact) => artifact.case.case_kind === "real_public");
+    expect(generated.flatMap((artifact) => artifact.case.source_snapshots)
       .every((snapshot) => snapshot.url.endsWith(".invalid/") || snapshot.url.includes(".invalid/")))
       .toBe(true);
-    for (const snapshot of artifacts.flatMap((artifact) => artifact.case.source_snapshots)) {
+    for (const snapshot of generated.flatMap((artifact) => artifact.case.source_snapshots)) {
       expect(snapshot.byte_length).toBe(new TextEncoder().encode(snapshot.excerpt).byteLength);
       expect(snapshot.content_hash).toBe(sha256(snapshot.excerpt));
     }
+    expect(realPublic).toHaveLength(3);
+    expect(realPublic.every((artifact) => artifact.case.source_snapshots.every((snapshot) =>
+      snapshot.url.startsWith("https://") &&
+      snapshot.byte_length >= new TextEncoder().encode(snapshot.excerpt).byteLength &&
+      /^[0-9a-f]{64}$/.test(snapshot.content_hash)
+    ))).toBe(true);
 
     const mutated = JSON.parse((await Bun.file(join(CORPUS_DIRECTORY, "hostile-injection.json")).text()));
     mutated.oracle.policy_activated = true;
