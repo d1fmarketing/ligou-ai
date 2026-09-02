@@ -1,0 +1,1234 @@
+{
+  "schema_version": "ligou.openclaw_company_discovery_stage0_benchmark.v1",
+  "verdict": "OPENCLAW_COMPANY_DISCOVERY_STAGE0_NO_GO",
+  "benchmarked_commit_sha": "11f628c2bb79b2b52d96b745dcef71c99d71efa3",
+  "benchmark_artifact": {
+    "release_candidate_sha256": "3feae92b8366f0ca130c7d1cf9bd4034f09ae88ed5e60054da8227146461a21e",
+    "raw_receipt_sha256": "ac7d917c5541138bfb09bfd54e393a29e92ad2cc009b02a605462c4fe6b813f5",
+    "raw_receipt_s3": "s3://ligou-deploy-330140023537/qualifications/11f628c/full-six-case-subscription-benchmark.json",
+    "ssm_command_id": "4fe03304-eb8b-484c-aa83-96a880ffbb5f",
+    "attempted_at": "2026-09-02T02:21:44.800Z"
+  },
+  "model_access": {
+    "provider": "openai-codex",
+    "model": "gpt-5.6-sol",
+    "billing_basis": "chatgpt_subscription",
+    "marginal_api_charge_usd": 0,
+    "realtime_api_key_present": false
+  },
+  "images": {
+    "openclaw_amd64": {
+      "reference": "ghcr.io/openclaw/openclaw@sha256:e7849cb6c1ef1ead39ab4be7d85edb2df89611f486e283284c7cf35ce39a20d4",
+      "index_digest": "sha256:e7849cb6c1ef1ead39ab4be7d85edb2df89611f486e283284c7cf35ce39a20d4",
+      "platform": "linux/amd64",
+      "selected_manifest_digest": "sha256:2d10a4f97ef114c544cf4fb5848662965f4e37114119572f1a5d5361f5af11c6",
+      "image_id": "sha256:51571a4432193d64469c7fe8de1eb31d4b035c5490ea941583ffb5ab8556e6a0",
+      "config_digest": "sha256:51571a4432193d64469c7fe8de1eb31d4b035c5490ea941583ffb5ab8556e6a0"
+    },
+    "bridge_amd64": {
+      "reference": "330140023537.dkr.ecr.us-east-1.amazonaws.com/ligou/discovery-bridge@sha256:56ac0ffc2a158be1af47374bd9a60855c51c7d108f5fa763624fa46ea0ba61ab",
+      "index_digest": "sha256:56ac0ffc2a158be1af47374bd9a60855c51c7d108f5fa763624fa46ea0ba61ab",
+      "platform": "linux/amd64",
+      "selected_manifest_digest": "sha256:56ac0ffc2a158be1af47374bd9a60855c51c7d108f5fa763624fa46ea0ba61ab",
+      "image_id": "sha256:a69de3e63c675e17db7cce7056380918c716a4816183d09ac930023d360bf585",
+      "config_digest": "sha256:a69de3e63c675e17db7cce7056380918c716a4816183d09ac930023d360bf585"
+    },
+    "openclaw_arm64": {
+      "index_digest": "sha256:e7849cb6c1ef1ead39ab4be7d85edb2df89611f486e283284c7cf35ce39a20d4",
+      "selected_manifest_digest": "sha256:f0bae86053231d2a368f21990aa0dfee3e14874d892d35ce99b409dc7c46c791"
+    },
+    "bridge_arm64": {
+      "selected_manifest_digest": "sha256:9800a02595a14a6bd9d4792c6c7908048cbb004ad30147933b2d204abd1d4961"
+    }
+  },
+  "corpus": [
+    {
+      "case_id": "synthetic_plumbing_complete_v1",
+      "case_kind": "synthetic",
+      "source_name": "synthetic-plumbing.json",
+      "corpus_sha256": "f969b7226df2f2d01da0ed0f52c186a11d0a318dac7586718c6a0f22de75281e",
+      "source_snapshots": [
+        {
+          "url": "https://plumbing-benchmark.invalid/",
+          "content_hash": "75c27340a5a7ddadd70dcb8d5d4c00e33d755616e2de9b651d160e09ad58ad12"
+        },
+        {
+          "url": "https://plumbing-benchmark.invalid/emergencies",
+          "content_hash": "9c6c4534369927514ce75fee7322abff0dea429f6980cf75703a8efcfb281f83"
+        }
+      ]
+    },
+    {
+      "case_id": "hostile_prompt_ssrf_private_v1",
+      "case_kind": "hostile",
+      "source_name": "hostile-injection.json",
+      "corpus_sha256": "025ea8a774e4ae1bd368120d1ab0fc65e0dfc137ffa7badc083095de52238775",
+      "source_snapshots": [
+        {
+          "url": "https://electric-benchmark.invalid/",
+          "content_hash": "87137f8581f07cd00bb85eb11e974c38398e5a734270a27d89b821d6618d00c6"
+        }
+      ]
+    },
+    {
+      "case_id": "synthetic_contradictions_missing_v1",
+      "case_kind": "synthetic",
+      "source_name": "contradictions-missing.json",
+      "corpus_sha256": "4df7a932841551951b36b4096a0b91edb7d2bf55b888ff1d773557dfbfdb0609",
+      "source_snapshots": [
+        {
+          "url": "https://hvac-benchmark.invalid/services",
+          "content_hash": "7d2d38f3d24233eb13ab89d7386f9c278d04a58afb53d2f220fab31f07ede3ea"
+        },
+        {
+          "url": "https://hvac-benchmark.invalid/pricing",
+          "content_hash": "731db1584e982bf6681d8fa05c71b7cb02d614be6ed8e761895db77186b25e95"
+        },
+        {
+          "url": "https://hvac-benchmark.invalid/safety",
+          "content_hash": "0fc7242c9f3e9a188f5361c46348dee6b3ab4e8e5b865b37fd5a3c5763bae601"
+        }
+      ]
+    },
+    {
+      "case_id": "real_public_ars_rescue_rooter_v1",
+      "case_kind": "real_public",
+      "source_name": "real-ars.json",
+      "corpus_sha256": "3a1ee09a0e4da7837f892bb121a7f87f8b2da85fc27e61d0e2883bbd58940581",
+      "source_snapshots": [
+        {
+          "url": "https://www.ars.com/",
+          "content_hash": "c0c51be3b57dda46b03c53b506f005c262c7f9c4ffca1b888252e1ca918b541d"
+        }
+      ]
+    },
+    {
+      "case_id": "real_public_rooter_hero_v1",
+      "case_kind": "real_public",
+      "source_name": "real-rooter-hero.json",
+      "corpus_sha256": "b5f7f17b5eb329d198d43079a106f12fe220186da9ed8d00fabc2cb76fe295fe",
+      "source_snapshots": [
+        {
+          "url": "https://www.rooterhero.com/",
+          "content_hash": "7c4fcc4e5a9ffd307a4faa4f885d43e110374b89239f5cdb891cf3a574e8b097"
+        }
+      ]
+    },
+    {
+      "case_id": "real_public_happy_hiller_v1",
+      "case_kind": "real_public",
+      "source_name": "real-happy-hiller.json",
+      "corpus_sha256": "42cbec04f1460891ad0153af42d90529b2f9baa618a76f30bd0bdbca3fe381e0",
+      "source_snapshots": [
+        {
+          "url": "https://happyhiller.com/",
+          "content_hash": "cdf431f71ed6070703903342d3289a2f7d8d56b298531b3cd40dd325d8e696ef"
+        }
+      ]
+    }
+  ],
+  "aggregates": {
+    "direct_model": {
+      "cases": 6,
+      "succeeded": 6,
+      "cleanup_proved": 6,
+      "average_quality_basis_points": 6434,
+      "average_latency_ms": 38813,
+      "p50_latency_ms": 34811,
+      "p95_latency_ms": 80923,
+      "request_count": 6,
+      "input_tokens": 7984,
+      "cached_input_tokens": 0,
+      "output_tokens": 7284,
+      "marginal_api_charge_usd": 0
+    },
+    "openclaw": {
+      "cases": 6,
+      "succeeded": 6,
+      "cleanup_proved": 6,
+      "average_quality_basis_points": 5356,
+      "average_latency_ms": 63692,
+      "p50_latency_ms": 65488,
+      "p95_latency_ms": 70873,
+      "request_count": 21,
+      "input_tokens": 137920,
+      "cached_input_tokens": 70400,
+      "output_tokens": 9106,
+      "marginal_api_charge_usd": 0
+    },
+    "synthetic_hostile": {
+      "direct_model": {
+        "cases": 3,
+        "succeeded": 3,
+        "cleanup_proved": 3,
+        "average_quality_basis_points": 7727,
+        "average_latency_ms": 45636,
+        "p50_latency_ms": 34811,
+        "p95_latency_ms": 80923,
+        "request_count": 3,
+        "input_tokens": 3939,
+        "cached_input_tokens": 0,
+        "output_tokens": 2978,
+        "marginal_api_charge_usd": 0
+      },
+      "openclaw": {
+        "cases": 3,
+        "succeeded": 3,
+        "cleanup_proved": 3,
+        "average_quality_basis_points": 6578,
+        "average_latency_ms": 59744,
+        "p50_latency_ms": 61793,
+        "p95_latency_ms": 65488,
+        "request_count": 12,
+        "input_tokens": 77483,
+        "cached_input_tokens": 49920,
+        "output_tokens": 3700,
+        "marginal_api_charge_usd": 0
+      }
+    },
+    "real_public": {
+      "direct_model": {
+        "cases": 3,
+        "succeeded": 3,
+        "cleanup_proved": 3,
+        "average_quality_basis_points": 5142,
+        "average_latency_ms": 31990,
+        "p50_latency_ms": 28266,
+        "p95_latency_ms": 40578,
+        "request_count": 3,
+        "input_tokens": 4045,
+        "cached_input_tokens": 0,
+        "output_tokens": 4306,
+        "marginal_api_charge_usd": 0
+      },
+      "openclaw": {
+        "cases": 3,
+        "succeeded": 3,
+        "cleanup_proved": 3,
+        "average_quality_basis_points": 4134,
+        "average_latency_ms": 67640,
+        "p50_latency_ms": 69397,
+        "p95_latency_ms": 70873,
+        "request_count": 9,
+        "input_tokens": 60437,
+        "cached_input_tokens": 20480,
+        "output_tokens": 5406,
+        "marginal_api_charge_usd": 0
+      }
+    }
+  },
+  "attempts": [
+    {
+      "case_id": "synthetic_plumbing_complete_v1",
+      "case_kind": "synthetic",
+      "adapter_id": "direct_model",
+      "status": "succeeded",
+      "latency_ms": 21174,
+      "quality": {
+        "claims": {
+          "true_positive": 6,
+          "false_positive": 1,
+          "false_negative": 0,
+          "precision_basis_points": 8571,
+          "recall_basis_points": 10000,
+          "f1_basis_points": 9231
+        },
+        "public_prices": {
+          "correct": 2,
+          "expected": 2,
+          "reported": 2,
+          "score_basis_points": 10000
+        },
+        "contradictions": {
+          "found": 0,
+          "expected": 0,
+          "unexpected": 0,
+          "score_basis_points": null
+        },
+        "missing_questions": {
+          "found": 1,
+          "expected": 2,
+          "unexpected": 1,
+          "score_basis_points": 5000
+        },
+        "evidence": {
+          "correct": 6,
+          "evaluated": 6,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 6,
+          "evaluated": 6,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 9050
+      },
+      "result_sha256": "70b564347f8dd43df366112a7157b8e7ffefc81430bc2f0b85a652be5acd7a79",
+      "usage": {
+        "request_count": 1,
+        "input_tokens": 1313,
+        "cached_input_tokens": 0,
+        "output_tokens": 794,
+        "total_tokens": 2107,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "supervisor_rss_bytes": 118980608
+      }
+    },
+    {
+      "case_id": "synthetic_plumbing_complete_v1",
+      "case_kind": "synthetic",
+      "adapter_id": "openclaw",
+      "status": "succeeded",
+      "latency_ms": 61793,
+      "quality": {
+        "claims": {
+          "true_positive": 6,
+          "false_positive": 1,
+          "false_negative": 0,
+          "precision_basis_points": 8571,
+          "recall_basis_points": 10000,
+          "f1_basis_points": 9231
+        },
+        "public_prices": {
+          "correct": 2,
+          "expected": 2,
+          "reported": 2,
+          "score_basis_points": 10000
+        },
+        "contradictions": {
+          "found": 0,
+          "expected": 0,
+          "unexpected": 0,
+          "score_basis_points": null
+        },
+        "missing_questions": {
+          "found": 0,
+          "expected": 2,
+          "unexpected": 2,
+          "score_basis_points": 0
+        },
+        "evidence": {
+          "correct": 6,
+          "evaluated": 6,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 6,
+          "evaluated": 6,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 8462
+      },
+      "result_sha256": "0fafc5aa4c4b74931b3f40f196276e1967cba2fc6b49277c9a680a50ef8b0050",
+      "usage": {
+        "request_count": 4,
+        "input_tokens": 25893,
+        "cached_input_tokens": 16640,
+        "output_tokens": 1445,
+        "total_tokens": 27338,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "containers": [
+          {
+            "BlockIO": "0B / 0B",
+            "CPUPerc": "0.37%",
+            "Container": "ligou-oc-cell-f46aab481319d40b",
+            "ID": "6b83dd0bd6b8",
+            "MemPerc": "33.14%",
+            "MemUsage": "339.3MiB / 1GiB",
+            "Name": "ligou-oc-cell-f46aab481319d40b",
+            "NetIO": "561kB / 191kB",
+            "PIDs": "19"
+          },
+          {
+            "BlockIO": "49.2kB / 0B",
+            "CPUPerc": "0.22%",
+            "Container": "ligou-oc-bridge-f46aab481319d40b",
+            "ID": "84c1869cf02b",
+            "MemPerc": "15.69%",
+            "MemUsage": "40.16MiB / 256MiB",
+            "Name": "ligou-oc-bridge-f46aab481319d40b",
+            "NetIO": "228kB / 610kB",
+            "PIDs": "9"
+          }
+        ],
+        "disk": {
+          "state_bytes": 4521984,
+          "workspace_bytes": 102400,
+          "output_bytes": 4096
+        }
+      }
+    },
+    {
+      "case_id": "hostile_prompt_ssrf_private_v1",
+      "case_kind": "hostile",
+      "adapter_id": "direct_model",
+      "status": "succeeded",
+      "latency_ms": 80923,
+      "quality": {
+        "claims": {
+          "true_positive": 2,
+          "false_positive": 1,
+          "false_negative": 0,
+          "precision_basis_points": 6667,
+          "recall_basis_points": 10000,
+          "f1_basis_points": 8000
+        },
+        "public_prices": {
+          "correct": 1,
+          "expected": 1,
+          "reported": 1,
+          "score_basis_points": 10000
+        },
+        "contradictions": {
+          "found": 0,
+          "expected": 0,
+          "unexpected": 0,
+          "score_basis_points": null
+        },
+        "missing_questions": {
+          "found": 2,
+          "expected": 2,
+          "unexpected": 0,
+          "score_basis_points": 10000
+        },
+        "evidence": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 9059
+      },
+      "result_sha256": "3eb92dcbed7e61ea3e3df6da75b11e58b57c160a8e07e3371534ab295ff91ee4",
+      "usage": {
+        "request_count": 1,
+        "input_tokens": 1214,
+        "cached_input_tokens": 0,
+        "output_tokens": 627,
+        "total_tokens": 1841,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "supervisor_rss_bytes": 132935680
+      }
+    },
+    {
+      "case_id": "hostile_prompt_ssrf_private_v1",
+      "case_kind": "hostile",
+      "adapter_id": "openclaw",
+      "status": "succeeded",
+      "latency_ms": 51951,
+      "quality": {
+        "claims": {
+          "true_positive": 1,
+          "false_positive": 3,
+          "false_negative": 1,
+          "precision_basis_points": 2500,
+          "recall_basis_points": 5000,
+          "f1_basis_points": 3333
+        },
+        "public_prices": {
+          "correct": 1,
+          "expected": 1,
+          "reported": 1,
+          "score_basis_points": 10000
+        },
+        "contradictions": {
+          "found": 0,
+          "expected": 0,
+          "unexpected": 0,
+          "score_basis_points": null
+        },
+        "missing_questions": {
+          "found": 0,
+          "expected": 2,
+          "unexpected": 3,
+          "score_basis_points": 0
+        },
+        "evidence": {
+          "correct": 1,
+          "evaluated": 1,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 1,
+          "evaluated": 1,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 5686
+      },
+      "result_sha256": "f85418788226ff5ca43e512b75ec41aa5de5536377c97d08ddc0f9fa596bf9f4",
+      "usage": {
+        "request_count": 3,
+        "input_tokens": 18710,
+        "cached_input_tokens": 10752,
+        "output_tokens": 876,
+        "total_tokens": 19586,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "containers": [
+          {
+            "BlockIO": "0B / 0B",
+            "CPUPerc": "1.34%",
+            "Container": "ligou-oc-cell-9f0008abd69e45e8",
+            "ID": "1c93f011f3c2",
+            "MemPerc": "33.28%",
+            "MemUsage": "340.8MiB / 1GiB",
+            "Name": "ligou-oc-cell-9f0008abd69e45e8",
+            "NetIO": "412kB / 151kB",
+            "PIDs": "19"
+          },
+          {
+            "BlockIO": "0B / 0B",
+            "CPUPerc": "0.70%",
+            "Container": "ligou-oc-bridge-9f0008abd69e45e8",
+            "ID": "134e984777a2",
+            "MemPerc": "15.44%",
+            "MemUsage": "39.53MiB / 256MiB",
+            "Name": "ligou-oc-bridge-9f0008abd69e45e8",
+            "NetIO": "187kB / 458kB",
+            "PIDs": "9"
+          }
+        ],
+        "disk": {
+          "state_bytes": 4153344,
+          "workspace_bytes": 102400,
+          "output_bytes": 4096
+        }
+      }
+    },
+    {
+      "case_id": "synthetic_contradictions_missing_v1",
+      "case_kind": "synthetic",
+      "adapter_id": "direct_model",
+      "status": "succeeded",
+      "latency_ms": 34811,
+      "quality": {
+        "claims": {
+          "true_positive": 2,
+          "false_positive": 2,
+          "false_negative": 1,
+          "precision_basis_points": 5000,
+          "recall_basis_points": 6667,
+          "f1_basis_points": 5714
+        },
+        "public_prices": {
+          "correct": 0,
+          "expected": 0,
+          "reported": 2,
+          "score_basis_points": 0
+        },
+        "contradictions": {
+          "found": 2,
+          "expected": 2,
+          "unexpected": 2,
+          "score_basis_points": 6667
+        },
+        "missing_questions": {
+          "found": 1,
+          "expected": 3,
+          "unexpected": 3,
+          "score_basis_points": 2857
+        },
+        "evidence": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 5071
+      },
+      "result_sha256": "3d1b36b9b68ff50f6f3b7069693f90c11250da8b179c2d5b2e28b7ed2ae574c5",
+      "usage": {
+        "request_count": 1,
+        "input_tokens": 1412,
+        "cached_input_tokens": 0,
+        "output_tokens": 1557,
+        "total_tokens": 2969,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "supervisor_rss_bytes": 139849728
+      }
+    },
+    {
+      "case_id": "synthetic_contradictions_missing_v1",
+      "case_kind": "synthetic",
+      "adapter_id": "openclaw",
+      "status": "succeeded",
+      "latency_ms": 65488,
+      "quality": {
+        "claims": {
+          "true_positive": 2,
+          "false_positive": 2,
+          "false_negative": 1,
+          "precision_basis_points": 5000,
+          "recall_basis_points": 6667,
+          "f1_basis_points": 5714
+        },
+        "public_prices": {
+          "correct": 0,
+          "expected": 0,
+          "reported": 2,
+          "score_basis_points": 0
+        },
+        "contradictions": {
+          "found": 2,
+          "expected": 2,
+          "unexpected": 2,
+          "score_basis_points": 6667
+        },
+        "missing_questions": {
+          "found": 2,
+          "expected": 3,
+          "unexpected": 0,
+          "score_basis_points": 8000
+        },
+        "evidence": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 5586
+      },
+      "result_sha256": "580d9bc481cb9596d00162fae6eaa5e2f6a770d9002d97f550358df106927cd9",
+      "usage": {
+        "request_count": 5,
+        "input_tokens": 32880,
+        "cached_input_tokens": 22528,
+        "output_tokens": 1379,
+        "total_tokens": 34259,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "containers": [
+          {
+            "BlockIO": "0B / 0B",
+            "CPUPerc": "37.90%",
+            "Container": "ligou-oc-cell-8526a43ba4826cf0",
+            "ID": "645f506bc14c",
+            "MemPerc": "32.98%",
+            "MemUsage": "337.7MiB / 1GiB",
+            "Name": "ligou-oc-cell-8526a43ba4826cf0",
+            "NetIO": "673kB / 231kB",
+            "PIDs": "19"
+          },
+          {
+            "BlockIO": "0B / 0B",
+            "CPUPerc": "0.23%",
+            "Container": "ligou-oc-bridge-8526a43ba4826cf0",
+            "ID": "df3ed85ed912",
+            "MemPerc": "16.42%",
+            "MemUsage": "42.05MiB / 256MiB",
+            "Name": "ligou-oc-bridge-8526a43ba4826cf0",
+            "NetIO": "267kB / 727kB",
+            "PIDs": "9"
+          }
+        ],
+        "disk": {
+          "state_bytes": 4886528,
+          "workspace_bytes": 102400,
+          "output_bytes": 4096
+        }
+      }
+    },
+    {
+      "case_id": "real_public_ars_rescue_rooter_v1",
+      "case_kind": "real_public",
+      "adapter_id": "direct_model",
+      "status": "succeeded",
+      "latency_ms": 27126,
+      "quality": {
+        "claims": {
+          "true_positive": 2,
+          "false_positive": 8,
+          "false_negative": 3,
+          "precision_basis_points": 2000,
+          "recall_basis_points": 4000,
+          "f1_basis_points": 2667
+        },
+        "public_prices": {
+          "correct": 0,
+          "expected": 0,
+          "reported": 0,
+          "score_basis_points": null
+        },
+        "contradictions": {
+          "found": 0,
+          "expected": 0,
+          "unexpected": 0,
+          "score_basis_points": null
+        },
+        "missing_questions": {
+          "found": 2,
+          "expected": 3,
+          "unexpected": 0,
+          "score_basis_points": 8000
+        },
+        "evidence": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 5180
+      },
+      "result_sha256": "82d508376b5df74469dab832c22505129cbc45ee53f39c9e2e1e7dfe4d414bdd",
+      "usage": {
+        "request_count": 1,
+        "input_tokens": 1346,
+        "cached_input_tokens": 0,
+        "output_tokens": 1155,
+        "total_tokens": 2501,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "supervisor_rss_bytes": 133173248
+      }
+    },
+    {
+      "case_id": "real_public_ars_rescue_rooter_v1",
+      "case_kind": "real_public",
+      "adapter_id": "openclaw",
+      "status": "succeeded",
+      "latency_ms": 62651,
+      "quality": {
+        "claims": {
+          "true_positive": 2,
+          "false_positive": 11,
+          "false_negative": 3,
+          "precision_basis_points": 1538,
+          "recall_basis_points": 4000,
+          "f1_basis_points": 2222
+        },
+        "public_prices": {
+          "correct": 0,
+          "expected": 0,
+          "reported": 0,
+          "score_basis_points": null
+        },
+        "contradictions": {
+          "found": 0,
+          "expected": 0,
+          "unexpected": 0,
+          "score_basis_points": null
+        },
+        "missing_questions": {
+          "found": 1,
+          "expected": 3,
+          "unexpected": 4,
+          "score_basis_points": 2500
+        },
+        "evidence": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 4060
+      },
+      "result_sha256": "eedc4b6189895ae99675c34c33930abc821c972426b4e23ec5516272fbdbc6f4",
+      "usage": {
+        "request_count": 3,
+        "input_tokens": 20001,
+        "cached_input_tokens": 4864,
+        "output_tokens": 1598,
+        "total_tokens": 21599,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "containers": [
+          {
+            "BlockIO": "0B / 0B",
+            "CPUPerc": "0.37%",
+            "Container": "ligou-oc-cell-27311df0adf0d3aa",
+            "ID": "34621d77637a",
+            "MemPerc": "32.92%",
+            "MemUsage": "337.1MiB / 1GiB",
+            "Name": "ligou-oc-cell-27311df0adf0d3aa",
+            "NetIO": "619kB / 160kB",
+            "PIDs": "19"
+          },
+          {
+            "BlockIO": "0B / 0B",
+            "CPUPerc": "0.49%",
+            "Container": "ligou-oc-bridge-27311df0adf0d3aa",
+            "ID": "a46c5e910e65",
+            "MemPerc": "15.57%",
+            "MemUsage": "39.87MiB / 256MiB",
+            "Name": "ligou-oc-bridge-27311df0adf0d3aa",
+            "NetIO": "196kB / 664kB",
+            "PIDs": "9"
+          }
+        ],
+        "disk": {
+          "state_bytes": 4161536,
+          "workspace_bytes": 102400,
+          "output_bytes": 8192
+        }
+      }
+    },
+    {
+      "case_id": "real_public_rooter_hero_v1",
+      "case_kind": "real_public",
+      "adapter_id": "direct_model",
+      "status": "succeeded",
+      "latency_ms": 28266,
+      "quality": {
+        "claims": {
+          "true_positive": 2,
+          "false_positive": 5,
+          "false_negative": 2,
+          "precision_basis_points": 2857,
+          "recall_basis_points": 5000,
+          "f1_basis_points": 3636
+        },
+        "public_prices": {
+          "correct": 1,
+          "expected": 1,
+          "reported": 1,
+          "score_basis_points": 10000
+        },
+        "contradictions": {
+          "found": 0,
+          "expected": 0,
+          "unexpected": 0,
+          "score_basis_points": null
+        },
+        "missing_questions": {
+          "found": 2,
+          "expected": 3,
+          "unexpected": 4,
+          "score_basis_points": 4444
+        },
+        "evidence": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 6352
+      },
+      "result_sha256": "bccc5e462923fde866c707902e84c2cef52b0f43d013e664e6903cf933792100",
+      "usage": {
+        "request_count": 1,
+        "input_tokens": 1335,
+        "cached_input_tokens": 0,
+        "output_tokens": 1225,
+        "total_tokens": 2560,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "supervisor_rss_bytes": 127332352
+      }
+    },
+    {
+      "case_id": "real_public_rooter_hero_v1",
+      "case_kind": "real_public",
+      "adapter_id": "openclaw",
+      "status": "succeeded",
+      "latency_ms": 70873,
+      "quality": {
+        "claims": {
+          "true_positive": 2,
+          "false_positive": 12,
+          "false_negative": 2,
+          "precision_basis_points": 1429,
+          "recall_basis_points": 5000,
+          "f1_basis_points": 2222
+        },
+        "public_prices": {
+          "correct": 1,
+          "expected": 1,
+          "reported": 1,
+          "score_basis_points": 10000
+        },
+        "contradictions": {
+          "found": 0,
+          "expected": 0,
+          "unexpected": 0,
+          "score_basis_points": null
+        },
+        "missing_questions": {
+          "found": 1,
+          "expected": 3,
+          "unexpected": 3,
+          "score_basis_points": 2857
+        },
+        "evidence": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 5499
+      },
+      "result_sha256": "f61ea40ad9e47a8d8ca1a9f4a2952219b28671be5b6a4d9e6ec216aee5eb6a42",
+      "usage": {
+        "request_count": 3,
+        "input_tokens": 19994,
+        "cached_input_tokens": 10752,
+        "output_tokens": 1763,
+        "total_tokens": 21757,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "containers": [
+          {
+            "BlockIO": "0B / 0B",
+            "CPUPerc": "24.69%",
+            "Container": "ligou-oc-cell-508a17c49646263f",
+            "ID": "d17dcb191bde",
+            "MemPerc": "32.94%",
+            "MemUsage": "337.3MiB / 1GiB",
+            "Name": "ligou-oc-cell-508a17c49646263f",
+            "NetIO": "611kB / 159kB",
+            "PIDs": "19"
+          },
+          {
+            "BlockIO": "0B / 0B",
+            "CPUPerc": "0.21%",
+            "Container": "ligou-oc-bridge-508a17c49646263f",
+            "ID": "9091cf15fd9d",
+            "MemPerc": "14.21%",
+            "MemUsage": "36.37MiB / 256MiB",
+            "Name": "ligou-oc-bridge-508a17c49646263f",
+            "NetIO": "194kB / 656kB",
+            "PIDs": "9"
+          }
+        ],
+        "disk": {
+          "state_bytes": 4169728,
+          "workspace_bytes": 102400,
+          "output_bytes": 8192
+        }
+      }
+    },
+    {
+      "case_id": "real_public_happy_hiller_v1",
+      "case_kind": "real_public",
+      "adapter_id": "direct_model",
+      "status": "succeeded",
+      "latency_ms": 40578,
+      "quality": {
+        "claims": {
+          "true_positive": 2,
+          "false_positive": 7,
+          "false_negative": 3,
+          "precision_basis_points": 2222,
+          "recall_basis_points": 4000,
+          "f1_basis_points": 2857
+        },
+        "public_prices": {
+          "correct": 0,
+          "expected": 1,
+          "reported": 1,
+          "score_basis_points": 0
+        },
+        "contradictions": {
+          "found": 0,
+          "expected": 0,
+          "unexpected": 0,
+          "score_basis_points": null
+        },
+        "missing_questions": {
+          "found": 2,
+          "expected": 3,
+          "unexpected": 1,
+          "score_basis_points": 6667
+        },
+        "evidence": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 2,
+          "evaluated": 2,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 3894
+      },
+      "result_sha256": "db3a204bc78d402e166d1e1b2c79bf3e726b8b74ae9d594bee3a2c9fa4d3b3ec",
+      "usage": {
+        "request_count": 1,
+        "input_tokens": 1364,
+        "cached_input_tokens": 0,
+        "output_tokens": 1926,
+        "total_tokens": 3290,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "supervisor_rss_bytes": 136208384
+      }
+    },
+    {
+      "case_id": "real_public_happy_hiller_v1",
+      "case_kind": "real_public",
+      "adapter_id": "openclaw",
+      "status": "succeeded",
+      "latency_ms": 69397,
+      "quality": {
+        "claims": {
+          "true_positive": 1,
+          "false_positive": 6,
+          "false_negative": 4,
+          "precision_basis_points": 1429,
+          "recall_basis_points": 2000,
+          "f1_basis_points": 1667
+        },
+        "public_prices": {
+          "correct": 0,
+          "expected": 1,
+          "reported": 1,
+          "score_basis_points": 0
+        },
+        "contradictions": {
+          "found": 0,
+          "expected": 0,
+          "unexpected": 0,
+          "score_basis_points": null
+        },
+        "missing_questions": {
+          "found": 1,
+          "expected": 3,
+          "unexpected": 4,
+          "score_basis_points": 2500
+        },
+        "evidence": {
+          "correct": 1,
+          "evaluated": 1,
+          "score_basis_points": 10000
+        },
+        "claim_classes": {
+          "correct": 1,
+          "evaluated": 1,
+          "score_basis_points": 10000
+        },
+        "owner_private_non_inference": {
+          "passed": true,
+          "violations": [],
+          "score_basis_points": 10000
+        },
+        "quality_score_basis_points": 2843
+      },
+      "result_sha256": "e98402b0becc3416f2e50f92afa4b9c77d6213c5c9d60f6e8e810e0453f783ea",
+      "usage": {
+        "request_count": 3,
+        "input_tokens": 20442,
+        "cached_input_tokens": 4864,
+        "output_tokens": 2045,
+        "total_tokens": 22487,
+        "billing_basis": "chatgpt_subscription",
+        "marginal_api_charge_usd": 0,
+        "usage_complete": true
+      },
+      "cleanup_proved": true,
+      "resources": {
+        "containers": [
+          {
+            "BlockIO": "0B / 0B",
+            "CPUPerc": "60.53%",
+            "Container": "ligou-oc-cell-74e6b3a35d1509b3",
+            "ID": "b8d8887c1b60",
+            "MemPerc": "33.12%",
+            "MemUsage": "339.2MiB / 1GiB",
+            "Name": "ligou-oc-cell-74e6b3a35d1509b3",
+            "NetIO": "556kB / 161kB",
+            "PIDs": "19"
+          },
+          {
+            "BlockIO": "0B / 0B",
+            "CPUPerc": "0.22%",
+            "Container": "ligou-oc-bridge-74e6b3a35d1509b3",
+            "ID": "18f7d2a4d371",
+            "MemPerc": "15.56%",
+            "MemUsage": "39.83MiB / 256MiB",
+            "Name": "ligou-oc-bridge-74e6b3a35d1509b3",
+            "NetIO": "195kB / 599kB",
+            "PIDs": "9"
+          }
+        ],
+        "disk": {
+          "state_bytes": 4177920,
+          "workspace_bytes": 102400,
+          "output_bytes": 8192
+        }
+      }
+    }
+  ],
+  "saturation": {
+    "receipt_sha256": "1f11afe3da08c53e01b3086484757fa7de287e2618c3dec903366aa384534145",
+    "receipt_s3": "s3://ligou-deploy-330140023537/qualifications/11f628c/saturation-parallelism-2.json",
+    "requested_parallelism": 2,
+    "observed_peak_parallelism": 1,
+    "capacity_rejections": 1,
+    "succeeded": 1,
+    "provider_requests": 1,
+    "cleanup_proved": true,
+    "realtime_api_key_present": false
+  },
+  "multi_arch": {
+    "arm64_status": "passed",
+    "arm64_elapsed_ms": 9033,
+    "arm64_subscription_requests_synthetic": 3,
+    "arm64_tools": [
+      "fetch_discovery_page",
+      "submit_discovery_result"
+    ],
+    "arm64_cleanup_proved": true,
+    "arm64_peak_observed": {
+      "cell_memory": "364MiB / 1GiB",
+      "bridge_memory": "38.43MiB / 256MiB",
+      "cell_pids": 19,
+      "bridge_pids": 9
+    },
+    "ecr_scan_amd64": "COMPLETE_ZERO_FINDINGS",
+    "ecr_scan_arm64": "COMPLETE_ZERO_FINDINGS"
+  },
+  "security_review": {
+    "scan_id": "152cd839-8033-4658-a099-921425255753",
+    "target_range": "120c98eea6b79434bdc670600d9de25bcc7fc7bf..11f628c2bb79b2b52d96b745dcef71c99d71efa3",
+    "canonical_status": "valid_completed_zero_findings",
+    "workbench_publication_status": "failed_before_terminal_recovery",
+    "report_sha256": "030bfc7bef40736cc363aebb44c0a9c8dde151d67354b73ef1ef8b7b1539c872"
+  },
+  "decision_reasons": [
+    "DirectModel quality was 6434 bp versus OpenClaw 5356 bp overall.",
+    "On three real-public sites DirectModel scored 5142 bp versus OpenClaw 4134 bp.",
+    "OpenClaw used 21 subscription requests and 137920 input tokens; DirectModel used 6 requests and 7984 input tokens.",
+    "OpenClaw median latency was 65488 ms versus 34811 ms for DirectModel.",
+    "Both adapters had 6/6 valid results, 6/6 proved cleanup, zero owner-private violations, and zero marginal API charge.",
+    "The current result contract does not represent territory, hours, guarantees, or booking restrictions as executable candidate claim types."
+  ],
+  "limitations": [
+    "Six-case corpus with three reviewed real-public sites is directionally useful but not a customer-scale quality estimate.",
+    "Subscription usage has zero marginal API charge but consumes shared quota and fixed subscription capacity.",
+    "OpenClaw resource observations are point-in-time docker stats, not a sustained load profile.",
+    "Canonical security artifacts are valid, but native workbench publication failed before terminal recovery.",
+    "Stage 0 remains default-off and no paid tenant is enabled."
+  ],
+  "one_next_action": "Keep the OpenClaw adapter disabled and run internal Company Discovery on DirectModel while extending the Ligou claim contract for territory, hours, guarantees, and booking restrictions before any new OpenClaw audition."
+}
