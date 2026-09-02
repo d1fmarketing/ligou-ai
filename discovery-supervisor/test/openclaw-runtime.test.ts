@@ -466,6 +466,8 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
     ]));
     expect(relay.argv.join(" ")).toContain("127.0.0.1");
     expect(relay.argv.join(" ")).toContain("maxConnections=8");
+    expect(relay.argv.join(" ")).toContain("pairs.delete(pair)");
+    expect(relay.argv.join(" ")).toContain("downstream.pause()");
     expect(relay.argv.at(-2)).toBe("4313");
     expect(relay.argv.at(-1)).toBe(String(identity.gateway_port));
     expect(plan).toContainEqual(expect.objectContaining({

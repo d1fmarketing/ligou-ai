@@ -22,25 +22,40 @@ const net = require("node:net");
 const listenPort = Number(process.argv[1]);
 const targetPort = Number(process.argv[2]);
 if (!Number.isSafeInteger(listenPort) || !Number.isSafeInteger(targetPort)) process.exit(64);
-const sockets = new Set();
-const track = (socket) => {
-  sockets.add(socket);
-  socket.setTimeout(610000, () => socket.destroy());
-  socket.on("error", () => socket.destroy());
-  socket.on("close", () => sockets.delete(socket));
-  return socket;
-};
+const pairs = new Set();
 const server = net.createServer((downstream) => {
-  if (sockets.size >= 16) { downstream.destroy(); return; }
-  track(downstream);
-  const upstream = track(net.connect({ host: "127.0.0.1", port: targetPort }));
-  downstream.pipe(upstream);
-  upstream.pipe(downstream);
+  if (pairs.size >= 8) { downstream.destroy(); return; }
+  downstream.pause();
+  const upstream = net.connect({ host: "127.0.0.1", port: targetPort });
+  const pair = { downstream, upstream };
+  pairs.add(pair);
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    pairs.delete(pair);
+    downstream.destroy();
+    upstream.destroy();
+  };
+  for (const socket of [downstream, upstream]) {
+    socket.setTimeout(610000, close);
+    socket.once("error", close);
+    socket.once("close", close);
+  }
+  upstream.once("connect", () => {
+    if (closed) return;
+    downstream.pipe(upstream);
+    upstream.pipe(downstream);
+    downstream.resume();
+  });
 });
 server.maxConnections=8;
 server.on("error", () => process.exit(1));
 server.listen(listenPort, "0.0.0.0");
-const stop = () => server.close(() => process.exit(0));
+const stop = () => {
+  for (const pair of pairs) { pair.downstream.destroy(); pair.upstream.destroy(); }
+  server.close(() => process.exit(0));
+};
 process.once("SIGTERM", stop);
 process.once("SIGINT", stop);
 `;
