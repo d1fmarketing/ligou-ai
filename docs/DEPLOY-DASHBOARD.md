@@ -13,9 +13,10 @@ Um deploy só serve os dois:
 
 ```bash
 cd /Users/d1f/Desktop/Ligou.AI            # worktree do main
-export LIGOU_PUBLIC_SUPABASE_URL=...        # valores públicos; ver dashboard/.env.local (fora do git)
-export LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY=...
-bun run site:build                          # bun run check + build do dashboard + montagem em dist/client
+# exporte as duas entradas públicas LIGOU_PUBLIC_SUPABASE_URL e LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+# com os valores de dashboard/.env.local (arquivo local, fora do git). Use um PATH curto (< 4096 chars):
+# production-env.mjs descarta PATH longo e cai em /usr/bin:/bin, onde o bun não está.
+PATH="/usr/bin:/bin:$HOME/.bun/bin" bun run site:build   # bun run check + build do dashboard + dist/client
 cd dist/client && vercel deploy --prod --yes --token "$VERCEL_TOKEN"
 ```
 
