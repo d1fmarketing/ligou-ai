@@ -152,7 +152,7 @@ function validateTools(value: unknown): readonly Record<string, unknown>[] {
     const normalized: Record<string, unknown> = {
       ...tool,
       parameters: CODEX_TOOL_PARAMETERS[tool.name],
-      strict: true,
+      strict: tool.name === "discovery__fetch_discovery_page",
     };
     return Object.freeze(normalized);
   });

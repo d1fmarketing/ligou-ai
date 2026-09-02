@@ -708,6 +708,8 @@ describe("trusted Codex subscription proxy", () => {
       maxLength: 2_048,
     });
     expect(forwardedTools[0]!.parameters.properties.url).not.toHaveProperty("format");
+    expect(forwardedTools[0]!.strict).toBe(true);
+    expect(forwardedTools[1]!.strict).toBe(false);
     expect(proxy.usage()).toEqual({
       request_count: 1,
       upstream_request_count: 1,
