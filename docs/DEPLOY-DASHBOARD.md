@@ -13,9 +13,13 @@ Um deploy só serve os dois:
 
 ```bash
 cd /Users/d1f/Desktop/Ligou.AI            # worktree do main
-# exporte as duas entradas públicas LIGOU_PUBLIC_SUPABASE_URL e LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY
-# com os valores de dashboard/.env.local (arquivo local, fora do git). Use um PATH curto (< 4096 chars):
-# production-env.mjs descarta PATH longo e cai em /usr/bin:/bin, onde o bun não está.
+# Exporte as QUATRO entradas públicas, com os valores de dashboard/.env.local (arquivo local, fora do git;
+# chaves VITE_SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY, VITE_SUPABASE_FUNCTIONS_URL, VITE_SESSION_URL):
+#   LIGOU_PUBLIC_SUPABASE_URL, LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
+#   LIGOU_PUBLIC_SUPABASE_FUNCTIONS_URL, LIGOU_PUBLIC_SESSION_URL
+# SEM LIGOU_PUBLIC_SESSION_URL o botão de voz é compilado apontando para http://127.0.0.1:8790/session
+# (dashboard/src/voice/session.js) — aconteceu num deploy de 2026-09-01, corrigido em minutos por redeploy.
+# Use um PATH curto (< 4096 chars): production-env.mjs descarta PATH longo e cai em /usr/bin:/bin, sem bun.
 PATH="/usr/bin:/bin:$HOME/.bun/bin" bun run site:build   # bun run check + build do dashboard + dist/client
 cd dist/client && vercel deploy --prod --yes --token "$VERCEL_TOKEN"
 ```
@@ -35,7 +39,7 @@ cd dist/client && vercel deploy --prod --yes --token "$VERCEL_TOKEN"
 
 ## Notas
 
-- `VITE_SESSION_URL` só é necessário se o botão de voz precisar apontar para outra base; hoje deriva da URL do Supabase.
+- Com as 4 variáveis acima o build reproduz byte a byte o bundle validado em 2026-09-01 01:25 (`dashboard/assets/index-BD5I2sSu.js`); prova rápida de que nada mudou no dashboard além do pretendido.
 - Cosmético conhecido: em produção o app dispara `POST http://127.0.0.1:8795/claim` (handshake do modo local, fire-and-forget) que o navegador bloqueia com `ERR_BLOCKED_BY_CLIENT`. Não afeta login nem voz.
 - Domínio próprio depois: `vercel domains add <dominio>` e alias no projeto.
 - Mapa do repositório: `docs/REPO-MAPA-2026-09-01.md`.
