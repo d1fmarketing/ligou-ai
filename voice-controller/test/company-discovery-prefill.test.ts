@@ -486,6 +486,49 @@ describe("Company Discovery Stage 0B onboarding prefill fixtures", () => {
       rule.sourceRefs.includes(first))).toBe(false);
   });
 
+  test("keeps two global questions distinct when both map to the same operational target", async () => {
+    const firstQuestion = "Confirme o horário publicado na página de contato.";
+    const secondQuestion = "Confirme o horário diferente publicado no rodapé.";
+    const secondId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const projection = await build([], {
+      unresolvedItems: [
+        unresolved({
+          source_kind: "contradiction",
+          source_index: 0,
+          claim_type: "business_hours",
+          coverage_field: "schedule.business_hours",
+          coverage_subject: null,
+          question_pt: firstQuestion,
+        }),
+        unresolved({
+          unresolved_id: secondId,
+          source_kind: "contradiction",
+          source_index: 1,
+          claim_type: "business_hours",
+          coverage_field: "schedule.business_hours",
+          coverage_subject: null,
+          question_pt: secondQuestion,
+        }),
+      ],
+    });
+
+    const collisionFallback =
+      `discovery.owner_question.${secondId.replaceAll("-", "")}`;
+    expect(projection.coverage.snapshot.cells["schedule.business_hours"]).toMatchObject({
+      state: "ambiguous",
+      questionPt: firstQuestion,
+    });
+    expect(projection.coverage.snapshot.cells[collisionFallback]).toMatchObject({
+      state: "ambiguous",
+      questionPt: secondQuestion,
+    });
+    const questions = projection.coverage.progress.ambiguous.filter((item) =>
+      item.field === "schedule.business_hours" || item.field === collisionFallback
+    );
+    expect(questions).toHaveLength(2);
+    expect(new Set(questions.map((item) => item.field)).size).toBe(2);
+  });
+
   test("keeps a conditional public price as a targeted question instead of discarding amount and condition", async () => {
     const projection = await build([fact("service", {
       service_type: "drain_cleaning",

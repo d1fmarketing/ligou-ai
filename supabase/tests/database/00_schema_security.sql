@@ -63,6 +63,7 @@ select extensions.ok(
       ('cancel_company_discovery(uuid,bigint)'),
       ('company_discovery_owner_status()'),
       ('create_company_discovery_review_nonce(uuid,uuid,uuid[])'),
+      ('create_company_discovery_review_nonce_v2(uuid,uuid,uuid[])'),
       ('decide_case(uuid,text,text,text,jsonb,text,text)'),
       ('decide_rule(uuid,text)'),
       ('edit_rule(uuid,text)'),

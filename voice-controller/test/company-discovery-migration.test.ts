@@ -774,6 +774,11 @@ describe("DirectModel company discovery Stage 0B database authority", () => {
     expect(review).toContain("'website_uncertainty', v_claim.uncertainty");
     expect(review).toContain("v_complete_claim_ids");
     expect(review).toContain("company_discovery_review_claim_set_mismatch");
+    expect(review).not.toContain("jsonb_array_length(p_decisions) = 0");
+    expect(sql).toContain("create or replace function public.create_company_discovery_review_nonce_v2(");
+    expect(sql).toContain("company_discovery.result.v2");
+    expect(sql).toContain("v_global_unresolved_count > 0");
+    expect(sql).toContain("cardinality(decision_ids) > 0 or jsonb_array_length(draft->'unresolved_items') > 0");
     expect(review).toContain("p_unresolved_decisions");
     expect(review).toContain("company_discovery_unresolved_decision_set_mismatch");
     for (const field of [
@@ -2534,38 +2539,18 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       };
     });
     const partialClaim = v2Claims.data![0]!;
-    const partialNonce = await owner.rpc("create_company_discovery_review_nonce", {
+    const partialNonce = await owner.rpc("create_company_discovery_review_nonce_v2", {
       p_job: retryJob,
       p_result: newCommitted.result_id,
       p_claim_ids: [partialClaim.id],
     });
-    expect(partialNonce.error).toBeNull();
-    const partialReview = await owner.rpc("review_company_discovery_claims_v2", {
-      p_job: retryJob,
-      p_result: newCommitted.result_id,
-      p_expected_version: replacementSelect.data.version,
-      p_decisions: [{
-        claim_id: partialClaim.id,
-        decision: "approve",
-        value: directV2Result.candidate_facts.find((fact) =>
-          fact.claim_type === partialClaim.claim_type
-        )!.normalized_value,
-        group_confirmed: partialClaim.claim_class !== "descriptive",
-        evidence_acknowledged: partialClaim.claim_class === "safety_critical",
-        acknowledged_evidence_refs: partialClaim.claim_class === "safety_critical"
-          ? partialClaim.evidence_refs
-          : [],
-      }],
-      p_unresolved_decisions: v2UnresolvedDecisions,
-      p_confirmation_nonce: String(partialNonce.data),
-    });
-    expect(partialReview.error?.message).toContain(
-      "company_discovery_review_claim_set_mismatch",
+    expect(partialNonce.error?.message).toContain(
+      "company_discovery_review_claim_set_invalid",
     );
     expect((await owner.from("company_discovery_onboarding_drafts")
       .select("id").eq("source_result_id", newCommitted.result_id)).data).toEqual([]);
     const incompleteUnresolvedNonce = await owner.rpc(
-      "create_company_discovery_review_nonce",
+      "create_company_discovery_review_nonce_v2",
       {
         p_job: retryJob,
         p_result: newCommitted.result_id,
@@ -2589,7 +2574,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     );
     expect((await owner.from("company_discovery_onboarding_drafts")
       .select("id").eq("source_result_id", newCommitted.result_id)).data).toEqual([]);
-    const v2Nonce = await owner.rpc("create_company_discovery_review_nonce", {
+    const v2Nonce = await owner.rpc("create_company_discovery_review_nonce_v2", {
       p_job: retryJob,
       p_result: newCommitted.result_id,
       p_claim_ids: v2Claims.data!.map((row) => row.id),
@@ -3035,6 +3020,110 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       coverage: 0,
       fallbacks: 1,
     });
+
+    const zeroClaimSubmit = await owner.rpc("submit_company_discovery", {
+      p_url: "https://example.com/zero-claim",
+      p_idempotency_key: `stage0b-zero-claim-${randomUUID()}`,
+    });
+    expect(zeroClaimSubmit.error).toBeNull();
+    const zeroClaimJob = String(zeroClaimSubmit.data);
+    const zeroClaimAttemptResult = await service.rpc(
+      "claim_company_discovery_attempt",
+      {
+        p_worker_id: `stage0b-zero-claim-${randomUUID()}`,
+        p_adapter_id: "direct_model",
+        p_lease_seconds: 300,
+      },
+    );
+    expect(zeroClaimAttemptResult.error).toBeNull();
+    expect(zeroClaimAttemptResult.data).toHaveLength(1);
+    const zeroClaimAttempt = zeroClaimAttemptResult.data![0] as ClaimedAttempt;
+    expect(zeroClaimAttempt.job_id).toBe(zeroClaimJob);
+    await bindClaim(zeroClaimAttempt, `zero-claim-${randomUUID()}`);
+    const zeroClaimResultPayload = {
+      schema_version: "company_discovery.result.v2",
+      source_snapshots: resultPayload.source_snapshots,
+      candidate_facts: [],
+      missing_questions: ["Qual é o limite privado?"],
+      contradictions: [],
+      uncertainty: [],
+    };
+    const zeroClaimCommit = await service.rpc(
+      "commit_company_discovery_result_v2",
+      {
+        p_attempt_id: zeroClaimAttempt.attempt_id,
+        p_fence_generation: zeroClaimAttempt.fence_generation,
+        p_claim_token: zeroClaimAttempt.claim_token,
+        p_result: zeroClaimResultPayload,
+        p_result_hash: postgresJsonbHash(zeroClaimResultPayload),
+      },
+    );
+    expect(zeroClaimCommit.error).toBeNull();
+    const zeroClaimCommitted = zeroClaimCommit.data as CommittedResult;
+    const zeroClaimSelect = await service.rpc("select_company_discovery_result", {
+      p_job_id: zeroClaimJob,
+      p_attempt_id: zeroClaimAttempt.attempt_id,
+      p_expected_version: zeroClaimCommitted.job_version,
+    });
+    expect(zeroClaimSelect.error).toBeNull();
+    expect((await owner.from("discovery_claims")
+      .select("id").eq("result_id", zeroClaimCommitted.result_id)).data).toEqual([]);
+    const zeroClaimNonce = await owner.rpc(
+      "create_company_discovery_review_nonce_v2",
+      {
+        p_job: zeroClaimJob,
+        p_result: zeroClaimCommitted.result_id,
+        p_claim_ids: [],
+      },
+    );
+    expect(zeroClaimNonce.error).toBeNull();
+    const zeroClaimReview = await owner.rpc(
+      "review_company_discovery_claims_v2",
+      {
+        p_job: zeroClaimJob,
+        p_result: zeroClaimCommitted.result_id,
+        p_expected_version: zeroClaimSelect.data.version,
+        p_decisions: [],
+        p_unresolved_decisions: [{
+          source_kind: "missing_question",
+          source_index: 0,
+          source_text: "Qual é o limite privado?",
+          decision: "ask",
+          owner_response: null,
+        }],
+        p_confirmation_nonce: String(zeroClaimNonce.data),
+      },
+    );
+    expect(zeroClaimReview.error).toBeNull();
+    expect(zeroClaimReview.data).toMatchObject({ reviewed: 0 });
+    const zeroClaimDraft = await owner.from("company_discovery_onboarding_drafts")
+      .select("decision_ids,draft")
+      .eq("id", zeroClaimReview.data.onboarding_draft_id)
+      .single();
+    expect(zeroClaimDraft.error).toBeNull();
+    expect(zeroClaimDraft.data!.decision_ids).toEqual([]);
+    expect(zeroClaimDraft.data!.draft.approved_facts).toEqual([]);
+    expect(zeroClaimDraft.data!.draft.unresolved_items).toHaveLength(1);
+    expect(zeroClaimDraft.data!.draft.unresolved_items[0]).toMatchObject({
+      source_kind: "missing_question",
+      review_status: "pending_onboarding",
+      question_pt: "Qual é o limite privado?",
+    });
+    expect(zeroClaimDraft.data!.draft.unresolved_items[0].coverage_field).toMatch(
+      /^discovery[.]owner_question[.][0-9a-f]{32}$/,
+    );
+    const zeroClaimCleanup = await service.rpc(
+      "record_company_discovery_cleanup",
+      {
+        p_attempt_id: zeroClaimAttempt.attempt_id,
+        p_fence_generation: zeroClaimAttempt.fence_generation,
+        p_claim_token: zeroClaimAttempt.claim_token,
+        p_proof: completeDirectCleanupProof,
+      },
+    );
+    expect(zeroClaimCleanup.error).toBeNull();
+    expect(zeroClaimCleanup.data).toMatchObject({ cleanup_state: "proved" });
+
     const unresolvedCleanup = await service.rpc("record_company_discovery_cleanup", {
       p_attempt_id: newAttempt.attempt_id,
       p_fence_generation: newAttempt.fence_generation,

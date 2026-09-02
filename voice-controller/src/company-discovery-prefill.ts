@@ -4,6 +4,7 @@ import {
   createCoverage,
   evaluateCoverage,
   isCoverageField,
+  isDiscoveryOwnerQuestionField,
   resolveLocalityValueFromRegistry,
   type CoverageCell,
   type CoverageField,
@@ -615,8 +616,28 @@ export function buildCompanyDiscoveryPrefill(
   for (const fact of readback.draft.approved_facts) {
     applyFact(snapshot, fact, input.localities);
   }
+  const claimedTargets = new Set<string>();
   for (const item of readback.draft.unresolved_items) {
-    applyUnresolved(snapshot, item);
+    let effective = item;
+    if (item.review_status === "pending_onboarding" &&
+        item.coverage_field !== null &&
+        !isDiscoveryOwnerQuestionField(item.coverage_field)) {
+      const targetKey = coverageKey(
+        item.coverage_field,
+        item.coverage_subject ?? undefined,
+      );
+      if (claimedTargets.has(targetKey)) {
+        effective = {
+          ...item,
+          coverage_field: `discovery.owner_question.${item.unresolved_id
+            .replaceAll("-", "").toLowerCase()}`,
+          coverage_subject: null,
+        };
+      } else {
+        claimedTargets.add(targetKey);
+      }
+    }
+    applyUnresolved(snapshot, effective);
   }
   snapshot.services.sort();
   snapshot.revision = 1;

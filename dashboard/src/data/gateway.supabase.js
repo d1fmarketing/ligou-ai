@@ -67,12 +67,15 @@ export async function reviewCompanyDiscoveryVia(client, review, reviewState) {
   // valid value held elsewhere.
   const payload = buildDiscoveryReviewRequest(review, reviewState, "preflight-only");
   const claimIds = payload.p_decisions.map((decision) => decision.claim_id);
-  const nonce = await discoveryRpc(client, "create_company_discovery_review_nonce", {
+  const stage0b = review?.result?.schema === "company_discovery.result.v2";
+  const nonce = await discoveryRpc(client, stage0b
+    ? "create_company_discovery_review_nonce_v2"
+    : "create_company_discovery_review_nonce", {
     p_job: review.job.id,
     p_result: review.result.id,
     p_claim_ids: claimIds,
   });
-  const reviewRpc = review?.result?.schema === "company_discovery.result.v2"
+  const reviewRpc = stage0b
     ? "review_company_discovery_claims_v2"
     : "review_company_discovery_claims";
   return discoveryRpc(client, reviewRpc, {

@@ -432,7 +432,10 @@ export function mapDiscoveryRead({
   if (unknownClaims.length) groups.push({ id: "private", label: "Assuntos privados", claims: unknownClaims });
 
   return {
-    phase: job.status === "reviewed" || mappedClaims.length === 0 ? "complete" : "review",
+    phase: job.status === "reviewed" ||
+      (mappedClaims.length === 0 && globalUnresolved.length === 0)
+      ? "complete"
+      : "review",
     interviewAvailable: true,
     authorityEffect: "suggestion_only",
     job: {

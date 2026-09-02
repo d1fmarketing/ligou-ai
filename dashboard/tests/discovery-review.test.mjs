@@ -510,6 +510,35 @@ test("Stage 0B sends one complete owner decision for every global unresolved ite
   assert.equal(request.p_decisions.length, 7);
 });
 
+test("Stage 0B reviews a zero-claim result when one global question remains", () => {
+  const rows = stage0bRows();
+  rows.claims = [];
+  rows.result.candidate_result = {
+    schema_version: "company_discovery.result.v2",
+    missing_questions: ["Qual é o limite privado?"],
+    contradictions: [],
+    uncertainty: [],
+  };
+  const review = mapDiscoveryRead(rows);
+
+  assert.equal(review.phase, "review");
+  assert.deepEqual(review.groups, []);
+  assert.equal(review.globalUnresolved.length, 1);
+  const request = buildDiscoveryReviewRequest(
+    review,
+    createDiscoveryReviewState(review),
+    "zero-claim-nonce",
+  );
+  assert.deepEqual(request.p_decisions, []);
+  assert.deepEqual(request.p_unresolved_decisions, [{
+    source_kind: "missing_question",
+    source_index: 0,
+    source_text: "Qual é o limite privado?",
+    decision: "ask",
+    owner_response: null,
+  }]);
+});
+
 test("Stage 0B blocks an empty owner resolution before requesting a nonce", () => {
   const review = mapDiscoveryRead(stage0bRows());
   let state = createDiscoveryReviewState(review);
@@ -918,7 +947,7 @@ test("owner gateway routes a Stage 0B review only to the v2 draft RPC", async ()
   const client = {
     async rpc(name, payload) {
       calls.push([name, payload]);
-      if (name === "create_company_discovery_review_nonce") {
+      if (name === "create_company_discovery_review_nonce_v2") {
         return { data: "stage0b-nonce", error: null };
       }
       if (name === "review_company_discovery_claims_v2") {
@@ -939,7 +968,7 @@ test("owner gateway routes a Stage 0B review only to the v2 draft RPC", async ()
   } finally {
     await vite.close();
   }
-  assert.equal(calls[0][0], "create_company_discovery_review_nonce");
+  assert.equal(calls[0][0], "create_company_discovery_review_nonce_v2");
   assert.equal(calls[1][0], "review_company_discovery_claims_v2");
   assert.equal(calls.some(([name]) => name === "review_company_discovery_claims"), false);
 });

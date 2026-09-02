@@ -48,6 +48,14 @@ alter table public.discovery_claims
     and jsonb_typeof(ambiguous_fields) = 'array'
   );
 
+alter table public.company_discovery_review_nonces
+  drop constraint if exists company_discovery_review_nonces_claim_ids_check;
+alter table public.company_discovery_review_nonces
+  add constraint company_discovery_review_nonces_claim_ids_check check (
+    cardinality(claim_ids) between 0 and 100
+    and array_position(claim_ids, null) is null
+  );
+
 create table public.company_discovery_onboarding_drafts (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null references public.tenants (id),
@@ -65,7 +73,10 @@ create table public.company_discovery_onboarding_drafts (
     references public.worker_jobs (id, tenant_id),
   foreign key (source_result_id, tenant_id)
     references public.worker_results (id, tenant_id),
-  check (cardinality(decision_ids) > 0),
+  check (
+    cardinality(decision_ids) > 0
+    or jsonb_array_length(draft->'unresolved_items') > 0
+  ),
   check (jsonb_typeof(draft) = 'object'),
   check (draft->>'schema_version' = 'company_discovery.onboarding_draft.v1'),
   check (draft->'authority' = '{
@@ -958,6 +969,95 @@ $$;
 revoke all on function public.company_discovery_coverage_target_v1(text,jsonb,text)
   from public, anon, authenticated, service_role;
 
+create or replace function public.create_company_discovery_review_nonce_v2(
+  p_job uuid,
+  p_result uuid,
+  p_claim_ids uuid[]
+) returns text
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_owner uuid := auth.uid();
+  v_job public.worker_jobs;
+  v_result public.worker_results;
+  v_claim_ids uuid[];
+  v_requested_claim_ids uuid[];
+  v_global_unresolved_count integer;
+  v_nonce text;
+begin
+  if v_owner is null then
+    raise exception using errcode = '42501', message = 'authentication_required';
+  end if;
+  select j.* into v_job
+  from public.worker_jobs j
+  join public.tenants t
+    on t.id = j.tenant_id and t.owner_user_id = v_owner
+  where j.id = p_job and j.status = 'awaiting_review';
+  if v_job.id is null then
+    raise exception using errcode = '42501',
+      message = 'company_discovery_review_result_not_owner';
+  end if;
+  select wr.* into v_result
+  from public.worker_results wr
+  where wr.job_id = v_job.id
+    and wr.id = p_result
+    and wr.validation_state = 'validated'
+    and wr.result_schema = 'company_discovery.result.v2'
+    and v_job.selected_attempt_id = wr.attempt_id;
+  if v_result.id is null then
+    raise exception using errcode = '42501',
+      message = 'company_discovery_review_result_not_owner';
+  end if;
+  select coalesce(array_agg(c.id order by c.id), '{}'::uuid[])
+    into v_claim_ids
+  from public.discovery_claims c
+  where c.result_id = p_result
+    and c.claim_schema_version = 'company_discovery.claim.v2';
+  select coalesce(array_agg(id order by id), '{}'::uuid[])
+    into v_requested_claim_ids
+  from unnest(coalesce(p_claim_ids, '{}'::uuid[])) requested(id);
+  if p_claim_ids is null
+     or v_requested_claim_ids is distinct from v_claim_ids then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_review_claim_set_invalid';
+  end if;
+  v_global_unresolved_count :=
+    jsonb_array_length(v_result.candidate_result->'missing_questions') +
+    jsonb_array_length(v_result.candidate_result->'contradictions') +
+    jsonb_array_length(v_result.candidate_result->'uncertainty');
+  if cardinality(v_claim_ids) = 0 and not (v_global_unresolved_count > 0) then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_review_claim_set_invalid';
+  end if;
+  if exists (
+    select 1 from public.discovery_decisions d
+    where d.claim_id = any(v_claim_ids)
+  ) then
+    raise exception using errcode = '55000',
+      message = 'company_discovery_claim_already_reviewed';
+  end if;
+  v_nonce := encode(extensions.gen_random_bytes(32), 'hex');
+  insert into public.company_discovery_review_nonces (
+    tenant_id, job_id, result_id, claim_ids, nonce_hash,
+    expires_at, created_by
+  ) values (
+    v_job.tenant_id, v_job.id, p_result, v_claim_ids,
+    extensions.digest(v_nonce, 'sha256'),
+    clock_timestamp() + interval '10 minutes', v_owner
+  );
+  return v_nonce;
+end;
+$$;
+
+revoke all on function public.create_company_discovery_review_nonce_v2(
+  uuid,uuid,uuid[]
+) from public, anon, authenticated, service_role;
+grant execute on function public.create_company_discovery_review_nonce_v2(
+  uuid,uuid,uuid[]
+) to authenticated;
+
 create or replace function public.review_company_discovery_claims_v2(
   p_job uuid,
   p_result uuid,
@@ -1059,8 +1159,7 @@ begin
     raise exception using errcode = '40001',
       message = 'company_discovery_stale_version';
   end if;
-  if jsonb_typeof(p_decisions) <> 'array'
-     or jsonb_array_length(p_decisions) = 0 then
+  if jsonb_typeof(p_decisions) <> 'array' then
     raise exception using errcode = '22023',
       message = 'company_discovery_review_decisions_invalid';
   end if;
@@ -1079,8 +1178,14 @@ begin
       message = 'company_discovery_review_nonce_invalid';
   end if;
   select
-    array_agg((item->>'claim_id')::uuid order by (item->>'claim_id')::uuid),
-    array_agg(distinct (item->>'claim_id')::uuid order by (item->>'claim_id')::uuid)
+    coalesce(
+      array_agg((item->>'claim_id')::uuid order by (item->>'claim_id')::uuid),
+      '{}'::uuid[]
+    ),
+    coalesce(
+      array_agg(distinct (item->>'claim_id')::uuid order by (item->>'claim_id')::uuid),
+      '{}'::uuid[]
+    )
     into v_claim_ids, v_distinct_ids
   from jsonb_array_elements(p_decisions) item
   where item->>'claim_id' ~
@@ -1091,12 +1196,12 @@ begin
     raise exception using errcode = '22023',
       message = 'company_discovery_review_claim_set_mismatch';
   end if;
-  select array_agg(c.id order by c.id) into v_complete_claim_ids
+  select coalesce(array_agg(c.id order by c.id), '{}'::uuid[])
+    into v_complete_claim_ids
   from public.discovery_claims c
   where c.result_id = p_result
     and c.claim_schema_version = 'company_discovery.claim.v2';
-  if v_complete_claim_ids is null
-     or v_claim_ids is distinct from v_complete_claim_ids then
+  if v_claim_ids is distinct from v_complete_claim_ids then
     raise exception using errcode = '22023',
       message = 'company_discovery_review_claim_set_mismatch';
   end if;
