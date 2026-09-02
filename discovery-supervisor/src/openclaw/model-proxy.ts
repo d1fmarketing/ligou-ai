@@ -686,13 +686,15 @@ export class FixedModelProxy {
       );
       this.#outputBytes += responseBody.length;
       const upstreamType = upstream.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-      if (upstream.ok && upstreamType !== "text/event-stream") {
+      if (upstream.ok && upstreamType !== undefined && upstreamType !== "text/event-stream") {
         this.#usageComplete = false;
         throw new ModelProxyPolicyError("Codex upstream requires text/event-stream");
       }
       const usage = upstream.ok ? parseUsage(responseBody) : null;
-      if (upstream.ok && usage === null) this.#usageComplete = false;
-      else if (usage !== null) {
+      if (upstream.ok && usage === null) {
+        this.#usageComplete = false;
+        throw new ModelProxyPolicyError("Codex upstream SSE terminal usage is invalid");
+      } else if (usage !== null) {
         if (this.#inputTokens + usage.input_tokens > MAX_OBSERVED_INPUT_TOKENS ||
             this.#outputTokens + usage.output_tokens > MAX_OBSERVED_OUTPUT_TOKENS) {
           this.#usageComplete = false;
@@ -704,7 +706,8 @@ export class FixedModelProxy {
         this.#totalTokens += usage.total_tokens;
       }
       const headers = new Headers({ "cache-control": "no-store" });
-      if (upstreamType) headers.set("content-type", upstreamType);
+      if (upstreamType !== undefined) headers.set("content-type", upstreamType);
+      else if (upstream.ok && usage !== null) headers.set("content-type", "text/event-stream");
       const upstreamId = upstream.headers.get("x-request-id") ?? upstream.headers.get("x-oai-request-id");
       if (upstreamId && /^[A-Za-z0-9_.:-]{1,200}$/.test(upstreamId)) headers.set("x-request-id", upstreamId);
       const retryAfter = validatedRetryAfter(upstream.headers.get("retry-after"), this.#now());

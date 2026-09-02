@@ -665,10 +665,7 @@ describe("trusted Codex subscription proxy", () => {
       create_request_id: () => "stage0_req_1234567890",
       fetch: async (input, init) => {
         calls.push({ input, init });
-        return new Response(completedSse(), {
-          status: 200,
-          headers: { "content-type": "text/event-stream" },
-        });
+        return new Response(completedSse(), { status: 200 });
       },
     });
 
@@ -676,6 +673,7 @@ describe("trusted Codex subscription proxy", () => {
     const inboundBytes = (await inboundRequest.clone().arrayBuffer()).byteLength;
     const response = await proxy.forward(inboundRequest);
     expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/event-stream");
     expect(await response.text()).toContain("response.completed");
     expect(String(calls[0]!.input)).toBe("https://chatgpt.com/backend-api/codex/responses");
     const headers = new Headers(calls[0]!.init?.headers);
@@ -737,6 +735,25 @@ describe("trusted Codex subscription proxy", () => {
         .rejects.toThrow("unexpected fields");
     }
     expect(calls).toBe(0);
+  });
+
+  test("rejects a headerless upstream body unless it is a complete metered SSE stream", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const deadline = "2099-09-01T10:10:00.000Z";
+    const proxy = new FixedModelProxy({
+      proxy_marker: markerJwt(now),
+      adapter_id: "openclaw",
+      codex_access_grant: syntheticGrant(deadline),
+      upstream_model: "gpt-5.6-sol",
+      deadline_at: deadline,
+      lease_session_id: "stage0_session_abcdefghijklmnop",
+      now: () => now,
+      fetch: async () => new Response(JSON.stringify({ status: "completed" }), { status: 200 }),
+    });
+
+    await expect(proxy.forward(observedOpenClawRequest(markerJwt(now))))
+      .rejects.toThrow("SSE terminal usage");
+    expect(proxy.usage().usage_complete).toBe(false);
   });
 
   test("rejects non-text and authority-expanding input items at every nested boundary", async () => {
