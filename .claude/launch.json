@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ligou-dashboard-dev",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["VITE_SUPABASE_URL=", "VITE_SUPABASE_PUBLISHABLE_KEY=", "npm", "run", "dev", "--prefix", "/Users/d1f/.codex/worktrees/ligou-v0.2-browser-pilot/Ligou.AI/dashboard"],
+      "port": 5173
+    },
+    {
+      "name": "ligou-dashboard-real",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "/Users/d1f/.codex/worktrees/ligou-v0.2-browser-pilot/Ligou.AI/dashboard", "--", "--port", "5174"],
+      "port": 5174
+    },
+    {
+      "name": "ligou-m3-contact-sheet",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8077", "--bind", "127.0.0.1", "-d", "/tmp/ligou-m3-sheet"],
+      "port": 8077
+    }
+  ]
+}
