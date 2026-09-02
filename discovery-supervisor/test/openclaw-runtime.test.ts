@@ -274,7 +274,7 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
     expect(config.models.catalogRefresh).toEqual({ enabled: false });
     expect(config.models.mode).toBe("replace");
     expect(config.models.providers.stage0_bridge).toMatchObject({
-      baseUrl: `http://127.0.0.1:${identity.bridge_http_port}/codex`,
+      baseUrl: `http://bridge:${identity.bridge_http_port}/codex`,
       apiKey: TEST_MARKER,
       api: "openai-chatgpt-responses",
     });
@@ -328,7 +328,7 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
       exclude: ["resources_*", "prompts_*"],
     });
     expect(config.mcp.servers.discovery.url).toBe(
-      `http://127.0.0.1:${identity.bridge_http_port}/mcp`,
+      `http://bridge:${identity.bridge_http_port}/mcp`,
     );
 
     const serialized = JSON.stringify(config);
@@ -422,8 +422,6 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
       "XDG_CACHE_HOME=/tmp/openclaw-cache",
       "--env",
       "TMPDIR=/tmp",
-      "-p",
-      `127.0.0.1:${identity.host_gateway_port}:${identity.bridge_relay_port}`,
       `ghcr.io/openclaw/openclaw@${TEST_IMAGES.cell_image.selected_manifest_digest}`,
       "gateway",
       "run",
@@ -453,20 +451,44 @@ describe("attempt-local runtime identity and OpenClaw config", () => {
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
       "--network",
-      `container:${identity.cell_container_name}`,
+      identity.egress_network_name,
       "--env",
-      "OPENCLAW_CELL_HOST=127.0.0.1",
+      "OPENCLAW_CELL_HOST=cell",
+      "--env",
+      "OPENCLAW_CELL_GATEWAY_PORT=4313",
+      "-p",
+      `127.0.0.1:${identity.host_gateway_port}:${identity.bridge_relay_port}`,
     ]));
-    expect(bridge.argv).not.toContain("-p");
-    expect(plan.some((command) => command.label === "connect-bridge-internal")).toBe(false);
+    const relay = plan.find((command) => command.label === "start-cell-loopback-relay")!;
+    expect(relay.argv).toEqual(expect.arrayContaining([
+      "docker", "exec", "--detach", "--user", "1000:1000",
+      identity.cell_container_name, "node", "-e",
+    ]));
+    expect(relay.argv.join(" ")).toContain("127.0.0.1");
+    expect(relay.argv.join(" ")).toContain("maxConnections=8");
+    expect(relay.argv.at(-2)).toBe("4313");
+    expect(relay.argv.at(-1)).toBe(String(identity.gateway_port));
+    expect(plan).toContainEqual(expect.objectContaining({
+      label: "connect-bridge-internal",
+      argv: [
+        "docker", "network", "connect", "--alias", "bridge",
+        identity.internal_network_name, identity.bridge_container_name,
+      ],
+    }));
     expect(plan.findIndex((command) => command.label === "start-cell")).toBeLessThan(
+      plan.findIndex((command) => command.label === "start-cell-loopback-relay"),
+    );
+    expect(plan.findIndex((command) => command.label === "start-cell-loopback-relay")).toBeLessThan(
       plan.findIndex((command) => command.label === "start-bridge"),
     );
     expect(plan).toContainEqual(expect.objectContaining({
       label: "create-internal-network",
       argv: ["docker", "network", "create", "--internal", identity.internal_network_name],
     }));
-    expect(plan.some((command) => command.label === "create-egress-network")).toBe(false);
+    expect(plan).toContainEqual(expect.objectContaining({
+      label: "create-egress-network",
+      argv: ["docker", "network", "create", identity.egress_network_name],
+    }));
     const keeperName = `ligou-oc-volume-keeper-${identity.opaque_id.slice(0, 16)}`;
     for (const volume of ["state", "workspace", "output"] as const) {
       expect(plan).toContainEqual(expect.objectContaining({

@@ -236,7 +236,7 @@ function modelCandidate(value: unknown): DirectModelCandidate {
   return candidate as unknown as DirectModelCandidate;
 }
 
-function outputText(envelopeValue: unknown): string {
+function outputTexts(envelopeValue: unknown): string[] {
   const envelope = plainRecord(envelopeValue, "provider response");
   if (!Object.hasOwn(envelope, "error")) {
     throw new Error("direct model provider response error field missing");
@@ -262,13 +262,21 @@ function outputText(envelopeValue: unknown): string {
       if (part.type === "output_text" && typeof part.text === "string") texts.push(part.text);
     }
   }
+  return texts;
+}
+
+function outputText(envelopeValue: unknown): string {
+  const texts = outputTexts(envelopeValue);
   if (texts.length !== 1) throw new Error("direct model provider response needs one output_text");
   return texts[0]!;
 }
 
-function completedResponseFromSse(value: string): Record<string, unknown> {
+function completedOutputTextFromSse(value: string): string {
   let completed: Record<string, unknown> | undefined;
   let completedCount = 0;
+  const deltas: string[] = [];
+  let deltaBytes = 0;
+  let deltaItemId: string | undefined;
   for (const line of value.split(/\r?\n/u)) {
     if (!line.startsWith("data:")) continue;
     const data = line.slice(5).trim();
@@ -279,7 +287,24 @@ function completedResponseFromSse(value: string): Record<string, unknown> {
     } catch {
       throw new Error("direct model subscription SSE invalid");
     }
-    if (event.type === "response.completed" || event.type === "response.done") {
+    if (event.type === "response.output_text.delta") {
+      if (typeof event.delta !== "string" ||
+          (event.output_index !== undefined && event.output_index !== 0) ||
+          (event.content_index !== undefined && event.content_index !== 0) ||
+          (event.item_id !== undefined &&
+            (typeof event.item_id !== "string" || event.item_id.length < 1 || event.item_id.length > 200))) {
+        throw new Error("direct model subscription output delta is invalid");
+      }
+      if (typeof event.item_id === "string") {
+        if (deltaItemId !== undefined && event.item_id !== deltaItemId) {
+          throw new Error("direct model subscription has multiple output text items");
+        }
+        deltaItemId = event.item_id;
+      }
+      deltaBytes += Buffer.byteLength(event.delta, "utf8");
+      if (deltaBytes > 400_000) throw new Error("direct model subscription output exceeds limit");
+      deltas.push(event.delta);
+    } else if (event.type === "response.completed" || event.type === "response.done") {
       completed = plainRecord(event.response, "subscription completed response");
       completedCount += 1;
     } else if (event.type === "response.failed" || event.type === "response.incomplete" ||
@@ -290,7 +315,14 @@ function completedResponseFromSse(value: string): Record<string, unknown> {
   if (completedCount !== 1 || completed === undefined) {
     throw new Error("direct model subscription requires one response.completed event");
   }
-  return completed;
+  if (deltas.length === 0) return outputText(completed);
+  const streamed = deltas.join("");
+  if (streamed.trim() === "") throw new Error("direct model subscription output is empty");
+  const terminalTexts = outputTexts(completed);
+  if (terminalTexts.length > 1 || (terminalTexts.length === 1 && terminalTexts[0] !== streamed)) {
+    throw new Error("direct model subscription terminal output mismatches streamed text");
+  }
+  return streamed;
 }
 
 export class DirectModelDiscoveryAdapter implements WorkerAdapter {
@@ -463,15 +495,15 @@ export class DirectModelDiscoveryAdapter implements WorkerAdapter {
       if (!response.ok) {
         throw new Error(`direct model subscription HTTP ${response.status}`);
       }
-      let envelope: unknown;
+      let completedText: string;
       try {
-        envelope = completedResponseFromSse(responseText);
+        completedText = completedOutputTextFromSse(responseText);
       } catch {
         throw new Error("direct model subscription SSE invalid");
       }
       let output: unknown;
       try {
-        output = JSON.parse(outputText(envelope));
+        output = JSON.parse(completedText);
       } catch (error) {
         if (error instanceof SyntaxError) throw new Error("direct model output JSON invalid");
         throw error;

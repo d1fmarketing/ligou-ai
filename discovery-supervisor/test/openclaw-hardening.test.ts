@@ -132,7 +132,7 @@ describe("outer-cell security boundary", () => {
       "exec", "process", "browser", "read", "write", "web_fetch", "gateway",
     ]));
     expect(config.models.providers.stage0_bridge).toMatchObject({
-      baseUrl: `http://127.0.0.1:${runtime.bridge_http_port}/codex`,
+      baseUrl: `http://bridge:${runtime.bridge_http_port}/codex`,
       api: "openai-chatgpt-responses",
     });
     expect(config.agents.defaults.models[`stage0_bridge/gpt-5.6-sol`].params).toEqual({

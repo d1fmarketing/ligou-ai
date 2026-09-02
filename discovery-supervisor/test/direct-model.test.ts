@@ -97,6 +97,28 @@ function duplicateTerminalResponse(output: unknown): Response {
   });
 }
 
+function streamedSubscriptionResponse(output: unknown): Response {
+  const text = JSON.stringify(output);
+  return new Response([
+    `data: ${JSON.stringify({
+      type: "response.output_text.delta",
+      output_index: 0,
+      content_index: 0,
+      item_id: "msg_streamed",
+      delta: text,
+    })}`,
+    `data: ${JSON.stringify({
+      type: "response.completed",
+      response: { status: "completed", error: null, output: [] },
+    })}`,
+    "data: [DONE]",
+    "",
+  ].join("\n\n"), {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
 const policy: SubscriptionPolicy = Object.freeze({
   model: "gpt-5.6-sol",
   deadline_at: job.deadline_at,
@@ -286,6 +308,23 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
     expect(await adapter.result(handle)).toMatchObject({
       schema_version: "company_discovery.result.v1",
     });
+  });
+
+  test("accepts one bounded streamed output_text when the terminal omits expanded output", async () => {
+    const gateway = new FakeSubscriptionGateway();
+    gateway.response = streamedSubscriptionResponse(candidate);
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: controlledClock().clock,
+    });
+
+    const handle = await adapter.submit(job, capability);
+    expect(await adapter.result(handle)).toEqual({
+      schema_version: "company_discovery.result.v1",
+      source_snapshots: job.source_snapshots,
+      ...candidate,
+    } as WorkerResult);
+    await adapter.retire(handle);
   });
 
   test("tombstones and releases adapter references even when revoke is ambiguous", async () => {

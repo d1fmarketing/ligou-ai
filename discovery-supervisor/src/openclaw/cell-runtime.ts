@@ -16,6 +16,34 @@ const MCP_TOOL_NAMES = [
   "discovery__submit_discovery_result",
 ] as const;
 const MCP_TOOL_POLICY = ["bundle-mcp", ...MCP_TOOL_NAMES] as const;
+const CELL_GATEWAY_RELAY_PORT = 4_313;
+const CELL_GATEWAY_RELAY_SCRIPT = String.raw`
+const net = require("node:net");
+const listenPort = Number(process.argv[1]);
+const targetPort = Number(process.argv[2]);
+if (!Number.isSafeInteger(listenPort) || !Number.isSafeInteger(targetPort)) process.exit(64);
+const sockets = new Set();
+const track = (socket) => {
+  sockets.add(socket);
+  socket.setTimeout(610000, () => socket.destroy());
+  socket.on("error", () => socket.destroy());
+  socket.on("close", () => sockets.delete(socket));
+  return socket;
+};
+const server = net.createServer((downstream) => {
+  if (sockets.size >= 16) { downstream.destroy(); return; }
+  track(downstream);
+  const upstream = track(net.connect({ host: "127.0.0.1", port: targetPort }));
+  downstream.pipe(upstream);
+  upstream.pipe(downstream);
+});
+server.maxConnections=8;
+server.on("error", () => process.exit(1));
+server.listen(listenPort, "0.0.0.0");
+const stop = () => server.close(() => process.exit(0));
+process.once("SIGTERM", stop);
+process.once("SIGINT", stop);
+`;
 
 export const BRIDGE_SUBSCRIPTION_SOCKET_PATH =
   "/run/ligou-subscription/subscription.sock" as const;
@@ -173,7 +201,7 @@ export function buildOpenClawConfig(input: OpenClawConfigInput): OpenClawConfig 
       catalogRefresh: Object.freeze({ enabled: false }),
       providers: Object.freeze({
         stage0_bridge: Object.freeze({
-          baseUrl: `http://127.0.0.1:${identity.bridge_http_port}/codex`,
+          baseUrl: `http://bridge:${identity.bridge_http_port}/codex`,
           apiKey: marker,
           api: "openai-chatgpt-responses",
           models: Object.freeze([Object.freeze({
@@ -196,7 +224,7 @@ export function buildOpenClawConfig(input: OpenClawConfigInput): OpenClawConfig 
     mcp: Object.freeze({
       servers: Object.freeze({
         discovery: Object.freeze({
-          url: `http://127.0.0.1:${identity.bridge_http_port}/mcp`,
+          url: `http://bridge:${identity.bridge_http_port}/mcp`,
           transport: "streamable-http",
           requestTimeoutMs: 30_000,
           connectionTimeoutMs: 5_000,
@@ -348,6 +376,7 @@ export function buildCellLifecyclePlan(input: CellLifecyclePlanInput): readonly 
       image_expectation: id.image_evidence.bridge_image,
     }),
     command("create-internal-network", ["docker", "network", "create", "--internal", id.internal_network_name]),
+    command("create-egress-network", ["docker", "network", "create", id.egress_network_name]),
   ];
   const volumeSizes = Object.freeze({
     config: 1_048_576,
@@ -434,18 +463,25 @@ export function buildCellLifecyclePlan(input: CellLifecyclePlanInput): readonly 
     "--env", `OPENCLAW_NO_AUTO_UPDATE=1`,
     "--env", "XDG_CACHE_HOME=/tmp/openclaw-cache",
     "--env", "TMPDIR=/tmp",
-    "-p", `127.0.0.1:${id.host_gateway_port}:${id.bridge_relay_port}`,
     cellImage,
     "node", "/app/openclaw.mjs",
     "--profile", id.profile_name,
     "gateway", "run", "--port", String(id.gateway_port),
+  ]));
+  plan.push(command("start-cell-loopback-relay", [
+    "docker", "exec", "--detach", "--user", "1000:1000",
+    id.cell_container_name,
+    "node", "-e", CELL_GATEWAY_RELAY_SCRIPT,
+    String(CELL_GATEWAY_RELAY_PORT), String(id.gateway_port),
   ]));
   plan.push(command("start-bridge", [
     "docker", "run", "--detach",
     "--platform", id.image_evidence.bridge_image.platform,
     "--pull=never",
     "--name", id.bridge_container_name,
-    "--network", `container:${id.cell_container_name}`,
+    "--hostname", "bridge",
+    "--network", id.egress_network_name,
+    "--network-alias", "bridge",
     "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
     "--pids-limit=128", "--memory=268435456", "--cpus=0.5",
     "--ulimit", "fsize=16777216:16777216",
@@ -458,9 +494,14 @@ export function buildCellLifecyclePlan(input: CellLifecyclePlanInput): readonly 
     "--env", `BRIDGE_OUTPUT_PATH=${id.output_path}/result.json`,
     "--env", `BRIDGE_HTTP_PORT=${id.bridge_http_port}`,
     "--env", `BRIDGE_RELAY_PORT=${id.bridge_relay_port}`,
-    "--env", "OPENCLAW_CELL_HOST=127.0.0.1",
-    "--env", `OPENCLAW_CELL_GATEWAY_PORT=${id.gateway_port}`,
+    "--env", "OPENCLAW_CELL_HOST=cell",
+    "--env", `OPENCLAW_CELL_GATEWAY_PORT=${CELL_GATEWAY_RELAY_PORT}`,
+    "-p", `127.0.0.1:${id.host_gateway_port}:${id.bridge_relay_port}`,
     bridgeImage,
+  ]));
+  plan.push(command("connect-bridge-internal", [
+    "docker", "network", "connect", "--alias", "bridge",
+    id.internal_network_name, id.bridge_container_name,
   ]));
   plan.push(command("stop-volume-keeper", [
     "docker", "stop", "--time", "2", volumeKeeper,
