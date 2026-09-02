@@ -3,6 +3,7 @@ import {
   coverageKey,
   createCoverage,
   evaluateCoverage,
+  isCoverageField,
   resolveLocalityValueFromRegistry,
   type CoverageCell,
   type CoverageField,
@@ -36,6 +37,20 @@ interface ApprovedFact {
   ambiguous_fields: string[];
   contradictions: string[];
   uncertainty: string[];
+  website_missing_fields: string[];
+  website_ambiguous_fields: string[];
+  website_contradictions: string[];
+  website_uncertainty: string[];
+}
+
+interface UnresolvedItem {
+  reason: string;
+  claim_id: string | null;
+  claim_type: string | null;
+  field: string | null;
+  coverage_field: CoverageField | null;
+  coverage_subject: string | null;
+  question_pt: string;
 }
 
 interface DraftReadback {
@@ -48,7 +63,7 @@ interface DraftReadback {
     source_result_id: string;
     approved_facts: ApprovedFact[];
     rejected_claim_ids: string[];
-    unresolved_items: unknown[];
+    unresolved_items: UnresolvedItem[];
     authority: typeof FALSE_AUTHORITY;
   };
 }
@@ -104,7 +119,8 @@ function parseFact(value: unknown, index: number): ApprovedFact {
     "claim_id", "claim_class", "claim_type", "value", "decision",
     "edited_by_owner", "evidence_refs", "confidence", "contradiction_status",
     "adapter_id", "provider", "model", "claim_schema_version", "missing_fields",
-    "ambiguous_fields", "contradictions", "uncertainty",
+    "ambiguous_fields", "contradictions", "uncertainty", "website_missing_fields",
+    "website_ambiguous_fields", "website_contradictions", "website_uncertainty",
   ], `fact_${index}`);
   if (typeof fact.claim_id !== "string" || !UUID.test(fact.claim_id) ||
       !["descriptive", "operational", "safety_critical"].includes(String(fact.claim_class)) ||
@@ -140,6 +156,42 @@ function parseFact(value: unknown, index: number): ApprovedFact {
     ambiguous_fields: strings(fact.ambiguous_fields, `fact_${index}_ambiguous`, 50),
     contradictions: strings(fact.contradictions, `fact_${index}_contradictions`, 20),
     uncertainty: strings(fact.uncertainty, `fact_${index}_uncertainty`, 20),
+    website_missing_fields: strings(fact.website_missing_fields, `fact_${index}_website_missing`, 50),
+    website_ambiguous_fields: strings(fact.website_ambiguous_fields, `fact_${index}_website_ambiguous`, 50),
+    website_contradictions: strings(fact.website_contradictions, `fact_${index}_website_contradictions`, 20),
+    website_uncertainty: strings(fact.website_uncertainty, `fact_${index}_website_uncertainty`, 20),
+  };
+}
+
+function parseUnresolvedItem(value: unknown, index: number): UnresolvedItem {
+  const item = record(value, `unresolved_${index}`);
+  exact(item, [
+    "reason", "claim_id", "claim_type", "field", "coverage_field",
+    "coverage_subject", "question_pt",
+  ], `unresolved_${index}`);
+  if (typeof item.reason !== "string" || !item.reason || item.reason.length > 100 ||
+      !(item.claim_id === null || (typeof item.claim_id === "string" && UUID.test(item.claim_id))) ||
+      !(item.claim_type === null || (typeof item.claim_type === "string" && item.claim_type.length > 0 && item.claim_type.length <= 200)) ||
+      !(item.field === null || (typeof item.field === "string" && item.field.length > 0 && item.field.length <= 200)) ||
+      !(item.coverage_field === null || isCoverageField(item.coverage_field)) ||
+      !(item.coverage_subject === null || (typeof item.coverage_subject === "string" && /^[a-z0-9][a-z0-9_]{0,199}$/.test(item.coverage_subject))) ||
+      typeof item.question_pt !== "string" || !item.question_pt.trim() || item.question_pt.length > 2_000) {
+    fail(`unresolved_${index}_shape`);
+  }
+  if (item.coverage_field?.startsWith("service.") &&
+      item.coverage_field !== "service.catalog_closure" && item.coverage_subject === null) {
+    fail(`unresolved_${index}_subject`);
+  }
+  if (item.coverage_field !== null && !item.coverage_field.startsWith("service.") &&
+      item.coverage_subject !== null) fail(`unresolved_${index}_subject`);
+  return {
+    reason: item.reason,
+    claim_id: item.claim_id,
+    claim_type: item.claim_type,
+    field: item.field,
+    coverage_field: item.coverage_field as CoverageField | null,
+    coverage_subject: item.coverage_subject,
+    question_pt: item.question_pt,
   };
 }
 
@@ -177,7 +229,7 @@ function parseDraftReadback(value: unknown): DraftReadback {
       source_result_id: draft.source_result_id,
       approved_facts: draft.approved_facts.map(parseFact),
       rejected_claim_ids: rejected,
-      unresolved_items: structuredClone(draft.unresolved_items),
+      unresolved_items: draft.unresolved_items.map(parseUnresolvedItem),
       authority: FALSE_AUTHORITY,
     },
   };
@@ -255,7 +307,13 @@ function restrictionText(value: Record<string, unknown>): string {
 }
 
 function guaranteeText(value: Record<string, unknown>): string {
-  const pieces: string[] = [];
+  const kind = ({
+    company_guarantee: "company guarantee",
+    manufacturer_warranty: "manufacturer warranty",
+    satisfaction_statement: "satisfaction statement",
+    case_by_case: "case-by-case guarantee",
+  })[String(value.guarantee_kind)] ?? String(value.guarantee_kind ?? "");
+  const pieces: string[] = kind ? [kind] : [];
   if (Array.isArray(value.coverage)) pieces.push(value.coverage.map(String).join(", "));
   const duration = value.duration as Record<string, unknown> | null;
   if (duration) pieces.push(`${duration.amount} ${duration.unit}`);
@@ -363,7 +421,16 @@ function applyService(snapshot: CoverageSnapshot, fact: ApprovedFact): void {
         price.qualifier === "estimate"
       ? price.qualifier
       : "owner_review";
-    setCell(snapshot, "service.price_mode", answered(mode), subject);
+    if (mode === "owner_review") {
+      const published = [price.currency, price.amount].filter(Boolean).join(" ");
+      const condition = typeof price.condition === "string" ? price.condition : "";
+      setCell(snapshot, "service.price_mode", ambiguous(
+        "website_conditional_public_price",
+        `Seu site publica ${published || "um preço"}${condition ? ` com a condição “${condition}”` : ""} para ${subject.replaceAll("_", " ")}. Como esse preço deve ser tratado?`,
+      ), subject);
+    } else {
+      setCell(snapshot, "service.price_mode", answered(mode), subject);
+    }
     if ((mode === "fixed" || mode === "starting_at") && typeof price.amount === "string") {
       setCell(snapshot, "service.price_target", answered(Number(price.amount)), subject);
       setCell(snapshot, "service.negotiation", {
@@ -375,6 +442,16 @@ function applyService(snapshot: CoverageSnapshot, fact: ApprovedFact): void {
   if (typeof value.duration_minutes === "number") {
     setCell(snapshot, "service.duration", answered(value.duration_minutes), subject);
   }
+}
+
+function applyUnresolved(snapshot: CoverageSnapshot, item: UnresolvedItem): void {
+  if (item.coverage_field === null) return;
+  const subject = item.coverage_subject ?? undefined;
+  if (subject) addService(snapshot, subject);
+  setCell(snapshot, item.coverage_field, ambiguous(
+    `company_discovery_${item.reason}`,
+    item.question_pt,
+  ), subject);
 }
 
 function applyGuarantee(snapshot: CoverageSnapshot, fact: ApprovedFact): void {
@@ -445,6 +522,9 @@ export function buildCompanyDiscoveryPrefill(
   const snapshot = createCoverage({ tenantId: input.tenant_id, callId: input.call_id });
   for (const fact of readback.draft.approved_facts) {
     applyFact(snapshot, fact, input.localities);
+  }
+  for (const item of readback.draft.unresolved_items) {
+    applyUnresolved(snapshot, item);
   }
   snapshot.services.sort();
   snapshot.revision = 1;

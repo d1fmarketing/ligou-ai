@@ -764,10 +764,16 @@ describe("DirectModel company discovery Stage 0B database authority", () => {
     expect(review).toContain("'rules_approved', false");
     expect(review).toContain("'powers_granted', false");
     expect(review).toContain("'operational_mode_changed', false");
-    expect(review).toContain("'missing_fields', v_claim.missing_fields");
-    expect(review).toContain("'ambiguous_fields', v_claim.ambiguous_fields");
-    expect(review).toContain("'contradictions', v_claim.contradictions");
-    expect(review).toContain("'uncertainty', v_claim.uncertainty");
+    expect(review).toContain("'missing_fields', v_effective_missing");
+    expect(review).toContain("'ambiguous_fields', v_effective_ambiguous");
+    expect(review).toContain("'contradictions', v_effective_contradictions");
+    expect(review).toContain("'uncertainty', v_effective_uncertainty");
+    expect(review).toContain("'website_missing_fields', v_claim.missing_fields");
+    expect(review).toContain("'website_ambiguous_fields', v_claim.ambiguous_fields");
+    expect(review).toContain("'website_contradictions', v_claim.contradictions");
+    expect(review).toContain("'website_uncertainty', v_claim.uncertainty");
+    expect(review).toContain("v_complete_claim_ids");
+    expect(review).toContain("company_discovery_review_claim_set_mismatch");
     expect(review).not.toContain("insert into public.rules");
     expect(review).not.toContain("insert into public.powers");
     expect(review).not.toContain("insert into public.effective_rules");
@@ -785,6 +791,7 @@ describe("DirectModel company discovery Stage 0B database authority", () => {
     expect(prefill).toContain("set search_path = ''");
     expect(prefill).toContain("request.jwt.claim.role");
     expect(prefill).toContain("service_role_required");
+    expect(prefill).toContain("'ligou.company_discovery.onboarding_draft:' || p_tenant::text");
     expect(prefill).toContain("t.owner_user_id = p_owner");
     expect(prefill).toContain("'transition_kind', 'discovery_prefill'");
     expect(prefill).toContain("'rules_approved', false");
@@ -2430,6 +2437,36 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     )).toBe(true);
     expect((await intruder.from("discovery_claims")
       .select("id").eq("result_id", newCommitted.result_id)).data).toEqual([]);
+    const partialClaim = v2Claims.data![0]!;
+    const partialNonce = await owner.rpc("create_company_discovery_review_nonce", {
+      p_job: retryJob,
+      p_result: newCommitted.result_id,
+      p_claim_ids: [partialClaim.id],
+    });
+    expect(partialNonce.error).toBeNull();
+    const partialReview = await owner.rpc("review_company_discovery_claims_v2", {
+      p_job: retryJob,
+      p_result: newCommitted.result_id,
+      p_expected_version: replacementSelect.data.version,
+      p_decisions: [{
+        claim_id: partialClaim.id,
+        decision: "approve",
+        value: directV2Result.candidate_facts.find((fact) =>
+          fact.claim_type === partialClaim.claim_type
+        )!.normalized_value,
+        group_confirmed: partialClaim.claim_class !== "descriptive",
+        evidence_acknowledged: partialClaim.claim_class === "safety_critical",
+        acknowledged_evidence_refs: partialClaim.claim_class === "safety_critical"
+          ? partialClaim.evidence_refs
+          : [],
+      }],
+      p_confirmation_nonce: String(partialNonce.data),
+    });
+    expect(partialReview.error?.message).toContain(
+      "company_discovery_review_claim_set_mismatch",
+    );
+    expect((await owner.from("company_discovery_onboarding_drafts")
+      .select("id").eq("source_result_id", newCommitted.result_id)).data).toEqual([]);
     const v2Nonce = await owner.rpc("create_company_discovery_review_nonce", {
       p_job: retryJob,
       p_result: newCommitted.result_id,
@@ -2440,18 +2477,25 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_job: retryJob,
       p_result: newCommitted.result_id,
       p_expected_version: replacementSelect.data.version,
-      p_decisions: v2Claims.data!.map((row) => ({
-        claim_id: row.id,
-        decision: row.claim_type === "booking_restriction" ? "reject" : "approve",
-        value: directV2Result.candidate_facts.find((fact) =>
+      p_decisions: v2Claims.data!.map((row) => {
+        const original = directV2Result.candidate_facts.find((fact) =>
           fact.claim_type === row.claim_type
-        )!.normalized_value,
-        group_confirmed: row.claim_class !== "descriptive",
-        evidence_acknowledged: row.claim_class === "safety_critical",
-        acknowledged_evidence_refs: row.claim_class === "safety_critical"
-          ? row.evidence_refs
-          : [],
-      })),
+        )!.normalized_value;
+        return {
+          claim_id: row.id,
+          decision: row.claim_type === "booking_restriction"
+            ? "reject"
+            : row.claim_type === "business_hours" ? "edit" : "approve",
+          value: row.claim_type === "business_hours"
+            ? { ...(original as Record<string, unknown>), holiday_policy: "Closed on federal holidays" }
+            : original,
+          group_confirmed: row.claim_class !== "descriptive",
+          evidence_acknowledged: row.claim_class === "safety_critical",
+          acknowledged_evidence_refs: row.claim_class === "safety_critical"
+            ? row.evidence_refs
+            : [],
+        };
+      }),
       p_confirmation_nonce: String(v2Nonce.data),
     });
     expect(v2Review.error).toBeNull();
@@ -2490,6 +2534,15 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     });
     expect(draftRows.data![0]!.draft.approved_facts).toHaveLength(5);
     expect(draftRows.data![0]!.draft.rejected_claim_ids).toHaveLength(1);
+    const reviewedHours = draftRows.data![0]!.draft.approved_facts.find(
+      (fact: Record<string, unknown>) => fact.claim_type === "business_hours",
+    );
+    expect(reviewedHours).toMatchObject({
+      decision: "edit",
+      edited_by_owner: true,
+      missing_fields: [],
+      website_missing_fields: ["holiday_policy"],
+    });
     expect((await intruder.from("company_discovery_onboarding_drafts")
       .select("id").eq("id", v2DraftId)).data).toEqual([]);
     const draftReadback = await service.rpc(

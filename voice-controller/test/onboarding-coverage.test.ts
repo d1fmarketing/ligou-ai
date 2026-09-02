@@ -192,6 +192,23 @@ describe("onboarding coverage", () => {
     });
   });
 
+  test("uses a trusted targeted question for a non-area ambiguous prefill cell", () => {
+    const subject = "drain_cleaning";
+    const snapshot = completeService(coveredUniversal(), subject);
+    snapshot.cells[`service:${subject}:service.price_mode`] = {
+      state: "ambiguous",
+      attempts: 0,
+      reason: "website_conditional_public_price",
+      questionPt: "Seu site diz USD 250.00 por até duas horas. Deseja manter essa condição?",
+    };
+
+    expect(evaluateCoverage(snapshot).nextQuestion).toEqual({
+      field: "service.price_mode",
+      subject,
+      questionPt: "Seu site diz USD 250.00 por até duas horas. Deseja manter essa condição?",
+    });
+  });
+
   test("documented one-fact service values answer pricing, duration, and negotiation without ambiguity", () => {
     let snapshot = createCoverage(identity);
     const subject = "limpeza_de_ralo";

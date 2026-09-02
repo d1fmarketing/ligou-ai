@@ -1101,13 +1101,12 @@ function questionFor(
   ref: CoverageRef,
   snapshot: CoverageSnapshot,
 ): CoverageQuestion {
+  const cell = snapshot.cells[keyFor(ref.field, ref.subject)];
   return {
     ...ref,
     questionPt:
-      ref.field === "area.coverage" &&
-          snapshot.cells["area.coverage"]?.state === "ambiguous" &&
-          snapshot.cells["area.coverage"].questionPt
-        ? snapshot.cells["area.coverage"].questionPt
+      cell?.state === "ambiguous" && cell.questionPt
+        ? cell.questionPt
         : ref.field === "service.catalog_closure" && snapshot.services.length === 0
         ? INITIAL_SERVICE_DISCOVERY_QUESTION_PT
         : ref.subject

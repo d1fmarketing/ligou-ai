@@ -1120,7 +1120,7 @@ export function createOnboardingStore(
       return { ok: true, status: "none", durationMs: elapsed(now, started) };
     }
     try {
-      const initialized = await bounded((signal) =>
+      let initialized = await bounded((signal) =>
         abortable<BoundaryResult<unknown>>(client.rpc(
           "initialize_company_discovery_onboarding_prefill",
           {
@@ -1133,14 +1133,56 @@ export function createOnboardingStore(
         ), signal)
       );
       if (initialized.error) {
-        return ambiguousBoundaryFailure(initialized.error)
-          ? failure(
-              "indeterminate",
-              "company discovery onboarding prefill is indeterminate",
-              now,
-              started,
-            )
-          : { ok: true, status: "none", durationMs: elapsed(now, started) };
+        if (!ambiguousBoundaryFailure(initialized.error)) {
+          return { ok: true, status: "none", durationMs: elapsed(now, started) };
+        }
+        const receiptResult = await bounded((signal) => coverageReceipts(cap, signal));
+        if (receiptResult.error || !Array.isArray(receiptResult.data)) {
+          return failure(
+            "indeterminate",
+            "company discovery onboarding prefill is indeterminate",
+            now,
+            started,
+          );
+        }
+        if (receiptResult.data.length === 0) {
+          return { ok: true, status: "none", durationMs: elapsed(now, started) };
+        }
+        const matching = receiptResult.data.filter((row) =>
+          UUID_RE.test(row.id) &&
+          row.readback?.transition_kind === "discovery_prefill" &&
+          row.readback?.discovery_context &&
+          typeof row.readback.discovery_context === "object" &&
+          !Array.isArray(row.readback.discovery_context) &&
+          (row.readback.discovery_context as Record<string, unknown>).draft_id ===
+            projection.draft_id &&
+          (row.readback.discovery_context as Record<string, unknown>).draft_hash ===
+            projection.draft_hash &&
+          typeof row.readback.snapshot_digest === "string" &&
+          /^[0-9a-f]{64}$/.test(row.readback.snapshot_digest)
+        );
+        if (receiptResult.data.length !== 1 || matching.length !== 1) {
+          return failure(
+            "indeterminate",
+            "company discovery onboarding prefill is indeterminate",
+            now,
+            started,
+          );
+        }
+        const recovered = matching[0]!;
+        initialized = {
+          data: {
+            status: "reused",
+            draft_id: projection.draft_id,
+            draft_hash: projection.draft_hash,
+            coverage_receipt_id: recovered.id,
+            revision: 1,
+            snapshot_digest: recovered.readback.snapshot_digest,
+            next_action: recovered.readback.next_action,
+            coverage: recovered.readback,
+          },
+          error: null,
+        };
       }
       if (!initialized.data || typeof initialized.data !== "object" ||
           Array.isArray(initialized.data)) {

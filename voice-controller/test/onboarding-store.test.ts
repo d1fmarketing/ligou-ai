@@ -378,6 +378,8 @@ describe("initializeOnboardingResume", () => {
           provider: "openai-codex", model: "gpt-5.6-sol",
           claim_schema_version: "company_discovery.claim.v2",
           missing_fields: [], ambiguous_fields: [], contradictions: [], uncertainty: [],
+          website_missing_fields: [], website_ambiguous_fields: [],
+          website_contradictions: [], website_uncertainty: [],
         }],
         rejected_claim_ids: [], unresolved_items: [],
         authority: { rules_approved: false, powers_granted: false, operational_mode_changed: false },
@@ -432,6 +434,71 @@ describe("initializeOnboardingResume", () => {
       powers_granted: false,
       operational_mode_changed: false,
     });
+  });
+
+  test("reconciles an ambiguous prefill write or proves absence before ordinary fallback", async () => {
+    for (const receiptCommitted of [true, false]) {
+      const boundary = new SupabaseBoundaryFake();
+      const draftId = "99999999-9999-4999-8999-999999999999";
+      const draftHash = "d".repeat(64);
+      const draftReadback = {
+        draft_id: draftId,
+        draft_version: 1,
+        draft_hash: draftHash,
+        draft: {
+          schema_version: "company_discovery.onboarding_draft.v1",
+          source_job_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          source_result_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          approved_facts: [],
+          rejected_claim_ids: [],
+          unresolved_items: [],
+          authority: { rules_approved: false, powers_granted: false, operational_mode_changed: false },
+        },
+      };
+      boundary.rpcHandler = (name, args) => {
+        if (name === "initialize_onboarding_resume") {
+          return { data: null, error: { code: "P0002", message: "onboarding_resume_source_missing" } };
+        }
+        if (name === "read_company_discovery_onboarding_draft") {
+          return { data: draftReadback, error: null };
+        }
+        if (name === "initialize_company_discovery_onboarding_prefill") {
+          if (receiptCommitted) {
+            boundary.receiptRows = [{
+              id: TARGET_RECEIPT_ID,
+              readback: {
+                ...(args.p_coverage as Record<string, unknown>),
+                snapshot_digest: "e".repeat(64),
+              },
+              detail: {
+                transition_kind: "discovery_prefill",
+                draft_id: draftId,
+                draft_hash: draftHash,
+              },
+            }];
+          }
+          return { data: null, error: { message: "network timeout" } };
+        }
+        return { data: null, error: { message: `unexpected ${name}` } };
+      };
+      const store = createOnboardingStore({ client: boundary.client(), now: () => 17 });
+
+      const initialized = await store.initializeOnboardingResume(ownerCapability());
+
+      if (receiptCommitted) {
+        expect(initialized).toMatchObject({
+          ok: true,
+          status: "discovery_prefill",
+          draftId,
+          draftHash,
+          coverageReceiptId: TARGET_RECEIPT_ID,
+          digest: "e".repeat(64),
+        });
+      } else {
+        expect(initialized).toEqual({ ok: true, status: "none", durationMs: 0 });
+      }
+      expect(boundary.receiptSetReads).toBe(1);
+    }
   });
 
   test("calls the service RPC with the exact owner-bound target and returns revision one", async () => {

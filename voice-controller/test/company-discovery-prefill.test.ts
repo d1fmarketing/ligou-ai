@@ -26,6 +26,10 @@ function fact(claimType: string, value: unknown, overrides: Record<string, unkno
     ambiguous_fields: [],
     contradictions: [],
     uncertainty: [],
+    website_missing_fields: [],
+    website_ambiguous_fields: [],
+    website_contradictions: [],
+    website_uncertainty: [],
     ...overrides,
   };
 }
@@ -53,12 +57,13 @@ function readback(approvedFacts: unknown[], unresolvedItems: unknown[] = []) {
 
 async function build(approvedFacts: unknown[], options: Record<string, unknown> = {}) {
   const module = await import("../src/company-discovery-prefill.ts");
+  const { unresolvedItems = [], ...inputOptions } = options;
   return module.buildCompanyDiscoveryPrefill({
     tenant_id: TENANT,
     call_id: CALL,
-    draft_readback: readback(approvedFacts),
+    draft_readback: readback(approvedFacts, unresolvedItems as unknown[]),
     localities: [],
-    ...options,
+    ...inputOptions,
   });
 }
 
@@ -154,6 +159,7 @@ describe("Company Discovery Stage 0B onboarding prefill fixtures", () => {
     })]);
     const warranty = projection.coverage.snapshot.cells["service:leak_repair:service.warranty"] as any;
     expect(warranty.state).toBe("answered");
+    expect(warranty.value).toContain("company guarantee");
     expect(warranty.value).toContain("90 days");
     expect(projection.coverage.snapshot.cells["authority.book"]).toBeUndefined();
   });
@@ -245,5 +251,66 @@ describe("Company Discovery Stage 0B onboarding prefill fixtures", () => {
       field: "service.catalog_closure",
       question_pt: "Quais serviços sua empresa oferece?",
     });
+  });
+
+  test("an owner edit resolves website ambiguity while preserving the original evidence signals", async () => {
+    const projection = await build([fact("service_territory", {
+      service_type: null,
+      included_areas: [{ kind: "city", name: "Concord", region_state: "CA", country_code: "US" }],
+      excluded_areas: [],
+      radius: null,
+    }, {
+      decision: "edit",
+      edited_by_owner: true,
+      ambiguous_fields: [],
+      website_ambiguous_fields: ["included_areas[0].region_state"],
+    })], {
+      localities: [{
+        locality_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        display_name: "Concord",
+        country_code: "US",
+        region_code: "CA",
+        aliases: ["concord"],
+      }],
+    });
+    expect(projection.coverage.snapshot.cells["area.coverage"]?.state).toBe("answered");
+  });
+
+  test("projects a rejected typed claim into an unresolved onboarding cell", async () => {
+    const projection = await build([], {
+      unresolvedItems: [{
+        reason: "rejected",
+        claim_id: CLAIM,
+        claim_type: "guarantee",
+        field: null,
+        coverage_field: "service.warranty",
+        coverage_subject: "leak_repair",
+        question_pt: "Você rejeitou a garantia do site. Qual garantia vale para leak repair?",
+      }],
+    });
+    expect(projection.coverage.snapshot.services).toContain("leak_repair");
+    expect(projection.coverage.snapshot.cells["service:leak_repair:service.warranty"]).toMatchObject({
+      state: "ambiguous",
+      questionPt: "Você rejeitou a garantia do site. Qual garantia vale para leak repair?",
+    });
+  });
+
+  test("keeps a conditional public price as a targeted question instead of discarding amount and condition", async () => {
+    const projection = await build([fact("service", {
+      service_type: "drain_cleaning",
+      service_names: ["Drain cleaning"],
+      public_price: {
+        amount: "250.00",
+        currency: "USD",
+        qualifier: "conditional",
+        condition: "up to two hours",
+      },
+      duration_minutes: 120,
+    })]);
+    const priceCell = projection.coverage.snapshot.cells["service:drain_cleaning:service.price_mode"] as any;
+    expect(priceCell.state).toBe("ambiguous");
+    expect(typeof priceCell.questionPt).toBe("string");
+    expect(priceCell.questionPt).toContain("USD 250.00");
+    expect(priceCell.questionPt).toContain("up to two hours");
   });
 });

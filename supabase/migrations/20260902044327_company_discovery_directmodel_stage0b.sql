@@ -880,6 +880,71 @@ grant execute on function public.commit_company_discovery_result_v2(
   uuid,bigint,text,jsonb,text
 ) to service_role;
 
+create or replace function public.company_discovery_coverage_target_v1(
+  p_claim_type text,
+  p_value jsonb,
+  p_field text default null
+) returns jsonb
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  v_target text;
+  v_subject text;
+  v_restriction text;
+begin
+  if p_claim_type = 'service' then
+    v_subject := nullif(p_value->>'service_type', '');
+    v_target := case p_field
+      when 'public_price' then 'service.price_mode'
+      when 'duration_minutes' then 'service.duration'
+      when 'service_names' then 'service.name_synonyms'
+      else 'service.name_synonyms'
+    end;
+  elsif p_claim_type = 'service_territory' then
+    v_target := 'area.coverage';
+  elsif p_claim_type = 'business_hours' then
+    v_target := case
+      when p_field in ('holiday_policy') then 'schedule.holidays'
+      when p_field in ('after_hours','emergency_24_7')
+        then 'emergency.after_hours'
+      else 'schedule.business_hours'
+    end;
+  elsif p_claim_type = 'guarantee' then
+    v_subject := nullif(p_value->>'service_type', '');
+    v_target := case when v_subject is null
+      then 'policy.warranty_materials' else 'service.warranty' end;
+  elsif p_claim_type = 'booking_restriction' then
+    v_restriction := p_value->>'restriction_type';
+    v_subject := nullif(p_value->>'service_type', '');
+    v_target := case
+      when v_restriction in ('same_day','advance_notice')
+        then 'schedule.same_day_lead_time'
+      when v_restriction in ('sunday','weekend','emergency_only')
+        then 'schedule.business_hours'
+      when v_restriction in ('cancellation','no_show_fee','visit_fee')
+        then 'schedule.reschedule_cancel'
+      when v_restriction in ('access','customer_presence')
+        then 'policy.access_cancellation'
+      when v_restriction = 'deposit' then 'policy.payment_estimate'
+      when v_restriction = 'service_specific' and v_subject is not null
+        then 'service.inclusions_exclusions'
+      else null
+    end;
+  elsif p_claim_type = 'emergency' then
+    v_target := 'emergency.safety_escalation';
+  else
+    return null;
+  end if;
+  if v_target is null then return null; end if;
+  return jsonb_build_object('field', v_target, 'subject', v_subject);
+end;
+$$;
+
+revoke all on function public.company_discovery_coverage_target_v1(text,jsonb,text)
+  from public, anon, authenticated, service_role;
+
 create or replace function public.review_company_discovery_claims_v2(
   p_job uuid,
   p_result uuid,
@@ -900,6 +965,7 @@ declare
   v_claim public.discovery_claims;
   v_claim_ids uuid[];
   v_distinct_ids uuid[];
+  v_complete_claim_ids uuid[];
   v_decision_id uuid;
   v_decision_ids uuid[] := '{}'::uuid[];
   v_decision_kind text;
@@ -910,6 +976,15 @@ declare
   v_unresolved jsonb := '[]'::jsonb;
   v_item jsonb;
   v_field text;
+  v_collection text;
+  v_area jsonb;
+  v_area_index bigint;
+  v_target jsonb;
+  v_effective_missing jsonb;
+  v_effective_ambiguous jsonb;
+  v_effective_contradictions jsonb;
+  v_effective_uncertainty jsonb;
+  v_effective_contradiction_status text;
   v_draft_id uuid := gen_random_uuid();
   v_draft_version bigint;
   v_draft jsonb;
@@ -987,6 +1062,15 @@ begin
     raise exception using errcode = '22023',
       message = 'company_discovery_review_claim_set_mismatch';
   end if;
+  select array_agg(c.id order by c.id) into v_complete_claim_ids
+  from public.discovery_claims c
+  where c.result_id = p_result
+    and c.claim_schema_version = 'company_discovery.claim.v2';
+  if v_complete_claim_ids is null
+     or v_claim_ids is distinct from v_complete_claim_ids then
+    raise exception using errcode = '22023',
+      message = 'company_discovery_review_claim_set_mismatch';
+  end if;
 
   perform pg_advisory_xact_lock(hashtextextended(
     'ligou.company_discovery.onboarding_draft:' || v_job.tenant_id::text,
@@ -1003,6 +1087,8 @@ begin
       'claim_id', null,
       'claim_type', null,
       'field', null,
+      'coverage_field', null,
+      'coverage_subject', null,
       'question_pt', v_item #>> '{}'
     ));
   end loop;
@@ -1016,6 +1102,8 @@ begin
       'claim_id', null,
       'claim_type', null,
       'field', null,
+      'coverage_field', null,
+      'coverage_subject', null,
       'question_pt', 'Confirme esta contradição encontrada no site: ' ||
         (v_item #>> '{}')
     ));
@@ -1030,6 +1118,8 @@ begin
       'claim_id', null,
       'claim_type', null,
       'field', null,
+      'coverage_field', null,
+      'coverage_subject', null,
       'question_pt', 'Confirme este ponto que o site deixou incerto: ' ||
         (v_item #>> '{}')
     ));
@@ -1099,6 +1189,76 @@ begin
         message = 'company_discovery_safety_evidence_ack_required';
     end if;
 
+    v_effective_missing := v_claim.missing_fields;
+    v_effective_ambiguous := v_claim.ambiguous_fields;
+    v_effective_contradictions := v_claim.contradictions;
+    v_effective_uncertainty := v_claim.uncertainty;
+    v_effective_contradiction_status := v_claim.contradiction_status;
+    if v_decision_kind = 'edit' then
+      v_effective_missing := '[]'::jsonb;
+      v_effective_ambiguous := '[]'::jsonb;
+      v_effective_contradictions := '[]'::jsonb;
+      v_effective_uncertainty := '[]'::jsonb;
+      v_effective_contradiction_status := 'none';
+      if v_claim.claim_type = 'service_territory' then
+        foreach v_collection in array array['included_areas','excluded_areas']
+        loop
+          for v_area, v_area_index in
+            select value, ordinality - 1
+            from jsonb_array_elements(v_value->v_collection) with ordinality
+          loop
+            if v_area->>'kind' = 'city'
+               and jsonb_typeof(v_area->'region_state') = 'null' then
+              v_effective_ambiguous := v_effective_ambiguous ||
+                jsonb_build_array(format(
+                  '%s[%s].region_state', v_collection, v_area_index
+                ));
+            end if;
+          end loop;
+        end loop;
+      elsif v_claim.claim_type = 'business_hours' then
+        if jsonb_typeof(v_value->'timezone') = 'null' then
+          v_effective_missing := v_effective_missing ||
+            jsonb_build_array('timezone');
+        end if;
+        if jsonb_typeof(v_value->'holiday_policy') = 'null' then
+          v_effective_missing := v_effective_missing ||
+            jsonb_build_array('holiday_policy');
+        end if;
+        if v_value->>'after_hours' = 'not_stated' then
+          v_effective_missing := v_effective_missing ||
+            jsonb_build_array('after_hours');
+        end if;
+      elsif v_claim.claim_type = 'service' then
+        if jsonb_typeof(v_value->'public_price') = 'null' then
+          v_effective_missing := v_effective_missing ||
+            jsonb_build_array('public_price');
+        end if;
+        if jsonb_typeof(v_value->'duration_minutes') = 'null' then
+          v_effective_missing := v_effective_missing ||
+            jsonb_build_array('duration_minutes');
+        end if;
+      elsif v_claim.claim_type = 'guarantee'
+            and v_value->>'guarantee_kind' in (
+              'company_guarantee','manufacturer_warranty'
+            )
+            and jsonb_typeof(v_value->'duration') = 'null' then
+        v_effective_missing := v_effective_missing ||
+          jsonb_build_array('duration');
+      elsif v_claim.claim_type = 'booking_restriction' then
+        if v_value->>'restriction_type' in ('same_day','advance_notice')
+           and jsonb_typeof(v_value->'notice_minutes') = 'null' then
+          v_effective_missing := v_effective_missing ||
+            jsonb_build_array('notice_minutes');
+        end if;
+        if v_value->>'rule' = 'fee_applies'
+           and jsonb_typeof(v_value->'public_fee') = 'null' then
+          v_effective_missing := v_effective_missing ||
+            jsonb_build_array('public_fee');
+        end if;
+      end if;
+    end if;
+
     v_decision_id := gen_random_uuid();
     v_decision_ids := array_append(v_decision_ids, v_decision_id);
     v_pending := v_pending || jsonb_build_array(jsonb_build_object(
@@ -1112,11 +1272,16 @@ begin
     ));
     if v_decision_kind = 'reject' then
       v_rejected := v_rejected || to_jsonb(v_claim.id);
+      v_target := public.company_discovery_coverage_target_v1(
+        v_claim.claim_type, v_claim.normalized_value, null
+      );
       v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
         'reason', 'rejected',
         'claim_id', v_claim.id,
         'claim_type', v_claim.claim_type,
         'field', null,
+        'coverage_field', v_target->>'field',
+        'coverage_subject', v_target->>'subject',
         'question_pt', format(
           'Você rejeitou a sugestão de %s do site. Qual é a informação correta?',
           replace(v_claim.claim_type, '_', ' ')
@@ -1132,63 +1297,87 @@ begin
         'edited_by_owner', v_decision_kind = 'edit',
         'evidence_refs', to_jsonb(v_claim.evidence_refs),
         'confidence', v_claim.confidence,
-        'contradiction_status', v_claim.contradiction_status,
-        'missing_fields', v_claim.missing_fields,
-        'ambiguous_fields', v_claim.ambiguous_fields,
-        'contradictions', v_claim.contradictions,
-        'uncertainty', v_claim.uncertainty,
+        'contradiction_status', v_effective_contradiction_status,
+        'missing_fields', v_effective_missing,
+        'ambiguous_fields', v_effective_ambiguous,
+        'contradictions', v_effective_contradictions,
+        'uncertainty', v_effective_uncertainty,
+        'website_missing_fields', v_claim.missing_fields,
+        'website_ambiguous_fields', v_claim.ambiguous_fields,
+        'website_contradictions', v_claim.contradictions,
+        'website_uncertainty', v_claim.uncertainty,
         'adapter_id', v_claim.adapter_id,
         'provider', v_claim.provider,
         'model', v_claim.model,
         'claim_schema_version', v_claim.claim_schema_version
       ));
     end if;
-    for v_item in select value from jsonb_array_elements(v_claim.missing_fields)
+    for v_item in select value from jsonb_array_elements(v_effective_missing)
     loop
       v_field := v_item #>> '{}';
+      v_target := public.company_discovery_coverage_target_v1(
+        v_claim.claim_type, v_value, v_field
+      );
       v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
         'reason', 'missing_field',
         'claim_id', v_claim.id,
         'claim_type', v_claim.claim_type,
         'field', v_field,
+        'coverage_field', v_target->>'field',
+        'coverage_subject', v_target->>'subject',
         'question_pt', format(
           'O site não informou %s para %s. Qual é a resposta correta?',
           replace(v_field, '_', ' '), replace(v_claim.claim_type, '_', ' ')
         )
       ));
     end loop;
-    for v_item in select value from jsonb_array_elements(v_claim.ambiguous_fields)
+    for v_item in select value from jsonb_array_elements(v_effective_ambiguous)
     loop
       v_field := v_item #>> '{}';
+      v_target := public.company_discovery_coverage_target_v1(
+        v_claim.claim_type, v_value, v_field
+      );
       v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
         'reason', 'ambiguous_field',
         'claim_id', v_claim.id,
         'claim_type', v_claim.claim_type,
         'field', v_field,
+        'coverage_field', v_target->>'field',
+        'coverage_subject', v_target->>'subject',
         'question_pt', format(
           'O site deixou %s ambíguo em %s. Como devemos registrar isso?',
           replace(v_field, '_', ' '), replace(v_claim.claim_type, '_', ' ')
         )
       ));
     end loop;
-    for v_item in select value from jsonb_array_elements(v_claim.contradictions)
+    for v_item in select value from jsonb_array_elements(v_effective_contradictions)
     loop
+      v_target := public.company_discovery_coverage_target_v1(
+        v_claim.claim_type, v_value, null
+      );
       v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
         'reason', 'contradiction',
         'claim_id', v_claim.id,
         'claim_type', v_claim.claim_type,
         'field', null,
+        'coverage_field', v_target->>'field',
+        'coverage_subject', v_target->>'subject',
         'question_pt', 'Confirme esta contradição encontrada no site: ' ||
           (v_item #>> '{}')
       ));
     end loop;
-    for v_item in select value from jsonb_array_elements(v_claim.uncertainty)
+    for v_item in select value from jsonb_array_elements(v_effective_uncertainty)
     loop
+      v_target := public.company_discovery_coverage_target_v1(
+        v_claim.claim_type, v_value, null
+      );
       v_unresolved := v_unresolved || jsonb_build_array(jsonb_build_object(
         'reason', 'operationally_incomplete',
         'claim_id', v_claim.id,
         'claim_type', v_claim.claim_type,
         'field', null,
+        'coverage_field', v_target->>'field',
+        'coverage_subject', v_target->>'subject',
         'question_pt', 'Confirme este ponto que o site deixou incerto: ' ||
           (v_item #>> '{}')
       ));
@@ -1360,6 +1549,10 @@ begin
     raise exception using errcode = '22023',
       message = 'company_discovery_onboarding_prefill_scope_required';
   end if;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'ligou.company_discovery.onboarding_draft:' || p_tenant::text,
+    0
+  ));
   perform pg_advisory_xact_lock(hashtextextended(
     'ligou.company_discovery.onboarding_prefill:' ||
       p_tenant::text || ':' || p_target_call::text,
