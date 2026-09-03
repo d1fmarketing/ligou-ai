@@ -10,6 +10,7 @@ export const DIRECT_MODEL_SYSTEM_INSTRUCTION = [
   "Return exactly one compact JSON object matching output_contract and no prose or Markdown.",
   "Use short verbatim excerpts and source_id values from the input.",
   "Do not repeat page text or explain your reasoning.",
+  "For public prices, amount is a decimal string with exactly two decimal places and currency is an uppercase three-letter ISO code; amount and currency appear together, fixed/starting_at/conditional require an amount, conditional requires its condition, and unknown carries neither amount nor currency.",
   "Never infer private prices, discount floors, negotiation or booking authority, internal exceptions, tenant identity, approval, powers, or effective rules.",
   "Keep contradictions explicit and ask in Portuguese for important missing or private information.",
 ].join(" ");
@@ -50,11 +51,22 @@ const scalarObservation = {
 const priceSchema = {
   anyOf: [{
     type: "object",
+    description: "amount uses exactly two decimal places; currency uses an uppercase three-letter ISO code; amount and currency appear together; fixed, starting_at, and conditional require both; conditional requires condition; unknown requires both null",
     additionalProperties: false,
     required: ["amount", "currency", "qualifier", "condition"],
     properties: {
-      amount: nullableString(12),
-      currency: nullableString(3),
+      amount: {
+        anyOf: [
+          { type: "string", pattern: "^(0|[1-9][0-9]{0,8})[.][0-9]{2}$" },
+          { type: "null" },
+        ],
+      },
+      currency: {
+        anyOf: [
+          { type: "string", pattern: "^[A-Z]{3}$" },
+          { type: "null" },
+        ],
+      },
       qualifier: {
         enum: ["fixed", "starting_at", "estimate", "promotional", "conditional", "unknown"],
       },
@@ -425,8 +437,14 @@ function price(value: unknown, path: string): Record<string, unknown> | null {
   if (value === null) return null;
   const candidate = object(value, path);
   exact(candidate, ["amount", "currency", "qualifier", "condition"], path);
-  const amount = nullableText(candidate.amount, `${path}.amount`, 12);
-  const currency = nullableText(candidate.currency, `${path}.currency`, 3);
+  const rawAmount = nullableText(candidate.amount, `${path}.amount`, 12);
+  const amount = rawAmount === null
+    ? null
+    : /^(0|[1-9][0-9]{0,8})$/u.test(rawAmount) ? `${rawAmount}.00`
+    : /^(0|[1-9][0-9]{0,8})[.][0-9]$/u.test(rawAmount) ? `${rawAmount}0`
+    : rawAmount;
+  const rawCurrency = nullableText(candidate.currency, `${path}.currency`, 3);
+  const currency = rawCurrency?.toUpperCase() ?? null;
   const qualifier = text(candidate.qualifier, `${path}.qualifier`, 20);
   if (!["fixed", "starting_at", "estimate", "promotional", "conditional", "unknown"].includes(qualifier) ||
       (amount === null) !== (currency === null) ||
@@ -437,6 +455,9 @@ function price(value: unknown, path: string): Record<string, unknown> | null {
   const condition = nullableText(candidate.condition, `${path}.condition`, 1_000);
   if (["fixed", "starting_at", "conditional"].includes(qualifier) && amount === null) {
     fail(path, "price amount required");
+  }
+  if (qualifier === "unknown" && amount !== null) {
+    fail(path, "unknown price cannot carry an amount");
   }
   if (qualifier === "conditional" && condition === null) fail(path, "condition required");
   return { amount, currency, qualifier, condition };

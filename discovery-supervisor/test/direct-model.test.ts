@@ -374,6 +374,13 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
     }]);
     expect(serializedContract).toContain("public_prices_and_conditions");
     expect(serializedContract).toContain("emergency_and_safety");
+    const priceProperties = evidenceEnvelope.output_contract.properties
+      .public_prices_and_conditions.items.properties.price.anyOf[0].properties;
+    expect(priceProperties.amount.anyOf[0].pattern).toBe(
+      "^(0|[1-9][0-9]{0,8})[.][0-9]{2}$",
+    );
+    expect(priceProperties.currency.anyOf[0].pattern).toBe("^[A-Z]{3}$");
+    expect(body.instructions).toContain("exactly two decimal places");
     expect(gateway.requests).toHaveLength(1);
     expect(gateway.usageValue.billing_basis).toBe("chatgpt_subscription");
     expect(gateway.usageValue.marginal_api_charge_usd).toBe(0);
@@ -629,6 +636,99 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
     expect(repairInput.validation_errors[0]).toContain("model output");
     expect(JSON.stringify(repairInput)).not.toContain(sourceSnapshot.excerpt);
     expect(JSON.stringify(repairInput)).not.toContain("source_snapshots");
+  });
+
+  test("gives both extraction and repair the exact canonical public-price contract", async () => {
+    const websiteEvidence = [{
+      source_id: "s0",
+      excerpt: "Drain cleaning costs $149 and takes 90 minutes.",
+    }];
+    const base = {
+      ...candidate,
+      services: [{
+        name: "Drain cleaning",
+        aliases: [],
+        duration_minutes: 90,
+        evidence: websiteEvidence,
+      }],
+    };
+    const invalidPrice = {
+      ...base,
+      public_prices_and_conditions: [{
+        service_name: "Drain cleaning",
+        price: { amount: "149", currency: "$", qualifier: "fixed", condition: null },
+        evidence: websiteEvidence,
+      }],
+    };
+    const validPrice = {
+      ...base,
+      public_prices_and_conditions: [{
+        service_name: "Drain cleaning",
+        price: { amount: "149.00", currency: "USD", qualifier: "fixed", condition: null },
+        evidence: websiteEvidence,
+      }],
+    };
+    const gateway = new FakeSubscriptionGateway();
+    const responses = [subscriptionResponse(invalidPrice), subscriptionResponse(validPrice)];
+    gateway.response = async () => responses.shift()!;
+    gateway.usageValue = Object.freeze({ ...usage, request_count: 2 });
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: controlledClock().clock,
+    });
+
+    const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
+    await expect(adapter.result(handle)).resolves.toMatchObject({
+      candidate_facts: expect.arrayContaining([expect.objectContaining({
+        claim_type: "service",
+        normalized_value: expect.objectContaining({
+          public_price: expect.objectContaining({ amount: "149.00", currency: "USD" }),
+        }),
+      })]),
+    });
+    const initialBody = await gateway.requests[0]!.clone().json() as any;
+    const repairBody = await gateway.requests[1]!.clone().json() as any;
+    expect(initialBody.instructions).toContain("exactly two decimal places");
+    expect(repairBody.instructions).toContain("exactly two decimal places");
+    const repairInput = JSON.parse(repairBody.input[0].content[0].text);
+    const amountSchema = repairInput.output_contract.properties
+      .public_prices_and_conditions.items.properties.price.anyOf[0].properties.amount;
+    expect(amountSchema.anyOf[0].pattern).toBe("^(0|[1-9][0-9]{0,8})[.][0-9]{2}$");
+  });
+
+  test("canonicalizes equivalent public-price decimal and ISO spellings without a repair call", async () => {
+    const websiteEvidence = [{
+      source_id: "s0",
+      excerpt: "Drain cleaning costs $149 and takes 90 minutes.",
+    }];
+    const equivalentPrice = {
+      ...candidate,
+      services: [{
+        name: "Drain cleaning",
+        aliases: [],
+        duration_minutes: 90,
+        evidence: websiteEvidence,
+      }],
+      public_prices_and_conditions: [{
+        service_name: "Drain cleaning",
+        price: { amount: "149", currency: "usd", qualifier: "fixed", condition: null },
+        evidence: websiteEvidence,
+      }],
+    };
+    const gateway = new FakeSubscriptionGateway();
+    gateway.response = subscriptionResponse(equivalentPrice);
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: controlledClock().clock,
+    });
+
+    const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
+    const result = await adapter.result(handle);
+    const service = result.candidate_facts.find((fact) => fact.claim_type === "service");
+    expect(service?.normalized_value).toMatchObject({
+      public_price: { amount: "149.00", currency: "USD" },
+    });
+    expect(gateway.requests).toHaveLength(1);
   });
 
   test("repairs values rejected only by the final typed WorkerResult contract", async () => {

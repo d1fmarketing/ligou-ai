@@ -947,7 +947,7 @@ export class DirectModelDiscoveryAdapter implements WorkerAdapter {
         ));
         if (!repairableOutputError(error, output)) throw error;
         completedText = await requestOutput(
-          "Repair the supplied candidate into exactly one JSON object matching output_contract. Return JSON only. Do not add facts or evidence.",
+          "Repair the supplied candidate into exactly one JSON object matching output_contract. Return JSON only. Do not add facts or evidence. Public-price amount must use exactly two decimal places, currency must be an uppercase three-letter ISO code, amount and currency must appear together, fixed/starting_at/conditional require an amount, conditional requires its condition, and unknown carries neither amount nor currency.",
           {
             invalid_output: output,
             output_contract: COMPACT_MODEL_SCHEMA,
