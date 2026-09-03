@@ -6,6 +6,11 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+  onboardingOpeningItemId,
+  onboardingOpeningText,
+  type OnboardingOpeningResumeContext,
+} from "../src/onboarding-greeting.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const migrationsDir = path.join(repoRoot, "supabase/migrations");
@@ -15,6 +20,36 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 function localSqlUuid(value: string): string {
   if (!UUID_PATTERN.test(value)) throw new Error("local SQL fixture requires a UUID");
   return `'${value}'::uuid`;
+}
+
+function applicationOpeningPayload(args: {
+  requestId: string;
+  callId: string;
+  tenantName: string;
+  resumeContext: OnboardingOpeningResumeContext;
+}) {
+  const text = onboardingOpeningText(args.tenantName, args.resumeContext);
+  const audio = Buffer.from([0, 1, 2]);
+  const textHash = createHash("sha256").update(text, "utf8").digest("hex");
+  const audioHash = createHash("sha256").update(audio).digest("hex");
+  return {
+    version: 2,
+    item_id: onboardingOpeningItemId({
+      browserRequestId: args.requestId,
+      callId: args.callId,
+      textSha256: textHash,
+      audioSha256: audioHash,
+    }),
+    text,
+    text_sha256: textHash,
+    audio_base64: audio.toString("base64"),
+    audio_sha256: audioHash,
+    mime: "audio/mpeg",
+    voice: "ash",
+    tts_model: "tts-1-hd",
+    cost_usd: 0.001,
+    resume_context: args.resumeContext,
+  };
 }
 
 async function runDisposableLocalSql(sql: string): Promise<string> {
@@ -86,6 +121,18 @@ function quotaRecoveryMigrationSql(): string {
     name.endsWith("_company_discovery_subscription_quota_recovery.sql")
   );
   expect(names, "missing subscription quota recovery migration").toHaveLength(1);
+  return readFileSync(path.join(migrationsDir, names[0]!), "utf8")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function onboardingHandoffMigrationSql(): string {
+  const names = readdirSync(migrationsDir).filter((name) =>
+    name.endsWith("_company_discovery_onboarding_processing_handoff.sql")
+  );
+  expect(names, "missing Company Discovery onboarding processing handoff migration")
+    .toHaveLength(1);
   return readFileSync(path.join(migrationsDir, names[0]!), "utf8")
     .replace(/\s+/g, " ")
     .trim()
@@ -951,6 +998,49 @@ describe("website-first Company Discovery database contract", () => {
     expect(sql).toContain("company_discovery.onboarding_draft.v2'' and j.status = ''awaiting_review''");
     expect(sql).toContain("company_discovery_prefill_status_patch_mismatch");
     expect(sql).toContain("company_discovery_reconcile_status_patch_mismatch");
+  });
+});
+
+describe("Company Discovery onboarding startup handoff contract", () => {
+  test("binds prefill initialization and reconciliation to the exact processing request", () => {
+    const sql = onboardingHandoffMigrationSql();
+    for (const signature of [
+      "initialize_company_discovery_onboarding_prefill(uuid,uuid,uuid,uuid,jsonb)",
+      "reconcile_company_discovery_onboarding_prefill(uuid,uuid,uuid,uuid,bigint,text,uuid,uuid,uuid,text,text)",
+    ]) {
+      expect(sql).toContain(`'public.${signature}'::regprocedure`);
+      const functionName = signature.slice(0, signature.indexOf("("));
+      expect(sql).toContain(`revoke all on function public.${functionName}(`);
+      expect(sql).toContain(`grant execute on function public.${functionName}(`);
+    }
+    expect(sql).toContain("v_old text := 'and br.status = ''ready''';");
+    expect(sql).toContain("v_new text := 'and br.status = ''processing''");
+    expect(sql).toContain("and br.opening_mode_requested = ''application_tts_v1''");
+    expect(sql).toContain("and br.onboarding_protocol_version = 2");
+    expect(sql).toContain("and br.answer_sdp is null");
+    expect(sql).toContain("and br.opening_mode_applied is null");
+    expect(sql).toContain("and br.opening_payload is null");
+    expect(sql).toContain("company_discovery_prefill_handoff_patch_mismatch");
+    expect(sql).toContain("company_discovery_reconcile_handoff_patch_mismatch");
+    expect(sql).not.toContain("v_new text := 'and br.status = ''ready''");
+    expect(sql).toContain(
+      "drop constraint if exists browser_session_requests_opening_state_check",
+    );
+    expect(sql).toContain(
+      "->>'question_pt' like 'eu já analisei seu website%'",
+    );
+    expect(sql).toContain(
+      "'eu já analisei seu website' in opening_payload->>'text'",
+    );
+    expect(sql).toContain(
+      "->>'question_pt' not like 'eu já analisei seu website%'",
+    );
+    expect(sql).toContain(
+      "'vamos continuar de onde paramos.' in opening_payload->>'text'",
+    );
+    expect(sql).toContain(
+      "validate constraint browser_session_requests_opening_state_check",
+    );
   });
 });
 
@@ -2778,10 +2868,11 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       user_id: ownerId,
       session_type: "onboarding",
       offer_sdp: `candidate-prefill-offer-${candidatePrefillRequest}`,
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
     })).error).toBeNull();
     expect((await service.from("browser_session_requests").update({
-      status: "ready",
-      answer_sdp: `candidate-prefill-answer-${candidatePrefillRequest}`,
+      status: "processing",
       call_id: candidatePrefillCall,
       handled_at: new Date().toISOString(),
     }).eq("id", candidatePrefillRequest)).error).toBeNull();
@@ -2813,6 +2904,30 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       draft_id: candidateDraftId,
       revision: 1,
     });
+    const candidateOpening = applicationOpeningPayload({
+      requestId: candidatePrefillRequest,
+      callId: candidatePrefillCall,
+      tenantName: "Discovery Owner",
+      resumeContext: {
+        coverage_receipt_id: String(
+          candidatePrefillCommit.data.coverage_receipt_id,
+        ),
+        revision: 1,
+        snapshot_digest: String(candidatePrefillCommit.data.snapshot_digest),
+        next_action: candidatePrefillCommit.data.next_action,
+      },
+    });
+    expect(candidateOpening.text).toContain("Eu já analisei seu website");
+    expect(candidateOpening.text).not.toContain(
+      "Vamos continuar de onde paramos",
+    );
+    expect((await service.from("browser_session_requests").update({
+      status: "ready",
+      answer_sdp: `candidate-prefill-answer-${candidatePrefillRequest}`,
+      opening_mode_applied: "application_tts_v1",
+      opening_payload: candidateOpening,
+    }).eq("id", candidatePrefillRequest).eq("status", "processing")).error)
+      .toBeNull();
     const rulesBeforeV2Review = Number(await runDisposableLocalSql(`
       select count(*)::text from public.rules
       where tenant_id = ${localSqlUuid(ownerTenant)};
@@ -3036,10 +3151,11 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       user_id: ownerId,
       session_type: "onboarding",
       offer_sdp: `stage0b-offer-${prefillRequest}`,
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
     })).error).toBeNull();
     expect((await service.from("browser_session_requests").update({
-      status: "ready",
-      answer_sdp: `stage0b-answer-${prefillRequest}`,
+      status: "processing",
       call_id: prefillCall,
       handled_at: new Date().toISOString(),
     }).eq("id", prefillRequest)).error).toBeNull();
@@ -3183,6 +3299,26 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       status: "indeterminate",
       reason: "result_hash_changed",
     });
+    const openingResumeContext = {
+      coverage_receipt_id: prefillReceiptId,
+      revision: 1 as const,
+      snapshot_digest: prefillDigest,
+      next_action: initializedPrefill.data.next_action,
+    };
+    const openingPayload = applicationOpeningPayload({
+      requestId: prefillRequest,
+      callId: prefillCall,
+      tenantName: "Discovery Owner",
+      resumeContext: openingResumeContext,
+    });
+    expect(openingPayload.text).toContain("Vamos continuar de onde paramos");
+    expect(openingPayload.text).not.toContain("Eu já analisei seu website");
+    expect((await service.from("browser_session_requests").update({
+      status: "ready",
+      answer_sdp: `stage0b-answer-${prefillRequest}`,
+      opening_mode_applied: "application_tts_v1",
+      opening_payload: openingPayload,
+    }).eq("id", prefillRequest).eq("status", "processing")).error).toBeNull();
     const { createOnboardingStore } = await import("../src/onboarding-store.ts");
     const realStore = createOnboardingStore({
       client: service as any,
@@ -3229,15 +3365,11 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       select count(*)::text from public.powers
       where tenant_id = ${localSqlUuid(ownerTenant)};
     `))).toBe(powersBeforeV2Review);
-    const multipleReceiptReconciliation = await service.rpc(
+    const readyRequestReconciliation = await service.rpc(
       "reconcile_company_discovery_onboarding_prefill",
       reconciliationArgs(prefillCall, prefillProjection),
     );
-    expect(multipleReceiptReconciliation.error).toBeNull();
-    expect(multipleReceiptReconciliation.data).toMatchObject({
-      status: "indeterminate",
-      reason: "multiple_receipts",
-    });
+    expect(readyRequestReconciliation.error).not.toBeNull();
 
     const fallbackCall = randomUUID();
     const fallbackRequest = randomUUID();
@@ -3254,10 +3386,11 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       user_id: ownerId,
       session_type: "onboarding",
       offer_sdp: `stage0b-fallback-offer-${fallbackRequest}`,
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
     })).error).toBeNull();
     expect((await service.from("browser_session_requests").update({
-      status: "ready",
-      answer_sdp: `stage0b-fallback-answer-${fallbackRequest}`,
+      status: "processing",
       call_id: fallbackCall,
       handled_at: new Date().toISOString(),
     }).eq("id", fallbackRequest)).error).toBeNull();

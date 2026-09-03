@@ -115,6 +115,8 @@ class SupabaseBoundaryFake {
     alias_normalized: string;
     locality_id: string;
   }> = [];
+  localityError: QueryError | null = null;
+  localityAliasError: QueryError | null = null;
 
   client() {
     const boundary = this;
@@ -198,14 +200,14 @@ class SupabaseBoundaryFake {
               );
               return Promise.resolve({
                 data: boundary.localityRows,
-                error: null,
+                error: boundary.localityError,
               }).then(resolve);
             }
             if (table === "onboarding_locality_aliases") {
               expect(selected).toBe("alias_normalized,locality_id");
               return Promise.resolve({
                 data: boundary.localityAliasRows,
-                error: null,
+                error: boundary.localityAliasError,
               }).then(resolve);
             }
             if (table !== "rules") {
@@ -344,6 +346,30 @@ function resumeRpcResult(
     next_action: nextAction,
     coverage,
     ...overrides,
+  };
+}
+
+function discoveryDraftReadback(): Record<string, unknown> {
+  return {
+    draft_id: "99999999-9999-4999-8999-999999999999",
+    draft_version: 1,
+    draft_hash: "d".repeat(64),
+    draft: {
+      schema_version: "company_discovery.onboarding_draft.v1",
+      source_job_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      source_attempt_id: "abababab-abab-4bab-8bab-abababababab",
+      source_result_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      source_result_hash: "c".repeat(64),
+      source_result_schema: "company_discovery.result.v2",
+      approved_facts: [],
+      rejected_claim_ids: [],
+      unresolved_items: [],
+      authority: {
+        rules_approved: false,
+        powers_granted: false,
+        operational_mode_changed: false,
+      },
+    },
   };
 }
 
@@ -661,6 +687,135 @@ describe("initializeOnboardingResume", () => {
     expect(boundary.receiptSetReads).toBe(0);
   });
 
+  test("never hides a deterministic discovery prefill binding rejection as an empty onboarding", async () => {
+    const boundary = new SupabaseBoundaryFake();
+    boundary.rpcHandler = (name) => {
+      if (name === "initialize_onboarding_resume") {
+        return {
+          data: null,
+          error: { code: "P0002", message: "onboarding_resume_source_missing" },
+        };
+      }
+      if (name === "read_company_discovery_onboarding_draft") return {
+        data: {
+          draft_id: "99999999-9999-4999-8999-999999999999",
+          draft_version: 1,
+          draft_hash: "d".repeat(64),
+          draft: {
+            schema_version: "company_discovery.onboarding_draft.v1",
+            source_job_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            source_attempt_id: "abababab-abab-4bab-8bab-abababababab",
+            source_result_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            source_result_hash: "c".repeat(64),
+            source_result_schema: "company_discovery.result.v2",
+            approved_facts: [],
+            rejected_claim_ids: [],
+            unresolved_items: [],
+            authority: {
+              rules_approved: false,
+              powers_granted: false,
+              operational_mode_changed: false,
+            },
+          },
+        },
+        error: null,
+      };
+      if (name === "initialize_company_discovery_onboarding_prefill") return {
+        data: null,
+        error: { code: "42501", message: "onboarding_call_not_owner_bound" },
+      };
+      return { data: null, error: { message: `unexpected ${name}` } };
+    };
+    const store = createOnboardingStore({ client: boundary.client(), now: () => 23 });
+
+    expect(await store.initializeOnboardingResume(ownerCapability())).toMatchObject({
+      ok: false,
+      code: "not_owner_bound",
+    });
+    expect(boundary.rpcCalls.map((call) => call.name)).toEqual([
+      "initialize_onboarding_resume",
+      "read_company_discovery_onboarding_draft",
+      "initialize_company_discovery_onboarding_prefill",
+    ]);
+  });
+
+  test("fails closed when a Discovery draft cannot be read, parsed, or prepared", async () => {
+    const scenarios: Array<{
+      name: string;
+      prepare(boundary: SupabaseBoundaryFake): void;
+      draftResult: { data: unknown; error: QueryError | null };
+      expectedCode: "not_owner_bound" | "query_error" | "changed";
+    }> = [
+      {
+        name: "owner binding rejected",
+        prepare() {},
+        draftResult: {
+          data: null,
+          error: {
+            code: "42501",
+            message: "company_discovery_onboarding_draft_not_owner_bound",
+          },
+        },
+        expectedCode: "not_owner_bound",
+      },
+      {
+        name: "draft read query failed",
+        prepare() {},
+        draftResult: {
+          data: null,
+          error: { code: "XX000", message: "database query failed" },
+        },
+        expectedCode: "query_error",
+      },
+      {
+        name: "persisted draft is malformed",
+        prepare() {},
+        draftResult: { data: {}, error: null },
+        expectedCode: "changed",
+      },
+      {
+        name: "locality registry query failed",
+        prepare(boundary) {
+          boundary.localityError = {
+            code: "XX000",
+            message: "locality registry query failed",
+          };
+        },
+        draftResult: { data: discoveryDraftReadback(), error: null },
+        expectedCode: "query_error",
+      },
+      {
+        name: "locality registry shape changed",
+        prepare(boundary) {
+          boundary.localityRows = null as unknown as typeof boundary.localityRows;
+        },
+        draftResult: { data: discoveryDraftReadback(), error: null },
+        expectedCode: "changed",
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const boundary = new SupabaseBoundaryFake();
+      scenario.prepare(boundary);
+      boundary.rpcHandler = (name) => {
+        if (name === "initialize_onboarding_resume") return {
+          data: null,
+          error: { code: "P0002", message: "onboarding_resume_source_missing" },
+        };
+        if (name === "read_company_discovery_onboarding_draft") {
+          return scenario.draftResult;
+        }
+        return { data: null, error: { message: `unexpected ${name}` } };
+      };
+      const store = createOnboardingStore({ client: boundary.client(), now: () => 29 });
+
+      expect(
+        await store.initializeOnboardingResume(ownerCapability()),
+        scenario.name,
+      ).toMatchObject({ ok: false, code: scenario.expectedCode });
+    }
+  });
+
   test("blocks fallback for mismatched, multiple, stale-revision, or wrong-hash reconciliation", async () => {
     for (const reason of [
       "receipt_mismatch",
@@ -756,9 +911,15 @@ describe("initializeOnboardingResume", () => {
 
   test("returns an explicit no-resume success only when no prior source exists", async () => {
     const boundary = new SupabaseBoundaryFake();
-    boundary.rpcResult = {
-      data: null,
-      error: { code: "P0002", message: "onboarding_resume_source_missing" },
+    boundary.rpcHandler = (name) => {
+      if (name === "initialize_onboarding_resume") return {
+        data: null,
+        error: { code: "P0002", message: "onboarding_resume_source_missing" },
+      };
+      if (name === "read_company_discovery_onboarding_draft") {
+        return { data: null, error: null };
+      }
+      return { data: null, error: { message: `unexpected ${name}` } };
     };
     const store = createOnboardingStore({
       client: boundary.client(),

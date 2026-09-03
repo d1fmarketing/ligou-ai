@@ -1071,6 +1071,24 @@ export function createOnboardingStore(
     cap: Capability,
     started: number,
   ): Promise<OnboardingResume> => {
+    const preparationFailure = (
+      error: unknown,
+      safeDetail: string,
+    ): StoreFailure => {
+      const boundary = error && typeof error === "object"
+        ? error as BoundaryError
+        : {};
+      const message = String(boundary.message ?? "").toLowerCase();
+      if (boundary.code === "42501" || message.includes("not_owner_bound")) {
+        return failure("not_owner_bound", safeDetail, now, started);
+      }
+      return failure(
+        ambiguousBoundaryFailure(error) ? "indeterminate" : "query_error",
+        safeDetail,
+        now,
+        started,
+      );
+    };
     let draftResult: BoundaryResult<unknown>;
     try {
       draftResult = await bounded((signal) =>
@@ -1079,10 +1097,19 @@ export function createOnboardingStore(
           { p_tenant: cap.tenantId, p_owner: cap.ownerUserId! },
         ), signal)
       );
-    } catch {
-      return { ok: true, status: "none", durationMs: elapsed(now, started) };
+    } catch (error) {
+      return preparationFailure(
+        error,
+        "company discovery onboarding draft could not be read",
+      );
     }
-    if (draftResult.error || draftResult.data === null) {
+    if (draftResult.error) {
+      return preparationFailure(
+        draftResult.error,
+        "company discovery onboarding draft could not be read",
+      );
+    }
+    if (draftResult.data === null) {
       return { ok: true, status: "none", durationMs: elapsed(now, started) };
     }
     let registry: LocalityRegistryEntry[];
@@ -1091,9 +1118,19 @@ export function createOnboardingStore(
         bounded(localityRegistry),
         bounded(localityAliases),
       ]);
-      if (registryResult.error || aliasesResult.error ||
-          !Array.isArray(registryResult.data) || !Array.isArray(aliasesResult.data)) {
-        return { ok: true, status: "none", durationMs: elapsed(now, started) };
+      if (registryResult.error || aliasesResult.error) {
+        return preparationFailure(
+          registryResult.error ?? aliasesResult.error,
+          "company discovery onboarding localities could not be read",
+        );
+      }
+      if (!Array.isArray(registryResult.data) || !Array.isArray(aliasesResult.data)) {
+        return failure(
+          "changed",
+          "company discovery onboarding locality readback is invalid",
+          now,
+          started,
+        );
       }
       const aliasesByLocality = new Map<string, string[]>();
       for (const alias of aliasesResult.data) {
@@ -1105,8 +1142,11 @@ export function createOnboardingStore(
         ...entry,
         aliases: aliasesByLocality.get(entry.locality_id) ?? [],
       }));
-    } catch {
-      return { ok: true, status: "none", durationMs: elapsed(now, started) };
+    } catch (error) {
+      return preparationFailure(
+        error,
+        "company discovery onboarding localities could not be read",
+      );
     }
     let projection: ReturnType<typeof buildCompanyDiscoveryPrefill>;
     try {
@@ -1117,7 +1157,12 @@ export function createOnboardingStore(
         localities: registry,
       });
     } catch {
-      return { ok: true, status: "none", durationMs: elapsed(now, started) };
+      return failure(
+        "changed",
+        "company discovery onboarding draft is invalid",
+        now,
+        started,
+      );
     }
     const completePrefill = (
       raw: unknown,
@@ -1246,10 +1291,27 @@ export function createOnboardingStore(
         ), signal)
       );
       if (initialized.error) {
-        if (!ambiguousBoundaryFailure(initialized.error)) {
-          return { ok: true, status: "none", durationMs: elapsed(now, started) };
+        if (ambiguousBoundaryFailure(initialized.error)) {
+          return await reconcilePrefill();
         }
-        return await reconcilePrefill();
+        const message = String(initialized.error.message ?? "").toLowerCase();
+        if (
+          initialized.error.code === "42501" ||
+          message.includes("not_owner_bound")
+        ) {
+          return failure(
+            "not_owner_bound",
+            "company discovery onboarding prefill is not owner-bound",
+            now,
+            started,
+          );
+        }
+        return failure(
+          "changed",
+          "company discovery onboarding prefill was rejected",
+          now,
+          started,
+        );
       }
       if (initialized.data && typeof initialized.data === "object" &&
           !Array.isArray(initialized.data) &&
