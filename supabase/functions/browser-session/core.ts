@@ -119,7 +119,12 @@ function expectedApplicationOpeningText(
   if (payload.version === 1 || payload.resume_context === null)
     return `${identity} Quais serviços sua empresa oferece?`;
   if (!validResumeContext(payload.resume_context)) return null;
-  return `${identity} Vamos continuar de onde paramos. ${(payload.resume_context.next_action as Record<string, unknown>).question_pt}`;
+  const question = String(
+    (payload.resume_context.next_action as Record<string, unknown>).question_pt,
+  );
+  return question.startsWith("Eu já analisei seu website")
+    ? `${identity} ${question}`
+    : `${identity} Vamos continuar de onde paramos. ${question}`;
 }
 
 function validReadyOpening(

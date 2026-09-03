@@ -228,6 +228,10 @@ const OMITTED_ELEMENTS = new Set([
   "script", "style", "noscript", "template", "form", "iframe", "object", "embed",
   "svg", "canvas", "audio", "video", "source",
 ]);
+const BLOCK_TEXT_ELEMENTS = new Set([
+  "title", "p", "li", "main", "article", "section", "address",
+  "blockquote", "dt", "dd",
+]);
 
 function isElement(node: Node): node is Element {
   return "tagName" in node;
@@ -275,11 +279,38 @@ export function parseStaticHtml(bytes: Buffer): ParsedHtmlPage {
   const document = parse(html);
   const text: string[] = [];
   const links: string[] = [];
+  let tableCellIndex = 0;
+
+  const lineBreak = (): void => {
+    if (text.length > 0 && text[text.length - 1] !== "\n") text.push("\n");
+  };
+  const append = (value: string): void => {
+    const normalized = value.replace(/\s+/gu, " ").trim();
+    if (!normalized) return;
+    const previous = text[text.length - 1] ?? "";
+    if (previous !== "" && previous !== "\n" && !previous.endsWith(" ") &&
+        !previous.endsWith("#") && !previous.endsWith("| ")) {
+      text.push(" ");
+    }
+    text.push(normalized);
+  };
 
   const visit = (node: Node, omitted: boolean): void => {
     const element = isElement(node) ? node : undefined;
     const nextOmitted = omitted || (element !== undefined && OMITTED_ELEMENTS.has(element.tagName));
-    if (!nextOmitted && "value" in node) text.push(node.value);
+    const tag = element?.tagName;
+    const heading = tag !== undefined && /^h[1-6]$/u.test(tag)
+      ? Number(tag.slice(1))
+      : 0;
+    const block = tag !== undefined && BLOCK_TEXT_ELEMENTS.has(tag);
+    if (!nextOmitted && (heading > 0 || block || tag === "tr")) lineBreak();
+    if (!nextOmitted && heading > 0) text.push(`${"#".repeat(heading)} `);
+    if (!nextOmitted && tag === "tr") tableCellIndex = 0;
+    if (!nextOmitted && (tag === "th" || tag === "td")) {
+      if (tableCellIndex > 0) text.push(" | ");
+      tableCellIndex += 1;
+    }
+    if (!nextOmitted && "value" in node) append(node.value);
     if (!nextOmitted && element?.tagName === "a") {
       const href = attribute(element, "href");
       if (href !== undefined && href !== "" && attribute(element, "download") === undefined) {
@@ -289,11 +320,18 @@ export function parseStaticHtml(bytes: Buffer): ParsedHtmlPage {
     if ("childNodes" in node && !nextOmitted) {
       for (const child of node.childNodes) visit(child, false);
     }
+    if (!nextOmitted && (heading > 0 || block || tag === "tr")) lineBreak();
   };
   visit(document, false);
 
+  const excerpt = text.join("")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/gu, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+
   return Object.freeze({
-    excerpt: truncateUtf8(text.join(" ").replace(/\s+/gu, " ").trim(), 16_384),
+    excerpt: truncateUtf8(excerpt, 16_384),
     links: Object.freeze(links),
     contentHash: createHash("sha256").update(bytes).digest("hex"),
   });

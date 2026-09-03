@@ -624,6 +624,28 @@ const directAdapterResult: WorkerResult = {
   uncertainty: [],
 };
 
+const directCompactOutput = {
+  company: {
+    name: {
+      value: "Example Plumbing",
+      evidence: [{ source_id: "s0", excerpt: "Example Plumbing" }],
+    },
+    description: null,
+    public_phone: null,
+    public_email: null,
+    public_address: null,
+  },
+  services: [],
+  public_prices_and_conditions: [],
+  service_area: [],
+  business_hours: null,
+  guarantees: [],
+  booking_restrictions: [],
+  emergency_and_safety: [],
+  missing_questions: [],
+  contradictions: [],
+};
+
 function subscriptionUsage(overrides: Partial<SubscriptionUsage> = {}): SubscriptionUsage {
   return {
     schema_version: "ligou.subscription_usage.v1",
@@ -734,6 +756,8 @@ describe("trusted Codex subscription proxy", () => {
     expect(proxy.usage()).toEqual({
       request_count: 1,
       upstream_request_count: 1,
+      completed_response_count: 1,
+      metered_response_count: 1,
       active_requests: 0,
       input_bytes: inboundBytes,
       output_bytes: Buffer.byteLength(completedSse()),
@@ -940,7 +964,10 @@ describe("trusted Codex subscription proxy", () => {
       store: false,
       stream: true,
       text: { verbosity: "low" },
+      reasoning: { effort: "low" },
     });
+    expect(forwarded).not.toHaveProperty("include");
+    expect((forwarded!.reasoning as Record<string, unknown>)).not.toHaveProperty("summary");
     expect(forwarded).not.toHaveProperty("max_output_tokens");
     expect((forwarded!.text as Record<string, unknown>)).not.toHaveProperty("format");
     await expect(proxy.forward(directCodexRequest(markerJwt(now), {
@@ -954,6 +981,137 @@ describe("trusted Codex subscription proxy", () => {
         content: [{ type: "input_text", text: "evidence", annotations: [] }],
       }],
     }))).rejects.toThrow("direct model input");
+  });
+
+  test("preserves a completed DirectModel result when terminal usage is absent", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const deadline = "2099-09-01T10:10:00.000Z";
+    const output = JSON.stringify({ company: { name: "Foghorn Air" } });
+    const upstreamBody = [
+      `data: ${JSON.stringify({
+        type: "response.output_text.delta",
+        item_id: "msg_1",
+        output_index: 2,
+        content_index: 0,
+        delta: output,
+      })}`,
+      `data: ${JSON.stringify({
+        type: "response.completed",
+        response: { status: "completed", error: null, output: [] },
+      })}`,
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+    const proxy = new FixedModelProxy({
+      proxy_marker: markerJwt(now),
+      adapter_id: "direct_model",
+      codex_access_grant: syntheticGrant(deadline),
+      upstream_model: "gpt-5.6-sol",
+      deadline_at: deadline,
+      lease_session_id: "stage0_session_abcdefghijklmnop",
+      now: () => now,
+      fetch: async () => new Response(upstreamBody, {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    });
+
+    const response = await proxy.forward(directCodexRequest(markerJwt(now)));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("response.output_text.delta");
+    expect(proxy.usage()).toMatchObject({ usage_complete: false });
+  });
+
+  test("rejects malformed DirectModel usage instead of treating it as merely pending", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const deadline = "2099-09-01T10:10:00.000Z";
+    const proxy = new FixedModelProxy({
+      proxy_marker: markerJwt(now),
+      adapter_id: "direct_model",
+      codex_access_grant: syntheticGrant(deadline),
+      upstream_model: "gpt-5.6-sol",
+      deadline_at: deadline,
+      lease_session_id: "stage0_session_abcdefghijklmnop",
+      now: () => now,
+      fetch: async () => new Response([
+        `data: ${JSON.stringify({
+          type: "response.completed",
+          response: { status: "completed", error: null, output: [], usage: { total_tokens: "forged" } },
+        })}`,
+        "data: [DONE]",
+        "",
+      ].join("\n\n"), { headers: { "content-type": "text/event-stream" } }),
+    });
+
+    await expect(proxy.forward(directCodexRequest(markerJwt(now))))
+      .rejects.toThrow("usage");
+  });
+
+  test("retains only bounded DirectModel text while streaming split UTF-8 SSE", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const deadline = "2099-09-01T10:10:00.000Z";
+    const json = JSON.stringify({ company: { name: "Climatização São José" } });
+    const wire = [
+      `data: ${JSON.stringify({
+        type: "response.reasoning.delta",
+        delta: "private-reasoning-must-disappear",
+      })}`,
+      `data: ${JSON.stringify({
+        type: "response.output_text.delta",
+        item_id: "msg_utf8",
+        output_index: 2,
+        content_index: 0,
+        delta: json,
+      })}`,
+      `data: ${JSON.stringify({
+        type: "response.completed",
+        response: {
+          status: "completed",
+          error: null,
+          output: [],
+          usage: {
+            input_tokens: 40,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 12,
+            total_tokens: 52,
+          },
+        },
+      })}`,
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+    const encoded = new TextEncoder().encode(wire);
+    const accent = encoded.findIndex((byte, index) => byte >= 0xc0 && encoded[index + 1] >= 0x80);
+    const chunks = [
+      encoded.slice(0, accent + 1),
+      encoded.slice(accent + 1, accent + 2),
+      encoded.slice(accent + 2),
+    ];
+    const proxy = new FixedModelProxy({
+      proxy_marker: markerJwt(now),
+      adapter_id: "direct_model",
+      codex_access_grant: syntheticGrant(deadline),
+      upstream_model: "gpt-5.6-sol",
+      deadline_at: deadline,
+      lease_session_id: "stage0_session_abcdefghijklmnop",
+      now: () => now,
+      fetch: async () => new Response(new ReadableStream({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk);
+          controller.close();
+        },
+      }), { headers: { "content-type": "text/event-stream" } }),
+    });
+
+    const response = await proxy.forward(directCodexRequest(markerJwt(now)));
+    const sanitized = await response.text();
+    expect(sanitized).toContain("Climatização São José");
+    expect(sanitized).not.toContain("private-reasoning-must-disappear");
+    expect(sanitized).not.toContain("response.reasoning.delta");
+    expect(proxy.usage()).toMatchObject({
+      output_bytes: encoded.byteLength,
+      completed_response_count: 1,
+      metered_response_count: 1,
+    });
   });
 
   test("propagates only validated provider cooldown headers", async () => {
@@ -1793,6 +1951,39 @@ describe("subscription UDS host boundary", () => {
 });
 
 describe("central multi-lease subscription gateway", () => {
+  test("limits a DirectModel lease to one extraction plus one repair", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const context = centralContext({ adapter_id: "direct_model", source_snapshot_count: 25 });
+    const capability = Object.freeze(Object.create(null)) as ModelAccessCapability;
+    const governor = subscriptionGovernorStubs(now);
+    const gateway = new CentralSubscriptionGateway({
+      model_access_authority: {
+        ...governor,
+        async assertSubscriptionRecoveryCurrent() { throw new Error("not used"); },
+        async assertModelAccessCurrent() { return context; },
+      },
+      credential_owner: {
+        credential_owner_id: context.credential_owner_id,
+        credential_generation: context.credential_generation,
+        account_id_sha256: context.expected_account_hash,
+      },
+      resolve_codex_grant: async () => syntheticGrant(context.deadline_at, "acct-central-owner"),
+      listener_manager: {
+        async proveAbsent() { return { listener_closed: true, socket_absent: true }; },
+        async open() {
+          return { async close() { return { listener_closed: true, socket_absent: true }; } };
+        },
+      },
+      now: () => now,
+      random_bytes: () => Buffer.alloc(24, 0x69),
+      fetch: async () => new Response(completedSse()),
+    });
+
+    const registered = await gateway.register(capability);
+    expect(registered.policy.max_requests).toBe(2);
+    await gateway.revoke(registered.lease);
+  });
+
   test("authenticates the in-process DirectModel path without exposing the local marker", async () => {
     const now = Date.parse("2099-09-01T10:00:00.000Z");
     const context = centralContext({ adapter_id: "direct_model" });
@@ -1806,12 +1997,7 @@ describe("central multi-lease subscription gateway", () => {
         type: "message",
         content: [{
           type: "output_text",
-          text: JSON.stringify({
-            candidate_facts: directAdapterResult.candidate_facts,
-            missing_questions: directAdapterResult.missing_questions,
-            contradictions: directAdapterResult.contradictions,
-            uncertainty: directAdapterResult.uncertainty,
-          }),
+          text: JSON.stringify(directCompactOutput),
         }],
       }],
       usage: {
@@ -1876,6 +2062,82 @@ describe("central multi-lease subscription gateway", () => {
       subscription_requests_drained: true,
       subscription_listener_closed: true,
       subscription_socket_absent: true,
+    });
+  });
+
+  test("settles completed DirectModel text with pending usage without poisoning quota", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const context = centralContext({ adapter_id: "direct_model" });
+    const capability = Object.freeze(Object.create(null)) as ModelAccessCapability;
+    const governor = subscriptionGovernorStubs(now);
+    let settlement: SubscriptionRequestSettlement | undefined;
+    const output = JSON.stringify(directCompactOutput);
+    const gateway = new CentralSubscriptionGateway({
+      model_access_authority: {
+        ...governor,
+        async settleSubscriptionRequest(reservation, received) {
+          settlement = received;
+          return governor.settleSubscriptionRequest(reservation, received);
+        },
+        async assertSubscriptionRecoveryCurrent() { throw new Error("not used"); },
+        async assertModelAccessCurrent() { return context; },
+      },
+      credential_owner: {
+        credential_owner_id: context.credential_owner_id,
+        credential_generation: context.credential_generation,
+        account_id_sha256: context.expected_account_hash,
+      },
+      resolve_codex_grant: async () => syntheticGrant(
+        context.deadline_at,
+        "acct-central-owner",
+      ),
+      listener_manager: {
+        async proveAbsent() { return { listener_closed: true, socket_absent: true }; },
+        async open() {
+          return { async close() { return { listener_closed: true, socket_absent: true }; } };
+        },
+      },
+      now: () => now,
+      random_bytes: () => Buffer.alloc(24, 0x6b),
+      fetch: async () => new Response([
+        `data: ${JSON.stringify({
+          type: "response.output_text.delta",
+          item_id: "msg_pending_usage",
+          output_index: 2,
+          content_index: 0,
+          delta: output,
+        })}`,
+        `data: ${JSON.stringify({
+          type: "response.completed",
+          response: { status: "completed", error: null, output: [] },
+        })}`,
+        "data: [DONE]",
+        "",
+      ].join("\n\n"), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    });
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: {
+        now: () => now,
+        setTimeout: (callback, delay) => setTimeout(callback, delay),
+        clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+      },
+    });
+
+    const handle = await adapter.submit(adapterJob, capability);
+    await expect(adapter.result(handle)).resolves.toEqual(directAdapterResult);
+    expect(settlement).toMatchObject({
+      usage_complete: false,
+      quota_state: "available",
+      observed_input_tokens: null,
+      observed_output_tokens: null,
+    });
+    expect(adapter.subscriptionUsage(handle)).toMatchObject({
+      usage_complete: false,
+      quota_state: "available",
     });
   });
 

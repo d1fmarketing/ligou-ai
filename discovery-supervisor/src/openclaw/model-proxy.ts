@@ -36,6 +36,8 @@ export interface FixedModelProxyOptions {
 export interface ModelProxyUsage {
   readonly request_count: number;
   readonly upstream_request_count: number;
+  readonly completed_response_count: number;
+  readonly metered_response_count: number;
   readonly active_requests: number;
   readonly input_bytes: number;
   readonly output_bytes: number;
@@ -83,6 +85,8 @@ const DEFAULT_MAX_REQUESTS = 28;
 const DEFAULT_MAX_INPUT_BYTES = 400_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8_388_608;
 const MAX_RESPONSE_BYTES = 4_194_304;
+const MAX_DIRECT_RESPONSE_BYTES = 262_144;
+const MAX_DIRECT_TEXT_BYTES = 65_535;
 const MAX_OBSERVED_INPUT_TOKENS = 400_000;
 const MAX_OBSERVED_OUTPUT_TOKENS = 8_192;
 const ACCESS_EXPIRY_SKEW_SECONDS = 120;
@@ -456,8 +460,7 @@ function sanitizeDirectBody(body: Record<string, unknown>, model: string): Recor
       Object.freeze({ type: "input_text", text: directText }),
     ]) }]),
     text: Object.freeze({ verbosity: "low" }),
-    reasoning: Object.freeze({ effort: "high", summary: "auto" }),
-    include: Object.freeze(["reasoning.encrypted_content"]),
+    reasoning: Object.freeze({ effort: "low" }),
   });
 }
 
@@ -515,6 +518,29 @@ function parseUsage(body: Buffer): ParsedUsage | null {
   }
 }
 
+function hasExactlyOneCompletedTerminal(body: Buffer): boolean {
+  let terminals = 0;
+  for (const line of body.toString("utf8").split(/\r?\n/u)) {
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice(5).trim();
+    if (data === "" || data === "[DONE]") continue;
+    try {
+      const event = record(JSON.parse(data), "Codex SSE event");
+      if (event.type === "response.completed" || event.type === "response.done") {
+        const response = record(event.response, "Codex SSE response");
+        if (response.status !== "completed") return false;
+        terminals += 1;
+      } else if (event.type === "response.failed" || event.type === "response.incomplete" ||
+          event.type === "response.cancelled" || event.type === "error") {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return terminals === 1;
+}
+
 function validatedRetryAfterMilliseconds(value: string | null): string | null {
   if (value === null || value.length > 32 || !/^\d+(?:[.]\d+)?$/.test(value)) return null;
   const milliseconds = Number(value);
@@ -558,6 +584,211 @@ async function readBounded(response: Response, maximum: number, signal: AbortSig
   }
 }
 
+interface DirectSseReadback {
+  readonly body: Buffer;
+  readonly raw_bytes: number;
+  readonly usage: ParsedUsage | null;
+}
+
+function directTerminalOutputTexts(value: Record<string, unknown>): string[] {
+  if (!Array.isArray(value.output)) return [];
+  const texts: string[] = [];
+  for (const rawItem of value.output) {
+    const item = record(rawItem, "Codex DirectModel terminal output");
+    if (item.type !== "message") continue;
+    if (!Array.isArray(item.content)) {
+      throw new ModelProxyPolicyError("Codex DirectModel terminal content is invalid");
+    }
+    for (const rawPart of item.content) {
+      const part = record(rawPart, "Codex DirectModel terminal content");
+      if (part.type === "output_text" && typeof part.text === "string") {
+        texts.push(part.text);
+      }
+    }
+  }
+  return texts;
+}
+
+async function readDirectModelSse(
+  response: Response,
+  maximumWireBytes: number,
+  signal: AbortSignal,
+): Promise<DirectSseReadback> {
+  if (response.body === null) {
+    throw new ModelProxyPolicyError("Codex DirectModel SSE body is missing");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let pending = "";
+  let rawBytes = 0;
+  let terminal: Record<string, unknown> | undefined;
+  let terminalCount = 0;
+  let output = "";
+  let outputBytes = 0;
+  let itemId: string | undefined;
+  let outputIndex: number | undefined;
+  let contentIndex: number | undefined;
+
+  const fail = (message: string): never => {
+    throw new ModelProxyPolicyError(message);
+  };
+  const coordinate = (
+    value: unknown,
+    current: number | undefined,
+    name: string,
+  ): number | undefined => {
+    if (value === undefined) return current;
+    if (!Number.isSafeInteger(value) || (value as number) < 0) {
+      fail(`Codex DirectModel ${name} is invalid`);
+    }
+    if (current !== undefined && current !== value) {
+      fail(`Codex DirectModel ${name} changed`);
+    }
+    return value as number;
+  };
+  const processLine = (rawLine: string): void => {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (!line.startsWith("data:")) return;
+    const data = line.slice(5).trim();
+    if (data === "" || data === "[DONE]") return;
+    let parsed: unknown = undefined;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      fail("Codex DirectModel SSE event is invalid");
+    }
+    const event = record(parsed, "Codex DirectModel SSE event");
+    if (event.type === "response.output_text.delta") {
+      const delta = event.delta;
+      if (terminalCount !== 0 || typeof delta !== "string") {
+        fail("Codex DirectModel output delta is invalid");
+      }
+      if (event.item_id !== undefined) {
+        const candidateItemId = event.item_id;
+        if (typeof candidateItemId !== "string" || candidateItemId.length < 1 ||
+            candidateItemId.length > 200 ||
+            (itemId !== undefined && itemId !== candidateItemId)) {
+          fail("Codex DirectModel item identity changed");
+        }
+        itemId = candidateItemId as string;
+      }
+      outputIndex = coordinate(event.output_index, outputIndex, "output index");
+      contentIndex = coordinate(event.content_index, contentIndex, "content index");
+      outputBytes += Buffer.byteLength(delta as string, "utf8");
+      if (outputBytes > MAX_DIRECT_TEXT_BYTES) {
+        fail("Codex DirectModel output text limit exceeded");
+      }
+      output += delta as string;
+      return;
+    }
+    if (event.type === "response.completed" || event.type === "response.done") {
+      terminalCount += 1;
+      if (terminalCount !== 1) fail("Codex DirectModel terminal is duplicated");
+      terminal = record(event.response, "Codex DirectModel completed response");
+      if (terminal.status !== "completed" ||
+          (Object.hasOwn(terminal, "error") && terminal.error !== null)) {
+        fail("Codex DirectModel terminal is not completed");
+      }
+      return;
+    }
+    if (event.type === "response.failed" || event.type === "response.incomplete" ||
+        event.type === "response.cancelled" || event.type === "error") {
+      fail("Codex DirectModel response failed");
+    }
+    // Reasoning and lifecycle events are intentionally ignored. They are
+    // neither retained nor relayed to the extraction adapter.
+  };
+  const drainLines = (final: boolean): void => {
+    for (;;) {
+      const separator = pending.indexOf("\n");
+      if (separator < 0) break;
+      const line = pending.slice(0, separator);
+      pending = pending.slice(separator + 1);
+      processLine(line);
+    }
+    if (final && pending.trim() !== "") {
+      processLine(pending);
+      pending = "";
+    }
+  };
+
+  try {
+    for (;;) {
+      if (signal.aborted) fail("Codex DirectModel request aborted");
+      const next = await reader.read();
+      if (next.done) break;
+      if (!next.value?.byteLength) continue;
+      rawBytes += next.value.byteLength;
+      if (rawBytes > Math.min(MAX_DIRECT_RESPONSE_BYTES, maximumWireBytes)) {
+        await reader.cancel("DirectModel SSE limit").catch(() => undefined);
+        fail("Codex DirectModel SSE byte limit exceeded");
+      }
+      try {
+        pending += decoder.decode(next.value, { stream: true });
+      } catch {
+        fail("Codex DirectModel SSE is not valid UTF-8");
+      }
+      drainLines(false);
+    }
+    try {
+      pending += decoder.decode();
+    } catch {
+      fail("Codex DirectModel SSE is not valid UTF-8");
+    }
+    drainLines(true);
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  const completedTerminal = terminal;
+  if (terminalCount !== 1 || completedTerminal === undefined) {
+    throw new ModelProxyPolicyError(
+      "Codex DirectModel requires exactly one completed terminal",
+    );
+  }
+  const terminalTexts = directTerminalOutputTexts(completedTerminal);
+  if (output === "" && terminalTexts.length === 1) {
+    output = terminalTexts[0]!;
+    outputBytes = Buffer.byteLength(output, "utf8");
+    if (outputBytes > MAX_DIRECT_TEXT_BYTES) {
+      fail("Codex DirectModel output text limit exceeded");
+    }
+  } else if (terminalTexts.length > 1 ||
+      (terminalTexts.length === 1 && terminalTexts[0] !== output)) {
+    fail("Codex DirectModel terminal output mismatches streamed text");
+  }
+  const safeTerminal: Record<string, unknown> = {
+    status: "completed",
+    error: null,
+    output: [],
+  };
+  if (completedTerminal.usage !== undefined) safeTerminal.usage = completedTerminal.usage;
+  const frames: string[] = [];
+  if (output !== "") {
+    frames.push(`data: ${JSON.stringify({
+      type: "response.output_text.delta",
+      ...(itemId === undefined ? {} : { item_id: itemId }),
+      ...(outputIndex === undefined ? {} : { output_index: outputIndex }),
+      ...(contentIndex === undefined ? {} : { content_index: contentIndex }),
+      delta: output,
+    })}`);
+  }
+  frames.push(`data: ${JSON.stringify({
+    type: "response.completed",
+    response: safeTerminal,
+  })}`);
+  frames.push("data: [DONE]", "");
+  const body = Buffer.from(frames.join("\n\n"), "utf8");
+  const usage = parseUsage(body);
+  if (Object.hasOwn(completedTerminal, "usage") && usage === null) {
+    fail("Codex DirectModel terminal usage is invalid");
+  }
+  return Object.freeze({
+    body,
+    raw_bytes: rawBytes,
+    usage,
+  });
+}
+
 export class FixedModelProxy {
   readonly #marker: string;
   readonly #adapterId: DiscoveryAdapterId;
@@ -575,6 +806,8 @@ export class FixedModelProxy {
   readonly #controllers = new Set<AbortController>();
   #requests = 0;
   #upstreamRequests = 0;
+  #completedResponses = 0;
+  #meteredResponses = 0;
   #active = 0;
   #inputBytes = 0;
   #upstreamInputBytes = 0;
@@ -618,6 +851,8 @@ export class FixedModelProxy {
     return Object.freeze({
       request_count: this.#requests,
       upstream_request_count: this.#upstreamRequests,
+      completed_response_count: this.#completedResponses,
+      metered_response_count: this.#meteredResponses,
       active_requests: this.#active,
       input_bytes: this.#inputBytes,
       output_bytes: this.#outputBytes,
@@ -698,21 +933,37 @@ export class FixedModelProxy {
         signal: controller.signal,
         redirect: "error",
       });
-      const responseBody = await readBounded(
-        upstream,
-        Math.min(MAX_RESPONSE_BYTES, outputRemaining),
-        controller.signal,
-      );
-      this.#outputBytes += responseBody.length;
       const upstreamType = upstream.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
       if (upstream.ok && upstreamType !== undefined && upstreamType !== "text/event-stream") {
         this.#usageComplete = false;
         throw new ModelProxyPolicyError("Codex upstream requires text/event-stream");
       }
-      const usage = upstream.ok ? parseUsage(responseBody) : null;
+      let responseBody: Buffer;
+      let usage: ParsedUsage | null;
+      if (upstream.ok && this.#adapterId === "direct_model") {
+        const direct = await readDirectModelSse(
+          upstream,
+          Math.min(MAX_DIRECT_RESPONSE_BYTES, outputRemaining),
+          controller.signal,
+        );
+        responseBody = direct.body;
+        usage = direct.usage;
+        this.#outputBytes += direct.raw_bytes;
+      } else {
+        responseBody = await readBounded(
+          upstream,
+          Math.min(MAX_RESPONSE_BYTES, outputRemaining),
+          controller.signal,
+        );
+        usage = upstream.ok ? parseUsage(responseBody) : null;
+        this.#outputBytes += responseBody.length;
+      }
       if (upstream.ok && usage === null) {
         this.#usageComplete = false;
-        throw new ModelProxyPolicyError("Codex upstream SSE terminal usage is invalid");
+        if (this.#adapterId !== "direct_model") {
+          throw new ModelProxyPolicyError("Codex upstream SSE terminal usage is invalid");
+        }
+        this.#completedResponses += 1;
       } else if (usage !== null) {
         if (this.#inputTokens + usage.input_tokens > MAX_OBSERVED_INPUT_TOKENS ||
             this.#outputTokens + usage.output_tokens > MAX_OBSERVED_OUTPUT_TOKENS) {
@@ -723,10 +974,14 @@ export class FixedModelProxy {
         this.#cachedInputTokens += usage.cached_input_tokens;
         this.#outputTokens += usage.output_tokens;
         this.#totalTokens += usage.total_tokens;
+        this.#completedResponses += 1;
+        this.#meteredResponses += 1;
       }
       const headers = new Headers({ "cache-control": "no-store" });
       if (upstreamType !== undefined) headers.set("content-type", upstreamType);
-      else if (upstream.ok && usage !== null) headers.set("content-type", "text/event-stream");
+      else if (upstream.ok && (usage !== null || this.#adapterId === "direct_model")) {
+        headers.set("content-type", "text/event-stream");
+      }
       const upstreamId = upstream.headers.get("x-request-id") ?? upstream.headers.get("x-oai-request-id");
       if (upstreamId && /^[A-Za-z0-9_.:-]{1,200}$/.test(upstreamId)) headers.set("x-request-id", upstreamId);
       const retryAfter = validatedRetryAfter(upstream.headers.get("retry-after"), this.#now());

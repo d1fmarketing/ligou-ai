@@ -626,7 +626,9 @@ function policy(context: ModelAccessContext): Readonly<SubscriptionPolicy> {
   return Object.freeze({
     model: "gpt-5.6-sol",
     deadline_at: context.deadline_at,
-    max_requests: Math.min(context.source_snapshot_count + 3, 28),
+    max_requests: context.adapter_id === "direct_model"
+      ? 2
+      : Math.min(context.source_snapshot_count + 3, 28),
     max_input_bytes: 400_000,
     max_output_bytes: 8_388_608,
     max_response_bytes: 4_194_304,
@@ -892,27 +894,35 @@ export class CentralSubscriptionGateway implements SubscriptionGateway {
       const actualInputBytes = Math.max(0, after.input_bytes - before.input_bytes);
       const upstreamAttempted = after.upstream_request_count > before.upstream_request_count;
       const observedAggregateExceeded = this.#observedLimitsExceeded(state);
-      const requestUsageComplete = !observedAggregateExceeded &&
+      const oneUpstreamRequest = after.upstream_request_count ===
+        before.upstream_request_count + 1;
+      const completedResponse = after.completed_response_count ===
+        before.completed_response_count + 1;
+      const meteredResponse = after.metered_response_count ===
+        before.metered_response_count + 1;
+      const requestOutcomeKnown = !observedAggregateExceeded &&
         actualInputBytes <= prospective.input_bytes && (
         !upstreamAttempted ||
-        (response?.ok === true && after.usage_complete &&
-          after.upstream_request_count === before.upstream_request_count + 1) ||
+        (response?.ok === true && oneUpstreamRequest && completedResponse) ||
         (response?.status === 429 && retryAfter !== null)
       );
-      if (!requestUsageComplete) quotaState = "unknown";
+      const requestUsageComplete = requestOutcomeKnown && (
+        !upstreamAttempted || response?.status === 429 || meteredResponse
+      );
+      if (!requestOutcomeKnown) quotaState = "unknown";
       state.usage_complete &&= requestUsageComplete;
       try {
-        const completedWithoutModelUsage = requestUsageComplete &&
+        const completedWithoutModelUsage = requestOutcomeKnown &&
           (!upstreamAttempted || response?.status === 429);
         const settled = await this.#options.model_access_authority.settleSubscriptionRequest(
           reserved.reservation,
           Object.freeze({
             input_bytes: actualInputBytes,
             output_bytes: Math.max(0, after.output_bytes - before.output_bytes),
-            observed_input_tokens: response?.ok && requestUsageComplete
+            observed_input_tokens: response?.ok && requestUsageComplete && meteredResponse
               ? Math.max(0, after.input_tokens - before.input_tokens)
               : completedWithoutModelUsage ? 0 : null,
-            observed_output_tokens: response?.ok && requestUsageComplete
+            observed_output_tokens: response?.ok && requestUsageComplete && meteredResponse
               ? Math.max(0, after.output_tokens - before.output_tokens)
               : completedWithoutModelUsage ? 0 : null,
             usage_complete: requestUsageComplete,

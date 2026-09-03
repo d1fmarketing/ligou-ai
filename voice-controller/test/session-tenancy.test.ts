@@ -117,6 +117,24 @@ describe("resolveSessionTenant", () => {
 });
 
 describe("browser capability ownership", () => {
+  test("website-first opening starts directly with the persisted discovery context", () => {
+    const question = "Eu já analisei seu website e encontrei as informações públicas básicas. Agora vou confirmar o que falta. Qual é o limite de negociação?";
+    const opening = onboardingOpeningText("D1F Marketing", {
+      coverage_receipt_id: "44444444-4444-4444-8444-444444444444",
+      revision: 1,
+      snapshot_digest: "c".repeat(64),
+      next_action: {
+        type: "ask",
+        field: "authority.negotiate_floor",
+        question_pt: question,
+      },
+    });
+    expect(opening).toBe(
+      `Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. ${question}`,
+    );
+    expect(opening).not.toContain("Vamos continuar de onde paramos");
+  });
+
   test("authenticated owner identity is retained only for owner and onboarding browser sessions", () => {
     for (const sessionType of ["owner_browser", "onboarding"] as const) {
       const cap = makeBrowserSessionCapability({

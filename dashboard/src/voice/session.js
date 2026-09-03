@@ -518,8 +518,13 @@ async function validateApplicationOpening(response) {
   }
   const identity =
     `Oi! Aqui é o Ligou, agente de inteligência artificial da ${businessName}.`;
-  const expectedText = currentV2 && payload.resume_context !== null
-    ? `${identity} Vamos continuar de onde paramos. ${payload.resume_context.next_action.question_pt}`
+  const resumeQuestion = currentV2 && payload.resume_context !== null
+    ? payload.resume_context.next_action.question_pt
+    : null;
+  const expectedText = resumeQuestion !== null
+    ? resumeQuestion.startsWith("Eu já analisei seu website")
+      ? `${identity} ${resumeQuestion}`
+      : `${identity} Vamos continuar de onde paramos. ${resumeQuestion}`
     : `${identity} Quais serviços sua empresa oferece?`;
   if (payload.text !== expectedText) throw safeOpeningError("texto de abertura divergente");
   if (legacyV1 && (

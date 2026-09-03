@@ -80,7 +80,9 @@ interface DraftReadback {
   draft_version: number;
   draft_hash: string;
   draft: {
-    schema_version: "company_discovery.onboarding_draft.v1";
+    schema_version:
+      | "company_discovery.onboarding_draft.v1"
+      | "company_discovery.onboarding_draft.v2";
     source_job_id: string;
     source_attempt_id: string;
     source_result_id: string;
@@ -198,6 +200,61 @@ function parseFact(value: unknown, index: number): ApprovedFact {
   };
 }
 
+function parseCandidateFact(value: unknown, index: number): ApprovedFact {
+  const fact = record(value, `candidate_fact_${index}`);
+  exact(fact, [
+    "claim_id", "claim_class", "claim_type", "value", "evidence_refs",
+    "confidence", "contradiction_status", "missing_fields", "ambiguous_fields",
+    "contradictions", "uncertainty", "adapter_id", "provider", "model",
+    "claim_schema_version", "review_status",
+  ], `candidate_fact_${index}`);
+  if (typeof fact.claim_id !== "string" || !UUID.test(fact.claim_id) ||
+      !["descriptive", "operational", "safety_critical"].includes(String(fact.claim_class)) ||
+      typeof fact.claim_type !== "string" || !fact.claim_type || fact.claim_type.length > 200 ||
+      (fact.confidence !== "high" && fact.confidence !== "medium" && fact.confidence !== "low") ||
+      !["none", "possible", "confirmed"].includes(String(fact.contradiction_status)) ||
+      fact.adapter_id !== "direct_model" || fact.provider !== "openai-codex" ||
+      fact.model !== "gpt-5.6-sol" ||
+      fact.claim_schema_version !== "company_discovery.claim.v2" ||
+      fact.review_status !== "pending_onboarding") {
+    fail(`candidate_fact_${index}_identity`);
+  }
+  const evidence = strings(fact.evidence_refs, `candidate_fact_${index}_evidence`, 25);
+  if (evidence.length === 0 || evidence.some((id) => !UUID.test(id))) {
+    fail(`candidate_fact_${index}_evidence`);
+  }
+  const missing = strings(fact.missing_fields, `candidate_fact_${index}_missing`, 50);
+  const ambiguous = strings(fact.ambiguous_fields, `candidate_fact_${index}_ambiguous`, 50);
+  const contradictions = strings(fact.contradictions, `candidate_fact_${index}_contradictions`, 20);
+  const uncertainty = strings(fact.uncertainty, `candidate_fact_${index}_uncertainty`, 20);
+  return {
+    claim_id: fact.claim_id,
+    claim_class: fact.claim_class as ApprovedFact["claim_class"],
+    claim_type: fact.claim_type,
+    value: structuredClone(fact.value),
+    // These fields are an internal compatibility projection only. Candidate
+    // drafts never write owner decisions; authority remains false until the
+    // final voice approval materializes the completed coverage snapshot.
+    decision: "approve",
+    edited_by_owner: false,
+    evidence_refs: evidence,
+    confidence: fact.confidence,
+    contradiction_status: fact.contradiction_status as ApprovedFact["contradiction_status"],
+    adapter_id: "direct_model",
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    claim_schema_version: "company_discovery.claim.v2",
+    missing_fields: missing,
+    ambiguous_fields: ambiguous,
+    contradictions,
+    uncertainty,
+    website_missing_fields: [...missing],
+    website_ambiguous_fields: [...ambiguous],
+    website_contradictions: [...contradictions],
+    website_uncertainty: [...uncertainty],
+  };
+}
+
 function parseUnresolvedItem(value: unknown, index: number): UnresolvedItem {
   const item = record(value, `unresolved_${index}`);
   exact(item, [
@@ -273,53 +330,226 @@ function parseUnresolvedItem(value: unknown, index: number): UnresolvedItem {
   };
 }
 
+function derivedUuid(seed: string): string {
+  const digest = createHash("sha256").update(seed, "utf8").digest("hex");
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+function candidateQuestion(args: {
+  draftId: string;
+  sourceJobId: string;
+  sourceAttemptId: string;
+  sourceResultId: string;
+  draftRevision: number;
+  kind: "missing_question" | "contradiction" | "uncertainty";
+  index: number;
+  question: string;
+  coverageField?: CoverageField;
+  sourceClaimIds?: string[];
+  evidenceRefs?: string[];
+  claimType?: string | null;
+}): UnresolvedItem {
+  const unresolvedId = derivedUuid(
+    `${args.draftId}:${args.kind}:${args.index}:${args.question}`,
+  );
+  return {
+    unresolved_id: unresolvedId,
+    source_kind: args.kind,
+    source_index: args.index,
+    source_claim_ids: args.sourceClaimIds ?? [],
+    evidence_refs: args.evidenceRefs ?? [],
+    source_job_id: args.sourceJobId,
+    source_attempt_id: args.sourceAttemptId,
+    source_result_id: args.sourceResultId,
+    draft_revision: args.draftRevision,
+    review_status: "pending_onboarding",
+    owner_response: null,
+    reason: args.kind === "contradiction"
+      ? "contradiction"
+      : args.kind === "uncertainty" ? "operationally_incomplete" : "missing_or_owner_private",
+    claim_id: null,
+    claim_type: args.claimType ?? null,
+    field: null,
+    coverage_field: args.coverageField ??
+      `discovery.owner_question.${unresolvedId.replaceAll("-", "")}`,
+    coverage_subject: null,
+    question_pt: args.question,
+  };
+}
+
 function parseDraftReadback(value: unknown): DraftReadback {
   const readback = record(value, "readback");
   exact(readback, ["draft_id", "draft_version", "draft_hash", "draft"], "readback");
   const draft = record(readback.draft, "draft");
-  exact(draft, [
-    "schema_version", "source_job_id", "source_attempt_id", "source_result_id",
-    "source_result_hash", "source_result_schema", "approved_facts",
-    "rejected_claim_ids", "unresolved_items", "authority",
-  ], "draft");
   const authority = record(draft.authority, "authority");
   exact(authority, ["rules_approved", "powers_granted", "operational_mode_changed"], "authority");
   if (typeof readback.draft_id !== "string" || !UUID.test(readback.draft_id) ||
       !Number.isSafeInteger(readback.draft_version) || Number(readback.draft_version) < 1 ||
       typeof readback.draft_hash !== "string" || !HASH.test(readback.draft_hash) ||
-      draft.schema_version !== "company_discovery.onboarding_draft.v1" ||
       typeof draft.source_job_id !== "string" || !UUID.test(draft.source_job_id) ||
       typeof draft.source_attempt_id !== "string" || !UUID.test(draft.source_attempt_id) ||
       typeof draft.source_result_id !== "string" || !UUID.test(draft.source_result_id) ||
       typeof draft.source_result_hash !== "string" || !HASH.test(draft.source_result_hash) ||
       draft.source_result_schema !== "company_discovery.result.v2" ||
       authority.rules_approved !== false || authority.powers_granted !== false ||
-      authority.operational_mode_changed !== false ||
-      !Array.isArray(draft.approved_facts) || draft.approved_facts.length > 100 ||
-      !Array.isArray(draft.unresolved_items) || draft.unresolved_items.length > 500) {
+      authority.operational_mode_changed !== false) {
     fail("readback_shape");
   }
-  const rejected = strings(draft.rejected_claim_ids, "rejected_claim_ids", 100);
-  if (rejected.some((id) => !UUID.test(id))) fail("rejected_claim_ids");
-  const unresolved = draft.unresolved_items.map(parseUnresolvedItem);
+  const revision = Number(readback.draft_version);
+  let facts: ApprovedFact[];
+  let rejected: string[] = [];
+  let unresolved: UnresolvedItem[];
+  if (draft.schema_version === "company_discovery.onboarding_draft.v1") {
+    exact(draft, [
+      "schema_version", "source_job_id", "source_attempt_id", "source_result_id",
+      "source_result_hash", "source_result_schema", "approved_facts",
+      "rejected_claim_ids", "unresolved_items", "authority",
+    ], "draft");
+    if (!Array.isArray(draft.approved_facts) || draft.approved_facts.length > 100 ||
+        !Array.isArray(draft.unresolved_items) || draft.unresolved_items.length > 500) {
+      fail("readback_shape");
+    }
+    facts = draft.approved_facts.map(parseFact);
+    rejected = strings(draft.rejected_claim_ids, "rejected_claim_ids", 100);
+    if (rejected.some((id) => !UUID.test(id))) fail("rejected_claim_ids");
+    unresolved = draft.unresolved_items.map(parseUnresolvedItem);
+  } else if (draft.schema_version === "company_discovery.onboarding_draft.v2") {
+    exact(draft, [
+      "schema_version", "review_mode", "source_job_id", "source_attempt_id",
+      "source_result_id", "source_result_hash", "source_result_schema",
+      "candidate_facts", "missing_information", "ambiguous_information",
+      "contradictions", "owner_private_information_needed", "sources", "authority",
+    ], "draft");
+    if (draft.review_mode !== "onboarding_voice" ||
+        !Array.isArray(draft.candidate_facts) || draft.candidate_facts.length > 100 ||
+        !Array.isArray(draft.ambiguous_information) || draft.ambiguous_information.length > 100 ||
+        !Array.isArray(draft.contradictions) || draft.contradictions.length > 100 ||
+        !Array.isArray(draft.owner_private_information_needed) ||
+          draft.owner_private_information_needed.length > 100 ||
+        !Array.isArray(draft.sources) || draft.sources.length > 25) {
+      fail("candidate_draft_shape");
+    }
+    facts = draft.candidate_facts.map(parseCandidateFact);
+    unresolved = strings(draft.missing_information, "missing_information", 100)
+      .map((question, index) => candidateQuestion({
+        draftId: readback.draft_id as string,
+        sourceJobId: draft.source_job_id as string,
+        sourceAttemptId: draft.source_attempt_id as string,
+        sourceResultId: draft.source_result_id as string,
+        draftRevision: revision,
+        kind: "missing_question",
+        index,
+        question,
+      }));
+    for (const [index, raw] of draft.ambiguous_information.entries()) {
+      const item = record(raw, `ambiguous_information_${index}`);
+      exact(item, ["claim_id", "claim_type", "fields", "evidence_refs"], `ambiguous_information_${index}`);
+      const claimIds = strings([item.claim_id], `ambiguous_information_${index}_claim`, 1);
+      const evidenceRefs = strings(item.evidence_refs, `ambiguous_information_${index}_evidence`, 25);
+      if (claimIds.some((id) => !UUID.test(id)) || evidenceRefs.some((id) => !UUID.test(id))) {
+        fail(`ambiguous_information_${index}_identity`);
+      }
+      const fields = strings(item.fields, `ambiguous_information_${index}_fields`, 50);
+      const claimType = typeof item.claim_type === "string" ? item.claim_type : fail(`ambiguous_information_${index}_type`);
+      unresolved.push(candidateQuestion({
+        draftId: readback.draft_id as string,
+        sourceJobId: draft.source_job_id as string,
+        sourceAttemptId: draft.source_attempt_id as string,
+        sourceResultId: draft.source_result_id as string,
+        draftRevision: revision,
+        kind: "uncertainty",
+        index,
+        question: `O site deixou ${fields.join(", ").replaceAll("_", " ")} ambíguo em ${claimType.replaceAll("_", " ")}. Como devemos registrar isso?`,
+        sourceClaimIds: claimIds,
+        evidenceRefs,
+        claimType,
+      }));
+    }
+    for (const [index, raw] of draft.contradictions.entries()) {
+      let question: string;
+      let sourceClaimIds: string[] = [];
+      let evidenceRefs: string[] = [];
+      let claimType: string | null = null;
+      if (typeof raw === "string") {
+        question = `Confirme esta contradição encontrada no site: ${raw}`;
+      } else {
+        const item = record(raw, `candidate_contradiction_${index}`);
+        exact(item, ["claim_id", "claim_type", "items", "evidence_refs"], `candidate_contradiction_${index}`);
+        sourceClaimIds = strings([item.claim_id], `candidate_contradiction_${index}_claim`, 1);
+        evidenceRefs = strings(item.evidence_refs, `candidate_contradiction_${index}_evidence`, 25);
+        if (sourceClaimIds.some((id) => !UUID.test(id)) || evidenceRefs.some((id) => !UUID.test(id))) {
+          fail(`candidate_contradiction_${index}_identity`);
+        }
+        claimType = typeof item.claim_type === "string" ? item.claim_type : fail(`candidate_contradiction_${index}_type`);
+        const items = strings(item.items, `candidate_contradiction_${index}_items`, 20);
+        question = `Confirme esta contradição encontrada no site: ${items.join("; ")}`;
+      }
+      unresolved.push(candidateQuestion({
+        draftId: readback.draft_id as string,
+        sourceJobId: draft.source_job_id as string,
+        sourceAttemptId: draft.source_attempt_id as string,
+        sourceResultId: draft.source_result_id as string,
+        draftRevision: revision,
+        kind: "contradiction",
+        index,
+        question,
+        sourceClaimIds,
+        evidenceRefs,
+        claimType,
+      }));
+    }
+    for (const [index, raw] of draft.owner_private_information_needed.entries()) {
+      const item = record(raw, `owner_private_${index}`);
+      exact(item, ["field", "question_pt"], `owner_private_${index}`);
+      if (!isCoverageField(item.field) || isDiscoveryOwnerQuestionField(item.field) ||
+          item.field.startsWith("service.")) {
+        fail(`owner_private_${index}_field`);
+      }
+      unresolved.push(candidateQuestion({
+        draftId: readback.draft_id as string,
+        sourceJobId: draft.source_job_id as string,
+        sourceAttemptId: draft.source_attempt_id as string,
+        sourceResultId: draft.source_result_id as string,
+        draftRevision: revision,
+        kind: "missing_question",
+        index: 100 + index,
+        question: typeof item.question_pt === "string" && item.question_pt.trim()
+          ? item.question_pt
+          : fail(`owner_private_${index}_question`),
+        coverageField: item.field,
+      }));
+    }
+    for (const [index, raw] of draft.sources.entries()) {
+      const source = record(raw, `candidate_source_${index}`);
+      exact(source, ["evidence_id", "url", "excerpt", "crawl_order"], `candidate_source_${index}`);
+      if (typeof source.evidence_id !== "string" || !UUID.test(source.evidence_id) ||
+          typeof source.url !== "string" || !source.url.startsWith("https://") ||
+          typeof source.excerpt !== "string" || source.excerpt.length > 500 ||
+          !Number.isSafeInteger(source.crawl_order) || source.crawl_order !== index) {
+        fail(`candidate_source_${index}_shape`);
+      }
+    }
+  } else {
+    fail("draft_schema");
+  }
   if (unresolved.some((item) =>
     item.source_job_id !== draft.source_job_id ||
     item.source_attempt_id !== draft.source_attempt_id ||
     item.source_result_id !== draft.source_result_id ||
-    item.draft_revision !== Number(readback.draft_version)
+    item.draft_revision !== revision
   )) fail("unresolved_identity");
   return {
     draft_id: readback.draft_id,
-    draft_version: Number(readback.draft_version),
+    draft_version: revision,
     draft_hash: readback.draft_hash,
     draft: {
-      schema_version: "company_discovery.onboarding_draft.v1",
+      schema_version: draft.schema_version,
       source_job_id: draft.source_job_id,
       source_attempt_id: draft.source_attempt_id,
       source_result_id: draft.source_result_id,
       source_result_hash: draft.source_result_hash,
       source_result_schema: "company_discovery.result.v2",
-      approved_facts: draft.approved_facts.map(parseFact),
+      approved_facts: facts,
       rejected_claim_ids: rejected,
       unresolved_items: unresolved,
       authority: FALSE_AUTHORITY,
@@ -502,13 +732,19 @@ function applyHours(snapshot: CoverageSnapshot, fact: ApprovedFact): void {
 function applyService(snapshot: CoverageSnapshot, fact: ApprovedFact): void {
   const value = record(fact.value, "service_value");
   const subject = String(value.service_type ?? "");
-  if (!subject || disputed(fact) || fact.ambiguous_fields.length) return;
+  if (!subject) return;
   addService(snapshot, subject);
   if (Array.isArray(value.service_names) && value.service_names.length) {
     setCell(snapshot, "service.name_synonyms", answered(value.service_names), subject);
   }
   const price = value.public_price as Record<string, unknown> | null;
-  if (price) {
+  const priceAmbiguous = fact.ambiguous_fields.includes("public_price") || disputed(fact);
+  if (priceAmbiguous) {
+    setCell(snapshot, "service.price_mode", ambiguous(
+      "website_public_price_ambiguous",
+      `O site apresenta preço ou condições conflitantes para ${subject.replaceAll("_", " ")}. Qual é a informação correta?`,
+    ), subject);
+  } else if (price) {
     const mode = price.qualifier === "fixed" || price.qualifier === "starting_at" ||
         price.qualifier === "estimate"
       ? price.qualifier
@@ -531,7 +767,8 @@ function applyService(snapshot: CoverageSnapshot, fact: ApprovedFact): void {
       }, subject);
     }
   }
-  if (typeof value.duration_minutes === "number") {
+  if (typeof value.duration_minutes === "number" &&
+      !fact.ambiguous_fields.includes("duration_minutes")) {
     setCell(snapshot, "service.duration", answered(value.duration_minutes), subject);
   }
 }
@@ -646,11 +883,18 @@ export function buildCompanyDiscoveryPrefill(
     fail("prefill_must_leave_owner_question");
   }
   const next = progress.nextQuestion;
+  const projectedQuestion = readback.draft.schema_version ===
+      "company_discovery.onboarding_draft.v2"
+    ? `Eu já analisei seu website e encontrei as informações públicas básicas. Agora vou confirmar alguns pontos e perguntar somente o que falta. ${next.questionPt}`
+    : next.questionPt;
+  const questionPt = projectedQuestion.length <= 1_000
+    ? projectedQuestion
+    : `${projectedQuestion.slice(0, 996).trimEnd()}…`;
   const nextAction = Object.freeze({
     type: "ask",
     field: next.field,
     ...(next.subject ? { subject: next.subject } : {}),
-    question_pt: next.questionPt,
+    question_pt: questionPt,
   });
   const coverage = Object.freeze({
     schema_version: 2,

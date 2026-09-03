@@ -10,6 +10,7 @@ import type {
   WorkerResult,
   WorkerStatus,
 } from "./contracts";
+import { WorkerExecutionError } from "./contracts";
 import type {
   ClaimedAttempt,
   CleanupAuthority,
@@ -253,6 +254,9 @@ function terminalReason(
   if (error instanceof SupervisorDeadlineError) {
     return { outcome: "failed", reason: "deadline_exceeded" };
   }
+  if (error instanceof WorkerExecutionError) {
+    return { outcome: "failed", reason: error.code };
+  }
   const reason = `${phase}_failed`;
   return {
     outcome: "failed",
@@ -395,9 +399,12 @@ export class DiscoverySupervisor {
       phase = "worker_wait";
       const status = await this.#waitForTerminal(claimed.job, handle, signal);
       if (status.state !== "succeeded") {
-        throw status.state === "cancelled"
-          ? new SupervisorCancelledError()
-          : new Error(`company discovery worker ended ${status.state}`);
+        if (status.state === "cancelled") throw new SupervisorCancelledError();
+        // The adapter owns the precise, owner-safe terminal classification.
+        // Reading result after a failed terminal cannot restart work; it only
+        // rethrows the already-settled execution error.
+        await this.#options.broker.result(handle);
+        throw new Error(`company discovery worker ended ${status.state}`);
       }
 
       phase = "worker_result";

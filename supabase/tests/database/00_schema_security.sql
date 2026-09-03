@@ -62,6 +62,7 @@ select extensions.ok(
       ('begin_connector_handoff(uuid,text,text)'),
       ('cancel_company_discovery(uuid,bigint)'),
       ('company_discovery_owner_status()'),
+      ('company_discovery_setup_status()'),
       ('create_company_discovery_review_nonce(uuid,uuid,uuid[])'),
       ('create_company_discovery_review_nonce_v2(uuid,uuid,uuid[])'),
       ('decide_case(uuid,text,text,text,jsonb,text,text)'),
@@ -74,10 +75,12 @@ select extensions.ok(
       ('grant_power(uuid,text,text,text,jsonb,numeric,timestamp with time zone)'),
       ('reset_owner_test_memory()'),
       ('retry_company_discovery(uuid,bigint)'),
+      ('retry_company_discovery_setup(uuid,bigint)'),
       ('review_company_discovery_claims(uuid,uuid,bigint,jsonb,text)'),
       ('review_company_discovery_claims_v2(uuid,uuid,bigint,jsonb,jsonb,text)'),
       ('revoke_power(uuid)'),
       ('revoke_rule(uuid,text)'),
+      ('start_company_discovery_setup(text)'),
       ('submit_company_discovery(text,text)')
     ) expected(signature)
     order by signature

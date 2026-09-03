@@ -70,6 +70,17 @@ function stage0bMigrationSql(): string {
     .toLowerCase();
 }
 
+function websiteFirstMigrationSql(): string {
+  const names = readdirSync(migrationsDir).filter((name) =>
+    name.endsWith("_company_discovery_website_first_onboarding.sql")
+  );
+  expect(names, "missing website-first onboarding migration").toHaveLength(1);
+  return readFileSync(path.join(migrationsDir, names[0]!), "utf8")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function functionBody(sql: string, signature: string, nextMarker: string): string {
   const functionName = signature.slice(0, signature.indexOf("("));
   const start = sql.indexOf(`function public.${functionName}(`);
@@ -850,6 +861,85 @@ describe("DirectModel company discovery Stage 0B database authority", () => {
     expect(sql).toContain("create trigger company_discovery_subscription_analyzing_stage");
     expect(sql).toContain("create trigger company_discovery_result_review_stage");
     expect(sql).toContain("create trigger company_discovery_job_status_stage");
+  });
+});
+
+describe("website-first Company Discovery database contract", () => {
+  test("atomically selects a validated result and creates exactly one candidate draft", () => {
+    const sql = websiteFirstMigrationSql();
+    expect(sql).toContain("company_discovery.onboarding_draft.v2");
+    expect(sql).toContain("create unique index company_discovery_candidate_draft_result_unique");
+    const selection = functionBody(
+      sql,
+      "select_company_discovery_result(uuid,uuid,bigint)",
+      "revoke all on function public.select_company_discovery_result(uuid,uuid,bigint)",
+    );
+    expect(selection).toContain("insert into public.company_discovery_onboarding_drafts");
+    expect(selection).toContain("'candidate_facts'");
+    expect(selection).toContain("'missing_information'");
+    expect(selection).toContain("'ambiguous_information'");
+    expect(selection).toContain("'contradictions'");
+    expect(selection).toContain("'owner_private_information_needed'");
+    expect(selection).toContain("'rules_approved', false");
+    expect(selection).toContain("'powers_granted', false");
+    expect(selection).toContain("'operational_mode_changed', false");
+    expect(selection).toContain("then 'ready_for_onboarding'");
+    expect(selection).toContain("v_already_selected");
+    expect(selection).toContain("company_discovery_candidate_draft_mismatch");
+    expect(selection).not.toContain("insert into public.discovery_decisions");
+    expect(selection).not.toContain("insert into public.rules");
+    expect(selection).not.toContain("insert into public.powers");
+  });
+
+  test("exposes owner-scoped setup status, start, and idempotent retry without tenant input", () => {
+    const sql = websiteFirstMigrationSql();
+    for (const signature of [
+      "company_discovery_setup_status()",
+      "start_company_discovery_setup(text)",
+      "retry_company_discovery_setup(uuid,bigint)",
+    ]) {
+      const body = functionBody(sql, signature, `revoke all on function public.${signature}`);
+      expect(body).toContain("security definer");
+      expect(body).toContain("set search_path = ''");
+      expect(body).toContain("auth.uid()");
+      expect(sql).toContain(`grant execute on function public.${signature} to authenticated`);
+    }
+    expect(sql).not.toContain("company_discovery_setup_status(p_tenant");
+    expect(sql).not.toContain("start_company_discovery_setup(p_tenant");
+    expect(sql).toContain("'payment_pending'");
+    expect(sql).toContain("'website_required'");
+    expect(sql).toContain("'learning'");
+    expect(sql).toContain("'learning_failed'");
+    expect(sql).toContain("'ready_for_onboarding'");
+    expect(sql).toContain("'onboarding_in_progress'");
+    expect(sql).toContain("'onboarding_complete'");
+    expect(sql).toContain("hashtextextended( 'ligou.company_discovery.setup:' || v_tenant.id::text");
+    expect(sql).toContain("deadline_at = clock_timestamp() + interval '10 minutes'");
+    expect(sql).toContain("'result_selection_incomplete'");
+    expect(sql).toContain("'legacy_review_requires_restart'");
+    expect(sql).toContain("'setup_state_unrecoverable'");
+    const retry = functionBody(
+      sql,
+      "retry_company_discovery_setup(uuid,bigint)",
+      "revoke all on function public.retry_company_discovery_setup(uuid,bigint)",
+    );
+    expect(retry).toContain("select public.select_company_discovery_result(");
+    expect(retry).toContain("'recovered', true");
+  });
+
+  test("keeps v1 reviewed drafts compatible and admits v2 candidates only for the selected attempt", () => {
+    const sql = websiteFirstMigrationSql();
+    for (const signature of [
+      "initialize_company_discovery_onboarding_prefill(uuid,uuid,uuid,uuid,jsonb)",
+      "reconcile_company_discovery_onboarding_prefill(uuid,uuid,uuid,uuid,bigint,text,uuid,uuid,uuid,text,text)",
+    ]) {
+      expect(sql).toContain(`'public.${signature}'::regprocedure`);
+    }
+    expect(sql).toContain("v_old text := 'and j.status = ''reviewed'''");
+    expect(sql).toContain("company_discovery.onboarding_draft.v1'' and j.status = ''reviewed''");
+    expect(sql).toContain("company_discovery.onboarding_draft.v2'' and j.status = ''awaiting_review''");
+    expect(sql).toContain("company_discovery_prefill_status_patch_mismatch");
+    expect(sql).toContain("company_discovery_reconcile_status_patch_mismatch");
   });
 });
 
@@ -2281,11 +2371,28 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       p_result_hash: postgresJsonbHash(resultPayload),
     });
     expect(lateCommit.error?.message).toContain("company_discovery_attempt_terminal");
-    const retried = await owner.rpc("retry_company_discovery", {
+    const retried = await owner.rpc("retry_company_discovery_setup", {
       p_job: retryJob,
       p_expected_version: 5,
     });
     expect(retried.error).toBeNull();
+    expect(retried.data).toMatchObject({
+      job_id: retryJob,
+      status: "queued",
+      version: 6,
+      reused: false,
+    });
+    const duplicateRetry = await owner.rpc("retry_company_discovery_setup", {
+      p_job: retryJob,
+      p_expected_version: 5,
+    });
+    expect(duplicateRetry.error).toBeNull();
+    expect(duplicateRetry.data).toMatchObject({
+      job_id: retryJob,
+      status: "queued",
+      version: 6,
+      reused: true,
+    });
     const directWorker = `stage0-direct-${randomUUID()}`;
     expect((await service.from("worker_runtime_slots").insert({
       slot_name: `${directWorker}:direct_model`,
@@ -2492,12 +2599,166 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     });
     expect(newCommit.error).toBeNull();
     const newCommitted = newCommit.data as CommittedResult;
-    const replacementSelect = await service.rpc("select_company_discovery_result", {
+    const commitOnlyStatus = await owner.rpc("company_discovery_setup_status");
+    expect(commitOnlyStatus.error).toBeNull();
+    expect(commitOnlyStatus.data).toMatchObject({
+      state: "learning_failed",
+      job: {
+        job_id: retryJob,
+        failure_code: "result_selection_incomplete",
+      },
+    });
+    const replacementSelect = await owner.rpc("retry_company_discovery_setup", {
+      p_job: retryJob,
+      p_expected_version: newCommitted.job_version,
+    });
+    expect(replacementSelect.error).toBeNull();
+    expect(replacementSelect.data).toMatchObject({
+      job_id: retryJob,
+      attempt_id: newAttempt.attempt_id,
+      result_id: newCommitted.result_id,
+      status: "awaiting_review",
+      recovered: true,
+      reused: true,
+    });
+    const duplicateSelection = await service.rpc("select_company_discovery_result", {
       p_job_id: retryJob,
       p_attempt_id: newAttempt.attempt_id,
       p_expected_version: newCommitted.job_version,
     });
-    expect(replacementSelect.error).toBeNull();
+    expect(duplicateSelection.error).toBeNull();
+    expect(duplicateSelection.data).toMatchObject({
+      job_id: retryJob,
+      attempt_id: newAttempt.attempt_id,
+      result_id: newCommitted.result_id,
+      version: replacementSelect.data.version,
+    });
+    const candidateDraftRows = await owner.from("company_discovery_onboarding_drafts")
+      .select("id,decision_ids,draft,draft_hash")
+      .eq("source_result_id", newCommitted.result_id);
+    expect(candidateDraftRows.error).toBeNull();
+    expect(candidateDraftRows.data).toHaveLength(1);
+    const candidateDraftId = String(candidateDraftRows.data![0]!.id);
+    expect(candidateDraftId).toMatch(UUID_PATTERN);
+    expect(candidateDraftRows.data![0]).toMatchObject({
+      id: candidateDraftId,
+      decision_ids: [],
+      draft: {
+        schema_version: "company_discovery.onboarding_draft.v2",
+        review_mode: "onboarding_voice",
+        source_job_id: retryJob,
+        source_attempt_id: newAttempt.attempt_id,
+        source_result_id: newCommitted.result_id,
+        authority: {
+          rules_approved: false,
+          powers_granted: false,
+          operational_mode_changed: false,
+        },
+      },
+    });
+    const setupStatus = await owner.rpc("company_discovery_setup_status");
+    expect(setupStatus.error).toBeNull();
+    expect(setupStatus.data).toMatchObject({
+      schema_version: "company_discovery.setup_status.v1",
+      state: "ready_for_onboarding",
+      entitlement_source: "pilot_allowlist",
+      ready_proof: {
+        job_id: retryJob,
+        attempt_id: newAttempt.attempt_id,
+        result_id: newCommitted.result_id,
+        draft_id: candidateDraftId,
+      },
+    });
+    const intruderSetupStatus = await intruder.rpc("company_discovery_setup_status");
+    expect(intruderSetupStatus.error).toBeNull();
+    expect(intruderSetupStatus.data).toMatchObject({
+      state: "learning",
+      entitlement_source: "pilot_allowlist",
+      job: {
+        normalized_origin: "https://example.net/",
+      },
+      summary: null,
+      ready_proof: null,
+    });
+    expect(intruderSetupStatus.data.job.job_id).not.toBe(retryJob);
+    const sameUrlJobsBefore = Number(await runDisposableLocalSql(`
+      select count(*)::text from public.worker_jobs
+      where tenant_id = ${localSqlUuid(ownerTenant)}
+        and request_hash = (select request_hash from public.worker_jobs
+          where id = ${localSqlUuid(retryJob)});
+    `));
+    const reusedSetup = await owner.rpc("start_company_discovery_setup", {
+      p_url: newAttempt.normalized_origin,
+    });
+    expect(reusedSetup.error).toBeNull();
+    expect(reusedSetup.data).toMatchObject({
+      job_id: retryJob,
+      reused: true,
+    });
+    expect(Number(await runDisposableLocalSql(`
+      select count(*)::text from public.worker_jobs
+      where tenant_id = ${localSqlUuid(ownerTenant)}
+        and request_hash = (select request_hash from public.worker_jobs
+          where id = ${localSqlUuid(retryJob)});
+    `))).toBe(sameUrlJobsBefore);
+    const candidateDraftReadback = await service.rpc(
+      "read_company_discovery_onboarding_draft",
+      { p_tenant: ownerTenant, p_owner: ownerId },
+    );
+    expect(candidateDraftReadback.error).toBeNull();
+    expect(candidateDraftReadback.data.draft.schema_version).toBe(
+      "company_discovery.onboarding_draft.v2",
+    );
+    const candidatePrefillCall = randomUUID();
+    const candidatePrefillRequest = randomUUID();
+    expect((await service.from("calls").insert({
+      id: candidatePrefillCall,
+      tenant_id: ownerTenant,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").insert({
+      id: candidatePrefillRequest,
+      tenant_id: ownerTenant,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `candidate-prefill-offer-${candidatePrefillRequest}`,
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "ready",
+      answer_sdp: `candidate-prefill-answer-${candidatePrefillRequest}`,
+      call_id: candidatePrefillCall,
+      handled_at: new Date().toISOString(),
+    }).eq("id", candidatePrefillRequest)).error).toBeNull();
+    const { buildCompanyDiscoveryPrefill: buildCandidatePrefill } = await import(
+      "../src/company-discovery-prefill.ts"
+    );
+    const candidatePrefill = buildCandidatePrefill({
+      tenant_id: ownerTenant,
+      call_id: candidatePrefillCall,
+      draft_readback: candidateDraftReadback.data,
+      localities: [],
+    });
+    expect(candidatePrefill.coverage.next_action.question_pt).toContain(
+      "Eu já analisei seu website",
+    );
+    const candidatePrefillCommit = await service.rpc(
+      "initialize_company_discovery_onboarding_prefill",
+      {
+        p_tenant: ownerTenant,
+        p_target_call: candidatePrefillCall,
+        p_owner: ownerId,
+        p_draft: candidatePrefill.draft_id,
+        p_coverage: candidatePrefill.coverage,
+      },
+    );
+    expect(candidatePrefillCommit.error).toBeNull();
+    expect(candidatePrefillCommit.data).toMatchObject({
+      status: "initialized",
+      draft_id: candidateDraftId,
+      revision: 1,
+    });
     const rulesBeforeV2Review = Number(await runDisposableLocalSql(`
       select count(*)::text from public.rules
       where tenant_id = ${localSqlUuid(ownerTenant)};
@@ -2548,7 +2809,8 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       "company_discovery_review_claim_set_invalid",
     );
     expect((await owner.from("company_discovery_onboarding_drafts")
-      .select("id").eq("source_result_id", newCommitted.result_id)).data).toEqual([]);
+      .select("id").eq("source_result_id", newCommitted.result_id)).data)
+      .toEqual([{ id: candidateDraftId }]);
     const incompleteUnresolvedNonce = await owner.rpc(
       "create_company_discovery_review_nonce_v2",
       {
@@ -2573,7 +2835,8 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       "company_discovery_unresolved_decision_set_mismatch",
     );
     expect((await owner.from("company_discovery_onboarding_drafts")
-      .select("id").eq("source_result_id", newCommitted.result_id)).data).toEqual([]);
+      .select("id").eq("source_result_id", newCommitted.result_id)).data)
+      .toEqual([{ id: candidateDraftId }]);
     const v2Nonce = await owner.rpc("create_company_discovery_review_nonce_v2", {
       p_job: retryJob,
       p_result: newCommitted.result_id,
@@ -3112,6 +3375,27 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     expect(zeroClaimDraft.data!.draft.unresolved_items[0].coverage_field).toMatch(
       /^discovery[.]owner_question[.][0-9a-f]{32}$/,
     );
+    const endedSetupCalls = await service.from("calls").update({
+      status: "ended",
+      ended_at: new Date().toISOString(),
+    }).eq("tenant_id", ownerTenant).eq("status", "active");
+    expect(endedSetupCalls.error).toBeNull();
+    const reviewedDraftSetup = await owner.rpc("company_discovery_setup_status");
+    expect(reviewedDraftSetup.error).toBeNull();
+    expect(reviewedDraftSetup.data).toMatchObject({
+      state: "ready_for_onboarding",
+      job: {
+        job_id: zeroClaimJob,
+        status: "reviewed",
+        processing_stage: "reviewed",
+      },
+      ready_proof: {
+        job_id: zeroClaimJob,
+        attempt_id: zeroClaimAttempt.attempt_id,
+        result_id: zeroClaimCommit.data.result_id,
+        draft_id: zeroClaimReview.data.onboarding_draft_id,
+      },
+    });
     const zeroClaimCleanup = await service.rpc(
       "record_company_discovery_cleanup",
       {

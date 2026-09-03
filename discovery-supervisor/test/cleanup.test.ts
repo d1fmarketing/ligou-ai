@@ -13,6 +13,7 @@ import type {
   WorkerResult,
   WorkerStatus,
 } from "../src/contracts";
+import { WorkerExecutionError } from "../src/contracts";
 import { JobStore } from "../src/job-store";
 import type {
   CleanupProof,
@@ -858,6 +859,12 @@ class FakeBroker implements SupervisorBroker {
   readonly calls: string[] = [];
   modelAccess?: ModelAccessCapability;
   private state: WorkerStatus = { state: "succeeded" };
+  private terminalError?: Error;
+
+  failWith(error: Error): void {
+    this.state = { state: "failed" };
+    this.terminalError = error;
+  }
 
   async submit(
     adapterId: DiscoveryAdapterId,
@@ -887,6 +894,7 @@ class FakeBroker implements SupervisorBroker {
 
   async result(): Promise<WorkerResult> {
     this.calls.push("result");
+    if (this.terminalError) throw this.terminalError;
     return result;
   }
 }
@@ -1082,6 +1090,35 @@ describe("DiscoverySupervisor attempt lifecycle", () => {
       fence_generation: 8,
       runtime_slot: runtimeSlot,
     });
+  });
+
+  test("persists the DirectModel terminal code instead of generic worker_wait_failed", async () => {
+    const store = new FakeStore();
+    const broker = new FakeBroker();
+    broker.failWith(new WorkerExecutionError(
+      "direct_model_stream_incomplete",
+      "subscription ended before a complete terminal",
+    ));
+    const supervisor = new DiscoverySupervisor({
+      worker_id: "openclaw-stage0-slot",
+      store,
+      broker,
+      fetch_gateway: new FakeFetchGateway(),
+      select_adapter: () => "openclaw",
+      allocate_runtime_identity: async () => identity(),
+      runtime_identities: new AttemptRuntimeIdentityRegistry(),
+      subscription_gateway: supervisorSubscriptionGateway(store),
+      retire_worker: async () => completeRuntimeProof,
+      cleanup_bound_runtime: async () => completeRuntimeProof,
+      now: () => Date.parse("2026-09-01T10:01:00.000Z"),
+    });
+
+    await expect(supervisor.runOnce()).rejects.toThrow("subscription ended");
+    expect(broker.calls).toEqual(["submit", "status", "result", "cancel"]);
+    expect(store.calls).toContain(
+      "terminalize-failed-direct_model_stream_incomplete",
+    );
+    expect(store.calls).not.toContain("terminalize-failed-worker_wait_failed");
   });
 
   test("reallocates opaque identity after a database reservation collision before creating resources", async () => {

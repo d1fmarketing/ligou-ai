@@ -63,6 +63,40 @@ function readback(approvedFacts: unknown[], unresolvedItems: unknown[] = []) {
   };
 }
 
+function candidateReadback(candidateFacts: unknown[], overrides: Record<string, unknown> = {}) {
+  return {
+    draft_id: DRAFT,
+    draft_version: 2,
+    draft_hash: "c".repeat(64),
+    draft: {
+      schema_version: "company_discovery.onboarding_draft.v2",
+      review_mode: "onboarding_voice",
+      source_job_id: JOB,
+      source_attempt_id: ATTEMPT,
+      source_result_id: RESULT,
+      source_result_hash: RESULT_HASH,
+      source_result_schema: "company_discovery.result.v2",
+      candidate_facts: candidateFacts,
+      missing_information: [],
+      ambiguous_information: [],
+      contradictions: [],
+      owner_private_information_needed: [],
+      sources: [{
+        evidence_id: EVIDENCE,
+        url: "https://example.com/",
+        excerpt: "Example website evidence",
+        crawl_order: 0,
+      }],
+      authority: {
+        rules_approved: false,
+        powers_granted: false,
+        operational_mode_changed: false,
+      },
+      ...overrides,
+    },
+  };
+}
+
 function unresolved(overrides: Record<string, unknown> = {}) {
   return {
     unresolved_id: "99999999-9999-4999-8999-999999999999",
@@ -100,6 +134,59 @@ async function build(approvedFacts: unknown[], options: Record<string, unknown> 
 }
 
 describe("Company Discovery Stage 0B onboarding prefill fixtures", () => {
+  test("candidate draft v2 prefills clear facts while preserving directed private questions", async () => {
+    const approved = fact("business_hours", {
+      timezone: "America/Los_Angeles",
+      ordinary_intervals: [{ days: ["mon", "tue", "wed", "thu", "fri"], opens: "08:00", closes: "18:00" }],
+      closed_days: ["sat", "sun"], ordinary_24_7: false,
+      emergency_24_7: false, after_hours: "unavailable",
+      holiday_policy: "Closed on federal holidays",
+    });
+    const {
+      decision: _decision,
+      edited_by_owner: _edited,
+      website_missing_fields: _websiteMissing,
+      website_ambiguous_fields: _websiteAmbiguous,
+      website_contradictions: _websiteContradictions,
+      website_uncertainty: _websiteUncertainty,
+      ...candidate
+    } = approved;
+    const module = await import("../src/company-discovery-prefill.ts");
+    const projection = module.buildCompanyDiscoveryPrefill({
+      tenant_id: TENANT,
+      call_id: CALL,
+      draft_readback: candidateReadback([{ ...candidate, review_status: "pending_onboarding" }], {
+        missing_information: ["Quais tipos de clientes vocês atendem?"],
+        owner_private_information_needed: [{
+          field: "authority.book",
+          question_pt: "O Ligou pode confirmar agendamentos?",
+        }],
+      }),
+      localities: [],
+    });
+
+    expect(projection.coverage.snapshot.cells["schedule.business_hours"]?.state).toBe("answered");
+    expect(projection.coverage.next_action.question_pt).toContain(
+      "Eu já analisei seu website",
+    );
+    expect(projection.coverage.snapshot.cells["authority.book"]).toMatchObject({
+      state: "ambiguous",
+      questionPt: "O Ligou pode confirmar agendamentos?",
+    });
+    expect(Object.entries(projection.coverage.snapshot.cells)).toContainEqual([
+      expect.stringMatching(/^discovery[.]owner_question[.][0-9a-f]{32}$/),
+      expect.objectContaining({
+        state: "ambiguous",
+        questionPt: "Quais tipos de clientes vocês atendem?",
+      }),
+    ]);
+    expect(projection.coverage.authority).toEqual({
+      rules_approved: false,
+      powers_granted: false,
+      operational_mode_changed: false,
+    });
+  });
+
   test("1. exact city and state territory resolves only through the locality registry", async () => {
     const projection = await build([fact("service_territory", {
       service_type: null,
@@ -546,5 +633,27 @@ describe("Company Discovery Stage 0B onboarding prefill fixtures", () => {
     expect(typeof priceCell.questionPt).toBe("string");
     expect(priceCell.questionPt).toContain("USD 250.00");
     expect(priceCell.questionPt).toContain("up to two hours");
+  });
+
+  test("keeps an identified service when only its public price is ambiguous", async () => {
+    const projection = await build([fact("service", {
+      service_type: "drain_cleaning",
+      service_names: ["Drain cleaning"],
+      public_price: null,
+      duration_minutes: 90,
+    }, {
+      ambiguous_fields: ["public_price"],
+    })]);
+
+    expect(projection.coverage.snapshot.services).toContain("drain_cleaning");
+    expect(projection.coverage.snapshot.cells[
+      "service:drain_cleaning:service.name_synonyms"
+    ]?.state).toBe("answered");
+    expect(projection.coverage.snapshot.cells[
+      "service:drain_cleaning:service.duration"
+    ]?.state).toBe("answered");
+    expect(projection.coverage.progress.nextQuestion?.field).not.toBe(
+      "service.name_synonyms",
+    );
   });
 });

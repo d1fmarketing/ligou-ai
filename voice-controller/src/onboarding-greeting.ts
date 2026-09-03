@@ -148,6 +148,9 @@ export function onboardingOpeningText(
     return `${identity} Quais serviços sua empresa oferece?`;
   if (!openingResumeContextIsInternallyValid(resumeContext))
     throw new Error("onboarding_opening_resume_context_invalid");
+  if (resumeContext.next_action.question_pt.startsWith(
+    "Eu já analisei seu website",
+  )) return `${identity} ${resumeContext.next_action.question_pt}`;
   return `${identity} Vamos continuar de onde paramos. ${resumeContext.next_action.question_pt}`;
 }
 

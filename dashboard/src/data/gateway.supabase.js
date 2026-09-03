@@ -9,6 +9,7 @@ import {
   scopeUsageAlertQuery,
 } from "./gateway-rule-mapping.js";
 import { buildDiscoveryReviewRequest, mapDiscoveryRead } from "../discovery-model.js";
+import { mapWebsiteSetupStatus, validateWebsiteUrl } from "../website-setup-model.js";
 
 const DISCOVERY_ERROR_COPY = {
   company_discovery_stale_version: "A descoberta mudou enquanto você revisava. Recarregue antes de confirmar.",
@@ -25,6 +26,8 @@ const DISCOVERY_ERROR_COPY = {
   company_discovery_disabled: "A leitura automática do site está desativada. A entrevista continua disponível.",
   company_discovery_tenant_not_allowlisted: "A leitura automática do site não está disponível para esta empresa. A entrevista continua disponível.",
   company_discovery_deadline_expired: "O tempo da leitura terminou. A entrevista continua disponível.",
+  company_discovery_url_change_blocked: "Uma análise já está em andamento. Aguarde a conclusão antes de trocar o endereço.",
+  company_discovery_candidate_context_empty: "O site não produziu informações nem perguntas utilizáveis.",
 };
 
 function discoveryError(error) {
@@ -44,6 +47,24 @@ export async function submitCompanyDiscoveryVia(client, url, idempotencyKey) {
   return discoveryRpc(client, "submit_company_discovery", {
     p_url: url,
     p_idempotency_key: idempotencyKey,
+  });
+}
+
+export async function loadWebsiteSetupVia(client) {
+  const data = await discoveryRpc(client, "company_discovery_setup_status");
+  return mapWebsiteSetupStatus(data);
+}
+
+export async function startWebsiteSetupVia(client, url) {
+  return discoveryRpc(client, "start_company_discovery_setup", {
+    p_url: validateWebsiteUrl(url),
+  });
+}
+
+export async function retryWebsiteSetupVia(client, jobId, expectedVersion) {
+  return discoveryRpc(client, "retry_company_discovery_setup", {
+    p_job: jobId,
+    p_expected_version: expectedVersion,
   });
 }
 
@@ -310,6 +331,18 @@ export function createSupabaseGateway() {
       }
     },
 
+    async loadWebsiteSetup() {
+      return loadWebsiteSetupVia(supabase);
+    },
+
+    async startWebsiteSetup(url) {
+      return startWebsiteSetupVia(supabase, url);
+    },
+
+    async retryWebsiteSetup(jobId, expectedVersion) {
+      return retryWebsiteSetupVia(supabase, jobId, expectedVersion);
+    },
+
     async startCompanyDiscovery(url) {
       const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       return submitCompanyDiscoveryVia(supabase, url, `dashboard-${suffix}`);
@@ -339,6 +372,7 @@ export function createSupabaseGateway() {
         .on("postgres_changes", { event: "*", schema: "public", table: "worker_results" }, onChange)
         .on("postgres_changes", { event: "*", schema: "public", table: "discovery_claims" }, onChange)
         .on("postgres_changes", { event: "*", schema: "public", table: "discovery_decisions" }, onChange)
+        .on("postgres_changes", { event: "INSERT", schema: "public", table: "company_discovery_onboarding_drafts" }, onChange)
         .subscribe();
       return () => { supabase.removeChannel(channel); channel = null; };
     },

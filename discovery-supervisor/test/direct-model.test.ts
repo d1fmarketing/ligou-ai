@@ -11,6 +11,7 @@ import type {
   WorkerJob,
   WorkerResult,
 } from "../src/contracts";
+import { WorkerExecutionError } from "../src/contracts";
 import {
   DirectModelDiscoveryAdapter,
   type DirectModelClock,
@@ -23,7 +24,7 @@ const sourceSnapshot = {
   mime_type: "text/html" as const,
   byte_length: 164,
   content_hash: "c".repeat(64),
-  excerpt: "Example Plumbing. Drain cleaning costs $149 and takes 90 minutes.",
+  excerpt: "Example Plumbing. Drain cleaning costs $149 and takes 90 minutes. Serves Novato, CA.",
   crawl_order: 0,
   crawl_depth: 0,
 };
@@ -46,7 +47,28 @@ const job: WorkerJob = {
   source_snapshots: [sourceSnapshot],
 };
 
+const evidence = [{ source_id: "s0", excerpt: "Example Plumbing" }];
+
 const candidate = {
+  company: {
+    name: { value: "Example Plumbing", evidence },
+    description: null,
+    public_phone: null,
+    public_email: null,
+    public_address: null,
+  },
+  services: [],
+  public_prices_and_conditions: [],
+  service_area: [],
+  business_hours: null,
+  guarantees: [],
+  booking_restrictions: [],
+  emergency_and_safety: [],
+  missing_questions: ["Qual é o preço mínimo privado autorizado?"],
+  contradictions: [],
+};
+
+const expectedCandidate = {
   candidate_facts: [{
     claim_class: "descriptive",
     claim_type: "business_name",
@@ -66,6 +88,36 @@ const candidate = {
 };
 
 const stage0bCandidate = {
+  company: {
+    name: null,
+    description: null,
+    public_phone: null,
+    public_email: null,
+    public_address: null,
+  },
+  services: [],
+  public_prices_and_conditions: [],
+  service_area: [{
+    service_name: null,
+    included_areas: [{
+      kind: "city",
+      name: "Novato",
+      region_state: "CA",
+      country_code: "US",
+    }],
+    excluded_areas: [],
+    radius: null,
+    evidence: [{ source_id: "s0", excerpt: "Serves Novato, CA" }],
+  }],
+  business_hours: null,
+  guarantees: [],
+  booking_restrictions: [],
+  emergency_and_safety: [],
+  missing_questions: ["Qual é a política para feriados?"],
+  contradictions: [],
+};
+
+const expectedStage0bCandidate = {
   candidate_facts: [{
     claim_class: "operational",
     claim_type: "service_territory",
@@ -298,10 +350,15 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
 
     expect(result.schema_version).toBe("company_discovery.result.v2");
     expect(result.candidate_facts[0]!.claim_type).toBe("service_territory");
-    expect(evidenceEnvelope.schema_version).toBe("company_discovery.evidence.v2");
-    expect(serializedContract).toContain("business_hours");
-    expect(serializedContract).toContain("guarantee");
-    expect(serializedContract).toContain("booking_restriction");
+    expect(evidenceEnvelope.schema_version).toBe("company_discovery.evidence.v3");
+    expect(evidenceEnvelope.sources).toEqual([{
+      source_id: "s0",
+      url: sourceSnapshot.url,
+      title: sourceSnapshot.excerpt,
+      content: sourceSnapshot.excerpt,
+    }]);
+    expect(serializedContract).toContain("public_prices_and_conditions");
+    expect(serializedContract).toContain("emergency_and_safety");
     expect(gateway.requests).toHaveLength(1);
     expect(gateway.usageValue.billing_basis).toBe("chatgpt_subscription");
     expect(gateway.usageValue.marginal_api_charge_usd).toBe(0);
@@ -332,13 +389,14 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
     });
     expect(body).not.toHaveProperty("max_output_tokens");
     expect(body).not.toHaveProperty("text");
-    expect(JSON.stringify(body)).toContain("candidate_facts");
+    expect(JSON.stringify(body)).toContain("public_prices_and_conditions");
+    expect(JSON.stringify(body)).not.toContain("claim_schema_version");
     expect(JSON.stringify(body)).not.toContain("tenant_id");
     expect(JSON.stringify(body)).not.toContain(job.job_id);
     expect(result).toEqual({
       schema_version: "company_discovery.result.v2",
       source_snapshots: [sourceSnapshot],
-      ...candidate,
+      ...expectedCandidate,
     } as WorkerResult);
     expect(adapter.subscriptionUsage(handle)).toEqual(gateway.usageValue);
     expect(timer.delays()).toEqual([]);
@@ -381,7 +439,7 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
     expect(await adapter.result(handle)).toEqual({
       schema_version: "company_discovery.result.v2",
       source_snapshots: job.source_snapshots,
-      ...candidate,
+      ...expectedCandidate,
     } as WorkerResult);
     await adapter.retire(handle);
   });
@@ -398,9 +456,32 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
     expect(await adapter.result(handle)).toEqual({
       schema_version: "company_discovery.result.v2",
       source_snapshots: job.source_snapshots,
-      ...candidate,
+      ...expectedCandidate,
     } as WorkerResult);
     await adapter.retire(handle);
+  });
+
+  test("consumes the normalized subscription body incrementally without Response.text", async () => {
+    class StreamingOnlyResponse extends Response {
+      override text(): Promise<string> {
+        return Promise.reject(new Error("Response.text must not be used"));
+      }
+    }
+    const source = streamedSubscriptionResponse(candidate, 2);
+    const gateway = new FakeSubscriptionGateway();
+    gateway.response = async () => new StreamingOnlyResponse(source.clone().body, {
+      status: source.status,
+      headers: source.headers,
+    });
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: controlledClock().clock,
+    });
+
+    const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
+    await expect(adapter.result(handle)).resolves.toMatchObject({
+      schema_version: "company_discovery.result.v2",
+    });
   });
 
   test("tombstones and releases adapter references even when revoke is ambiguous", async () => {
@@ -461,10 +542,10 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
     expect(invalidGateway.revocations).toHaveLength(1);
   });
 
-  test("rejects incomplete or multi-request subscription usage", async () => {
+  test("rejects unknown or invalid subscription usage", async () => {
     for (const mutation of [
-      { usage_complete: false },
-      { request_count: 2 },
+      { usage_complete: false, quota_state: "unknown" },
+      { request_count: 3 },
       { active_requests: 1 },
       { provider: "openai" },
     ]) {
@@ -479,6 +560,113 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
       await expect(adapter.result(handle)).rejects.toThrow("usage incomplete");
       expect(gateway.revocations).toHaveLength(1);
     }
+  });
+
+  test("accepts completed JSON when usage is pending but quota remains available", async () => {
+    const gateway = new FakeSubscriptionGateway();
+    gateway.usageValue = Object.freeze({
+      ...usage,
+      usage_complete: false,
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      quota_state: "available",
+    });
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: controlledClock().clock,
+    });
+
+    const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
+    await expect(adapter.result(handle)).resolves.toMatchObject({
+      schema_version: "company_discovery.result.v2",
+    });
+    expect(adapter.subscriptionUsage(handle)).toMatchObject({
+      usage_complete: false,
+      quota_state: "available",
+    });
+  });
+
+  test("repairs one completed schema-invalid response without resending website evidence", async () => {
+    const gateway = new FakeSubscriptionGateway();
+    const responses = [
+      subscriptionResponse({ company: {} }),
+      subscriptionResponse(candidate),
+    ];
+    gateway.response = async () => responses.shift()!;
+    gateway.usageValue = Object.freeze({ ...usage, request_count: 2 });
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: controlledClock().clock,
+    });
+
+    const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
+    await expect(adapter.result(handle)).resolves.toMatchObject({
+      schema_version: "company_discovery.result.v2",
+      candidate_facts: expectedCandidate.candidate_facts,
+    });
+    expect(gateway.requests).toHaveLength(2);
+    const repairBody = await gateway.requests[1]!.clone().json() as any;
+    const repairInput = JSON.parse(repairBody.input[0].content[0].text);
+    expect(repairInput).toHaveProperty("invalid_output");
+    expect(repairInput).toHaveProperty("output_contract");
+    expect(repairInput.validation_errors[0]).toContain("model output");
+    expect(JSON.stringify(repairInput)).not.toContain(sourceSnapshot.excerpt);
+    expect(JSON.stringify(repairInput)).not.toContain("source_snapshots");
+  });
+
+  test("repairs values rejected only by the final typed WorkerResult contract", async () => {
+    const invalidMappedValue = {
+      ...candidate,
+      business_hours: {
+        timezone: "America/Los_Angeles",
+        ordinary_intervals: [{ days: ["mon"], opens: "08:00", closes: "18:00" }],
+        closed_days: [],
+        ordinary_24_7: "false",
+        emergency_24_7: false,
+        after_hours: "unavailable",
+        holiday_policy: "Closed on holidays",
+        evidence: [{ source_id: "s0", excerpt: "Example Plumbing" }],
+      },
+    };
+    const gateway = new FakeSubscriptionGateway();
+    const responses = [
+      subscriptionResponse(invalidMappedValue),
+      subscriptionResponse(candidate),
+    ];
+    gateway.response = async () => responses.shift()!;
+    gateway.usageValue = Object.freeze({ ...usage, request_count: 2 });
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: controlledClock().clock,
+    });
+
+    const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
+    await expect(adapter.result(handle)).resolves.toMatchObject({
+      schema_version: "company_discovery.result.v2",
+    });
+    expect(gateway.requests).toHaveLength(2);
+  });
+
+  test("classifies a second schema failure with the durable DirectModel code", async () => {
+    const gateway = new FakeSubscriptionGateway();
+    const responses = [
+      subscriptionResponse({ company: {} }),
+      subscriptionResponse({ company: {} }),
+    ];
+    gateway.response = async () => responses.shift()!;
+    gateway.usageValue = Object.freeze({ ...usage, request_count: 2 });
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: controlledClock().clock,
+    });
+
+    const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
+    const error = await adapter.result(handle).catch((caught) => caught);
+    expect(error).toBeInstanceOf(WorkerExecutionError);
+    expect(error.code).toBe("direct_model_schema_invalid");
+    expect(gateway.requests).toHaveLength(2);
   });
 
   test("rejects forged capability before helper or forwarding", async () => {

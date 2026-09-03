@@ -285,6 +285,24 @@ export class ContractValidationError extends Error {
   }
 }
 
+export type WorkerExecutionFailureCode =
+  | "direct_model_provider_error"
+  | "direct_model_stream_incomplete"
+  | "direct_model_stream_truncated"
+  | "direct_model_protocol_invalid"
+  | "direct_model_deadline_exceeded"
+  | "direct_model_schema_invalid";
+
+export class WorkerExecutionError extends Error {
+  readonly code: WorkerExecutionFailureCode;
+
+  constructor(code: WorkerExecutionFailureCode, message: string) {
+    super(message);
+    this.name = "WorkerExecutionError";
+    this.code = code;
+  }
+}
+
 const RESULT_KEYS = [
   "schema_version",
   "source_snapshots",

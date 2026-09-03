@@ -1,5 +1,6 @@
 import {
   ContractValidationError,
+  WorkerExecutionError,
   deepFreeze,
   parseWorkerHandle,
   parseWorkerJob,
@@ -19,6 +20,12 @@ import {
   type WorkerState,
   type WorkerStatus,
 } from "../contracts";
+import {
+  buildDirectModelEvidenceInput,
+  COMPACT_MODEL_SCHEMA,
+  DIRECT_MODEL_SYSTEM_INSTRUCTION,
+  parseAndMapDirectModelExtraction,
+} from "./direct-model-extraction";
 
 const SUBSCRIPTION_REQUEST_URL = "http://ligou-subscription.local/codex/responses";
 const SYSTEM_INSTRUCTION = [
@@ -358,6 +365,48 @@ function errorFrom(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
 
+function directModelExecutionError(value: unknown): WorkerExecutionError {
+  if (value instanceof WorkerExecutionError) return value;
+  const error = errorFrom(value);
+  const message = error.message;
+  if (error instanceof ContractValidationError || /schema|json invalid/i.test(message)) {
+    return new WorkerExecutionError("direct_model_schema_invalid", message);
+  }
+  if (/deadline|timed out|timeout/i.test(message)) {
+    return new WorkerExecutionError("direct_model_deadline_exceeded", message);
+  }
+  if (/byte limit|text limit|exceeds limit|truncat/i.test(message)) {
+    return new WorkerExecutionError("direct_model_stream_truncated", message);
+  }
+  if (/requires exactly one completed terminal|requires one response[.]completed|body missing/i.test(message)) {
+    return new WorkerExecutionError("direct_model_stream_incomplete", message);
+  }
+  if (/http [45][0-9]{2}|provider|response failed/i.test(message)) {
+    return new WorkerExecutionError("direct_model_provider_error", message);
+  }
+  return new WorkerExecutionError("direct_model_protocol_invalid", message);
+}
+
+const FORBIDDEN_MODEL_OUTPUT_KEYS = new Set([
+  "tenant", "tenant_id", "job_id", "attempt_id", "claim_id", "evidence_id",
+  "approved", "approval", "authority", "power", "powers", "rule_id",
+  "effective", "policy_hash", "source_snapshots", "api_key",
+]);
+
+function hasForbiddenModelOutputKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasForbiddenModelOutputKey);
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value as Record<string, unknown>).some(([key, nested]) =>
+    FORBIDDEN_MODEL_OUTPUT_KEYS.has(key) || hasForbiddenModelOutputKey(nested));
+}
+
+function repairableOutputError(error: unknown, output: unknown): boolean {
+  if (hasForbiddenModelOutputKey(output)) return false;
+  if (error instanceof SyntaxError) return true;
+  return error instanceof ContractValidationError &&
+    !error.message.includes("evidence does not match source");
+}
+
 function modelCandidate(value: unknown): DirectModelCandidate {
   const candidate = plainRecord(value, "model output");
   const keys = Object.keys(candidate);
@@ -474,6 +523,42 @@ function completedOutputTextFromSse(value: string): string {
   return streamed;
 }
 
+async function completedOutputTextFromSseResponse(response: Response): Promise<string> {
+  if (response.body === null) throw new Error("direct model subscription SSE body missing");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let pending = "";
+  let totalBytes = 0;
+  const lines: string[] = [];
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      if (!next.value?.byteLength) continue;
+      totalBytes += next.value.byteLength;
+      if (totalBytes > 131_072) {
+        await reader.cancel("normalized SSE limit").catch(() => undefined);
+        throw new Error("direct model normalized SSE exceeds limit");
+      }
+      pending += decoder.decode(next.value, { stream: true });
+      for (;;) {
+        const newline = pending.indexOf("\n");
+        if (newline < 0) break;
+        lines.push(pending.slice(0, newline));
+        pending = pending.slice(newline + 1);
+      }
+    }
+    pending += decoder.decode();
+    if (pending !== "") lines.push(pending);
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    throw new Error("direct model normalized SSE invalid");
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  return completedOutputTextFromSse(lines.join("\n"));
+}
+
 export class DirectModelDiscoveryAdapter implements WorkerAdapter {
   readonly #executions = new Map<string, Execution>();
   readonly #retiredKeys = new Set<string>();
@@ -547,7 +632,10 @@ export class DirectModelDiscoveryAdapter implements WorkerAdapter {
     };
     this.#executions.set(key, execution);
     execution.timer = this.#clock.setTimeout(() => {
-      this.finish(execution, "failed", undefined, new Error("direct model deadline exceeded"));
+      this.finish(execution, "failed", undefined, new WorkerExecutionError(
+        "direct_model_deadline_exceeded",
+        "direct model deadline exceeded",
+      ));
       execution.controller.abort();
       void this.revoke(execution).catch(() => undefined);
     }, deadline - now);
@@ -612,72 +700,94 @@ export class DirectModelDiscoveryAdapter implements WorkerAdapter {
     registration: RegisteredSubscriptionLease,
   ): Promise<void> {
     try {
-      const body = {
-        model: "gpt-5.6-sol",
-        store: false,
-        stream: true,
-        instructions: SYSTEM_INSTRUCTION,
-        input: [{
-          type: "message",
-          role: "user",
-          content: [{
-            type: "input_text",
-            text: JSON.stringify({
-              schema_version: "company_discovery.evidence.v2",
-              output_contract: MODEL_SCHEMA,
-              source_snapshots: job.source_snapshots,
+      const evidenceInput = buildDirectModelEvidenceInput(job.source_snapshots);
+      const requestOutput = async (
+        instructions: string,
+        input: unknown,
+      ): Promise<string> => {
+        const response = await this.#gateway.forward(
+          registration.lease,
+          new Request(SUBSCRIPTION_REQUEST_URL, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              model: "gpt-5.6-sol",
+              store: false,
+              stream: true,
+              instructions,
+              input: [{
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: JSON.stringify(input) }],
+              }],
             }),
-          }],
-        }],
+            signal: execution.controller.signal,
+          }),
+          execution.controller.signal,
+        );
+        if (!response.ok) {
+          throw new Error(`direct model subscription HTTP ${response.status}`);
+        }
+        try {
+          return await completedOutputTextFromSseResponse(response);
+        } catch {
+          throw new Error("direct model subscription SSE invalid");
+        }
       };
-      const response = await this.#gateway.forward(
-        registration.lease,
-        new Request(SUBSCRIPTION_REQUEST_URL, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-          signal: execution.controller.signal,
-        }),
-        execution.controller.signal,
+
+      let completedText = await requestOutput(
+        DIRECT_MODEL_SYSTEM_INSTRUCTION,
+        evidenceInput,
       );
-      const responseText = await response.text();
-      if (!response.ok) {
-        throw new Error(`direct model subscription HTTP ${response.status}`);
-      }
-      let completedText: string;
+      let output: unknown = completedText;
+      const parseCompleteResult = (text: string): WorkerResult => {
+        output = JSON.parse(text);
+        const modelOutput = parseAndMapDirectModelExtraction(output, evidenceInput);
+        return parseWorkerResult({
+          schema_version: "company_discovery.result.v2",
+          source_snapshots: job.source_snapshots,
+          candidate_facts: modelOutput.candidate_facts,
+          missing_questions: modelOutput.missing_questions,
+          contradictions: modelOutput.contradictions,
+          uncertainty: modelOutput.uncertainty,
+        });
+      };
+      let result: WorkerResult;
       try {
-        completedText = completedOutputTextFromSse(responseText);
-      } catch {
-        throw new Error("direct model subscription SSE invalid");
-      }
-      let output: unknown;
-      try {
-        output = JSON.parse(completedText);
+        result = parseCompleteResult(completedText);
       } catch (error) {
-        if (error instanceof SyntaxError) throw new Error("direct model output JSON invalid");
-        throw error;
+        if (!repairableOutputError(error, output)) throw error;
+        completedText = await requestOutput(
+          "Repair the supplied candidate into exactly one JSON object matching output_contract. Return JSON only. Do not add facts or evidence.",
+          {
+            invalid_output: output,
+            output_contract: COMPACT_MODEL_SCHEMA,
+            validation_errors: [errorFrom(error).message.slice(0, 1_000)],
+          },
+        );
+        try {
+          result = parseCompleteResult(completedText);
+        } catch {
+          throw new WorkerExecutionError(
+            "direct_model_schema_invalid",
+            "direct model schema invalid after one repair",
+          );
+        }
       }
-      const modelOutput = modelCandidate(output);
-      const result = parseWorkerResult({
-        schema_version: "company_discovery.result.v2",
-        source_snapshots: job.source_snapshots,
-        candidate_facts: modelOutput.candidate_facts,
-        missing_questions: modelOutput.missing_questions,
-        contradictions: modelOutput.contradictions,
-        uncertainty: modelOutput.uncertainty,
-      });
       const usage = this.#gateway.usage(registration.lease);
       if (usage.provider !== "openai-codex" || usage.model !== "gpt-5.6-sol" ||
           usage.billing_basis !== "chatgpt_subscription" ||
-          usage.marginal_api_charge_usd !== 0 || !usage.usage_complete ||
-          usage.request_count !== 1 || usage.active_requests !== 0 || usage.revoked) {
+          usage.marginal_api_charge_usd !== 0 ||
+          (usage.usage_complete === false && usage.quota_state !== "available") ||
+          (usage.request_count !== 1 && usage.request_count !== 2) ||
+          usage.active_requests !== 0 || usage.revoked) {
         throw new Error("direct model subscription usage incomplete");
       }
       await this.revoke(execution);
       this.finish(execution, "succeeded", result);
     } catch (error) {
       await this.revoke(execution).catch(() => undefined);
-      this.finish(execution, "failed", undefined, errorFrom(error));
+      this.finish(execution, "failed", undefined, directModelExecutionError(error));
     }
   }
 

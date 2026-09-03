@@ -4188,6 +4188,185 @@ button:disabled {
   }
 }
 
+.website-setup-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: clamp(20px, 5vw, 64px);
+  background:
+    radial-gradient(circle at 15% 10%, rgba(70, 194, 175, 0.16), transparent 32%),
+    radial-gradient(circle at 88% 88%, rgba(255, 90, 54, 0.1), transparent 30%),
+    var(--paper);
+}
+
+.website-setup-card {
+  width: min(100%, 760px);
+  padding: clamp(28px, 6vw, 64px);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xl);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--shadow-float);
+}
+
+.website-setup-card h1 {
+  margin: 10px 0 12px;
+  max-width: 640px;
+  font: 700 var(--type-title)/var(--leading-tight) var(--font-display);
+  letter-spacing: var(--track-display);
+}
+
+.website-setup-card > p {
+  max-width: 620px;
+  margin: 0 0 24px;
+  color: var(--text-secondary);
+  line-height: var(--leading-body);
+}
+
+.website-setup-kicker {
+  display: inline-flex;
+  color: var(--teal);
+  font-size: var(--type-small);
+  font-weight: 800;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.website-setup-hero-icon {
+  display: block;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 18px;
+  color: var(--teal);
+}
+
+.website-setup-hero-icon.is-ready { color: var(--teal); }
+.website-setup-hero-icon.is-warning { color: var(--orange-dark); }
+
+.website-setup-form {
+  margin-top: 28px;
+}
+
+.website-setup-form label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 700;
+}
+
+.website-setup-input-row {
+  display: grid;
+  gap: 10px;
+}
+
+.website-setup-input-row input {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--white);
+  color: var(--ink-950);
+  font: inherit;
+}
+
+.website-setup-input-row input:focus {
+  outline: 3px solid color-mix(in srgb, var(--focus-ring-color) 25%, transparent);
+  border-color: var(--focus-ring-color);
+}
+
+.website-setup-error {
+  margin: 10px 0 0;
+  color: var(--orange-dark);
+  font-weight: 600;
+}
+
+.website-setup-progress {
+  display: grid;
+  gap: 10px;
+  padding: 0;
+  margin: 28px 0;
+  list-style: none;
+}
+
+.website-setup-progress li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  min-height: 52px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+}
+
+.website-setup-progress li > :first-child {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border-strong);
+  border-radius: 50%;
+}
+
+.website-setup-progress li.is-active {
+  border-color: var(--teal-bright);
+  background: var(--teal-soft);
+  color: var(--ink-950);
+}
+
+.website-setup-progress li.is-active > svg,
+.website-setup-progress li.is-done > svg {
+  border: 0;
+  color: var(--teal);
+}
+
+.website-setup-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 26px 0;
+}
+
+.website-setup-summary > div {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--paper-warm);
+}
+
+.website-setup-summary dt {
+  color: var(--text-muted);
+  font-size: var(--type-small);
+  font-weight: 700;
+}
+
+.website-setup-summary dd {
+  margin: 5px 0 0;
+  color: var(--ink-950);
+  font-weight: 700;
+}
+
+.website-setup-services {
+  margin-bottom: 26px;
+  padding: 16px;
+  border-left: 3px solid var(--teal);
+  background: var(--teal-soft);
+}
+
+.website-setup-services p { margin: 6px 0 0; }
+.website-setup-start { min-width: 220px; }
+
+@media (min-width: 640px) {
+  .website-setup-input-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}
+
+@media (max-width: 520px) {
+  .website-setup-summary { grid-template-columns: 1fr; }
+  .website-setup-start { width: 100%; }
+}
+
+@keyframes website-setup-spin { to { transform: rotate(360deg); } }
+.website-setup-progress .is-spinning { animation: website-setup-spin 900ms linear infinite; }
+
 @media (hover: hover) {
   .destination-link,
   .button,
