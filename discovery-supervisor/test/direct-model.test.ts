@@ -15,6 +15,7 @@ import { WorkerExecutionError } from "../src/contracts";
 import {
   DirectModelDiscoveryAdapter,
   type DirectModelClock,
+  type DirectModelValidationEvidence,
 } from "../src/adapters/direct-model";
 
 const sourceSnapshot = {
@@ -165,6 +166,20 @@ function subscriptionResponse(
     })}\n\ndata: [DONE]\n\n`,
     { status: 200, headers: { "content-type": "text/event-stream" } },
   );
+}
+
+function subscriptionTextResponse(text: string): Response {
+  return new Response(`data: ${JSON.stringify({
+    type: "response.completed",
+    response: {
+      status: "completed",
+      error: null,
+      output: [{ type: "message", content: [{ type: "output_text", text }] }],
+    },
+  })}\n\ndata: [DONE]\n\n`, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
 }
 
 function duplicateTerminalResponse(output: unknown): Response {
@@ -651,22 +666,90 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
 
   test("classifies a second schema failure with the durable DirectModel code", async () => {
     const gateway = new FakeSubscriptionGateway();
+    const invalid = { company: { private_value: "must-never-enter-the-receipt" } };
     const responses = [
-      subscriptionResponse({ company: {} }),
-      subscriptionResponse({ company: {} }),
+      subscriptionResponse(invalid),
+      subscriptionResponse(invalid),
     ];
     gateway.response = async () => responses.shift()!;
     gateway.usageValue = Object.freeze({ ...usage, request_count: 2 });
+    const validationEvidence: DirectModelValidationEvidence[] = [];
     const adapter = new DirectModelDiscoveryAdapter({
       subscription_gateway: gateway,
       clock: controlledClock().clock,
+      record_validation_evidence: (evidence) => { validationEvidence.push(evidence); },
     });
 
-    const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
+    const candidateJob = { ...job, attempt_id: crypto.randomUUID() };
+    const handle = await adapter.submit(candidateJob, capability);
     const error = await adapter.result(handle).catch((caught) => caught);
     expect(error).toBeInstanceOf(WorkerExecutionError);
     expect(error.code).toBe("direct_model_schema_invalid");
     expect(gateway.requests).toHaveLength(2);
+    expect(validationEvidence).toEqual([
+      expect.objectContaining({
+        schema_version: "ligou.direct_model_validation_evidence.v1",
+        job_id: job.job_id,
+        attempt_id: candidateJob.attempt_id,
+        fence_generation: job.fence_generation,
+        request_number: 1,
+        phase: "initial",
+        validation_stage: "compact_extraction",
+        json_state: "object",
+        root_fields_present: ["company"],
+        unknown_root_field_count: 0,
+        error_kind: "contract_validation",
+        error_path: "root",
+        error_reason: "exact_keys_invalid",
+      }),
+      expect.objectContaining({
+        request_number: 2,
+        phase: "repair",
+        validation_stage: "compact_extraction",
+        json_state: "object",
+        root_fields_present: ["company"],
+        unknown_root_field_count: 0,
+        error_kind: "contract_validation",
+        error_path: "root",
+        error_reason: "exact_keys_invalid",
+      }),
+    ]);
+    expect(validationEvidence[0]!.output_bytes).toBe(Buffer.byteLength(JSON.stringify(invalid)));
+    expect(JSON.stringify(validationEvidence)).not.toContain("must-never-enter-the-receipt");
+  });
+
+  test("receipts malformed repair JSON from the current response rather than stale initial structure", async () => {
+    const gateway = new FakeSubscriptionGateway();
+    const responses = [
+      subscriptionResponse({ company: {} }),
+      subscriptionTextResponse("{"),
+    ];
+    gateway.response = async () => responses.shift()!;
+    gateway.usageValue = Object.freeze({ ...usage, request_count: 2 });
+    const validationEvidence: DirectModelValidationEvidence[] = [];
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: controlledClock().clock,
+      record_validation_evidence: (evidence) => { validationEvidence.push(evidence); },
+    });
+
+    const handle = await adapter.submit({ ...job, attempt_id: crypto.randomUUID() }, capability);
+    await expect(adapter.result(handle)).rejects.toMatchObject({
+      code: "direct_model_schema_invalid",
+    });
+    expect(validationEvidence).toHaveLength(2);
+    expect(validationEvidence[1]).toMatchObject({
+      request_number: 2,
+      phase: "repair",
+      validation_stage: "json",
+      output_bytes: 1,
+      json_state: "invalid",
+      root_fields_present: [],
+      unknown_root_field_count: 0,
+      error_kind: "json_syntax",
+      error_path: null,
+      error_reason: "json_syntax_invalid",
+    });
   });
 
   test("rejects forged capability before helper or forwarding", async () => {

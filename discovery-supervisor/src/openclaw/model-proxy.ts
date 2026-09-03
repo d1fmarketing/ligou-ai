@@ -776,7 +776,10 @@ async function readDirectModelSse(
     const snapshot = evidence(resultState);
     if (!evidenceRecorded) {
       evidenceRecorded = true;
-      try { recordEvidence?.(snapshot); } catch {}
+      try {
+        const outcome = recordEvidence?.(snapshot) as unknown;
+        void Promise.resolve(outcome).catch(() => undefined);
+      } catch {}
     }
     return snapshot;
   };

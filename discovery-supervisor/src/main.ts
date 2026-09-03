@@ -6,7 +6,10 @@ import {
   createDiscoveryAttemptContext,
   DiscoveryFetchGateway,
 } from "./fetch/discovery-fetch-gateway";
-import { DirectModelDiscoveryAdapter } from "./adapters/direct-model";
+import {
+  DirectModelDiscoveryAdapter,
+  type DirectModelValidationEvidence,
+} from "./adapters/direct-model";
 import {
   EphemeralOpenClawAttemptFactory,
   OpenClawDiscoveryAdapter,
@@ -79,6 +82,9 @@ export interface ProductionCompositionDependencies {
   readonly now?: () => number;
   readonly record_direct_stream_evidence?: (
     evidence: Readonly<DirectModelAttemptStreamEvidence>,
+  ) => void;
+  readonly record_direct_validation_evidence?: (
+    evidence: Readonly<DirectModelValidationEvidence>,
   ) => void;
 }
 
@@ -169,6 +175,13 @@ export async function composeProductionSupervisor(
   });
   const directAdapter = new DirectModelDiscoveryAdapter({
     subscription_gateway: subscriptionGateway,
+    record_validation_evidence: dependencies.record_direct_validation_evidence ?? ((evidence) => {
+      console.info(JSON.stringify({
+        event: "ligou.direct_model_validation_evidence.v1",
+        recorded_at: new Date((dependencies.now ?? Date.now)()).toISOString(),
+        ...evidence,
+      }));
+    }),
   });
   const openClawAdapter = new OpenClawDiscoveryAdapter({ attempts: openClawFactory });
   const broker = new WorkerBroker({

@@ -310,6 +310,28 @@ export interface DirectModelClock {
 export interface DirectModelOptions {
   readonly subscription_gateway: SubscriptionGateway;
   readonly clock?: DirectModelClock;
+  readonly record_validation_evidence?: (
+    evidence: Readonly<DirectModelValidationEvidence>,
+  ) => void;
+}
+
+export interface DirectModelValidationEvidence {
+  readonly schema_version: "ligou.direct_model_validation_evidence.v1";
+  readonly job_id: string;
+  readonly attempt_id: string;
+  readonly fence_generation: number;
+  readonly request_number: 1 | 2;
+  readonly phase: "initial" | "repair";
+  readonly validation_stage: "json" | "compact_extraction" | "worker_result";
+  readonly output_bytes: number;
+  readonly json_state: "invalid" | "object" | "array" | "scalar";
+  readonly root_fields_present: readonly string[];
+  readonly unknown_root_field_count: number;
+  readonly collection_counts: Readonly<Record<string, number | null>>;
+  readonly forbidden_key_present: boolean;
+  readonly error_kind: "json_syntax" | "contract_validation" | "worker_execution" | "unknown";
+  readonly error_path: string | null;
+  readonly error_reason: string;
 }
 
 interface DirectModelCandidate {
@@ -339,6 +361,12 @@ const MODEL_RESULT_KEYS = [
   "contradictions",
   "uncertainty",
 ] as const;
+const COMPACT_ROOT_FIELDS = COMPACT_MODEL_SCHEMA.required;
+const COMPACT_COLLECTION_FIELDS = [
+  "services", "public_prices_and_conditions", "service_area", "guarantees",
+  "booking_restrictions", "emergency_and_safety", "missing_questions",
+  "contradictions",
+] as const;
 
 const systemClock: DirectModelClock = {
   now: () => Date.now(),
@@ -363,6 +391,155 @@ function plainRecord(value: unknown, message: string): Record<string, unknown> {
 
 function errorFrom(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
+}
+
+function validationError(value: unknown): Pick<
+  DirectModelValidationEvidence,
+  "error_kind" | "error_path" | "error_reason"
+> {
+  const error = errorFrom(value);
+  if (error instanceof SyntaxError) {
+    return {
+      error_kind: "json_syntax",
+      error_path: null,
+      error_reason: "json_syntax_invalid",
+    };
+  }
+  if (error instanceof ContractValidationError) {
+    const separator = error.message.indexOf(": ");
+    const rawPath = separator < 0 ? "" : error.message.slice(0, separator)
+      .replace(/^model output(?: )?/u, "") || "root";
+    const rawReason = separator < 0 ? "" : error.message.slice(separator + 2);
+    const errorPath = /^[a-z_]+(?:\[[0-9]{1,3}\])?(?:[.][a-z_]+(?:\[[0-9]{1,3}\])?)*$/u
+      .test(rawPath)
+      ? rawPath.replace(/\[[0-9]{1,3}\]/gu, "[]")
+      : null;
+    const reasons: readonly (readonly [RegExp, string])[] = [
+      [/^expected exact keys /u, "exact_keys_invalid"],
+      [/^exact candidate keys required$/u, "exact_candidate_keys_invalid"],
+      [/^expected (?:plain )?object$/u, "expected_object"],
+      [/^invalid string$/u, "invalid_string"],
+      [/^invalid array$/u, "invalid_array"],
+      [/^invalid service name$/u, "invalid_service_name"],
+      [/^evidence does not match source$/u, "evidence_mismatch"],
+      [/^evidence required$/u, "evidence_required"],
+      [/^invalid public price$/u, "invalid_public_price"],
+      [/^price amount required$/u, "price_amount_required"],
+      [/^condition required$/u, "condition_required"],
+      [/^invalid territory kind$/u, "invalid_territory_kind"],
+      [/^invalid country code$/u, "invalid_country_code"],
+      [/^invalid duration$/u, "invalid_duration"],
+      [/^invalid radius$/u, "invalid_radius"],
+      [/^empty territory$/u, "empty_territory"],
+      [/^expected integer between /u, "integer_range_invalid"],
+      [/^expected string length /u, "string_length_invalid"],
+      [/^must be JSON serializable$/u, "json_serialization_invalid"],
+      [/^exceeds [0-9]+ bytes$/u, "byte_limit_exceeded"],
+      [/^expected at most [0-9]+ items$/u, "collection_limit_exceeded"],
+      [/^invalid URL$/u, "invalid_url"],
+      [/^HTTPS required$/u, "https_required"],
+      [/^invalid UTC timestamp$/u, "invalid_timestamp"],
+      [/^text\/html required$/u, "mime_type_invalid"],
+      [/^invalid SHA-256$/u, "sha256_invalid"],
+      [/^invalid service type$/u, "invalid_service_type"],
+      [/^at least one name required$/u, "service_name_required"],
+      [/^expected non-exponent decimal string$/u, "decimal_invalid"],
+      [/^invalid currency$/u, "invalid_currency"],
+      [/^invalid public price qualifier$/u, "invalid_price_qualifier"],
+      [/^unsupported .* claim type$/u, "unsupported_claim_type"],
+      [/^duplicate territory area$/u, "duplicate_territory_area"],
+      [/^territory needs explicit /u, "territory_evidence_required"],
+      [/^positive decimal string required$/u, "positive_decimal_required"],
+      [/^invalid radius unit$/u, "invalid_radius_unit"],
+      [/^invalid unique weekdays$/u, "invalid_unique_weekdays"],
+      [/^invalid ordinary interval$/u, "invalid_ordinary_interval"],
+      [/^closed day also has ordinary hours$/u, "closed_day_conflict"],
+      [/^24\/7 flags must be boolean$/u, "hours_boolean_invalid"],
+      [/^ordinary 24\/7 conflicts /u, "ordinary_24_7_conflict"],
+      [/^invalid after-hours value$/u, "invalid_after_hours"],
+      [/^emergency 24\/7 conflicts /u, "emergency_24_7_conflict"],
+      [/^invalid explicit timezone$/u, "invalid_timezone"],
+      [/^invalid guarantee kind$/u, "invalid_guarantee_kind"],
+      [/^invalid guarantee coverage$/u, "invalid_guarantee_coverage"],
+      [/^invalid duration unit$/u, "invalid_duration_unit"],
+      [/^vague guarantee cannot invent a duration$/u, "vague_guarantee_duration"],
+      [/^invalid booking restriction type$/u, "invalid_booking_restriction_type"],
+      [/^invalid booking restriction rule$/u, "invalid_booking_restriction_rule"],
+      [/^explicit condition required$/u, "explicit_condition_required"],
+      [/^amount and currency must appear together$/u, "amount_currency_pair_invalid"],
+      [/^priced qualifier requires public amount$/u, "priced_amount_required"],
+      [/^unknown price cannot carry an amount$/u, "unknown_price_amount_invalid"],
+      [/^conditional public price requires its condition$/u, "conditional_price_condition_required"],
+      [/^unique service names required$/u, "duplicate_service_name"],
+      [/^owner_private facts forbidden$/u, "owner_private_forbidden"],
+      [/^invalid claim class$/u, "invalid_claim_class"],
+      [/^expected 1[.][.]25 evidence references$/u, "evidence_reference_count_invalid"],
+      [/^duplicate evidence reference$/u, "duplicate_evidence_reference"],
+      [/^invalid confidence$/u, "invalid_confidence"],
+      [/^invalid contradiction status$/u, "invalid_contradiction_status"],
+      [/^contradiction status does not match evidence$/u, "contradiction_status_mismatch"],
+      [/^company_discovery[.]claim[.]v2 required$/u, "claim_schema_version_invalid"],
+      [/^ambiguous city region must remain explicit$/u, "ambiguous_city_region_required"],
+      [/^[a-z_]+ must remain missing$/u, "required_missing_field_absent"],
+      [/^supported company discovery result required$/u, "result_schema_invalid"],
+      [/^empty discovery must preserve owner questions$/u, "empty_discovery_questions_required"],
+      [/^company_discovery[.]v1 required$/u, "job_type_invalid"],
+      [/^invalid UUID$/u, "invalid_uuid"],
+    ];
+    const code = reasons.find(([pattern]) => pattern.test(rawReason))?.[1]
+      ?? "contract_validation_failed";
+    return { error_kind: "contract_validation", error_path: errorPath, error_reason: code };
+  }
+  if (error instanceof WorkerExecutionError) {
+    return { error_kind: "worker_execution", error_path: null, error_reason: error.code };
+  }
+  return { error_kind: "unknown", error_path: null, error_reason: "validation_failed" };
+}
+
+function directModelValidationEvidence(
+  job: WorkerJob,
+  requestNumber: 1 | 2,
+  phase: "initial" | "repair",
+  stage: DirectModelValidationEvidence["validation_stage"],
+  outputText: string,
+  parsedOutput: unknown,
+  error: unknown,
+): Readonly<DirectModelValidationEvidence> {
+  const objectOutput = parsedOutput !== null && typeof parsedOutput === "object" &&
+    !Array.isArray(parsedOutput)
+    ? parsedOutput as Record<string, unknown>
+    : undefined;
+  const rootFieldsPresent = objectOutput === undefined
+    ? []
+    : COMPACT_ROOT_FIELDS.filter((field) => Object.hasOwn(objectOutput, field));
+  const allowed = new Set<string>(COMPACT_ROOT_FIELDS);
+  const collectionCounts = Object.fromEntries(COMPACT_COLLECTION_FIELDS.map((field) => [
+    field,
+    objectOutput !== undefined && Array.isArray(objectOutput[field])
+      ? objectOutput[field].length
+      : null,
+  ]));
+  return Object.freeze({
+    schema_version: "ligou.direct_model_validation_evidence.v1",
+    job_id: job.job_id,
+    attempt_id: job.attempt_id,
+    fence_generation: job.fence_generation,
+    request_number: requestNumber,
+    phase,
+    validation_stage: stage,
+    output_bytes: Buffer.byteLength(outputText, "utf8"),
+    json_state: typeof parsedOutput === "string" && parsedOutput === outputText
+      ? "invalid"
+      : Array.isArray(parsedOutput) ? "array"
+      : objectOutput !== undefined ? "object" : "scalar",
+    root_fields_present: Object.freeze(rootFieldsPresent),
+    unknown_root_field_count: objectOutput === undefined
+      ? 0
+      : Object.keys(objectOutput).filter((field) => !allowed.has(field)).length,
+    collection_counts: Object.freeze(collectionCounts),
+    forbidden_key_present: hasForbiddenModelOutputKey(parsedOutput),
+    ...validationError(error),
+  });
 }
 
 function directModelExecutionError(value: unknown): WorkerExecutionError {
@@ -565,6 +742,9 @@ export class DirectModelDiscoveryAdapter implements WorkerAdapter {
   readonly #retiredOrder: string[] = [];
   readonly #gateway: SubscriptionGateway;
   readonly #clock: DirectModelClock;
+  readonly #recordValidationEvidence?: (
+    evidence: Readonly<DirectModelValidationEvidence>,
+  ) => void;
 
   constructor(options: DirectModelOptions) {
     if (options.subscription_gateway === null ||
@@ -573,6 +753,7 @@ export class DirectModelDiscoveryAdapter implements WorkerAdapter {
     }
     this.#gateway = options.subscription_gateway;
     this.#clock = options.clock ?? systemClock;
+    this.#recordValidationEvidence = options.record_validation_evidence;
   }
 
   supports(jobType: WorkerJobType): boolean {
@@ -740,9 +921,14 @@ export class DirectModelDiscoveryAdapter implements WorkerAdapter {
         evidenceInput,
       );
       let output: unknown = completedText;
+      let validationStage: DirectModelValidationEvidence["validation_stage"] = "json";
       const parseCompleteResult = (text: string): WorkerResult => {
+        validationStage = "json";
+        output = text;
         output = JSON.parse(text);
+        validationStage = "compact_extraction";
         const modelOutput = parseAndMapDirectModelExtraction(output, evidenceInput);
+        validationStage = "worker_result";
         return parseWorkerResult({
           schema_version: "company_discovery.result.v2",
           source_snapshots: job.source_snapshots,
@@ -756,6 +942,9 @@ export class DirectModelDiscoveryAdapter implements WorkerAdapter {
       try {
         result = parseCompleteResult(completedText);
       } catch (error) {
+        this.recordValidationEvidence(directModelValidationEvidence(
+          job, 1, "initial", validationStage, completedText, output, error,
+        ));
         if (!repairableOutputError(error, output)) throw error;
         completedText = await requestOutput(
           "Repair the supplied candidate into exactly one JSON object matching output_contract. Return JSON only. Do not add facts or evidence.",
@@ -767,7 +956,10 @@ export class DirectModelDiscoveryAdapter implements WorkerAdapter {
         );
         try {
           result = parseCompleteResult(completedText);
-        } catch {
+        } catch (repairError) {
+          this.recordValidationEvidence(directModelValidationEvidence(
+            job, 2, "repair", validationStage, completedText, output, repairError,
+          ));
           throw new WorkerExecutionError(
             "direct_model_schema_invalid",
             "direct model schema invalid after one repair",
@@ -798,6 +990,15 @@ export class DirectModelDiscoveryAdapter implements WorkerAdapter {
       return readback;
     });
     return execution.revoking;
+  }
+
+  private recordValidationEvidence(
+    evidence: Readonly<DirectModelValidationEvidence>,
+  ): void {
+    try {
+      const outcome = this.#recordValidationEvidence?.(evidence) as unknown;
+      void Promise.resolve(outcome).catch(() => undefined);
+    } catch {}
   }
 
   private assertRegistration(
