@@ -417,12 +417,21 @@ function evidence(
     const source = sources[sourceIndex];
     const excerpt = text(item.excerpt, `${path}[${index}].excerpt`, 240);
     const canonicalExcerpt = canonicalEvidenceText(excerpt);
-    const canonicalSource = source === undefined ? "" : canonicalEvidenceText(source.content);
-    if (!source || canonicalExcerpt === "" ||
-        !` ${canonicalSource} `.includes(` ${canonicalExcerpt} `)) {
+    if (!source || canonicalExcerpt === "") {
       fail(`${path}[${index}]`, "evidence does not match source");
     }
-    indexes.push(sourceIndex);
+    const matches = (candidate: DirectModelEvidenceInput["sources"][number]): boolean =>
+      ` ${canonicalEvidenceText(candidate.content)} `.includes(` ${canonicalExcerpt} `);
+    if (matches(source)) {
+      indexes.push(sourceIndex);
+      continue;
+    }
+    const alternateIndexes = sources.flatMap((candidate, candidateIndex) =>
+      matches(candidate) ? [candidateIndex] : []);
+    if (alternateIndexes.length === 0) {
+      fail(`${path}[${index}]`, "evidence does not match source");
+    }
+    indexes.push(...alternateIndexes);
   }
   if (indexes.length === 0) fail(path, "evidence required");
   return { indexes: [...new Set(indexes)].sort((left, right) => left - right) };

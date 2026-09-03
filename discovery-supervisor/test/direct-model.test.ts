@@ -839,6 +839,50 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
       })],
     });
 
+    const alternateSourceGateway = new FakeSubscriptionGateway();
+    alternateSourceGateway.response = subscriptionResponse({
+      ...candidate,
+      company: {
+        ...candidate.company,
+        name: {
+          value: "Foghorn Air, Inc.",
+          evidence: [{ source_id: "s1", excerpt: "Foghorn Air, Inc." }],
+        },
+      },
+    });
+    const alternateSourceAdapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: alternateSourceGateway,
+      clock: controlledClock().clock,
+    });
+    const secondSourceText = "Contact our team";
+    const alternateSourceJob = {
+      ...job,
+      attempt_id: crypto.randomUUID(),
+      source_snapshots: [{
+        ...sourceSnapshot,
+        excerpt: "Foghorn Air, Inc.",
+        byte_length: Buffer.byteLength("Foghorn Air, Inc.", "utf8"),
+      }, {
+        ...sourceSnapshot,
+        url: "https://example.com/contact",
+        excerpt: secondSourceText,
+        byte_length: Buffer.byteLength(secondSourceText, "utf8"),
+        content_hash: "d".repeat(64),
+        crawl_order: 1,
+      }],
+    };
+    const alternateSourceHandle = await alternateSourceAdapter.submit(
+      alternateSourceJob,
+      capability,
+    );
+    await expect(alternateSourceAdapter.result(alternateSourceHandle)).resolves.toMatchObject({
+      candidate_facts: [expect.objectContaining({
+        claim_type: "business_name",
+        normalized_value: "Foghorn Air, Inc.",
+        evidence_refs: [0],
+      })],
+    });
+
     const paraphrase = {
       ...candidate,
       company: {
