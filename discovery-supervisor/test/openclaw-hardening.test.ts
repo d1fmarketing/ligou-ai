@@ -19,6 +19,7 @@ import {
 } from "../src/openclaw/runtime-identity";
 import {
   FixedModelProxy,
+  type DirectModelStreamEvidence,
 } from "../src/openclaw/model-proxy";
 import {
   AttemptMcpBridge,
@@ -36,6 +37,7 @@ import { DirectModelDiscoveryAdapter } from "../src/adapters/direct-model";
 import {
   CentralSubscriptionGateway,
   UnixSubscriptionListenerManager,
+  type DirectModelAttemptStreamEvidence,
   type SubscriptionRuntimeFileSystem,
 } from "../src/openclaw/subscription-gateway";
 import type {
@@ -496,6 +498,67 @@ function completedSse(usage = {
     "data: [DONE]",
     "",
   ].join("\n");
+}
+
+function productionShapedDirectSse(
+  output: string,
+  options: {
+    readonly reasoning_event_count?: number;
+    readonly reasoning_delta_bytes?: number;
+  } = {},
+) {
+  const encoder = new TextEncoder();
+  const chunks: Uint8Array[] = [];
+  const reasoningEventCount = options.reasoning_event_count ?? 1_750;
+  const reasoningDeltaBytes = options.reasoning_delta_bytes ?? 1_024;
+  const reasoningDelta = `discarded-reasoning:${"r".repeat(reasoningDeltaBytes)}`;
+  const append = (event: unknown): void => {
+    chunks.push(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+  };
+  for (let index = 0; index < reasoningEventCount; index += 1) {
+    append({
+      type: "response.reasoning.delta",
+      sequence_number: index,
+      delta: reasoningDelta,
+    });
+  }
+  const split = Math.max(1, Math.floor(output.length / 2));
+  for (const delta of [output.slice(0, split), output.slice(split)]) {
+    append({
+      type: "response.output_text.delta",
+      item_id: "msg_production_shape",
+      output_index: 2,
+      content_index: 0,
+      delta,
+    });
+  }
+  append({
+    type: "response.completed",
+    response: {
+      status: "completed",
+      error: null,
+      output: [],
+      usage: {
+        input_tokens: 6_800,
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 1_200,
+        total_tokens: 8_000,
+      },
+    },
+  });
+  chunks.push(encoder.encode("data: [DONE]\n\n"));
+  const rawBytes = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+  return {
+    rawBytes,
+    retainedBytes: Buffer.byteLength(output, "utf8"),
+    eventCount: reasoningEventCount + 3,
+    response: new Response(new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        controller.close();
+      },
+    }), { headers: { "content-type": "text/event-stream" } }),
+  };
 }
 
 function subscriptionGovernorStubs(now: number) {
@@ -1112,6 +1175,297 @@ describe("trusted Codex subscription proxy", () => {
       completed_response_count: 1,
       metered_response_count: 1,
     });
+  });
+
+  test("accepts the production-shaped DirectModel envelope above 1.84 MB while retaining only compact JSON", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const deadline = "2099-09-01T10:10:00.000Z";
+    const output = JSON.stringify(directCompactOutput);
+    const fixture = productionShapedDirectSse(output);
+    expect(fixture.rawBytes).toBeGreaterThan(1_836_396);
+    expect(fixture.rawBytes).toBeLessThan(4_194_304);
+    expect(fixture.retainedBytes).toBeLessThan(65_536);
+    expect(fixture.eventCount).toBeLessThan(32_768);
+    let evidence: DirectModelStreamEvidence | undefined;
+    const proxy = new FixedModelProxy({
+      proxy_marker: markerJwt(now),
+      adapter_id: "direct_model",
+      codex_access_grant: syntheticGrant(deadline),
+      upstream_model: "gpt-5.6-sol",
+      deadline_at: deadline,
+      lease_session_id: "stage0_session_abcdefghijklmnop",
+      now: () => now,
+      create_request_id: () => "stage0_req_production_shape",
+      record_direct_stream_evidence: (value) => { evidence = value; },
+      fetch: async () => fixture.response,
+    });
+
+    const response = await proxy.forward(directCodexRequest(markerJwt(now)));
+    const normalized = await response.text();
+    expect(normalized).toContain("Example Plumbing");
+    expect(normalized).not.toContain("discarded-reasoning");
+    expect(Buffer.byteLength(normalized, "utf8")).toBeLessThan(65_536);
+    expect(proxy.usage()).toMatchObject({
+      output_bytes: fixture.rawBytes,
+      completed_response_count: 1,
+      metered_response_count: 1,
+      usage_complete: true,
+    });
+    expect(evidence).toMatchObject({
+      request_id: "stage0_req_production_shape",
+      raw_transport_bytes: fixture.rawBytes,
+      parsed_event_count: fixture.eventCount,
+      retained_output_text_bytes: fixture.retainedBytes,
+      result_state: "complete",
+      terminal_count: 1,
+      usage_state: "complete",
+      partial_json_value_present: true,
+      output_item_id: "msg_production_shape",
+      output_index: 2,
+      content_index: 0,
+      last_valid_event_type: "response.completed",
+      event_counts: {
+        reasoning: 1_750,
+        output_text: 2,
+        terminal: 1,
+        failure: 0,
+        lifecycle: 0,
+      },
+    });
+    expect(evidence!.event_data_bytes.reasoning).toBeGreaterThan(1_800_000);
+    expect(JSON.stringify(evidence)).not.toContain("discarded-reasoning");
+  });
+
+  test("requires complete stable coordinates on every streamed DirectModel output delta", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const deadline = "2099-09-01T10:10:00.000Z";
+    const base = {
+      type: "response.output_text.delta",
+      item_id: "msg_stable",
+      output_index: 2,
+      content_index: 0,
+      delta: "{}",
+    };
+    const terminal = {
+      type: "response.completed",
+      response: { status: "completed", error: null, output: [] },
+    };
+    const scenarios = [
+      [{ ...base, item_id: undefined }],
+      [{ ...base, output_index: undefined }],
+      [{ ...base, content_index: undefined }],
+      [{ ...base, delta: "{" }, { ...base, item_id: "msg_other", delta: "}" }],
+      [{ ...base, delta: "{" }, { ...base, output_index: 3, delta: "}" }],
+      [{ ...base, delta: "{" }, { ...base, content_index: 1, delta: "}" }],
+      [{ ...base, item_id: "unsafe\nidentifier" }],
+    ];
+    for (const deltas of scenarios) {
+      const proxy = new FixedModelProxy({
+        proxy_marker: markerJwt(now),
+        adapter_id: "direct_model",
+        codex_access_grant: syntheticGrant(deadline),
+        upstream_model: "gpt-5.6-sol",
+        deadline_at: deadline,
+        lease_session_id: "stage0_session_abcdefghijklmnop",
+        now: () => now,
+        fetch: async () => new Response([
+          ...deltas.map((event) => `data: ${JSON.stringify(event)}`),
+          `data: ${JSON.stringify(terminal)}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n"), { headers: { "content-type": "text/event-stream" } }),
+      });
+      await expect(proxy.forward(directCodexRequest(markerJwt(now))))
+        .rejects.toThrow();
+    }
+  });
+
+  test("derives terminal-only coordinates and rejects a terminal that changes streamed identity", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const deadline = "2099-09-01T10:10:00.000Z";
+    const output = JSON.stringify(directCompactOutput);
+    let evidence: DirectModelStreamEvidence | undefined;
+    const terminalOnly = new FixedModelProxy({
+      proxy_marker: markerJwt(now),
+      adapter_id: "direct_model",
+      codex_access_grant: syntheticGrant(deadline),
+      upstream_model: "gpt-5.6-sol",
+      deadline_at: deadline,
+      lease_session_id: "stage0_session_abcdefghijklmnop",
+      now: () => now,
+      record_direct_stream_evidence: (value) => { evidence = value; },
+      fetch: async () => new Response(`data: ${JSON.stringify({
+        type: "response.completed",
+        response: {
+          status: "completed",
+          error: null,
+          output: [
+            { type: "reasoning", content: [] },
+            {
+              type: "message",
+              id: "msg_terminal_only",
+              content: [
+                { type: "refusal", refusal: "" },
+                { type: "output_text", text: output },
+              ],
+            },
+          ],
+        },
+      })}\n\ndata: [DONE]\n\n`, {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    });
+
+    await expect(terminalOnly.forward(directCodexRequest(markerJwt(now))))
+      .resolves.toBeInstanceOf(Response);
+    expect(evidence).toMatchObject({
+      output_item_id: "msg_terminal_only",
+      output_index: 1,
+      content_index: 1,
+      retained_output_text_bytes: Buffer.byteLength(output, "utf8"),
+      result_state: "complete",
+    });
+
+    const identityDrift = new FixedModelProxy({
+      proxy_marker: markerJwt(now),
+      adapter_id: "direct_model",
+      codex_access_grant: syntheticGrant(deadline),
+      upstream_model: "gpt-5.6-sol",
+      deadline_at: deadline,
+      lease_session_id: "stage0_session_qrstuvwxyzabcdef",
+      now: () => now,
+      fetch: async () => new Response([
+        `data: ${JSON.stringify({
+          type: "response.output_text.delta",
+          item_id: "msg_streamed",
+          output_index: 2,
+          content_index: 0,
+          delta: output,
+        })}`,
+        `data: ${JSON.stringify({
+          type: "response.completed",
+          response: {
+            status: "completed",
+            error: null,
+            output: [{
+              type: "message",
+              id: "msg_terminal_other",
+              content: [{ type: "output_text", text: output }],
+            }],
+          },
+        })}`,
+        "data: [DONE]",
+        "",
+      ].join("\n\n"), { headers: { "content-type": "text/event-stream" } }),
+    });
+    await expect(identityDrift.forward(directCodexRequest(markerJwt(now))))
+      .rejects.toThrow("terminal output coordinates changed");
+  });
+
+  test("cancels the upstream body on parser failure and receipts only the prior valid event", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const deadline = "2099-09-01T10:10:00.000Z";
+    const encoder = new TextEncoder();
+    let cancelCalls = 0;
+    let evidence: DirectModelStreamEvidence | undefined;
+    const proxy = new FixedModelProxy({
+      proxy_marker: markerJwt(now),
+      adapter_id: "direct_model",
+      codex_access_grant: syntheticGrant(deadline),
+      upstream_model: "gpt-5.6-sol",
+      deadline_at: deadline,
+      lease_session_id: "stage0_session_abcdefghijklmnop",
+      now: () => now,
+      record_direct_stream_evidence: (value) => { evidence = value; },
+      fetch: async () => new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode([
+            `data: ${JSON.stringify({ type: "response.created" })}`,
+            `data: ${JSON.stringify({
+              type: "response.output_text.delta",
+              output_index: 2,
+              content_index: 0,
+              delta: "{}",
+            })}`,
+            "",
+          ].join("\n\n")));
+        },
+        cancel() { cancelCalls += 1; },
+      }), { headers: { "content-type": "text/event-stream" } }),
+    });
+
+    await expect(proxy.forward(directCodexRequest(markerJwt(now))))
+      .rejects.toThrow("item identity");
+    expect(cancelCalls).toBe(1);
+    expect(proxy.usage()).toMatchObject({
+      active_requests: 0,
+      usage_complete: false,
+    });
+    expect(evidence).toMatchObject({
+      parsed_event_count: 2,
+      last_valid_event_type: "response.created",
+      result_state: "pending",
+      terminal_count: 0,
+      usage_state: "unknown",
+    });
+  });
+
+  test("rejects a DirectModel event flood even when its wire bytes remain globally bounded", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const deadline = "2099-09-01T10:10:00.000Z";
+    const fixture = productionShapedDirectSse(JSON.stringify(directCompactOutput), {
+      reasoning_event_count: 32_768,
+      reasoning_delta_bytes: 0,
+    });
+    expect(fixture.rawBytes).toBeLessThan(4_194_304);
+    const proxy = new FixedModelProxy({
+      proxy_marker: markerJwt(now),
+      adapter_id: "direct_model",
+      codex_access_grant: syntheticGrant(deadline),
+      upstream_model: "gpt-5.6-sol",
+      deadline_at: deadline,
+      lease_session_id: "stage0_session_abcdefghijklmnop",
+      now: () => now,
+      fetch: async () => fixture.response,
+    });
+
+    await expect(proxy.forward(directCodexRequest(markerJwt(now))))
+      .rejects.toThrow("event count limit");
+  });
+
+  test("meters the accepted DirectModel wire bytes when a globally oversized stream fails", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const deadline = "2099-09-01T10:10:00.000Z";
+    const fixture = productionShapedDirectSse(JSON.stringify(directCompactOutput), {
+      reasoning_event_count: 4_000,
+      reasoning_delta_bytes: 1_024,
+    });
+    expect(fixture.rawBytes).toBeGreaterThan(4_194_304);
+    let evidence: DirectModelStreamEvidence | undefined;
+    const proxy = new FixedModelProxy({
+      proxy_marker: markerJwt(now),
+      adapter_id: "direct_model",
+      codex_access_grant: syntheticGrant(deadline),
+      upstream_model: "gpt-5.6-sol",
+      deadline_at: deadline,
+      lease_session_id: "stage0_session_abcdefghijklmnop",
+      now: () => now,
+      create_request_id: () => "stage0_req_global_limit",
+      record_direct_stream_evidence: (value) => { evidence = value; },
+      fetch: async () => fixture.response,
+    });
+
+    await expect(proxy.forward(directCodexRequest(markerJwt(now))))
+      .rejects.toThrow("SSE byte limit exceeded");
+    expect(proxy.usage().output_bytes).toBe(4_194_304);
+    expect(evidence).toMatchObject({
+      request_id: "stage0_req_global_limit",
+      metered_transport_bytes: 4_194_304,
+      result_state: "pending",
+      usage_state: "unknown",
+      terminal_count: 0,
+    });
+    expect(evidence!.raw_transport_bytes).toBeGreaterThan(4_194_304);
   });
 
   test("propagates only validated provider cooldown headers", async () => {
@@ -1995,6 +2349,7 @@ describe("central multi-lease subscription gateway", () => {
       error: null,
       output: [{
         type: "message",
+        id: "msg_direct_terminal",
         content: [{
           type: "output_text",
           text: JSON.stringify(directCompactOutput),
@@ -2138,6 +2493,74 @@ describe("central multi-lease subscription gateway", () => {
     expect(adapter.subscriptionUsage(handle)).toMatchObject({
       usage_complete: false,
       quota_state: "available",
+    });
+  });
+
+  test("receipts production-shaped DirectModel transport with attempt identity and exact settlement", async () => {
+    const now = Date.parse("2099-09-01T10:00:00.000Z");
+    const context = centralContext({ adapter_id: "direct_model" });
+    const capability = Object.freeze(Object.create(null)) as ModelAccessCapability;
+    const governor = subscriptionGovernorStubs(now);
+    const fixture = productionShapedDirectSse(JSON.stringify(directCompactOutput));
+    let settlement: SubscriptionRequestSettlement | undefined;
+    let evidence: DirectModelAttemptStreamEvidence | undefined;
+    const gateway = new CentralSubscriptionGateway({
+      model_access_authority: {
+        ...governor,
+        async settleSubscriptionRequest(reservation, received) {
+          settlement = received;
+          return governor.settleSubscriptionRequest(reservation, received);
+        },
+        async assertSubscriptionRecoveryCurrent() { throw new Error("not used"); },
+        async assertModelAccessCurrent() { return context; },
+      },
+      credential_owner: {
+        credential_owner_id: context.credential_owner_id,
+        credential_generation: context.credential_generation,
+        account_id_sha256: context.expected_account_hash,
+      },
+      resolve_codex_grant: async () => syntheticGrant(
+        context.deadline_at,
+        "acct-central-owner",
+      ),
+      listener_manager: {
+        async proveAbsent() { return { listener_closed: true, socket_absent: true }; },
+        async open() {
+          return { async close() { return { listener_closed: true, socket_absent: true }; } };
+        },
+      },
+      record_direct_stream_evidence: (value) => { evidence = value; },
+      now: () => now,
+      random_bytes: () => Buffer.alloc(24, 0x6c),
+      fetch: async () => fixture.response,
+    });
+    const adapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: gateway,
+      clock: {
+        now: () => now,
+        setTimeout: (callback, delay) => setTimeout(callback, delay),
+        clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+      },
+    });
+
+    const handle = await adapter.submit(adapterJob, capability);
+    await expect(adapter.result(handle)).resolves.toEqual(directAdapterResult);
+    expect(settlement).toMatchObject({
+      output_bytes: fixture.rawBytes,
+      observed_input_tokens: 6_800,
+      observed_output_tokens: 1_200,
+      usage_complete: true,
+      quota_state: "available",
+    });
+    expect(evidence).toMatchObject({
+      job_id: adapterJob.job_id,
+      attempt_id: adapterJob.attempt_id,
+      fence_generation: adapterJob.fence_generation,
+      raw_transport_bytes: fixture.rawBytes,
+      retained_output_text_bytes: fixture.retainedBytes,
+      result_state: "complete",
+      terminal_count: 1,
+      usage_state: "complete",
     });
   });
 

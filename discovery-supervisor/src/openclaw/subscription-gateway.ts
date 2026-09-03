@@ -36,8 +36,15 @@ import type { CredentialOwnerBinding } from "./hermes-codex-grant";
 import {
   FixedModelProxy,
   type CodexAccessGrant,
+  type DirectModelStreamEvidence,
   type ModelProxyFetch,
 } from "./model-proxy";
+
+export interface DirectModelAttemptStreamEvidence extends DirectModelStreamEvidence {
+  readonly job_id: string;
+  readonly attempt_id: string;
+  readonly fence_generation: number;
+}
 
 export interface SubscriptionListener {
   close(): Promise<{ readonly listener_closed: boolean; readonly socket_absent: boolean }>;
@@ -117,6 +124,9 @@ export interface CentralSubscriptionGatewayOptions {
   readonly revoke_drain_timeout_ms?: number;
   readonly quota_recovery_authority?: SubscriptionQuotaRecoveryAuthority;
   readonly quota_recovery_worker_id?: string;
+  readonly record_direct_stream_evidence?: (
+    evidence: Readonly<DirectModelAttemptStreamEvidence>,
+  ) => void;
 }
 
 export type SubscriptionQuotaRecoveryOutcome = Readonly<
@@ -970,6 +980,14 @@ export class CentralSubscriptionGateway implements SubscriptionGateway {
       max_concurrency: attemptPolicy.concurrency,
       now: this.#now,
       fetch: this.#options.fetch,
+      record_direct_stream_evidence: context.adapter_id === "direct_model"
+        ? (evidence) => this.#options.record_direct_stream_evidence?.(Object.freeze({
+          job_id: context.job_id,
+          attempt_id: context.attempt_id,
+          fence_generation: context.fence_generation,
+          ...evidence,
+        }))
+        : undefined,
     });
     const state: LeaseState = {
       capability: modelAccess,

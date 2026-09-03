@@ -24,6 +24,7 @@ import {
 import {
   CentralSubscriptionGateway,
   UnixSubscriptionListenerManager,
+  type DirectModelAttemptStreamEvidence,
   type SubscriptionListenerManager,
   type SubscriptionRuntimeRootReadback,
 } from "./openclaw/subscription-gateway";
@@ -76,6 +77,9 @@ export interface ProductionCompositionDependencies {
   readonly fetch_gateway?: DiscoveryFetchGateway;
   readonly cell_runtime?: CellRuntime;
   readonly now?: () => number;
+  readonly record_direct_stream_evidence?: (
+    evidence: Readonly<DirectModelAttemptStreamEvidence>,
+  ) => void;
 }
 
 export interface ProductionSupervisorComposition {
@@ -140,6 +144,13 @@ export async function composeProductionSupervisor(
     fetch: dependencies.model_fetch ?? globalThis.fetch,
     now: dependencies.now,
     revoke_drain_timeout_ms: Math.min(30_000, config.shutdown_timeout_ms),
+    record_direct_stream_evidence: dependencies.record_direct_stream_evidence ?? ((evidence) => {
+      console.info(JSON.stringify({
+        event: "ligou.direct_model_stream_evidence.v1",
+        recorded_at: new Date((dependencies.now ?? Date.now)()).toISOString(),
+        ...evidence,
+      }));
+    }),
   });
   const cellRuntime = dependencies.cell_runtime ?? new CellRuntime({
     command_runner: commandRunner as CommandRunner,

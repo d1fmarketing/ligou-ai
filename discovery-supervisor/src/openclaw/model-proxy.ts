@@ -17,6 +17,32 @@ export interface CodexAccessGrant {
   readonly source: "hermes-auth-store" | "credential_pool";
 }
 
+interface DirectModelEventTotals {
+  readonly reasoning: number;
+  readonly output_text: number;
+  readonly terminal: number;
+  readonly failure: number;
+  readonly lifecycle: number;
+}
+
+export interface DirectModelStreamEvidence {
+  readonly request_id: string;
+  readonly raw_transport_bytes: number;
+  readonly metered_transport_bytes: number;
+  readonly parsed_event_count: number;
+  readonly retained_output_text_bytes: number;
+  readonly result_state: "pending" | "complete" | "invalid" | "incomplete";
+  readonly terminal_count: number;
+  readonly usage_state: "complete" | "pending_reconciliation" | "unknown";
+  readonly partial_json_value_present: boolean;
+  readonly output_item_id: string | null;
+  readonly output_index: number | null;
+  readonly content_index: number | null;
+  readonly last_valid_event_type: string | null;
+  readonly event_counts: DirectModelEventTotals;
+  readonly event_data_bytes: DirectModelEventTotals;
+}
+
 export interface FixedModelProxyOptions {
   readonly proxy_marker: string;
   readonly adapter_id: DiscoveryAdapterId;
@@ -31,6 +57,9 @@ export interface FixedModelProxyOptions {
   readonly max_input_bytes?: number;
   readonly max_output_bytes?: number;
   readonly max_concurrency?: number;
+  readonly record_direct_stream_evidence?: (
+    evidence: Readonly<DirectModelStreamEvidence>,
+  ) => void;
 }
 
 export interface ModelProxyUsage {
@@ -85,8 +114,12 @@ const DEFAULT_MAX_REQUESTS = 28;
 const DEFAULT_MAX_INPUT_BYTES = 400_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8_388_608;
 const MAX_RESPONSE_BYTES = 4_194_304;
-const MAX_DIRECT_RESPONSE_BYTES = 262_144;
+// Historical subscription responses reached 1,836,396 wire bytes while the
+// retained extraction remained small. Use the already-reserved 4 MiB response
+// budget as the finite transport ceiling rather than reusing the JSON budget.
+const MAX_DIRECT_RESPONSE_BYTES = MAX_RESPONSE_BYTES;
 const MAX_DIRECT_TEXT_BYTES = 65_535;
+const MAX_DIRECT_SSE_EVENTS = 32_768;
 const MAX_OBSERVED_INPUT_TOKENS = 400_000;
 const MAX_OBSERVED_OUTPUT_TOKENS = 8_192;
 const ACCESS_EXPIRY_SKEW_SECONDS = 120;
@@ -481,6 +514,19 @@ interface ParsedUsage {
   total_tokens: number;
 }
 
+function parsedUsage(value: unknown): ParsedUsage {
+  const usage = record(value, "Codex usage");
+  const details = record(usage.input_tokens_details, "Codex input token details");
+  const input = integer(usage.input_tokens, "Codex input tokens", 0, Number.MAX_SAFE_INTEGER);
+  const cached = integer(details.cached_tokens, "Codex cached input tokens", 0, input);
+  const output = integer(usage.output_tokens, "Codex output tokens", 0, Number.MAX_SAFE_INTEGER);
+  const total = integer(usage.total_tokens, "Codex total tokens", 0, Number.MAX_SAFE_INTEGER);
+  if (total !== input + output) {
+    throw new ModelProxyPolicyError("Codex total tokens are invalid");
+  }
+  return { input_tokens: input, cached_input_tokens: cached, output_tokens: output, total_tokens: total };
+}
+
 function parseUsage(body: Buffer): ParsedUsage | null {
   let rawUsage: unknown;
   let terminalCount = 0;
@@ -505,14 +551,7 @@ function parseUsage(body: Buffer): ParsedUsage | null {
   }
   if (rawUsage === undefined || terminalCount !== 1) return null;
   try {
-    const usage = record(rawUsage, "Codex usage");
-    const details = record(usage.input_tokens_details, "Codex input token details");
-    const input = integer(usage.input_tokens, "Codex input tokens", 0, Number.MAX_SAFE_INTEGER);
-    const cached = integer(details.cached_tokens, "Codex cached input tokens", 0, input);
-    const output = integer(usage.output_tokens, "Codex output tokens", 0, Number.MAX_SAFE_INTEGER);
-    const total = integer(usage.total_tokens, "Codex total tokens", 0, Number.MAX_SAFE_INTEGER);
-    if (total !== input + output) return null;
-    return { input_tokens: input, cached_input_tokens: cached, output_tokens: output, total_tokens: total };
+    return parsedUsage(rawUsage);
   } catch {
     return null;
   }
@@ -588,31 +627,83 @@ interface DirectSseReadback {
   readonly body: Buffer;
   readonly raw_bytes: number;
   readonly usage: ParsedUsage | null;
+  readonly evidence: Readonly<DirectModelStreamEvidence>;
 }
 
-function directTerminalOutputTexts(value: Record<string, unknown>): string[] {
-  if (!Array.isArray(value.output)) return [];
-  const texts: string[] = [];
-  for (const rawItem of value.output) {
+interface DirectModelTerminalOutput {
+  readonly text: string;
+  readonly item_id: string;
+  readonly output_index: number;
+  readonly content_index: number;
+}
+
+function directModelItemId(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_.:-]{1,200}$/.test(value)) {
+    throw new ModelProxyPolicyError("Codex DirectModel item identity is invalid");
+  }
+  return value;
+}
+
+function directTerminalOutputText(
+  value: Record<string, unknown>,
+): DirectModelTerminalOutput | undefined {
+  if (!Array.isArray(value.output)) return undefined;
+  let output: DirectModelTerminalOutput | undefined;
+  for (let outputIndex = 0; outputIndex < value.output.length; outputIndex += 1) {
+    const rawItem = value.output[outputIndex];
     const item = record(rawItem, "Codex DirectModel terminal output");
     if (item.type !== "message") continue;
     if (!Array.isArray(item.content)) {
       throw new ModelProxyPolicyError("Codex DirectModel terminal content is invalid");
     }
-    for (const rawPart of item.content) {
+    for (let contentIndex = 0; contentIndex < item.content.length; contentIndex += 1) {
+      const rawPart = item.content[contentIndex];
       const part = record(rawPart, "Codex DirectModel terminal content");
       if (part.type === "output_text" && typeof part.text === "string") {
-        texts.push(part.text);
+        if (output !== undefined) {
+          throw new ModelProxyPolicyError(
+            "Codex DirectModel terminal contains multiple output texts",
+          );
+        }
+        if (Buffer.byteLength(part.text, "utf8") > MAX_DIRECT_TEXT_BYTES) {
+          throw new ModelProxyPolicyError("Codex DirectModel output text limit exceeded");
+        }
+        output = Object.freeze({
+          text: part.text,
+          item_id: directModelItemId(item.id),
+          output_index: outputIndex,
+          content_index: contentIndex,
+        });
       }
     }
   }
-  return texts;
+  return output;
+}
+
+type DirectModelEventClass = keyof DirectModelEventTotals;
+
+function directModelEventClass(type: unknown): DirectModelEventClass {
+  if (type === "response.output_text.delta") return "output_text";
+  if (type === "response.completed" || type === "response.done") return "terminal";
+  if (type === "response.failed" || type === "response.incomplete" ||
+      type === "response.cancelled" || type === "error") return "failure";
+  if (typeof type === "string" && type.includes("reasoning")) return "reasoning";
+  return "lifecycle";
+}
+
+function safeDirectModelEventType(value: unknown): string {
+  return typeof value === "string" && /^[A-Za-z0-9_.:-]{1,100}$/.test(value)
+    ? value
+    : "unknown";
 }
 
 async function readDirectModelSse(
   response: Response,
   maximumWireBytes: number,
   signal: AbortSignal,
+  requestId: string,
+  meterWireBytes: (bytes: number) => void,
+  recordEvidence?: (evidence: Readonly<DirectModelStreamEvidence>) => void,
 ): Promise<DirectSseReadback> {
   if (response.body === null) {
     throw new ModelProxyPolicyError("Codex DirectModel SSE body is missing");
@@ -620,16 +711,78 @@ async function readDirectModelSse(
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let pending = "";
-  let rawBytes = 0;
-  let terminal: Record<string, unknown> | undefined;
+  const wireLimit = Math.min(MAX_DIRECT_RESPONSE_BYTES, maximumWireBytes);
+  let rawTransportBytes = 0;
+  let meteredTransportBytes = 0;
+  let parsedEventCount = 0;
   let terminalCount = 0;
+  let terminalOutput: DirectModelTerminalOutput | undefined;
+  let terminalUsage: ParsedUsage | undefined;
   let output = "";
   let outputBytes = 0;
   let itemId: string | undefined;
   let outputIndex: number | undefined;
   let contentIndex: number | undefined;
+  let lastValidEventType: string | null = null;
+  let evidenceRecorded = false;
+  const eventCounts = {
+    reasoning: 0,
+    output_text: 0,
+    terminal: 0,
+    failure: 0,
+    lifecycle: 0,
+  };
+  const eventDataBytes = {
+    reasoning: 0,
+    output_text: 0,
+    terminal: 0,
+    failure: 0,
+    lifecycle: 0,
+  };
+
+  const partialJsonValuePresent = (): boolean => {
+    if (output === "") return false;
+    try {
+      JSON.parse(output);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const evidence = (
+    resultState: DirectModelStreamEvidence["result_state"],
+  ): Readonly<DirectModelStreamEvidence> => Object.freeze({
+    request_id: requestId,
+    raw_transport_bytes: rawTransportBytes,
+    metered_transport_bytes: meteredTransportBytes,
+    parsed_event_count: parsedEventCount,
+    retained_output_text_bytes: outputBytes,
+    result_state: resultState,
+    terminal_count: terminalCount,
+    usage_state: terminalUsage !== undefined
+      ? "complete"
+      : terminalCount === 1 ? "pending_reconciliation" : "unknown",
+    partial_json_value_present: partialJsonValuePresent(),
+    output_item_id: itemId ?? null,
+    output_index: outputIndex ?? null,
+    content_index: contentIndex ?? null,
+    last_valid_event_type: lastValidEventType,
+    event_counts: Object.freeze({ ...eventCounts }),
+    event_data_bytes: Object.freeze({ ...eventDataBytes }),
+  });
+  const emitEvidence = (
+    resultState: DirectModelStreamEvidence["result_state"],
+  ): Readonly<DirectModelStreamEvidence> => {
+    const snapshot = evidence(resultState);
+    if (!evidenceRecorded) {
+      evidenceRecorded = true;
+      try { recordEvidence?.(snapshot); } catch {}
+    }
+    return snapshot;
+  };
 
   const fail = (message: string): never => {
+    emitEvidence(terminalCount === 1 ? "invalid" : outputBytes === 0 ? "pending" : "incomplete");
     throw new ModelProxyPolicyError(message);
   };
   const coordinate = (
@@ -658,45 +811,72 @@ async function readDirectModelSse(
       fail("Codex DirectModel SSE event is invalid");
     }
     const event = record(parsed, "Codex DirectModel SSE event");
+    parsedEventCount += 1;
+    if (parsedEventCount > MAX_DIRECT_SSE_EVENTS) {
+      fail("Codex DirectModel SSE event count limit exceeded");
+    }
+    const eventClass = directModelEventClass(event.type);
+    eventCounts[eventClass] += 1;
+    eventDataBytes[eventClass] += Buffer.byteLength(data, "utf8");
+    const markValid = (): void => {
+      lastValidEventType = safeDirectModelEventType(event.type);
+    };
     if (event.type === "response.output_text.delta") {
       const delta = event.delta;
       if (terminalCount !== 0 || typeof delta !== "string") {
         fail("Codex DirectModel output delta is invalid");
       }
-      if (event.item_id !== undefined) {
-        const candidateItemId = event.item_id;
-        if (typeof candidateItemId !== "string" || candidateItemId.length < 1 ||
-            candidateItemId.length > 200 ||
-            (itemId !== undefined && itemId !== candidateItemId)) {
-          fail("Codex DirectModel item identity changed");
-        }
-        itemId = candidateItemId as string;
+      let candidateItemId: string;
+      try {
+        candidateItemId = directModelItemId(event.item_id);
+      } catch {
+        fail("Codex DirectModel item identity changed");
+      }
+      if (itemId !== undefined && itemId !== candidateItemId!) {
+        fail("Codex DirectModel item identity changed");
+      }
+      itemId = candidateItemId!;
+      if (event.output_index === undefined || event.content_index === undefined) {
+        fail("Codex DirectModel output coordinates are missing");
       }
       outputIndex = coordinate(event.output_index, outputIndex, "output index");
       contentIndex = coordinate(event.content_index, contentIndex, "content index");
-      outputBytes += Buffer.byteLength(delta as string, "utf8");
-      if (outputBytes > MAX_DIRECT_TEXT_BYTES) {
+      const nextOutputBytes = outputBytes + Buffer.byteLength(delta as string, "utf8");
+      if (nextOutputBytes > MAX_DIRECT_TEXT_BYTES) {
         fail("Codex DirectModel output text limit exceeded");
       }
+      outputBytes = nextOutputBytes;
       output += delta as string;
+      markValid();
       return;
     }
     if (event.type === "response.completed" || event.type === "response.done") {
       terminalCount += 1;
       if (terminalCount !== 1) fail("Codex DirectModel terminal is duplicated");
-      terminal = record(event.response, "Codex DirectModel completed response");
+      const terminal = record(event.response, "Codex DirectModel completed response");
       if (terminal.status !== "completed" ||
           (Object.hasOwn(terminal, "error") && terminal.error !== null)) {
         fail("Codex DirectModel terminal is not completed");
       }
+      terminalOutput = directTerminalOutputText(terminal);
+      if (Object.hasOwn(terminal, "usage")) {
+        try {
+          terminalUsage = parsedUsage(terminal.usage);
+        } catch {
+          fail("Codex DirectModel terminal usage is invalid");
+        }
+      }
+      markValid();
       return;
     }
     if (event.type === "response.failed" || event.type === "response.incomplete" ||
         event.type === "response.cancelled" || event.type === "error") {
+      markValid();
       fail("Codex DirectModel response failed");
     }
     // Reasoning and lifecycle events are intentionally ignored. They are
     // neither retained nor relayed to the extraction adapter.
+    markValid();
   };
   const drainLines = (final: boolean): void => {
     for (;;) {
@@ -718,8 +898,16 @@ async function readDirectModelSse(
       const next = await reader.read();
       if (next.done) break;
       if (!next.value?.byteLength) continue;
-      rawBytes += next.value.byteLength;
-      if (rawBytes > Math.min(MAX_DIRECT_RESPONSE_BYTES, maximumWireBytes)) {
+      rawTransportBytes += next.value.byteLength;
+      const accepted = Math.min(
+        next.value.byteLength,
+        Math.max(0, wireLimit - meteredTransportBytes),
+      );
+      if (accepted > 0) {
+        meteredTransportBytes += accepted;
+        meterWireBytes(accepted);
+      }
+      if (rawTransportBytes > wireLimit) {
         await reader.cancel("DirectModel SSE limit").catch(() => undefined);
         fail("Codex DirectModel SSE byte limit exceeded");
       }
@@ -736,32 +924,49 @@ async function readDirectModelSse(
       fail("Codex DirectModel SSE is not valid UTF-8");
     }
     drainLines(true);
+  } catch (error) {
+    await reader.cancel("DirectModel SSE parser failure").catch(() => undefined);
+    if (!evidenceRecorded) {
+      emitEvidence(terminalCount === 1 ? "invalid" : outputBytes === 0 ? "pending" : "incomplete");
+    }
+    throw error;
   } finally {
     try { reader.releaseLock(); } catch {}
   }
-  const completedTerminal = terminal;
-  if (terminalCount !== 1 || completedTerminal === undefined) {
-    throw new ModelProxyPolicyError(
-      "Codex DirectModel requires exactly one completed terminal",
-    );
+  if (terminalCount !== 1) {
+    fail("Codex DirectModel requires exactly one completed terminal");
   }
-  const terminalTexts = directTerminalOutputTexts(completedTerminal);
-  if (output === "" && terminalTexts.length === 1) {
-    output = terminalTexts[0]!;
+  if (itemId === undefined && terminalOutput !== undefined) {
+    output = terminalOutput.text;
     outputBytes = Buffer.byteLength(output, "utf8");
     if (outputBytes > MAX_DIRECT_TEXT_BYTES) {
       fail("Codex DirectModel output text limit exceeded");
     }
-  } else if (terminalTexts.length > 1 ||
-      (terminalTexts.length === 1 && terminalTexts[0] !== output)) {
-    fail("Codex DirectModel terminal output mismatches streamed text");
+    itemId = terminalOutput.item_id;
+    outputIndex = terminalOutput.output_index;
+    contentIndex = terminalOutput.content_index;
+  } else if (terminalOutput !== undefined) {
+    if (terminalOutput.text !== output) {
+      fail("Codex DirectModel terminal output mismatches streamed text");
+    }
+    if (terminalOutput.item_id !== itemId || terminalOutput.output_index !== outputIndex ||
+        terminalOutput.content_index !== contentIndex) {
+      fail("Codex DirectModel terminal output coordinates changed");
+    }
   }
   const safeTerminal: Record<string, unknown> = {
     status: "completed",
     error: null,
     output: [],
   };
-  if (completedTerminal.usage !== undefined) safeTerminal.usage = completedTerminal.usage;
+  if (terminalUsage !== undefined) {
+    safeTerminal.usage = {
+      input_tokens: terminalUsage.input_tokens,
+      input_tokens_details: { cached_tokens: terminalUsage.cached_input_tokens },
+      output_tokens: terminalUsage.output_tokens,
+      total_tokens: terminalUsage.total_tokens,
+    };
+  }
   const frames: string[] = [];
   if (output !== "") {
     frames.push(`data: ${JSON.stringify({
@@ -778,14 +983,14 @@ async function readDirectModelSse(
   })}`);
   frames.push("data: [DONE]", "");
   const body = Buffer.from(frames.join("\n\n"), "utf8");
-  const usage = parseUsage(body);
-  if (Object.hasOwn(completedTerminal, "usage") && usage === null) {
-    fail("Codex DirectModel terminal usage is invalid");
-  }
+  const completedEvidence = emitEvidence(
+    partialJsonValuePresent() ? "complete" : "invalid",
+  );
   return Object.freeze({
     body,
-    raw_bytes: rawBytes,
-    usage,
+    raw_bytes: meteredTransportBytes,
+    usage: terminalUsage ?? null,
+    evidence: completedEvidence,
   });
 }
 
@@ -803,6 +1008,9 @@ export class FixedModelProxy {
   readonly #maxInputBytes: number;
   readonly #maxOutputBytes: number;
   readonly #maxConcurrency: number;
+  readonly #recordDirectStreamEvidence?: (
+    evidence: Readonly<DirectModelStreamEvidence>,
+  ) => void;
   readonly #controllers = new Set<AbortController>();
   #requests = 0;
   #upstreamRequests = 0;
@@ -845,6 +1053,7 @@ export class FixedModelProxy {
     this.#maxInputBytes = limit(options.max_input_bytes, DEFAULT_MAX_INPUT_BYTES, DEFAULT_MAX_INPUT_BYTES, "model input byte limit");
     this.#maxOutputBytes = limit(options.max_output_bytes, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_MAX_OUTPUT_BYTES, "model output byte limit");
     this.#maxConcurrency = limit(options.max_concurrency, 1, 1, "model concurrency limit");
+    this.#recordDirectStreamEvidence = options.record_direct_stream_evidence;
   }
 
   usage(): Readonly<ModelProxyUsage> {
@@ -941,14 +1150,22 @@ export class FixedModelProxy {
       let responseBody: Buffer;
       let usage: ParsedUsage | null;
       if (upstream.ok && this.#adapterId === "direct_model") {
-        const direct = await readDirectModelSse(
-          upstream,
-          Math.min(MAX_DIRECT_RESPONSE_BYTES, outputRemaining),
-          controller.signal,
-        );
+        let direct: DirectSseReadback;
+        try {
+          direct = await readDirectModelSse(
+            upstream,
+            Math.min(MAX_DIRECT_RESPONSE_BYTES, outputRemaining),
+            controller.signal,
+            id,
+            (acceptedBytes) => { this.#outputBytes += acceptedBytes; },
+            this.#recordDirectStreamEvidence,
+          );
+        } catch (error) {
+          this.#usageComplete = false;
+          throw error;
+        }
         responseBody = direct.body;
         usage = direct.usage;
-        this.#outputBytes += direct.raw_bytes;
       } else {
         responseBody = await readBounded(
           upstream,
