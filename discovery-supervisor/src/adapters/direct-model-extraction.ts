@@ -406,6 +406,7 @@ function evidence(
   value: unknown,
   path: string,
   sources: DirectModelEvidenceInput["sources"],
+  fallbackAnchors: readonly string[] = [],
 ): EvidenceReadback {
   const indexes: number[] = [];
   for (const [index, raw] of list(value, path, 5).entries()) {
@@ -428,10 +429,28 @@ function evidence(
     }
     const alternateIndexes = sources.flatMap((candidate, candidateIndex) =>
       matches(candidate) ? [candidateIndex] : []);
-    if (alternateIndexes.length === 0) {
+    if (alternateIndexes.length > 0) {
+      indexes.push(...alternateIndexes);
+      continue;
+    }
+    const canonicalAnchors = fallbackAnchors.map(canonicalEvidenceText)
+      .filter((anchor) => anchor !== "");
+    const canonicalClaimedExcerpt = ` ${canonicalEvidenceText(excerpt)} `;
+    const excerptContainsAnchors = canonicalAnchors.length === fallbackAnchors.length &&
+      canonicalAnchors.length > 0 &&
+      canonicalAnchors.every((anchor) => canonicalClaimedExcerpt.includes(` ${anchor} `));
+    const anchoredIndexes = excerptContainsAnchors
+      ? sources.flatMap((candidate, candidateIndex) => {
+        const content = ` ${canonicalEvidenceText(candidate.content)} `;
+        return canonicalAnchors.every((anchor) => content.includes(` ${anchor} `))
+          ? [candidateIndex]
+          : [];
+      })
+      : [];
+    if (anchoredIndexes.length === 0) {
       fail(`${path}[${index}]`, "evidence does not match source");
     }
-    indexes.push(...alternateIndexes);
+    indexes.push(...anchoredIndexes);
   }
   if (indexes.length === 0) fail(path, "evidence required");
   return { indexes: [...new Set(indexes)].sort((left, right) => left - right) };
@@ -542,11 +561,17 @@ export function parseAndMapDirectModelExtraction(
     if (company[key] === null) continue;
     const observation = object(company[key], `company.${key}`);
     exact(observation, ["value", "evidence"], `company.${key}`);
+    const normalizedValue = text(observation.value, `company.${key}.value`, 2_000);
     facts.push(fact({
       claim_class: "descriptive",
       claim_type: companyTypes[key],
-      normalized_value: text(observation.value, `company.${key}.value`, 2_000),
-      evidence_refs: evidence(observation.evidence, `company.${key}.evidence`, input.sources).indexes,
+      normalized_value: normalizedValue,
+      evidence_refs: evidence(
+        observation.evidence,
+        `company.${key}.evidence`,
+        input.sources,
+        [normalizedValue],
+      ).indexes,
     }));
   }
 

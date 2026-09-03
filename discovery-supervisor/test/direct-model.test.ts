@@ -883,6 +883,43 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
       })],
     });
 
+    const anchoredSource = "Foghorn Air — Heating, Cooling & Heat Pumps for the Bay Area";
+    const anchoredGateway = new FakeSubscriptionGateway();
+    anchoredGateway.response = subscriptionResponse({
+      ...candidate,
+      company: {
+        ...candidate.company,
+        name: {
+          value: "Foghorn Air",
+          evidence: [{
+            source_id: "s0",
+            excerpt: "Foghorn Air is a Bay Area HVAC company",
+          }],
+        },
+      },
+    });
+    const anchoredAdapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: anchoredGateway,
+      clock: controlledClock().clock,
+    });
+    const anchoredJob = {
+      ...job,
+      attempt_id: crypto.randomUUID(),
+      source_snapshots: [{
+        ...sourceSnapshot,
+        excerpt: anchoredSource,
+        byte_length: Buffer.byteLength(anchoredSource, "utf8"),
+      }],
+    };
+    const anchoredHandle = await anchoredAdapter.submit(anchoredJob, capability);
+    await expect(anchoredAdapter.result(anchoredHandle)).resolves.toMatchObject({
+      candidate_facts: [expect.objectContaining({
+        claim_type: "business_name",
+        normalized_value: "Foghorn Air",
+        evidence_refs: [0],
+      })],
+    });
+
     const paraphrase = {
       ...candidate,
       company: {
