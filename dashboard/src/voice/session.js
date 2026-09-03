@@ -392,6 +392,7 @@ const MAX_OPENING_BUSINESS_NAME_LENGTH = 256;
 const MAX_OPENING_TEXT_LENGTH = 1_000;
 const MAX_OPENING_BASE64_LENGTH = 2_000_000;
 const DEFAULT_OPENING_TIMEOUT_MS = 15_000;
+const DEFAULT_OPENING_PLAYBACK_TIMEOUT_MS = 45_000;
 
 function safeOpeningError(detail) {
   return new Error(`Abertura segura indisponível — sessão encerrada (${detail}).`);
@@ -401,6 +402,22 @@ function safeOpeningTimeout(timeoutMs) {
   return Number.isFinite(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60_000
     ? timeoutMs
     : DEFAULT_OPENING_TIMEOUT_MS;
+}
+
+export function resolveOpeningTimeouts(
+  openingTimeoutMs,
+  openingPlaybackTimeoutMs,
+) {
+  const controlMs = safeOpeningTimeout(
+    openingTimeoutMs ?? DEFAULT_OPENING_TIMEOUT_MS,
+  );
+  const playbackMs = safeOpeningTimeout(
+    openingPlaybackTimeoutMs ??
+      (openingTimeoutMs === undefined
+        ? DEFAULT_OPENING_PLAYBACK_TIMEOUT_MS
+        : controlMs),
+  );
+  return { controlMs, playbackMs };
 }
 
 function exactKeys(value, keys) {
@@ -638,12 +655,16 @@ export async function startVoiceSession({
   onEvent,
   onEnd,
   signal,
-  openingTimeoutMs = DEFAULT_OPENING_TIMEOUT_MS,
+  openingTimeoutMs,
+  openingPlaybackTimeoutMs,
 }) {
   if (signal?.aborted) throw safeOpeningError("abertura cancelada");
   const media = await navigator.mediaDevices.getUserMedia({ audio: true });
   const onboarding = sessionType === "onboarding";
-  const boundedOpeningTimeout = safeOpeningTimeout(openingTimeoutMs);
+  const {
+    controlMs: boundedOpeningTimeout,
+    playbackMs: boundedOpeningPlaybackTimeout,
+  } = resolveOpeningTimeouts(openingTimeoutMs, openingPlaybackTimeoutMs);
   let pc = null;
   let channel = null;
   let remoteAudio = null;
@@ -815,7 +836,7 @@ export async function startVoiceSession({
       await waitForDataChannelOpen(channel, boundedOpeningTimeout, setupAbort.signal);
       await playApplicationOpening(
         opening.audioBytes,
-        boundedOpeningTimeout,
+        boundedOpeningPlaybackTimeout,
         setupAbort.signal,
         (audio, objectUrl) => {
           openingAudio = audio;

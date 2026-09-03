@@ -177,6 +177,18 @@ function emptyOpeningRetryMigrationSql(): string {
     .toLowerCase();
 }
 
+function playbackRetryMigrationSql(): string {
+  const names = readdirSync(migrationsDir).filter((name) =>
+    name.endsWith("_company_discovery_playback_retry.sql")
+  );
+  expect(names, "missing Company Discovery playback retry migration")
+    .toHaveLength(1);
+  return readFileSync(path.join(migrationsDir, names[0]!), "utf8")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function functionBody(sql: string, signature: string, nextMarker: string): string {
   const functionName = signature.slice(0, signature.indexOf("("));
   const start = sql.indexOf(`function public.${functionName}(`);
@@ -1135,6 +1147,27 @@ describe("Company Discovery empty-opening retry contract", () => {
     );
     expect(sql).not.toContain(
       "source_allowed( uuid,uuid,uuid,uuid ) to authenticated",
+    );
+  });
+});
+
+describe("Company Discovery playback-timeout retry contract", () => {
+  test("treats a persisted agent-only opening with no provider transcript as owner-empty", () => {
+    const sql = playbackRetryMigrationSql();
+    expect(sql).toContain(
+      "'public.company_discovery_onboarding_prefill_source_allowed(uuid,uuid,uuid,uuid)'::regprocedure",
+    );
+    expect(sql).toContain("v_prior.transcript is not distinct from ''[]''::jsonb");
+    expect(sql).toContain("jsonb_array_length(v_prior.transcript) = 1");
+    expect(sql).toContain(
+      "v_prior.transcript->0->>''role'' is not distinct from ''agent''",
+    );
+    expect(sql).toContain(
+      "v_prior.transcript->0->>''text'' is not distinct from v_request.opening_payload->>''text''",
+    );
+    expect(sql).toContain("company_discovery_playback_retry_patch_mismatch");
+    expect(sql).not.toContain(
+      "grant execute on function public.company_discovery_onboarding_prefill_source_allowed(",
     );
   });
 });
@@ -3176,7 +3209,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       status: "ended",
       ended_at: candidateEndedAt,
       duration_seconds: 1,
-      transcript: [{ role: "agent", text: candidateOpening.text, at: candidateEndedAt }],
+      transcript: [],
       cost_estimate_usd: 0,
       openai_call_id: `call_${candidatePrefillCall.replaceAll("-", "")}`,
       provider_termination_state: "confirmed",

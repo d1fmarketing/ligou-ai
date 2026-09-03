@@ -885,7 +885,7 @@ export function buildCompanyDiscoveryPrefill(
   const next = progress.nextQuestion;
   const projectedQuestion = readback.draft.schema_version ===
       "company_discovery.onboarding_draft.v2"
-    ? `Eu já analisei seu website e encontrei as informações públicas básicas. Agora vou confirmar alguns pontos e perguntar somente o que falta. ${next.questionPt}`
+    ? `Eu já analisei seu website. ${next.questionPt}`
     : next.questionPt;
   const questionPt = projectedQuestion.length <= 1_000
     ? projectedQuestion

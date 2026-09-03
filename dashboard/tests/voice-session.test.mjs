@@ -21,12 +21,55 @@ const {
   handleClientUpgradeRequired,
   markVoiceSessionAccepted,
   onboardingOutcomeCopy,
+  resolveOpeningTimeouts,
   resolveOnboardingOutcome,
   settleStartedSession,
   startVoiceSession,
   voiceSessionRestartLabel,
   watchOnboardingOutcome,
 } = sessionModule;
+
+test("opening playback has its own bounded default while explicit test deadlines stay coupled", () => {
+  assert.deepEqual(resolveOpeningTimeouts(), {
+    controlMs: 15_000,
+    playbackMs: 45_000,
+  });
+  assert.deepEqual(resolveOpeningTimeouts(5), {
+    controlMs: 5,
+    playbackMs: 5,
+  });
+  assert.deepEqual(resolveOpeningTimeouts(10_000, 30_000), {
+    controlMs: 10_000,
+    playbackMs: 30_000,
+  });
+});
+
+test("a separate playback timeout is wired to audio without widening channel or ACK deadlines", async () => {
+  const browser = installVoiceBrowser({ autoPlayback: "pending" });
+  let settled = false;
+  let session = null;
+  try {
+    const starting = startVoiceSession({
+      accessToken: "owner-token",
+      sessionType: "onboarding",
+      openingTimeoutMs: 5,
+      openingPlaybackTimeoutMs: 500,
+    }).finally(() => { settled = true; });
+    await waitUntil(
+      () => browser.audios[1]?.playCalls === 1,
+      "independently bounded opening playback",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(settled, false);
+    browser.audios[1].dispatch("ended");
+    session = await starting;
+    assert.equal(browser.tracks[0].enabled, true);
+    assert.equal(browser.audios[0].muted, false);
+  } finally {
+    session?.end();
+    browser.restore();
+  }
+});
 
 const CLIENT_UPGRADE_MESSAGE_PT =
   "O Ligou foi atualizado. Recarregue esta página para continuar.";

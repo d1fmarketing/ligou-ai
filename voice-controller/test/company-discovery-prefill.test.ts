@@ -169,6 +169,12 @@ describe("Company Discovery Stage 0B onboarding prefill fixtures", () => {
     expect(projection.coverage.next_action.question_pt).toContain(
       "Eu já analisei seu website",
     );
+    expect(projection.coverage.next_action.question_pt.startsWith(
+      "Eu já analisei seu website. ",
+    )).toBe(true);
+    expect(projection.coverage.next_action.question_pt).not.toContain(
+      "encontrei as informações públicas básicas",
+    );
     expect(projection.coverage.snapshot.cells["authority.book"]).toMatchObject({
       state: "ambiguous",
       questionPt: "O Ligou pode confirmar agendamentos?",
