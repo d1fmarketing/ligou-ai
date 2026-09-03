@@ -731,6 +731,137 @@ describe("DirectModelDiscoveryAdapter subscription boundary", () => {
     expect(gateway.requests).toHaveLength(1);
   });
 
+  test("accepts only typography-equivalent evidence while rejecting lexical paraphrases", async () => {
+    const typographyEquivalent = {
+      ...candidate,
+      services: [{
+        name: "Drain cleaning",
+        aliases: [],
+        duration_minutes: 90,
+        evidence: [{
+          source_id: "s0",
+          excerpt: "Drain cleaning costs $149 and takes 90 minutes",
+        }],
+      }],
+      public_prices_and_conditions: [{
+        service_name: "Drain cleaning",
+        price: { amount: "149.00", currency: "USD", qualifier: "fixed", condition: null },
+        evidence: [{
+          source_id: "s0",
+          excerpt: "Drain cleaning costs $149 and takes 90 minutes",
+        }],
+      }],
+    };
+    const acceptedGateway = new FakeSubscriptionGateway();
+    acceptedGateway.response = subscriptionResponse(typographyEquivalent);
+    const accepted = new DirectModelDiscoveryAdapter({
+      subscription_gateway: acceptedGateway,
+      clock: controlledClock().clock,
+    });
+    const acceptedHandle = await accepted.submit({
+      ...job,
+      attempt_id: crypto.randomUUID(),
+    }, capability);
+    await expect(accepted.result(acceptedHandle)).resolves.toMatchObject({
+      candidate_facts: expect.arrayContaining([
+        expect.objectContaining({ claim_type: "service", evidence_refs: [0] }),
+      ]),
+    });
+    expect(acceptedGateway.requests).toHaveLength(1);
+
+    const separatorSource = "$89 diagnostic · most repairs $180–$650";
+    const separatorGateway = new FakeSubscriptionGateway();
+    separatorGateway.response = subscriptionResponse({
+      ...candidate,
+      company: {
+        ...candidate.company,
+        name: {
+          value: "Example Plumbing",
+          evidence: [{
+            source_id: "s0",
+            excerpt: "$89 diagnostic — most repairs $180-$650",
+          }],
+        },
+      },
+    });
+    const separatorAdapter = new DirectModelDiscoveryAdapter({
+      subscription_gateway: separatorGateway,
+      clock: controlledClock().clock,
+    });
+    const separatorJob = {
+      ...job,
+      attempt_id: crypto.randomUUID(),
+      source_snapshots: [{
+        ...sourceSnapshot,
+        excerpt: separatorSource,
+        byte_length: Buffer.byteLength(separatorSource, "utf8"),
+      }],
+    };
+    const separatorHandle = await separatorAdapter.submit(separatorJob, capability);
+    await expect(separatorAdapter.result(separatorHandle)).resolves.toMatchObject({
+      candidate_facts: [expect.objectContaining({ evidence_refs: [0] })],
+    });
+
+    const paraphrase = {
+      ...candidate,
+      company: {
+        ...candidate.company,
+        name: {
+          value: "Example Plumbing",
+          evidence: [{ source_id: "s0", excerpt: "A different plumbing company" }],
+        },
+      },
+    };
+    const rejectedGateway = new FakeSubscriptionGateway();
+    rejectedGateway.response = subscriptionResponse(paraphrase);
+    const rejected = new DirectModelDiscoveryAdapter({
+      subscription_gateway: rejectedGateway,
+      clock: controlledClock().clock,
+    });
+    const rejectedHandle = await rejected.submit({
+      ...job,
+      attempt_id: crypto.randomUUID(),
+    }, capability);
+    await expect(rejected.result(rejectedHandle)).rejects.toThrow("evidence does not match source");
+    expect(rejectedGateway.requests).toHaveLength(1);
+
+    for (const [source, forgedExcerpt] of [
+      ["Duration: 1.5 hours", "Duration: 1-5 hours"],
+      ["Price is $149", "Price is 149"],
+      ["Save 10%", "Save 10"],
+      ["24/7 emergency", "24 7 emergency"],
+    ] as const) {
+      const collisionGateway = new FakeSubscriptionGateway();
+      collisionGateway.response = subscriptionResponse({
+        ...candidate,
+        company: {
+          ...candidate.company,
+          name: {
+            value: "Example Plumbing",
+            evidence: [{ source_id: "s0", excerpt: forgedExcerpt }],
+          },
+        },
+      });
+      const collisionAdapter = new DirectModelDiscoveryAdapter({
+        subscription_gateway: collisionGateway,
+        clock: controlledClock().clock,
+      });
+      const collisionJob = {
+        ...job,
+        attempt_id: crypto.randomUUID(),
+        source_snapshots: [{
+          ...sourceSnapshot,
+          excerpt: source,
+          byte_length: Buffer.byteLength(source, "utf8"),
+        }],
+      };
+      const collisionHandle = await collisionAdapter.submit(collisionJob, capability);
+      await expect(collisionAdapter.result(collisionHandle))
+        .rejects.toThrow("evidence does not match source");
+      expect(collisionGateway.requests).toHaveLength(1);
+    }
+  });
+
   test("repairs values rejected only by the final typed WorkerResult contract", async () => {
     const invalidMappedValue = {
       ...candidate,
