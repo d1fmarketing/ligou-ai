@@ -26,7 +26,7 @@ function applicationOpeningPayload(args: {
   requestId: string;
   callId: string;
   tenantName: string;
-  resumeContext: OnboardingOpeningResumeContext;
+  resumeContext: OnboardingOpeningResumeContext | null;
 }) {
   const text = onboardingOpeningText(args.tenantName, args.resumeContext);
   const audio = Buffer.from([0, 1, 2]);
@@ -49,6 +49,32 @@ function applicationOpeningPayload(args: {
     tts_model: "tts-1-hd",
     cost_usd: 0.001,
     resume_context: args.resumeContext,
+  };
+}
+
+function onboardingCapability(args: {
+  tenantId: string;
+  ownerId: string;
+  callId: string;
+}) {
+  return {
+    actor: "CALLER" as const,
+    tenantSlug: `discovery-${args.tenantId.slice(0, 8)}`,
+    tenantId: args.tenantId,
+    callId: args.callId,
+    ownerUserId: args.ownerId,
+    sessionType: "onboarding" as const,
+    jti: `stage0b-onboarding-${randomUUID()}`,
+    expiresAt: Date.now() + 60_000,
+    allowedTools: [
+      "get_business_info",
+      "record_interview_answer",
+      "approve_onboarding_summary",
+      "end_session",
+    ],
+    authEpoch: 1,
+    policyEpoch: 1,
+    simulation: true,
   };
 }
 
@@ -132,6 +158,18 @@ function onboardingHandoffMigrationSql(): string {
     name.endsWith("_company_discovery_onboarding_processing_handoff.sql")
   );
   expect(names, "missing Company Discovery onboarding processing handoff migration")
+    .toHaveLength(1);
+  return readFileSync(path.join(migrationsDir, names[0]!), "utf8")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function emptyOpeningRetryMigrationSql(): string {
+  const names = readdirSync(migrationsDir).filter((name) =>
+    name.endsWith("_company_discovery_empty_opening_retry.sql")
+  );
+  expect(names, "missing Company Discovery empty-opening retry migration")
     .toHaveLength(1);
   return readFileSync(path.join(migrationsDir, names[0]!), "utf8")
     .replace(/\s+/g, " ")
@@ -1040,6 +1078,63 @@ describe("Company Discovery onboarding startup handoff contract", () => {
     );
     expect(sql).toContain(
       "validate constraint browser_session_requests_opening_state_check",
+    );
+  });
+});
+
+describe("Company Discovery empty-opening retry contract", () => {
+  test("allows only terminal owner-empty openings and preserves every real progress source", () => {
+    const sql = emptyOpeningRetryMigrationSql();
+    expect(sql).toContain(
+      "function public.company_discovery_onboarding_prefill_source_allowed(",
+    );
+    expect(sql).toContain("security definer");
+    expect(sql).toContain("set search_path = ''");
+    expect(sql).toContain("c.test_memory_generation = t.test_memory_generation");
+    expect(sql).toContain("item->>'role' = 'caller'");
+    expect(sql).toContain("'onboarding_voice_approval'");
+    expect(sql).toContain("'onboarding_event_alias'");
+    expect(sql).toContain("r.related_call_id = v_prior.id");
+    expect(sql).toContain("v_coverage_count = 0");
+    expect(sql).toContain("v_coverage_count > 1");
+    expect(sql).toContain(
+      "->>'transition_kind' is distinct from 'discovery_prefill'",
+    );
+    expect(sql).toContain("->'revision' is distinct from '1'::jsonb");
+    expect(sql).toContain(
+      "->'selected_rule_ids' is distinct from '[]'::jsonb",
+    );
+    expect(sql).toContain(
+      "->'materializations' is distinct from '[]'::jsonb",
+    );
+    expect(sql).toContain("'rules_approved', false");
+    expect(sql).toContain("'powers_granted', false");
+    expect(sql).toContain("'operational_mode_changed', false");
+    expect(sql).toContain("->>'coverage_receipt_id'");
+    expect(sql).toContain("'eu já analisei seu website'");
+    expect(sql).toContain("company_discovery_onboarding_prior_progress_present");
+    for (const signature of [
+      "initialize_discovery_prefill_after_empty_opening",
+      "reconcile_discovery_prefill_after_empty_opening",
+    ]) {
+      expect(sql).toContain(`create function public.${signature}(`);
+      expect(sql).toContain(`revoke all on function public.${signature}(`);
+      expect(sql).toContain(`grant execute on function public.${signature}(`);
+    }
+    expect(sql).toContain(
+      "'ligou.company_discovery.onboarding_draft:' || p_tenant::text",
+    );
+    expect(sql).toContain(
+      "'ligou.company_discovery.onboarding_prefill:' || p_tenant::text || ':' || p_target_call::text",
+    );
+    expect(sql).toContain(
+      "revoke all on function public.company_discovery_onboarding_prefill_source_allowed(",
+    );
+    expect(sql).not.toContain(
+      "grant execute on function public.company_discovery_onboarding_prefill_source_allowed(",
+    );
+    expect(sql).not.toContain(
+      "source_allowed( uuid,uuid,uuid,uuid ) to authenticated",
     );
   });
 });
@@ -2853,15 +2948,133 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     expect(candidateDraftReadback.data.draft.schema_version).toBe(
       "company_discovery.onboarding_draft.v2",
     );
-    const candidatePrefillCall = randomUUID();
-    const candidatePrefillRequest = randomUUID();
+
+    // Reproduce the exact production chain before the successful prefill:
+    // one generic app-owned opening with no caller speech, followed by one
+    // pre-provider startup error. Neither call contains owner progress.
+    const genericEmptyCall = randomUUID();
+    const genericEmptyRequest = randomUUID();
+    expect((await service.from("browser_session_requests").insert({
+      id: genericEmptyRequest,
+      tenant_id: ownerTenant,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `generic-empty-offer-${genericEmptyRequest}`,
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "processing",
+      call_id: genericEmptyCall,
+      handled_at: new Date().toISOString(),
+    }).eq("id", genericEmptyRequest)).error).toBeNull();
     expect((await service.from("calls").insert({
-      id: candidatePrefillCall,
+      id: genericEmptyCall,
       tenant_id: ownerTenant,
       channel: "browser",
       session_type: "onboarding",
       status: "active",
     })).error).toBeNull();
+    expect((await service.rpc("reserve_call_budget", {
+      p_tenant: ownerTenant,
+      p_call: genericEmptyCall,
+      p_est_cost: 0.01,
+      p_reserved_minutes: 30,
+    })).error).toBeNull();
+    const genericOpening = applicationOpeningPayload({
+      requestId: genericEmptyRequest,
+      callId: genericEmptyCall,
+      tenantName: "Discovery Owner",
+      resumeContext: null,
+    });
+    expect(genericOpening.text).toContain("Quais serviços sua empresa oferece?");
+    expect((await service.from("browser_session_requests").update({
+      status: "ready",
+      answer_sdp: `generic-empty-answer-${genericEmptyRequest}`,
+      opening_mode_applied: "application_tts_v1",
+      opening_payload: genericOpening,
+    }).eq("id", genericEmptyRequest).eq("status", "processing")).error)
+      .toBeNull();
+    const genericEndedAt = new Date().toISOString();
+    expect((await service.from("calls").update({
+      status: "ended",
+      ended_at: genericEndedAt,
+      duration_seconds: 1,
+      transcript: [{ role: "agent", text: genericOpening.text, at: genericEndedAt }],
+      cost_estimate_usd: 0,
+      openai_call_id: `call_${genericEmptyCall.replaceAll("-", "")}`,
+      provider_termination_state: "confirmed",
+      provider_termination_mode: "hangup",
+      provider_termination_reason: "bounded_opening_smoke",
+      provider_terminated_at: genericEndedAt,
+      provider_usage_state: "not_applicable",
+    }).eq("id", genericEmptyCall)).error).toBeNull();
+    expect((await service.rpc("settle_call_budget", {
+      p_tenant: ownerTenant,
+      p_call: genericEmptyCall,
+      p_actual_cost: 0,
+      p_minutes: 0,
+      p_outcome: "ended",
+      p_detail: { fixture: "generic_empty_opening" },
+    })).error).toBeNull();
+
+    const preProviderEmptyCall = randomUUID();
+    const preProviderEmptyRequest = randomUUID();
+    expect((await service.from("browser_session_requests").insert({
+      id: preProviderEmptyRequest,
+      tenant_id: ownerTenant,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `pre-provider-empty-offer-${preProviderEmptyRequest}`,
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "processing",
+      call_id: preProviderEmptyCall,
+      handled_at: new Date().toISOString(),
+    }).eq("id", preProviderEmptyRequest)).error).toBeNull();
+    expect((await service.from("calls").insert({
+      id: preProviderEmptyCall,
+      tenant_id: ownerTenant,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    })).error).toBeNull();
+    expect((await service.rpc("reserve_call_budget", {
+      p_tenant: ownerTenant,
+      p_call: preProviderEmptyCall,
+      p_est_cost: 0.01,
+      p_reserved_minutes: 30,
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "error",
+      error: "synthetic_empty_opening",
+    }).eq("id", preProviderEmptyRequest).eq("status", "processing")).error)
+      .toBeNull();
+    const preProviderEndedAt = new Date().toISOString();
+    expect((await service.from("calls").update({
+      status: "error",
+      ended_at: preProviderEndedAt,
+      duration_seconds: 0,
+      transcript: [],
+      cost_estimate_usd: 0,
+      provider_termination_state: "not_required",
+      provider_termination_mode: null,
+      provider_termination_reason: "synthetic_empty_opening",
+      provider_usage_state: "not_applicable",
+    }).eq("id", preProviderEmptyCall)).error).toBeNull();
+    expect((await service.rpc("settle_call_budget", {
+      p_tenant: ownerTenant,
+      p_call: preProviderEmptyCall,
+      p_actual_cost: 0,
+      p_minutes: 0,
+      p_outcome: "startup_error",
+      p_detail: { fixture: "pre_provider_empty_opening" },
+    })).error).toBeNull();
+
+    const candidatePrefillCall = randomUUID();
+    const candidatePrefillRequest = randomUUID();
     expect((await service.from("browser_session_requests").insert({
       id: candidatePrefillRequest,
       tenant_id: ownerTenant,
@@ -2876,6 +3089,19 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       call_id: candidatePrefillCall,
       handled_at: new Date().toISOString(),
     }).eq("id", candidatePrefillRequest)).error).toBeNull();
+    expect((await service.from("calls").insert({
+      id: candidatePrefillCall,
+      tenant_id: ownerTenant,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    })).error).toBeNull();
+    expect((await service.rpc("reserve_call_budget", {
+      p_tenant: ownerTenant,
+      p_call: candidatePrefillCall,
+      p_est_cost: 0.01,
+      p_reserved_minutes: 30,
+    })).error).toBeNull();
     const { buildCompanyDiscoveryPrefill: buildCandidatePrefill } = await import(
       "../src/company-discovery-prefill.ts"
     );
@@ -2888,6 +3114,23 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     expect(candidatePrefill.coverage.next_action.question_pt).toContain(
       "Eu já analisei seu website",
     );
+    const { createOnboardingStore: createCandidateOnboardingStore } =
+      await import("../src/onboarding-store.ts");
+    const candidateStore = createCandidateOnboardingStore({
+      client: service as any,
+      timeoutMs: 5_000,
+    });
+    const candidateRecoveredFromEmpty = await candidateStore
+      .initializeOnboardingResume(onboardingCapability({
+        tenantId: ownerTenant,
+        ownerId,
+        callId: candidatePrefillCall,
+      }));
+    expect(candidateRecoveredFromEmpty).toMatchObject({
+      ok: true,
+      status: "discovery_prefill",
+      draftId: candidateDraftId,
+    });
     const candidatePrefillCommit = await service.rpc(
       "initialize_company_discovery_onboarding_prefill",
       {
@@ -2900,7 +3143,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     );
     expect(candidatePrefillCommit.error).toBeNull();
     expect(candidatePrefillCommit.data).toMatchObject({
-      status: "initialized",
+      status: "reused",
       draft_id: candidateDraftId,
       revision: 1,
     });
@@ -2928,6 +3171,170 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
       opening_payload: candidateOpening,
     }).eq("id", candidatePrefillRequest).eq("status", "processing")).error)
       .toBeNull();
+    const candidateEndedAt = new Date().toISOString();
+    expect((await service.from("calls").update({
+      status: "ended",
+      ended_at: candidateEndedAt,
+      duration_seconds: 1,
+      transcript: [{ role: "agent", text: candidateOpening.text, at: candidateEndedAt }],
+      cost_estimate_usd: 0,
+      openai_call_id: `call_${candidatePrefillCall.replaceAll("-", "")}`,
+      provider_termination_state: "confirmed",
+      provider_termination_mode: "hangup",
+      provider_termination_reason: "bounded_website_first_smoke",
+      provider_terminated_at: candidateEndedAt,
+      provider_usage_state: "not_applicable",
+    }).eq("id", candidatePrefillCall)).error).toBeNull();
+    expect((await service.rpc("settle_call_budget", {
+      p_tenant: ownerTenant,
+      p_call: candidatePrefillCall,
+      p_actual_cost: 0,
+      p_minutes: 0,
+      p_outcome: "ended",
+      p_detail: { fixture: "website_first_opening_only" },
+    })).error).toBeNull();
+
+    const candidateRetryCall = randomUUID();
+    const candidateRetryRequest = randomUUID();
+    expect((await service.from("browser_session_requests").insert({
+      id: candidateRetryRequest,
+      tenant_id: ownerTenant,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `candidate-retry-offer-${candidateRetryRequest}`,
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "processing",
+      call_id: candidateRetryCall,
+      handled_at: new Date().toISOString(),
+    }).eq("id", candidateRetryRequest)).error).toBeNull();
+    expect((await service.from("calls").insert({
+      id: candidateRetryCall,
+      tenant_id: ownerTenant,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    })).error).toBeNull();
+    expect((await service.rpc("reserve_call_budget", {
+      p_tenant: ownerTenant,
+      p_call: candidateRetryCall,
+      p_est_cost: 0.01,
+      p_reserved_minutes: 30,
+    })).error).toBeNull();
+    const candidateRetryResume = await candidateStore
+      .initializeOnboardingResume(onboardingCapability({
+        tenantId: ownerTenant,
+        ownerId,
+        callId: candidateRetryCall,
+      }));
+    expect(candidateRetryResume).toMatchObject({
+      ok: true,
+      status: "discovery_prefill",
+      draftId: candidateDraftId,
+    });
+    if (!candidateRetryResume.ok || candidateRetryResume.status !== "discovery_prefill") {
+      throw new Error("candidate retry prefill missing");
+    }
+    expect(typeof candidateRetryResume.nextAction.question_pt).toBe("string");
+    expect(String(candidateRetryResume.nextAction.question_pt)).toContain(
+      "Eu já analisei seu website",
+    );
+    expect(candidateRetryResume.coverageReceiptId).not.toBe(
+      candidatePrefillCommit.data.coverage_receipt_id,
+    );
+    const candidateRetryContext = {
+      coverage_receipt_id: candidateRetryResume.coverageReceiptId,
+      revision: 1 as const,
+      snapshot_digest: candidateRetryResume.digest,
+      next_action: candidateRetryResume.nextAction as OnboardingOpeningResumeContext["next_action"],
+    };
+    expect({
+      receipt_uuid: UUID_PATTERN.test(candidateRetryContext.coverage_receipt_id),
+      digest: /^[0-9a-f]{64}$/.test(candidateRetryContext.snapshot_digest),
+      action_keys: Object.keys(candidateRetryContext.next_action).sort(),
+      action_type: candidateRetryContext.next_action.type,
+      field_type: typeof candidateRetryContext.next_action.field,
+      question_type: typeof candidateRetryContext.next_action.question_pt,
+      subject_valid: candidateRetryContext.next_action.subject === undefined ||
+        typeof candidateRetryContext.next_action.subject === "string",
+    }).toEqual({
+      receipt_uuid: true,
+      digest: true,
+      action_keys: ["field", "question_pt", "type"],
+      action_type: "ask",
+      field_type: "string",
+      question_type: "string",
+      subject_valid: true,
+    });
+    const candidateRetryOpening = applicationOpeningPayload({
+      requestId: candidateRetryRequest,
+      callId: candidateRetryCall,
+      tenantName: "Discovery Owner",
+      resumeContext: candidateRetryContext,
+    });
+    expect((await service.from("browser_session_requests").update({
+      status: "ready",
+      answer_sdp: `candidate-retry-answer-${candidateRetryRequest}`,
+      opening_mode_applied: "application_tts_v1",
+      opening_payload: candidateRetryOpening,
+    }).eq("id", candidateRetryRequest).eq("status", "processing")).error)
+      .toBeNull();
+    const candidateRetryEndedAt = new Date().toISOString();
+    expect((await service.from("calls").update({
+      status: "ended",
+      ended_at: candidateRetryEndedAt,
+      duration_seconds: 2,
+      transcript: [
+        { role: "agent", text: candidateRetryOpening.text, at: candidateRetryEndedAt },
+        { role: "caller", text: "Esta resposta deve bloquear o reset.", at: candidateRetryEndedAt },
+      ],
+      cost_estimate_usd: 0,
+      openai_call_id: `call_${candidateRetryCall.replaceAll("-", "")}`,
+      provider_termination_state: "confirmed",
+      provider_termination_mode: "hangup",
+      provider_termination_reason: "synthetic_owner_progress",
+      provider_terminated_at: candidateRetryEndedAt,
+      provider_usage_state: "not_applicable",
+    }).eq("id", candidateRetryCall)).error).toBeNull();
+    expect((await service.rpc("settle_call_budget", {
+      p_tenant: ownerTenant,
+      p_call: candidateRetryCall,
+      p_actual_cost: 0,
+      p_minutes: 0,
+      p_outcome: "ended",
+      p_detail: { fixture: "owner_progress_blocks_retry" },
+    })).error).toBeNull();
+
+    const blockedRetryCall = randomUUID();
+    const blockedRetryRequest = randomUUID();
+    expect((await service.from("browser_session_requests").insert({
+      id: blockedRetryRequest,
+      tenant_id: ownerTenant,
+      user_id: ownerId,
+      session_type: "onboarding",
+      offer_sdp: `blocked-retry-offer-${blockedRetryRequest}`,
+      opening_mode_requested: "application_tts_v1",
+      onboarding_protocol_version: 2,
+    })).error).toBeNull();
+    expect((await service.from("browser_session_requests").update({
+      status: "processing",
+      call_id: blockedRetryCall,
+      handled_at: new Date().toISOString(),
+    }).eq("id", blockedRetryRequest)).error).toBeNull();
+    expect((await service.from("calls").insert({
+      id: blockedRetryCall,
+      tenant_id: ownerTenant,
+      channel: "browser",
+      session_type: "onboarding",
+      status: "active",
+    })).error).toBeNull();
+    expect(await candidateStore.initializeOnboardingResume(onboardingCapability({
+      tenantId: ownerTenant,
+      ownerId,
+      callId: blockedRetryCall,
+    }))).toMatchObject({ ok: false, code: "changed" });
     const rulesBeforeV2Review = Number(await runDisposableLocalSql(`
       select count(*)::text from public.rules
       where tenant_id = ${localSqlUuid(ownerTenant)};

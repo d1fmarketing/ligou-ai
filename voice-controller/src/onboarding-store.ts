@@ -1070,6 +1070,7 @@ export function createOnboardingStore(
   const initializeDiscoveryPrefill = async (
     cap: Capability,
     started: number,
+    requireDraft = false,
   ): Promise<OnboardingResume> => {
     const preparationFailure = (
       error: unknown,
@@ -1110,7 +1111,14 @@ export function createOnboardingStore(
       );
     }
     if (draftResult.data === null) {
-      return { ok: true, status: "none", durationMs: elapsed(now, started) };
+      return requireDraft
+        ? failure(
+            "changed",
+            "latest onboarding state cannot be replaced without a discovery draft",
+            now,
+            started,
+          )
+        : { ok: true, status: "none", durationMs: elapsed(now, started) };
     }
     let registry: LocalityRegistryEntry[];
     try {
@@ -1221,7 +1229,9 @@ export function createOnboardingStore(
         const context = projection.coverage.discovery_context;
         const reconciled = await bounded((signal) =>
           abortable<BoundaryResult<unknown>>(client.rpc(
-            "reconcile_company_discovery_onboarding_prefill",
+            requireDraft
+              ? "reconcile_discovery_prefill_after_empty_opening"
+              : "reconcile_company_discovery_onboarding_prefill",
             {
               p_tenant: cap.tenantId,
               p_target_call: cap.callId,
@@ -1280,7 +1290,9 @@ export function createOnboardingStore(
     try {
       const initialized = await bounded((signal) =>
         abortable<BoundaryResult<unknown>>(client.rpc(
-          "initialize_company_discovery_onboarding_prefill",
+          requireDraft
+            ? "initialize_discovery_prefill_after_empty_opening"
+            : "initialize_company_discovery_onboarding_prefill",
           {
             p_tenant: cap.tenantId,
             p_target_call: cap.callId,
@@ -1372,9 +1384,10 @@ export function createOnboardingStore(
         if (message.includes("onboarding_resume_source_missing"))
           return await initializeDiscoveryPrefill(cap, started);
         if (
-          message.includes("onboarding_resume_latest_ineligible") ||
-          message.includes("onboarding_resume_source_consumed")
-        )
+          result.error.code === "55000" &&
+          message === "onboarding_resume_latest_ineligible"
+        ) return await initializeDiscoveryPrefill(cap, started, true);
+        if (message.includes("onboarding_resume_source_consumed"))
           return failure(
             "changed",
             "latest onboarding state cannot be resumed safely",

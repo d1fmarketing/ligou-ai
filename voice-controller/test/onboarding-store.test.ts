@@ -935,13 +935,65 @@ describe("initializeOnboardingResume", () => {
 
   test("blocks an ineligible latest source instead of permitting fresh fallback", async () => {
     const denied = new SupabaseBoundaryFake();
-    denied.rpcResult = {
-      data: null,
-      error: { code: "55000", message: "onboarding_resume_latest_ineligible" },
+    denied.rpcHandler = (name) => {
+      if (name === "initialize_onboarding_resume") return {
+        data: null,
+        error: { code: "55000", message: "onboarding_resume_latest_ineligible" },
+      };
+      if (name === "read_company_discovery_onboarding_draft") {
+        return { data: null, error: null };
+      }
+      return { data: null, error: { message: `unexpected ${name}` } };
     };
     const deniedStore = createOnboardingStore({ client: denied.client() });
     expect(await deniedStore.initializeOnboardingResume(ownerCapability()))
       .toMatchObject({ ok: false, code: "changed" });
+  });
+
+  test("uses Discovery only when its database boundary certifies retry after an empty latest opening", async () => {
+    const boundary = new SupabaseBoundaryFake();
+    const draft = discoveryDraftReadback();
+    boundary.rpcHandler = (name, args) => {
+      if (name === "initialize_onboarding_resume") return {
+        data: null,
+        error: { code: "55000", message: "onboarding_resume_latest_ineligible" },
+      };
+      if (name === "read_company_discovery_onboarding_draft") {
+        return { data: draft, error: null };
+      }
+      if (
+        name ===
+          "initialize_discovery_prefill_after_empty_opening"
+      ) {
+        const coverage = args.p_coverage as Record<string, unknown>;
+        return {
+          data: {
+            status: "initialized",
+            draft_id: draft.draft_id,
+            draft_hash: draft.draft_hash,
+            coverage_receipt_id: TARGET_RECEIPT_ID,
+            revision: 1,
+            snapshot_digest: "e".repeat(64),
+            next_action: coverage.next_action,
+            coverage: { ...coverage, snapshot_digest: "e".repeat(64) },
+          },
+          error: null,
+        };
+      }
+      return { data: null, error: { message: `unexpected ${name}` } };
+    };
+    const store = createOnboardingStore({ client: boundary.client(), now: () => 31 });
+
+    expect(await store.initializeOnboardingResume(ownerCapability())).toMatchObject({
+      ok: true,
+      status: "discovery_prefill",
+      coverageReceiptId: TARGET_RECEIPT_ID,
+    });
+    expect(boundary.rpcCalls.map((call) => call.name)).toEqual([
+      "initialize_onboarding_resume",
+      "read_company_discovery_onboarding_draft",
+      "initialize_discovery_prefill_after_empty_opening",
+    ]);
   });
 
   test("blocks a consumed source instead of permitting a reset", async () => {
