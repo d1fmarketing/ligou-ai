@@ -29,6 +29,8 @@ const ALLOWED_RPCS = new Set([
   "quarantine_company_discovery_slot",
   "reserve_company_discovery_subscription_request",
   "settle_company_discovery_subscription_request",
+  "claim_company_discovery_subscription_quota_recovery",
+  "settle_company_discovery_subscription_quota_recovery",
 ]);
 
 function endpoint(value: string): string {

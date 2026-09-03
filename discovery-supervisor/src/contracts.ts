@@ -82,6 +82,7 @@ declare const modelAccessCapabilityBrand: unique symbol;
 declare const subscriptionLeaseCapabilityBrand: unique symbol;
 declare const subscriptionRecoveryCapabilityBrand: unique symbol;
 declare const subscriptionRequestReservationBrand: unique symbol;
+declare const subscriptionQuotaRecoveryCapabilityBrand: unique symbol;
 
 export interface ModelAccessCapability {
   readonly [modelAccessCapabilityBrand]: "ligou-model-access";
@@ -202,6 +203,85 @@ export interface SubscriptionRecoveryContext {
   readonly subscription_socket_path: string;
   readonly runtime_kind: "openclaw_cell" | "direct_model_subscription";
   readonly late_result_rejected: true;
+}
+
+export interface SubscriptionCredentialOwnerBinding {
+  readonly credential_owner_id: string;
+  readonly credential_generation: number;
+  readonly account_id_sha256: string;
+}
+
+export interface SubscriptionQuotaRecoveryCapability {
+  readonly [subscriptionQuotaRecoveryCapabilityBrand]: "ligou-subscription-quota-recovery";
+}
+
+export interface SubscriptionQuotaRecoveryClaim {
+  readonly capability: SubscriptionQuotaRecoveryCapability;
+  readonly probe_id: string;
+  readonly recovery_generation: number;
+  readonly lease_until: string;
+  readonly deadline_at: string;
+  readonly credential_owner_id: string;
+  readonly credential_generation: number;
+  readonly expected_account_hash: string;
+  readonly provider: "openai-codex";
+  readonly auth_kind: "chatgpt_subscription_oauth";
+  readonly model: "gpt-5.6-sol";
+}
+
+export interface SubscriptionQuotaRecoveryBlocked {
+  readonly state: "blocked";
+}
+
+export type SubscriptionQuotaRecoveryClaimResult =
+  | SubscriptionQuotaRecoveryClaim
+  | SubscriptionQuotaRecoveryBlocked;
+
+export interface SubscriptionQuotaRecoveryObservation {
+  readonly request_sha256: string | null;
+  readonly response_sha256: string | null;
+  readonly request_bytes: number;
+  readonly response_bytes: number;
+  readonly input_tokens: number | null;
+  readonly output_tokens: number | null;
+  readonly total_tokens: number | null;
+  readonly usage_complete: boolean;
+  readonly terminal_complete: boolean;
+}
+
+export type SubscriptionQuotaRecoveryTerminalReason =
+  | "probe_succeeded"
+  | "probe_grant_failed"
+  | "probe_provider_failed"
+  | "probe_usage_ambiguous"
+  | "probe_context_changed"
+  | "probe_lease_expired";
+
+export interface SubscriptionQuotaRecoverySettlement {
+  readonly outcome: "available" | "unknown";
+  readonly terminal_reason: SubscriptionQuotaRecoveryTerminalReason;
+  readonly observation: SubscriptionQuotaRecoveryObservation;
+}
+
+export interface SubscriptionQuotaRecoveryReadback {
+  readonly probe_id: string;
+  readonly recovery_generation: number;
+  readonly status: "succeeded" | "ambiguous";
+  readonly quota_state: "available" | "unknown";
+  readonly next_probe_at: string | null;
+  readonly governor_recovered: boolean;
+}
+
+export interface SubscriptionQuotaRecoveryAuthority {
+  claimSubscriptionQuotaRecovery(
+    owner: SubscriptionCredentialOwnerBinding,
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<Readonly<SubscriptionQuotaRecoveryClaimResult> | null>;
+  settleSubscriptionQuotaRecovery(
+    capability: SubscriptionQuotaRecoveryCapability,
+    settlement: SubscriptionQuotaRecoverySettlement,
+  ): Promise<Readonly<SubscriptionQuotaRecoveryReadback>>;
 }
 
 export interface SubscriptionPolicy {

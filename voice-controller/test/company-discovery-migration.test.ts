@@ -81,6 +81,17 @@ function websiteFirstMigrationSql(): string {
     .toLowerCase();
 }
 
+function quotaRecoveryMigrationSql(): string {
+  const names = readdirSync(migrationsDir).filter((name) =>
+    name.endsWith("_company_discovery_subscription_quota_recovery.sql")
+  );
+  expect(names, "missing subscription quota recovery migration").toHaveLength(1);
+  return readFileSync(path.join(migrationsDir, names[0]!), "utf8")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function functionBody(sql: string, signature: string, nextMarker: string): string {
   const functionName = signature.slice(0, signature.indexOf("("));
   const start = sql.indexOf(`function public.${functionName}(`);
@@ -943,6 +954,48 @@ describe("website-first Company Discovery database contract", () => {
   });
 });
 
+describe("stale subscription quota recovery database contract", () => {
+  test("elects one bounded service-only probe without changing historical reservations", () => {
+    const sql = quotaRecoveryMigrationSql();
+    expect(sql).toContain(
+      "create table public.company_discovery_subscription_quota_recovery_probes",
+    );
+    expect(sql).toContain("company_discovery_subscription_quota_one_running_probe");
+    expect(sql).toContain("quota_unknown_since + interval '1 hour'");
+    expect(sql).toContain("wa.cleanup_state <> 'proved'");
+    expect(sql).toContain("j.status in ('queued','running')");
+    expect(sql).not.toContain("insert into public.company_discovery_subscription_reservations");
+    for (const signature of [
+      "claim_company_discovery_subscription_quota_recovery(text,uuid,bigint,text,integer)",
+      "settle_company_discovery_subscription_quota_recovery(uuid,bigint,text,text,text,jsonb)",
+    ]) {
+      const body = functionBody(sql, signature, `revoke all on function public.${signature}`);
+      expect(body).toContain("security definer");
+      expect(body).toContain("set search_path = ''");
+      expect(sql).toContain(`grant execute on function public.${signature} to service_role`);
+      expect(sql).not.toContain(`grant execute on function public.${signature} to authenticated`);
+    }
+  });
+
+  test("requires measured terminal subscription usage before atomically reopening quota", () => {
+    const sql = quotaRecoveryMigrationSql();
+    const settle = functionBody(
+      sql,
+      "settle_company_discovery_subscription_quota_recovery(uuid,bigint,text,text,text,jsonb)",
+      "revoke all on function public.settle_company_discovery_subscription_quota_recovery(uuid,bigint,text,text,text,jsonb)",
+    );
+    expect(settle).toContain("company_discovery_quota_recovery_success_unproved");
+    expect(settle).toContain("p_observation->>'usage_complete'");
+    expect(settle).toContain("p_observation->>'terminal_complete'");
+    expect(settle).toContain("quota_state = 'available'");
+    expect(settle).toContain("settled_requests = 1");
+    expect(settle).toContain("governor_recovered");
+    expect(settle).not.toContain("delete from public.company_discovery_subscription_reservations");
+    expect(sql).toContain("marginal_api_charge_usd numeric not null default 0");
+    expect(sql).toContain("billing_basis text not null default 'chatgpt_subscription'");
+  });
+});
+
 function postgresJsonbText(value: unknown): string {
   if (value === null || typeof value === "boolean" || typeof value === "number")
     return JSON.stringify(value);
@@ -1214,6 +1267,7 @@ test.skipIf(process.env.LIGOU_LOCAL_DB_TEST !== "1")(
     for (const privateTable of [
       "company_discovery_subscription_governors",
       "company_discovery_subscription_reservations",
+      "company_discovery_subscription_quota_recovery_probes",
     ]) {
       const privateRead = await owner.from(privateTable).select("*");
       expect(privateRead.error).not.toBeNull();

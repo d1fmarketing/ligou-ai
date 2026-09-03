@@ -5548,6 +5548,435 @@ async function onboardingResumeCheckpointConcurrency(connection, home) {
   `), "post-reset generation binding"), "1:1");
 }
 
+async function staleSubscriptionQuotaRecoveryConcurrency(connection, home) {
+  const tenantId = "85000000-0000-4000-8000-000000000001";
+  const credentialOwnerId = "85000000-0000-4000-8000-000000000002";
+  const jobId = "85000000-0000-4000-8000-000000000003";
+  const attemptId = "85000000-0000-4000-8000-000000000004";
+  const historicalReservationId = "85000000-0000-4000-8000-000000000005";
+  const activeReservationId = "85000000-0000-4000-8000-000000000006";
+  const successTenantId = "86000000-0000-4000-8000-000000000001";
+  const successCredentialOwnerId = "86000000-0000-4000-8000-000000000002";
+  const successJobId = "86000000-0000-4000-8000-000000000003";
+  const successAttemptId = "86000000-0000-4000-8000-000000000004";
+  const successReservationId = "86000000-0000-4000-8000-000000000005";
+  const accountHash = "8".repeat(64);
+  const cleanupProof = {
+    outcome: "runtime_not_bound",
+    database_proven: true,
+    runtime_identity_bound: false,
+  };
+  const claimSql = `select coalesce(public.claim_company_discovery_subscription_quota_recovery(
+    'quota-recovery-concurrency', '${credentialOwnerId}', 1, '${accountHash}', 60
+  )::text, 'null');`;
+  const successClaimSql = `select coalesce(public.claim_company_discovery_subscription_quota_recovery(
+    'quota-recovery-success', '${successCredentialOwnerId}', 1, '${accountHash}', 60
+  )::text, 'null');`;
+  const assertBlocked = (value, label) => {
+    assert.deepEqual(JSON.parse(value), { state: "blocked" }, label);
+  };
+
+  requireSuccess(await runSql(connection, home, `
+    update public.company_discovery_controls
+    set enabled = true, updated_at = clock_timestamp()
+    where singleton;
+    insert into public.tenants (
+      id, slug, name, status, operational_mode
+    ) values (
+      '${tenantId}', 'quota-recovery-fixture', 'Quota Recovery Fixture',
+      'onboarding', 'simulation_only'
+    );
+    insert into public.company_discovery_allowlist (tenant_id, active)
+    values ('${tenantId}', true);
+    insert into public.company_discovery_subscription_bindings (
+      tenant_id, credential_owner_id, expected_account_hash,
+      credential_generation, active
+    ) values (
+      '${tenantId}', '${credentialOwnerId}', '${accountHash}', 1, true
+    );
+    insert into public.worker_jobs (
+      id, tenant_id, normalized_origin, origin_host, idempotency_key,
+      request_hash, version, fence_generation, status, deadline_at,
+      fallback_state, created_at, updated_at
+    ) values (
+      '${jobId}', '${tenantId}', 'https://quota-recovery.invalid/',
+      'quota-recovery.invalid', 'quota-recovery-fixture', '${"7".repeat(64)}',
+      3, 2, 'failed', clock_timestamp() - interval '2 hours',
+      'existing_onboarding', clock_timestamp() - interval '3 hours',
+      clock_timestamp() - interval '2 hours'
+    );
+    insert into public.worker_attempts (
+      id, tenant_id, job_id, attempt_number, adapter_id, fence_generation,
+      status, claim_token_hash, claimed_by, claimed_at, lease_until,
+      terminal_at, terminal_reason, cleanup_state, cleanup_outcome,
+      cleanup_proof, created_at
+    ) values (
+      '${attemptId}', '${tenantId}', '${jobId}', 1, 'direct_model', 1,
+      'failed', extensions.digest('fixture-claim', 'sha256'),
+      'quota-recovery-fixture', clock_timestamp() - interval '3 hours',
+      clock_timestamp() - interval '170 minutes',
+      clock_timestamp() - interval '165 minutes', 'worker_wait_failed',
+      'proved', 'runtime_not_bound', ${jsonb(cleanupProof)},
+      clock_timestamp() - interval '3 hours'
+    );
+    update public.worker_jobs
+    set current_attempt_id = '${attemptId}'
+    where id = '${jobId}';
+    insert into public.company_discovery_subscription_reservations (
+      id, request_key, tenant_id, job_id, attempt_id, fence_generation,
+      credential_owner_id, credential_generation, reservation_token_hash,
+      claim_token_hash, prospective_input_bytes, prospective_output_bytes,
+      state, lease_until, settled_input_bytes, settled_output_bytes,
+      observed_input_tokens, observed_output_tokens, usage_complete,
+      quota_state, retry_after_seconds, created_at, settled_at
+    ) values (
+      '${historicalReservationId}', '85000000-0000-4000-8000-000000000015',
+      '${tenantId}', '${jobId}', '${attemptId}', 1, '${credentialOwnerId}', 1,
+      extensions.digest('historical-reservation', 'sha256'),
+      extensions.digest('fixture-claim', 'sha256'), 3000, 4096,
+      'expired', clock_timestamp() - interval '160 minutes', 3000, 4096,
+      null, null, false, 'unknown', null,
+      clock_timestamp() - interval '170 minutes',
+      clock_timestamp() - interval '160 minutes'
+    );
+    update public.company_discovery_subscription_governors
+    set window_started_at = clock_timestamp() - interval '3 hours',
+        window_ends_at = clock_timestamp() - interval '2 hours',
+        settled_requests = 1,
+        settled_input_bytes = 3000,
+        settled_output_bytes = 4096,
+        reserved_requests = 0,
+        reserved_input_bytes = 0,
+        reserved_output_bytes = 0,
+        active_requests = 0,
+        quota_state = 'unknown',
+        cooldown_until = null,
+        quota_unknown_since = clock_timestamp(),
+        updated_at = clock_timestamp()
+    where credential_owner_id = '${credentialOwnerId}'
+      and credential_generation = 1;
+  `), "quota recovery fixture");
+
+  assertBlocked(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(claimSql),
+  ), "recent unknown recovery claim"), "recent unknown must stay blocked");
+
+  requireSuccess(await runSql(connection, home, `
+    update public.company_discovery_subscription_governors
+    set quota_unknown_since = clock_timestamp() - interval '2 hours',
+        updated_at = clock_timestamp() - interval '2 hours'
+    where credential_owner_id = '${credentialOwnerId}'
+      and credential_generation = 1;
+    update public.worker_jobs set status = 'queued' where id = '${jobId}';
+  `), "age unknown with active job");
+  assertBlocked(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(claimSql),
+  ), "active job recovery claim"), "active job must block recovery");
+  requireSuccess(await runSql(connection, home, `
+    update public.worker_jobs set status = 'failed' where id = '${jobId}';
+    insert into public.company_discovery_subscription_reservations (
+      id, request_key, tenant_id, job_id, attempt_id, fence_generation,
+      credential_owner_id, credential_generation, reservation_token_hash,
+      claim_token_hash, prospective_input_bytes, prospective_output_bytes,
+      state, lease_until
+    ) values (
+      '${activeReservationId}', '85000000-0000-4000-8000-000000000016',
+      '${tenantId}', '${jobId}', '${attemptId}', 1, '${credentialOwnerId}', 1,
+      extensions.digest('active-reservation', 'sha256'),
+      extensions.digest('fixture-claim', 'sha256'), 64, 1024,
+      'reserved', clock_timestamp() + interval '5 minutes'
+    );
+    update public.company_discovery_subscription_governors
+    set reserved_requests = 1, reserved_input_bytes = 64,
+        reserved_output_bytes = 1024, active_requests = 1
+    where credential_owner_id = '${credentialOwnerId}'
+      and credential_generation = 1;
+  `), "active recovery reservation");
+  assertBlocked(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(claimSql),
+  ), "active reservation recovery claim"), "active reservation must block recovery");
+
+  requireSuccess(await runSql(connection, home, `
+    update public.company_discovery_subscription_reservations
+    set state = 'expired', settled_input_bytes = 64, settled_output_bytes = 1024,
+        observed_input_tokens = null, observed_output_tokens = null,
+        usage_complete = false, quota_state = 'unknown',
+        retry_after_seconds = null, settled_at = clock_timestamp()
+    where id = '${activeReservationId}';
+    update public.company_discovery_subscription_governors
+    set reserved_requests = 0, reserved_input_bytes = 0,
+        reserved_output_bytes = 0, active_requests = 0,
+        settled_requests = 2, settled_input_bytes = 3064,
+        settled_output_bytes = 5120,
+        quota_unknown_since = clock_timestamp() - interval '2 hours',
+        updated_at = clock_timestamp() - interval '2 hours'
+    where credential_owner_id = '${credentialOwnerId}'
+      and credential_generation = 1;
+    update public.worker_attempts
+    set cleanup_state = 'pending', cleanup_outcome = 'pending', cleanup_proof = null
+    where id = '${attemptId}';
+  `), "clear active reservation with cleanup pending");
+  assertBlocked(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(claimSql),
+  ), "pending cleanup recovery claim"), "pending cleanup must block recovery");
+  requireSuccess(await runSql(connection, home, `
+    update public.worker_attempts
+    set cleanup_state = 'proved', cleanup_outcome = 'runtime_not_bound',
+        cleanup_proof = ${jsonb(cleanupProof)}
+    where id = '${attemptId}';
+  `), "prove recovery fixture cleanup");
+
+  const [claimA, claimB] = await Promise.all([
+    runSql(connection, home, serviceTransaction(claimSql)),
+    runSql(connection, home, serviceTransaction(claimSql)),
+  ]);
+  const claims = [
+    scalar(claimA, "first concurrent quota recovery claim"),
+    scalar(claimB, "second concurrent quota recovery claim"),
+  ];
+  const parsedClaims = claims.map((value) => JSON.parse(value));
+  assert.equal(parsedClaims.filter((value) => value.probe_id).length, 1);
+  assert.equal(parsedClaims.filter((value) => value.state === "blocked").length, 1);
+  const firstClaim = parsedClaims.find((value) => value.probe_id);
+  assert.equal(firstClaim.recovery_generation, 1);
+  assert.equal(firstClaim.provider, "openai-codex");
+  assert.equal(firstClaim.auth_kind, "chatgpt_subscription_oauth");
+  assert.equal(firstClaim.model, "gpt-5.6-sol");
+  assertBlocked(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(claimSql),
+  ), "duplicate running recovery claim"), "running probe must block duplicates");
+
+  const ambiguousObservation = {
+    request_sha256: "a".repeat(64),
+    response_sha256: "b".repeat(64),
+    request_bytes: 256,
+    response_bytes: 512,
+    input_tokens: 9,
+    output_tokens: 2,
+    total_tokens: 11,
+    usage_complete: true,
+    terminal_complete: true,
+  };
+  const ambiguousSettlementSql =
+    `select public.settle_company_discovery_subscription_quota_recovery(
+      '${firstClaim.probe_id}', ${firstClaim.recovery_generation},
+      '${firstClaim.claim_token}', 'available', 'probe_succeeded',
+      ${jsonb(ambiguousObservation)}
+    )::text;`;
+  requireSuccess(await runSql(connection, home, `
+    update public.worker_jobs set status = 'queued' where id = '${jobId}';
+  `), "create quota recovery settlement context change");
+  const governorLock = startSql(connection, home, `
+    begin;
+    set local deadlock_timeout = '100ms';
+    set local lock_timeout = '5s';
+    select 1
+    from public.company_discovery_subscription_governors
+    where credential_owner_id = '${credentialOwnerId}'
+      and credential_generation = 1
+    for update;
+    select 'QUOTA_RECOVERY_GOVERNOR_LOCK_HELD';
+    select pg_sleep(0.5);
+    ${claimSql}
+    commit;
+  `);
+  await governorLock.waitFor("QUOTA_RECOVERY_GOVERNOR_LOCK_HELD");
+  const settlementRace = startSql(
+    connection,
+    home,
+    serviceTransaction(`
+      set local lock_timeout = '5s';
+      ${ambiguousSettlementSql}
+    `),
+  );
+  const [governorLockResult, settlementRaceResult] = await Promise.all([
+    governorLock.done,
+    settlementRace.done,
+  ]);
+  requireSuccess(governorLockResult, "quota recovery claim-side lock order");
+  const ambiguous = JSON.parse(scalar(
+    settlementRaceResult,
+    "ambiguous quota recovery settlement",
+  ));
+  assert.equal(ambiguous.status, "ambiguous");
+  assert.equal(ambiguous.quota_state, "unknown");
+  assert.equal(ambiguous.governor_recovered, false);
+  const downgradedReplay = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(ambiguousSettlementSql),
+  ), "replay server-downgraded quota recovery settlement"));
+  assert.deepEqual(downgradedReplay, ambiguous);
+  assert.equal(scalar(await runSql(connection, home, `
+    select terminal_reason
+    from public.company_discovery_subscription_quota_recovery_probes
+    where id = '${firstClaim.probe_id}';
+  `), "server-derived quota recovery reason"), "probe_context_changed");
+  assertBlocked(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(claimSql),
+  ), "backed off recovery claim"), "ambiguous probe must renew backoff");
+
+  requireSuccess(await runSql(connection, home, `
+    insert into public.tenants (
+      id, slug, name, status, operational_mode
+    ) values (
+      '${successTenantId}', 'quota-recovery-success',
+      'Quota Recovery Success', 'onboarding', 'simulation_only'
+    );
+    insert into public.company_discovery_allowlist (tenant_id, active)
+    values ('${successTenantId}', true);
+    insert into public.company_discovery_subscription_bindings (
+      tenant_id, credential_owner_id, expected_account_hash,
+      credential_generation, active
+    ) values (
+      '${successTenantId}', '${successCredentialOwnerId}',
+      '${accountHash}', 1, true
+    );
+    insert into public.worker_jobs (
+      id, tenant_id, normalized_origin, origin_host, idempotency_key,
+      request_hash, version, fence_generation, status, deadline_at,
+      fallback_state, created_at, updated_at
+    ) values (
+      '${successJobId}', '${successTenantId}',
+      'https://quota-recovery-success.invalid/',
+      'quota-recovery-success.invalid', 'quota-recovery-success',
+      '${"6".repeat(64)}', 3, 2, 'failed',
+      clock_timestamp() - interval '2 hours', 'existing_onboarding',
+      clock_timestamp() - interval '3 hours',
+      clock_timestamp() - interval '2 hours'
+    );
+    insert into public.worker_attempts (
+      id, tenant_id, job_id, attempt_number, adapter_id, fence_generation,
+      status, claim_token_hash, claimed_by, claimed_at, lease_until,
+      terminal_at, terminal_reason, cleanup_state, cleanup_outcome,
+      cleanup_proof, created_at
+    ) values (
+      '${successAttemptId}', '${successTenantId}', '${successJobId}', 1,
+      'direct_model', 1, 'failed',
+      extensions.digest('success-claim', 'sha256'),
+      'quota-recovery-success', clock_timestamp() - interval '3 hours',
+      clock_timestamp() - interval '170 minutes',
+      clock_timestamp() - interval '165 minutes', 'worker_wait_failed',
+      'proved', 'runtime_not_bound', ${jsonb(cleanupProof)},
+      clock_timestamp() - interval '3 hours'
+    );
+    update public.worker_jobs
+    set current_attempt_id = '${successAttemptId}'
+    where id = '${successJobId}';
+    insert into public.company_discovery_subscription_reservations (
+      id, request_key, tenant_id, job_id, attempt_id, fence_generation,
+      credential_owner_id, credential_generation, reservation_token_hash,
+      claim_token_hash, prospective_input_bytes, prospective_output_bytes,
+      state, lease_until, settled_input_bytes, settled_output_bytes,
+      observed_input_tokens, observed_output_tokens, usage_complete,
+      quota_state, retry_after_seconds, created_at, settled_at
+    ) values (
+      '${successReservationId}', '86000000-0000-4000-8000-000000000015',
+      '${successTenantId}', '${successJobId}', '${successAttemptId}', 1,
+      '${successCredentialOwnerId}', 1,
+      extensions.digest('success-reservation', 'sha256'),
+      extensions.digest('success-claim', 'sha256'), 100, 200,
+      'expired', clock_timestamp() - interval '160 minutes', 100, 200,
+      null, null, false, 'unknown', null,
+      clock_timestamp() - interval '170 minutes',
+      clock_timestamp() - interval '160 minutes'
+    );
+    update public.company_discovery_subscription_governors
+    set window_started_at = clock_timestamp() - interval '3 hours',
+        window_ends_at = clock_timestamp() - interval '2 hours',
+        settled_requests = 1, settled_input_bytes = 100,
+        settled_output_bytes = 200, reserved_requests = 0,
+        reserved_input_bytes = 0, reserved_output_bytes = 0,
+        active_requests = 0, quota_state = 'unknown', cooldown_until = null,
+        updated_at = clock_timestamp()
+    where credential_owner_id = '${successCredentialOwnerId}'
+      and credential_generation = 1;
+    update public.company_discovery_subscription_governors
+    set quota_unknown_since = clock_timestamp() - interval '2 hours',
+        updated_at = clock_timestamp() - interval '2 hours'
+    where credential_owner_id = '${successCredentialOwnerId}'
+      and credential_generation = 1;
+  `), "successful quota recovery fixture");
+  const secondClaim = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(successClaimSql),
+  ), "second quota recovery claim"));
+  assert.equal(secondClaim.recovery_generation, 1);
+
+  const successObservation = {
+    request_sha256: "c".repeat(64),
+    response_sha256: "d".repeat(64),
+    request_bytes: 240,
+    response_bytes: 480,
+    input_tokens: 9,
+    output_tokens: 2,
+    total_tokens: 11,
+    usage_complete: true,
+    terminal_complete: true,
+  };
+  const successSql = `select public.settle_company_discovery_subscription_quota_recovery(
+    '${secondClaim.probe_id}', ${secondClaim.recovery_generation},
+    '${secondClaim.claim_token}', 'available', 'probe_succeeded',
+    ${jsonb(successObservation)}
+  )::text;`;
+  const succeeded = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(successSql),
+  ), "successful quota recovery settlement"));
+  assert.equal(succeeded.status, "succeeded");
+  assert.equal(succeeded.quota_state, "available");
+  assert.equal(succeeded.governor_recovered, true);
+  const replay = JSON.parse(scalar(await runSql(
+    connection,
+    home,
+    serviceTransaction(successSql),
+  ), "idempotent quota recovery settlement"));
+  assert.deepEqual(replay, succeeded);
+
+  assert.equal(scalar(await runSql(connection, home, `
+    select quota_state || ':' || settled_requests::text || ':' ||
+      settled_input_bytes::text || ':' || settled_output_bytes::text || ':' ||
+      reserved_requests::text || ':' || active_requests::text || ':' ||
+      (quota_unknown_since is null)::text
+    from public.company_discovery_subscription_governors
+    where credential_owner_id = '${successCredentialOwnerId}'
+      and credential_generation = 1;
+  `), "recovered governor state"), "available:1:240:480:0:0:true");
+  assert.equal(scalar(await runSql(connection, home, `
+    select count(*)::text || ':' ||
+      count(*) filter (where status = 'succeeded')::text || ':' ||
+      count(*) filter (where status = 'ambiguous')::text
+    from public.company_discovery_subscription_quota_recovery_probes
+    where credential_owner_id in ('${credentialOwnerId}', '${successCredentialOwnerId}')
+      and credential_generation = 1;
+  `), "quota recovery receipt history"), "2:1:1");
+  assert.equal(scalar(await runSql(connection, home, `
+    select count(*)::text
+    from public.company_discovery_subscription_reservations
+    where credential_owner_id = '${successCredentialOwnerId}'
+      and credential_generation = 1;
+  `), "quota recovery does not invent reservations"), "1");
+  requireSuccess(await runSql(connection, home, `
+    update public.company_discovery_controls
+    set enabled = false, updated_at = clock_timestamp()
+    where singleton;
+  `), "disable quota recovery fixture");
+}
+
 export async function runConcurrencySuite(env = process.env) {
   const connection = connectionFromEnvironment(env);
   const isolatedHome = await mkdtemp(path.join(os.tmpdir(), "ligou-rc1-psql-home-"));
@@ -5571,6 +6000,7 @@ export async function runConcurrencySuite(env = process.env) {
     ["owner reset mutator lock ordering", ownerResetMutatorLockOrdering],
     ["onboarding resume exact generation candidate", onboardingResumeGenerationCandidateSelection],
     ["onboarding resume checkpoint concurrency", onboardingResumeCheckpointConcurrency],
+    ["stale subscription quota recovery concurrency", staleSubscriptionQuotaRecoveryConcurrency],
   ];
   try {
     for (const [, test] of tests) await test(connection, isolatedHome);

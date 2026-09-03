@@ -779,6 +779,119 @@ describe("JobStore recovery authority seam", () => {
     expect(calls).toHaveLength(afterSettlement);
   });
 
+  test("claims and settles one quota-recovery probe through opaque store-local authority", async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const probeId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const claimToken = "c".repeat(64);
+    const owner = Object.freeze({
+      credential_owner_id: credentialOwnerId,
+      credential_generation: 7,
+      account_id_sha256: subscriptionAccountHash,
+    });
+    const claimReadback = {
+      probe_id: probeId,
+      recovery_generation: 4,
+      claim_token: claimToken,
+      lease_until: "2026-09-01T10:01:00.000Z",
+      deadline_at: "2026-09-01T10:01:00.000Z",
+      credential_owner_id: credentialOwnerId,
+      credential_generation: 7,
+      expected_account_hash: subscriptionAccountHash,
+      provider: "openai-codex",
+      auth_kind: "chatgpt_subscription_oauth",
+      model: "gpt-5.6-sol",
+    };
+    const settlementReadback = {
+      probe_id: probeId,
+      recovery_generation: 4,
+      status: "succeeded",
+      quota_state: "available",
+      next_probe_at: null,
+      governor_recovered: true,
+    };
+    const client = {
+      async rpc(name: string, args: Record<string, unknown>) {
+        calls.push({ name, args });
+        if (name === "claim_company_discovery_subscription_quota_recovery") {
+          return { data: claimReadback, error: null };
+        }
+        if (name === "settle_company_discovery_subscription_quota_recovery") {
+          return { data: settlementReadback, error: null };
+        }
+        throw new Error(`unexpected RPC ${name}`);
+      },
+    };
+    const store = new JobStore(client);
+    const otherStore = new JobStore(client);
+    const claimed = await (store as any).claimSubscriptionQuotaRecovery(
+      owner,
+      "quota-recovery-worker",
+      60,
+    );
+    expect(claimed).toMatchObject({
+      probe_id: probeId,
+      recovery_generation: 4,
+      credential_owner_id: credentialOwnerId,
+      credential_generation: 7,
+      expected_account_hash: subscriptionAccountHash,
+      provider: "openai-codex",
+      auth_kind: "chatgpt_subscription_oauth",
+      model: "gpt-5.6-sol",
+    });
+    expect(Object.keys(claimed.capability)).toEqual([]);
+    expect(Object.getPrototypeOf(claimed.capability)).toBeNull();
+    expect(JSON.stringify(claimed)).not.toContain(claimToken);
+    expect(calls[0]).toEqual({
+      name: "claim_company_discovery_subscription_quota_recovery",
+      args: {
+        p_worker_id: "quota-recovery-worker",
+        p_credential_owner: credentialOwnerId,
+        p_credential_generation: 7,
+        p_expected_account_hash: subscriptionAccountHash,
+        p_lease_seconds: 60,
+      },
+    });
+
+    const observation = {
+      request_sha256: "1".repeat(64),
+      response_sha256: "2".repeat(64),
+      request_bytes: 240,
+      response_bytes: 480,
+      input_tokens: 9,
+      output_tokens: 2,
+      total_tokens: 11,
+      usage_complete: true,
+      terminal_complete: true,
+    };
+    const beforeCrossStore = calls.length;
+    await expect((otherStore as any).settleSubscriptionQuotaRecovery(
+      claimed.capability,
+      { outcome: "available", terminal_reason: "probe_succeeded", observation },
+    )).rejects.toThrow("store-issued");
+    expect(calls).toHaveLength(beforeCrossStore);
+    expect(await (store as any).settleSubscriptionQuotaRecovery(
+      claimed.capability,
+      { outcome: "available", terminal_reason: "probe_succeeded", observation },
+    )).toEqual(settlementReadback);
+    expect(calls.at(-1)).toEqual({
+      name: "settle_company_discovery_subscription_quota_recovery",
+      args: {
+        p_probe_id: probeId,
+        p_recovery_generation: 4,
+        p_claim_token: claimToken,
+        p_outcome: "available",
+        p_terminal_reason: "probe_succeeded",
+        p_observation: observation,
+      },
+    });
+    const afterSettlement = calls.length;
+    await expect((store as any).settleSubscriptionQuotaRecovery(
+      claimed.capability,
+      { outcome: "available", terminal_reason: "probe_succeeded", observation },
+    )).rejects.toThrow("active store-issued");
+    expect(calls).toHaveLength(afterSettlement);
+  });
+
   test("binds one exact nonsecret runtime identity and terminalizes to rotated cleanup authority", async () => {
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
     const store = new JobStore({

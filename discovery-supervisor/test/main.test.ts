@@ -547,6 +547,9 @@ describe("concrete supervisor composition", () => {
         rpc_client: {
           async rpc(name, args) {
             rpcCalls.push({ name, args });
+            if (name === "claim_company_discovery_subscription_quota_recovery") {
+              return { data: null, error: null };
+            }
             return { data: [], error: null };
           },
         },
@@ -597,6 +600,16 @@ describe("concrete supervisor composition", () => {
       {
         name: "claim_expired_company_discovery_cleanup",
         args: { p_worker_id: "ligou-stage0-worker-openclaw", p_lease_seconds: 300 },
+      },
+      {
+        name: "claim_company_discovery_subscription_quota_recovery",
+        args: {
+          p_worker_id: "ligou-stage0-worker-quota-recovery",
+          p_credential_owner: "11111111-1111-4111-8111-111111111111",
+          p_credential_generation: 3,
+          p_expected_account_hash: "a".repeat(64),
+          p_lease_seconds: 60,
+        },
       },
       {
         name: "claim_company_discovery_attempt",

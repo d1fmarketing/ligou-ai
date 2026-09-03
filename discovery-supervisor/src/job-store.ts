@@ -18,6 +18,15 @@ import {
   type SubscriptionRequestSettlement,
   type SubscriptionReservationReadback,
   type SubscriptionSettlementReadback,
+  type SubscriptionCredentialOwnerBinding,
+  type SubscriptionQuotaRecoveryAuthority,
+  type SubscriptionQuotaRecoveryCapability,
+  type SubscriptionQuotaRecoveryClaim,
+  type SubscriptionQuotaRecoveryClaimResult,
+  type SubscriptionQuotaRecoveryObservation,
+  type SubscriptionQuotaRecoveryReadback,
+  type SubscriptionQuotaRecoverySettlement,
+  type SubscriptionQuotaRecoveryTerminalReason,
   type WorkerJob,
   type WorkerResult,
 } from "./contracts";
@@ -334,6 +343,20 @@ const SUBSCRIPTION_SETTLEMENT_READBACK_KEYS = [
   "owner_current_input_bytes", "owner_current_output_bytes",
   "owner_max_requests", "owner_max_input_bytes", "owner_max_output_bytes",
   "max_concurrency",
+] as const;
+const SUBSCRIPTION_QUOTA_RECOVERY_CLAIM_KEYS = [
+  "probe_id", "recovery_generation", "claim_token", "lease_until",
+  "deadline_at", "credential_owner_id", "credential_generation",
+  "expected_account_hash", "provider", "auth_kind", "model",
+] as const;
+const SUBSCRIPTION_QUOTA_RECOVERY_OBSERVATION_KEYS = [
+  "request_sha256", "response_sha256", "request_bytes", "response_bytes",
+  "input_tokens", "output_tokens", "total_tokens", "usage_complete",
+  "terminal_complete",
+] as const;
+const SUBSCRIPTION_QUOTA_RECOVERY_READBACK_KEYS = [
+  "probe_id", "recovery_generation", "status", "quota_state",
+  "next_probe_at", "governor_recovered",
 ] as const;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
@@ -914,6 +937,163 @@ function parseSubscriptionRecoveryReadback(
   return parsed;
 }
 
+interface SubscriptionQuotaRecoveryState {
+  readonly probe_id: string;
+  readonly recovery_generation: number;
+  readonly claim_token: string;
+  readonly credential_owner_id: string;
+  readonly credential_generation: number;
+  readonly expected_account_hash: string;
+}
+
+function opaqueSubscriptionQuotaRecoveryCapability(): SubscriptionQuotaRecoveryCapability {
+  return Object.freeze(Object.create(null)) as SubscriptionQuotaRecoveryCapability;
+}
+
+function parseSubscriptionQuotaRecoveryClaim(
+  value: unknown,
+  owner: SubscriptionCredentialOwnerBinding,
+  capability: SubscriptionQuotaRecoveryCapability,
+):
+  | { readonly blocked: Readonly<{ state: "blocked" }> }
+  | { readonly claim: SubscriptionQuotaRecoveryClaim; readonly claim_token: string }
+  | null {
+  if (value === null) return null;
+  const row = plainRecord(value, "subscription quota recovery claim");
+  if (Object.keys(row).length === 1 && row.state === "blocked") {
+    return Object.freeze({ blocked: Object.freeze({ state: "blocked" as const }) });
+  }
+  exactKeys(row, SUBSCRIPTION_QUOTA_RECOVERY_CLAIM_KEYS, "subscription quota recovery claim");
+  if (row.provider !== "openai-codex" ||
+      row.auth_kind !== "chatgpt_subscription_oauth" || row.model !== "gpt-5.6-sol") {
+    throw new ContractValidationError("subscription quota recovery claim: fixed identity required");
+  }
+  const leaseUntil = nonemptyString(
+    row.lease_until,
+    "subscription quota recovery claim.lease_until",
+    64,
+  );
+  const deadlineAt = nonemptyString(
+    row.deadline_at,
+    "subscription quota recovery claim.deadline_at",
+    64,
+  );
+  if (!Number.isFinite(Date.parse(leaseUntil)) ||
+      Date.parse(deadlineAt) !== Date.parse(leaseUntil)) {
+    throw new ContractValidationError("subscription quota recovery claim: invalid deadline");
+  }
+  const claimToken = nonemptyString(
+    row.claim_token,
+    "subscription quota recovery claim token",
+    64,
+  );
+  if (!/^[0-9a-f]{64}$/.test(claimToken)) {
+    throw new ContractValidationError("subscription quota recovery claim token: invalid format");
+  }
+  const claim = Object.freeze({
+    capability,
+    probe_id: uuid(row.probe_id, "subscription quota recovery probe id"),
+    recovery_generation: positiveInteger(
+      row.recovery_generation,
+      "subscription quota recovery generation",
+    ),
+    lease_until: leaseUntil,
+    deadline_at: deadlineAt,
+    credential_owner_id: uuid(
+      row.credential_owner_id,
+      "subscription quota recovery credential owner",
+    ),
+    credential_generation: positiveInteger(
+      row.credential_generation,
+      "subscription quota recovery credential generation",
+    ),
+    expected_account_hash: hash(
+      row.expected_account_hash,
+      "subscription quota recovery account hash",
+    ),
+    provider: "openai-codex" as const,
+    auth_kind: "chatgpt_subscription_oauth" as const,
+    model: "gpt-5.6-sol" as const,
+  });
+  if (claim.credential_owner_id !== owner.credential_owner_id ||
+      claim.credential_generation !== owner.credential_generation ||
+      claim.expected_account_hash !== owner.account_id_sha256) {
+    throw new ContractValidationError("subscription quota recovery claim mismatched owner");
+  }
+  return Object.freeze({ claim, claim_token: claimToken });
+}
+
+function parseSubscriptionQuotaRecoveryObservation(
+  value: unknown,
+): Readonly<SubscriptionQuotaRecoveryObservation> {
+  const row = plainRecord(value, "subscription quota recovery observation");
+  exactKeys(
+    row,
+    SUBSCRIPTION_QUOTA_RECOVERY_OBSERVATION_KEYS,
+    "subscription quota recovery observation",
+  );
+  const optionalHash = (candidate: unknown, name: string) => candidate === null
+    ? null
+    : hash(candidate, name);
+  const optionalCount = (candidate: unknown, name: string) => candidate === null
+    ? null
+    : nonnegativeInteger(candidate, name);
+  const parsed = Object.freeze({
+    request_sha256: optionalHash(row.request_sha256, "quota recovery request hash"),
+    response_sha256: optionalHash(row.response_sha256, "quota recovery response hash"),
+    request_bytes: nonnegativeInteger(row.request_bytes, "quota recovery request bytes"),
+    response_bytes: nonnegativeInteger(row.response_bytes, "quota recovery response bytes"),
+    input_tokens: optionalCount(row.input_tokens, "quota recovery input tokens"),
+    output_tokens: optionalCount(row.output_tokens, "quota recovery output tokens"),
+    total_tokens: optionalCount(row.total_tokens, "quota recovery total tokens"),
+    usage_complete: row.usage_complete,
+    terminal_complete: row.terminal_complete,
+  });
+  if (parsed.request_bytes > 4_096 || parsed.response_bytes > 32_768 ||
+      typeof parsed.usage_complete !== "boolean" ||
+      typeof parsed.terminal_complete !== "boolean" ||
+      [parsed.input_tokens, parsed.output_tokens, parsed.total_tokens].some(
+        (count) => count !== null && count > 1_000_000,
+      )) {
+    throw new ContractValidationError("subscription quota recovery observation invalid");
+  }
+  return parsed as Readonly<SubscriptionQuotaRecoveryObservation>;
+}
+
+function parseSubscriptionQuotaRecoveryReadback(
+  value: unknown,
+  state: SubscriptionQuotaRecoveryState,
+): Readonly<SubscriptionQuotaRecoveryReadback> {
+  const row = plainRecord(value, "subscription quota recovery readback");
+  exactKeys(row, SUBSCRIPTION_QUOTA_RECOVERY_READBACK_KEYS, "subscription quota recovery readback");
+  if ((row.status !== "succeeded" && row.status !== "ambiguous") ||
+      (row.quota_state !== "available" && row.quota_state !== "unknown") ||
+      typeof row.governor_recovered !== "boolean" ||
+      (row.status === "succeeded") !== row.governor_recovered ||
+      (row.status === "succeeded") !== (row.quota_state === "available") ||
+      (row.status === "succeeded") !== (row.next_probe_at === null) ||
+      (row.next_probe_at !== null &&
+        (typeof row.next_probe_at !== "string" || !Number.isFinite(Date.parse(row.next_probe_at))))) {
+    throw new ContractValidationError("subscription quota recovery readback invalid");
+  }
+  const parsed = Object.freeze({
+    probe_id: uuid(row.probe_id, "subscription quota recovery readback.probe_id"),
+    recovery_generation: positiveInteger(
+      row.recovery_generation,
+      "subscription quota recovery readback.generation",
+    ),
+    status: row.status,
+    quota_state: row.quota_state,
+    next_probe_at: row.next_probe_at as string | null,
+    governor_recovered: row.governor_recovered,
+  }) as Readonly<SubscriptionQuotaRecoveryReadback>;
+  if (parsed.probe_id !== state.probe_id ||
+      parsed.recovery_generation !== state.recovery_generation) {
+    throw new ContractValidationError("subscription quota recovery readback mismatched authority");
+  }
+  return parsed;
+}
+
 interface SubscriptionReservationState {
   readonly reservation_id: string;
   readonly reservation_token: string;
@@ -1165,7 +1345,7 @@ function assertWorkerIdAndLease(workerId: string, leaseSeconds: number, message:
   }
 }
 
-export class JobStore implements ModelAccessAuthority {
+export class JobStore implements ModelAccessAuthority, SubscriptionQuotaRecoveryAuthority {
   readonly #trustedJobs = new WeakSet<object>();
   readonly #claimForJob = new WeakMap<object, ClaimedAttempt>();
   readonly #trustedClaims = new WeakSet<object>();
@@ -1195,6 +1375,10 @@ export class JobStore implements ModelAccessAuthority {
   readonly #activeSubscriptionReservations = new WeakSet<object>();
   readonly #subscriptionReservationStates =
     new WeakMap<object, SubscriptionReservationState>();
+  readonly #trustedSubscriptionQuotaRecovery = new WeakSet<object>();
+  readonly #activeSubscriptionQuotaRecovery = new WeakSet<object>();
+  readonly #subscriptionQuotaRecoveryStates =
+    new WeakMap<object, SubscriptionQuotaRecoveryState>();
 
   constructor(private readonly client: ServiceRpcClient) {}
 
@@ -1419,6 +1603,119 @@ export class JobStore implements ModelAccessAuthority {
       this.deactivateSubscriptionRecovery(capability);
       throw error;
     }
+  }
+
+  async claimSubscriptionQuotaRecovery(
+    ownerValue: SubscriptionCredentialOwnerBinding,
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<Readonly<SubscriptionQuotaRecoveryClaimResult> | null> {
+    const ownerRecord = plainRecord(ownerValue, "subscription quota recovery owner");
+    exactKeys(ownerRecord, [
+      "credential_owner_id", "credential_generation", "account_id_sha256",
+    ], "subscription quota recovery owner");
+    const owner = Object.freeze({
+      credential_owner_id: uuid(
+        ownerRecord.credential_owner_id,
+        "subscription quota recovery owner id",
+      ),
+      credential_generation: positiveInteger(
+        ownerRecord.credential_generation,
+        "subscription quota recovery owner generation",
+      ),
+      account_id_sha256: hash(
+        ownerRecord.account_id_sha256,
+        "subscription quota recovery owner account hash",
+      ),
+    });
+    assertWorkerIdAndLease(workerId, leaseSeconds, "subscription quota recovery claim");
+    if (leaseSeconds < 15 || leaseSeconds > 120) {
+      throw new ContractValidationError("subscription quota recovery claim: invalid lease");
+    }
+    const capability = opaqueSubscriptionQuotaRecoveryCapability();
+    const parsed = parseSubscriptionQuotaRecoveryClaim(await rpcOrThrow(
+      this.client,
+      "claim_company_discovery_subscription_quota_recovery",
+      {
+        p_worker_id: workerId,
+        p_credential_owner: owner.credential_owner_id,
+        p_credential_generation: owner.credential_generation,
+        p_expected_account_hash: owner.account_id_sha256,
+        p_lease_seconds: leaseSeconds,
+      },
+    ), owner, capability);
+    if (parsed === null) return null;
+    if ("blocked" in parsed) return parsed.blocked;
+    const state = Object.freeze({
+      probe_id: parsed.claim.probe_id,
+      recovery_generation: parsed.claim.recovery_generation,
+      claim_token: parsed.claim_token,
+      credential_owner_id: parsed.claim.credential_owner_id,
+      credential_generation: parsed.claim.credential_generation,
+      expected_account_hash: parsed.claim.expected_account_hash,
+    });
+    this.#trustedSubscriptionQuotaRecovery.add(capability);
+    this.#activeSubscriptionQuotaRecovery.add(capability);
+    this.#subscriptionQuotaRecoveryStates.set(capability, state);
+    return parsed.claim;
+  }
+
+  async settleSubscriptionQuotaRecovery(
+    capability: SubscriptionQuotaRecoveryCapability,
+    settlementValue: SubscriptionQuotaRecoverySettlement,
+  ): Promise<Readonly<SubscriptionQuotaRecoveryReadback>> {
+    if (!this.#trustedSubscriptionQuotaRecovery.has(capability) ||
+        !this.#activeSubscriptionQuotaRecovery.has(capability)) {
+      throw new ContractValidationError(
+        "active store-issued subscription quota recovery required",
+      );
+    }
+    const state = this.#subscriptionQuotaRecoveryStates.get(capability);
+    if (state === undefined) {
+      this.#activeSubscriptionQuotaRecovery.delete(capability);
+      throw new ContractValidationError("subscription quota recovery private state unavailable");
+    }
+    const settlement = plainRecord(
+      settlementValue,
+      "subscription quota recovery settlement",
+    );
+    exactKeys(
+      settlement,
+      ["outcome", "terminal_reason", "observation"],
+      "subscription quota recovery settlement",
+    );
+    const reasons = new Set<SubscriptionQuotaRecoveryTerminalReason>([
+      "probe_succeeded", "probe_grant_failed", "probe_provider_failed",
+      "probe_usage_ambiguous", "probe_context_changed", "probe_lease_expired",
+    ]);
+    if ((settlement.outcome !== "available" && settlement.outcome !== "unknown") ||
+        !reasons.has(settlement.terminal_reason as SubscriptionQuotaRecoveryTerminalReason)) {
+      throw new ContractValidationError("subscription quota recovery settlement invalid");
+    }
+    const observation = parseSubscriptionQuotaRecoveryObservation(settlement.observation);
+    if (settlement.outcome === "available" && (
+      settlement.terminal_reason !== "probe_succeeded" ||
+      !observation.usage_complete || !observation.terminal_complete ||
+      observation.request_sha256 === null || observation.response_sha256 === null ||
+      observation.input_tokens === null || observation.output_tokens === null ||
+      observation.total_tokens !== observation.input_tokens + observation.output_tokens
+    )) {
+      throw new ContractValidationError("subscription quota recovery success unproved");
+    }
+    const readback = parseSubscriptionQuotaRecoveryReadback(await rpcOrThrow(
+      this.client,
+      "settle_company_discovery_subscription_quota_recovery",
+      {
+        p_probe_id: state.probe_id,
+        p_recovery_generation: state.recovery_generation,
+        p_claim_token: state.claim_token,
+        p_outcome: settlement.outcome,
+        p_terminal_reason: settlement.terminal_reason,
+        p_observation: observation,
+      },
+    ), state);
+    this.#activeSubscriptionQuotaRecovery.delete(capability);
+    return readback;
   }
 
   async reserveSubscriptionRequest(

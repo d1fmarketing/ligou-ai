@@ -25,6 +25,12 @@ import type {
   SubscriptionRevocationReadback,
   SubscriptionSettlementReadback,
   SubscriptionUsage,
+  SubscriptionQuotaRecoveryAuthority,
+  SubscriptionQuotaRecoveryBlocked,
+  SubscriptionQuotaRecoveryClaim,
+  SubscriptionQuotaRecoveryClaimResult,
+  SubscriptionQuotaRecoveryObservation,
+  SubscriptionQuotaRecoveryTerminalReason,
 } from "../contracts";
 import type { CredentialOwnerBinding } from "./hermes-codex-grant";
 import {
@@ -109,6 +115,22 @@ export interface CentralSubscriptionGatewayOptions {
   readonly now?: () => number;
   readonly random_bytes?: (size: number) => Buffer;
   readonly revoke_drain_timeout_ms?: number;
+  readonly quota_recovery_authority?: SubscriptionQuotaRecoveryAuthority;
+  readonly quota_recovery_worker_id?: string;
+}
+
+export type SubscriptionQuotaRecoveryOutcome = Readonly<
+  | { state: "idle" | "blocked" }
+  | { state: "recovered" | "ambiguous" | "unresolved"; probe_id: string }
+>;
+
+interface PendingSubscriptionQuotaRecoverySettlement {
+  readonly claim: Readonly<SubscriptionQuotaRecoveryClaim>;
+  readonly settlement: Readonly<{
+    outcome: "available" | "unknown";
+    terminal_reason: SubscriptionQuotaRecoveryTerminalReason;
+    observation: Readonly<SubscriptionQuotaRecoveryObservation>;
+  }>;
 }
 
 function constantTimeEqual(left: string, right: string): boolean {
@@ -622,6 +644,32 @@ function validateContext(context: ModelAccessContext, owner: CredentialOwnerBind
   }
 }
 
+function validateQuotaRecoveryClaim(
+  claim: Readonly<SubscriptionQuotaRecoveryClaim>,
+  owner: CredentialOwnerBinding,
+  now: number,
+): void {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const deadline = Date.parse(claim.deadline_at);
+  if (!uuid.test(claim.probe_id) ||
+      !Number.isSafeInteger(claim.recovery_generation) || claim.recovery_generation < 1 ||
+      claim.credential_owner_id !== owner.credential_owner_id ||
+      claim.credential_generation !== owner.credential_generation ||
+      claim.expected_account_hash !== owner.account_id_sha256 ||
+      claim.provider !== "openai-codex" ||
+      claim.auth_kind !== "chatgpt_subscription_oauth" || claim.model !== "gpt-5.6-sol" ||
+      !Number.isFinite(deadline) || deadline <= now || deadline - now > 120_000 ||
+      Date.parse(claim.lease_until) !== deadline) {
+    throw new Error("subscription quota recovery claim is invalid");
+  }
+}
+
+function quotaRecoveryBlocked(
+  claim: Readonly<SubscriptionQuotaRecoveryClaimResult>,
+): claim is Readonly<SubscriptionQuotaRecoveryBlocked> {
+  return "state" in claim && claim.state === "blocked";
+}
+
 function policy(context: ModelAccessContext): Readonly<SubscriptionPolicy> {
   return Object.freeze({
     model: "gpt-5.6-sol",
@@ -694,6 +742,8 @@ export class CentralSubscriptionGateway implements SubscriptionGateway {
   #tenantActive = new Map<string, number>();
   #cooldownUntil: number | null = null;
   #quotaUnknown = false;
+  #quotaRecovery?: Promise<SubscriptionQuotaRecoveryOutcome>;
+  #pendingQuotaRecoverySettlement?: PendingSubscriptionQuotaRecoverySettlement;
 
   constructor(options: CentralSubscriptionGatewayOptions) {
     this.#options = options;
@@ -704,7 +754,183 @@ export class CentralSubscriptionGateway implements SubscriptionGateway {
         this.#revokeDrainTimeoutMs < 1 || this.#revokeDrainTimeoutMs > 30_000) {
       throw new Error("subscription revoke drain timeout is invalid");
     }
+    const hasRecoveryAuthority = options.quota_recovery_authority !== undefined;
+    const hasRecoveryWorker = options.quota_recovery_worker_id !== undefined;
+    if (hasRecoveryAuthority !== hasRecoveryWorker ||
+        (hasRecoveryWorker && (
+          options.quota_recovery_worker_id!.trim() === "" ||
+          options.quota_recovery_worker_id!.length > 200
+        ))) {
+      throw new Error("subscription quota recovery configuration is invalid");
+    }
     this.#globalMeter = emptyMeter(this.#now());
+  }
+
+  async recoverStaleQuota(): Promise<SubscriptionQuotaRecoveryOutcome> {
+    if (this.#options.quota_recovery_authority === undefined ||
+        this.#options.quota_recovery_worker_id === undefined) {
+      return Object.freeze({ state: "idle" });
+    }
+    if (this.#quotaRecovery !== undefined) return this.#quotaRecovery;
+    const running = this.#runQuotaRecovery();
+    this.#quotaRecovery = running;
+    try {
+      return await running;
+    } finally {
+      if (this.#quotaRecovery === running) this.#quotaRecovery = undefined;
+    }
+  }
+
+  async #runQuotaRecovery(): Promise<SubscriptionQuotaRecoveryOutcome> {
+    const authority = this.#options.quota_recovery_authority!;
+    if (this.#pendingQuotaRecoverySettlement !== undefined) {
+      return this.#reconcileQuotaRecoverySettlement(
+        authority,
+        this.#pendingQuotaRecoverySettlement,
+      );
+    }
+    const claim = await authority.claimSubscriptionQuotaRecovery(
+      this.#options.credential_owner,
+      this.#options.quota_recovery_worker_id!,
+      60,
+    );
+    if (claim === null) return Object.freeze({ state: "idle" });
+    if (quotaRecoveryBlocked(claim)) {
+      this.#quotaUnknown = true;
+      return Object.freeze({ state: "blocked" });
+    }
+    validateQuotaRecoveryClaim(claim, this.#options.credential_owner, this.#now());
+
+    const requestBody = JSON.stringify({
+      model: "gpt-5.6-sol",
+      store: false,
+      stream: true,
+      instructions: "Return exactly OK and no other text.",
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Subscription health probe." }],
+      }],
+    });
+    const requestBytes = Buffer.byteLength(requestBody, "utf8");
+    const requestHash = createHash("sha256").update(requestBody).digest("hex");
+    let responseHash: string | null = null;
+    let proxy: FixedModelProxy | undefined;
+    let usage: Readonly<ReturnType<FixedModelProxy["usage"]>> | undefined;
+    let terminalReason: SubscriptionQuotaRecoveryTerminalReason = "probe_grant_failed";
+    try {
+      const grant = await this.#options.resolve_codex_grant(
+        this.#options.credential_owner,
+        claim.deadline_at,
+      );
+      const accountHash = createHash("sha256").update(grant.account_id, "utf8").digest("hex");
+      if (accountHash !== claim.expected_account_hash) {
+        throw new Error("subscription quota recovery grant account binding mismatch");
+      }
+      const bytes = opaqueBytes(this.#random);
+      const attemptMarker = marker(bytes, claim.deadline_at);
+      const sessionId = `stage0_session_${createHash("sha256")
+        .update("quota-recovery-session").update(bytes).digest("base64url").slice(0, 32)}`;
+      proxy = new FixedModelProxy({
+        proxy_marker: attemptMarker,
+        adapter_id: "direct_model",
+        codex_access_grant: grant,
+        upstream_model: "gpt-5.6-sol",
+        deadline_at: claim.deadline_at,
+        lease_session_id: sessionId,
+        max_request_count: 1,
+        max_input_bytes: 4_096,
+        max_output_bytes: 32_768,
+        max_concurrency: 1,
+        now: this.#now,
+        fetch: this.#options.fetch,
+      });
+      terminalReason = "probe_provider_failed";
+      const response = await proxy.forward(new Request(
+        "http://ligou-quota-recovery.local/codex/responses",
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${attemptMarker}`,
+            "content-type": "application/json",
+          },
+          body: requestBody,
+        },
+      ));
+      const responseEvidence = Buffer.from(await response.arrayBuffer());
+      responseHash = createHash("sha256").update(responseEvidence).digest("hex");
+      usage = proxy.usage();
+      const measured = response.ok && usage.request_count === 1 &&
+        usage.upstream_request_count === 1 && usage.completed_response_count === 1 &&
+        usage.metered_response_count === 1 && usage.active_requests === 0 &&
+        usage.usage_complete && usage.input_bytes === requestBytes &&
+        usage.output_bytes > 0 && usage.output_bytes <= 32_768 &&
+        usage.total_tokens === usage.input_tokens + usage.output_tokens;
+      terminalReason = measured ? "probe_succeeded" :
+        response.ok ? "probe_usage_ambiguous" : "probe_provider_failed";
+    } catch {
+      usage = proxy?.usage();
+    } finally {
+      proxy?.retire();
+    }
+
+    const succeeded = terminalReason === "probe_succeeded";
+    const terminalComplete = usage?.completed_response_count === 1;
+    const observation: SubscriptionQuotaRecoveryObservation = Object.freeze({
+      request_sha256: requestHash,
+      response_sha256: responseHash,
+      request_bytes: usage?.input_bytes ?? requestBytes,
+      response_bytes: usage?.output_bytes ?? 0,
+      input_tokens: succeeded ? usage!.input_tokens : null,
+      output_tokens: succeeded ? usage!.output_tokens : null,
+      total_tokens: succeeded ? usage!.total_tokens : null,
+      usage_complete: succeeded,
+      terminal_complete: terminalComplete,
+    });
+    const pending = Object.freeze({
+      claim,
+      settlement: Object.freeze({
+        outcome: succeeded ? "available" as const : "unknown" as const,
+        terminal_reason: terminalReason,
+        observation,
+      }),
+    });
+    this.#pendingQuotaRecoverySettlement = pending;
+    return this.#reconcileQuotaRecoverySettlement(authority, pending);
+  }
+
+  async #reconcileQuotaRecoverySettlement(
+    authority: SubscriptionQuotaRecoveryAuthority,
+    pending: PendingSubscriptionQuotaRecoverySettlement,
+  ): Promise<SubscriptionQuotaRecoveryOutcome> {
+    try {
+      const readback = await authority.settleSubscriptionQuotaRecovery(
+        pending.claim.capability,
+        pending.settlement,
+      );
+      if (this.#pendingQuotaRecoverySettlement === pending) {
+        this.#pendingQuotaRecoverySettlement = undefined;
+      }
+      if (readback.governor_recovered) {
+        const observation = pending.settlement.observation;
+        this.#quotaUnknown = false;
+        this.#cooldownUntil = null;
+        this.#globalMeter = {
+          window_started_at: this.#now(),
+          request_count: 1,
+          input_bytes: observation.request_bytes,
+          output_bytes: observation.response_bytes,
+          input_tokens: observation.input_tokens!,
+          output_tokens: observation.output_tokens!,
+        };
+        return Object.freeze({ state: "recovered", probe_id: pending.claim.probe_id });
+      }
+      this.#quotaUnknown = true;
+      return Object.freeze({ state: "ambiguous", probe_id: pending.claim.probe_id });
+    } catch {
+      this.#quotaUnknown = true;
+      return Object.freeze({ state: "unresolved", probe_id: pending.claim.probe_id });
+    }
   }
 
   async register(modelAccess: ModelAccessCapability): Promise<RegisteredSubscriptionLease> {

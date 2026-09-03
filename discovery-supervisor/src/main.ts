@@ -132,6 +132,8 @@ export async function composeProductionSupervisor(
   }
   const subscriptionGateway = new CentralSubscriptionGateway({
     model_access_authority: store,
+    quota_recovery_authority: store,
+    quota_recovery_worker_id: `${config.worker_id}-quota-recovery`,
     credential_owner: ownerBinding,
     resolve_codex_grant: (binding, deadlineAt) => grantResolver.resolve(binding, deadlineAt),
     listener_manager: listenerManager,
@@ -226,6 +228,8 @@ export async function composeProductionSupervisor(
         const recovered = await supervisors.get(cleanupAdapter)!.recoverExpiredCleanup();
         if (recovered !== null) return recovered;
       }
+      const quotaRecovery = await subscriptionGateway.recoverStaleQuota();
+      if (quotaRecovery.state !== "idle") return quotaRecovery;
       const adapterId = sequence[next % sequence.length]!;
       next += 1;
       return supervisors.get(adapterId)!.runOnce(signal, { recover_expired_cleanup: false });
