@@ -11,6 +11,7 @@ import { runConcurrencySuite } from "../supabase/tests/local-db-concurrency.mjs"
 import { runAuthenticatedRlsSuite } from "../supabase/tests/local-db-rls.mjs";
 import { runUpgradeRehearsal } from "../supabase/tests/local-db-upgrade-rehearsal.mjs";
 import { runWebsiteInterviewActualSchemaSuite } from "../supabase/tests/local-website-interview-actual-schema.mjs";
+import { runSalesPersistenceSuite } from "../supabase/tests/local-sales-persistence.mjs";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 const LOCAL_PROJECT_ID = "ligou-v0-1-rc1";
@@ -773,6 +774,7 @@ export async function runLocalDatabaseGate() {
     };
     const concurrency = await runConcurrencySuite(testEnvironment);
     const websiteInterview = await runWebsiteInterviewActualSchemaSuite(testEnvironment);
+    const salesPersistence = await runSalesPersistenceSuite(testEnvironment);
     const upgrade = await runUpgradeRehearsal(testEnvironment, {
       beforeDestructive: async ({ rehearsalRoot }) => {
         if (!allowedWorkdirs.includes(rehearsalRoot)) allowedWorkdirs.push(rehearsalRoot);
@@ -901,6 +903,7 @@ export async function runLocalDatabaseGate() {
       sqlAssertions: pgTapCount,
       concurrencyTests: concurrency.tests,
       websiteInterview,
+      salesPersistence,
       upgradeTests: upgrade.tests,
       applicationIntegrationTests,
       onboardingPolicyIntegrationTests,
