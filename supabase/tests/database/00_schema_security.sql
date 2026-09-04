@@ -72,8 +72,10 @@ select extensions.ok(
       ('get_calendar_test_state(uuid)'),
       ('get_connector_status(uuid)'),
       ('get_onboarding_resume_status(uuid)'),
+      ('get_website_interview_status(uuid)'),
       ('grant_power(uuid,text,text,text,jsonb,numeric,timestamp with time zone)'),
       ('reset_owner_test_memory()'),
+      ('read_website_interview_speech(uuid,text)'),
       ('retry_company_discovery(uuid,bigint)'),
       ('retry_company_discovery_setup(uuid,bigint)'),
       ('review_company_discovery_claims(uuid,uuid,bigint,jsonb,text)'),
@@ -81,7 +83,8 @@ select extensions.ok(
       ('revoke_power(uuid)'),
       ('revoke_rule(uuid,text)'),
       ('start_company_discovery_setup(text)'),
-      ('submit_company_discovery(text,text)')
+      ('submit_company_discovery(text,text)'),
+      ('website_browser_opening_v3_valid(jsonb,uuid)')
     ) expected(signature)
     order by signature
   ),
@@ -97,6 +100,22 @@ select extensions.ok(
     order by 1
   ) = array(
     select signature from (values
+      ('prepare_fresh_website_interview(uuid,uuid,uuid,bigint,uuid,uuid,text,uuid,text)'),
+      ('resolve_prepared_website_source(uuid,uuid,uuid)'),
+      ('initialize_website_interview(uuid,uuid,uuid,uuid,jsonb)'),
+      ('read_website_interview(uuid,uuid,uuid)'),
+      ('attach_website_interview(uuid,uuid,uuid,uuid,uuid)'),
+      ('record_website_interview_owner_turn(uuid,uuid,uuid,text,text)'),
+      ('commit_website_interview_turn(uuid,uuid,uuid,bigint,bigint,text,text,jsonb,text,jsonb)'),
+      ('prepare_website_interview_summary(uuid,uuid,uuid,uuid,bigint,bigint,text,uuid,jsonb)'),
+      ('claim_website_interview_speech(uuid,uuid,uuid,jsonb,uuid,integer,text)'),
+      ('complete_website_interview_speech(uuid,uuid,uuid,text,jsonb)'),
+      ('fail_website_interview_speech(uuid,uuid,uuid,text,text)'),
+      ('record_website_interview_speech_played(uuid,uuid,uuid,text,text,text,text,text)'),
+      ('approve_website_interview_summary(uuid,uuid,uuid,uuid,text,text,bigint,bigint,text)'),
+      ('record_website_interview_completion(uuid,uuid,uuid,text,uuid)'),
+      ('list_website_interview_terminal_candidates(integer)'),
+      ('website_browser_opening_v3_valid(jsonb,uuid)'),
       ('authorize_booking_intent(uuid,uuid,uuid,uuid,uuid,numeric,integer,integer,jsonb,text)'),
       ('begin_calendar_test_attempt(uuid,text,text,text,text,text)'),
       ('begin_provider_write(uuid,uuid)'),
@@ -235,7 +254,11 @@ select extensions.ok(
       ('usage_ledger'),
       ('worker_attempts'),
       ('worker_jobs'),
-      ('worker_results')
+      ('worker_results'),
+      ('website_interview_preparations'),
+      ('website_interviews'),
+      ('website_interview_calls'),
+      ('website_interview_owner_turns')
     ) expected(relation)
     order by relation
   ),

@@ -1,0 +1,2851 @@
+{
+  "schema": "ligou.foghorn_website_first_voice_fixture.v1",
+  "provenance": {
+    "source_bundle_sha256": "3f19bcb209ff48e41cce1152171560a8dfeb81f6b9b529f99c19ec5bc00ef864",
+    "source_bundle_bytes": 53266,
+    "baseline_source": "aab2bd429edcdafcd0251791ed31aeac01215d3f",
+    "recorded_call_id": "3c7a37be-c8a0-456e-a1a1-9b937bd0ef4a",
+    "sanitization": "Canonical draft and initial coverage preserved exactly, including five bounded pre-sanitized source evidence excerpts. Source excerpts are not raw website bodies; no new crawl, raw HTML, credentials, or model reasoning included."
+  },
+  "draft_row": {
+    "draft": {
+      "ambiguous_information": [],
+      "authority": {
+        "operational_mode_changed": false,
+        "powers_granted": false,
+        "rules_approved": false
+      },
+      "candidate_facts": [
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "0b8c6ae9-298a-4da2-9524-714349800855",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "booking_restriction",
+          "confidence": "high",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "ba007a93-bfc1-4456-9235-aab29e344242"
+          ],
+          "missing_fields": [],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "conditions": [
+              "Sunday service is limited to emergencies."
+            ],
+            "notice_minutes": null,
+            "public_fee": null,
+            "restriction_type": "sunday",
+            "rule": "emergency_only",
+            "service_type": null
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "0f414723-26c8-4493-89e5-d4f28a5d1952",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "booking_restriction",
+          "confidence": "high",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "ba007a93-bfc1-4456-9235-aab29e344242"
+          ],
+          "missing_fields": [],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "conditions": [
+              "The diagnostic fee is credited to the fix."
+            ],
+            "notice_minutes": null,
+            "public_fee": {
+              "amount": "89.00",
+              "condition": "Credited to the fix.",
+              "currency": "USD",
+              "qualifier": "conditional"
+            },
+            "restriction_type": "visit_fee",
+            "rule": "fee_applies",
+            "service_type": "repair_diagnostic"
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "1befe409-5b5d-4d57-8560-a09eb691ae78",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "business_hours",
+          "confidence": "medium",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "ba007a93-bfc1-4456-9235-aab29e344242"
+          ],
+          "missing_fields": [
+            "timezone",
+            "holiday_policy"
+          ],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "after_hours": "emergency_only",
+            "closed_days": [
+              "sun"
+            ],
+            "emergency_24_7": true,
+            "holiday_policy": null,
+            "ordinary_24_7": false,
+            "ordinary_intervals": [
+              {
+                "closes": "19:00",
+                "days": [
+                  "mon",
+                  "tue",
+                  "wed",
+                  "thu",
+                  "fri"
+                ],
+                "opens": "07:00"
+              },
+              {
+                "closes": "17:00",
+                "days": [
+                  "sat"
+                ],
+                "opens": "08:00"
+              }
+            ],
+            "timezone": null
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "descriptive",
+          "claim_id": "206ae761-0e3d-41cc-9526-414e6978933e",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "business_description",
+          "confidence": "high",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "a00da170-c4db-4caa-9629-7e4520fe3fd0"
+          ],
+          "missing_fields": [],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": "Heating, cooling and heat-pump HVAC company for the Bay Area; a fictional company for design demonstration."
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "398c107f-4fd4-4205-810c-8887d67ef915",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "service",
+          "confidence": "medium",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "3f6b25e3-2d07-4e50-b728-34d8107c4cbf",
+            "a00da170-c4db-4caa-9629-7e4520fe3fd0"
+          ],
+          "missing_fields": [
+            "public_price",
+            "duration_minutes"
+          ],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "duration_minutes": null,
+            "public_price": null,
+            "service_names": [
+              "Heat pump installation",
+              "Ducted heat pump",
+              "Ductless heat pump",
+              "Hybrid heat pump"
+            ],
+            "service_type": "heat_pump_installation"
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "safety_critical",
+          "claim_id": "48ce5c93-0fb8-40fb-8968-e2a3d3a3565f",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "emergency",
+          "confidence": "high",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "ba007a93-bfc1-4456-9235-aab29e344242"
+          ],
+          "missing_fields": [],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "guidance": "For emergencies, call rather than using the online form."
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "descriptive",
+          "claim_id": "58288783-2423-4bea-a5b4-85cd5889a483",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "business_name",
+          "confidence": "high",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "a00da170-c4db-4caa-9629-7e4520fe3fd0"
+          ],
+          "missing_fields": [],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": "Foghorn Air, Inc."
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "70df1b75-16c3-45fd-a00f-e83c678c22cc",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "service",
+          "confidence": "medium",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "3f6b25e3-2d07-4e50-b728-34d8107c4cbf"
+          ],
+          "missing_fields": [
+            "duration_minutes"
+          ],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "duration_minutes": null,
+            "public_price": {
+              "amount": "89.00",
+              "condition": "Credited to the repair.",
+              "currency": "USD",
+              "qualifier": "conditional"
+            },
+            "service_names": [
+              "Repair diagnostic"
+            ],
+            "service_type": "repair_diagnostic"
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "77d5b5e6-2ccf-459a-8dd8-cc372d040205",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "service",
+          "confidence": "medium",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "ba007a93-bfc1-4456-9235-aab29e344242"
+          ],
+          "missing_fields": [
+            "duration_minutes"
+          ],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "duration_minutes": null,
+            "public_price": {
+              "amount": "0.00",
+              "condition": null,
+              "currency": "USD",
+              "qualifier": "fixed"
+            },
+            "service_names": [
+              "New-system assessment"
+            ],
+            "service_type": "new_system_assessment"
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "descriptive",
+          "claim_id": "950d347b-63cb-4ea9-a0ef-9dfca0a9d97f",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "public_phone",
+          "confidence": "high",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "a00da170-c4db-4caa-9629-7e4520fe3fd0"
+          ],
+          "missing_fields": [],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": "(510) 555-0142"
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "9bcc48e6-d5dd-4904-affe-867723e0002c",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "service",
+          "confidence": "medium",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "3f6b25e3-2d07-4e50-b728-34d8107c4cbf"
+          ],
+          "missing_fields": [
+            "duration_minutes"
+          ],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "duration_minutes": null,
+            "public_price": {
+              "amount": "24.00",
+              "condition": "Per month per system.",
+              "currency": "USD",
+              "qualifier": "conditional"
+            },
+            "service_names": [
+              "Comfort Plan maintenance",
+              "Maintenance"
+            ],
+            "service_type": "comfort_plan_maintenance"
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "ac461f06-4cd3-49bb-b604-92586c29132e",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "service",
+          "confidence": "medium",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "3f6b25e3-2d07-4e50-b728-34d8107c4cbf"
+          ],
+          "missing_fields": [
+            "duration_minutes"
+          ],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "duration_minutes": null,
+            "public_price": {
+              "amount": "1450.00",
+              "condition": null,
+              "currency": "USD",
+              "qualifier": "starting_at"
+            },
+            "service_names": [
+              "Filter cabinet upgrade"
+            ],
+            "service_type": "filter_cabinet_upgrade"
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "b9eb56f3-daa3-4a46-ae18-0d13dde8fe19",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "service_territory",
+          "confidence": "high",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "a00da170-c4db-4caa-9629-7e4520fe3fd0"
+          ],
+          "missing_fields": [],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "excluded_areas": [],
+            "included_areas": [
+              {
+                "country_code": "US",
+                "kind": "county",
+                "name": "Alameda",
+                "region_state": "CA"
+              },
+              {
+                "country_code": "US",
+                "kind": "county",
+                "name": "Contra Costa",
+                "region_state": "CA"
+              },
+              {
+                "country_code": "US",
+                "kind": "county",
+                "name": "San Francisco",
+                "region_state": "CA"
+              },
+              {
+                "country_code": "US",
+                "kind": "county",
+                "name": "Marin",
+                "region_state": "CA"
+              },
+              {
+                "country_code": "US",
+                "kind": "county",
+                "name": "San Mateo",
+                "region_state": "CA"
+              }
+            ],
+            "radius": null,
+            "service_type": null
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "ce4d6c48-5cfe-4e30-8b59-c5050d6861b7",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "service",
+          "confidence": "medium",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "3f6b25e3-2d07-4e50-b728-34d8107c4cbf"
+          ],
+          "missing_fields": [
+            "duration_minutes"
+          ],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "duration_minutes": null,
+            "public_price": {
+              "amount": "11900.00",
+              "condition": "After rebates.",
+              "currency": "USD",
+              "qualifier": "starting_at"
+            },
+            "service_names": [
+              "Single-zone ductless heat pump installation"
+            ],
+            "service_type": "single_zone_ductless_heat_pump_installation"
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "descriptive",
+          "claim_id": "d0db1011-af6d-4e98-92ad-3fefbc9ed507",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "public_email",
+          "confidence": "high",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "a00da170-c4db-4caa-9629-7e4520fe3fd0"
+          ],
+          "missing_fields": [],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": "hello@foghornair.com"
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "e7156c4b-65d0-4d0b-ac50-a1416e93f35b",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "service",
+          "confidence": "medium",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "3f6b25e3-2d07-4e50-b728-34d8107c4cbf",
+            "a00da170-c4db-4caa-9629-7e4520fe3fd0"
+          ],
+          "missing_fields": [
+            "public_price",
+            "duration_minutes"
+          ],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "duration_minutes": null,
+            "public_price": null,
+            "service_names": [
+              "Same-day repair",
+              "Repair"
+            ],
+            "service_type": "same_day_repair"
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "safety_critical",
+          "claim_id": "f2df7635-129e-4dc7-a74a-aa93da5296e8",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "emergency",
+          "confidence": "high",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "ba007a93-bfc1-4456-9235-aab29e344242"
+          ],
+          "missing_fields": [],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "guidance": "The emergency line is answered 24/7."
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "f8412bc3-4067-483a-b285-8d56021dc9b7",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "service",
+          "confidence": "medium",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "3f6b25e3-2d07-4e50-b728-34d8107c4cbf"
+          ],
+          "missing_fields": [
+            "public_price",
+            "duration_minutes"
+          ],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "duration_minutes": null,
+            "public_price": null,
+            "service_names": [
+              "Air quality and smoke-season services",
+              "Smoke-season air",
+              "Aeroseal duct sealing",
+              "Whole-home filtration",
+              "Humidity control"
+            ],
+            "service_type": "air_quality_and_smoke_season_services"
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "fb8a1379-94dc-4a30-b8d3-42f48992c2e6",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "service",
+          "confidence": "medium",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "3f6b25e3-2d07-4e50-b728-34d8107c4cbf"
+          ],
+          "missing_fields": [
+            "duration_minutes"
+          ],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "duration_minutes": null,
+            "public_price": {
+              "amount": "180.00",
+              "condition": "Most repairs are publicly listed at $180–$650.",
+              "currency": "USD",
+              "qualifier": "starting_at"
+            },
+            "service_names": [
+              "Repair"
+            ],
+            "service_type": "repair"
+          }
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "descriptive",
+          "claim_id": "fcf8bf2b-3c89-458f-ada9-7bbe494a7290",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "public_address",
+          "confidence": "high",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "ba007a93-bfc1-4456-9235-aab29e344242"
+          ],
+          "missing_fields": [],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": "1450 Mandela Pkwy, Oakland, CA 94607"
+        },
+        {
+          "adapter_id": "direct_model",
+          "ambiguous_fields": [],
+          "claim_class": "operational",
+          "claim_id": "fd9ab77d-aae5-4b80-8af4-8061a378d58e",
+          "claim_schema_version": "company_discovery.claim.v2",
+          "claim_type": "service",
+          "confidence": "medium",
+          "contradiction_status": "none",
+          "contradictions": [],
+          "evidence_refs": [
+            "a00da170-c4db-4caa-9629-7e4520fe3fd0"
+          ],
+          "missing_fields": [
+            "public_price",
+            "duration_minutes"
+          ],
+          "model": "gpt-5.6-sol",
+          "provider": "openai-codex",
+          "review_status": "pending_onboarding",
+          "uncertainty": [],
+          "value": {
+            "duration_minutes": null,
+            "public_price": null,
+            "service_names": [
+              "Light commercial HVAC",
+              "Rooftop units",
+              "VRF",
+              "Maintenance contracts"
+            ],
+            "service_type": "light_commercial_hvac"
+          }
+        }
+      ],
+      "contradictions": [
+        "Os horários de sábado divergem: s0 publica “Mon–Sat 7am–7pm”, enquanto s4 publica “Saturday 8:00 AM – 5:00 PM”.",
+        "s0 e s1 anunciam reparos no mesmo dia durante sete dias, mas s4 limita o domingo a “Emergency only”; não está claro se reparos comuns no mesmo dia estão disponíveis aos domingos."
+      ],
+      "missing_information": [
+        "Qual é o fuso horário oficial usado para os horários publicados?",
+        "Qual é a política de funcionamento em feriados?",
+        "Quem fornece as garantias de 12 anos para peças e 2 anos para mão de obra, e quais são suas condições e exclusões?",
+        "Quais são as políticas públicas de cancelamento, reagendamento, depósito e não comparecimento?",
+        "Há taxas adicionais para atendimentos emergenciais ou fora do horário normal?",
+        "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?"
+      ],
+      "owner_private_information_needed": [
+        {
+          "field": "authority.quote_price",
+          "question_pt": "Quando o Ligou pode informar um preço ao cliente?"
+        },
+        {
+          "field": "authority.negotiate_floor",
+          "question_pt": "Qual é o limite privado de negociação e desconto?"
+        },
+        {
+          "field": "authority.read_calendar",
+          "question_pt": "O Ligou pode consultar sua agenda?"
+        },
+        {
+          "field": "authority.book",
+          "question_pt": "O Ligou pode confirmar agendamentos?"
+        },
+        {
+          "field": "authority.reschedule_cancel",
+          "question_pt": "O Ligou pode remarcar ou cancelar serviços?"
+        },
+        {
+          "field": "authority.charge_fee",
+          "question_pt": "O Ligou pode confirmar ou cobrar taxas?"
+        },
+        {
+          "field": "authority.emergency",
+          "question_pt": "Que autonomia o Ligou tem em emergências?"
+        },
+        {
+          "field": "authority.out_of_area",
+          "question_pt": "Que autonomia o Ligou tem fora da área atendida?"
+        }
+      ],
+      "review_mode": "onboarding_voice",
+      "schema_version": "company_discovery.onboarding_draft.v2",
+      "source_attempt_id": "e89e1e94-510f-4468-adf2-b444e3c06736",
+      "source_job_id": "1e683651-76c8-4297-b7c3-562fdedd4516",
+      "source_result_hash": "9458407ff967e6ff23ef80a677e3de38bf6d36a9696c29d982e149386dd79545",
+      "source_result_id": "c023899f-4dbe-46b9-89d4-2e1065709ca7",
+      "source_result_schema": "company_discovery.result.v2",
+      "sources": [
+        {
+          "crawl_order": 0,
+          "evidence_id": "a00da170-c4db-4caa-9629-7e4520fe3fd0",
+          "excerpt": "[UNTRUSTED WEBSITE EVIDENCE]\nFoghorn Air — Heating, Cooling & Heat Pumps for the Bay Area\nSkip to content Crews available today · next opening 2:30 PM PT in Oakland & Berkeley Licensed C-20 · #1038422 · Since 2011 Foghorn Air\nServices\nHeat pumps\nAbout\nContact\n(510) 555-0142 Book a visit\n# Comfort, engineered for every microclimate.\nFog in the Sunset. 100° in Walnut Creek. Smoke in October. One Oakland crew that knows the difference, and installs for it.\nScroll Book a visit Heat pump rebates\nRigh",
+          "url": "https://foghorn-air.vercel.app/"
+        },
+        {
+          "crawl_order": 1,
+          "evidence_id": "3f6b25e3-2d07-4e50-b728-34d8107c4cbf",
+          "excerpt": "[UNTRUSTED WEBSITE EVIDENCE]\nServices & Pricing — Foghorn Air\nSkip to content Crews available today · next opening 2:30 PM PT in Oakland & Berkeley Licensed C-20 · #1038422 · Since 2011 Foghorn Air\nServices\nHeat pumps\nAbout\nContact\n(510) 555-0142 Book a visit\nServices & pricing\n# Everything between the thermostat and the roof.\nFlat diagnostic fees, fixed-price quotes, and technicians who've been with us an average of seven years. Prices below are typical for Bay Area homes; your quote is your qu",
+          "url": "https://foghorn-air.vercel.app/services"
+        },
+        {
+          "crawl_order": 2,
+          "evidence_id": "1118d5d0-228c-4c99-8a76-15f03fc6e3c7",
+          "excerpt": "[UNTRUSTED WEBSITE EVIDENCE]\nHeat Pumps for Bay Area Homes — Foghorn Air\nSkip to content Crews available today · next opening 2:30 PM PT in Oakland & Berkeley Licensed C-20 · #1038422 · Since 2011 Foghorn Air\nServices\nHeat pumps\nAbout\nContact\n(510) 555-0142 Book a visit\nThe heat pump guide\n# One machine. Heating, cooling, and a smaller bill.\nA heat pump moves heat instead of making it, which is why it uses a third of the energy of a gas furnace and doubles as your air conditioner. Here's how it ",
+          "url": "https://foghorn-air.vercel.app/heat-pumps"
+        },
+        {
+          "crawl_order": 3,
+          "evidence_id": "037f787f-1594-4a04-bf85-35d291133b74",
+          "excerpt": "[UNTRUSTED WEBSITE EVIDENCE]\nAbout — Foghorn Air\nSkip to content Crews available today · next opening 2:30 PM PT in Oakland & Berkeley Licensed C-20 · #1038422 · Since 2011 Foghorn Air\nServices\nHeat pumps\nAbout\nContact\n(510) 555-0142 Book a visit\nAbout Foghorn Air\n# Started in a West Oakland garage. Still there, bigger garage.\nMateo Reyes spent twelve years fixing other companies' rushed installs before deciding the Bay deserved a crew that did it right the first time. Fifteen years and 4,800 he",
+          "url": "https://foghorn-air.vercel.app/about"
+        },
+        {
+          "crawl_order": 4,
+          "evidence_id": "ba007a93-bfc1-4456-9235-aab29e344242",
+          "excerpt": "[UNTRUSTED WEBSITE EVIDENCE]\nBook a Visit — Foghorn Air\nSkip to content Crews available today · next opening 2:30 PM PT in Oakland & Berkeley Licensed C-20 · #1038422 · Since 2011 Foghorn Air\nServices\nHeat pumps\nAbout\nContact\n(510) 555-0142 Book a visit\nBook a visit\n# Pick a window. We'll text when the van leaves.\nRepairs are $89 to diagnose, credited to the fix. New-system assessments are free. Emergencies: call, don't type.\n### Got it, there .\nA dispatcher will text you within 30 minutes to lo",
+          "url": "https://foghorn-air.vercel.app/contact"
+        }
+      ]
+    },
+    "draft_hash": "32dfe1a9341118b8e868650a1ed5c6bf70b7257728ca3637f374fda5e54ee4e0",
+    "draft_id": "46603c2c-c4d9-4d79-b35c-cd5b658388ab",
+    "draft_version": 1,
+    "tenant_id": "6e915234-0cee-4d67-9eba-60c2c920dd15"
+  },
+  "initial_coverage": {
+    "authority": {
+      "operational_mode_changed": false,
+      "powers_granted": false,
+      "rules_approved": false
+    },
+    "call_id": "3c7a37be-c8a0-456e-a1a1-9b937bd0ef4a",
+    "complete": false,
+    "current_answer_hashes": {
+      "area.coverage": "4452267b58ffe2a5d6c89071b14bb57c9f6197e469d81f1811be6a1c843479d7",
+      "authority.book": "813c96a0c186b772e1f96231f0443cb158dc5b0b029663cb38a7c327c4d26d6f",
+      "authority.charge_fee": "1630ac27447577f6255f32467dbccaadfd4190b2015c2b6deb6f0ef3152a214d",
+      "authority.emergency": "ae472461aab646f7b25307680194087f3585e2838abd7d01566e19d1ce0e7d90",
+      "authority.negotiate_floor": "1bc842af02bab88d8de765b5fb5580669de5ece165a280704ef62374dcd93fe5",
+      "authority.out_of_area": "d9665e3ffd92a71ba9b48b9cfce2d967fcd979c868a0ed93f7ebf4058167e336",
+      "authority.quote_price": "dbddeeae9adcdd35a04c4ea7fb85f92e17052e7690ea04d547edd489d1da2182",
+      "authority.read_calendar": "1c66bdf5765eedd86d66122593b5aa25e3fe53c8ad22669ce98a69b67cbd3824",
+      "authority.reschedule_cancel": "75441666161ffe7941953be2a3832eb9e69bb7bc467240af1925130d4eae7e77",
+      "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49": "7da166baf60fde1cd51cbf34ff8cb75e49dfed5b9d87f5d80359c150b1c7ce02",
+      "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d": "28614f71035c9f1e66fd6113d19e854d0c6ac148b5852233507ab412ee8831ce",
+      "discovery.owner_question.765e3066368e4f928af07adb701d9016": "8c3de372aacea8a833ec9d859d16e19b157518369daf7cb6d5777b3521db47d2",
+      "discovery.owner_question.832bbe1e136144da860b749a0b419b60": "b725e7d868c699784d36d37c2ed7a14766d99fd17f460c724e21730b3952a4ca",
+      "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732": "f9af8ecf32b8a1bd0fe4a70a83970f44179816d80917329e809c3bcf7613ca75",
+      "discovery.owner_question.96d2a50e7b5f4a4f8733835aaf93febc": "49e1b505253f0780ec159230c81b1d799ec6b039a0bc18a775624e43c770faf1",
+      "discovery.owner_question.a7f482402bbc43a684dbd4c085969d63": "b8435a717c56a5430a82027f5113c17cffa879fc0ab877dc8517dd9dc2ba3c42",
+      "discovery.owner_question.ff9fa80b12d54afa85e2a17a937aceca": "c3a5af7378a1429ab01b15c35d4a19b3a6c495f67b1430f74dd6d92e3d6d232b",
+      "emergency.after_hours": "e53c8c83e885912ca1a57f1a9be36663ce33b38db72ae1a1ba37f78c7de7fcf6",
+      "emergency.safety_escalation": "e0903da0ceafbed6620308f228f2e7f6bf2a56ad91eafa8ced11683237681aa0",
+      "schedule.business_hours": "a9fca1dc2a39a67ba2fa255b4fb5769a46d80585b5bb78ade76fb939968638a2",
+      "schedule.reschedule_cancel": "710786383be3bdae8d718c14ad9637d2167e4edbdb90794db87f41bf9d5a0e2d",
+      "service:air_quality_and_smoke_season_services:service.name_synonyms": "4031026b1708fda14e4135c47071a1ab685af981f481dbf574942babffb53030",
+      "service:comfort_plan_maintenance:service.name_synonyms": "89dd0792694e892c7f67c5e81756ead0842346f1ab733fc6323d32e841d51303",
+      "service:comfort_plan_maintenance:service.price_mode": "aa82c401e996b1362a33400b9a56eef6aebc85fe9981b012e99c528a2f9edd58",
+      "service:filter_cabinet_upgrade:service.name_synonyms": "dadc18a72a479ad7d3702c9d6132427c979f36828243397beaf79c931051022b",
+      "service:filter_cabinet_upgrade:service.negotiation": "b250df703feb35681569c73de4317a35af83ba8b8af932e433dda33e3347dfbd",
+      "service:filter_cabinet_upgrade:service.price_mode": "a2dead6ba12f29978c8456922d1bedde7c8a62f1689da639d0b58257f35467b6",
+      "service:filter_cabinet_upgrade:service.price_target": "fd47cf75ba2c5ac8ba284a25cc950240c329e103b945b074dadb306480f50f41",
+      "service:heat_pump_installation:service.name_synonyms": "24d1cef89ba6eb67a0967ac04838b484d9c8775aba603764d1f2c9539080237b",
+      "service:light_commercial_hvac:service.name_synonyms": "ff2525246b45910a8e4dd32ddeaf933d24d5cd428245227b7f7d396169224004",
+      "service:new_system_assessment:service.name_synonyms": "d29a1e6f153a25858a9c62cc88f45dc52e7abbbf7a534e76f2f270d5e3bbed0f",
+      "service:new_system_assessment:service.negotiation": "7eb35c6978f12d56538136e3bbb59c70c50cbddec35e255a6f4ba9edc9b7490c",
+      "service:new_system_assessment:service.price_mode": "08405ea2e871cf42d207bb87894f830d2804a8223b3485886ff74d87cbc3b78c",
+      "service:new_system_assessment:service.price_target": "fcd71358265d22d33518d79fccd120a7c2fbfdf6a0470146c34da1b04f62daf2",
+      "service:repair:service.name_synonyms": "0362304c6a6225baf8bc19410aef692c6e2a3649fa9677abf76d7b3972e8f3f8",
+      "service:repair:service.negotiation": "c0b75e95d9bc41a1b6d12633acc08fc3194440ee8a193130a16ce6f0556dd9a5",
+      "service:repair:service.price_mode": "22d399a7145ab0b9d497e5c3ab8c7724b83a29948270a56ae35a37350a18c39e",
+      "service:repair:service.price_target": "a336a0edfacd8b87912508719904e9ea0be4d2051263e684e1c486b59b63284e",
+      "service:repair_diagnostic:service.name_synonyms": "75556d366ca2eb233dbe2844bfdec20536815bc909890f59236e9f2110303d3c",
+      "service:repair_diagnostic:service.price_mode": "aefa9266e8f82fb5e85322ce0e8f6e63abd6b5d672e801880b735232265ff8fb",
+      "service:same_day_repair:service.name_synonyms": "e441df8d06d21f697a40c9f235ab1ae0ec923328fdea0f08e8cdf24fc9cd89a3",
+      "service:single_zone_ductless_heat_pump_installation:service.name_synonyms": "328663e39ebc11ea9514dc1a24783f62dfe20828517017190110b218c9bca769",
+      "service:single_zone_ductless_heat_pump_installation:service.negotiation": "f62e3929f3214e8a441a5a6f7229289d5cf5c0bbdf8c4b199f15d858fb35bae8",
+      "service:single_zone_ductless_heat_pump_installation:service.price_mode": "e9d3a28de2004a63ae8be33df0aa30f1342a1cc0e59929791544b22a6b67dabf",
+      "service:single_zone_ductless_heat_pump_installation:service.price_target": "c064a83e3dc6eb05011f080c19d70752f78eee511ca7840ad432b5207919492f"
+    },
+    "discovery_context": {
+      "draft_hash": "32dfe1a9341118b8e868650a1ed5c6bf70b7257728ca3637f374fda5e54ee4e0",
+      "draft_id": "46603c2c-c4d9-4d79-b35c-cd5b658388ab",
+      "draft_version": 1,
+      "source_attempt_id": "e89e1e94-510f-4468-adf2-b444e3c06736",
+      "source_job_id": "1e683651-76c8-4297-b7c3-562fdedd4516",
+      "source_result_hash": "9458407ff967e6ff23ef80a677e3de38bf6d36a9696c29d982e149386dd79545",
+      "source_result_id": "c023899f-4dbe-46b9-89d4-2e1065709ca7",
+      "source_result_schema": "company_discovery.result.v2"
+    },
+    "materializations": [],
+    "next_action": {
+      "field": "area.coverage",
+      "question_pt": "Eu já analisei seu website. O site descreve a área de atendimento de forma ampla ou ambígua. Quais cidades exatas sua empresa atende?",
+      "type": "ask"
+    },
+    "progress": {
+      "ambiguous": [
+        {
+          "field": "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49"
+        },
+        {
+          "field": "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d"
+        },
+        {
+          "field": "discovery.owner_question.765e3066368e4f928af07adb701d9016"
+        },
+        {
+          "field": "discovery.owner_question.832bbe1e136144da860b749a0b419b60"
+        },
+        {
+          "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732"
+        },
+        {
+          "field": "discovery.owner_question.96d2a50e7b5f4a4f8733835aaf93febc"
+        },
+        {
+          "field": "discovery.owner_question.a7f482402bbc43a684dbd4c085969d63"
+        },
+        {
+          "field": "discovery.owner_question.ff9fa80b12d54afa85e2a17a937aceca"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "authority.quote_price"
+        },
+        {
+          "field": "authority.negotiate_floor"
+        },
+        {
+          "field": "authority.read_calendar"
+        },
+        {
+          "field": "authority.book"
+        },
+        {
+          "field": "authority.reschedule_cancel"
+        },
+        {
+          "field": "authority.charge_fee"
+        },
+        {
+          "field": "authority.emergency"
+        },
+        {
+          "field": "authority.out_of_area"
+        },
+        {
+          "field": "area.coverage"
+        },
+        {
+          "field": "schedule.business_hours"
+        }
+      ],
+      "answered": [
+        {
+          "field": "schedule.reschedule_cancel"
+        },
+        {
+          "field": "emergency.after_hours"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "emergency.safety_escalation"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "repair"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "repair"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "repair"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "light_commercial_hvac"
+        }
+      ],
+      "catalogNormallyComplete": true,
+      "conditionalFields": [
+        {
+          "field": "service.price_target",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "repair"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "repair"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        }
+      ],
+      "missingRequired": [
+        {
+          "field": "service.catalog_closure"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.duration",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.duration",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.duration",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.duration",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.duration",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.duration",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.duration",
+          "subject": "repair"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "repair"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "repair"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "repair"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "repair"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "repair"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.duration",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.duration",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.duration",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "emergency.types"
+        },
+        {
+          "field": "emergency.fee_authority"
+        },
+        {
+          "field": "area.out_of_area_policy"
+        },
+        {
+          "field": "area.travel_fee"
+        },
+        {
+          "field": "schedule.same_day_lead_time"
+        },
+        {
+          "field": "schedule.capacity_buffer"
+        },
+        {
+          "field": "schedule.holidays"
+        },
+        {
+          "field": "policy.payment_estimate"
+        },
+        {
+          "field": "policy.warranty_materials"
+        },
+        {
+          "field": "policy.access_cancellation"
+        },
+        {
+          "field": "policy.complaints_returns"
+        },
+        {
+          "field": "business.customer_types"
+        },
+        {
+          "field": "business.excluded_work"
+        },
+        {
+          "field": "business.languages_tone"
+        }
+      ],
+      "nextQuestion": {
+        "field": "area.coverage",
+        "questionPt": "O site descreve a área de atendimento de forma ampla ou ambígua. Quais cidades exatas sua empresa atende?"
+      },
+      "notApplicable": [],
+      "ownerReviewRequired": [
+        {
+          "field": "service.negotiation",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "repair"
+        }
+      ],
+      "readyForReview": false,
+      "requiredFields": [
+        {
+          "field": "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49"
+        },
+        {
+          "field": "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d"
+        },
+        {
+          "field": "discovery.owner_question.765e3066368e4f928af07adb701d9016"
+        },
+        {
+          "field": "discovery.owner_question.832bbe1e136144da860b749a0b419b60"
+        },
+        {
+          "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732"
+        },
+        {
+          "field": "discovery.owner_question.96d2a50e7b5f4a4f8733835aaf93febc"
+        },
+        {
+          "field": "discovery.owner_question.a7f482402bbc43a684dbd4c085969d63"
+        },
+        {
+          "field": "discovery.owner_question.ff9fa80b12d54afa85e2a17a937aceca"
+        },
+        {
+          "field": "service.catalog_closure"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.duration",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "air_quality_and_smoke_season_services"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.duration",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "comfort_plan_maintenance"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.duration",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "filter_cabinet_upgrade"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.duration",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "heat_pump_installation"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.duration",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "light_commercial_hvac"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.duration",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "new_system_assessment"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "repair"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "repair"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "repair"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "repair"
+        },
+        {
+          "field": "service.duration",
+          "subject": "repair"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "repair"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "repair"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "repair"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "repair"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "repair"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.duration",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "repair_diagnostic"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.duration",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "same_day_repair"
+        },
+        {
+          "field": "service.name_synonyms",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.price_mode",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.price_target",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.negotiation",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.duration",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.inclusions_exclusions",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.materials_parts",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.warranty",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.emergency_eligibility",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "service.escalation",
+          "subject": "single_zone_ductless_heat_pump_installation"
+        },
+        {
+          "field": "emergency.types"
+        },
+        {
+          "field": "emergency.safety_escalation"
+        },
+        {
+          "field": "emergency.after_hours"
+        },
+        {
+          "field": "emergency.fee_authority"
+        },
+        {
+          "field": "authority.quote_price"
+        },
+        {
+          "field": "authority.negotiate_floor"
+        },
+        {
+          "field": "authority.read_calendar"
+        },
+        {
+          "field": "authority.book"
+        },
+        {
+          "field": "authority.reschedule_cancel"
+        },
+        {
+          "field": "authority.charge_fee"
+        },
+        {
+          "field": "authority.emergency"
+        },
+        {
+          "field": "authority.out_of_area"
+        },
+        {
+          "field": "area.coverage"
+        },
+        {
+          "field": "area.out_of_area_policy"
+        },
+        {
+          "field": "area.travel_fee"
+        },
+        {
+          "field": "schedule.business_hours"
+        },
+        {
+          "field": "schedule.same_day_lead_time"
+        },
+        {
+          "field": "schedule.capacity_buffer"
+        },
+        {
+          "field": "schedule.reschedule_cancel"
+        },
+        {
+          "field": "schedule.holidays"
+        },
+        {
+          "field": "policy.payment_estimate"
+        },
+        {
+          "field": "policy.warranty_materials"
+        },
+        {
+          "field": "policy.access_cancellation"
+        },
+        {
+          "field": "policy.complaints_returns"
+        },
+        {
+          "field": "business.customer_types"
+        },
+        {
+          "field": "business.excluded_work"
+        },
+        {
+          "field": "business.languages_tone"
+        }
+      ],
+      "summaryInvalidated": false
+    },
+    "revision": 1,
+    "schema_version": 2,
+    "selected_rule_ids": [],
+    "snapshot": {
+      "callId": "3c7a37be-c8a0-456e-a1a1-9b937bd0ef4a",
+      "cells": {
+        "area.coverage": {
+          "attempts": 0,
+          "questionPt": "O site descreve a área de atendimento de forma ampla ou ambígua. Quais cidades exatas sua empresa atende?",
+          "reason": "website_territory_requires_owner_resolution",
+          "state": "ambiguous"
+        },
+        "authority.book": {
+          "attempts": 0,
+          "questionPt": "O Ligou pode confirmar agendamentos?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "authority.charge_fee": {
+          "attempts": 0,
+          "questionPt": "O Ligou pode confirmar ou cobrar taxas?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "authority.emergency": {
+          "attempts": 0,
+          "questionPt": "Que autonomia o Ligou tem em emergências?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "authority.negotiate_floor": {
+          "attempts": 0,
+          "questionPt": "Qual é o limite privado de negociação e desconto?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "authority.out_of_area": {
+          "attempts": 0,
+          "questionPt": "Que autonomia o Ligou tem fora da área atendida?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "authority.quote_price": {
+          "attempts": 0,
+          "questionPt": "Quando o Ligou pode informar um preço ao cliente?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "authority.read_calendar": {
+          "attempts": 0,
+          "questionPt": "O Ligou pode consultar sua agenda?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "authority.reschedule_cancel": {
+          "attempts": 0,
+          "questionPt": "O Ligou pode remarcar ou cancelar serviços?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49": {
+          "attempts": 0,
+          "questionPt": "Quem fornece as garantias de 12 anos para peças e 2 anos para mão de obra, e quais são suas condições e exclusões?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d": {
+          "attempts": 0,
+          "questionPt": "Há taxas adicionais para atendimentos emergenciais ou fora do horário normal?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "discovery.owner_question.765e3066368e4f928af07adb701d9016": {
+          "attempts": 0,
+          "questionPt": "Confirme esta contradição encontrada no site: s0 e s1 anunciam reparos no mesmo dia durante sete dias, mas s4 limita o domingo a “Emergency only”; não está claro se reparos comuns no mesmo dia estão disponíveis aos domingos.",
+          "reason": "company_discovery_contradiction",
+          "state": "ambiguous"
+        },
+        "discovery.owner_question.832bbe1e136144da860b749a0b419b60": {
+          "attempts": 0,
+          "questionPt": "Confirme esta contradição encontrada no site: Os horários de sábado divergem: s0 publica “Mon–Sat 7am–7pm”, enquanto s4 publica “Saturday 8:00 AM – 5:00 PM”.",
+          "reason": "company_discovery_contradiction",
+          "state": "ambiguous"
+        },
+        "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732": {
+          "attempts": 0,
+          "questionPt": "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "discovery.owner_question.96d2a50e7b5f4a4f8733835aaf93febc": {
+          "attempts": 0,
+          "questionPt": "Qual é a política de funcionamento em feriados?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "discovery.owner_question.a7f482402bbc43a684dbd4c085969d63": {
+          "attempts": 0,
+          "questionPt": "Quais são as políticas públicas de cancelamento, reagendamento, depósito e não comparecimento?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "discovery.owner_question.ff9fa80b12d54afa85e2a17a937aceca": {
+          "attempts": 0,
+          "questionPt": "Qual é o fuso horário oficial usado para os horários publicados?",
+          "reason": "company_discovery_missing_or_owner_private",
+          "state": "ambiguous"
+        },
+        "emergency.after_hours": {
+          "attempts": 0,
+          "state": "answered",
+          "value": "Atendimento fora do horário somente para emergência; disponibilidade de emergência 24/7 quando publicada."
+        },
+        "emergency.safety_escalation": {
+          "attempts": 0,
+          "state": "answered",
+          "value": "For emergencies, call rather than using the online form.; The emergency line is answered 24/7."
+        },
+        "schedule.business_hours": {
+          "attempts": 0,
+          "questionPt": "Confirme os horários normais da empresa e o fuso horário, inclusive domingo.",
+          "reason": "website_hours_need_owner_normalization",
+          "state": "ambiguous"
+        },
+        "schedule.reschedule_cancel": {
+          "attempts": 0,
+          "state": "answered",
+          "value": "fee_applies — USD 89.00 — The diagnostic fee is credited to the fix."
+        },
+        "service:air_quality_and_smoke_season_services:service.name_synonyms": {
+          "attempts": 0,
+          "state": "answered",
+          "value": [
+            "Air quality and smoke-season services",
+            "Smoke-season air",
+            "Aeroseal duct sealing",
+            "Whole-home filtration",
+            "Humidity control"
+          ]
+        },
+        "service:comfort_plan_maintenance:service.name_synonyms": {
+          "attempts": 0,
+          "state": "answered",
+          "value": [
+            "Comfort Plan maintenance",
+            "Maintenance"
+          ]
+        },
+        "service:comfort_plan_maintenance:service.price_mode": {
+          "attempts": 0,
+          "questionPt": "Seu site publica USD 24.00 com a condição “Per month per system.” para comfort plan maintenance. Como esse preço deve ser tratado?",
+          "reason": "website_conditional_public_price",
+          "state": "ambiguous"
+        },
+        "service:filter_cabinet_upgrade:service.name_synonyms": {
+          "attempts": 0,
+          "state": "answered",
+          "value": [
+            "Filter cabinet upgrade"
+          ]
+        },
+        "service:filter_cabinet_upgrade:service.negotiation": {
+          "attempts": 0,
+          "safeRestriction": "Preço mínimo e negociação permanecem privados e exigem resposta do dono.",
+          "state": "owner_review_required"
+        },
+        "service:filter_cabinet_upgrade:service.price_mode": {
+          "attempts": 0,
+          "state": "answered",
+          "value": "starting_at"
+        },
+        "service:filter_cabinet_upgrade:service.price_target": {
+          "attempts": 0,
+          "state": "answered",
+          "value": 1450
+        },
+        "service:heat_pump_installation:service.name_synonyms": {
+          "attempts": 0,
+          "state": "answered",
+          "value": [
+            "Heat pump installation",
+            "Ducted heat pump",
+            "Ductless heat pump",
+            "Hybrid heat pump"
+          ]
+        },
+        "service:light_commercial_hvac:service.name_synonyms": {
+          "attempts": 0,
+          "state": "answered",
+          "value": [
+            "Light commercial HVAC",
+            "Rooftop units",
+            "VRF",
+            "Maintenance contracts"
+          ]
+        },
+        "service:new_system_assessment:service.name_synonyms": {
+          "attempts": 0,
+          "state": "answered",
+          "value": [
+            "New-system assessment"
+          ]
+        },
+        "service:new_system_assessment:service.negotiation": {
+          "attempts": 0,
+          "safeRestriction": "Preço mínimo e negociação permanecem privados e exigem resposta do dono.",
+          "state": "owner_review_required"
+        },
+        "service:new_system_assessment:service.price_mode": {
+          "attempts": 0,
+          "state": "answered",
+          "value": "fixed"
+        },
+        "service:new_system_assessment:service.price_target": {
+          "attempts": 0,
+          "state": "answered",
+          "value": 0
+        },
+        "service:repair:service.name_synonyms": {
+          "attempts": 0,
+          "state": "answered",
+          "value": [
+            "Repair"
+          ]
+        },
+        "service:repair:service.negotiation": {
+          "attempts": 0,
+          "safeRestriction": "Preço mínimo e negociação permanecem privados e exigem resposta do dono.",
+          "state": "owner_review_required"
+        },
+        "service:repair:service.price_mode": {
+          "attempts": 0,
+          "state": "answered",
+          "value": "starting_at"
+        },
+        "service:repair:service.price_target": {
+          "attempts": 0,
+          "state": "answered",
+          "value": 180
+        },
+        "service:repair_diagnostic:service.name_synonyms": {
+          "attempts": 0,
+          "state": "answered",
+          "value": [
+            "Repair diagnostic"
+          ]
+        },
+        "service:repair_diagnostic:service.price_mode": {
+          "attempts": 0,
+          "questionPt": "Seu site publica USD 89.00 com a condição “Credited to the repair.” para repair diagnostic. Como esse preço deve ser tratado?",
+          "reason": "website_conditional_public_price",
+          "state": "ambiguous"
+        },
+        "service:same_day_repair:service.name_synonyms": {
+          "attempts": 0,
+          "state": "answered",
+          "value": [
+            "Same-day repair",
+            "Repair"
+          ]
+        },
+        "service:single_zone_ductless_heat_pump_installation:service.name_synonyms": {
+          "attempts": 0,
+          "state": "answered",
+          "value": [
+            "Single-zone ductless heat pump installation"
+          ]
+        },
+        "service:single_zone_ductless_heat_pump_installation:service.negotiation": {
+          "attempts": 0,
+          "safeRestriction": "Preço mínimo e negociação permanecem privados e exigem resposta do dono.",
+          "state": "owner_review_required"
+        },
+        "service:single_zone_ductless_heat_pump_installation:service.price_mode": {
+          "attempts": 0,
+          "state": "answered",
+          "value": "starting_at"
+        },
+        "service:single_zone_ductless_heat_pump_installation:service.price_target": {
+          "attempts": 0,
+          "state": "answered",
+          "value": 11900
+        }
+      },
+      "followUpGroups": {},
+      "followUps": 0,
+      "revision": 1,
+      "services": [
+        "air_quality_and_smoke_season_services",
+        "comfort_plan_maintenance",
+        "filter_cabinet_upgrade",
+        "heat_pump_installation",
+        "light_commercial_hvac",
+        "new_system_assessment",
+        "repair",
+        "repair_diagnostic",
+        "same_day_repair",
+        "single_zone_ductless_heat_pump_installation"
+      ],
+      "summaryInvalidated": false,
+      "tenantId": "6e915234-0cee-4d67-9eba-60c2c920dd15"
+    },
+    "snapshot_digest": "fd31451cc61f5a9090ecd4b02ab17c6e5f7cc2ae594209e9d4a1a2a67313f675",
+    "summary_hash": null,
+    "summary_projection": null,
+    "tenant_id": "6e915234-0cee-4d67-9eba-60c2c920dd15",
+    "transition_kind": "discovery_prefill"
+  },
+  "recorded_transcript": [
+    {
+      "at": "2026-09-04T00:47:24.664Z",
+      "role": "agent",
+      "text": "Oi! Aqui é o Ligou, agente de inteligência artificial da D1f Marketing. Eu já analisei seu website. O site descreve a área de atendimento de forma ampla ou ambígua. Quais cidades exatas sua empresa atende?"
+    },
+    {
+      "at": "2026-09-04T00:47:32.124Z",
+      "role": "caller",
+      "text": "A gente atende novato, Rafael e Petaluma, somente essas três cidades."
+    },
+    {
+      "at": "2026-09-04T00:47:42.709Z",
+      "role": "agent",
+      "text": "Perfeito. Agora preciso dessa informação em suas palavras: quem fornece as garantias de 12 anos para peças e 2 anos para mão de obra? E quais são as condições e as exclusões, por exemplo requisitos de instalação, manutenção, registro, uso, cobertura de terceiros, ou coisas que não estão cobertas?"
+    },
+    {
+      "at": "2026-09-04T00:48:03.326Z",
+      "role": "caller",
+      "text": "Garantias vêm dos fabricantes e dos instaladores que a gente usa. Cobre defeitos de fabricação e de instalação, mas não cobre mau uso nem modificações de terceiros."
+    },
+    {
+      "at": "2026-09-04T00:48:09.221Z",
+      "role": "agent",
+      "text": "Obrigado, ficou claro.\n\nAgora me diga: existem taxas adicionais para atendimentos emergenciais ou para serviços fora do horário normal? Se sim, como elas funcionam?"
+    },
+    {
+      "at": "2026-09-04T00:48:20.597Z",
+      "role": "caller",
+      "text": "Não."
+    },
+    {
+      "at": "2026-09-04T00:48:37.866Z",
+      "role": "caller",
+      "text": "Não tente taxa automática fora do horário, a gente só atende emergência e precisa de aprovação explícita minha antes de confirmar qualquer coisa. Se o cliente relatar gás ou monóxido, a orientação é sair e ligar pro 911 e pra concessionária."
+    },
+    {
+      "at": "2026-09-04T00:48:48.851Z",
+      "role": "agent",
+      "text": "Sim, isso é uma contradição. Se o site diz em s0 e s1 que há reparos no mesmo dia durante sete dias, mas em s4 o domingo é “Emergency only”, então não fica claro se reparos comuns no mesmo dia estão disponíveis aos domingos.\n\nA leitura mais coerente seria: domingo tem apenas atendimento emergencial, e reparos comuns no mesmo dia não se aplicam. Se for isso, o texto precisa deixar isso explícito. Se não for, é necessário ajustar o que está em s0 e s1 ou em s4 para alinhar a política."
+    },
+    {
+      "at": "2026-09-04T00:49:20.491Z",
+      "role": "agent",
+      "text": "Confirmado: há, sim, uma contradição. Se o site promete “reparos no mesmo dia”"
+    },
+    {
+      "at": "2026-09-04T00:49:39.396Z",
+      "role": "caller",
+      "text": "Sim, você tem razão. Sim, é exatamente isso, domingo é só emergência. Repara os comuns no mesmo dia valem de segunda a sábado, dentro do horário. Domingo é somente emergência e só com minha aprovação explícita antes de confirmar qualquer atendimento."
+    },
+    {
+      "at": "2026-09-04T00:49:47.192Z",
+      "role": "agent",
+      "text": "Sim, há uma contradição clara. Um trecho indica “Mon–Sat 7am–7pm”, que inclui sábado até 7 da noite, enquanto outro diz “Saturday 8:00 AM – 5:00 PM”. Ou seja, o horário de sábado não é o mesmo nas duas partes. É preciso alinhar esses horários, decidindo qual é o correto, para evitar confusão e chamadas fora de hora."
+    },
+    {
+      "at": "2026-09-04T00:50:08.204Z",
+      "role": "agent",
+      "text": "Confirmado. Há, sim, uma contradição: em um lugar"
+    },
+    {
+      "at": "2026-09-04T00:50:09.902Z",
+      "role": "caller",
+      "text": "Observação:"
+    },
+    {
+      "at": "2026-09-04T00:50:22.274Z",
+      "role": "caller",
+      "text": "Confirmo que o correto é sábado das oito às cinco, segunda a sexta é das sete da manhã às sete da noite, e domingo é fechado. Só emergência com minha aprovação."
+    },
+    {
+      "at": "2026-09-04T00:50:32.279Z",
+      "role": "agent",
+      "text": "Os limites são bem restritos: vocês atendem apenas Novato, San Rafael e Petaluma.\n\nEntão, em Marin, qualquer área “depois” de San Rafael, fora dessas três cidades, fica fora de cobertura. Na Península, qualquer coisa depois de Palo Alto também não é atendida.\n\nSe alguém estiver fora dessas cidades, o padrão é não atender, a menos que você decida uma exceção por conta própria."
+    },
+    {
+      "at": "2026-09-04T00:50:56.391Z",
+      "role": "agent",
+      "text": "Perfeito, é isso. O atendimento fica limitado a Novato, San Rafael e Petaluma,"
+    },
+    {
+      "at": "2026-09-04T00:51:10.022Z",
+      "role": "caller",
+      "text": "Exatamente. É isso mesmo, só atendemos no Vato, São Rafael e Petaluma. Qualquer endereço fora dessas cidades não é atendido, a não ser que eu aprove uma exceção explicitamente"
+    },
+    {
+      "at": "2026-09-04T00:51:18.031Z",
+      "role": "agent",
+      "text": "Perfeito, entendido.\nA cobertura é exclusivamente Novato, San Rafael e Petaluma. Qualquer endereço fora dessas cidades fica fora de atendimento, salvo se você aprovar explicitamente uma exceção.\nSe quiser, posso te ajudar a transformar isso em um texto curto e claro para o site ou para o script de atendimento, para evitar qualquer ambiguidade."
+    },
+    {
+      "at": "2026-09-04T00:51:39.993Z",
+      "role": "agent",
+      "text": "Perfeito, ficou bem definido. Vocês atendem somente Novato, San Rafael e Pet"
+    },
+    {
+      "at": "2026-09-04T00:51:49.573Z",
+      "role": "caller",
+      "text": "Ótimo, quero sim. Me manda um texto curto e direto que eu possa colocar no site e usar no script do agente."
+    }
+  ],
+  "recorded_transitions": [
+    {
+      "coverage_key": null,
+      "created_at": "2026-09-04 00:47:05.286887+00",
+      "fact": null,
+      "field": null,
+      "id": "e979bf18-2a56-4703-83aa-c9f5697cb386",
+      "next_action": {
+        "field": "area.coverage",
+        "question_pt": "Eu já analisei seu website. O site descreve a área de atendimento de forma ampla ou ambígua. Quais cidades exatas sua empresa atende?",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 20,
+        "answered": 21,
+        "missingRequired": 91,
+        "nextQuestion": {
+          "field": "area.coverage",
+          "questionPt": "O site descreve a área de atendimento de forma ampla ou ambígua. Quais cidades exatas sua empresa atende?"
+        },
+        "ownerReviewRequired": 4,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": null,
+      "question_pt": null,
+      "revision": 1,
+      "subject": null,
+      "transition": "discovery_prefill"
+    },
+    {
+      "coverage_key": "area.coverage",
+      "created_at": "2026-09-04 00:47:36.825284+00",
+      "fact": {
+        "disposition": "answered",
+        "field": "area.coverage",
+        "owner_words": "A gente atende novato, Rafael e Petaluma, somente essas três cidades.",
+        "rule_text": "O dono informou que atende exclusivamente as cidades de Novato, San Rafael e Petaluma.",
+        "structured": {
+          "value": {
+            "localities": [
+              {
+                "country_code": "US",
+                "display_name": "Novato",
+                "region_code": "CA"
+              },
+              {
+                "country_code": "US",
+                "display_name": "San Rafael",
+                "region_code": "CA"
+              },
+              {
+                "country_code": "US",
+                "display_name": "Petaluma",
+                "region_code": "CA"
+              }
+            ]
+          }
+        },
+        "topic": "area"
+      },
+      "field": null,
+      "id": "313005f6-fd14-41e9-8eb4-816dd18dd633",
+      "next_action": {
+        "field": "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49",
+        "question_pt": "Quem fornece as garantias de 12 anos para peças e 2 anos para mão de obra, e quais são suas condições e exclusões?",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 19,
+        "answered": 21,
+        "missingRequired": 91,
+        "nextQuestion": {
+          "field": "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49",
+          "questionPt": "Quem fornece as garantias de 12 anos para peças e 2 anos para mão de obra, e quais são suas condições e exclusões?"
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": "call_rhL21qn52eRzMxE4",
+      "question_pt": null,
+      "revision": 2,
+      "subject": null,
+      "transition": "answer"
+    },
+    {
+      "coverage_key": "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49",
+      "created_at": "2026-09-04 00:47:37.155317+00",
+      "fact": null,
+      "field": "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49",
+      "id": "25e919da-fb44-4a16-8dd6-fddfa9794613",
+      "next_action": {
+        "field": "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49",
+        "question_pt": "Quem fornece as garantias de 12 anos para peças e 2 anos para mão de obra, e quais são suas condições e exclusões?",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 19,
+        "answered": 21,
+        "missingRequired": 91,
+        "nextQuestion": {
+          "field": "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49",
+          "questionPt": "Quem fornece as garantias de 12 anos para peças e 2 anos para mão de obra, e quais são suas condições e exclusões?"
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": null,
+      "question_pt": "Quem fornece as garantias de 12 anos para peças e 2 anos para mão de obra, e quais são suas condições e exclusões?",
+      "revision": 3,
+      "subject": null,
+      "transition": "directed_followup"
+    },
+    {
+      "coverage_key": "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49",
+      "created_at": "2026-09-04 00:48:04.929084+00",
+      "fact": {
+        "disposition": "answered",
+        "field": "discovery.owner_question.2a19450a5492480b84cc9f8a1687cf49",
+        "owner_words": "Garantias vêm dos fabricantes e dos instaladores que a gente usa. Cobre defeitos de fabricação e de instalação, mas não cobre mau uso nem modificações de terceiros.",
+        "rule_text": "O dono informou que as garantias são fornecidas por fabricantes e instaladores parceiros; cobrem defeitos de fabricação e instalação, e excluem mau uso e modificações de terceiros.",
+        "structured": {
+          "value": "As garantias vêm dos fabricantes e dos instaladores parceiros; cobrem defeitos de fabricação e de instalação, e não cobrem mau uso nem modificações feitas por terceiros."
+        },
+        "topic": "outro"
+      },
+      "field": null,
+      "id": "f3a5dcdb-6ee9-42d1-b063-1dfad8de6cba",
+      "next_action": {
+        "field": "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d",
+        "question_pt": "Há taxas adicionais para atendimentos emergenciais ou fora do horário normal?",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 18,
+        "answered": 22,
+        "missingRequired": 91,
+        "nextQuestion": {
+          "field": "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d",
+          "questionPt": "Há taxas adicionais para atendimentos emergenciais ou fora do horário normal?"
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": "call_Op9F38XOPHhcppZA",
+      "question_pt": null,
+      "revision": 4,
+      "subject": null,
+      "transition": "answer"
+    },
+    {
+      "coverage_key": "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d",
+      "created_at": "2026-09-04 00:48:05.227667+00",
+      "fact": null,
+      "field": "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d",
+      "id": "eba06480-3dee-45e8-961e-958705cb9269",
+      "next_action": {
+        "field": "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d",
+        "question_pt": "Há taxas adicionais para atendimentos emergenciais ou fora do horário normal?",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 18,
+        "answered": 22,
+        "missingRequired": 91,
+        "nextQuestion": {
+          "field": "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d",
+          "questionPt": "Há taxas adicionais para atendimentos emergenciais ou fora do horário normal?"
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": null,
+      "question_pt": "Há taxas adicionais para atendimentos emergenciais ou fora do horário normal?",
+      "revision": 5,
+      "subject": null,
+      "transition": "directed_followup"
+    },
+    {
+      "coverage_key": "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d",
+      "created_at": "2026-09-04 00:48:39.987415+00",
+      "fact": {
+        "disposition": "answered",
+        "field": "discovery.owner_question.3be3bb5c25e8460a83dc32c5796f023d",
+        "owner_words": "Não tente taxa automática fora do horário, a gente só atende emergência e precisa de aprovação explícita minha antes de confirmar qualquer coisa. Se o cliente relatar gás ou monóxido, a orientação é sair e ligar pro 911 e pra concessionária.",
+        "rule_text": "O dono informou que não há taxa automática; atendimentos fora do horário são somente emergenciais e exigem aprovação explícita do dono. Em caso de gás ou monóxido, orientar o cliente a sair e ligar para o 911 e para a concessionária.",
+        "structured": {
+          "value": "Não há taxa automática. Fora do horário, só atende emergência com aprovação explícita do dono. Se houver relato de gás ou monóxido, orientar o cliente a sair e ligar para o 911 e para a concessionária."
+        },
+        "topic": "outro"
+      },
+      "field": null,
+      "id": "18c01a41-c7c8-4a41-99ab-9eea612b2ec4",
+      "next_action": {
+        "field": "discovery.owner_question.765e3066368e4f928af07adb701d9016",
+        "question_pt": "Confirme esta contradição encontrada no site: s0 e s1 anunciam reparos no mesmo dia durante sete dias, mas s4 limita o domingo a “Emergency only”; não está claro se reparos comuns no mesmo dia estão disponíveis aos domingos.",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 17,
+        "answered": 23,
+        "missingRequired": 91,
+        "nextQuestion": {
+          "field": "discovery.owner_question.765e3066368e4f928af07adb701d9016",
+          "questionPt": "Confirme esta contradição encontrada no site: s0 e s1 anunciam reparos no mesmo dia durante sete dias, mas s4 limita o domingo a “Emergency only”; não está claro se reparos comuns no mesmo dia estão disponíveis aos domingos."
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": "call_uJrAVJXFojCZPLRN",
+      "question_pt": null,
+      "revision": 6,
+      "subject": null,
+      "transition": "answer"
+    },
+    {
+      "coverage_key": "discovery.owner_question.765e3066368e4f928af07adb701d9016",
+      "created_at": "2026-09-04 00:48:40.308547+00",
+      "fact": null,
+      "field": "discovery.owner_question.765e3066368e4f928af07adb701d9016",
+      "id": "b802f3d8-c106-49e6-be66-290ec95c8de8",
+      "next_action": {
+        "field": "discovery.owner_question.765e3066368e4f928af07adb701d9016",
+        "question_pt": "Confirme esta contradição encontrada no site: s0 e s1 anunciam reparos no mesmo dia durante sete dias, mas s4 limita o domingo a “Emergency only”; não está claro se reparos comuns no mesmo dia estão disponíveis aos domingos.",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 17,
+        "answered": 23,
+        "missingRequired": 91,
+        "nextQuestion": {
+          "field": "discovery.owner_question.765e3066368e4f928af07adb701d9016",
+          "questionPt": "Confirme esta contradição encontrada no site: s0 e s1 anunciam reparos no mesmo dia durante sete dias, mas s4 limita o domingo a “Emergency only”; não está claro se reparos comuns no mesmo dia estão disponíveis aos domingos."
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": null,
+      "question_pt": "Confirme esta contradição encontrada no site: s0 e s1 anunciam reparos no mesmo dia durante sete dias, mas s4 limita o domingo a “Emergency only”; não está claro se reparos comuns no mesmo dia estão disponíveis aos domingos.",
+      "revision": 7,
+      "subject": null,
+      "transition": "directed_followup"
+    },
+    {
+      "coverage_key": "discovery.owner_question.765e3066368e4f928af07adb701d9016",
+      "created_at": "2026-09-04 00:49:41.164279+00",
+      "fact": {
+        "disposition": "answered",
+        "field": "discovery.owner_question.765e3066368e4f928af07adb701d9016",
+        "owner_words": "Sim, você tem razão. Sim, é exatamente isso, domingo é só emergência. Repara os comuns no mesmo dia valem de segunda a sábado, dentro do horário. Domingo é somente emergência e só com minha aprovação explícita antes de confirmar qualquer atendimento.",
+        "rule_text": "O dono confirmou que reparos comuns no mesmo dia valem apenas de segunda a sábado dentro do horário; aos domingos há somente atendimento emergencial, que depende de aprovação explícita do dono antes de confirmar.",
+        "structured": {
+          "value": "Reparos comuns no mesmo dia valem de segunda a sábado, dentro do horário. Aos domingos, somente emergência, com aprovação explícita do dono antes de confirmar atendimento."
+        },
+        "topic": "outro"
+      },
+      "field": null,
+      "id": "174d2811-6cee-4a5e-af7c-724bd67cac81",
+      "next_action": {
+        "field": "discovery.owner_question.832bbe1e136144da860b749a0b419b60",
+        "question_pt": "Confirme esta contradição encontrada no site: Os horários de sábado divergem: s0 publica “Mon–Sat 7am–7pm”, enquanto s4 publica “Saturday 8:00 AM – 5:00 PM”.",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 16,
+        "answered": 24,
+        "missingRequired": 91,
+        "nextQuestion": {
+          "field": "discovery.owner_question.832bbe1e136144da860b749a0b419b60",
+          "questionPt": "Confirme esta contradição encontrada no site: Os horários de sábado divergem: s0 publica “Mon–Sat 7am–7pm”, enquanto s4 publica “Saturday 8:00 AM – 5:00 PM”."
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": "call_J2BkSvzeSL8w3c5E",
+      "question_pt": null,
+      "revision": 8,
+      "subject": null,
+      "transition": "answer"
+    },
+    {
+      "coverage_key": "discovery.owner_question.832bbe1e136144da860b749a0b419b60",
+      "created_at": "2026-09-04 00:49:41.545488+00",
+      "fact": null,
+      "field": "discovery.owner_question.832bbe1e136144da860b749a0b419b60",
+      "id": "38d464c4-5211-43c6-a4a3-6a9faa0ad1e5",
+      "next_action": {
+        "field": "discovery.owner_question.832bbe1e136144da860b749a0b419b60",
+        "question_pt": "Confirme esta contradição encontrada no site: Os horários de sábado divergem: s0 publica “Mon–Sat 7am–7pm”, enquanto s4 publica “Saturday 8:00 AM – 5:00 PM”.",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 16,
+        "answered": 24,
+        "missingRequired": 91,
+        "nextQuestion": {
+          "field": "discovery.owner_question.832bbe1e136144da860b749a0b419b60",
+          "questionPt": "Confirme esta contradição encontrada no site: Os horários de sábado divergem: s0 publica “Mon–Sat 7am–7pm”, enquanto s4 publica “Saturday 8:00 AM – 5:00 PM”."
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": null,
+      "question_pt": "Confirme esta contradição encontrada no site: Os horários de sábado divergem: s0 publica “Mon–Sat 7am–7pm”, enquanto s4 publica “Saturday 8:00 AM – 5:00 PM”.",
+      "revision": 9,
+      "subject": null,
+      "transition": "directed_followup"
+    },
+    {
+      "coverage_key": "discovery.owner_question.832bbe1e136144da860b749a0b419b60",
+      "created_at": "2026-09-04 00:50:24.147363+00",
+      "fact": {
+        "disposition": "answered",
+        "field": "discovery.owner_question.832bbe1e136144da860b749a0b419b60",
+        "owner_words": "Confirmo que o correto é sábado das oito às cinco, segunda a sexta é das sete da manhã às sete da noite, e domingo é fechado. Só emergência com minha aprovação.",
+        "rule_text": "O dono confirmou que o horário correto é: segunda a sexta das 07:00 às 19:00; sábado das 08:00 às 17:00; domingo fechado, com atendimento apenas emergencial mediante aprovação do dono.",
+        "structured": {
+          "value": "Horário confirmado: seg–sex 07:00–19:00; sábado 08:00–17:00; domingo fechado, apenas emergência com aprovação do dono."
+        },
+        "topic": "outro"
+      },
+      "field": null,
+      "id": "6a830bd7-3fcd-4ba6-a8b4-6966253e175f",
+      "next_action": {
+        "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+        "question_pt": "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 15,
+        "answered": 25,
+        "missingRequired": 91,
+        "nextQuestion": {
+          "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+          "questionPt": "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?"
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": "call_5stmBF66eF2uIMQK",
+      "question_pt": null,
+      "revision": 10,
+      "subject": null,
+      "transition": "answer"
+    },
+    {
+      "coverage_key": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+      "created_at": "2026-09-04 00:50:24.659945+00",
+      "fact": null,
+      "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+      "id": "fb0a7748-18fe-4b70-ac0f-43de38aec1ad",
+      "next_action": {
+        "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+        "question_pt": "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 15,
+        "answered": 25,
+        "missingRequired": 91,
+        "nextQuestion": {
+          "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+          "questionPt": "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?"
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": null,
+      "question_pt": "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?",
+      "revision": 11,
+      "subject": null,
+      "transition": "directed_followup"
+    },
+    {
+      "coverage_key": "area.out_of_area_policy",
+      "created_at": "2026-09-04 00:51:11.92895+00",
+      "fact": {
+        "disposition": "answered",
+        "field": "area.out_of_area_policy",
+        "owner_words": "Exatamente. É isso mesmo, só atendemos no Vato, São Rafael e Petaluma. Qualquer endereço fora dessas cidades não é atendido, a não ser que eu aprove uma exceção explicitamente",
+        "rule_text": "O dono informou que o atendimento ocorre apenas em Novato, San Rafael e Petaluma; fora dessas cidades, não atende salvo exceção explicitamente aprovada pelo dono.",
+        "structured": {
+          "value": "Atende apenas Novato, San Rafael e Petaluma. Endereços fora dessas cidades não são atendidos, salvo exceção explicitamente aprovada pelo dono."
+        },
+        "topic": "area"
+      },
+      "field": null,
+      "id": "5db0653b-19e1-4b6b-bf2a-a7941b402c6b",
+      "next_action": {
+        "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+        "question_pt": "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 15,
+        "answered": 26,
+        "missingRequired": 90,
+        "nextQuestion": {
+          "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+          "questionPt": "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?"
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": "call_2a1NQaN7Vi128Vqb",
+      "question_pt": null,
+      "revision": 12,
+      "subject": null,
+      "transition": "answer"
+    },
+    {
+      "coverage_key": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+      "created_at": "2026-09-04 00:51:12.294874+00",
+      "fact": null,
+      "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+      "id": "d273fde0-6243-43aa-b345-e3e6b6b98d88",
+      "next_action": {
+        "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+        "question_pt": "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?",
+        "type": "ask"
+      },
+      "progress_counts": {
+        "ambiguous": 15,
+        "answered": 26,
+        "missingRequired": 90,
+        "nextQuestion": {
+          "field": "discovery.owner_question.92b3f78b12b94f1d81f2db03bc2c0732",
+          "questionPt": "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?"
+        },
+        "ownerReviewRequired": 5,
+        "requiredFields": 136
+      },
+      "provider_tool_call_id": null,
+      "question_pt": "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?",
+      "revision": 13,
+      "subject": null,
+      "transition": "directed_followup"
+    }
+  ],
+  "original_questions": {
+    "ambiguous_information": [],
+    "contradictions": [
+      "Os horários de sábado divergem: s0 publica “Mon–Sat 7am–7pm”, enquanto s4 publica “Saturday 8:00 AM – 5:00 PM”.",
+      "s0 e s1 anunciam reparos no mesmo dia durante sete dias, mas s4 limita o domingo a “Emergency only”; não está claro se reparos comuns no mesmo dia estão disponíveis aos domingos."
+    ],
+    "id": "46603c2c-c4d9-4d79-b35c-cd5b658388ab",
+    "missing_information": [
+      "Qual é o fuso horário oficial usado para os horários publicados?",
+      "Qual é a política de funcionamento em feriados?",
+      "Quem fornece as garantias de 12 anos para peças e 2 anos para mão de obra, e quais são suas condições e exclusões?",
+      "Quais são as políticas públicas de cancelamento, reagendamento, depósito e não comparecimento?",
+      "Há taxas adicionais para atendimentos emergenciais ou fora do horário normal?",
+      "Quais são os limites exatos de atendimento dentro dos cinco condados, especialmente em Marin após San Rafael e na Península após Palo Alto?"
+    ],
+    "owner_private_information_needed": [
+      {
+        "field": "authority.quote_price",
+        "question_pt": "Quando o Ligou pode informar um preço ao cliente?"
+      },
+      {
+        "field": "authority.negotiate_floor",
+        "question_pt": "Qual é o limite privado de negociação e desconto?"
+      },
+      {
+        "field": "authority.read_calendar",
+        "question_pt": "O Ligou pode consultar sua agenda?"
+      },
+      {
+        "field": "authority.book",
+        "question_pt": "O Ligou pode confirmar agendamentos?"
+      },
+      {
+        "field": "authority.reschedule_cancel",
+        "question_pt": "O Ligou pode remarcar ou cancelar serviços?"
+      },
+      {
+        "field": "authority.charge_fee",
+        "question_pt": "O Ligou pode confirmar ou cobrar taxas?"
+      },
+      {
+        "field": "authority.emergency",
+        "question_pt": "Que autonomia o Ligou tem em emergências?"
+      },
+      {
+        "field": "authority.out_of_area",
+        "question_pt": "Que autonomia o Ligou tem fora da área atendida?"
+      }
+    ]
+  }
+}

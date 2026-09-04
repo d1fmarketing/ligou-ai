@@ -4003,6 +4003,166 @@ test("owner-turn recovery invariant is deduplicated by its causal key", () => {
     .toBe(false);
 });
 
+test("coverage advancement retires a deferred exhausted-followup recovery so later failure stays deliverable", () => {
+  let lifecycle = startCollecting();
+  function interruptExhaustedFollowup(key: string) {
+    const intentKey = `tool-batch:${key}:retry:1`;
+    lifecycle.phase = "follow_up";
+    lifecycle.responseIntents[intentKey] = {
+      intentKey, purpose: "tool_continuation", state: "queued",
+    };
+    lifecycle.followupSpeech = {
+      intentKey, questionPt: "Quais cidades vocês atendem?", attempt: 1,
+      transcript: "", transcriptFinal: false, audioDone: false,
+      responseDone: false, playbackStopped: false, interrupted: false,
+    };
+    for (const event of [
+      { type: "response.intent_sent", intentKey },
+      { type: "response.created", intentKey, responseId: key },
+    ] as const) ({ lifecycle } = step(lifecycle, {
+      ...event, socketGeneration: 1, elapsedMs: 10,
+    }));
+    const interrupted = step(lifecycle, {
+      type: "response.audio_interrupted", responseId: key,
+      socketGeneration: 1, elapsedMs: 11,
+    });
+    lifecycle = interrupted.lifecycle;
+    expect(interrupted.commands.filter((command) =>
+      command.type === "request_response" && command.purpose === "recovery"
+    )).toHaveLength(1);
+    return lifecycle.recoverySpeech!.intentKey;
+  }
+
+  const oldRecovery = interruptExhaustedFollowup("old-followup");
+  expect(lifecycle.responseIntents[oldRecovery]?.state).toBe("queued");
+  ({ lifecycle } = step(lifecycle, {
+    type: "coverage.changed", revision: 1, digest: "owner-answer-1",
+    complete: false, missing: [{ field: "area.coverage" }], ambiguous: [],
+    nextQuestion: { field: "area.coverage", questionPt: "Quais cidades vocês atendem?" },
+    elapsedMs: 12,
+  }));
+  expect(lifecycle.phase).toBe("collecting");
+  expect(lifecycle.recoverySpeech).toBeUndefined();
+  expect(lifecycle.responseIntents[oldRecovery]?.state).toBe("terminal");
+  for (const event of [
+    { type: "response.created", intentKey: oldRecovery, responseId: "late-recovery" },
+    { type: "response.audio_interrupted", responseId: "old-followup" },
+    { type: "response.done", responseId: "old-followup" },
+    { type: "output_audio_buffer.stopped", responseId: "old-followup" },
+  ] as const) {
+    const late = step(lifecycle, { ...event, socketGeneration: 1, elapsedMs: 13 });
+    lifecycle = late.lifecycle;
+    expect(late.commands.every((command) => command.type === "telemetry")).toBe(true);
+    expect(lifecycle.recoverySpeech).toBeUndefined();
+    expect(lifecycle.approval).toBeUndefined();
+  }
+
+  const newRecovery = interruptExhaustedFollowup("new-followup");
+  expect(newRecovery).not.toBe(oldRecovery);
+  for (const [attempt, intentKey] of [
+    [0, newRecovery], [1, `${newRecovery}:retry:1`],
+  ] as const) {
+    for (const event of [
+      { type: "response.intent_sent", intentKey },
+      { type: "response.created", intentKey, responseId: `new-recovery-${attempt}` },
+    ] as const) ({ lifecycle } = step(lifecycle, {
+      ...event, socketGeneration: 1, elapsedMs: 20 + attempt,
+    }));
+    const result = step(lifecycle, {
+      type: "response.done", responseId: `new-recovery-${attempt}`,
+      socketGeneration: 1, elapsedMs: 22 + attempt,
+    });
+    lifecycle = result.lifecycle;
+    expect(result.commands.filter((command) => attempt === 0
+      ? command.type === "request_response" && command.purpose === "recovery"
+      : command.type === "request_recovery_error_hangup"
+    )).toHaveLength(1);
+  }
+  expect(lifecycle.phase).toBe("recovery_error_ready_to_terminate");
+  const replay = step(lifecycle, {
+    type: "response.done", responseId: "new-recovery-1",
+    socketGeneration: 1, elapsedMs: 30,
+  });
+  expect(replay.commands.every((command) =>
+    command.type === "telemetry" || command.type === "block"
+  )).toBe(true);
+  expect(replay.lifecycle.requestedRecoveryHangupKeys).toEqual([`recovery-error-hangup:${callId}`]);
+  expect(replay.lifecycle.approval).toBeUndefined();
+});
+
+test("coverage advancement preserves an unrelated queued correlation recovery and its delivery fence", () => {
+  const queued = step(startCollecting(), {
+    type: "recovery.required", reason: "caller_turn_correlation_mismatch",
+    recoveryKey: "unrelated-correlation", socketGeneration: 1, elapsedMs: 10,
+  });
+  const intentKey = queued.lifecycle.recoverySpeech!.intentKey;
+  const changed = coverageReady(queued.lifecycle);
+  expect(changed.lifecycle.recoverySpeech?.intentKey).toBe(intentKey);
+  expect(changed.lifecycle.responseIntents[intentKey]?.state).toBe("queued");
+  expect(changed.lifecycle.phase).toBe("follow_up");
+  expect(changed.commands.every((command) => command.type === "telemetry")).toBe(true);
+  const sent = step(changed.lifecycle, {
+    type: "response.intent_sent", intentKey, socketGeneration: 1, elapsedMs: 41,
+  });
+  expect(sent.lifecycle.responseIntents[intentKey]?.state).toBe("sent");
+  expect(sent.lifecycle.recoverySpeech?.intentKey).toBe(intentKey);
+});
+
+test("coverage advancement keeps sent recovery fenced through audible playback before preparing new authority", () => {
+  for (const delivery of ["sent", "acknowledged", "playback_pending"] as const) {
+    let lifecycle = step(startCollecting(), {
+      type: "recovery.required", reason: "owner_turn_completed_without_tool",
+      recoveryKey: delivery, socketGeneration: 1, elapsedMs: 10,
+    }).lifecycle;
+    const intentKey = lifecycle.recoverySpeech!.intentKey;
+    ({ lifecycle } = step(lifecycle, {
+      type: "response.intent_sent", intentKey, socketGeneration: 1, elapsedMs: 11,
+    }));
+    const proofEvents = [
+      { type: "response.created", intentKey },
+      { type: "response.transcript.done", transcript: lifecycle.recoverySpeech!.expectedTranscript },
+      { type: "response.output_audio.done" },
+      { type: "response.done" },
+    ] as const;
+    const beforeCoverage = delivery === "sent" ? 0 : delivery === "acknowledged" ? 1 : 4;
+    for (const event of proofEvents.slice(0, beforeCoverage))
+      ({ lifecycle } = step(lifecycle, {
+        ...event, responseId: "sent-recovery", socketGeneration: 1, elapsedMs: 12,
+      }));
+    const changed = coverageReady(lifecycle);
+    lifecycle = changed.lifecycle;
+    expect(lifecycle.phase).toBe("follow_up");
+    expect(lifecycle.recoverySpeech?.intentKey).toBe(intentKey);
+    expect(changed.commands.every((command) => command.type === "telemetry")).toBe(true);
+    const competingRecovery = step(lifecycle, {
+      type: "recovery.required", reason: "caller_turn_correlation_mismatch",
+      recoveryKey: `later-${delivery}`, socketGeneration: 1, elapsedMs: 44,
+    });
+    lifecycle = competingRecovery.lifecycle;
+    expect(lifecycle.recoverySpeech?.intentKey).toBe(intentKey);
+    expect(competingRecovery.commands.every((command) => command.type === "telemetry")).toBe(true);
+    for (const event of proofEvents.slice(beforeCoverage)) {
+      const pending = step(lifecycle, {
+        ...event, responseId: "sent-recovery", socketGeneration: 1, elapsedMs: 45,
+      });
+      lifecycle = pending.lifecycle;
+      expect(pending.commands.every((command) => command.type === "telemetry")).toBe(true);
+    }
+    const played = step(lifecycle, {
+      type: "output_audio_buffer.stopped", responseId: "sent-recovery",
+      socketGeneration: 1, elapsedMs: 46,
+    });
+    expect(played.lifecycle.recoverySpeech).toBeUndefined();
+    expect(played.commands.filter((command) => command.type === "prepare_summary"))
+      .toEqual([{ type: "prepare_summary", revision: 41, digest: "digest-41" }]);
+    const replay = step(played.lifecycle, {
+      type: "output_audio_buffer.stopped", responseId: "sent-recovery",
+      socketGeneration: 1, elapsedMs: 47,
+    });
+    expect(replay.commands).toEqual([]);
+  }
+});
+
 test("truthful recovery requires exact audible playback and text-only output retries once", () => {
   let lifecycle = startCollecting();
   let result = step(lifecycle, {

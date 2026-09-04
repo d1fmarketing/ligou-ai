@@ -250,6 +250,33 @@ beforeEach(() => {
 });
 
 describe("browser-session opening contract", () => {
+  test("protocol3 returns exact nested persisted speech and preserves protocol identity", async () => {
+    const speech = { schema: "onboarding.speech.v1", actionId: "a".repeat(64), interviewId: "33333333-3333-4333-8333-333333333333", callId: "33333333-3333-4333-8333-333333333333", revision: 0, kind: "ASK_NEXT_GAP", text: PAYLOAD.text, sourceDigest: "b".repeat(64), text_sha256: PAYLOAD.text_sha256, audio_base64: PAYLOAD.audio_base64, audio_sha256: PAYLOAD.audio_sha256, mime: "audio/mpeg", voice: "ash", tts_model: "tts-1-hd", cost_usd: PAYLOAD.cost_usd };
+    const payload = { version: 3, item_id: `lgs-${speech.actionId.slice(0, 28)}`, speech };
+    currentClient = edgeClient({ readyRow: { status: "ready", answer_sdp: "answer", call_id: speech.callId, opening_mode_applied: "application_tts_v1", opening_payload: payload, onboarding_protocol_version: 3 } });
+    const response = await handler!(request({ session_type: "onboarding", opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 3 }));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.opening_payload).toEqual(payload);
+    expect(body.onboarding_protocol_version).toBe(3);
+    expect(body.max_minutes).toBe(55);
+    expect(body).not.toHaveProperty("opening_text");
+    expect(body).not.toHaveProperty("resume_context");
+    expect(currentClient.inserts[0].onboarding_protocol_version).toBe(3);
+  });
+
+  test("protocol3 nested contract validates actual hashes and rejects flattening and changed bindings", () => {
+    const speech = { schema: "onboarding.speech.v1", actionId: "a".repeat(64), interviewId: "33333333-3333-4333-8333-333333333333", callId: "33333333-3333-4333-8333-333333333333", revision: 0, kind: "ASK_NEXT_GAP", text: PAYLOAD.text, sourceDigest: "b".repeat(64), text_sha256: PAYLOAD.text_sha256, audio_base64: PAYLOAD.audio_base64, audio_sha256: PAYLOAD.audio_sha256, mime: "audio/mpeg", voice: "ash", tts_model: "tts-1-hd", cost_usd: PAYLOAD.cost_usd };
+    const payload = { version: 3, item_id: `lgs-${speech.actionId.slice(0, 28)}`, speech };
+    const validate = (edgeModule as any).isApplicationOpeningPayload;
+    expect(validate(payload)).toBe(true);
+    expect(validate({ ...payload, speech: { ...speech, interviewId: "55555555-5555-4555-8555-555555555555" } })).toBe(true);
+    for (const changed of [{ text_sha256: "c".repeat(64) }, { audio_sha256: "c".repeat(64) }, { callId: "invalid" }, { actionId: "c".repeat(64) }, { kind: "generic_chat" }, { cost_usd: 0 }, { revision: -1 }, { audio_base64: "bm90bXAz", audio_sha256: createHash("sha256").update("notmp3").digest("hex") }])
+      expect(validate({ ...payload, speech: { ...speech, ...changed } })).toBe(false);
+    expect(validate({ ...payload, extra: true })).toBe(false);
+    expect(validate({ version: 3, item_id: payload.item_id, ...speech })).toBe(false);
+  });
+
   test("dual-validates legacy v1 and exact v2 payloads", () => {
     const validate = (edgeModule as any).isApplicationOpeningPayload;
     expect(validate).toBeFunction();

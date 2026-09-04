@@ -327,6 +327,12 @@ function readyStatus() {
   });
 }
 
+test('prepared voice protocol is chosen only from durable setup readback and preserves unprepared legacy starts',()=>{
+  assert.equal(mapWebsiteSetupStatus(readyStatus()).voiceProtocolVersion,2);
+  assert.equal(mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:3}).voiceProtocolVersion,3);
+  assert.throws(()=>mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:4}),/protocol/i);
+});
+
 function publicClaim(claim_type, normalized_value, overrides = {}) {
   return { job_id: UUID, result_id: readyStatus().ready_proof.result_id, claim_class: "operational",
     claim_schema_version: "company_discovery.claim.v2", claim_type, normalized_value,

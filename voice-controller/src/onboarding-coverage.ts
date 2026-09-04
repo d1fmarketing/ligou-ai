@@ -1119,7 +1119,7 @@ export function applyCoverageFact(
     summaryInvalidated: ready(snapshot) || snapshot.summaryInvalidated,
   };
 }
-function questionFor(
+export function questionFor(
   ref: CoverageRef,
   snapshot: CoverageSnapshot,
 ): CoverageQuestion {

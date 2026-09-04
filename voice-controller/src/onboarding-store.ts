@@ -359,7 +359,7 @@ function boundOwner(cap: Capability): boolean {
   );
 }
 
-function cleanFact(
+export function cleanFact(
   args: OnboardingAnswerArgs,
 ): Record<string, unknown> | null {
   const topic = typeof args.topic === "string" ? args.topic : "";

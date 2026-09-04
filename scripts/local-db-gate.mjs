@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { runConcurrencySuite } from "../supabase/tests/local-db-concurrency.mjs";
 import { runAuthenticatedRlsSuite } from "../supabase/tests/local-db-rls.mjs";
 import { runUpgradeRehearsal } from "../supabase/tests/local-db-upgrade-rehearsal.mjs";
+import { runWebsiteInterviewActualSchemaSuite } from "../supabase/tests/local-website-interview-actual-schema.mjs";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 const LOCAL_PROJECT_ID = "ligou-v0-1-rc1";
@@ -771,6 +772,7 @@ export async function runLocalDatabaseGate() {
       LIGOU_DOCKER_HOST: colima.dockerHost,
     };
     const concurrency = await runConcurrencySuite(testEnvironment);
+    const websiteInterview = await runWebsiteInterviewActualSchemaSuite(testEnvironment);
     const upgrade = await runUpgradeRehearsal(testEnvironment, {
       beforeDestructive: async ({ rehearsalRoot }) => {
         if (!allowedWorkdirs.includes(rehearsalRoot)) allowedWorkdirs.push(rehearsalRoot);
@@ -898,6 +900,7 @@ export async function runLocalDatabaseGate() {
       extensionStatementsWithoutVersionClauses: extensionStatements,
       sqlAssertions: pgTapCount,
       concurrencyTests: concurrency.tests,
+      websiteInterview,
       upgradeTests: upgrade.tests,
       applicationIntegrationTests,
       onboardingPolicyIntegrationTests,
@@ -959,7 +962,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   try {
     console.log(JSON.stringify(await runLocalDatabaseGate(), null, 2));
   } catch (error) {
-    console.error(error instanceof Error ? error.message : "Local database gate failed");
+    console.error(error instanceof Error ? (error.stack ?? error.message) : "Local database gate failed");
     process.exitCode = 1;
   }
 }

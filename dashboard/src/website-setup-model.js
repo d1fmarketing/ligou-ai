@@ -92,6 +92,8 @@ function rawReadyProof(value) {
 
 export function mapWebsiteSetupStatus(value) {
   const status = object(value, "website setup");
+  if(status.voice_protocol_version !== undefined && ![2,3].includes(status.voice_protocol_version))
+    throw new Error("website voice protocol inválido");
   if (status.schema_version !== "company_discovery.setup_status.v1" ||
       !STATES.has(status.state) ||
       !["pilot_allowlist", "none"].includes(status.entitlement_source) ||
@@ -119,6 +121,7 @@ export function mapWebsiteSetupStatus(value) {
     summary,
     readyProof,
     startOnboardingEnabled: status.state === "ready_for_onboarding" && readyProof !== null,
+    voiceProtocolVersion: status.voice_protocol_version ?? 2,
     failureMessage: status.state === "learning_failed"
       ? FAILURE_COPY[job?.failureCode] ?? "Não conseguimos concluir a análise. Confira o endereço e tente novamente."
       : null,

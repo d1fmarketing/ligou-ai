@@ -1,5 +1,6 @@
 // Browser side of a voice session: microphone + WebRTC only.
 // All authority (tools, budget, deadline, transcript of record) lives in the voice-controller.
+import { createWebsiteSpeechPlayer, validateWebsiteSpeech } from "./website-speech.js";
 const CONTROLLER_URL = import.meta.env.VITE_CONTROLLER_URL || "http://127.0.0.1:8790";
 // Remote mode (production): a public Supabase Edge Function bootstraps the session and the EC2 controller
 // (zero inbound ports) services it via Realtime. Set VITE_SESSION_URL to the function URL to enable.
@@ -208,7 +209,11 @@ export async function resolveOnboardingOutcome({
   now = Date.now,
   sleep,
   knownRevision,
+  onboardingProtocolVersion = 2,
 }) {
+  if (onboardingProtocolVersion === 3) return resolveWebsiteInterviewOutcome({
+    client,reason,callId,timeoutMs,pollIntervalMs,isCancelled,signal,now,sleep,knownRevision,
+  });
   if (MANUAL_END_REASONS.has(reason)
     || !client
     || typeof client.from !== "function"
@@ -311,6 +316,37 @@ export async function resolveOnboardingOutcome({
   return revision === null ? { status: "interrupted" } : { status: "finalizing", revision };
 }
 
+async function resolveWebsiteInterviewOutcome({client,reason,callId,timeoutMs,pollIntervalMs,isCancelled,signal,now,sleep,knownRevision}) {
+  if(MANUAL_END_REASONS.has(reason) || !client?.rpc || typeof callId !== "string")return {status:"interrupted"};
+  const deadline=now()+(Number.isFinite(timeoutMs)&&timeoutMs>0?timeoutMs:ONBOARDING_OUTCOME_WINDOW_MS);
+  let revision=Number.isSafeInteger(knownRevision)?knownRevision:null;
+  while(!cancellationRequested(isCancelled,signal)){
+    const remaining=deadline-now();if(remaining<=0)break;
+    const read=await boundedRead(readSignal=>{
+      const request=client.rpc("get_website_interview_status",{p_call:callId});
+      return typeof request.abortSignal==="function"?request.abortSignal(readSignal):request;
+    },remaining,signal);
+    if(cancellationRequested(isCancelled,signal))return {status:"interrupted"};
+    const data=read.ok && !read.value?.error?read.value?.data:null;
+    if(data?.callId===callId && data.currentCallId===callId && Number.isSafeInteger(data.revision) && data.revision>=0){
+      revision=data.revision;
+      const t=data.terminal;
+      const uuid=value=>typeof value==="string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+      if(data.state==="complete" && data.completed===true && t?.outcome==="complete"
+        && t.callId===callId && t.interviewId===data.interviewId && t.callStatus==="ended"
+        && uuid(t.receiptId) && uuid(data.approvalReceiptId) && t.approvalReceiptId===data.approvalReceiptId
+        && t.providerConfirmed===true && t.budgetSettled===true && uuid(t.budgetReservationId))
+        return {status:"complete",revision,protocolVersion:3};
+      if(data.resumeEligible===true && data.state==="unfinished")return {status:"resumable",revision,snapshotDigest:data.digest,protocolVersion:3};
+      if(t?.outcome==="unfinished" || (data.budgetStatus==="settled" && ["ended","error","killed_budget","killed_deadline"].includes(data.callStatus)
+        && data.state!=="closing" && data.state!=="complete"))return {status:"interrupted",revision,protocolVersion:3};
+    }
+    const delay=Math.min(Math.max(1,pollIntervalMs??250),Math.max(0,deadline-now()));
+    if(delay && !await pause(delay,{signal,sleep}))return {status:"interrupted"};
+  }
+  return {status:"finalizing",...(revision!==null?{revision}:{}),protocolVersion:3};
+}
+
 export async function watchOnboardingOutcome({
   resolve = resolveOnboardingOutcome,
   onOutcome,
@@ -340,6 +376,7 @@ export async function watchOnboardingOutcome({
 export function onboardingOutcomeCopy(outcome) {
   if (!outcome) return "Verificando conclusão…";
   if (outcome?.status === "complete") {
+    if(outcome.protocolVersion===3)return `Entrevista concluída e salva · revisão ${outcome.revision}. Os pontos pendentes continuam sujeitos à revisão; nenhum poder foi concedido automaticamente.`;
     return `Entrevista concluída. Cobertura confirmada por voz · revisão ${outcome.revision}. Regras ainda aguardando aprovação na Memória.`;
   }
   if (outcome?.status === "finalizing") {
@@ -657,10 +694,17 @@ export async function startVoiceSession({
   signal,
   openingTimeoutMs,
   openingPlaybackTimeoutMs,
+  onboardingProtocolVersion = ONBOARDING_PROTOCOL_VERSION,
+  speechClient,
 }) {
   if (signal?.aborted) throw safeOpeningError("abertura cancelada");
   const media = await navigator.mediaDevices.getUserMedia({ audio: true });
   const onboarding = sessionType === "onboarding";
+  const websiteInterview = onboarding && onboardingProtocolVersion === 3;
+  if (onboarding && ![2, 3].includes(onboardingProtocolVersion)) {
+    for (const track of media.getTracks()) track.stop();
+    throw safeOpeningError("protocolo desconhecido");
+  }
   const {
     controlMs: boundedOpeningTimeout,
     playbackMs: boundedOpeningPlaybackTimeout,
@@ -684,11 +728,14 @@ export async function startVoiceSession({
   let openingGateResolve = null;
   let openingGateReject = null;
   let openingGateTimer = null;
+  let websitePlayer = null;
+  let earlyWebsiteVad = null;
+  let earlyWebsiteNotice = null;
 
   function setSpeechCustody(active) {
     if (!onboarding) return;
     for (const track of media.getTracks()) track.enabled = active;
-    if (remoteAudio) remoteAudio.muted = !active;
+    if (remoteAudio) remoteAudio.muted = websiteInterview || !active;
   }
 
   function releaseOpeningObjectUrl() {
@@ -710,6 +757,7 @@ export async function startVoiceSession({
   function stop() {
     if (stopped) return;
     stopped = true;
+    websitePlayer?.stop();
     setupAbort.abort("voice_session_stopped");
     if (externalAbort) signal?.removeEventListener("abort", externalAbort);
     externalAbort = null;
@@ -761,6 +809,14 @@ export async function startVoiceSession({
     channel.onmessage = (msg) => {
       try {
         const ev = JSON.parse(msg.data);
+        if (websiteInterview) {
+          if (websitePlayer) websitePlayer.handleEvent(ev);
+          else if (ev.type === "session.updated") earlyWebsiteVad = ev;
+          else if (["conversation.item.created", "conversation.item.done"].includes(ev.type)
+            && ev.item?.role === "system" && ev.item?.content?.[0]?.text?.startsWith("ligou.website_speech:"))
+            earlyWebsiteNotice = ev;
+          return;
+        }
         const openingAckEvent = ev.type === "conversation.item.done"
           || ev.type === "conversation.item.created";
         if (onboarding && openingAckEvent && openingPayload
@@ -812,7 +868,7 @@ export async function startVoiceSession({
     const requestBody = { sdp: offer.sdp, session_type: sessionType, model };
     if (onboarding) {
       requestBody.opening_mode_requested = APPLICATION_OPENING_MODE;
-      requestBody.onboarding_protocol_version = ONBOARDING_PROTOCOL_VERSION;
+      requestBody.onboarding_protocol_version = onboardingProtocolVersion;
     }
     const res = await fetch(SESSION_URL, {
       method: "POST",
@@ -828,10 +884,48 @@ export async function startVoiceSession({
     const { sdp, call_id, max_minutes } = response;
     callId = call_id;
     let opening = null;
-    if (onboarding) opening = await validateApplicationOpening(response);
+    if (websiteInterview) {
+      const envelope = response.opening_payload;
+      if (response.onboarding_protocol_version !== 3 || response.opening_mode_applied !== APPLICATION_OPENING_MODE
+        || !exactKeys(envelope, ["version", "item_id", "speech"]) || envelope.version !== 3
+        || envelope.item_id !== `lgs-${envelope.speech?.actionId?.slice(0, 28)}`
+        || response.opening_text !== undefined || response.resume_context !== undefined
+        || typeof response.business_name !== "string" || !response.business_name.trim()
+        || !envelope.speech?.text?.startsWith(`Oi! Aqui é o Ligou, agente de inteligência artificial da ${response.business_name}. Eu já analisei seu website. `)
+        || !speechClient?.rpc) throw safeOpeningError("contrato da entrevista divergente");
+      await validateWebsiteSpeech(envelope.speech, {callId, interviewId:envelope.speech.interviewId, actionId:envelope.speech.actionId});
+      websitePlayer = createWebsiteSpeechPlayer({callId,interviewId:envelope.speech.interviewId,
+        signal:setupAbort.signal,controlTimeoutMs:boundedOpeningTimeout,
+        readSpeech:async(actionId,abortSignal)=>{
+          const request=speechClient.rpc("read_website_interview_speech",{p_call:callId,p_action:actionId});
+          const result=await (typeof request.abortSignal === "function" ? request.abortSignal(abortSignal) : request);
+          if(result.error || !result.data)throw safeOpeningError("fala atual indisponível");
+          return result.data;
+        },
+        play:async(bytes,abortSignal)=>{
+          try {
+            await playApplicationOpening(bytes,180_000,abortSignal,(audio,url)=>{openingAudio=audio;openingObjectUrl=url;});
+          } finally {
+            if(openingAudio){try{openingAudio.pause();}catch{}openingAudio.removeAttribute?.("src");try{openingAudio.load?.();}catch{}openingAudio=null;}
+            releaseOpeningObjectUrl();
+          }
+        },
+        send:event=>{if(stopped)throw safeOpeningError("sessão encerrada");channel.send(JSON.stringify(event));},
+        setMicrophone:setSpeechCustody,onCaption:onEvent,onFailure:()=>end("application_speech_error"),
+      });
+      if(earlyWebsiteVad)websitePlayer.handleEvent(earlyWebsiteVad);
+      opening=envelope;
+    } else if (onboarding) opening = await validateApplicationOpening(response);
     if (stopped || signal?.aborted) throw safeOpeningError("abertura cancelada");
     await pc.setRemoteDescription({ type: "answer", sdp });
-    if (onboarding) {
+    if (websiteInterview) {
+      await waitForDataChannelOpen(channel,boundedOpeningTimeout,setupAbort.signal);
+      const played=websitePlayer.start(opening.speech);
+      if(earlyWebsiteNotice)websitePlayer.handleEvent(earlyWebsiteNotice);
+      await played;
+      if(stopped || signal?.aborted)throw safeOpeningError("entrevista encerrada");
+      openingActivated=true;
+    } else if (onboarding) {
       openingPayload = opening.payload;
       await waitForDataChannelOpen(channel, boundedOpeningTimeout, setupAbort.signal);
       await playApplicationOpening(

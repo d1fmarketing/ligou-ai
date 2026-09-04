@@ -56,6 +56,17 @@ type FetchLike = (
   init?: RequestInit,
 ) => Promise<Response>;
 
+export interface OnboardingTtsDependencies {
+  openaiKey: string;
+  fetchImpl?: FetchLike;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export type ExactOnboardingAudio = Omit<OnboardingOpeningPayloadBase, "item_id"> & {
+  tts_model: "tts-1-hd";
+};
+
 const TTS_MODEL = "tts-1-hd" as const;
 const LEGACY_TTS_MODEL = "tts-1" as const;
 const TTS_VOICE = "ash" as const;
@@ -231,15 +242,36 @@ export async function synthesizeOnboardingOpening(
     callId: string;
     resumeContext?: OnboardingOpeningResumeContext | null;
   },
-  dependencies: {
-    openaiKey: string;
-    fetchImpl?: FetchLike;
-    timeoutMs?: number;
-    signal?: AbortSignal;
-  },
+  dependencies: OnboardingTtsDependencies,
 ): Promise<OnboardingOpeningPayloadV2> {
   const resumeContext = args.resumeContext ?? null;
   const text = onboardingOpeningText(args.tenantName, resumeContext);
+  const audio = await synthesizeExactOnboardingText(text, dependencies);
+  try {
+    return {
+      version: 2,
+      item_id: onboardingOpeningItemId({
+        browserRequestId: args.browserRequestId,
+        callId: args.callId,
+        textSha256: audio.text_sha256,
+        audioSha256: audio.audio_sha256,
+      }),
+      ...audio,
+      resume_context: resumeContext === null
+        ? null
+        : structuredClone(resumeContext),
+    };
+  } catch {
+    throw openingFailure("onboarding_tts_invalid_response", true, audio.cost_usd);
+  }
+}
+
+/** Exact-text transport only. Application speech callers must validate their
+ * persisted action before invoking this shared legacy-opening transport. */
+export async function synthesizeExactOnboardingText(
+  text: string,
+  dependencies: OnboardingTtsDependencies,
+): Promise<ExactOnboardingAudio> {
   const costUsd = onboardingTtsCostUsd(text);
   const timeoutMs = dependencies.timeoutMs ?? DEFAULT_TTS_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
@@ -291,13 +323,6 @@ export async function synthesizeOnboardingOpening(
     const textSha256 = sha256(text);
     const audioSha256 = sha256(audio);
     return {
-      version: 2,
-      item_id: onboardingOpeningItemId({
-        browserRequestId: args.browserRequestId,
-        callId: args.callId,
-        textSha256,
-        audioSha256,
-      }),
       text,
       text_sha256: textSha256,
       audio_base64: Buffer.from(audio).toString("base64"),
@@ -306,9 +331,6 @@ export async function synthesizeOnboardingOpening(
       voice: TTS_VOICE,
       tts_model: TTS_MODEL,
       cost_usd: costUsd,
-      resume_context: resumeContext === null
-        ? null
-        : structuredClone(resumeContext),
     };
   } catch (error) {
     if (

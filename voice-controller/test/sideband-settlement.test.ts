@@ -193,6 +193,13 @@ function ledger(status: SessionLedger["status"]): SessionLedger {
 }
 
 describe("sideband budget finalization", () => {
+  test("website manual transport close still requires audited provider termination evidence",async()=>{
+    const ended=ledger("ended");ended.websiteInterviewRuntime={} as any;
+    expect(ended.providerTerminalEvidence).toBeUndefined();expect(ended.agentEnded).toBeUndefined();
+    await persistLedger(cap,ended,async()=>{throw new Error("No provider call without an admitted attempt");});
+    expect(rpcCalls.filter(call=>call.name==="begin_provider_termination_attempt")).toHaveLength(1);
+    expect(callUpdates.some(row=>row.provider_termination_state==="confirmed")).toBe(false);
+  });
   test("real sideband constructor failure rolls back live state and every timer", () => {
     const clock = installSyntheticClock();
     const originalWebSocket = globalThis.WebSocket;

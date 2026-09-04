@@ -557,6 +557,14 @@ function parseDraftReadback(value: unknown): DraftReadback {
   };
 }
 
+/** Read-only source question projection; preserves the parser's stable IDs and
+ * typed targets without applying facts, granting authority, or writing state. */
+export function getCompanyDiscoveryUnresolvedItems(value: unknown) {
+  return Object.freeze(parseDraftReadback(value).draft.unresolved_items.map(item =>
+    Object.freeze({ ...item, source_claim_ids: Object.freeze([...item.source_claim_ids]), evidence_refs: Object.freeze([...item.evidence_refs]) })
+  ));
+}
+
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
   if (value && typeof value === "object") {

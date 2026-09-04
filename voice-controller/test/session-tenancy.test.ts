@@ -836,6 +836,31 @@ describe("browser request handling", () => {
 });
 
 describe("durable browser cancel_requested handshake", () => {
+  test("protocol3 forwards durable identity and preserves ready cancellation custody", async () => {
+    const b = boundary({ protocolVersion: 3 });
+    _setClient(b.client as any);
+    const reasons: string[] = [];
+    const payload = {
+      version: 3, item_id: `lgs-${"a".repeat(28)}`,
+      speech: { schema: "onboarding.speech.v1", actionId: "a".repeat(64), interviewId: "22222222-2222-4222-8222-222222222229", callId: "22222222-2222-4222-8222-222222222229", revision: 0, kind: "ASK_NEXT_GAP", sourceDigest: "b".repeat(64), text: APPLICATION_OPENING_PAYLOAD_V2.text, text_sha256: APPLICATION_OPENING_PAYLOAD_V2.text_sha256, audio_base64: APPLICATION_OPENING_PAYLOAD_V2.audio_base64, audio_sha256: APPLICATION_OPENING_PAYLOAD_V2.audio_sha256, mime: "audio/mpeg", voice: "ash", tts_model: "tts-1-hd", cost_usd: APPLICATION_OPENING_PAYLOAD_V2.cost_usd },
+    };
+    await _handleBrowserRequest(structuredClone(b.row), async (...args: any[]) => {
+      expect(args[6].onboardingProtocolVersion).toBe(3);
+      expect(args[6].browserRequestId).toBe("request-cancel-1");
+      args[5]({ callId: "22222222-2222-4222-8222-222222222229", startupComplete: true, cancel: async (reason: string) => {
+        reasons.push(reason); Object.assign(b.call, { status: "error", provider_termination_state: "confirmed" });
+      } });
+      return { sdp: "answer", call_id: "22222222-2222-4222-8222-222222222229", opening_mode_applied: "application_tts_v1", opening_payload: payload } as any;
+    });
+    expect(b.row.error).toBeUndefined();
+    expect(b.row.status).toBe("ready");
+    expect(b.row.opening_payload).toEqual(payload);
+    Object.assign(b.row, { status: "cancel_requested", error: "protocol3_cancel" });
+    expect(await (browserRequestsModule as any)._handleBrowserCancellation(structuredClone(b.row))).toBe(true);
+    expect(reasons).toEqual(["protocol3_cancel"]);
+    expect(b.row.status).toBe("expired");
+  });
+
   test("ready cancellation classification accepts wrong-cost V2 cleanup identity but rejects wrong protocol", () => {
     const classify = (browserRequestsModule as any)
       ._cancellationRequestKindForTests;

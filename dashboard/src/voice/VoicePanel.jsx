@@ -20,6 +20,7 @@ export function VoicePanel({
   onClose,
   initialSessionType = "owner_browser",
   lockedOnboarding = false,
+  onboardingProtocolVersion = 2,
 }) {
   const [status, setStatus] = useState("idle"); // idle | connecting | live | ended | error
   const [error, setError] = useState(null);
@@ -90,6 +91,7 @@ export function VoicePanel({
       client: supabase,
       reason: end.reason,
       callId: end.callId,
+      onboardingProtocolVersion,
       signal: outcomeAbort.signal,
       isCancelled: () => sessionRunRef.current !== runId,
       onOutcome: (outcome) => applyCurrentSessionRun({
@@ -127,6 +129,8 @@ export function VoicePanel({
         accessToken: token,
         model,
         sessionType: startedSessionType,
+        onboardingProtocolVersion,
+        speechClient: supabase,
         signal: startAbort.signal,
         onEvent: (ev) => applyCurrentSessionRun({
           runId,

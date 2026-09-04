@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { createServer } from "vite";
@@ -264,6 +265,7 @@ function installVoiceBrowser({
   autoPlayback = "ended",
   autoOpeningEvents = true,
   providerGreetingTranscript,
+  vadEvent = LIVE_VAD_EVENT,
 } = {}) {
   const originals = {
     navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
@@ -316,7 +318,7 @@ function installVoiceBrowser({
         });
         this.emit({ type: "conversation.item.added", item: event.item });
         this.emit({ type: "conversation.item.done", item: event.item });
-        this.emit(LIVE_VAD_EVENT);
+        this.emit(vadEvent);
       });
     },
   };
@@ -505,6 +507,61 @@ test("protocol v2 fresh opening validates exact HD Ash cost and service question
   } finally {
     browser.restore();
   }
+});
+
+function websiteOpeningResponse() {
+  const response=openingResponseV2();
+  const text='Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Eu já analisei seu website. Quais cidades exatas atende?';
+  const speech={schema:'onboarding.speech.v1',actionId:'a'.repeat(64),interviewId:CALL_ID,callId:CALL_ID,
+    revision:0,kind:'ASK_NEXT_GAP',text,sourceDigest:'b'.repeat(64),
+    text_sha256:createHash('sha256').update(text).digest('hex'),audio_base64:OPENING_AUDIO_BASE64,
+    audio_sha256:OPENING_AUDIO_SHA256,mime:'audio/mpeg',voice:'ash',tts_model:'tts-1-hd',
+    cost_usd:Number(([...text].length*30/1e6).toFixed(8))};
+  delete response.opening_text;delete response.resume_context;
+  return {...response,onboarding_protocol_version:3,opening_payload:{version:3,item_id:`lgs-${speech.actionId.slice(0,28)}`,speech}};
+}
+test('website protocol3 uses owner-scoped application speech and never unmutes Realtime',async()=>{
+  const response=websiteOpeningResponse(),reads=[],events=[];
+  const safeVad=structuredClone(LIVE_VAD_EVENT);
+  safeVad.session.audio.input.turn_detection.create_response=false;
+  safeVad.session.audio.input.turn_detection.interrupt_response=false;
+  const browser=installVoiceBrowser({response,vadEvent:safeVad,providerGreetingTranscript:'Se quiser, posso escrever seu site.'});
+  try{
+    const session=await startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
+      speechClient:{rpc:async(name,args)=>{reads.push({name,args});return{data:response.opening_payload.speech,error:null};}},
+      onEvent:event=>events.push(event)});
+    assert.equal(browser.requestBodies[0].onboarding_protocol_version,3);
+    assert.deepEqual(reads,[{name:'read_website_interview_speech',args:{p_call:CALL_ID,p_action:'a'.repeat(64)}}]);
+    assert.equal(browser.audios[0].muted,true);assert.equal(browser.tracks[0].enabled,true);
+    assert.equal(browser.audios[1].playCalls,1);assert.equal(browser.channel.sent[0].item.id,response.opening_payload.item_id);
+    assert.deepEqual(events,[{kind:'agent',text:response.opening_payload.speech.text}]);
+    browser.channel.emit({type:'response.output_audio_transcript.done',transcript:'Quer mais alguma coisa?'});
+    assert.equal(events.length,1);assert.equal(browser.audios[0].muted,true);
+    session.end();assert.equal(browser.revokedObjectUrls.length,1);
+  }finally{browser.restore();}
+});
+test('website protocol3 refuses downgrade before any audio',async()=>{
+  const browser=installVoiceBrowser({response:openingResponseV2()});
+  try{
+    await assert.rejects(startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,speechClient:{rpc:async()=>({data:null})}}));
+    assert.equal(browser.audios.length,1);assert.equal(browser.tracks[0].enabled,false);
+  }finally{browser.restore();}
+});
+
+test('website completion requires one durable terminal receipt with approval, provider and budget proof',async()=>{
+  const approval='22222222-2222-4222-8222-222222222222';
+  const terminal={receiptId:'33333333-3333-4333-8333-333333333333',callId:CALL_ID,interviewId:CALL_ID,
+    outcome:'complete',approvalReceiptId:approval,providerConfirmed:true,budgetSettled:true,
+    budgetReservationId:'44444444-4444-4444-8444-444444444444',callStatus:'ended'};
+  const status={callId:CALL_ID,currentCallId:CALL_ID,interviewId:CALL_ID,state:'complete',completed:true,revision:116,
+    approvalReceiptId:approval,terminal};
+  const read=async(data)=>resolveOnboardingOutcome({client:{rpc:async()=>({data,error:null})},callId:CALL_ID,
+    reason:'remote_hangup',onboardingProtocolVersion:3,timeoutMs:10,pollIntervalMs:0});
+  assert.deepEqual(await read(status),{status:'complete',revision:116,protocolVersion:3});
+  for(const change of [{budgetSettled:false},{providerConfirmed:false},{outcome:'unfinished'},{callStatus:'error'},
+    {approvalReceiptId:'55555555-5555-4555-8555-555555555555'},{callId:'55555555-5555-4555-8555-555555555555'}])
+    assert.notEqual((await read({...status,terminal:{...terminal,...change}})).status,'complete');
+  assert.notEqual((await read({...status,state:'closing',completed:false,terminal:null})).status,'complete');
 });
 
 test("protocol v2 resume speaks identity, continuation, and persisted question exactly once", async () => {

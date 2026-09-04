@@ -457,6 +457,7 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
             type: "voice",
             sessionType: "onboarding",
             lockedOnboarding: true,
+            onboardingProtocolVersion: websiteSetup.voiceProtocolVersion ?? 2,
           })}
         />
         <DashboardDialog
@@ -665,6 +666,7 @@ function DashboardDialog({
         onClose={onClose}
         initialSessionType={dialog.sessionType ?? "owner_browser"}
         lockedOnboarding={dialog.lockedOnboarding === true}
+        onboardingProtocolVersion={dialog.onboardingProtocolVersion ?? 2}
       />
     );
   }
