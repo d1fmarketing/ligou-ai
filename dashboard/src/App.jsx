@@ -39,7 +39,8 @@ function Toast({ toast, onClose }) {
   onCloseRef.current = onClose;
   useEffect(() => {
     if (!toast) return undefined;
-    const timer = window.setTimeout(() => onCloseRef.current(), 4200);
+    // Sucesso tem gêmeo inline (.system-message) — 3,2s bastam; aviso não tem.
+    const timer = window.setTimeout(() => onCloseRef.current(), toast.kind === "warning" ? 4200 : 3200);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -489,35 +490,54 @@ function DashboardDialog({
           event.preventDefault();
           run(onApprove, approval.id, { mode: approvalMode, scope, duration });
         }}>
-          <fieldset className="choice-grid">
-            <legend>Como aplicar?</legend>
-            <label className={approvalMode === "case" ? "is-selected" : ""}>
-              <input type="radio" name="approval-mode" value="case" checked={approvalMode === "case"} onChange={() => setApprovalMode("case")} />
-              <span><strong>Somente este caso</strong><small>Autoriza o pedido de John sem alterar a memória.</small></span>
-            </label>
-            <label className={approvalMode === "rule" ? "is-selected" : ""}>
-              <input type="radio" name="approval-mode" value="rule" checked={approvalMode === "rule"} onChange={() => setApprovalMode("rule")} />
-              <span><strong>Salvar como regra</strong><small>Cria uma nova orientação operacional aprovada.</small></span>
-            </label>
-          </fieldset>
-          {approvalMode === "rule" ? (
-            <div className="rule-options">
-              <label>Escopo
-                <select value={scope} onChange={(event) => setScope(event.target.value)}>
-                  <option value="client">Este cliente</option>
-                  <option value="service">Este serviço</option>
-                  <option value="location">Esta localização</option>
-                  <option value="general">Regra geral</option>
-                </select>
+          {/* Eco dos fatos que a folha cobre — inclusive a proposta, que é o
+              texto literalmente salvo como regra. Rótulos já existentes no produto. */}
+          <div className="comparison-grid">
+            {approval.request ? (
+              <div><span>Solicitação</span><p>{approval.request}{approval.note ? ` · ${approval.note}` : ""}</p></div>
+            ) : null}
+            {approval.rule ? (
+              <div><span>Regra consultada</span><p>{approval.rule}</p></div>
+            ) : null}
+            {approval.proposedAction ? (
+              <div><span>Nova proposta</span><p>{approval.proposedAction}</p></div>
+            ) : null}
+          </div>
+          {/* Opções + revelação num só filho do grid do formulário: um wrapper
+              colapsado como linha própria ainda cobraria o gap (18 → 36px). */}
+          <div className="choice-block">
+            <fieldset className="choice-grid">
+              <legend>Como aplicar?</legend>
+              <label className={approvalMode === "case" ? "is-selected" : ""}>
+                <input type="radio" name="approval-mode" value="case" checked={approvalMode === "case"} onChange={() => setApprovalMode("case")} />
+                <span><strong>Somente este caso</strong><small>Autoriza o pedido de John sem alterar a memória.</small></span>
               </label>
-              <label>Duração
-                <select value={duration} onChange={(event) => setDuration(event.target.value)}>
-                  <option value="permanent">Permanente</option>
-                  <option value="temporary">Temporária</option>
-                </select>
+              <label className={approvalMode === "rule" ? "is-selected" : ""}>
+                <input type="radio" name="approval-mode" value="rule" checked={approvalMode === "rule"} onChange={() => setApprovalMode("rule")} />
+                <span><strong>Salvar como regra</strong><small>Cria uma nova orientação operacional aprovada.</small></span>
               </label>
+            </fieldset>
+            {/* Sempre montado; abre por transição de grid-template-rows (a folha
+                não pula). `inert` tira os selects do Tab/leitor enquanto fechado. */}
+            <div className="rule-options-reveal" data-open={approvalMode === "rule" ? "true" : "false"} inert={approvalMode !== "rule"}>
+              <div className="rule-options">
+                <label>Escopo
+                  <select value={scope} onChange={(event) => setScope(event.target.value)}>
+                    <option value="client">Este cliente</option>
+                    <option value="service">Este serviço</option>
+                    <option value="location">Esta localização</option>
+                    <option value="general">Regra geral</option>
+                  </select>
+                </label>
+                <label>Duração
+                  <select value={duration} onChange={(event) => setDuration(event.target.value)}>
+                    <option value="permanent">Permanente</option>
+                    <option value="temporary">Temporária</option>
+                  </select>
+                </label>
+              </div>
             </div>
-          ) : null}
+          </div>
           <div className="dialog-actions">
             <button className="button button--ghost" type="button" onClick={onClose}>Cancelar</button>
             <button className="button button--primary" type="submit" disabled={busy}>Confirmar aprovação</button>

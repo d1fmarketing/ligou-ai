@@ -19,10 +19,15 @@ export function Dialog({ open, title, description, onClose, children, size = "me
   useEffect(() => {
     if (!open) return undefined;
 
-    returnFocusRef.current = document.activeElement;
+    // Guarda o gatilho E o caso a que ele pertencia: o botão Aprovar é o mesmo
+    // nó DOM antes e depois de o card trocar de cliente (React reaproveita).
+    const trigger = document.activeElement;
+    returnFocusRef.current = { el: trigger, key: trigger?.dataset?.approvalId ?? null };
     const panel = panelRef.current;
-    const focusables = panel?.querySelectorAll(FOCUSABLE);
-    (focusables?.[0] || panel)?.focus();
+    // Foco inicial no painel (tabIndex -1 + aria-labelledby/describedby): o
+    // título e a consequência são anunciados antes de qualquer controle — não
+    // o "Fechar" X. O primeiro Tab ainda cai no X (44px, primeiro do DOM).
+    panel?.focus();
 
     const handleKeyDown = (event) => {
       if (event.key === "Escape") {
@@ -39,7 +44,9 @@ export function Dialog({ open, title, description, onClose, children, size = "me
       }
       const first = items[0];
       const last = items.at(-1);
-      if (event.shiftKey && document.activeElement === first) {
+      // Shift+Tab a partir do painel recém-focado também fecha o ciclo — sem
+      // isso o foco vazaria para o app atrás do backdrop.
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === panel)) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -53,11 +60,18 @@ export function Dialog({ open, title, description, onClose, children, size = "me
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
       document.body.classList.remove("dialog-open");
-      // O gatilho pode ter desmontado (ex.: card de aprovação resolvido);
-      // sem fallback o foco de teclado cai no body e o leitor se perde.
-      const trigger = returnFocusRef.current;
-      if (trigger?.isConnected) trigger.focus?.();
-      else document.getElementById("main-content")?.focus?.();
+      // Devolve o foco ao gatilho SÓ se ele ainda é o mesmo controle do mesmo
+      // caso (Ajustar mantém o caso pendente → volta ao próprio botão). Se o
+      // card trocou de cliente ou desmontou, o foco vai à última confirmação
+      // (.system-message, role=status) — nunca ao Aprovar de outro cliente.
+      const { el, key } = returnFocusRef.current || {};
+      const hadTrigger = el && el !== document.body && el.isConnected;
+      if (hadTrigger && (el.dataset?.approvalId ?? null) === key) {
+        el.focus?.();
+      } else {
+        const confirmation = [...document.querySelectorAll(".conversation .system-message")].at(-1);
+        (confirmation || document.getElementById("main-content"))?.focus?.();
+      }
     };
   }, [open, onClose]);
 

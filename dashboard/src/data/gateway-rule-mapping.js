@@ -194,3 +194,16 @@ export function mapRuleGroups(rules) {
   );
   return entries;
 }
+
+// Kicker do card de decisão. O banco só conhece urgency ∈ {normal, urgente};
+// a string "Pedido urgente · mesmo dia" (mock aprovado) só é honesta quando o
+// caso é urgente E foi aberto hoje (fuso do navegador). Fora disso: sem kicker.
+export function caseUrgencyLabel(c, now = new Date()) {
+  if (!c || c.urgency !== "urgente" || !c.created_at) return null;
+  const created = new Date(c.created_at);
+  if (Number.isNaN(created.getTime())) return null;
+  const sameDay = created.getFullYear() === now.getFullYear()
+    && created.getMonth() === now.getMonth()
+    && created.getDate() === now.getDate();
+  return sameDay ? "Pedido urgente · mesmo dia" : null;
+}

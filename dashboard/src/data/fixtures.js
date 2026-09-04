@@ -149,6 +149,10 @@ const BASE_STATE = {
     {
       id: "approval-john-urgent",
       clientName: "John Miller",
+      // Strings do mock aprovado — antes eram defaults do ApprovalCard e
+      // vazavam para qualquer caso (Maria virava "Pedido urgente · mesmo dia").
+      urgencyLabel: "Pedido urgente · mesmo dia",
+      isNewClient: true,
       request: "Antes das 17h · Problema na chaminé",
       note: "Relatou chuva entrando no teto.",
       rule: "Encaixe no mesmo dia exige sua aprovação.",

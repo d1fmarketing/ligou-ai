@@ -29,11 +29,27 @@ test("client-area links exist in both React surfaces without claiming a bundled 
 });
 
 test("placeholder and label-cleanup boundaries stay explicit", () => {
-  expect(application).toContain('<a href="#" style={a}>Termos</a>');
-  expect(application).toContain('<a href="#" style={a}>Privacidade</a>');
+  // Termos/Privacidade have no pages yet: they must stay visible but must not be dead links (L24).
+  expect(application).toContain('<span style={a}>Termos</span>');
+  expect(application).toContain('<span style={a}>Privacidade</span>');
+  expect(application).not.toContain('href="#"');
   expect(application).not.toMatch(/<Eyebrow[^>]*>\s*A dor\s*<\/Eyebrow>/);
   expect(application).not.toMatch(/<Eyebrow[^>]*>\s*Prova do produto\s*<\/Eyebrow>/);
   expect(noScript).not.toMatch(/>\s*(?:A dor|Prova do produto)\s*</);
+});
+
+test("share metadata points at the existing 1200x630 card with an absolute URL", () => {
+  expect(html).toContain('<meta property="og:image" content="https://client-nine-taupe-24.vercel.app/og-ligou.png">');
+  expect(html).toContain('<meta name="twitter:card" content="summary_large_image">');
+  expect(html).toContain('<meta property="og:title" content="Ligou? Atendido. — Agente operacional de inteligência artificial">');
+});
+
+test("mockup controls carry no false affordance and the pricing primary routes to the proof", () => {
+  expect(application).not.toMatch(/<button className="(?:iv-approve|p7-apr|p7-adj|lc-apr|lc-adj)"/);
+  expect(application).toContain('<span className="lc-apr">Aprovar encaixe</span>');
+  expect(application).toContain('<button className="p7-again" type="button" onClick={replay}>');
+  expect(application).toContain('href="#prova" onClick={replayDemo} style={{marginTop: 8}}>Quero aproveitar a oferta</Button>');
+  expect(application).not.toContain('href="#preco"');
 });
 
 test("display typography maps static Familjen files to their exact weights", () => {

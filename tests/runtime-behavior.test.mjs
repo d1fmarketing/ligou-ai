@@ -173,7 +173,8 @@ describe("interactive and accessible state", () => {
       findAll(tree, (node) => node.props?.id === "lc-rel-toggle")[0];
     const report = (tree) => findAll(tree, (node) => node.props?.id === "lc-relato-full");
     const replay = (tree) => findAll(tree, hasClass("lc-again"))[0];
-    const mobileDemo = (tree) => findAll(tree, hasClass("p7m"))[0];
+    // The keyed node is the shell (the .p7m wrapper stays mounted so its in-view observer survives a replay).
+    const mobileDemo = (tree) => findAll(tree, hasClass("lc-shell"))[0];
 
     let demo = harness.render(CallDemo);
     expect(reportToggle(demo).props["aria-controls"]).toBe("lc-relato-full");
@@ -193,6 +194,25 @@ describe("interactive and accessible state", () => {
     expect(reportToggle(demo).props["aria-expanded"]).toBe("false");
     expect(report(demo)).toHaveLength(0);
     expect(mobileDemo(demo).props.key).toBe(1);
+    expect(findAll(demo, hasClass("p7-board"))[0].props.key).toBe(1);
+    expect(textContent(replay(demo))).toContain("Ver de novo");
+  });
+
+  test("desktop replay control is a real button and re-keys the board", async () => {
+    const harness = await createRuntimeHarness();
+    const { CallDemo } = harness.bindings;
+    const again = (tree) => findAll(tree, hasClass("p7-again"))[0];
+    const board = (tree) => findAll(tree, hasClass("p7-board"))[0];
+
+    let demo = harness.render(CallDemo);
+    expect(again(demo).type).toBe("button");
+    expect(board(demo).props.key).toBe(0);
+    expect(findAll(demo, hasClass("p7-i"))).toHaveLength(7);
+    expect(findAll(demo, (node) => node.props?.lang === "en-US")).toHaveLength(6);
+
+    again(demo).props.onClick();
+    demo = harness.render(CallDemo);
+    expect(board(demo).props.key).toBe(1);
   });
 });
 
@@ -222,7 +242,7 @@ describe("intro and reduced-motion fallbacks", () => {
     ]);
   });
 
-  test("runs the normal intro timeline and supports an early skip", async () => {
+  test("runs the shortened intro timeline (0.9s) and hands off in one step", async () => {
     let completions = 0;
     const timeline = await createRuntimeHarness();
     const props = {
@@ -232,33 +252,54 @@ describe("intro and reduced-motion fallbacks", () => {
     };
 
     let intro = timeline.render(timeline.bindings.Intro4, props);
+    expect(intro.type).toBe("button");
+    expect(intro.props["aria-label"]).toBe("Pular introdução");
     expect(textContent(intro)).toContain("Ligou?");
+    expect(findAll(intro, hasClass("acc"))).toHaveLength(0);
 
-    timeline.scheduler.advanceBy(900);
+    timeline.scheduler.advanceBy(450);
     intro = timeline.render(timeline.bindings.Intro4, props);
     expect(textContent(intro)).toContain("Atendido.");
+    expect(findAll(intro, hasClass("acc"))).toHaveLength(0);
+    expect(intro.props.className).not.toContain("out");
+    expect(completions).toBe(0);
 
-    timeline.scheduler.advanceBy(850);
+    timeline.scheduler.advanceBy(450);
     intro = timeline.render(timeline.bindings.Intro4, props);
     expect(intro.props.className).toContain("out");
-
-    timeline.scheduler.advanceBy(700);
     expect(completions).toBe(1);
 
-    let skippedCompletions = 0;
-    const skipped = await createRuntimeHarness();
-    const skippedProps = {
-      onDone: () => {
-        skippedCompletions += 1;
-      },
-    };
-    intro = skipped.render(skipped.bindings.Intro4, skippedProps);
-    intro.props.onClick();
-    intro = skipped.render(skipped.bindings.Intro4, skippedProps);
-    expect(intro.props.className).toContain("out");
-    skipped.scheduler.advanceBy(300);
-    expect(skippedCompletions).toBe(1);
-    skipped.scheduler.advanceBy(2200);
-    expect(skippedCompletions).toBe(1);
+    timeline.scheduler.advanceBy(2000);
+    expect(completions).toBe(1);
+  });
+
+  test("intro skips immediately on click, Enter, Space and Escape, and never fires twice", async () => {
+    for (const trigger of ["click", "Enter", " ", "Escape"]) {
+      let skippedCompletions = 0;
+      const skipped = await createRuntimeHarness();
+      const skippedProps = {
+        onDone: () => {
+          skippedCompletions += 1;
+        },
+      };
+      let intro = skipped.render(skipped.bindings.Intro4, skippedProps);
+      let prevented = false;
+      if (trigger === "click") intro.props.onClick();
+      else intro.props.onKeyDown({ key: trigger, preventDefault: () => { prevented = true; } });
+      intro = skipped.render(skipped.bindings.Intro4, skippedProps);
+      expect(intro.props.className).toContain("out");
+      expect(skippedCompletions).toBe(1);
+      if (trigger !== "click") expect(prevented).toBe(true);
+      skipped.scheduler.advanceBy(2500);
+      expect(skippedCompletions).toBe(1);
+    }
+
+    const ignored = await createRuntimeHarness();
+    let ignoredCompletions = 0;
+    let intro = ignored.render(ignored.bindings.Intro4, { onDone: () => { ignoredCompletions += 1; } });
+    intro.props.onKeyDown({ key: "Tab", preventDefault: () => {} });
+    intro = ignored.render(ignored.bindings.Intro4, { onDone: () => { ignoredCompletions += 1; } });
+    expect(intro.props.className).not.toContain("out");
+    expect(ignoredCompletions).toBe(0);
   });
 });

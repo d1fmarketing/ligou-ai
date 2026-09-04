@@ -23,8 +23,10 @@ function TimelineAvatar({ className = "" }) {
 function ChatMessage({ message, showAvatar = true }) {
   const role = message.role || "agent";
   if (role === "system") {
+    // tabIndex -1: o Dialog devolve o foco para cá quando o gatilho (Aprovar)
+    // deixou de pertencer ao caso decidido — o leitor ouve a confirmação.
     return (
-      <div className="system-message" role="status">
+      <div className="system-message" role="status" tabIndex={-1}>
         <IconChecks aria-hidden="true" />
         <span>{message.text}</span>
         <time>{message.time}</time>
@@ -54,30 +56,57 @@ function ChatMessage({ message, showAvatar = true }) {
   );
 }
 
-function CausalStrip({ context }) {
+const APPROVAL_CARD_ANCHOR = "approval-card";
+
+function jumpToApprovalCard(event) {
+  const target = document.getElementById(APPROVAL_CARD_ANCHOR);
+  if (!target) return; // sem alvo, o href="#approval-card" segue como âncora comum
+  event.preventDefault();
+  const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  target.scrollIntoView({ block: "start", behavior: reduced ? "auto" : "smooth" });
+  target.focus?.({ preventScroll: true });
+}
+
+function CausalStrip({ context, jumpTarget = false }) {
+  const pending = ["pending", "aguardando"].includes(context?.status);
+  // Ícone segue o mesmo predicado do texto: laranja = aguardando, teal = registrada.
+  const statusCell = (
+    <>
+      <span className={`causal-icon ${pending ? "causal-icon--pending" : "causal-icon--done"}`}><IconClock aria-hidden="true" /></span>
+      <p><small>Aguardando</small><strong>{pending ? "sua decisão" : "decisão registrada"}</strong></p>
+    </>
+  );
   return (
     <div className="causal-strip" aria-label="Contexto da ligação">
       {context?.language ? (
-        <div>
+        <div data-cell="call">
           <span className="causal-icon"><IconPhone aria-hidden="true" /></span>
           <p><small>Ligação</small><strong>{context.language}</strong></p>
         </div>
       ) : null}
       {context?.rule ? (
-        <div>
+        <div data-cell="rule">
           <span className="causal-icon"><IconNotebook aria-hidden="true" /></span>
           <p><small>Regra consultada</small><strong>{context.rule}</strong></p>
         </div>
       ) : null}
-      <div>
-        <span className="causal-icon causal-icon--pending"><IconClock aria-hidden="true" /></span>
-        <p><small>Aguardando</small><strong>{["pending", "aguardando"].includes(context?.status) ? "sua decisão" : "decisão registrada"}</strong></p>
+      <div data-cell="status">
+        {pending && jumpTarget ? (
+          // Telefone baixo (375×667): a célula de status leva ao card num toque.
+          <a className="causal-jump" href={`#${APPROVAL_CARD_ANCHOR}`} onClick={jumpToApprovalCard}>{statusCell}</a>
+        ) : statusCell}
       </div>
     </div>
   );
 }
 
-function OperationalTimeline({ messages, context, approval, onApprove, onAdjust, onReject }) {
+function focusInspectorApproval() {
+  document.querySelector(".context-inspector .approval-actions button")?.focus();
+}
+
+function OperationalTimeline({ messages, context, approval, resolution, pendingApproval, onApprove, onAdjust, onReject }) {
+  // `approval` = caso narrado pelas mensagens 2-3 (só se ainda pendente);
+  // `pendingApproval` = próximo caso global (badge, inspector, handoff).
   return (
     <div className="operational-timeline">
       <span className="timeline-rail" aria-hidden="true" />
@@ -91,7 +120,7 @@ function OperationalTimeline({ messages, context, approval, onApprove, onAdjust,
         <>
           <span className="timeline-context-node" aria-hidden="true" />
           <div className="timeline-content timeline-content--context">
-            <CausalStrip context={context} />
+            <CausalStrip context={context} jumpTarget={Boolean(approval)} />
           </div>
         </>
       ) : null}
@@ -101,23 +130,43 @@ function OperationalTimeline({ messages, context, approval, onApprove, onAdjust,
         {messages[1] ? <ChatMessage message={messages[1]} showAvatar={false} /> : null}
       </div>
 
-      <span className="timeline-approval-node" aria-hidden="true" />
+      {/* Nó de ação segue o mesmo `!pendingApproval` do handoff: teal só quando
+          nada está pendente (senão pintaria "registrado" ao lado de um card vivo). */}
+      <span className={`timeline-approval-node${pendingApproval ? "" : " is-resolved"}`} aria-hidden="true" />
       <div className="timeline-content timeline-content--approval">
-        <div className="mobile-approval">
-          <ApprovalCard
-            approval={approval}
-            onApprove={onApprove}
-            onAdjust={onAdjust}
-            onReject={onReject}
-          />
-          {approval ? <p className="approval-caption">Aprovação necessária para exceção de regra.</p> : null}
+        {/* id no wrapper (não dentro do ApprovalCard, que também vive no inspector ≥1200). */}
+        <div className="mobile-approval" id={APPROVAL_CARD_ANCHOR} tabIndex={-1}>
+          {approval ? (
+            <>
+              <ApprovalCard
+                approval={approval}
+                onApprove={onApprove}
+                onAdjust={onAdjust}
+                onReject={onReject}
+              />
+              <p className="approval-caption">Aprovação necessária para exceção de regra.</p>
+            </>
+          ) : resolution ? (
+            // O caso narrado fechou: a confirmação ocupa o lugar do card.
+            <ChatMessage message={resolution} />
+          ) : !pendingApproval ? (
+            <ApprovalCard approval={null} />
+          ) : null}
         </div>
 
-        <div className={`desktop-timeline-handoff${approval ? "" : " is-resolved"}`}>
-          <span>{approval ? "Exceção pronta" : "Decisão registrada"}</span>
-          <strong>{approval ? "Decida no painel à direita" : "Nenhuma exceção pendente"}</strong>
-          {approval ? <IconArrowRight aria-hidden="true" /> : <IconChecks aria-hidden="true" />}
-        </div>
+        {pendingApproval ? (
+          <button type="button" className="desktop-timeline-handoff" onClick={focusInspectorApproval}>
+            <span>Exceção pronta</span>
+            <strong>Decida no painel à direita</strong>
+            <IconArrowRight aria-hidden="true" />
+          </button>
+        ) : (
+          <div className="desktop-timeline-handoff is-resolved" role="status">
+            <span>Decisão registrada</span>
+            <strong>Nenhuma exceção pendente</strong>
+            <IconChecks aria-hidden="true" />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -140,9 +189,24 @@ export function ChatView({
   const [draft, setDraft] = useState("");
   const initialMessages = useMemo(() => messages.slice(0, 3), [messages]);
   const hasOperationalTimeline = Boolean(callContext || pendingApproval);
+  // O card do timeline pertence ao caso que as mensagens 2-3 narram. Se esse
+  // caso já foi decidido, o próximo pendente NÃO herda a narrativa do John:
+  // ele segue no badge, na aba Aprovações e no inspector (desktop).
+  const narratedApprovalId = initialMessages[2]?.relatedApprovalId || initialMessages[1]?.relatedApprovalId || null;
+  const timelineApproval = pendingApproval && (!narratedApprovalId || pendingApproval.id === narratedApprovalId)
+    ? pendingApproval
+    : null;
+  const narratedResolution = useMemo(
+    () => (narratedApprovalId
+      ? messages.find((message) => message.role === "system" && message.relatedApprovalId === narratedApprovalId) || null
+      : null),
+    [messages, narratedApprovalId],
+  );
   const recentMessages = useMemo(
-    () => messages.slice(hasOperationalTimeline ? 3 : 1),
-    [messages, hasOperationalTimeline],
+    () => messages
+      .slice(hasOperationalTimeline ? 3 : 1)
+      .filter((message) => !narratedResolution || message !== narratedResolution),
+    [messages, hasOperationalTimeline, narratedResolution],
   );
 
   // New messages land below the fold; follow them — but only when the owner
@@ -210,7 +274,9 @@ export function ChatView({
           <OperationalTimeline
             messages={[initialMessages[1], initialMessages[2]]}
             context={callContext}
-            approval={pendingApproval}
+            approval={timelineApproval}
+            resolution={narratedResolution}
+            pendingApproval={pendingApproval}
             onApprove={onApprove}
             onAdjust={onAdjust}
             onReject={onReject}

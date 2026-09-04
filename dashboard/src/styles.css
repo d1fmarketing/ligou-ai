@@ -84,12 +84,18 @@
   --border-strong: rgba(4, 29, 39, 0.18);
   --shadow-soft: 0 1px 2px rgba(4, 29, 39, 0.04), 0 8px 24px -12px rgba(4, 29, 39, 0.16);
   --shadow-float: 0 24px 48px -16px rgba(4, 29, 39, 0.28);
-  --nav-height: 77px;
-  --header-height: 62px;
+  --nav-height: 70px;
+  --header-height: 56px;
   --type-micro: 0.625rem;
   --type-small: 0.75rem;
   --type-body: clamp(0.75rem, calc(0.6607rem + 0.4464vw), 0.875rem);
-  --type-chat: clamp(0.6875rem, calc(0.5982rem + 0.4464vw), 0.8125rem);
+  /* Escala de papéis da view #ligou (2026-09-01): rótulo / corpo / lead /
+     subtítulo. --type-body e --type-subhead ficam como estão — alimentam
+     Memória, Aprovações e Conta; só seletores do #ligou apontam para estes. */
+  --type-label: 11px;
+  --type-chat: clamp(13px, calc(11.98px + 0.2625vw), 15px); /* 390→13 · 768→14 · ≥1150→15 */
+  --type-lead: clamp(15px, calc(13.9px + 0.28vw), 18px);
+  --type-subhead-fluid: clamp(20px, calc(18.4px + 0.4vw), 24px);
   --type-subhead: 1.25rem;
   --type-title: clamp(1.5rem, calc(1.3077rem + 0.9615vw), 2.125rem);
   --leading-tight: 1.15;
@@ -245,7 +251,7 @@ button:disabled {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   min-height: var(--header-height);
-  padding: 8px 14px;
+  padding: 5px 14px;
   color: var(--white);
   background: var(--ink-900);
   border-bottom: 1px solid rgba(255, 255, 255, 0.09);
@@ -295,7 +301,7 @@ button:disabled {
 .business-compact span {
   margin-top: 2px;
   color: #c2cdd1;
-  font-size: 10px;
+  font-size: var(--type-small);
 }
 
 .profile-button,
@@ -307,6 +313,7 @@ button:disabled {
   min-height: 44px;
   padding: 0;
   border: 0;
+  border-radius: var(--radius-sm);
   background: transparent;
   cursor: pointer;
 }
@@ -352,7 +359,7 @@ button:disabled {
 
 .profile-menu-panel span {
   color: var(--text-secondary);
-  font-size: 9px;
+  font-size: var(--type-chat);
   line-height: 1.4;
 }
 
@@ -367,7 +374,7 @@ button:disabled {
   border-radius: 9px;
   color: var(--ink-900);
   background: var(--paper);
-  font-size: 10px;
+  font-size: var(--type-chat);
   font-weight: 700;
   cursor: pointer;
 }
@@ -411,7 +418,7 @@ button:disabled {
 }
 
 .bottom-nav .destination-link {
-  font-size: 11px;
+  font-size: var(--type-label);
 }
 
 .bottom-nav .destination-link > span:last-child {
@@ -483,14 +490,15 @@ button:disabled {
   padding: 0 5px;
   border: 2px solid var(--white);
   border-radius: 999px;
-  color: var(--white);
+  /* Glifo ink sobre laranja (5.59:1) — tabela p.17 do guia; branco dava 3.10:1. */
+  color: var(--ink-950);
   background: var(--orange);
   font-size: 10px;
   font-weight: 800;
 }
 
 .page-heading {
-  padding: 7px 16px 4px;
+  padding: 2px 16px 0;
 }
 
 .prototype-badge,
@@ -506,9 +514,10 @@ button:disabled {
 }
 
 .prototype-badge {
-  padding: 5px 9px;
+  padding: 4px 9px;
   border-radius: 999px;
   background: var(--teal-soft);
+  font-size: var(--type-label);
 }
 
 .prototype-badge i {
@@ -517,7 +526,7 @@ button:disabled {
 
 .page-heading h1 {
   max-width: 100%;
-  margin: 10px 0 5px;
+  margin: 6px 0 3px;
   color: var(--ink-950);
   font-size: var(--type-title);
   line-height: var(--leading-tight);
@@ -528,7 +537,7 @@ button:disabled {
   display: block;
   width: 34px;
   height: 3px;
-  margin: 7px 0 7px;
+  margin: 5px 0;
   border-radius: 999px;
   background: var(--orange);
 }
@@ -536,7 +545,7 @@ button:disabled {
 .page-heading > p {
   margin: 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--type-chat);
 }
 
 /* Cabeçalho padrão das views (Poderes/Conta) — mesma voz dos títulos de página. */
@@ -577,19 +586,22 @@ button:disabled {
 .conversation {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
   width: 100%;
   max-width: 760px;
   margin: 0 auto;
-  padding: 14px 14px 16px;
+  padding: 4px 14px 16px;
 }
 
 .operational-timeline {
   --timeline-avatar-size: 52px;
   --timeline-rail-column: 52px;
   --timeline-column-gap: 10px;
-  --timeline-row-gap: 12px;
+  --timeline-row-gap: 8px;
   --timeline-approval-offset: 18px;
+  /* Recuo do card sob o trilho; o cotovelo do nó usa o mesmo token e termina
+     rente à borda do card em qualquer breakpoint. */
+  --timeline-approval-inset: -8px;
   position: relative;
   display: grid;
   grid-template-columns: var(--timeline-rail-column) minmax(0, 1fr);
@@ -665,6 +677,14 @@ button:disabled {
   align-self: start;
   margin-top: var(--timeline-approval-offset);
   background: var(--orange);
+  transition: background-color var(--dur-med) var(--ease-out), border-color var(--dur-med) var(--ease-out);
+}
+
+/* Decisão registrada: o nó de ação vira teal (confirma); trilho e conectores
+   seguem laranja — continuidade operacional, não sinal de ação. */
+.timeline-approval-node.is-resolved {
+  border-color: var(--teal);
+  background: var(--teal);
 }
 
 .timeline-approval-node::before {
@@ -682,7 +702,7 @@ button:disabled {
   position: absolute;
   top: calc(50% - 1px);
   left: 100%;
-  width: calc(var(--timeline-rail-column) / 2 + var(--timeline-column-gap) - 6px);
+  width: calc(var(--timeline-rail-column) / 2 + var(--timeline-column-gap) - 6px + var(--timeline-approval-inset));
   height: 2px;
   background: var(--orange);
 }
@@ -700,6 +720,7 @@ button:disabled {
 
 .timeline-content--context {
   grid-row: 2;
+  margin-top: -8px; /* a faixa encosta na bolha do agente (mock: 0.5px) */
   margin-right: 16px;
   margin-left: -24px;
 }
@@ -711,7 +732,7 @@ button:disabled {
 .timeline-content--approval {
   grid-row: 4;
   margin-right: 8px;
-  margin-left: -8px;
+  margin-left: var(--timeline-approval-inset);
 }
 
 .message-row {
@@ -744,8 +765,10 @@ button:disabled {
   max-width: min(calc(100% - 72px), 230px);
 }
 
+/* Resumo do agente ocupa a coluna do timeline (300px em 390): com corpo em
+   13px são 4 linhas em vez de 5 — o orçamento da primeira tela pede isso. */
 .timeline-content .message-row--agent .message-bubble {
-  max-width: min(100%, 270px);
+  max-width: min(100%, 300px);
 }
 
 .timeline-content--prompt .message-row--agent .message-bubble {
@@ -753,8 +776,19 @@ button:disabled {
 }
 
 .timeline-content--prompt .message-bubble {
-  padding-top: 10px;
+  padding-top: 8px;
   padding-bottom: 6px;
+}
+
+/* Hora na mesma linha do texto (como no mock) — não em linha própria — nas
+   duas bolhas do timeline (resumo e pergunta). */
+.timeline-content .message-bubble p {
+  display: inline;
+}
+
+.timeline-content .message-bubble time {
+  float: right;
+  margin: 2px 0 0 12px;
 }
 
 /* Avatar das respostas do agente — só aparece em conversa corrida (depois
@@ -790,7 +824,7 @@ button:disabled {
   display: block;
   margin-bottom: 5px;
   color: var(--text-secondary);
-  font-size: var(--type-micro);
+  font-size: var(--type-label);
   font-weight: 800;
   letter-spacing: 0.15em;
   text-transform: uppercase;
@@ -798,7 +832,7 @@ button:disabled {
 
 .message-bubble p {
   margin: 0;
-  font-size: var(--type-body);
+  font-size: var(--type-chat);
   font-weight: 500;
   line-height: var(--leading-body);
 }
@@ -806,19 +840,14 @@ button:disabled {
 .message-row--owner .message-bubble p,
 .message-row--agent .message-bubble p {
   font-size: var(--type-chat);
-  line-height: 1.42;
-}
-
-.message-row--owner .message-bubble time {
-  margin-top: 2px;
-  font-size: 8px;
+  line-height: var(--leading-body);
 }
 
 .owner-message-time {
   flex: 0 0 auto;
   padding-bottom: 8px;
   color: var(--text-secondary);
-  font-size: var(--type-micro);
+  font-size: var(--type-label);
   font-variant-numeric: tabular-nums;
 }
 
@@ -826,7 +855,7 @@ button:disabled {
   display: block;
   margin-top: 3px;
   color: var(--text-secondary);
-  font-size: var(--type-micro);
+  font-size: var(--type-label);
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
@@ -855,7 +884,7 @@ button:disabled {
   border-radius: 10px;
   color: #285049;
   background: var(--teal-soft);
-  font-size: var(--type-small);
+  font-size: var(--type-chat);
   font-weight: 600;
 }
 
@@ -866,15 +895,33 @@ button:disabled {
 
 .causal-strip {
   display: grid;
-  grid-template-columns: 0.85fr 1.2fr 0.95fr;
+  /* Telefone: 3 colunas não seguram rótulos ≥9px abaixo de ~430px. A regra
+     (texto mais longo) ocupa a coluna direita inteira; ligação e status
+     empilham à esquerda. Áreas nomeadas: as células são condicionais. */
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr);
+  grid-template-areas:
+    "call rule"
+    "status rule";
   width: 100%;
   min-height: 56px;
   margin: 0;
-  padding: 9px 5px;
+  padding: 6px;
   border: 1px solid var(--border);
   border-radius: 13px;
   background: rgba(255, 255, 255, 0.9);
   box-shadow: var(--shadow-soft);
+}
+
+.causal-strip:not(:has([data-cell="rule"])) {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "call"
+    "status";
+}
+
+.causal-strip:not(:has([data-cell="call"])) {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+  grid-template-areas: "status rule";
 }
 
 .causal-strip > div {
@@ -885,8 +932,39 @@ button:disabled {
   padding: 0 1px;
 }
 
-.causal-strip > div + div {
+.causal-strip > [data-cell="call"] {
+  grid-area: call;
+}
+
+.causal-strip > [data-cell="rule"] {
+  grid-area: rule;
+  padding-left: 4px;
   border-left: 1px solid var(--border);
+}
+
+.causal-strip > [data-cell="status"] {
+  grid-area: status;
+  margin-top: 1px;
+  padding-top: 1px;
+  border-top: 1px solid var(--border);
+}
+
+.causal-strip:not(:has([data-cell="call"])) > [data-cell="status"] {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* Salto para o card no telefone baixo (375×667): mesma célula, agora link. */
+.causal-jump {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: inherit;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 8px;
 }
 
 .causal-icon {
@@ -898,11 +976,17 @@ button:disabled {
   border-radius: 50%;
   color: var(--ink-800);
   background: var(--teal-soft);
+  transition: background-color var(--dur-med) var(--ease-out), color var(--dur-med) var(--ease-out);
 }
 
 .causal-icon--pending {
   color: var(--orange-dark);
   background: var(--orange-soft);
+}
+
+.causal-icon--done {
+  color: var(--teal);
+  background: var(--teal-soft);
 }
 
 .causal-icon svg {
@@ -919,29 +1003,36 @@ button:disabled {
 }
 
 .causal-strip small {
-  overflow: hidden;
+  overflow: visible;
   color: var(--text-secondary);
-  font-size: clamp(7px, calc(6.2857px + 0.2232vw), 8px);
-  font-weight: 800;
-  letter-spacing: 0;
-  text-overflow: ellipsis;
+  font-size: clamp(9px, calc(8.1px + 0.23vw), 10px);
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.04em;
+  text-overflow: clip;
   text-transform: uppercase;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .causal-strip strong {
   display: -webkit-box;
   overflow: hidden;
   margin-top: 3px;
-  font-size: clamp(8px, calc(6.5714px + 0.4464vw), 10px);
+  font-size: clamp(11px, calc(9.9px + 0.28vw), 13px);
   font-weight: 600;
-  line-height: 1.25;
+  line-height: var(--leading-compact);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
 }
 
 .mobile-approval {
   width: 100%;
+  /* Alvo do salto #approval-card: o topo do card assenta sob o header fixo. */
+  scroll-margin-top: calc(var(--header-height) + 12px);
+}
+
+.mobile-approval:focus {
+  outline: none;
 }
 
 .desktop-timeline-handoff {
@@ -957,15 +1048,40 @@ button:disabled {
   box-shadow: var(--shadow-float);
 }
 
+/* Ritmo do card SÓ no timeline mobile — o card do inspector (desktop) não muda.
+   (Medido em 390×844: com corpo 13px e faixa causal legível, 14/6/10-8 ainda
+   deixava a linha de ações 5px sob o composer; 12/5/8-6 fecha o orçamento.) */
+.mobile-approval .approval-card {
+  padding: 12px 12px 10px;
+}
+
+.mobile-approval .approval-kicker {
+  margin-bottom: 8px;
+}
+
+.mobile-approval .approval-facts {
+  gap: 5px;
+}
+
+.mobile-approval .client-tag {
+  padding-block: 1px;
+  line-height: 1.1;
+}
+
+.mobile-approval .approval-actions {
+  margin-top: 8px;
+  padding-top: 6px;
+}
+
 .approval-kicker {
   display: flex;
   align-items: center;
   gap: 9px;
   margin-bottom: 10px;
   color: #ff7959;
-  font-size: 9px;
+  font-size: var(--type-label);
   font-weight: 800;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.13em;
   text-transform: uppercase;
 }
 
@@ -996,12 +1112,13 @@ button:disabled {
 }
 
 .approval-facts dt svg {
+  display: block; /* inline svg somava um strut de linha: linhas 20px → 17px */
   width: 17px;
   height: 17px;
 }
 
 .approval-facts dd {
-  font-size: var(--type-body);
+  font-size: var(--type-chat);
   line-height: 1.35;
 }
 
@@ -1013,7 +1130,7 @@ button:disabled {
   display: block;
   margin-top: 2px;
   color: #c1cfd4;
-  font-size: var(--type-micro);
+  font-size: var(--type-label);
 }
 
 .client-tag {
@@ -1023,7 +1140,7 @@ button:disabled {
   border: 1px solid rgba(255, 255, 255, 0.24);
   border-radius: 999px;
   color: #d7e1e4;
-  font-size: var(--type-micro);
+  font-size: var(--type-label);
 }
 
 .approval-context {
@@ -1038,17 +1155,17 @@ button:disabled {
 
 .approval-context span {
   color: #9fb6be;
-  font-size: 8px;
+  font-size: var(--type-label);
   font-weight: 800;
-  letter-spacing: 0.12em;
+  letter-spacing: var(--tracking-label);
   text-transform: uppercase;
 }
 
 .approval-context p {
   margin: 3px 0 0;
   color: #eaf0f2;
-  font-size: 10px;
-  line-height: 1.4;
+  font-size: var(--type-chat);
+  line-height: var(--leading-compact);
 }
 
 .approval-actions {
@@ -1070,7 +1187,7 @@ button:disabled {
   padding: 0 13px;
   border: 1px solid transparent;
   border-radius: 10px;
-  font-size: 13px;
+  font-size: var(--type-chat);
   font-weight: 700;
   line-height: 1;
   cursor: pointer;
@@ -1078,12 +1195,14 @@ button:disabled {
 
 .button svg,
 .approval-actions button svg {
+  flex: 0 0 auto; /* o ícone era o único item encolhível: virava fatia de 1-8px */
   width: 17px;
   height: 17px;
 }
 
 .button--primary {
-  color: var(--white);
+  /* Glifo ink sobre laranja (5.59:1) — tabela p.17 do guia; branco dava 3.10:1. */
+  color: var(--ink-950);
   background: var(--orange);
 }
 
@@ -1111,7 +1230,7 @@ button:disabled {
 .approval-caption {
   margin: 8px 10px 0;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--type-chat);
 }
 
 /* Renderiza em DOIS contextos: timeline clara (mobile) e inspector navy. */
@@ -1132,10 +1251,14 @@ button:disabled {
   color: var(--teal);
 }
 
+.approval-empty strong {
+  font-size: var(--type-lead);
+}
+
 .approval-empty p {
   margin: 6px 0 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--type-chat);
   line-height: 1.45;
 }
 
@@ -1175,14 +1298,14 @@ button:disabled {
   right: 12px;
   /* Folga de 10px sobre a ALTURA REAL do nav (48px de conteúdo + inset),
      sem contar o safe-area duas vezes — o nav já o absorve no padding. */
-  bottom: calc(max(var(--nav-height), 48px + max(4px, env(safe-area-inset-bottom, 0px))) + 10px);
+  bottom: calc(max(var(--nav-height), 48px + max(4px, env(safe-area-inset-bottom, 0px))) + 4px);
   left: 12px;
   z-index: var(--z-composer);
   display: flex;
   align-items: center;
   gap: 4px;
-  min-height: 54px;
-  padding: 5px 6px 5px 8px;
+  min-height: 50px;
+  padding: 2px 6px 2px 8px;
   border: 1px solid var(--border);
   border-radius: 28px;
   background: rgba(255, 255, 255, 0.97);
@@ -1202,8 +1325,17 @@ button:disabled {
   font-size: 16px;
 }
 
+/* Foco no campo: a pílula inteira recebe o anel (o input mantém outline:0).
+   :has(input:focus-visible) — não focus-within — para Anexar/Voz/Enviar não
+   ganharem um segundo anel por cima do próprio. */
+.composer:has(input:focus-visible) {
+  border-color: var(--teal);
+  box-shadow: var(--shadow-float), 0 0 0 3px var(--focus-ring-color);
+}
+
 .composer input::placeholder {
-  color: #798b92;
+  color: var(--text-secondary); /* 6.25:1 sobre branco; #798b92 dava 3.55:1 */
+  opacity: 1;
 }
 
 .composer-attachment,
@@ -1235,7 +1367,7 @@ button:disabled {
   padding: 0 12px;
   color: var(--ink-900);
   background: var(--teal-soft);
-  font-size: var(--type-small);
+  font-size: var(--type-chat);
   font-weight: 800;
 }
 
@@ -1249,13 +1381,44 @@ button:disabled {
   bottom: calc(100% + 6px);
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 8px;
+  gap: 6px;
+  min-height: 28px;
+  padding: 6px 10px;
   border-radius: 8px;
   color: var(--text-secondary);
   background: var(--white);
   box-shadow: var(--shadow-soft);
-  font-size: 9px;
+  font-size: var(--type-small);
+  font-weight: 600;
+  /* Só aparece se o envio ainda estiver pendente após 120ms: a resposta
+     instantânea do protótipo nunca pisca; o envio de rede ganha entrada real. */
+  animation: status-in var(--dur-med) var(--ease-out) 120ms both;
+}
+
+.sending-status svg {
+  flex: 0 0 auto;
+  animation: status-breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes status-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes status-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
 }
 
 .memory-view,
@@ -1687,12 +1850,14 @@ button:disabled {
 .memory-card-actions .memory-approve-button {
   border-color: var(--orange);
   background: var(--orange);
-  color: #fff;
+  color: var(--ink-950); /* 5.59:1 — mesma regra do .button--primary */
 }
 
+/* Hover mantém o preenchimento laranja: ink sobre --orange-dark daria 2.90:1. */
 .memory-card-actions .memory-approve-button:hover {
-  background: var(--orange-dark);
-  border-color: var(--orange-dark);
+  background: var(--orange);
+  border-color: var(--orange);
+  filter: brightness(0.94);
 }
 
 .memory-card-actions .memory-reject-button {
@@ -2038,6 +2203,7 @@ button:disabled {
 .approvals-approve-button {
   border-color: var(--orange) !important;
   background: var(--orange) !important;
+  color: var(--ink-950) !important; /* vence .approvals-actions button { color } */
 }
 
 .approvals-resolved {
@@ -2096,6 +2262,12 @@ button:disabled {
   animation: dialog-rise var(--dur-med) var(--ease-out);
 }
 
+/* O painel recebe o foco inicial (título + descrição anunciados); não está na
+   sequência de Tab, então não ganha anel. */
+.dialog-panel:focus-visible {
+  outline: none;
+}
+
 @keyframes dialog-rise {
   from {
     transform: translateY(14px);
@@ -2127,7 +2299,8 @@ button:disabled {
 
 .dialog-heading h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: var(--type-subhead-fluid);
+  line-height: var(--leading-tight);
   letter-spacing: -0.035em;
 }
 
@@ -2135,8 +2308,8 @@ button:disabled {
   max-width: 500px;
   margin: 6px 0 0;
   color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 1.45;
+  font-size: var(--type-chat);
+  line-height: var(--leading-body);
 }
 
 .dialog-content {
@@ -2159,9 +2332,9 @@ button:disabled {
 
 .choice-grid legend {
   margin-bottom: 9px;
-  font-size: 10px;
+  font-size: var(--type-label);
   font-weight: 800;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--tracking-label);
   text-transform: uppercase;
 }
 
@@ -2173,6 +2346,7 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 12px;
   cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
 }
 
 .choice-grid label.is-selected {
@@ -2193,20 +2367,43 @@ button:disabled {
 }
 
 .choice-grid strong {
-  font-size: 12px;
+  font-size: var(--type-lead);
 }
 
 .choice-grid small {
   margin-top: 4px;
   color: var(--text-secondary);
-  font-size: 10px;
-  line-height: 1.4;
+  font-size: var(--type-chat);
+  line-height: var(--leading-body);
 }
 
 .rule-options,
 .comparison-grid {
   display: grid;
   gap: 12px;
+}
+
+/* Escopo/Duração abrem por transição de linha de grid, não por montagem:
+   a folha não pula 164px num frame. A revelação vive DENTRO do .choice-block
+   (mesmo filho do grid que as opções): fechada mede 0 e o gap até os botões
+   segue 18px; aberta ganha os 18px de margem junto com a linha. */
+.rule-options-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  margin-top: 0;
+  margin-inline: -4px;
+  padding-inline: 4px;
+  transition: grid-template-rows var(--dur-med) var(--ease-out), margin-top var(--dur-med) var(--ease-out);
+}
+
+.rule-options-reveal[data-open="true"] {
+  grid-template-rows: 1fr;
+  margin-top: 18px;
+}
+
+.rule-options-reveal > .rule-options {
+  min-height: 0;
 }
 
 .comparison-grid > div,
@@ -2221,15 +2418,15 @@ button:disabled {
 
 .comparison-grid span {
   color: var(--text-secondary);
-  font-size: 9px;
+  font-size: var(--type-label);
   font-weight: 800;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--tracking-label);
   text-transform: uppercase;
 }
 
 .comparison-grid p {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--type-chat);
   line-height: 1.5;
 }
 
@@ -2272,6 +2469,29 @@ button:disabled {
   font-size: 12px;
   font-weight: 600;
   line-height: 1.4;
+  animation: toast-in var(--dur-med) var(--ease-out) both;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes toast-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .toast--warning {
@@ -2594,7 +2814,7 @@ button:disabled {
   }
 
   .business-compact span {
-    font-size: 9px;
+    font-size: var(--type-micro);
   }
 
   .page-heading {
@@ -2630,17 +2850,26 @@ button:disabled {
     padding-inline: 2px;
   }
 
-  .causal-strip > div + div {
+  .causal-strip,
+  .causal-strip:not(:has([data-cell="call"])) {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "call"
+      "rule"
+      "status";
+  }
+
+  .causal-strip > [data-cell="rule"],
+  .causal-strip > [data-cell="status"] {
+    margin-top: 0;
+    padding-top: 0;
+    padding-left: 2px;
     border-top: 1px solid var(--border);
     border-left: 0;
   }
 
-  .causal-strip small {
-    font-size: var(--type-micro);
-  }
-
-  .causal-strip strong {
-    font-size: var(--type-small);
+  .causal-strip > [data-cell="call"] + [data-cell="status"] {
+    border-top: 1px solid var(--border);
   }
 
   .causal-icon {
@@ -2652,11 +2881,47 @@ button:disabled {
     padding-inline: 12px;
   }
 
-  .approval-actions {
+  .approvals-actions {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .approvals-actions {
+  .approvals-approve-button {
+    grid-column: 1 / -1;
+  }
+
+  .approvals-actions button {
+    padding-inline: 8px;
+    font-size: var(--type-small);
+  }
+}
+
+/* Card de decisão no telefone: ícone fixo em 16px, botões mais justos e o
+   card alinhado à borda do mock (306px em 390). Abaixo de ~381px três colunas
+   não seguram ícone + rótulo: cai para duas, com Aprovar em linha própria. */
+@media (max-width: 767px) {
+  .operational-timeline {
+    --timeline-approval-inset: -14px;
+  }
+
+  .mobile-approval .approval-card {
+    padding-inline: 12px;
+  }
+
+  .mobile-approval .approval-actions button {
+    gap: 5px;
+    min-width: 0;
+    padding-inline: 6px;
+  }
+
+  .mobile-approval .approval-actions button svg {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+  }
+}
+
+@media (max-width: 389px) {
+  .approval-actions {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -2664,12 +2929,7 @@ button:disabled {
     grid-column: 1 / -1;
   }
 
-  .approvals-approve-button {
-    grid-column: 1 / -1;
-  }
-
-  .approval-actions button,
-  .approvals-actions button {
+  .approval-actions button {
     padding-inline: 8px;
     font-size: var(--type-small);
   }
@@ -2856,8 +3116,36 @@ button:disabled {
     line-height: var(--leading-body);
   }
 
-  .causal-strip {
+  /* ≥768: volta às três células em linha (a coluna de 690px tem espaço). */
+  .causal-strip,
+  .causal-strip:not(:has([data-cell="rule"])),
+  .causal-strip:not(:has([data-cell="call"])) {
+    grid-template-columns: 0.75fr 1.25fr 1fr;
+    grid-template-areas: "call rule status";
     width: 100%;
+    padding: 9px 6px;
+  }
+
+  .causal-strip:not(:has([data-cell="rule"])) {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas: "call status";
+  }
+
+  .causal-strip:not(:has([data-cell="call"])) {
+    grid-template-columns: 1.25fr 1fr;
+    grid-template-areas: "rule status";
+  }
+
+  .causal-strip > [data-cell="rule"] {
+    padding-left: 1px;
+  }
+
+  .causal-strip > [data-cell="status"],
+  .causal-strip:not(:has([data-cell="call"])) > [data-cell="status"] {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+    border-left: 1px solid var(--border);
   }
 
   .mobile-approval {
@@ -2865,11 +3153,7 @@ button:disabled {
   }
 
   .causal-strip small {
-    letter-spacing: 0.08em;
-  }
-
-  .approval-facts dd {
-    font-size: 13px;
+    letter-spacing: var(--tracking-label);
   }
 
   .composer {
@@ -3036,9 +3320,9 @@ button:disabled {
 
   .business-card span {
     color: #90a8b0;
-    font-size: 8px;
-    font-weight: 800;
-    letter-spacing: 0.12em;
+    font-size: var(--type-label);
+    font-weight: 700;
+    letter-spacing: var(--tracking-label);
     text-transform: uppercase;
   }
 
@@ -3049,7 +3333,7 @@ button:disabled {
 
   .business-card small {
     color: #b7c7cc;
-    font-size: 10px;
+    font-size: var(--type-small);
   }
 
   .desktop-nav {
@@ -3063,7 +3347,7 @@ button:disabled {
     gap: 12px;
     min-height: 52px;
     padding: 0 14px;
-    font-size: 12px;
+    font-size: var(--type-chat);
     text-align: left;
   }
 
@@ -3076,7 +3360,7 @@ button:disabled {
     justify-content: flex-start;
     gap: 9px;
     padding: 0 12px;
-    font-size: 10px;
+    font-size: var(--type-chat);
   }
 
   .reset-button span {
@@ -3105,13 +3389,20 @@ button:disabled {
     border-left: 1px solid rgba(255, 255, 255, 0.1);
   }
 
+  /* Centraliza o bloco na coluna navy (vazio repartido acima/abaixo) e limita
+     a largura do card em telas largas (em 1920 ele esticava a ~856px). */
   .inspector-content {
+    display: grid;
+    align-content: center;
+    width: min(100%, 428px);
+    min-height: 100%;
+    margin-inline: auto;
     padding: 32px 24px;
   }
 
   .inspector-kicker {
     color: var(--teal-bright);
-    font-size: 9px;
+    font-size: var(--type-label);
     font-weight: 800;
     letter-spacing: 0.14em;
     text-transform: uppercase;
@@ -3119,16 +3410,29 @@ button:disabled {
 
   .inspector-content > h2 {
     margin: 10px 0 8px;
-    font-size: clamp(22px, 2vw, 30px);
-    line-height: 1.05;
+    font-size: var(--type-subhead-fluid);
+    line-height: var(--leading-tight);
     letter-spacing: -0.04em;
   }
 
   .inspector-content > p {
+    max-width: 40ch;
     margin: 0 0 24px;
     color: #adc0c7;
-    font-size: 11px;
-    line-height: 1.55;
+    font-size: var(--type-chat);
+    line-height: var(--leading-body);
+  }
+
+  /* Toast desce para o navy vazio sob o card do inspector — nunca sobre o
+     título "Agora / Sua decisão é necessária" que acabou de mudar.
+     (O Toast é irmão do .app-shell no #root, não filho — daí o `~`.) */
+  .app-shell.has-inspector ~ .toast {
+    top: auto;
+    right: 24px;
+    bottom: 24px;
+    left: auto;
+    width: 376px;
+    animation-name: toast-in-up;
   }
 
   .context-inspector .approval-card {
@@ -3152,43 +3456,66 @@ button:disabled {
     display: none;
   }
 
+  /* No desktop o card vive no inspector, mas a confirmação do caso narrado
+     fecha a história aqui mesmo (linha 4) — e recebe o foco ao sair da folha. */
+  .mobile-approval:has(> .system-message) {
+    display: block;
+    margin-bottom: 10px;
+  }
+
+  /* Ponteiro honesto: quando há exceção é um <button> que foca o Aprovar do
+     inspector; resolvido continua <div role=status>. Mesma tinta "pendente"
+     (orange-soft/orange-dark) do .onboarding-cta e do .approvals-status. */
   .desktop-timeline-handoff {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: 3px 12px;
+    gap: 0 10px;
     width: min(100%, 520px);
-    min-height: 62px;
-    padding: 12px 14px;
+    min-height: 44px;
+    padding: 8px 14px;
     border: 1px solid rgba(255, 90, 54, 0.32);
     border-radius: 14px;
     color: var(--ink-900);
     background: var(--orange-soft);
+    font: inherit;
+    text-align: left;
+    cursor: default;
+    transition: background-color var(--dur-med) var(--ease-out), border-color var(--dur-med) var(--ease-out), color var(--dur-med) var(--ease-out);
+  }
+
+  button.desktop-timeline-handoff {
+    cursor: pointer;
+  }
+
+  button.desktop-timeline-handoff:focus-visible {
+    outline: 3px solid var(--teal);
+    outline-offset: 2px;
   }
 
   .desktop-timeline-handoff span,
   .desktop-timeline-handoff strong {
-    display: block;
-    grid-column: 1;
+    display: inline;
+    grid-column: auto;
   }
 
   .desktop-timeline-handoff span {
     color: var(--orange-dark);
-    font-size: var(--type-micro);
+    font-size: var(--type-label);
     font-weight: 800;
     letter-spacing: var(--tracking-label);
     text-transform: uppercase;
   }
 
   .desktop-timeline-handoff strong {
-    font-size: var(--type-body);
+    font-size: var(--type-lead);
   }
 
   .desktop-timeline-handoff svg {
-    grid-row: 1 / 3;
-    grid-column: 2;
-    width: 24px;
-    height: 24px;
+    grid-row: auto;
+    grid-column: auto;
+    width: 18px;
+    height: 18px;
     color: var(--orange-dark);
   }
 
@@ -3284,8 +3611,15 @@ button:disabled {
   .memory-card-actions button,
   .memory-filter-button,
   .approvals-list-item,
-  .reset-button {
-    transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease, transform 140ms ease;
+  .reset-button,
+  .composer-send,
+  .voice-demo-button,
+  .composer-attachment,
+  .icon-button,
+  .profile-button,
+  .toast button,
+  .profile-menu-panel button {
+    transition: color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
   }
 
   .button:hover:not(:disabled),
@@ -3294,10 +3628,63 @@ button:disabled {
     transform: translateY(-1px);
   }
 
+  /* Tintas de hover na família laranja aprovada — nunca --orange-dark (é o
+     preenchimento do .button--danger). */
+  .button--primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--orange), #000 10%);
+  }
+
+  .button--outline-dark:hover:not(:disabled) {
+    border-color: rgba(255, 255, 255, 0.9);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .voice-demo-button:hover {
+    background: color-mix(in srgb, var(--teal-soft), var(--teal) 12%);
+  }
+
+  .icon-button:hover,
+  .toast button:hover,
+  .profile-menu-panel button:hover {
+    background: rgba(4, 29, 39, 0.06);
+  }
+
+  .profile-button:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
   .approvals-list-item:hover,
   .memory-card-actions button:hover {
     border-color: var(--teal);
   }
+}
+
+/* Estado pressionado — fora de media query para valer no toque e vencer, por
+   ordem, o lift do hover enquanto o ponteiro está para baixo. O tap highlight
+   do sistema foi removido em :164; isto o substitui por feedback desenhado. */
+.button:active:not(:disabled),
+.approval-actions button:active:not(:disabled),
+.composer-send:active,
+.voice-demo-button:active,
+.composer-attachment:active:not(:disabled),
+.icon-button:active,
+.profile-button:active,
+.toast button:active,
+.profile-menu-panel button:active {
+  transform: translateY(0) scale(0.97);
+}
+
+.button--primary:active:not(:disabled),
+.composer-send:active {
+  background: color-mix(in srgb, var(--orange), #000 14%);
+}
+
+.button--outline-dark:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.destination-link:active .destination-icon {
+  transform: scale(0.92);
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: c19f5672de166649a0a9c554ca476b0dfe7ebe7e7a4c4f1063c60288b9d21dba
+ * Source SHA-256: 8f7c2bfa96ef19c0335baf9c85d3134fd0dcf010b73273510420284352faa891
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -21,16 +21,35 @@ function SectionHead({ eyebrow, title, lede, center }) {
   }, eyebrow)), React.createElement(Reveal, {
     delay: 90
   }, React.createElement("h2", {
-    style: { fontSize: "var(--size-display)", fontWeight: "var(--weight-black)", letterSpacing: "var(--track-display)", lineHeight: "var(--leading-display)" }
+    style: { fontSize: "var(--t-h2-quiet)", fontWeight: "var(--weight-black)", letterSpacing: "var(--track-display)", lineHeight: "var(--leading-display)" }
   }, title)), lede && React.createElement(Reveal, {
     delay: 170
   }, React.createElement("p", {
-    style: { margin: 0, fontSize: "var(--size-body-lg)", color: "var(--text-secondary)", maxWidth: 620 }
+    style: { margin: 0, fontSize: "var(--t-lede)", color: "var(--text-secondary)", maxWidth: 620 }
   }, lede)));
+}
+const INTRO_SEEN_KEY = "ligou-intro";
+function readIntroSeen() {
+  try {
+    return window.sessionStorage.getItem(INTRO_SEEN_KEY) === "1";
+  } catch (e) {
+    return false;
+  }
+}
+function markIntroSeen() {
+  try {
+    window.sessionStorage.setItem(INTRO_SEEN_KEY, "1");
+  } catch (e) {}
+}
+function replayDemo() {
+  try {
+    window.dispatchEvent(new CustomEvent("ligou:replay"));
+  } catch (e) {}
 }
 function Intro4({ onDone }) {
   const [txt, setTxt] = useState(0);
   const [out, setOut] = useState(false);
+  const [seen] = useState(readIntroSeen);
   const doneRef = useRef(false);
   const fire = () => {
     if (!doneRef.current) {
@@ -38,30 +57,47 @@ function Intro4({ onDone }) {
       onDone();
     }
   };
+  const skip = () => {
+    setOut(true);
+    fire();
+  };
   useEffect(() => {
-    if (LGFX_REDUCED) {
+    if (LGFX_REDUCED || seen) {
       fire();
       return;
     }
-    const t1 = setTimeout(() => setTxt(1), 900);
-    const t2 = setTimeout(() => setOut(true), 1750);
-    const t3 = setTimeout(fire, 2450);
+    markIntroSeen();
+    const t1 = setTimeout(() => setTxt(1), 450);
+    const t2 = setTimeout(skip, 900);
+    const canListen = typeof window.addEventListener === "function";
+    if (canListen) {
+      window.addEventListener("wheel", skip, { passive: true });
+      window.addEventListener("touchmove", skip, { passive: true });
+    }
     return () => {
       clearTimeout(t1);
       clearTimeout(t2);
-      clearTimeout(t3);
+      if (canListen) {
+        window.removeEventListener("wheel", skip);
+        window.removeEventListener("touchmove", skip);
+      }
     };
   }, []);
-  if (LGFX_REDUCED)
+  if (LGFX_REDUCED || seen)
     return null;
-  const skip = () => {
-    setOut(true);
-    setTimeout(fire, 300);
+  const onKey = (e) => {
+    if (e.key === "Enter" || e.key === " " || e.key === "Escape") {
+      e.preventDefault();
+      skip();
+    }
   };
-  return React.createElement("div", {
+  return React.createElement("button", {
+    type: "button",
     className: "intro intro4 " + (out ? "out" : ""),
     onClick: skip,
-    role: "presentation"
+    onKeyDown: onKey,
+    "aria-label": "Pular introdução",
+    autoFocus: true
   }, React.createElement("div", {
     className: "intro__veil"
   }), React.createElement("div", {
@@ -76,9 +112,7 @@ function Intro4({ onDone }) {
   }, "Ligou?") : React.createElement("div", {
     className: "intro__t",
     key: "b"
-  }, React.createElement("span", {
-    className: "acc"
-  }, "Atendido.")), React.createElement("span", {
+  }, "Atendido."), React.createElement("span", {
     className: "intro__cap"
   }, "ligou.ai · agente operacional de inteligência artificial"), React.createElement("div", {
     className: "intro__bar"
@@ -202,6 +236,7 @@ function Nav() {
     size: "sm",
     variant: "accent",
     href: "#prova",
+    onClick: replayDemo,
     style: { whiteSpace: "nowrap" }
   }, "Falar com o Ligou")))));
 }
@@ -341,7 +376,7 @@ function Hero() {
     style: { maxWidth: 1500 }
   }, React.createElement("div", {
     className: "hero4-copy hd",
-    style: { "--d": "40ms" }
+    style: { "--d": "0ms" }
   }, React.createElement("div", {
     className: "hd",
     style: { "--d": "60ms" }
@@ -356,7 +391,7 @@ function Hero() {
     className: "lmask"
   }, React.createElement("span", {
     className: "ln",
-    style: { "--d": "290ms" }
+    style: { "--d": "260ms" }
   }, React.createElement("span", {
     className: "acc"
   }, "Atendido.")))), React.createElement("svg", {
@@ -373,20 +408,21 @@ function Hero() {
     strokeLinecap: "round"
   })), React.createElement("p", {
     className: "hd h4-lede",
-    style: { "--d": "440ms" }
+    style: { "--d": "380ms" }
   }, "Seu cliente liga. O Ligou consulta suas regras, agenda o trabalho e só te chama quando precisa de aprovação."), React.createElement("div", {
     className: "hd h4-ctas",
-    style: { "--d": "560ms" }
+    style: { "--d": "480ms" }
   }, React.createElement(Button, {
     variant: "accent",
     size: "lg",
-    href: "#prova"
+    href: "#prova",
+    onClick: replayDemo
   }, "Falar com o Ligou"), band !== "mobile" && React.createElement("a", {
     className: "h4-ghostbtn",
     href: "#diferenca"
   }, "Ver uma operação completa")), React.createElement("p", {
     className: "hd h4-trust",
-    style: { "--d": "680ms" }
+    style: { "--d": "560ms" }
   }, "Você ensina em português · Ele atende em inglês, espanhol e português")), React.createElement("div", {
     className: "hero4-artslot"
   }, band === "mid" ? art : null)));
@@ -574,9 +610,8 @@ function Scene() {
     className: "iv-rav"
   }, "R"), React.createElement("span", {
     className: "iv-own"
-  }, React.createElement("b", null, "Roberto Almeida"), React.createElement("i", null, "Proprietário")), React.createElement("button", {
-    className: "iv-approve",
-    type: "button"
+  }, React.createElement("b", null, "Roberto Almeida"), React.createElement("i", null, "Proprietário")), React.createElement("span", {
+    className: "iv-approve"
   }, "Aprovar e ativar ", React.createElement("svg", {
     width: "15",
     height: "15",
@@ -628,6 +663,18 @@ function Scene() {
 function CallDemo() {
   const [mrun, setMrun] = React.useState(0);
   const [mrel, setMrel] = React.useState(false);
+  const [boardRef, boardOn] = useInView({ threshold: 0.35 });
+  const [shellRef, shellOn] = useInView({ threshold: 0.3 });
+  const replay = () => {
+    setMrel(false);
+    setMrun((m) => m + 1);
+  };
+  React.useEffect(() => {
+    if (typeof window.addEventListener !== "function")
+      return;
+    window.addEventListener("ligou:replay", replay);
+    return () => window.removeEventListener("ligou:replay", replay);
+  }, []);
   return React.createElement("section", {
     id: "prova",
     "data-screen-label": "Prova do produto",
@@ -639,14 +686,16 @@ function CallDemo() {
     "aria-hidden": "true"
   }), React.createElement("h2", {
     className: "p7-title"
-  }, "Quando a regra exige decisão,", React.createElement("br", null), "ele traz a exceção pronta."), React.createElement("p", {
+  }, "Quando a regra exige decisão, ", React.createElement("br", null), "ele traz a exceção pronta."), React.createElement("p", {
     className: "p7-sub p7-bridge"
   }, "Quando a regra permite, ele resolve sozinho. Quando não permite, traz o caso pronto para você decidir."), React.createElement("p", {
     className: "p7-langnote"
   }, "Este exemplo está em inglês. O Ligou também atende em espanhol."), React.createElement("div", {
-    className: "p7-cq"
+    className: "p7-cq",
+    ref: boardRef
   }, React.createElement("div", {
-    className: "p7-board"
+    className: "p7-board" + (boardOn ? " on" : ""),
+    key: mrun
   }, React.createElement("div", {
     className: "p7-bar"
   }, React.createElement("span", {
@@ -884,8 +933,10 @@ function CallDemo() {
     "aria-hidden": "true"
   }), React.createElement("span", {
     className: "p7-time"
-  }, "00:12"), React.createElement("span", {
-    className: "p7-again"
+  }, "00:12"), React.createElement("button", {
+    className: "p7-again",
+    type: "button",
+    onClick: replay
   }, React.createElement("svg", {
     width: "14",
     height: "14",
@@ -921,6 +972,7 @@ function CallDemo() {
     strokeDasharray: "3 7",
     fill: "none"
   }), React.createElement("path", {
+    pathLength: "1",
     d: "M381 153 C 452 185, 468 224, 453 286 C 438 348, 384 420, 374 470 C 369 498, 370 522, 372 545",
     stroke: "#7fd0c2",
     strokeWidth: "3",
@@ -984,7 +1036,8 @@ function CallDemo() {
     src: "assets/agent-ligou.png",
     alt: ""
   })), React.createElement("div", {
-    className: "p7-card p7-c1"
+    className: "p7-card p7-c1 p7-i",
+    style: { "--lcd": ".45s" }
   }, React.createElement("span", {
     className: "p7-clabel"
   }, React.createElement("i", {
@@ -998,7 +1051,8 @@ function CallDemo() {
   }, "Local"), React.createElement("p", {
     className: "p7-cval"
   }, "San Rafael, CA")), React.createElement("div", {
-    className: "p7-card p7-c2"
+    className: "p7-card p7-c2 p7-i",
+    style: { "--lcd": "1.35s" }
   }, React.createElement("span", {
     className: "p7-clabel"
   }, React.createElement("i", {
@@ -1012,7 +1066,8 @@ function CallDemo() {
   }, "Fonte"), React.createElement("p", {
     className: "p7-cval"
   }, "Política de Atendimento · v2.4")), React.createElement("div", {
-    className: "p7-card p7-c3"
+    className: "p7-card p7-c3 p7-i",
+    style: { "--lcd": "2.25s" }
   }, React.createElement("span", {
     className: "p7-clabel"
   }, React.createElement("i", {
@@ -1045,31 +1100,42 @@ function CallDemo() {
     className: "p7-crule",
     style: { margin: "4px 0 0" }
   }, "Aguardando decisão")), React.createElement("div", {
-    className: "p7-brow p7-b1"
+    className: "p7-brow p7-b1 p7-i",
+    style: { "--lcd": "0s" }
   }, React.createElement("span", {
     className: "p7-bub p7-bub--mint"
   }, React.createElement("span", {
     className: "p7-blbl"
-  }, "Cliente · Inglês"), "Hi, water is coming in near the chimney in San Rafael.", React.createElement("br", null), "Is there any chance someone can come today?"), React.createElement("span", {
+  }, "Cliente · Inglês"), React.createElement("span", {
+    lang: "en-US"
+  }, "Hi, water is coming in near the chimney in San Rafael.", React.createElement("br", null), "Is there any chance someone can come today?")), React.createElement("span", {
     className: "p7-ts"
   }, "00:02")), React.createElement("div", {
-    className: "p7-brow p7-b2"
+    className: "p7-brow p7-b2 p7-i",
+    style: { "--lcd": ".9s" }
   }, React.createElement("span", {
     className: "p7-bub"
   }, React.createElement("span", {
     className: "p7-blbl"
-  }, "Ligou · Inglês"), "I can help. Same-day visits need team approval,", React.createElement("br", null), "so I’ll check availability now."), React.createElement("span", {
+  }, "Ligou · Inglês"), React.createElement("span", {
+    lang: "en-US"
+  }, "I can help. Same-day visits need team approval,", React.createElement("br", null), "so I’ll check availability now.")), React.createElement("span", {
     className: "p7-ts"
   }, "00:06")), React.createElement("div", {
-    className: "p7-brow p7-b3"
+    className: "p7-brow p7-b3 p7-i",
+    style: { "--lcd": "1.8s" }
   }, React.createElement("span", {
     className: "p7-bub"
   }, React.createElement("span", {
     className: "p7-blbl"
-  }, "Ligou · Inglês"), "I’ve sent your request to the team.", React.createElement("br", null), "The team will contact you as soon as they confirm."), React.createElement("span", {
+  }, "Ligou · Inglês"), React.createElement("span", {
+    lang: "en-US"
+  }, "I’ve sent your request to the team.", React.createElement("br", null), "The team will contact you as soon as they confirm.")), React.createElement("span", {
     className: "p7-ts"
   }, "00:10")), React.createElement("aside", {
-    className: "p7-drawer"
+    className: "p7-drawer p7-i",
+    style: { "--lcd": "2.7s" },
+    "aria-label": "Resumo em português"
   }, React.createElement("span", {
     className: "p7-tab",
     "aria-hidden": "true"
@@ -1209,17 +1275,16 @@ function CallDemo() {
     className: "p7-darrow"
   }, "→ Aguardando sua decisão."), React.createElement("div", {
     className: "p7-dbtns"
-  }, React.createElement("button", {
-    className: "p7-apr",
-    type: "button"
-  }, "Aprovar encaixe"), React.createElement("button", {
-    className: "p7-adj",
-    type: "button"
+  }, React.createElement("span", {
+    className: "p7-apr"
+  }, "Aprovar encaixe"), React.createElement("span", {
+    className: "p7-adj"
   }, "Ajustar resposta"))))), React.createElement("div", {
     className: "p7m",
-    key: mrun
+    ref: shellRef
   }, React.createElement("div", {
-    className: "lc-shell"
+    className: "lc-shell" + (shellOn ? " on" : ""),
+    key: mrun
   }, React.createElement("div", {
     className: "lc-head lc-i",
     style: { "--lcd": "0s" }
@@ -1235,7 +1300,9 @@ function CallDemo() {
     className: "lc-idsub"
   }, React.createElement("i", {
     className: "lc-en"
-  }, "EN"), React.createElement("svg", {
+  }, "EN"), React.createElement("i", {
+    className: "lc-en lc-ex"
+  }, "Chamada · Exemplo"), React.createElement("svg", {
     className: "lc-wf",
     width: "120",
     height: "22",
@@ -1391,11 +1458,7 @@ function CallDemo() {
   }, "00:12"), React.createElement("button", {
     className: "lc-again",
     type: "button",
-    onClick: () => {
-      setMrel(false);
-      setMrun((m) => m + 1);
-    },
-    "aria-label": "Ver de novo"
+    onClick: replay
   }, React.createElement("svg", {
     width: "14",
     height: "14",
@@ -1404,10 +1467,11 @@ function CallDemo() {
     stroke: "currentColor",
     strokeWidth: "2.2",
     strokeLinecap: "round",
-    strokeLinejoin: "round"
+    strokeLinejoin: "round",
+    "aria-hidden": "true"
   }, React.createElement("path", {
     d: "M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"
-  })))), React.createElement("div", {
+  })), React.createElement("span", null, "Ver de novo"))), React.createElement("div", {
     className: "lc-convo"
   }, React.createElement("div", {
     className: "lc-row lc-row--cust lc-i",
@@ -1419,7 +1483,8 @@ function CallDemo() {
   }, "Cliente · Inglês", React.createElement("i", {
     className: "lc-ts"
   }, "00:02")), React.createElement("div", {
-    className: "lc-bub lc-bub--cust"
+    className: "lc-bub lc-bub--cust",
+    lang: "en-US"
   }, "Hi, water is coming in near the chimney in San Rafael. Is there any chance someone can come today?")), React.createElement("span", {
     className: "lc-face lc-face--jm"
   }, "JM")), React.createElement("div", {
@@ -1447,7 +1512,8 @@ function CallDemo() {
   }, "Ligou · Inglês", React.createElement("i", {
     className: "lc-ts"
   }, "00:06")), React.createElement("div", {
-    className: "lc-bub"
+    className: "lc-bub",
+    lang: "en-US"
   }, "I can help. Same-day visits need team approval, so I’ll check availability now."))), React.createElement("div", {
     className: "lc-ev lc-i",
     style: { "--lcd": "1.45s" }
@@ -1473,7 +1539,8 @@ function CallDemo() {
   }, "Ligou · Inglês", React.createElement("i", {
     className: "lc-ts"
   }, "00:10")), React.createElement("div", {
-    className: "lc-bub"
+    className: "lc-bub",
+    lang: "en-US"
   }, "I’ve sent your request to the team. The team will contact you as soon as they confirm."))), React.createElement("div", {
     className: "lc-ev lc-i",
     style: { "--lcd": "2.35s" }
@@ -1485,7 +1552,8 @@ function CallDemo() {
     style: { background: "var(--lg-orange-500)" }
   }), React.createElement("span", null, React.createElement("b", null, "Responsável avisado"), React.createElement("em", null, "Pedido urgente enviado · Aguardando decisão")))), React.createElement("aside", {
     className: "lc-sheet lc-i",
-    style: { "--lcd": "2.85s" }
+    style: { "--lcd": "2.85s" },
+    "aria-label": "Resumo em português"
   }, React.createElement("div", {
     className: "lc-dhead"
   }, React.createElement("span", {
@@ -1582,12 +1650,10 @@ function CallDemo() {
     className: "lc-darrow"
   }, "→ Aguardando sua decisão"), React.createElement("div", {
     className: "lc-btns"
-  }, React.createElement("button", {
-    className: "lc-apr",
-    type: "button"
-  }, "Aprovar encaixe"), React.createElement("button", {
-    className: "lc-adj",
-    type: "button"
+  }, React.createElement("span", {
+    className: "lc-apr"
+  }, "Aprovar encaixe"), React.createElement("span", {
+    className: "lc-adj"
   }, "Ajustar resposta")))))));
 }
 function Dor() {
@@ -1610,11 +1676,11 @@ function Dor() {
   }, "não fica esperando."))), React.createElement(Reveal, {
     delay: 140
   }, React.createElement("p", {
-    style: { margin: 0, fontSize: "var(--size-body-lg)", color: "var(--text-secondary)", maxWidth: 680 }
+    style: { margin: 0, fontSize: "var(--t-lede)", color: "var(--text-secondary)", maxWidth: 680 }
   }, "Para o brasileiro que toca uma empresa de serviços nos EUA, atender nem sempre cabe no meio do trabalho. Você está no telhado, dirigindo ou com outro cliente — e a ligação cai na caixa postal.")), React.createElement(Reveal, {
     delay: 200
   }, React.createElement("p", {
-    style: { margin: 0, fontFamily: "var(--font-display)", fontWeight: 800, fontSize: "var(--size-h3)", letterSpacing: "var(--track-tight)", maxWidth: 680 }
+    style: { margin: 0, fontFamily: "var(--font-display)", fontWeight: 800, fontSize: "var(--t-h3)", letterSpacing: "var(--track-tight)", maxWidth: 680 }
   }, "Para quem ligou, a próxima empresa está a um toque de distância. Em inglês ou espanhol, essa oportunidade fica ainda mais difícil de disputar."))));
 }
 function Faz() {
@@ -1677,7 +1743,9 @@ function Faq() {
   const qs = [
     ["Ele pode inventar um preço ou uma resposta?", "Não. O Ligou só informa preços, condições e políticas que você aprovou. Quando não tem uma resposta autorizada, coleta as informações, avisa que a equipe confirma e pergunta para você. A resposta só vira regra depois da sua aprovação."],
     ["E se o cliente quiser falar comigo?", "Você escolhe: quando transferir na hora, quando só receber aviso, e quando deixar o Ligou concluir sozinho."],
-    ["Ele fala que é inteligência artificial?", 'Sim. Ele se apresenta como o agente de inteligência artificial da sua empresa: "Hi, you’ve reached [Your Business]. I’m their AI assistant — how can I help?" A conversa é natural, e a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.'],
+    ["Ele fala que é inteligência artificial?", React.createElement(React.Fragment, null, 'Sim. Ele se apresenta como o agente de inteligência artificial da sua empresa: "', React.createElement("span", {
+      lang: "en-US"
+    }, "Hi, you’ve reached [Your Business]. I’m their AI assistant — how can I help?"), '" A conversa é natural, e a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.')],
     ["Preciso falar inglês ou espanhol para ensinar o Ligou?", "Não. A entrevista, os ajustes e a aprovação são em português. O Ligou atende em inglês, espanhol ou português e envia o resumo para você em português."],
     ["E se eu quiser cancelar?", "Você cancela pelo painel, sem multa e sem precisar falar com vendedor."]
   ];
@@ -1690,7 +1758,8 @@ function Faq() {
   }, q, React.createElement("span", {
     className: "pm"
   }, "+")), React.createElement("div", {
-    className: "faq-a"
+    className: "faq-a",
+    "aria-hidden": open === i ? undefined : true
   }, React.createElement("p", null, a)));
   return React.createElement("section", {
     id: "faq",
@@ -1708,7 +1777,7 @@ function Faq() {
   }, item(qa, i))))));
 }
 function Pricing() {
-  const label = { fontSize: 11, fontWeight: 700, letterSpacing: ".16em", textTransform: "uppercase" };
+  const label = { fontSize: "var(--t-label)", fontWeight: "var(--t-label-weight)", letterSpacing: "var(--t-label-track)", textTransform: "uppercase" };
   const inc = ["Uma empresa e uma localização", "Número do Ligou ou redirecionamento do seu", "Atendimento em inglês, espanhol e português", "Onboarding, regras e aprovação em português", "Integração de agenda, resumos e histórico das ligações", "400 minutos/mês · excedente $0.35/min"];
   return React.createElement("section", {
     id: "preco",
@@ -1722,7 +1791,7 @@ function Pricing() {
   }, "Preço")), React.createElement(Reveal, {
     delay: 90
   }, React.createElement("h2", {
-    style: { margin: "18px 0 0", fontSize: "var(--size-display)", fontWeight: "var(--weight-black)", letterSpacing: "var(--track-display)", lineHeight: "var(--leading-display)" }
+    style: { margin: "18px 0 0", fontSize: "var(--t-h2-price)", fontWeight: "var(--weight-black)", letterSpacing: "var(--track-display)", lineHeight: "var(--leading-display)" }
   }, "Contrate até 31 de dezembro de 2026 por $299/mês.")), React.createElement("div", {
     className: "pricegrid"
   }, React.createElement(Reveal, {
@@ -1748,7 +1817,8 @@ function Pricing() {
     className: "price-mobile-normal"
   }, "Para novas assinaturas após a oferta: $499/mês + ativação de $499."), React.createElement(Button, {
     variant: "accent",
-    href: "#preco",
+    href: "#prova",
+    onClick: replayDemo,
     style: { marginTop: 8 }
   }, "Quero aproveitar a oferta"))), React.createElement(Reveal, {
     className: "price-regular-reveal",
@@ -1767,11 +1837,11 @@ function Pricing() {
   }, "Para novas assinaturas, com ativação de $499.")))), React.createElement(Reveal, {
     delay: 140
   }, React.createElement("p", {
-    style: { margin: "34px 0 0", fontFamily: "var(--font-display)", fontWeight: 800, fontSize: "var(--size-h3)", letterSpacing: "var(--track-tight)", maxWidth: 640 }
+    style: { margin: "34px 0 0", fontFamily: "var(--font-display)", fontWeight: 800, fontSize: "var(--t-h3)", letterSpacing: "var(--track-tight)", maxWidth: 640 }
   }, "Se uma única ligação recuperada vale mais de $499 para o seu negócio, o Ligou pode se pagar com um único trabalho.")), React.createElement(Reveal, {
     delay: 200
   }, React.createElement("p", {
-    style: { margin: "10px 0 0", color: "var(--text-inverse-secondary)", fontSize: 14 }
+    style: { margin: "10px 0 0", color: "var(--text-inverse-secondary)", fontSize: "var(--t-small)" }
   }, "Plano mês a mês. Sem fidelidade."))));
 }
 function Cta() {
@@ -1783,7 +1853,7 @@ function Cta() {
   }, React.createElement(Container, {
     style: { position: "relative", zIndex: 1 }
   }, React.createElement(Reveal, null, React.createElement("p", {
-    style: { margin: "0 0 26px", color: "var(--lg-teal-400)", fontSize: 12, fontWeight: 700, letterSpacing: ".18em", textTransform: "uppercase" }
+    style: { margin: "0 0 26px", color: "var(--lg-teal-400)", fontSize: "var(--t-label)", fontWeight: "var(--t-label-weight)", letterSpacing: "var(--t-label-track)", textTransform: "uppercase" }
   }, "Seu negócio pode atender em inglês e espanhol — mesmo que você fale só português")), React.createElement("h2", {
     className: on ? "wr-on" : "",
     style: { maxWidth: "72%" }
@@ -1804,7 +1874,8 @@ function Cta() {
   }, React.createElement(Button, {
     variant: "accent",
     size: "lg",
-    href: "#prova"
+    href: "#prova",
+    onClick: replayDemo
   }, "Falar com o Ligou agora")))), React.createElement("img", {
     className: "cta-robot floaty",
     src: "assets/crop-robot.png",
@@ -1832,7 +1903,7 @@ function Footer() {
     href: "/dashboard/"
   }, "Área do cliente"), React.createElement("span", {
     className: "footer-links",
-    style: { display: "flex", gap: 10, flexWrap: "wrap", fontSize: 14, alignItems: "center" }
+    style: { display: "flex", gap: 10, flexWrap: "wrap", fontSize: "var(--t-small)", alignItems: "center" }
   }, React.createElement("a", {
     href: "https://ligou.ai",
     style: a
@@ -1843,13 +1914,11 @@ function Footer() {
     style: a
   }, "suporte@ligou.ai"), React.createElement("span", {
     style: { opacity: 0.4 }
-  }, "·"), React.createElement("a", {
-    href: "#",
+  }, "·"), React.createElement("span", {
     style: a
   }, "Termos"), React.createElement("span", {
     style: { opacity: 0.4 }
-  }, "·"), React.createElement("a", {
-    href: "#",
+  }, "·"), React.createElement("span", {
     style: a
   }, "Privacidade"))), React.createElement("p", {
     style: { margin: "16px 0 0", maxWidth: 440, color: "var(--text-inverse-secondary)", fontSize: 15 }

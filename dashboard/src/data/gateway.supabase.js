@@ -3,6 +3,7 @@
 import { supabase } from "../lib/supabase.js";
 import { decideMemoryVia } from "./memory-decisions.js";
 import {
+  caseUrgencyLabel,
   isFreshTestResetReadback,
   mapRuleGroups,
   projectRowsAfterTestReset,
@@ -33,6 +34,9 @@ function mapCase(c) {
     location: null,
     language: null,
     urgency: c.urgency,
+    // Só quando o caso é urgente E do próprio dia; caso contrário o card não
+    // mostra kicker nenhum (nada de "mesmo dia" inventado).
+    ...(caseUrgencyLabel(c) ? { urgencyLabel: caseUrgencyLabel(c) } : {}),
     date: c.created_at?.slice(0, 10),
     createdAt: c.created_at,
     updatedAt: c.resolved_at ?? c.created_at,

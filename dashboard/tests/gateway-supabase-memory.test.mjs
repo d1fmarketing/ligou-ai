@@ -301,3 +301,18 @@ test("every V2 domain renders its canonical title, intent, fields, and coverage 
     assert.ok(["ativa", "revisão do dono"].includes(entry.materializationIntent));
   }
 });
+
+// F02 — o kicker "Pedido urgente · mesmo dia" só quando o caso é urgente E de hoje.
+test("the case mapper only labels same-day urgent cases; nothing else gets a kicker", () => {
+  const { caseUrgencyLabel } = gatewayProjection;
+  const now = new Date("2026-09-01T15:00:00");
+  const todayIso = new Date("2026-09-01T09:10:00").toISOString();
+  const yesterdayIso = new Date("2026-08-31T09:10:00").toISOString();
+
+  assert.equal(caseUrgencyLabel({ urgency: "urgente", created_at: todayIso }, now), "Pedido urgente · mesmo dia");
+  assert.equal(caseUrgencyLabel({ urgency: "urgente", created_at: yesterdayIso }, now), null);
+  assert.equal(caseUrgencyLabel({ urgency: "normal", created_at: todayIso }, now), null);
+  assert.equal(caseUrgencyLabel({ urgency: "urgente", created_at: null }, now), null);
+  assert.equal(caseUrgencyLabel({ urgency: "urgente", created_at: "not-a-date" }, now), null);
+  assert.equal(caseUrgencyLabel(null, now), null);
+});
