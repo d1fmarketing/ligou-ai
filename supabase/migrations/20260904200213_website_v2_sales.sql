@@ -18,7 +18,7 @@ create table public.sales_sessions (
  network_hash text not null check(network_hash ~ '^[a-f0-9]{64}$'),
  status text not null default 'pending' check(status in ('pending','starting','ready','ending','ended','error','quarantined')),
  offer_sdp text not null check(length(offer_sdp) between 0 and 65536), answer_sdp text,
- provider_call_id text, model text,
+ provider_call_id text, model text, client_connected_at timestamptz,
  max_minutes integer not null, expires_at timestamptz not null,
  created_at timestamptz not null default clock_timestamp(),updated_at timestamptz not null default clock_timestamp(),
  stop_requested boolean not null default false, claim_token uuid, lease_expires_at timestamptz, worker_id text,
@@ -33,7 +33,12 @@ create index sales_sessions_visitor_day on public.sales_sessions(visitor_hash,cr
 create index sales_sessions_network_day on public.sales_sessions(network_hash,created_at);
 create index sales_sessions_unsettled on public.sales_sessions(created_at) where usage_state <> 'settled';
 create index sales_sessions_active on public.sales_sessions(created_at) where status not in ('ended','error');
-create table public.sales_cancellations(session_id uuid primary key,token_hash text not null check(token_hash ~ '^[a-f0-9]{64}$'),created_at timestamptz not null default clock_timestamp());
+create table public.sales_cancellations(
+ session_id uuid primary key,token_hash text not null check(token_hash ~ '^[a-f0-9]{64}$'),
+ network_hash text not null check(network_hash ~ '^[a-f0-9]{64}$'),created_at timestamptz not null default clock_timestamp()
+);
+create index sales_cancellations_network_day on public.sales_cancellations(network_hash,created_at);
+create index sales_cancellations_day on public.sales_cancellations(created_at);
 create table public.sales_transcript_items (
  id uuid primary key default gen_random_uuid(),session_id uuid not null references public.sales_sessions(session_id),
  provider_item_id text not null check(length(provider_item_id) between 1 and 200),
@@ -51,16 +56,25 @@ create table public.sales_leads (
  session_id uuid primary key references public.sales_sessions(session_id),fields jsonb not null default '{}',
  contact_confirmed boolean not null default false,contact_confirmation jsonb,
  followup_consent boolean not null default false,followup_consent_evidence jsonb,
+ followup_decision_at timestamptz,followup_decision_item_id text,
  created_at timestamptz not null default clock_timestamp(),updated_at timestamptz not null default clock_timestamp()
 );
 alter table public.sales_usage_events enable row level security;
+alter table public.sales_usage_events force row level security;
 alter table public.sales_configuration enable row level security;
+alter table public.sales_configuration force row level security;
 alter table public.sales_sessions enable row level security;
+alter table public.sales_sessions force row level security;
 alter table public.sales_cancellations enable row level security;
+alter table public.sales_cancellations force row level security;
 alter table public.sales_transcript_items enable row level security;
+alter table public.sales_transcript_items force row level security;
 alter table public.sales_leads enable row level security;
-revoke all on public.sales_configuration,public.sales_sessions,public.sales_cancellations,public.sales_transcript_items,public.sales_leads,public.sales_usage_events from public,anon,authenticated;
-grant all on public.sales_configuration,public.sales_sessions,public.sales_cancellations,public.sales_transcript_items,public.sales_leads,public.sales_usage_events to service_role;
+alter table public.sales_leads force row level security;
+revoke all on public.sales_configuration,public.sales_sessions,public.sales_cancellations,public.sales_transcript_items,public.sales_leads,public.sales_usage_events from public,anon,authenticated,service_role;
+grant select,update on public.sales_configuration to service_role;
+grant select,insert,update on public.sales_sessions,public.sales_leads to service_role;
+grant select,insert on public.sales_cancellations,public.sales_transcript_items,public.sales_usage_events to service_role;
 -- The private config is never exposed just to support an RLS predicate.
 create function public.sales_is_owner() returns boolean language sql stable security definer set search_path = '' as $$
  select exists(select 1 from public.sales_configuration where singleton and owner_user_id=(select auth.uid()));
@@ -112,19 +126,36 @@ begin
  insert into public.sales_leads(session_id) values(s.session_id);
  return public.sales_public_shape(s);
 end;$$;
-create function public.sales_public_session(p_session_id uuid,p_token_hash text,p_end boolean default false) returns jsonb
+create function public.sales_public_session(p_session_id uuid,p_token_hash text,p_network_hash text,p_end boolean default false) returns jsonb
 language plpgsql set search_path='' as $$
-declare s public.sales_sessions;t public.sales_cancellations;
+declare s public.sales_sessions;t public.sales_cancellations;day_start timestamptz:=date_trunc('day',clock_timestamp() at time zone 'UTC') at time zone 'UTC';
 begin
- if p_session_id is null or p_token_hash is null or p_token_hash !~ '^[a-f0-9]{64}$' then raise exception 'invalid_request';end if;
- -- Same lock order as admission makes an end-before-start cancellation durable.
- if p_end then perform 1 from public.sales_configuration where singleton for update;end if;
+ if p_session_id is null or p_token_hash is null or p_token_hash !~ '^[a-f0-9]{64}$' or p_network_hash is null or p_network_hash !~ '^[a-f0-9]{64}$' then raise exception 'invalid_request';end if;
+ -- Existing sessions and cancellation replays never take the global admission lock.
  select * into s from public.sales_sessions where session_id=p_session_id for update;
  if not found then
-  if p_end then insert into public.sales_cancellations(session_id,token_hash) values(p_session_id,p_token_hash) on conflict do nothing;end if;
   select * into t from public.sales_cancellations where session_id=p_session_id;
-  if not found or t.token_hash<>p_token_hash or t.created_at+interval '1 hour'<clock_timestamp() then raise exception 'session_not_found';end if;
-  return jsonb_build_object('session_id',p_session_id,'status','ended','max_minutes',5,'expires_at',t.created_at,'provider_termination_state','not_started');
+  if not found and p_end then
+   -- Fast rejection avoids contending on the singleton once either bound is exhausted.
+   if (select count(*) from public.sales_cancellations where network_hash=p_network_hash and created_at>=day_start)>=10
+      or (select count(*) from public.sales_cancellations where created_at>=day_start)>=100 then raise exception 'cancellation_limit';end if;
+   -- Same lock order as admission; no session row was locked above because it did not exist.
+   perform 1 from public.sales_configuration where singleton for update;
+   select * into s from public.sales_sessions where session_id=p_session_id for update;
+   if not found then
+    select * into t from public.sales_cancellations where session_id=p_session_id;
+    if not found then
+     -- Recheck under lock: concurrent unknown requests cannot overrun either bound.
+     if (select count(*) from public.sales_cancellations where network_hash=p_network_hash and created_at>=day_start)>=10
+        or (select count(*) from public.sales_cancellations where created_at>=day_start)>=100 then raise exception 'cancellation_limit';end if;
+     insert into public.sales_cancellations(session_id,token_hash,network_hash) values(p_session_id,p_token_hash,p_network_hash) returning * into t;
+    end if;
+   end if;
+  end if;
+  if s.session_id is null then
+   if t.session_id is null or t.token_hash<>p_token_hash or t.created_at+interval '1 hour'<clock_timestamp() then raise exception 'session_not_found';end if;
+   return jsonb_build_object('session_id',p_session_id,'status','ended','max_minutes',5,'expires_at',t.created_at,'provider_termination_state','not_started');
+  end if;
  end if;
  if s.token_hash<>p_token_hash or s.expires_at+interval '1 hour'<clock_timestamp() then raise exception 'session_not_found';end if;
  if p_end or s.expires_at<=clock_timestamp() then
@@ -136,6 +167,19 @@ begin
    end if;
   end if;
  end if;
+ return public.sales_public_shape(s);
+end;$$;
+create function public.sales_client_connected(p_session_id uuid,p_token_hash text) returns jsonb
+language plpgsql set search_path='' as $$
+declare s public.sales_sessions;
+begin
+ select * into s from public.sales_sessions where session_id=p_session_id for update;
+ if not found or p_token_hash is null or s.token_hash<>p_token_hash or s.expires_at+interval '1 hour'<clock_timestamp() then raise exception 'session_not_found';end if;
+ if s.expires_at<=clock_timestamp() or s.status in ('ending','ended','error','quarantined') then
+  return public.sales_public_session(p_session_id,p_token_hash,s.network_hash,false);
+ end if;
+ if s.status<>'ready' then raise exception 'session_not_ready';end if;
+ if s.client_connected_at is null then update public.sales_sessions set client_connected_at=clock_timestamp(),updated_at=clock_timestamp() where session_id=s.session_id returning * into s;end if;
  return public.sales_public_shape(s);
 end;$$;
 create function public.sales_heartbeat(p_worker_id text) returns jsonb language plpgsql set search_path='' as $$
@@ -168,7 +212,7 @@ begin
 end;$$;
 create function public.sales_worker_apply(p_session_id uuid,p_claim_token uuid,p_operation text,p_payload jsonb default '{}') returns jsonb
 language plpgsql set search_path='' as $$
-declare s public.sales_sessions;t public.sales_transcript_items; l public.sales_leads; k text; v jsonb; evidence text; a public.sales_transcript_items; u public.sales_transcript_items; amount numeric; out_id uuid; channel text;
+declare s public.sales_sessions;t public.sales_transcript_items; l public.sales_leads; k text; v jsonb; evidence text; a public.sales_transcript_items; u public.sales_transcript_items; amount numeric; out_id uuid; channel text; evidence_at timestamptz;
 begin
  select * into s from public.sales_sessions where session_id=p_session_id for update;
  if not found or p_claim_token is null or s.claim_token is distinct from p_claim_token or s.lease_expires_at<=clock_timestamp() then raise exception 'stale_claim';end if;
@@ -224,19 +268,35 @@ begin
    if channel is null or channel not in ('phone','email') or l.fields->channel->>'value' is null or l.fields->channel->>'value' is distinct from v->>'value' then raise exception 'invalid_contact';end if;
    select * into a from public.sales_transcript_items where session_id=s.session_id and provider_item_id=v->>'readback_item_id' and role='assistant' and context='real';
    select * into u from public.sales_transcript_items where session_id=s.session_id and provider_item_id=v->>'confirmation_item_id' and role='user' and context='real';
-   if a.id is null or u.id is null or u.created_at<=a.created_at then raise exception 'invalid_confirmation_evidence';end if;
+   select max(created_at) into evidence_at from public.sales_transcript_items where session_id=s.session_id and provider_item_id in (select jsonb_array_elements_text(l.fields->channel->'evidence_item_ids'));
+   if a.id is null or u.id is null or evidence_at is null or a.created_at<=evidence_at or u.created_at<=a.created_at then raise exception 'invalid_confirmation_evidence';end if;
    l.contact_confirmed:=true;l.contact_confirmation:=v;
   end if;
   if p_payload ? 'followup_consent' then
    v:=p_payload->'followup_consent';channel:=v->>'channel';
-   if not l.contact_confirmed or l.contact_confirmation->>'channel' is distinct from channel then raise exception 'contact_not_confirmed';end if;
    if jsonb_typeof(v->'granted') is distinct from 'boolean' then raise exception 'invalid_consent';end if;
-   select * into a from public.sales_transcript_items where session_id=s.session_id and provider_item_id=v->>'request_item_id' and role='assistant' and context='real';
    select * into u from public.sales_transcript_items where session_id=s.session_id and provider_item_id=v->>'response_item_id' and role='user' and context='real';
-   if a.id is null or u.id is null or u.created_at<=a.created_at or a.provider_item_id=l.contact_confirmation->>'readback_item_id' or u.provider_item_id=l.contact_confirmation->>'confirmation_item_id' then raise exception 'invalid_consent_evidence';end if;
-   l.followup_consent:=(v->>'granted')::boolean;l.followup_consent_evidence:=v;
+   if u.id is null then raise exception 'invalid_consent_evidence';end if;
+   if l.followup_decision_item_id=u.provider_item_id and l.followup_consent_evidence=v and l.followup_consent=(v->>'granted')::boolean then
+    null; -- Exact current decision replay does not rewrite its evidence order.
+   else
+    if l.followup_decision_at is not null and u.created_at<=l.followup_decision_at then raise exception 'stale_consent_decision';end if;
+    if (v->>'granted')::boolean then
+     select * into a from public.sales_transcript_items where session_id=s.session_id and provider_item_id=v->>'request_item_id' and role='assistant' and context='real';
+     if a.id is null then raise exception 'invalid_consent_evidence';end if;
+     if l.followup_decision_at is not null and a.created_at<=l.followup_decision_at then raise exception 'stale_consent_decision';end if;
+     if not l.contact_confirmed or channel is null or l.contact_confirmation->>'channel' is distinct from channel then raise exception 'contact_not_confirmed';end if;
+     select * into t from public.sales_transcript_items where session_id=s.session_id and provider_item_id=l.contact_confirmation->>'confirmation_item_id' and role='user' and context='real';
+     select max(created_at) into evidence_at from public.sales_transcript_items where session_id=s.session_id and provider_item_id in (select jsonb_array_elements_text(l.fields->channel->'evidence_item_ids'));
+     if t.id is null or evidence_at is null or t.created_at<=evidence_at or a.created_at<=t.created_at or u.created_at<=a.created_at or a.provider_item_id=l.contact_confirmation->>'readback_item_id' or u.provider_item_id=t.provider_item_id then raise exception 'invalid_consent_evidence';end if;
+    elsif channel is not null and channel not in ('all','phone','email') then raise exception 'invalid_consent';
+    end if;
+    -- A real user's withdrawal needs no new assistant question or confirmed contact.
+    l.followup_consent:=(v->>'granted')::boolean;l.followup_consent_evidence:=v;
+    l.followup_decision_at:=u.created_at;l.followup_decision_item_id:=u.provider_item_id;
+   end if;
   end if;
-  update public.sales_leads set fields=l.fields,contact_confirmed=l.contact_confirmed,contact_confirmation=l.contact_confirmation,followup_consent=l.followup_consent,followup_consent_evidence=l.followup_consent_evidence,updated_at=clock_timestamp() where session_id=s.session_id;
+  update public.sales_leads set fields=l.fields,contact_confirmed=l.contact_confirmed,contact_confirmation=l.contact_confirmation,followup_consent=l.followup_consent,followup_consent_evidence=l.followup_consent_evidence,followup_decision_at=l.followup_decision_at,followup_decision_item_id=l.followup_decision_item_id,updated_at=clock_timestamp() where session_id=s.session_id;
  when 'usage' then
   if jsonb_typeof(p_payload->'observed_cost_usd') is distinct from 'number' then raise exception 'invalid_usage';end if;
   amount:=(p_payload->>'observed_cost_usd')::numeric;
@@ -265,5 +325,5 @@ begin
  update public.sales_sessions set status=s.status,offer_sdp=s.offer_sdp,answer_sdp=s.answer_sdp,provider_call_id=s.provider_call_id,model=s.model,stop_requested=s.stop_requested,lease_expires_at=s.lease_expires_at,create_intent_at=s.create_intent_at,create_attempts=s.create_attempts,observed_cost_usd=s.observed_cost_usd,usage_state=s.usage_state,provider_termination_state=s.provider_termination_state,error=s.error,updated_at=clock_timestamp() where session_id=s.session_id returning * into s;
  return public.sales_worker_shape(s)||case when out_id is null then '{}'::jsonb else jsonb_build_object('transcript_item_id',out_id) end;
 end;$$;
-revoke all on function public.sales_public_shape(public.sales_sessions),public.sales_worker_shape(public.sales_sessions),public.sales_admit(uuid,text,text,text,text),public.sales_public_session(uuid,text,boolean),public.sales_heartbeat(text),public.sales_claim(text),public.sales_worker_apply(uuid,uuid,text,jsonb) from public,anon,authenticated;
-grant execute on function public.sales_public_shape(public.sales_sessions),public.sales_worker_shape(public.sales_sessions),public.sales_admit(uuid,text,text,text,text),public.sales_public_session(uuid,text,boolean),public.sales_heartbeat(text),public.sales_claim(text),public.sales_worker_apply(uuid,uuid,text,jsonb) to service_role;
+revoke all on function public.sales_public_shape(public.sales_sessions),public.sales_worker_shape(public.sales_sessions),public.sales_admit(uuid,text,text,text,text),public.sales_public_session(uuid,text,text,boolean),public.sales_client_connected(uuid,text),public.sales_heartbeat(text),public.sales_claim(text),public.sales_worker_apply(uuid,uuid,text,jsonb) from public,anon,authenticated;
+grant execute on function public.sales_public_shape(public.sales_sessions),public.sales_worker_shape(public.sales_sessions),public.sales_admit(uuid,text,text,text,text),public.sales_public_session(uuid,text,text,boolean),public.sales_client_connected(uuid,text),public.sales_heartbeat(text),public.sales_claim(text),public.sales_worker_apply(uuid,uuid,text,jsonb) to service_role;

@@ -111,11 +111,11 @@ describe("public sales Edge admission", () => {
     ).toBe(503);
     expect(calls).toHaveLength(0);
   });
-  it("keeps end usable when new admissions disabled and without trusted ingress", async () => {
+  it("keeps proxied end usable when new admissions are disabled", async () => {
     const { handler, req, calls } = setup({ SALES_ENABLED: "false" });
     expect(
       (await handler(
-        req({ action: "end", session_id: id }, { "x-sales-proxy-secret": "" }),
+        req({ action: "end", session_id: id }),
       )).status,
     ).toBe(200);
     expect(calls[0].args.p_end).toBe(true);
@@ -124,6 +124,38 @@ describe("public sales Edge admission", () => {
         req({ action: "start", request_id: id, visitor_id: id, sdp: "v=0" }),
       )).status,
     ).toBe(503);
+  });
+  it("rejects direct status and end even when admission is disabled", async () => {
+    const { handler, req, calls } = setup({ SALES_ENABLED: "false" });
+    for (const action of ["status", "end", "connected"]) {
+      const response = await handler(
+        req({ action, session_id: id }, { "x-sales-proxy-secret": "" }),
+      );
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "network_unavailable" });
+    }
+    expect(calls).toHaveLength(0);
+  });
+  it("sends only hashed trusted network identity for status and end", async () => {
+    const { handler, req, calls } = setup();
+    for (const action of ["status", "end"]) {
+      expect((await handler(req({ action, session_id: id }))).status).toBe(200);
+    }
+    for (const call of calls) {
+      expect(call.args.p_network_hash).toMatch(/^[a-f0-9]{64}$/);
+    }
+    expect(calls[0].args.p_network_hash).toBe(calls[1].args.p_network_hash);
+    expect(JSON.stringify(calls)).not.toContain("203.0.113.44");
+  });
+  it("routes connected through a capability-scoped server acknowledgement", async () => {
+    const { handler, req, calls } = setup();
+    expect((await handler(req({ action: "connected", session_id: id }))).status)
+      .toBe(200);
+    expect(calls[0].name).toBe("sales_client_connected");
+    expect(calls[0].args).toEqual({
+      p_session_id: id,
+      p_token_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
   });
   it("bounds SDP and request bytes, fails safe on malformed JSON", async () => {
     const { handler, req, calls } = setup();

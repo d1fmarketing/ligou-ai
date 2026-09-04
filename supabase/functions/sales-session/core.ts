@@ -91,6 +91,8 @@ const safeErrors = new Map<string, number>([
   ["global_busy", 429],
   ["visitor_limit", 429],
   ["network_limit", 429],
+  ["cancellation_limit", 429],
+  ["session_not_ready", 409],
   ["daily_budget", 429],
   ["service_unavailable", 503],
 ]);
@@ -131,6 +133,24 @@ export function createSalesSessionHandler(deps: SalesSessionDependencies) {
       )
     ) return reply({ error: "invalid_request" }, 400);
     try {
+      // Only a controlled ingress may assert network identity. Never trust browser XFF.
+      const proxySecret = deps.env("SALES_TRUSTED_PROXY_SECRET"),
+        hashSecret = deps.env("SALES_HASH_SECRET");
+      const presented = req.headers.get("x-sales-proxy-secret") ?? "";
+      if (
+        !proxySecret || proxySecret.length < 12 || !hashSecret ||
+        hashSecret.length < 32 ||
+        await sha(presented) !== await sha(proxySecret)
+      ) throw Error("network_unavailable");
+      const network = req.headers.get(
+        deps.env("SALES_TRUSTED_NETWORK_HEADER") ?? "x-sales-network-ip",
+      ) ?? "";
+      // Ingress strips forwarded lists and provides one normalized IPv4/IPv6 address.
+      if (
+        !network || network.length > 64 ||
+        !/^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[a-fA-F0-9:]+$/.test(network) ||
+        network.includes(",")
+      ) throw Error("network_unavailable");
       const body = await boundedJson(req), tokenHash = await sha(match[1]);
       const url = deps.env("SUPABASE_URL"),
         key = deps.env("SERVICE_KEY") ?? deps.env("SUPABASE_SERVICE_ROLE_KEY");
@@ -146,24 +166,6 @@ export function createSalesSessionHandler(deps: SalesSessionDependencies) {
           body.sdp.length < 1 || body.sdp.length > 65536
         ) throw Error("invalid_request");
         if (deps.env("SALES_ENABLED") !== "true") throw Error("sales_disabled");
-        // Only a controlled ingress may assert network identity. Never trust browser XFF.
-        const proxySecret = deps.env("SALES_TRUSTED_PROXY_SECRET"),
-          hashSecret = deps.env("SALES_HASH_SECRET");
-        const presented = req.headers.get("x-sales-proxy-secret") ?? "";
-        if (
-          !proxySecret || proxySecret.length < 12 || !hashSecret ||
-          hashSecret.length < 32 ||
-          await sha(presented) !== await sha(proxySecret)
-        ) throw Error("network_unavailable");
-        const network = req.headers.get(
-          deps.env("SALES_TRUSTED_NETWORK_HEADER") ?? "x-sales-network-ip",
-        ) ?? "";
-        // Ingress strips forwarded lists and provides one normalized IPv4/IPv6 address.
-        if (
-          !network || network.length > 64 ||
-          !/^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[a-fA-F0-9:]+$/.test(network) ||
-          network.includes(",")
-        ) throw Error("network_unavailable");
         name = "sales_admit";
         args = {
           p_request_id: body.request_id,
@@ -175,18 +177,29 @@ export function createSalesSessionHandler(deps: SalesSessionDependencies) {
           ),
           p_offer_sdp: body.sdp,
         };
-      } else if (body.action === "status" || body.action === "end") {
+      } else if (
+        body.action === "status" || body.action === "end" ||
+        body.action === "connected"
+      ) {
         if (
           Object.keys(body).some((k) =>
             !["action", "session_id"].includes(k)
           ) || typeof body.session_id !== "string" ||
           !UUID.test(body.session_id)
         ) throw Error("invalid_request");
-        name = "sales_public_session";
+        name = body.action === "connected"
+          ? "sales_client_connected"
+          : "sales_public_session";
         args = {
           p_session_id: body.session_id,
           p_token_hash: tokenHash,
-          p_end: body.action === "end",
+          ...(body.action === "connected" ? {} : {
+            p_end: body.action === "end",
+            p_network_hash: await hmac(
+              hashSecret,
+              `network:${network.toLowerCase()}`,
+            ),
+          }),
         };
       } else throw Error("invalid_request");
       const result = await deps.createClient(url, key).rpc(name, args);

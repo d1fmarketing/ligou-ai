@@ -82,6 +82,7 @@ select extensions.ok(
       ('review_company_discovery_claims_v2(uuid,uuid,bigint,jsonb,jsonb,text)'),
       ('revoke_power(uuid)'),
       ('revoke_rule(uuid,text)'),
+      ('sales_is_owner()'),
       ('start_company_discovery_setup(text)'),
       ('submit_company_discovery(text,text)'),
       ('website_browser_opening_v3_valid(jsonb,uuid)')
@@ -179,6 +180,15 @@ select extensions.ok(
       ('reserve_call_budget(uuid,uuid,numeric,numeric)'),
       ('reserve_phone_call_budget(uuid,uuid,numeric)'),
       ('repair_legacy_phone_links()'),
+      ('sales_admit(uuid,text,text,text,text)'),
+      ('sales_claim(text)'),
+      ('sales_client_connected(uuid,text)'),
+      ('sales_heartbeat(text)'),
+      ('sales_is_owner()'),
+      ('sales_public_session(uuid,text,text,boolean)'),
+      ('sales_public_shape(sales_sessions)'),
+      ('sales_worker_apply(uuid,uuid,text,jsonb)'),
+      ('sales_worker_shape(sales_sessions)'),
       ('select_company_discovery_result(uuid,uuid,bigint)'),
       ('settle_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
       ('settle_unresolved_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
@@ -247,6 +257,8 @@ select extensions.ok(
       ('powers'),
       ('receipts'),
       ('rules'),
+      ('sales_leads'),
+      ('sales_transcript_items'),
       ('skill_candidates'),
       ('skill_pipeline_events'),
       ('tenant_provisioning_receipts'),
@@ -536,7 +548,13 @@ select extensions.ok(
       ('worker_jobs', 'select'),
       ('worker_results', 'select'),
       ('worker_runtime_slots', 'select'),
-      ('worker_runtime_slots', 'insert')
+      ('worker_runtime_slots', 'insert'),
+      ('sales_configuration', 'select'), ('sales_configuration', 'update'),
+      ('sales_sessions', 'select'), ('sales_sessions', 'insert'), ('sales_sessions', 'update'),
+      ('sales_leads', 'select'), ('sales_leads', 'insert'), ('sales_leads', 'update'),
+      ('sales_cancellations', 'select'), ('sales_cancellations', 'insert'),
+      ('sales_transcript_items', 'select'), ('sales_transcript_items', 'insert'),
+      ('sales_usage_events', 'select'), ('sales_usage_events', 'insert')
     ) required(relation, privilege)
     where not has_table_privilege('service_role', format('public.%I', relation), privilege)
   ),

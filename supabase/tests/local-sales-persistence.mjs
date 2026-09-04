@@ -55,11 +55,12 @@ export async function runSalesPersistenceSuite(env) {
       p_network_hash: network.repeat(64),
       p_offer_sdp: "v=0\r\n",
     });
-  const pub = (id, end = false, token = "a") =>
+  const pub = (id, end = false, token = "a", network = "c") =>
     rpc("sales_public_session", {
       p_session_id: id,
       p_token_hash: token.repeat(64),
       p_end: end,
+      p_network_hash: network.repeat(64),
     });
   const claim = () => rpc("sales_claim", { p_worker_id: "sales-test" });
   const apply = (s, op, p = {}) =>
@@ -72,6 +73,21 @@ export async function runSalesPersistenceSuite(env) {
   const tests = [];
   await sql(
     "truncate public.sales_usage_events,public.sales_transcript_items,public.sales_leads,public.sales_sessions,public.sales_cancellations;update public.sales_configuration set enabled=false,owner_user_id=null,heartbeat_at=null,network_daily_limit=10,visitor_daily_limit=3,daily_budget_usd=15;",
+  );
+  assert.equal(
+    await sql(
+      "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname like 'sales_%' and c.relkind='r' and (not c.relrowsecurity or not c.relforcerowsecurity)",
+    ),
+    "0",
+  );
+  assert.equal(
+    await sql(
+      "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname like 'sales_%' and c.relkind='r' and has_table_privilege('service_role',c.oid,'delete,truncate,references,trigger')",
+    ),
+    "0",
+  );
+  tests.push(
+    "all sales tables FORCE RLS and service role lacks destructive grants",
   );
   await assert.rejects(admit, /sales_disabled/);
   await sql(
@@ -95,6 +111,64 @@ export async function runSalesPersistenceSuite(env) {
   assert.equal((await pub(canceled, true)).status, "ended");
   assert.equal((await admit(canceled)).status, "ended");
   tests.push("replay token isolation and cancellation before admission");
+  await assert.rejects(
+    () =>
+      rpc("sales_public_session", {
+        p_session_id: randomUUID(),
+        p_token_hash: "a".repeat(64),
+        p_network_hash: null,
+        p_end: true,
+      }),
+    /invalid_request/,
+  );
+  const cancellations = await Promise.allSettled(
+    Array.from({ length: 20 }, () => pub(randomUUID(), true)),
+  );
+  assert.equal(cancellations.filter((x) => x.status === "fulfilled").length, 9);
+  assert.ok(
+    cancellations.filter((x) => x.status === "rejected").every((x) =>
+      /cancellation_limit/.test(x.reason.message)
+    ),
+  );
+  assert.equal(
+    await sql("select count(*) from public.sales_cancellations"),
+    "10",
+  );
+  await sql(
+    "insert into public.sales_cancellations(session_id,token_hash,network_hash) select gen_random_uuid(),repeat('a',64),md5(n::text)||md5(n::text) from generate_series(1,85) n",
+  );
+  const globalCancellations = await Promise.allSettled(
+    Array.from({ length: 12 }, () => pub(randomUUID(), true, "a", "e")),
+  );
+  assert.equal(
+    globalCancellations.filter((x) => x.status === "fulfilled").length,
+    5,
+  );
+  assert.ok(
+    globalCancellations.filter((x) => x.status === "rejected").every((x) =>
+      /cancellation_limit/.test(x.reason.message)
+    ),
+  );
+  assert.equal(
+    await sql("select count(*) from public.sales_cancellations"),
+    "100",
+  );
+
+  assert.equal((await pub(canceled, true)).status, "ended");
+  assert.equal((await pub(canceled)).status, "ended");
+  const admittedDespiteCancellationLimit = await admit();
+  assert.equal(
+    (await pub(admittedDespiteCancellationLimit.session_id, true)).status,
+    "ended",
+  );
+  await assert.rejects(() => pub(canceled, true, "d"), /session_not_found/);
+  await sql(
+    "truncate public.sales_usage_events,public.sales_transcript_items,public.sales_leads,public.sales_sessions,public.sales_cancellations",
+  );
+  tests.push(
+    "concurrent unknown cancellations respect network/global bounds while replays and admitted ends remain usable",
+  );
+
   await admit();
   active = await claim();
   await apply(active, "create_intent", { model: "realtime2.1" });
@@ -172,8 +246,50 @@ export async function runSalesPersistenceSuite(env) {
     model: "realtime2.1",
   });
   assert.equal((await pub(active.session_id)).sdp, undefined);
+  await assert.rejects(
+    () =>
+      rpc("sales_client_connected", {
+        p_session_id: active.session_id,
+        p_token_hash: "a".repeat(64),
+      }),
+    /session_not_ready/,
+  );
+  await assert.rejects(
+    () =>
+      rpc("sales_client_connected", {
+        p_session_id: active.session_id,
+        p_token_hash: "d".repeat(64),
+      }),
+    /session_not_found/,
+  );
+
   await apply(active, "activate");
   assert.equal((await pub(active.session_id)).sdp, "answer");
+  const connected = () =>
+    rpc("sales_client_connected", {
+      p_session_id: active.session_id,
+      p_token_hash: "a".repeat(64),
+    });
+  assert.equal((await connected()).client_connected_at, undefined);
+  const connectedAt = await sql(
+    `select client_connected_at from public.sales_sessions where session_id=${
+      q(active.session_id)
+    }`,
+  );
+  assert.ok(connectedAt);
+  await connected();
+  assert.equal(
+    await sql(
+      `select client_connected_at from public.sales_sessions where session_id=${
+        q(active.session_id)
+      }`,
+    ),
+    connectedAt,
+  );
+  tests.push(
+    "client connection acknowledgement is capability-scoped, ready-only, private and idempotent",
+  );
+
   const tx = (id, role, text, context = "real") =>
     apply(active, "transcript", { provider_item_id: id, role, text, context });
   await tx("u1", "user", "Meu nome é RJ, email rj@example.test");
@@ -228,6 +344,32 @@ export async function runSalesPersistenceSuite(env) {
   );
   assert.equal(lead.contact_confirmed, true);
   assert.equal(lead.followup_consent, true);
+  await tx("withdraw", "user", "Não autorizo mais o contato");
+  await apply(active, "lead_patch", {
+    followup_consent: { granted: false, response_item_id: "withdraw" },
+  });
+  const oldYes = {
+    granted: true,
+    channel: "email",
+    request_item_id: "a2",
+    response_item_id: "u3",
+  };
+  await assert.rejects(
+    () => apply(active, "lead_patch", { followup_consent: oldYes }),
+    /stale_consent_decision/,
+  );
+  await tx("lateYes", "user", "Sim");
+  await assert.rejects(
+    () =>
+      apply(active, "lead_patch", {
+        followup_consent: { ...oldYes, response_item_id: "lateYes" },
+      }),
+    /stale_consent_decision/,
+  );
+  lead = JSON.parse(await sql("select to_jsonb(l) from public.sales_leads l"));
+  assert.equal(lead.followup_consent, false);
+  assert.equal(lead.followup_decision_item_id, "withdraw");
+
   await tx("u4", "user", "Agora rj2@example.test");
   await apply(active, "lead_patch", {
     fields: { email: { value: "rj2@example.test", evidence_item_ids: ["u4"] } },
@@ -235,6 +377,57 @@ export async function runSalesPersistenceSuite(env) {
   lead = JSON.parse(await sql("select to_jsonb(l) from public.sales_leads l"));
   assert.equal(lead.contact_confirmed, false);
   assert.equal(lead.followup_consent, false);
+  assert.equal(lead.followup_decision_item_id, "withdraw");
+  await assert.rejects(
+    () => apply(active, "lead_patch", { followup_consent: oldYes }),
+    /stale_consent_decision/,
+  );
+  await assert.rejects(
+    () =>
+      apply(active, "lead_patch", {
+        contact_confirmation: {
+          channel: "email",
+          value: "rj2@example.test",
+          readback_item_id: "a1",
+          confirmation_item_id: "u2",
+        },
+      }),
+    /invalid_confirmation_evidence/,
+  );
+  await tx("withdraw2", "user", "Não quero contato");
+  await apply(active, "lead_patch", {
+    followup_consent: { granted: false, response_item_id: "withdraw2" },
+  });
+  await apply(active, "lead_patch", {
+    followup_consent: { granted: false, response_item_id: "withdraw2" },
+  });
+  await tx("read2", "assistant", "Confirma rj2@example.test?");
+  await tx("confirm2", "user", "Sim, correto");
+  await apply(active, "lead_patch", {
+    contact_confirmation: {
+      channel: "email",
+      value: "rj2@example.test",
+      readback_item_id: "read2",
+      confirmation_item_id: "confirm2",
+    },
+  });
+  await tx("request2", "assistant", "Posso enviar um email de retorno?");
+  await tx("yes2", "user", "Sim, autorizo");
+  await apply(active, "lead_patch", {
+    followup_consent: {
+      granted: true,
+      channel: "email",
+      request_item_id: "request2",
+      response_item_id: "yes2",
+    },
+  });
+  lead = JSON.parse(await sql("select to_jsonb(l) from public.sales_leads l"));
+  assert.equal(lead.followup_consent, true);
+  assert.equal(lead.followup_decision_item_id, "yes2");
+  tests.push(
+    "withdrawal survives stale yes replay and contact changes, later fresh request and confirmation may grant",
+  );
+
   await tx("u4", "user", "Agora rj2@example.test");
   await assert.rejects(
     () => tx("u4", "user", "changed"),
