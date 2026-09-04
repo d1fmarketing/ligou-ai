@@ -144,6 +144,7 @@ export function WebsiteSetupView({
             <button className="button button--primary" type="button" disabled={busy || !setup.canStart} onClick={onRetry}>
               {busy ? "Tentando…" : "Tentar novamente"}
             </button>
+            <a className="button" href="/">Continuar depois</a>
           </div>
           <WebsiteForm
             initialUrl={setup.job?.normalizedOrigin || ""}
@@ -179,6 +180,22 @@ export function WebsiteSetupView({
           ) : (
             <p>Analisamos seu site, mas precisamos confirmar mais informações durante o onboarding.</p>
           )}
+          <p>Informações candidatas do website, para confirmar no onboarding — não são regras ativas.</p>
+          <SetupReadWarning message={setup.publicDetailsUnavailable
+            ? "Não foi possível carregar os detalhes agora. Você pode continuar o onboarding." : null} />
+          {[
+            ["prices", "Preços e condições publicados"],
+            ["territories", "Área de atendimento"],
+            ["hours", "Horários publicados"],
+            ["conditions", "Condições de atendimento publicadas"],
+          ].map(([key, label]) => (
+            <div className="website-setup-services" key={key}>
+              <strong>{label}</strong>
+              {setup.publicDetails?.[key]?.length
+                ? setup.publicDetails[key].map((text) => <p key={text}>{text}</p>)
+                : <p>A confirmar no onboarding.</p>}
+            </div>
+          ))}
           <button
             className="button button--primary website-setup-start"
             type="button"

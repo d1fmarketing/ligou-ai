@@ -125,6 +125,123 @@ export function mapWebsiteSetupStatus(value) {
   });
 }
 
+const PUBLIC_DETAIL_TYPES = new Set(["service", "service_territory", "business_hours", "booking_restriction"]);
+const DAY_LABELS = { mon: "seg", tue: "ter", wed: "qua", thu: "qui", fri: "sex", sat: "sáb", sun: "dom" };
+
+function detailText(value) {
+  return typeof value === "string" && value.length <= 2_000 ? value.trim() : "";
+}
+
+function detailList(value) {
+  return Array.isArray(value) ? value.map(detailText).filter(Boolean) : [];
+}
+
+function publicPriceText(price) {
+  if (!price || !["fixed", "starting_at", "estimate", "promotional", "conditional", "unknown"].includes(price.qualifier)) return null;
+  const hasAmount = typeof price.amount === "string" && /^(0|[1-9][0-9]{0,8})\.[0-9]{2}$/.test(price.amount);
+  const hasCurrency = typeof price.currency === "string" && /^[A-Z]{3}$/.test(price.currency);
+  if (hasAmount !== hasCurrency || (!hasAmount && (price.amount !== null || price.currency !== null))) return null;
+  if (["fixed", "starting_at", "conditional"].includes(price.qualifier) && !hasAmount) return null;
+  if (price.qualifier === "unknown" && hasAmount) return null;
+  const condition = detailText(price.condition);
+  // A condition must never be silently dropped while retaining its price.
+  if ((price.condition !== null && !condition) || (price.qualifier === "conditional" && !condition)) return null;
+  const amount = hasAmount ? `${price.currency} ${price.amount}` : "valor não informado";
+  const label = {
+    fixed: `Preço fixo: ${amount}`, starting_at: `A partir de ${amount}`,
+    estimate: `Estimativa: ${amount}`, promotional: `Promocional: ${amount}`,
+    conditional: `Condicional: ${amount}`, unknown: "Valor não informado",
+  }[price.qualifier];
+  return [label, condition].filter(Boolean).join(" · ");
+}
+
+function areaText(area) {
+  if (!area || !detailText(area.name)) return "";
+  return [detailText(area.name), detailText(area.region_state), detailText(area.country_code)].filter(Boolean).join(", ")
+    + ({ marketing_region: " (região ampla)", county: " (condado)" }[area.kind] || "");
+}
+
+function publicHoursText(value) {
+  const days = (items) => detailList(items).map((day) => DAY_LABELS[day]).filter(Boolean).join(", ");
+  const intervals = (Array.isArray(value.ordinary_intervals) ? value.ordinary_intervals : []).flatMap((interval) => {
+    if (!interval || !days(interval.days) || !/^\d{2}:\d{2}$/.test(interval.opens) || !/^\d{2}:\d{2}$/.test(interval.closes)) return [];
+    return [`${days(interval.days)} ${interval.opens}–${interval.closes}`];
+  });
+  return [
+    value.ordinary_24_7 === true ? "Atendimento normal 24/7" : intervals.length
+      ? `Atendimento normal: ${intervals.join("; ")}` : "Horário normal não informado",
+    days(value.closed_days) ? `Fechado: ${days(value.closed_days)}` : null,
+    value.emergency_24_7 === true ? "Emergência 24/7" : null,
+    ({ available: "Fora do horário: disponível", unavailable: "Fora do horário: indisponível",
+      emergency_only: "Fora do horário: somente emergências" })[value.after_hours],
+    detailText(value.timezone) || "Fuso não informado",
+    detailText(value.holiday_policy),
+  ].filter(Boolean).join(" · ");
+}
+
+// Candidate display only: never changes the server's readiness or exposes raw values.
+export function mapWebsiteSetupPublicDetails(setup, claims) {
+  if (!setup?.startOnboardingEnabled || !setup.readyProof) return null;
+  if (!Array.isArray(claims)) throw new Error("Detalhes indisponíveis");
+  const rows = claims.slice(0, 100).filter((claim) => claim &&
+    claim.job_id === setup.readyProof.jobId && claim.result_id === setup.readyProof.resultId &&
+    claim.claim_class === "operational" && claim.claim_schema_version === "company_discovery.claim.v2" &&
+    PUBLIC_DETAIL_TYPES.has(claim.claim_type) && claim.normalized_value &&
+    typeof claim.normalized_value === "object" && !Array.isArray(claim.normalized_value));
+  const names = new Map(rows.filter((claim) => claim.claim_type === "service").map((claim) =>
+    [claim.normalized_value.service_type, detailList(claim.normalized_value.service_names).join(", ")]));
+  const details = { prices: [], territories: [], hours: [], conditions: [] };
+  for (const claim of rows) {
+    const value = claim.normalized_value;
+    const scope = names.get(value.service_type) || detailText(value.service_type).replaceAll("_", " ");
+    const notes = [
+      claim.contradiction_status !== "none" || detailList(claim.ambiguous_fields).length ? "Há pontos incertos a confirmar" : null,
+      ...detailList(claim.uncertainty),
+    ].filter(Boolean);
+    let group;
+    let text;
+    if (claim.claim_type === "service") {
+      const price = publicPriceText(value.public_price);
+      if (!price) continue;
+      group = "prices";
+      text = [scope, price].filter(Boolean).join(" · ");
+    } else if (claim.claim_type === "service_territory") {
+      const areas = (items) => (Array.isArray(items) ? items : []).map(areaText).filter(Boolean).join("; ");
+      const included = areas(value.included_areas);
+      const excluded = areas(value.excluded_areas);
+      const radius = value.radius;
+      group = "territories";
+      text = [scope, included ? `Inclui: ${included}` : null, excluded ? `Exclui: ${excluded}` : null,
+        radius && detailText(radius.distance) && ["miles", "kilometers"].includes(radius.unit)
+          ? `Raio: ${radius.distance} ${radius.unit}${detailText(radius.center) ? ` de ${detailText(radius.center)}` : ""}` : null,
+      ].filter(Boolean).join(" · ");
+    } else if (claim.claim_type === "business_hours") {
+      group = "hours";
+      text = publicHoursText(value);
+    } else {
+      group = "conditions";
+      const conditions = detailList(value.conditions);
+      if (!conditions.length) continue;
+      const restriction = ({
+        same_day: "Atendimento no mesmo dia", advance_notice: "Agendamento antecipado",
+        weekend: "Atendimento no fim de semana", sunday: "Atendimento aos domingos",
+        emergency_only: "Atendimento de emergência", access: "Acesso ao local",
+        deposit: "Depósito", cancellation: "Cancelamento", no_show_fee: "Taxa por não comparecimento",
+        visit_fee: "Taxa de visita", customer_presence: "Presença do cliente", service_specific: "Condição específica do serviço",
+      })[value.restriction_type];
+      const rule = ({ allowed: "Permitido", not_allowed: "Não permitido", required: "Obrigatório",
+        conditional: "Condicional", fee_applies: "Taxa aplicável", emergency_only: "Somente emergências" })[value.rule];
+      if (typeof restriction !== "string" || typeof rule !== "string") continue;
+      const notice = Number.isSafeInteger(value.notice_minutes) && value.notice_minutes > 0 && value.notice_minutes <= 525_600
+        ? `Antecedência: ${value.notice_minutes} min` : null;
+      text = [scope, restriction, rule, notice, publicPriceText(value.public_fee), ...conditions].filter(Boolean).join(" · ");
+    }
+    if (text) details[group].push([text, ...notes].join(" · "));
+  }
+  return Object.freeze(Object.fromEntries(Object.entries(details).map(([key, values]) =>
+    [key, Object.freeze([...new Set(values)])])));
+}
+
 export function validateWebsiteUrl(value) {
   let url;
   try {

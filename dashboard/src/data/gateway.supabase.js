@@ -9,7 +9,7 @@ import {
   scopeUsageAlertQuery,
 } from "./gateway-rule-mapping.js";
 import { buildDiscoveryReviewRequest, mapDiscoveryRead } from "../discovery-model.js";
-import { mapWebsiteSetupStatus, validateWebsiteUrl } from "../website-setup-model.js";
+import { mapWebsiteSetupStatus, mapWebsiteSetupPublicDetails, validateWebsiteUrl } from "../website-setup-model.js";
 
 const DISCOVERY_ERROR_COPY = {
   company_discovery_stale_version: "A descoberta mudou enquanto você revisava. Recarregue antes de confirmar.",
@@ -52,7 +52,23 @@ export async function submitCompanyDiscoveryVia(client, url, idempotencyKey) {
 
 export async function loadWebsiteSetupVia(client) {
   const data = await discoveryRpc(client, "company_discovery_setup_status");
-  return mapWebsiteSetupStatus(data);
+  const setup = mapWebsiteSetupStatus(data);
+  if (!setup.startOnboardingEnabled) return setup;
+  try {
+    // Owner RLS chooses the tenant; only the authoritative ready proof chooses the result.
+    const claims = discoveryData(await client.from("discovery_claims")
+      .select("job_id,result_id,claim_class,claim_type,claim_schema_version,normalized_value,uncertainty,ambiguous_fields,contradiction_status")
+      .eq("job_id", setup.readyProof.jobId)
+      .eq("result_id", setup.readyProof.resultId)
+      .eq("claim_class", "operational")
+      .in("claim_type", ["service", "service_territory", "business_hours", "booking_restriction"])
+      .order("created_at", { ascending: true })
+      .limit(100));
+    return Object.freeze({ ...setup, publicDetails: mapWebsiteSetupPublicDetails(setup, claims) });
+  } catch {
+    // Optional details must not revoke a ready result or leak transport/provider diagnostics.
+    return Object.freeze({ ...setup, publicDetailsUnavailable: true });
+  }
 }
 
 export async function startWebsiteSetupVia(client, url) {
