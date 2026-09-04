@@ -157,6 +157,11 @@ body{overflow-x:hidden}
 .pricegrid .lg-card{color:var(--text-body)}
 .price-mobile-normal{display:none;margin:0;color:var(--text-secondary);font-size:var(--t-small);font-weight:700}
 .pricecard--ghost{background:transparent;border:1px solid rgba(251,252,248,.18);border-radius:var(--radius-lg);padding:36px;color:var(--text-inverse)}
+@media (min-width:1200px){
+.price-regular-reveal{align-self:start}
+.pricecard--ghost{padding:28px;gap:12px!important}
+.pricecard--ghost>div{font-size:clamp(32px,3vw,40px)!important}
+}
 .inclist{width:100%;margin-top:6px}
 .incitem{display:flex;gap:10px;padding:8px 0;border-top:1px solid var(--border-soft);font-size:var(--t-small);color:var(--text-secondary);align-items:baseline}
 .incitem b{color:var(--lg-teal-600);font-weight:700;flex:none}
