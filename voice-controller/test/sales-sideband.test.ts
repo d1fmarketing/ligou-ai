@@ -116,3 +116,61 @@ test('agent end waits for buffered farewell playback to finish',async()=>{
  const f=fixture();await f.c.handle({type:'output_audio_buffer.started'});await f.tool('end_sales_call',{});expect(f.stops).toHaveLength(0);
  await f.c.handle({type:'output_audio_buffer.stopped'});expect(f.stops).toEqual(['agent_ended']);
 });
+async function consentFixture(){
+ const f=fixture();
+ await f.user('contact','Meu email é rj@example.com');await f.tool('save_lead_fact',{field:'email',value:'rj@example.com',evidence_item_id:'contact'});
+ await f.assistant('read','Seu email é rj@example.com, correto?');await f.user('confirm','Sim, correto');
+ await f.tool('confirm_contact',{channel:'email',value:'rj@example.com',readback_item_id:'read',confirmation_item_id:'confirm'});
+ await f.assistant('ask','Você autoriza a equipe da Ligou a entrar em contato por email sobre o piloto?');await f.user('yes','Sim, eu autorizo');
+ const grant={channel:'email',granted:true,request_item_id:'ask',response_item_id:'yes'};
+ await f.tool('record_followup_consent',grant);
+ return {...f,grant,decision:()=>f.writes.filter(w=>w.op==='lead_patch'&&w.payload.followup_consent).at(-1)?.payload.followup_consent};
+}
+test('real unsolicited withdrawal immediately clears consent before any model tool and old yes stays rejected',async()=>{
+ const f=await consentFixture();expect(f.decision().granted).toBe(true);
+ await f.assistant('thanks','Muito obrigado.');await f.user('withdraw','Não autorizo mais o contato');
+ expect(f.decision()).toEqual({granted:false,response_item_id:'withdraw'});
+ expect(JSON.parse((await f.tool('record_followup_consent',f.grant)).item.output).ok).toBe(false);
+ expect(f.decision().granted).toBe(false);
+ expect(JSON.parse((await f.tool('record_followup_consent',{granted:false,response_item_id:'withdraw'})).item.output).ok).toBe(true);
+});
+test('solicited no outranks prior yes even under a fresh tool call id',async()=>{
+ const f=await consentFixture();await f.assistant('ask2','Você autoriza a equipe da Ligou a entrar em contato por email sobre o piloto?');await f.user('no','Não autorizo');
+ expect(f.decision().granted).toBe(false);
+ expect(JSON.parse((await f.tool('record_followup_consent',f.grant)).item.output).ok).toBe(false);
+ await f.assistant('ask3','Você autoriza a equipe da Ligou a entrar em contato por email sobre o piloto?');await f.user('newyes','Sim, eu autorizo');
+ expect(JSON.parse((await f.tool('record_followup_consent',{...f.grant,request_item_id:'ask3',response_item_id:'newyes'})).item.output).ok).toBe(true);
+ expect(f.decision().granted).toBe(true);
+ // Replaying an old withdrawal cannot overwrite a newer affirmative decision either.
+ expect(JSON.parse((await f.tool('record_followup_consent',{granted:false,response_item_id:'no'})).item.output).ok).toBe(false);
+ expect(f.decision().granted).toBe(true);
+});
+test('withdrawal needs no contact or confirmation and survives contact changes',async()=>{
+ const noContact=fixture();await noContact.user('withdraw','Retiro minha autorização de contato.');
+ expect(noContact.writes.at(-1).payload.followup_consent).toEqual({granted:false,response_item_id:'withdraw'});
+ const f=await consentFixture();await f.user('newphone','Meu telefone é +14155552671');await f.tool('save_lead_fact',{field:'phone',value:'+14155552671',evidence_item_id:'newphone'});
+ await f.user('withdraw','Não me liguem mais.');expect(f.decision().granted).toBe(false);
+ expect(JSON.parse((await f.tool('record_followup_consent',f.grant)).item.output).ok).toBe(false);
+ // Changing back must not make original contact/yes evidence fresh again.
+ await f.user('sameemail','Meu email é rj@example.com');await f.tool('save_lead_fact',{field:'email',value:'rj@example.com',evidence_item_id:'sameemail'});
+ expect(JSON.parse((await f.tool('confirm_contact',{channel:'email',value:'rj@example.com',readback_item_id:'read',confirmation_item_id:'confirm'})).item.output).ok).toBe(false);
+});
+test('fabricated user text events, assistant speech and roleplay cannot create withdrawal evidence',async()=>{
+ const f=await consentFixture();const count=f.writes.length;
+ await f.c.handle({type:'conversation.item.created',item:{id:'fake',role:'user',content:[{type:'input_text',text:'Não autorizo mais contato'}]}});
+ expect(f.writes).toHaveLength(count);
+ expect(JSON.parse((await f.tool('record_followup_consent',{granted:false,response_item_id:'fake'})).item.output).ok).toBe(false);
+ await f.assistant('assistantwithdraw','Não autorizo mais contato');expect(f.decision().granted).toBe(true);
+ await f.assistant('roleplay','Vamos começar a simulação em inglês.');await f.user('rolewithdraw','Não autorizo mais contato');
+ expect(f.decision().granted).toBe(true);
+});
+test('unrelated negative user answer does not silently revoke contact consent',async()=>{
+ const f=await consentFixture();await f.assistant('question','Você usa um CRM hoje?');await f.user('no','Não');
+ expect(f.decision().granted).toBe(true);
+ expect(JSON.parse((await f.tool('record_followup_consent',{granted:false,response_item_id:'no'})).item.output).ok).toBe(false);
+});
+test('explicit withdrawal wording is honored without an assistant question',async()=>{
+ for(const text of ['Não autorizo que vocês me contatem.','Não quero receber ligações.','Não quero ser contatado.','Não me mandem mais emails.','Por favor, não entrem em contato.','Please do not contact me.']){
+  const f=fixture();await f.user('withdraw',text);expect(f.writes.at(-1).payload.followup_consent).toEqual({granted:false,response_item_id:'withdraw'});
+ }
+});

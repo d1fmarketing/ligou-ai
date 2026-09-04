@@ -7,6 +7,27 @@ const norm = (v: string) => v.normalize('NFD').replace(/[\u0300-\u036f]/g,'').to
 const contact = (v: string, channel: string) => channel === 'phone' ? v.replace(/\D/g,'') : norm(v).replace(/\s*arroba\s*/g,'@').replace(/\s*ponto\s*/g,'.').replace(/\s/g,'');
 const affirmative = (v:string) => /^(sim\b|confirmo\b|correto\b|esta correto\b|autorizo\b|eu autorizo\b|pode (sim|entrar|me contatar|enviar|ligar)\b)/.test(norm(v)) && !/\b(nao|talvez|mas|porem|se|depois|ainda)\b/.test(norm(v));
 const negative = (v:string) => /^(nao\b|nao autorizo\b|prefiro nao\b)/.test(norm(v));
+// Revocations do not need a contact, a model tool call, or a new permission question.
+const explicitWithdrawal = (text:string) => {
+  const n=norm(text);
+  return /\bnao (?:autorizo|permito)(?: mais)?(?:[.!?]|$)/.test(n)
+    || /\bnao (?:autorizo|quero|desejo|permito|aceito) (?:mais )?(?:(?:o|nenhum|qualquer) )?(?:contato|ligacoes|ligacao|mensagens|mensagem|e-?mails?)(?:\b|$)/.test(n)
+    || /\bnao (?:autorizo|quero|desejo|permito) que (?:(?:voces|a equipe|a ligou) )?(?:me (?:liguem|contatem|contactem)|entrem em contato)\b/.test(n)
+    || /\bnao (?:quero|desejo) (?:mais )?(?:receber (?:ligacoes|mensagens|e-?mails?)|ser (?:contatado|contatada|contactado|contactada))\b/.test(n)
+    || /\bnao me (?:mandem|enviem) (?:mais )?(?:e-?mails?|mensagens)\b/.test(n)
+    || /\bnao (?:me )?(?:ligue|liguem|contate|contatem|contacte|contactem)(?:\b|$)/.test(n)
+    || /\bnao (?:entrem?|entre) em contato\b/.test(n)
+    || /\b(?:pare|parem) de (?:me )?(?:ligar|contatar|contactar|enviar mensagens|mandar mensagens)\b/.test(n)
+    || /\b(?:retiro|revogo|cancelo) (?:a |o |minha |meu )?(?:autorizacao|permissao|consentimento)\b/.test(n)
+    || /\b(?:tire|tirem|remova|removam|exclua|excluam) (?:o |os )?meu(?:s)? (?:numero|contato|email|dados)\b/.test(n)
+    || /\b(?:do not|don't|stop) (?:contacting|calling|emailing|contact|call|email) me\b/.test(n)
+    || /\b(?:withdraw|revoke) (?:my )?consent\b/.test(n);
+};
+const specificContactRequest = (text:string,channel?:string) => {
+  const n=norm(text);
+  const hasChannel=channel==='phone'?/telefone|ligacao/.test(n):channel==='email'?/e-?mail/.test(n):/telefone|ligacao|e-?mail/.test(n);
+  return hasChannel&&n.includes('ligou')&&n.includes('piloto')&&/autoriza|permissao/.test(n)&&/entrar em contato|contatar|ligar|enviar/.test(n);
+};
 const canonical = (v:any):string => JSON.stringify(v && typeof v==='object' ? Array.isArray(v) ? v.map(x=>JSON.parse(canonical(x))) : Object.fromEntries(Object.keys(v).sort().map(k=>[k,JSON.parse(canonical(v[k]))])) : v);
 export function isSalesSessionIntact(session:any, model:string) {
   const expected = salesSessionConfig(model);
@@ -22,6 +43,8 @@ export function isSalesSessionIntact(session:any, model:string) {
 export class SalesConversation {
   private evidence = new Map<string,Evidence>();
   private fields = new Map<string,string>();
+  private contactEvidenceSequence = new Map<string,number>();
+  private consentDecision: {seq:number;id:string;granted:boolean} | null = null;
   private confirmed: {channel:string;value:string;seq:number} | null = null;
   private roleplay = false;
   private responses = new Set<string>();
@@ -51,6 +74,7 @@ export class SalesConversation {
     const item:Evidence={id,role,text,context:this.roleplay?'roleplay':'real',seq:++this.sequence};
     await this.write('transcript',{provider_item_id:id,role,text,context:item.context,...(usage ? {usage} : {})});
     this.evidence.set(id,item); // Never expose unsaved evidence to tool validation/model.
+    if(item.role==='user'&&item.context==='real'&&this.isWithdrawal(item)) await this.revoke(item);
     this.send({type:'conversation.item.create',item:{type:'message',role:'system',content:[{type:'input_text',text:`Evidência persistida: item_id=${id}, role=${role}, contexto=${item.context}. Use este identificador para referenciar a fala correspondente nas ferramentas. Não confunda contexto de simulação com fato real.`}]}});
   }
   private item(id:unknown,role:'user'|'assistant'):Evidence {
@@ -58,6 +82,19 @@ export class SalesConversation {
     const e=this.evidence.get(id);
     if(!e || e.role!==role || e.context!=='real') throw new Error('real_persisted_evidence_required');
     return e;
+  }
+  private isWithdrawal(reply:Evidence) {
+    if(explicitWithdrawal(reply.text)) return true;
+    const previous=[...this.evidence.values()].find(e=>e.seq===reply.seq-1);
+    return negative(reply.text)&&previous?.role==='assistant'&&previous.context==='real'&&specificContactRequest(previous.text);
+  }
+  private async revoke(reply:Evidence) {
+    if(this.consentDecision&&reply.seq<=this.consentDecision.seq){
+      if(reply.id===this.consentDecision.id&&!this.consentDecision.granted)return;
+      throw new Error('stale_consent_decision');
+    }
+    await this.write('lead_patch',{fields:{},followup_consent:{granted:false,response_item_id:reply.id}});
+    this.consentDecision={seq:reply.seq,id:reply.id,granted:false};
   }
   private async tool(call:any) {
     if(!call.call_id || this.tools.has(call.call_id)) return;
@@ -73,6 +110,7 @@ export class SalesConversation {
           if(!allowed.includes(a.field)||typeof a.value!=='string'||!a.value.trim()||a.value.length>1000) throw new Error('invalid_fact');
           const e=this.item(a.evidence_item_id,'user');
           const channel=['phone','email'].includes(a.field)?a.field:null;
+          if(channel&&e.seq<(this.contactEvidenceSequence.get(channel)??0))throw new Error('stale_contact_evidence');
           const needle=channel?contact(a.value,channel):norm(a.value);
           const haystack=channel?contact(e.text,channel):norm(e.text);
           if(!needle || !haystack.includes(needle)) throw new Error('value_not_in_evidence');
@@ -80,21 +118,29 @@ export class SalesConversation {
           if(a.field==='email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.value)) throw new Error('invalid_email');
           await this.write('lead_patch',{fields:{[a.field]:{value:a.value,evidence_item_ids:[e.id]}}});
           if(channel && this.fields.get(a.field)!==a.value) this.confirmed=null;
+          if(channel)this.contactEvidenceSequence.set(channel,e.seq);
           this.fields.set(a.field,a.value); result={ok:true,saved_field:a.field}; break;
         }
         case 'confirm_contact': {
           if(!['phone','email'].includes(a.channel)||typeof a.value!=='string'||this.fields.get(a.channel)!==a.value) throw new Error('saved_contact_required');
           const read=this.item(a.readback_item_id,'assistant'), reply=this.item(a.confirmation_item_id,'user');
-          if(reply.seq!==read.seq+1||!contact(read.text,a.channel).includes(contact(a.value,a.channel))||!/corret|confirm|certo/.test(norm(read.text))||!affirmative(reply.text)) throw new Error('explicit_contact_confirmation_required');
+          if(read.seq<=(this.contactEvidenceSequence.get(a.channel)??0)||reply.seq!==read.seq+1||!contact(read.text,a.channel).includes(contact(a.value,a.channel))||!/corret|confirm|certo/.test(norm(read.text))||!affirmative(reply.text)) throw new Error('explicit_contact_confirmation_required');
           await this.write('lead_patch',{fields:{},contact_confirmation:a});
           this.confirmed={channel:a.channel,value:a.value,seq:reply.seq}; result={ok:true,contact_confirmed:true}; break;
         }
         case 'record_followup_consent': {
-          if(typeof a.granted!=='boolean'||!this.confirmed||a.channel!==this.confirmed.channel||this.fields.get(a.channel)!==this.confirmed.value) throw new Error('confirmed_contact_required');
-          const request=this.item(a.request_item_id,'assistant'), reply=this.item(a.response_item_id,'user'), n=norm(request.text);
-          const channelMatch=a.channel==='phone'? /telefone|ligacao/.test(n):/e-?mail/.test(n);
-          if(request.seq<=this.confirmed.seq||reply.seq!==request.seq+1||!channelMatch||!n.includes('ligou')||!n.includes('piloto')||!/autoriza|permissao/.test(n)||!/entrar em contato|contatar|ligar|enviar/.test(n)||!(a.granted?affirmative(reply.text):negative(reply.text))) throw new Error('specific_followup_consent_required');
-          await this.write('lead_patch',{fields:{},followup_consent:a}); result={ok:true,followup_consent:a.granted}; break;
+          if(typeof a.granted!=='boolean')throw new Error('invalid_consent');
+          const reply=this.item(a.response_item_id,'user');
+          if(!a.granted){
+            if(!this.isWithdrawal(reply))throw new Error('explicit_withdrawal_required');
+            await this.revoke(reply);result={ok:true,followup_consent:false};break;
+          }
+          if(this.consentDecision&&reply.seq<=this.consentDecision.seq)throw new Error('stale_consent_decision');
+          if(!this.confirmed||a.channel!==this.confirmed.channel||this.fields.get(a.channel)!==this.confirmed.value) throw new Error('confirmed_contact_required');
+          const request=this.item(a.request_item_id,'assistant');
+          if(request.seq<=Math.max(this.confirmed.seq,this.consentDecision?.seq??0)||reply.seq!==request.seq+1||!specificContactRequest(request.text,a.channel)||!affirmative(reply.text)) throw new Error('specific_followup_consent_required');
+          await this.write('lead_patch',{fields:{},followup_consent:a});
+          this.consentDecision={seq:reply.seq,id:reply.id,granted:true};result={ok:true,followup_consent:true};break;
         }
         case 'end_sales_call': this.endingRequested=true; result={ok:true,ending:true}; break;
         default: throw new Error('sales_tool_forbidden');

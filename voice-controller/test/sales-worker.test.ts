@@ -2,12 +2,12 @@ import {expect,test} from 'bun:test';
 import {runSalesSession} from '../src/sales/worker.ts';
 import {createSalesStore} from '../src/sales/store.ts';
 function fixture(overrides:any={}) {
- let row:any={session_id:'s',request_id:'r',claim_token:'c',status:'starting',offer_sdp:'offer',provider_call_id:null,model:null,expires_at:new Date(Date.now()+300000).toISOString(),created_at:new Date().toISOString(),stop_requested:false,create_intent_at:null,observed_cost_usd:0,reserved_cost_usd:1.5,...overrides};
+ let row:any={session_id:'s',request_id:'r',claim_token:'c',status:'starting',client_connected_at:new Date().toISOString(),offer_sdp:'offer',provider_call_id:null,model:null,expires_at:new Date(Date.now()+300000).toISOString(),created_at:new Date().toISOString(),stop_requested:false,create_intent_at:null,observed_cost_usd:0,reserved_cost_usd:1.5,...overrides};
  const log:string[]=[];
  const store:any={heartbeat:async()=>({enabled:true}),apply:async(_r:any,op:string,p:any={})=>{log.push(op);if(op==='create_intent')row={...row,create_intent_at:'now',model:p.model};if(op==='provider_ready')row={...row,provider_call_id:p.provider_call_id,model:p.model};if(op==='activate')row={...row,status:'ready'};if(op==='termination')row={...row,status:p.state==='confirmed'?'ended':'ending',provider_termination_state:p.state};return row;}};
  let listener:any;
- const deps:any={store,workerId:'worker',create:async(_s:string,_r:string,_f:any,hooks:any)=>{await hooks.beforeAttempt('gpt-realtime-2.1');log.push('provider_create');return {outcome:'accepted',callId:'rtc',answer:'answer',model:'gpt-realtime-2.1'};},attach:async(_r:any,_store:any,stop:any)=>{log.push('sideband_ack'); listener=stop; return {send:()=>{},close:()=>{log.push('socket_close');}};},terminate:async()=>{log.push('hangup');return {confirmed:true};},tickMs:5};
- return {row,log,deps,stop:()=>listener('test_end')};
+ const deps:any={store,workerId:'worker',create:async(_s:string,_r:string,_f:any,hooks:any)=>{await hooks.beforeAttempt('gpt-realtime-2.1');log.push('provider_create');return {outcome:'accepted',callId:'rtc',answer:'answer',model:'gpt-realtime-2.1'};},attach:async(_r:any,_store:any,stop:any)=>{log.push('sideband_ack'); listener=stop; return {send:()=>{},greet:()=>{log.push('greeting');},close:()=>{log.push('socket_close');}};},terminate:async()=>{log.push('hangup');return {confirmed:true};},tickMs:5};
+ return {row,log,deps,connect:()=>{row={...row,client_connected_at:new Date().toISOString()};},stop:()=>listener('test_end')};
 }
 test('provider intent and identity precede sideband acknowledgement and public activation; durable stop precedes hangup',async()=>{
  const f=fixture();const running=runSalesSession(f.row,f.deps);
@@ -59,4 +59,18 @@ test('already confirmed recovered termination never calls provider again',async(
 test('RPC timeout bounds persistence failure so deadline hangup is not indefinitely blocked',async()=>{
  const store=createSalesStore({rpc:()=>new Promise(()=>{})},{timeoutMs:10});
  await expect(store.heartbeat('w')).rejects.toThrow('sales_store_timeout');
+});
+
+test('greeting waits for persisted browser-connected acknowledgement, then sends exactly once',async()=>{
+ const f=fixture({client_connected_at:null});const running=runSalesSession(f.row,f.deps);
+ for(let i=0;i<50&&!f.log.includes('activate');i++)await Bun.sleep(1);
+ await Bun.sleep(10);expect(f.log).not.toContain('greeting');
+ f.connect();await Bun.sleep(30);expect(f.log.filter(x=>x==='greeting')).toHaveLength(1);
+ await Bun.sleep(20);expect(f.log.filter(x=>x==='greeting')).toHaveLength(1);
+ await f.stop();await running;
+});
+test('cancelled before browser connection never produces a greeting',async()=>{
+ const f=fixture({client_connected_at:null});const running=runSalesSession(f.row,f.deps);
+ for(let i=0;i<50&&!f.log.includes('activate');i++)await Bun.sleep(1);
+ await f.stop();f.connect();await running;expect(f.log).not.toContain('greeting');
 });

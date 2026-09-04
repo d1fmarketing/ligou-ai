@@ -1,6 +1,6 @@
 export interface WorkerSession {
   session_id: string; request_id: string; status: string; offer_sdp: string; answer_sdp: string | null;
-  provider_call_id: string | null; model: string | null; max_minutes: number; expires_at: string; created_at: string;
+  client_connected_at: string | null; provider_call_id: string | null; model: string | null; max_minutes: number; expires_at: string; created_at: string;
   stop_requested: boolean; claim_token: string; lease_expires_at: string; create_intent_at: string | null;
   create_attempts: number; reserved_cost_usd: number; observed_cost_usd: number; usage_state: string;
   provider_termination_state: string; error: string | null;

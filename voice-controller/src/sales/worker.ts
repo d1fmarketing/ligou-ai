@@ -69,10 +69,19 @@ export async function runSalesSession(initial:WorkerSession,d:SalesWorkerDepende
    if(stopping){socket.close();return;}
    await write('activate');
    if(row.stop_requested||row.status!=='ready'||expired()){await stop('cancelled_before_ready');return;}
-   // Public polling must first deliver the SDP answer. The browser can begin speaking
-   // immediately; this bounded delay avoids consuming the initial greeting in setup.
-   const greeting=setTimeout(()=>{if(!stopping)try{socket?.send({type:'response.create'});}catch{void stop('greeting_failed');}},1200);
-   await finished;clearTimeout(greeting);
+   // The browser confirms its actual RTC connected state after applying the SDP.
+   // Public ready stays available before this acknowledgement to avoid a deadlock.
+   while(!stopping&&!row.client_connected_at){
+     let poll:ReturnType<typeof setTimeout>|undefined;
+     await Promise.race([finished,new Promise<void>(resolve=>{poll=setTimeout(resolve,d.tickMs??500);})]);
+     if(poll)clearTimeout(poll);
+     if(stopping)break;
+     await write('renew');
+     if(row.stop_requested||row.status!=='ready'||expired())await stop('cancelled_before_connected');
+   }
+   if(stopping)return;
+   socket.greet();
+   await finished;
  }catch{
    if(knownId&&stopping){stopping=null;}
    await stop('sales_runtime_failed').catch(()=>{});
