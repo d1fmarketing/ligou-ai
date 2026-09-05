@@ -3617,7 +3617,7 @@ export function attachSideband(
       ledger.pendingToolCalls = 0;
       maybeContinueResponse(ledger, sock);
       if (!ownsSocket(sock)) return;
-      if (!options.phone && requestResponse(ledger, sock, "greeting"))
+      if (requestResponse(ledger, sock, "greeting"))
         setPhase(ledger, "greeting");
     }
     if (!ownsSocket(sock)) return;

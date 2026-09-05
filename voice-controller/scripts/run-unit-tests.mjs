@@ -25,6 +25,7 @@ export const unitTestFiles = [
   "test/sideband-settlement.test.ts",
   "test/sideband-continuation.test.ts",
   "test/phone-budget.test.ts",
+  "test/phone-webhook.test.ts",
   "test/calendar-authority.test.ts",
   "test/worker-authority.test.ts",
   "test/summary-subscription.test.ts",

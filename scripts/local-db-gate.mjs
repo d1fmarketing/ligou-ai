@@ -865,6 +865,13 @@ export async function runLocalDatabaseGate() {
     );
     const startupTests = await runVoiceControllerStartup(repoRoot, runtime, fixture, runnerRoot);
 
+    // Test-only fixtures, after verifying the exact disposable database identity.
+    await verifyIdentity([repoRoot]);
+    successful(await runPsql(connection, psqlBin, isolatedHome, "delete from public.phone_events;"), "first-phone fixture isolation", [databaseSecret]);
+    const firstPhoneSql=successful(await runPsql(connection, psqlBin, isolatedHome, await readFile(path.join(repoRoot,"supabase/tests/first-phone-binding.sql"),"utf8")), "first-phone binding SQL", [databaseSecret]);
+    assert.match(firstPhoneSql,/first_phone_binding_passed/);
+    const firstPhoneIntegration=await runBunTestFile(path.join(repoRoot,"voice-controller/test/first-phone.local.integration.test.ts"),3,applicationEnv,runnerRoot);
+
     const beforeNoop = successful(await runPsql(connection, psqlBin, isolatedHome, `
       select version from supabase_migrations.schema_migrations order by version;
     `), "pre-noop migration history", [databaseSecret]).split("\n").filter(Boolean);
@@ -911,6 +918,7 @@ export async function runLocalDatabaseGate() {
       summarySubscriptionIntegrationTests,
       budgetRuntimeTests,
       startupTests,
+      firstPhone: { bindingSql: "passed", integrationTests: firstPhoneIntegration },
       authenticatedRlsTests: authenticatedRls.tests,
       migrationNoop: true,
       lint: assertExpectedLegacyLint(lintRows),

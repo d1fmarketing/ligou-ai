@@ -29,7 +29,7 @@ try {
     apply,
     store: {
       async transaction<T>(operation: (transaction: ConnectorMigrationTransaction) => Promise<T>): Promise<T> {
-        const result = await sql.begin(async (transactionSql) => {
+        const result = await sql.begin(async (transactionSql: postgres.TransactionSql) => {
           const transaction: ConnectorMigrationTransaction = {
           async lockLegacyRows(lockedTenant) {
             return await transactionSql`

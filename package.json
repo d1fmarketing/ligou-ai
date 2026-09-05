@@ -14,7 +14,10 @@
     "test:backup-restore": "node --test infra/test/backup-restore.test.mjs",
     "test:deploy-release": "node --test infra/test/deploy-release.test.mjs",
     "test:edge-functions": "node scripts/check-edge-functions.mjs",
-    "db:gate:local": "node scripts/local-db-gate.mjs"
+    "db:gate:local": "node scripts/local-db-gate.mjs",
+    "phone:plan": "node scripts/first-phone-number.mjs plan",
+    "phone:inspect": "node scripts/first-phone-number.mjs inspect",
+    "test:phone-setup": "node --test scripts/first-phone-number.test.mjs"
   },
   "devDependencies": {
     "supabase": "2.115.0"

@@ -233,6 +233,7 @@ describe("sideband budget finalization", () => {
       SyntheticWebSocket.instances[0]!.emit("open");
       await control.opened;
       expect(lifecycle.calls.filter((call) => call.name === "confirm_phone_sideband")).toHaveLength(1);
+      expect(SyntheticWebSocket.instances[0]!.sent.map(value=>JSON.parse(value)).filter(value=>value.type==='response.create')).toHaveLength(1);
       expect(clock.intervals.size).toBe(1);
       await [...clock.intervals.values()][0]!();
       await flushAsync();
