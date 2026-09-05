@@ -31,9 +31,9 @@ for (const failure of ['transport', '500', 'empty_sdp', 'missing_id', 'rejected_
 test('all explicit nonacceptance is safe without pretending provider usage exists', async () => {
   expect((await createSalesCall('offer', 'req', async () => new Response('', {status: 403}))).outcome).toBe('rejected');
 });
-test('native VAD replies, server transcript evidence and commercial instructions', () => {
+test('server-gated VAD replies, transcript evidence and commercial instructions', () => {
   const c = salesSessionConfig('gpt-realtime-2.1');
-  expect(c.audio.input.turn_detection.create_response).toBe(true);
+  expect(c.audio.input.turn_detection.create_response).toBe(false);
   expect(c.audio.input.transcription.model).toBe('gpt-4o-mini-transcribe');
   expect(c.instructions).toContain('299');
   expect(c.instructions).toContain('400');
@@ -44,4 +44,24 @@ test('usage requires complete consistent provider evidence and preserves cached 
   const valid = { input_tokens: 30, output_tokens: 4, total_tokens: 34, input_token_details: { text_tokens: 10, audio_tokens: 20, cached_tokens: 6, cached_tokens_details: { text_tokens: 2, audio_tokens: 4 } }, output_token_details: { text_tokens: 1, audio_tokens: 3 } };
   expect(parseSalesUsage(valid)).toEqual({ textIn: 10, audioIn: 20, textInCached: 2, audioInCached: 4, textOut: 1, audioOut: 3 });
   expect(parseSalesUsage({ ...valid, total_tokens: 33 })).toBeNull();
+});
+
+import {requestSalesTermination} from '../src/sales/termination.ts';
+test('sales hangup captures bounded safe HTTP metadata without declaring a missing call confirmed',async()=>{
+ const result=await requestSalesTermination({openaiCallId:'rtc_known',mode:'hangup',requestId:'termination-test',fetchImpl:async()=>new Response(JSON.stringify({error:{code:'call_id_not_found',type:'invalid_request_error',message:'private transcript sk-secret'}}),{status:404,headers:{'x-request-id':'req_safe'}})});
+ expect(result.confirmed).toBe(false);
+ expect(result.receipt?.http_status).toBe(404);
+ expect(result.receipt?.provider_error_code).toBe('call_id_not_found');
+ expect(result.receipt?.provider_error_type).toBe('invalid_request_error');
+ expect(result.receipt?.provider_request_id).toBe('req_safe');
+ expect(JSON.stringify(result)).not.toContain('private');expect(JSON.stringify(result)).not.toContain('sk-secret');
+});
+
+test('sales hangup confirms only a successful response and keeps timeout/transport unknown',async()=>{
+ const args:any={openaiCallId:'rtc_known',mode:'hangup',requestId:'termination-test'};
+ expect((await requestSalesTermination({...args,fetchImpl:async()=>new Response(null,{status:200})})).confirmed).toBe(true);
+ const timeout=await requestSalesTermination({...args,timeoutMs:10,fetchImpl:()=>new Promise(()=>{})});
+ expect(timeout.confirmed).toBe(false);expect(timeout.error).toBe('provider_hangup_timeout');
+ const lost=await requestSalesTermination({...args,fetchImpl:async()=>{throw new Error('sk-secret-private');}});
+ expect(lost.confirmed).toBe(false);expect(JSON.stringify(lost)).not.toContain('sk-secret');
 });

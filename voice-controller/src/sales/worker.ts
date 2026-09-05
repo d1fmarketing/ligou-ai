@@ -1,10 +1,10 @@
-import {requestProviderTermination} from '../provider-termination.ts';
+import {requestSalesTermination,type SalesTerminationResult} from './termination.ts';
 import {createSalesCall} from './provider.ts';
 import {attachSalesSocket,type SalesSocket} from './socket.ts';
 import type {SalesStore,WorkerSession} from './store.ts';
 export interface SalesWorkerDependencies {
  store:SalesStore;workerId:string;create?:typeof createSalesCall;attach?:typeof attachSalesSocket;
- terminate?:typeof requestProviderTermination;fetchImpl?:typeof fetch;tickMs?:number;signal?:AbortSignal;
+ terminate?:typeof requestSalesTermination;fetchImpl?:typeof fetch;tickMs?:number;signal?:AbortSignal;
 }
 export async function runSalesSession(initial:WorkerSession,d:SalesWorkerDependencies):Promise<void> {
  let row=initial,socket:SalesSocket|null=null,knownId=row.provider_call_id;
@@ -22,7 +22,10 @@ export async function runSalesSession(initial:WorkerSession,d:SalesWorkerDepende
          // An emergency hangup is still required if persistence/lease was lost.
          // The known identity is only from this claimed row or this create receipt.
          try{await write('termination',{state:'requested',error:reason});}catch{}
-         const result=await (d.terminate??requestProviderTermination)({openaiCallId:knownId,mode:'hangup',requestId:`sales-${row.session_id}-${row.claim_token}`,fetchImpl:d.fetchImpl});
+         let result:SalesTerminationResult;
+         try{result=await (d.terminate??requestSalesTermination)({openaiCallId:knownId,mode:'hangup',requestId:`sales-${row.session_id}-${row.claim_token}`,fetchImpl:d.fetchImpl});}
+         catch{result={confirmed:false,error:'provider_hangup_transport_unknown'};}
+         console.info(JSON.stringify({event:'sales_provider_termination',session_id:row.session_id,confirmed:result.confirmed,...(result.receipt?{receipt:result.receipt}:{}),...(result.error?{error:result.error}:{} )}));
          try{await write('termination',{state:result.confirmed?'confirmed':'unknown',error:result.error??reason});}catch{}
        }else if(row.create_intent_at){await write('quarantine',{error:reason});}
        else{await write('fail',{error:reason});}
@@ -35,7 +38,7 @@ export async function runSalesSession(initial:WorkerSession,d:SalesWorkerDepende
  let timer:ReturnType<typeof setInterval>|null=null;
  let deadline:ReturnType<typeof setTimeout>|null=null;
  try{
-   if(row.provider_termination_state==='confirmed')return;
+   if(row.provider_termination_state==='confirmed'||row.provider_termination_state==='expired')return;
    // Reclaimed calls are drained, not recreated or resumed with incomplete local evidence.
    if(knownId){await stop('recovered_session');return;}
    if(row.create_intent_at){await stop('recovered_create_unknown');return;}

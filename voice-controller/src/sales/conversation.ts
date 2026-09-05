@@ -3,10 +3,13 @@ import { parseSalesUsage, salesSessionConfig } from './provider.ts';
 import type { SalesStore, WorkerSession } from './store.ts';
 
 type Evidence = { id: string; role:'user'|'assistant'; text:string; context:'real'|'roleplay'; seq:number };
-const norm = (v: string) => v.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
-const contact = (v: string, channel: string) => channel === 'phone' ? v.replace(/\D/g,'') : norm(v).replace(/\s*arroba\s*/g,'@').replace(/\s*ponto\s*/g,'.').replace(/\s/g,'');
-const affirmative = (v:string) => /^(sim\b|confirmo\b|correto\b|esta correto\b|autorizo\b|eu autorizo\b|pode (sim|entrar|me contatar|enviar|ligar)\b)/.test(norm(v)) && !/\b(nao|talvez|mas|porem|se|depois|ainda)\b/.test(norm(v));
-const negative = (v:string) => /^(nao\b|nao autorizo\b|prefiro nao\b)/.test(norm(v));
+export function salesDiagnosticEvent(code:'no_speech_detected'|'transcription_timeout') {
+  return {type:'conversation.item.create',item:{type:'message',role:'system',content:[{type:'input_text',text:`LIGOU_SALES_DIAGNOSTIC:${JSON.stringify({code})}`}]}};
+}
+const norm = (v: string) => v.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[’‘]/g,"'").replace(/\s+/g,' ').trim();
+const contact = (v: string, channel: string) => channel === 'phone' ? v.replace(/\D/g,'') : norm(v).replace(/\s*(?:arroba|\bat\b)\s*/g,'@').replace(/\s*(?:ponto|punto|\bdot\b)\s*/g,'.').replace(/\s/g,'');
+const affirmative = (v:string) => /^(sim\b|confirmo\b|correto\b|esta correto\b|autorizo\b|eu autorizo\b|pode (sim|entrar|me contatar|enviar|ligar)\b|yes\b|correct\b|i (?:confirm|authorize)\b|si\b|correcto\b|es correcto\b)/.test(norm(v)) && !/\b(nao|talvez|mas|porem|se|depois|ainda|no|not|never|maybe|but|if|later|yet|quizas|pero|despues)\b/.test(norm(v));
+const negative = (v:string) => /^(nao\b|nao autorizo\b|prefiro nao\b|no\b|i do not\b|i don't\b)/.test(norm(v));
 // Revocations do not need a contact, a model tool call, or a new permission question.
 const explicitWithdrawal = (text:string) => {
   const n=norm(text);
@@ -21,12 +24,17 @@ const explicitWithdrawal = (text:string) => {
     || /\b(?:retiro|revogo|cancelo) (?:a |o |minha |meu )?(?:autorizacao|permissao|consentimento)\b/.test(n)
     || /\b(?:tire|tirem|remova|removam|exclua|excluam) (?:o |os )?meu(?:s)? (?:numero|contato|email|dados)\b/.test(n)
     || /\b(?:do not|don't|stop) (?:contacting|calling|emailing|contact|call|email) me\b/.test(n)
-    || /\b(?:withdraw|revoke) (?:my )?consent\b/.test(n);
+    || /\b(?:withdraw|revoke) (?:my )?consent\b/.test(n)
+    || /\bno (?:me )?(?:contacte|contacten|llame|llamen|envie|envien)\b/.test(n)
+    || /\b(?:retiro|revoco|cancelo) (?:mi |el )?(?:permiso|consentimiento|autorizacion)\b/.test(n);
 };
 const specificContactRequest = (text:string,channel?:string) => {
   const n=norm(text);
-  const hasChannel=channel==='phone'?/telefone|ligacao/.test(n):channel==='email'?/e-?mail/.test(n):/telefone|ligacao|e-?mail/.test(n);
-  return hasChannel&&n.includes('ligou')&&n.includes('piloto')&&/autoriza|permissao/.test(n)&&/entrar em contato|contatar|ligar|enviar/.test(n);
+  const hasChannel=channel==='phone'?/telefone|telefono|phone|ligacao|llamada/.test(n):channel==='email'?/e-?mail|correo/.test(n):/telefone|telefono|phone|ligacao|llamada|e-?mail|correo/.test(n);
+  return hasChannel && n.includes('ligou') && /\bpiloto?\b/.test(n)
+    && /autoriza|authorize|permission|permissao|permiso/.test(n)
+    && /entrar em contato|contat|contact|ligar|enviar|llamar|call|send/.test(n)
+    && !/\b(?:nao|not|no|don't)\b/.test(n);
 };
 const canonical = (v:any):string => JSON.stringify(v && typeof v==='object' ? Array.isArray(v) ? v.map(x=>JSON.parse(canonical(x))) : Object.fromEntries(Object.keys(v).sort().map(k=>[k,JSON.parse(canonical(v[k]))])) : v);
 export function isSalesSessionIntact(session:any, model:string) {
@@ -35,7 +43,7 @@ export function isSalesSessionIntact(session:any, model:string) {
   if (canonical(session.tools) !== canonical(expected.tools) || canonical(session.output_modalities) !== canonical(['audio'])) return false;
   const input=session.audio?.input, output=session.audio?.output;
   return output?.voice === 'ash' && input?.transcription?.model === expected.audio.input.transcription.model
-    && input?.turn_detection?.type === 'semantic_vad' && input.turn_detection.create_response === true && input.turn_detection.interrupt_response === true
+    && input?.turn_detection?.type === 'semantic_vad' && input.turn_detection.create_response === false && input.turn_detection.interrupt_response === true
     && input.turn_detection.eagerness === 'low' && session.max_output_tokens === expected.max_output_tokens;
 }
 
@@ -60,20 +68,45 @@ export class SalesConversation {
   private observed: number;
   private endingRequested = false;
   private audioPlaying = false;
+  private pendingToolBatches: any[][] = [];
+  private continuationPending = false;
+  private responseRequested = false;
+  private userSpeaking = false;
+  private transcriptQueue: Array<{id:string;role:'user'|'assistant';text?:string;usage?:unknown}> = [];
   constructor(private row: WorkerSession, private store: SalesStore, private send:(event:any)=>void, private stop:(reason:string)=>Promise<void>) { this.observed=Number(row.observed_cost_usd)||0; }
+  greet() {
+    if(this.responseRequested||this.responses.size||this.userSpeaking||this.pendingAudio.size)return;
+    this.responseRequested=true;this.send({type:'response.create'});
+  }
   private async write(op:string,payload:Record<string,unknown>) { this.row=await this.store.apply(this.row,op,payload); }
+  private async queueTranscript(id:string,role:'user'|'assistant',text:string,usage?:unknown) {
+    const pending=this.transcriptQueue.find(item=>item.id===id);
+    if(pending) {
+      if(pending.role!==role || (pending.text!==undefined&&pending.text!==text))throw new Error('sales_transcript_conflict');
+      pending.text=text;pending.usage=usage;
+    } else this.transcriptQueue.push({id,role,text,usage});
+    // Preserve the order established by committed caller audio, even when its
+    // transcription arrives after the assistant's spoken readback.
+    while(this.transcriptQueue.length&&this.transcriptQueue[0].text!==undefined) {
+      const next=this.transcriptQueue[0];
+      await this.transcript(next.id,next.role,next.text!,next.usage);
+      if(next.role==='user')this.pendingAudio.delete(next.id);
+      this.transcriptQueue.shift();
+    }
+  }
   private async transcript(id:string,role:'user'|'assistant',text:string,usage?:unknown) {
     if (!id || !text?.trim() || text.length > 16000) return;
     const existing=this.evidence.get(id);
     if (existing) { if (existing.role!==role || existing.text!==text) throw new Error('sales_transcript_conflict'); return; }
     const n=norm(text);
     if(role==='assistant') {
-      if (/fim da (simulacao|demonstracao)|voltando (a|para) (sua empresa|conversa real)|encerramos a simulacao/.test(n)) this.roleplay=false;
-      else if (/simulacao|demonstracao|role.?play/.test(n)) this.roleplay=true;
+      if (/fim da (simulacao|demonstracao)|voltando (a|para) (sua empresa|conversa real)|encerramos a simulacao|end of (?:the )?(?:simulation|demonstration|role.?play)|back to your business|fin de la simulacion|volviendo a tu empresa/.test(n)) this.roleplay=false;
+      else if (/(?:^|[.!?]\s*)(?:(?:vamos (?:comecar|iniciar)|iniciando|comecando) (?:a |uma )?(?:simulacao|demonstracao|role.?play)|(?:starting|beginning) (?:the |a )?(?:simulation|demonstration|role.?play)|(?:comenzamos|iniciamos) la simulacion)\b/.test(n)) this.roleplay=true;
     }
     const item:Evidence={id,role,text,context:this.roleplay?'roleplay':'real',seq:++this.sequence};
     await this.write('transcript',{provider_item_id:id,role,text,context:item.context,...(usage ? {usage} : {})});
     this.evidence.set(id,item); // Never expose unsaved evidence to tool validation/model.
+    if(item.role==='user')this.continuationPending=true;
     if(item.role==='user'&&item.context==='real'&&this.isWithdrawal(item)) await this.revoke(item);
     this.send({type:'conversation.item.create',item:{type:'message',role:'system',content:[{type:'input_text',text:`Evidência persistida: item_id=${id}, role=${role}, contexto=${item.context}. Use este identificador para referenciar a fala correspondente nas ferramentas. Não confunda contexto de simulação com fato real.`}]}});
   }
@@ -124,7 +157,7 @@ export class SalesConversation {
         case 'confirm_contact': {
           if(!['phone','email'].includes(a.channel)||typeof a.value!=='string'||this.fields.get(a.channel)!==a.value) throw new Error('saved_contact_required');
           const read=this.item(a.readback_item_id,'assistant'), reply=this.item(a.confirmation_item_id,'user');
-          if(read.seq<=(this.contactEvidenceSequence.get(a.channel)??0)||reply.seq!==read.seq+1||!contact(read.text,a.channel).includes(contact(a.value,a.channel))||!/corret|confirm|certo/.test(norm(read.text))||!affirmative(reply.text)) throw new Error('explicit_contact_confirmation_required');
+          if(read.seq<=(this.contactEvidenceSequence.get(a.channel)??0)||reply.seq!==read.seq+1||!contact(read.text,a.channel).includes(contact(a.value,a.channel))||!/corret|correct|confirm|certo/.test(norm(read.text))||!affirmative(reply.text)) throw new Error('explicit_contact_confirmation_required');
           await this.write('lead_patch',{fields:{},contact_confirmation:a});
           this.confirmed={channel:a.channel,value:a.value,seq:reply.seq}; result={ok:true,contact_confirmed:true}; break;
         }
@@ -148,14 +181,40 @@ export class SalesConversation {
     } catch(error) { result={ok:false,error:error instanceof Error?error.message:'invalid_tool',instruction:'Não afirme que salvou. Peça evidência ou confirmação explícita quando necessário.'}; }
     this.send({type:'conversation.item.create',item:{type:'function_call_output',call_id:call.call_id,output:JSON.stringify(result)}});
   }
+  private async flushTools() {
+    // Audio transcription arrives independently of response.done. Keep the same
+    // provider tool pending until its already-committed evidence is persisted.
+    if(this.pendingAudio.size || this.userSpeaking) return;
+    for(const calls of this.pendingToolBatches.splice(0)) {
+      for(const call of calls) await this.tool(call);
+      this.continuationPending=true;
+    }
+    if(this.endingRequested) {
+      this.continuationPending=false;
+      if(!this.audioPlaying) await this.stop('agent_ended');
+      return;
+    }
+    if(this.continuationPending && !this.responseRequested && this.responses.size===this.completed.size) {
+      this.continuationPending=false;this.responseRequested=true;
+      this.send({type:'response.create'});
+    }
+  }
   async handle(event:any):Promise<void> {
     switch(event.type) {
       case 'session.updated': if(!isSalesSessionIntact(event.session,String(this.row.model))) await this.stop('session_authority_changed'); break;
-      case 'input_audio_buffer.committed': if(event.item_id)this.pendingAudio.add(event.item_id); break;
+      case 'input_audio_buffer.speech_started': this.userSpeaking=true; break;
+      case 'input_audio_buffer.committed': {
+        this.userSpeaking=false;
+        if(event.item_id&&!this.transcriptionSeen.has(event.item_id)&&!this.pendingAudio.has(event.item_id)){
+          this.pendingAudio.add(event.item_id);this.transcriptQueue.push({id:event.item_id,role:'user'});
+        }
+        break;
+      }
       case 'conversation.item.input_audio_transcription.completed': {
-        await this.transcript(event.item_id,'user',event.transcript,event.usage);
+        await this.queueTranscript(event.item_id,'user',event.transcript,event.usage);
         if(!event.item_id || this.transcriptionSeen.has(event.item_id)) break;
-        this.transcriptionSeen.add(event.item_id);this.pendingAudio.delete(event.item_id);
+        this.transcriptionSeen.add(event.item_id);
+        if(!event.transcript?.trim())this.send(salesDiagnosticEvent('no_speech_detected'));
         const u=event.usage;
         if(u?.type==='tokens' && [u.input_tokens,u.output_tokens,u.total_tokens].every(x=>Number.isSafeInteger(x)&&x>=0) && u.total_tokens===u.input_tokens+u.output_tokens){
           // Official pricing 2026-09-04: mini-transcribe input $1.25, output $5 / 1M.
@@ -164,14 +223,16 @@ export class SalesConversation {
           await this.write('usage',{observed_cost_usd:this.observed,final:false,provider_event_id:`transcription:${event.item_id}`,provider_usage:u});
           if(this.observed>=Math.min(config.sessionCostCeilingUsd,1.5,Number(this.row.reserved_cost_usd))) await this.stop('cost_ceiling');
         }else this.transcriptionIncomplete=true;
+        await this.flushTools();
         break;
       }
-      case 'response.output_audio_transcript.done': await this.transcript(event.item_id,'assistant',event.transcript); break;
+      case 'response.output_audio_transcript.done': await this.queueTranscript(event.item_id,'assistant',event.transcript); break;
       case 'conversation.item.input_audio_transcription.failed': await this.stop('transcription_failed'); break;
       case 'output_audio_buffer.started': this.audioPlaying=true; break;
       case 'output_audio_buffer.stopped': case 'output_audio_buffer.cleared':
         this.audioPlaying=false;if(this.endingRequested)await this.stop('agent_ended');break;
       case 'response.created': {
+        this.responseRequested=false;
         const r=event.response;
         if((r?.output_modalities&&canonical(r.output_modalities)!==canonical(['audio']))||(r?.max_output_tokens!==undefined&&(!Number.isFinite(r.max_output_tokens)||r.max_output_tokens>1024))){await this.stop('response_authority_changed');break;}
         if(r?.id)this.responses.add(r.id);break;
@@ -188,9 +249,8 @@ export class SalesConversation {
           if(this.observed>=Math.min(config.sessionCostCeilingUsd,1.5,Number(this.row.reserved_cost_usd))) { await this.stop('cost_ceiling'); return; }
         } else this.interruptedUsage=true;
         const calls=Array.isArray(r.output)?r.output.filter((x:any)=>x.type==='function_call'):[];
-        for(const call of calls) await this.tool(call);
-        if(this.endingRequested) { if(!this.audioPlaying)await this.stop('agent_ended'); return; }
-        if(calls.length) this.send({type:'response.create'});
+        if(calls.length)this.pendingToolBatches.push(calls);
+        await this.flushTools();
         break;
       }
       case 'session.ended': case 'session.closed': {

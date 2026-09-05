@@ -5,7 +5,7 @@ export const SALES_MODELS = ['gpt-realtime-2.1', 'gpt-realtime-2.1-mini'] as con
 export function salesSessionConfig(model: string) {
   if (!(SALES_MODELS as readonly string[]).includes(model)) throw new Error('sales_model_forbidden');
   return { type: 'realtime', model, instructions: salesInstructions, tools: salesTools, tool_choice: 'auto', output_modalities: ['audio'], max_output_tokens: 1024,
-    audio: { input: { transcription: { model: 'gpt-4o-mini-transcribe', language: 'pt' }, turn_detection: { type: 'semantic_vad', eagerness: 'low', create_response: true, interrupt_response: true } }, output: { voice: 'ash' } } };
+    audio: { input: { transcription: { model: 'gpt-4o-mini-transcribe', language: 'pt' }, turn_detection: { type: 'semantic_vad', eagerness: 'low', create_response: false, interrupt_response: true } }, output: { voice: 'ash' } } };
 }
 export type CreateOutcome = { outcome: 'accepted'; callId: string; answer: string; model: string } | { outcome: 'unknown' | 'rejected'; callId: string | null; error: string; model: string };
 export async function createSalesCall(sdp: string, requestId: string, fetchImpl: typeof fetch = fetch, hooks?: { beforeAttempt(model: string): Promise<void>; rejected(): Promise<void> }): Promise<CreateOutcome> {

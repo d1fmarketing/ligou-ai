@@ -74,3 +74,16 @@ test('cancelled before browser connection never produces a greeting',async()=>{
  for(let i=0;i<50&&!f.log.includes('activate');i++)await Bun.sleep(1);
  await f.stop();f.connect();await running;expect(f.log).not.toContain('greeting');
 });
+
+test('reconciled provider expiry does not create another call or issue another hangup',async()=>{
+ const f=fixture({provider_call_id:'rtc',provider_termination_state:'expired',status:'ended'});
+ await runSalesSession(f.row,f.deps);expect(f.log).not.toContain('hangup');expect(f.log).not.toContain('provider_create');
+});
+
+test('unexpected termination transport rejection is persisted as unknown and never settled',async()=>{
+ const f=fixture({provider_call_id:'rtc',model:'gpt-realtime-2.1'}),states:string[]=[];
+ const apply=f.deps.store.apply;f.deps.store.apply=async(r:any,op:string,p:any)=>{if(op==='termination')states.push(p.state);return apply(r,op,p);};
+ f.deps.terminate=async()=>{throw Error('network failure');};
+ await runSalesSession(f.row,f.deps);
+ expect(states).toEqual(['requested','unknown']);expect(f.log).not.toContain('usage');
+});

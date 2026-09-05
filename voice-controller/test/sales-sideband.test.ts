@@ -96,10 +96,24 @@ test('authoritative terminal usage can settle only when every transcription and 
  expect(missing.writes.filter(w=>w.op==='usage').at(-1).payload.final).toBe(false);
 });
 test('a negative or qualified confirmation cannot authorize contact',async()=>{
- for(const reply of ['Não está correto','Sim, mas não autorizo','Talvez','Sim, se eu decidir depois']){
+ for(const reply of ['Não está correto','Sim, mas não autorizo','Talvez','Sim, se eu decidir depois','Yes, but not now','Yes, if I decide later','Sí, pero no ahora']){
   const f=fixture();await f.user('u','Meu email é rj@example.com');await f.tool('save_lead_fact',{field:'email',value:'rj@example.com',evidence_item_id:'u'});
   await f.assistant('a','Seu email é rj@example.com, correto?');await f.user('reply',reply);
   expect(JSON.parse((await f.tool('confirm_contact',{channel:'email',value:'rj@example.com',readback_item_id:'a',confirmation_item_id:'reply'})).item.output).ok).toBe(false);
+ }
+});
+test('English and Spanish contact confirmation and separate consent preserve withdrawal',async()=>{
+ for(const [read,yes,request,withdrawal] of [
+  ['Your email is rj@example.com, correct?','Yes, correct.','Do you authorize the Ligou team to contact you by email about the pilot?','Please do not contact me.'],
+  ['Tu correo es rj@example.com, ¿correcto?','Sí, correcto.','¿Autoriza al equipo Ligou a contactarle por email sobre el piloto?','No me contacte más.'],
+ ]) {
+  const f=fixture();await f.user('fact','rj@example.com');await f.tool('save_lead_fact',{field:'email',value:'rj@example.com',evidence_item_id:'fact'});
+  await f.assistant('read',read);await f.user('confirm',yes);
+  expect(JSON.parse((await f.tool('confirm_contact',{channel:'email',value:'rj@example.com',readback_item_id:'read',confirmation_item_id:'confirm'})).item.output).ok).toBe(true);
+  await f.assistant('ask',request);await f.user('allow',yes);
+  expect(JSON.parse((await f.tool('record_followup_consent',{channel:'email',granted:true,request_item_id:'ask',response_item_id:'allow'})).item.output).ok).toBe(true);
+  await f.user('revoke',withdrawal);
+  expect(f.writes.filter(w=>w.op==='lead_patch'&&w.payload.followup_consent).at(-1).payload.followup_consent.granted).toBe(false);
  }
 });
 test('unrelated later yes cannot retroactively confirm contact',async()=>{
@@ -172,5 +186,111 @@ test('unrelated negative user answer does not silently revoke contact consent',a
 test('explicit withdrawal wording is honored without an assistant question',async()=>{
  for(const text of ['Não autorizo que vocês me contatem.','Não quero receber ligações.','Não quero ser contatado.','Não me mandem mais emails.','Por favor, não entrem em contato.','Please do not contact me.']){
   const f=fixture();await f.user('withdraw',text);expect(f.writes.at(-1).payload.followup_consent).toEqual({granted:false,response_item_id:'withdraw'});
+ }
+});
+
+test('mentioning a product demonstration does not turn real business facts into roleplay',async()=>{
+ const f=fixture();
+ await f.assistant('intro','Sou uma IA da Ligou. Posso fazer uma demonstração depois de conhecer sua empresa.');
+ await f.user('business','Minha empresa é ACME.');
+ const saved=await f.tool('save_lead_fact',{field:'company',value:'ACME',evidence_item_id:'business'});
+ expect(JSON.parse(saved.item.output).ok).toBe(true);
+ expect(f.writes.find(w=>w.op==='transcript'&&w.payload.provider_item_id==='business').payload.context).toBe('real');
+});
+
+test('a tool waits for committed audio evidence instead of asking the visitor to repeat it',async()=>{
+ const f=fixture();
+ await f.c.handle({type:'input_audio_buffer.committed',item_id:'business'});
+ await f.c.handle({type:'response.created',response:{id:'r-pending'}});
+ await f.c.handle({type:'response.done',response:{id:'r-pending',output:[{type:'function_call',call_id:'save-business',name:'save_lead_fact',arguments:JSON.stringify({field:'company',value:'ACME',evidence_item_id:'business'})}]}});
+ expect(f.sent.filter(e=>e.item?.type==='function_call_output')).toHaveLength(0);
+ expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(0);
+ await f.user('business','Minha empresa é ACME.');
+ const outputs=f.sent.filter(e=>e.item?.type==='function_call_output');
+ expect(outputs).toHaveLength(1);
+ expect(JSON.parse(outputs[0].item.output).ok).toBe(true);
+ expect(f.writes.map(w=>w.op)).toEqual(['transcript','lead_patch']);
+ expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(1);
+ await f.user('business','Minha empresa é ACME.');
+ expect(f.sent.filter(e=>e.item?.type==='function_call_output')).toHaveLength(1);
+});
+
+test('deferred tool continuation does not collide with an active provider response',async()=>{
+ const f=fixture();
+ await f.c.handle({type:'input_audio_buffer.committed',item_id:'business'});
+ await f.tool('save_lead_fact',{field:'company',value:'ACME',evidence_item_id:'business'},'deferred');
+ await f.c.handle({type:'response.created',response:{id:'r-active'}});
+ await f.user('business','Minha empresa é ACME.');
+ expect(f.sent.filter(e=>e.item?.type==='function_call_output')).toHaveLength(1);
+ expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(0);
+ await f.c.handle({type:'response.done',response:{id:'r-active',output:[]}});
+ expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(1);
+});
+
+test('declining a simulation keeps subsequent business facts in the real conversation',async()=>{
+ const f=fixture();
+ await f.assistant('decline','Não vamos começar a simulação agora. Vamos falar da sua empresa.');
+ await f.user('business','Minha empresa é ACME.');
+ expect(JSON.parse((await f.tool('save_lead_fact',{field:'company',value:'ACME',evidence_item_id:'business'})).item.output).ok).toBe(true);
+});
+
+test('a delayed caller transcript stays before the assistant readback for contact confirmation',async()=>{
+ const f=fixture();
+ await f.c.handle({type:'input_audio_buffer.committed',item_id:'contact'});
+ await f.assistant('read','Seu email é rj@example.com, está correto?');
+ await f.user('contact','Meu email é rj@example.com');
+ await f.tool('save_lead_fact',{field:'email',value:'rj@example.com',evidence_item_id:'contact'});
+ await f.user('yes','Sim, está correto.');
+ expect(JSON.parse((await f.tool('confirm_contact',{channel:'email',value:'rj@example.com',readback_item_id:'read',confirmation_item_id:'yes'})).item.output).ok).toBe(true);
+ expect(f.writes.filter(w=>w.op==='transcript').map(w=>w.payload.provider_item_id)).toEqual(['contact','read','yes']);
+});
+
+test('automatic VAD replies are disabled while Ash, semantic VAD and interruption remain unchanged',()=>{
+ const s=salesSessionConfig('gpt-realtime-2.1');
+ expect(s.audio.input.turn_detection).toEqual({type:'semantic_vad',eagerness:'low',create_response:false,interrupt_response:true});
+ expect(s.audio.output.voice).toBe('ash');
+ expect(s.model).toBe('gpt-realtime-2.1');
+ expect(isSalesSessionIntact({...s,audio:{...s.audio,input:{...s.audio.input,turn_detection:{...s.audio.input.turn_detection,create_response:true}}}},'gpt-realtime-2.1')).toBe(false);
+});
+
+test('a real caller turn creates one response only after persisted transcription',async()=>{
+ const f=fixture();
+ await f.c.handle({type:'input_audio_buffer.speech_started',item_id:'u'});
+ await f.c.handle({type:'input_audio_buffer.committed',item_id:'u'});
+ expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(0);
+ await f.user('u','Minha empresa é ACME');
+ expect(f.writes[0].op).toBe('transcript');
+ expect(f.sent[0].item.content[0].text).toContain('Evidência persistida');
+ expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(1);
+ await f.user('u','Minha empresa é ACME');
+ expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(1);
+});
+
+test('empty transcription emits a diagnostic without starting another repeat request',async()=>{
+ const f=fixture();
+ await f.c.handle({type:'input_audio_buffer.committed',item_id:'noise'});
+ await f.user('noise','  ');
+ expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(0);
+ expect(f.sent.some(e=>e.item?.content?.[0]?.text?.includes('LIGOU_SALES_DIAGNOSTIC:{"code":"no_speech_detected"}'))).toBe(true);
+ expect(f.writes.filter(w=>w.op==='transcript')).toHaveLength(0);
+});
+
+test('caller interrupt waits for the cancelled response completion before responding',async()=>{
+ const f=fixture();
+ await f.c.handle({type:'response.created',response:{id:'speaking'}});
+ await f.c.handle({type:'input_audio_buffer.speech_started',item_id:'interrupt'});
+ await f.c.handle({type:'input_audio_buffer.committed',item_id:'interrupt'});
+ await f.user('interrupt','Quero saber o preço.');
+ expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(0);
+ await f.c.handle({type:'response.done',response:{id:'speaking',status:'cancelled',output:[]}});
+ expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(1);
+});
+
+test('explicit English and Spanish simulations cannot become real leads',async()=>{
+ for(const [start,end] of [['Starting the simulation.','End of simulation, back to your business.'],['Comenzamos la simulación.','Fin de la simulación, volviendo a tu empresa.']]){
+  const f=fixture();await f.assistant('start',start);await f.user('fake','Fake Company');
+  expect(JSON.parse((await f.tool('save_lead_fact',{field:'company',value:'Fake Company',evidence_item_id:'fake'})).item.output).ok).toBe(false);
+  await f.assistant('end',end);await f.user('real','Real Company');
+  expect(JSON.parse((await f.tool('save_lead_fact',{field:'company',value:'Real Company',evidence_item_id:'real'})).item.output).ok).toBe(true);
  }
 });
