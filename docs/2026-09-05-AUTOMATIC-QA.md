@@ -39,7 +39,7 @@ The third call, af8a6414-4526-451b-9138-7ef148b76a83, demonstrated two-way audio
 
 The email transcription differed from the spoken address; the validator correctly refused to mark it confirmed. Several reformulated business facts were also rejected. This exposed the missing literal transcript handoff, which was subsequently fixed and independently unit-reviewed. The final wording/handoff patch has **not** received another live conversation acceptance test; the QA visitor's three-session daily limit was respected. A successful human contact readback and confirmation remains required.
 
-Recorded usage for the three calls totals US$0.418097. This is observed usage, not a settled billing receipt. Their US$4.50 reservation remains held according to the existing settlement policy; no reservation was manually released. At the final conversation readback, zero active sessions and US$10.50 of the configured US$15 daily admission budget remained available.
+Recorded usage for the three calls totals US$0.418097. This is observed usage, not a settled billing receipt. Their US$4.50 reservation remains held according to the existing settlement policy; no reservation was manually released. The three current-day calls account for US$4.50 of reservations. A subsequent readback using the actual admission calculation also includes a US$1.50 older unsettled hold: total committed budget is US$6.00, leaving US$9.00 of the configured US$15 available, with zero active calls. The earlier US$10.50 report figure omitted that carried hold; the server limit itself already included it.
 
 ## Artifacts and rollback
 
