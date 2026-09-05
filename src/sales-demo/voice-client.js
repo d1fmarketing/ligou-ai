@@ -13,6 +13,8 @@ const messages = {
   microphone_busy: 'O microfone está sendo usado por outro aplicativo. Libere-o e tente novamente.',
   microphone_timeout: 'A permissão do microfone não foi concluída. Libere o microfone no navegador e tente novamente.',
   microphone_switch_failed: 'Não foi possível usar esse microfone. A entrada anterior continua selecionada.',
+  microphone_switch_timeout: 'Não foi possível concluir a troca. Seu microfone foi desligado; tente novamente após o encerramento.',
+  storage_unavailable: 'O navegador não conseguiu guardar o estado da conversa. Permita o armazenamento deste site ou tente em outra janela.',
   unsupported_browser: 'Este navegador não oferece chamada por voz. Abra a página em um navegador atualizado.',
   daily_budget: 'O limite de conversas de hoje foi atingido. Você pode voltar amanhã.',
   global_busy: 'O Ligou está em outra conversa. Tente novamente em alguns instantes.',
@@ -69,6 +71,7 @@ export function createSalesVoiceSession(options = {}, environment = globalThis) 
   let startedAt = 0, maxSeconds = 300, polling = false, failConnection = null;
   let disconnectHandler = null, connectionAcknowledged = false, rtcConnected = false;
   let cancelCapture = null, unresolvedPrevious = false, switchingMicrophone = false;
+  let cancelNegotiation = null, replacementStream = null;
   let audioContext = null, meterClock = null, meterSource = null, isMuted = false;
   let providerTerminationState = null;
   const partials = new Map();
@@ -76,8 +79,9 @@ export function createSalesVoiceSession(options = {}, environment = globalThis) 
   const report = (error) => options.onError?.({code:error.code || 'network_error',message:error.message || messages.network_error});
   const delay = ms => new Promise(resolve => env.setTimeout(resolve, ms));
   const active = () => !cancelled && !['ended','error','ending','ending_unconfirmed'].includes(state);
-  function stored(key, storage = env.sessionStorage) { try { return storage?.getItem(key); } catch { return null; } }
-  function store(key, value, storage = env.sessionStorage) { try { storage?.setItem(key,value); } catch {} }
+  function browserStorage(name) {try {return env[name];} catch {return null;}}
+  function stored(key, storage = browserStorage('sessionStorage')) { try { return storage?.getItem(key); } catch { return null; } }
+  function store(key, value, storage = browserStorage('sessionStorage')) { try { storage?.setItem(key,value); return storage?.getItem(key)===value; } catch {return false;} }
   function forget(id = sessionId, capability = token) {
     try { const current = JSON.parse(stored(ACTIVE_KEY)); if (current?.id === id && current?.token === capability) env.sessionStorage?.removeItem(ACTIVE_KEY); } catch {}
   }
@@ -127,11 +131,13 @@ export function createSalesVoiceSession(options = {}, environment = globalThis) 
 
   function silenceLocal() {
     cancelCapture?.(); cancelCapture = null;
+    cancelNegotiation?.(); cancelNegotiation = null;
     stopMeter();
     if (clock) env.clearInterval(clock); clock = null;
     if (statusClock) env.clearInterval(statusClock); statusClock = null;
     if (reconnectClock) env.clearTimeout(reconnectClock); reconnectClock = null;
     stream?.getTracks().forEach(track => {track.enabled = false; track.stop();});
+    replacementStream?.getTracks().forEach(track => {track.enabled = false; track.stop();}); replacementStream = null;
     if (audio) audio.pause();
   }
 
@@ -159,6 +165,23 @@ export function createSalesVoiceSession(options = {}, environment = globalThis) 
       const timer = env.setTimeout(() => finish(errorWithCode('microphone_timeout')), options.microphoneTimeoutMs || 45000);
       cancelCapture = () => finish(errorWithCode('microphone_timeout'));
       Promise.resolve().then(() => env.navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,...(deviceId ? {deviceId:{exact:deviceId}} : {})},video:false})).then(value => finish(null,value), error => finish(error));
+    });
+  }
+
+  // Bound browser-owned promises too: a network timeout cannot protect an SDP
+  // operation that stalled before the first server request.
+  function negotiate(operation) {
+    return new Promise((resolve,reject) => {
+      let settled=false;
+      const finish=(error,value)=>{
+        if(settled)return;settled=true;env.clearTimeout(timer);
+        if(cancelNegotiation===cancel)cancelNegotiation=null;
+        if(error)reject(error);else resolve(value);
+      };
+      const cancel=()=>finish(errorWithCode('connection_failed'));
+      const timer=env.setTimeout(()=>finish(errorWithCode('connection_timeout')),options.negotiationTimeoutMs||12000);
+      cancelNegotiation=cancel;
+      Promise.resolve().then(()=>{if(cancelled)throw errorWithCode('connection_failed');return operation();}).then(value=>finish(null,value),error=>finish(error));
     });
   }
 
@@ -203,16 +226,21 @@ export function createSalesVoiceSession(options = {}, environment = globalThis) 
     try {
       replacement = await captureMicrophone(deviceId);
       if (cancelled) return;
+      replacementStream = replacement;
       const sender = peer.getSenders().find(item => item.track?.kind === 'audio');
       const track = replacement.getAudioTracks()[0];
       if (!sender || !track) throw new Error();
       track.enabled = !isMuted;
-      await sender.replaceTrack(track);
+      await negotiate(()=>sender.replaceTrack(track));
       if (cancelled) return;
-      stream?.getTracks().forEach(oldTrack => oldTrack.stop()); stream = replacement; replacement = null;
+      track.enabled = !isMuted;
+      stream?.getTracks().forEach(oldTrack => oldTrack.stop()); stream = replacement; replacementStream = null; replacement = null;
       startMeter(); await reportMicrophones();
-    } catch {if (!cancelled) {report(errorWithCode('microphone_switch_failed')); await reportMicrophones();}}
-    finally {replacement?.getTracks().forEach(track => track.stop()); switchingMicrophone = false;}
+    } catch(error) {if (!cancelled) {
+      if(error.code==='connection_timeout'){await end();report(errorWithCode('microphone_switch_timeout'));}
+      else {report(errorWithCode('microphone_switch_failed')); await reportMicrophones();}
+    }}
+    finally {if(replacementStream===replacement)replacementStream=null;replacement?.getTracks().forEach(track => track.stop()); switchingMicrophone = false;}
   }
 
   function receive(event) {
@@ -287,7 +315,7 @@ export function createSalesVoiceSession(options = {}, environment = globalThis) 
   async function runStart() {
     try {
       endpoint = endpointUrl(options.endpoint, env.location?.href);
-      if (!env.navigator?.mediaDevices?.getUserMedia || !env.RTCPeerConnection || !env.crypto?.getRandomValues) throw errorWithCode('unsupported_browser');
+      if (!env.navigator?.mediaDevices?.getUserMedia || !env.RTCPeerConnection || !env.crypto?.getRandomValues || !env.crypto?.randomUUID) throw errorWithCode('unsupported_browser');
       let previous; try { previous = JSON.parse(stored(ACTIVE_KEY)); } catch {}
       if (previous && UUID.test(previous.id) && TOKEN.test(previous.token)) {
         if (previous.endpoint !== endpoint) { unresolvedPrevious = true; throw errorWithCode('ending_unconfirmed'); }
@@ -316,13 +344,16 @@ export function createSalesVoiceSession(options = {}, environment = globalThis) 
       };
       stream.getTracks().forEach(track => peer.addTrack(track,stream));
       channel = peer.createDataChannel('oai-events'); channel.onmessage = receive;
-      const offer = await peer.createOffer();
-      await peer.setLocalDescription(offer);
+      const offer = await negotiate(()=>peer.createOffer());
+      if(cancelled)return;
+      await negotiate(()=>peer.setLocalDescription(offer));
       if (cancelled) return;
       sessionId = env.crypto.randomUUID(); token = randomToken(env.crypto);
-      let visitorId = stored(VISITOR_KEY,env.localStorage);
-      if (!UUID.test(visitorId || '')) { visitorId = env.crypto.randomUUID(); store(VISITOR_KEY,visitorId,env.localStorage); }
-      store(ACTIVE_KEY,JSON.stringify({id:sessionId,token,endpoint}));
+      let visitorId = stored(VISITOR_KEY,browserStorage('localStorage'));
+      if (!UUID.test(visitorId || '')) { visitorId = env.crypto.randomUUID(); store(VISITOR_KEY,visitorId,browserStorage('localStorage')); }
+      if(!store(ACTIVE_KEY,JSON.stringify({id:sessionId,token,endpoint}))) {
+        sessionId=null;token=null;throw errorWithCode('storage_unavailable');
+      }
       watchPageExit();
       const payload = {action:'start',request_id:sessionId,visitor_id:visitorId,sdp:peer.localDescription.sdp};
       let result;
@@ -366,7 +397,7 @@ export function createSalesVoiceSession(options = {}, environment = globalThis) 
           }
         };
       });
-      try { await peer.setRemoteDescription({type:'answer',sdp:result.sdp}); await connected; }
+      try { await Promise.all([negotiate(()=>peer.setRemoteDescription({type:'answer',sdp:result.sdp})),connected]); }
       finally { env.clearTimeout(connectionTimer); }
       if (cancelled) return;
       const acknowledgement = await api({action:'connected',session_id:sessionId});
@@ -399,7 +430,7 @@ export function createSalesVoiceSession(options = {}, environment = globalThis) 
   return {
     start,end,getState:()=>state,
     selectMicrophone,
-    setMuted(muted) { isMuted = !!muted; stream?.getAudioTracks().forEach(track => { track.enabled = !isMuted; }); },
+    setMuted(muted) { isMuted = !!muted; for(const input of [stream,replacementStream])input?.getAudioTracks().forEach(track => { track.enabled = !isMuted; }); },
     async resumeAudio() { if (audio) await audio.play(); },
   };
 }

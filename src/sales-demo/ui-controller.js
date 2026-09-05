@@ -19,7 +19,7 @@ export function createVoiceBridge({loadClient, endpoint, emit}) {
           onState(next, detail) {
             if (current !== version) return;
             busy = ACTIVE_STATES.has(next);
-            update({state:next,...(detail?.providerTerminationState ? {providerTerminationState:detail.providerTerminationState} : {}),...(next === 'ended' ? {error:null} : {})});
+            update({state:next,...(detail?.providerTerminationState ? {providerTerminationState:detail.providerTerminationState} : {})});
           },
           onCaption(caption) {if (current === version) update({caption});},
           onElapsed(elapsed) {if (current === version) update({elapsed});},

@@ -55,12 +55,64 @@ test('a double click starts one peer and one admitted session; no owner token is
   assert.deepEqual(Object.keys(request.body).sort(),['action','request_id','sdp','visitor_id']);
   await f.session.end();
 });
+test('stalled local SDP negotiation times out before any admission and releases capture',async()=>{
+  const f=fixture({options:{negotiationTimeoutMs:15}}), Base=f.env.RTCPeerConnection;
+  f.env.RTCPeerConnection=class extends Base {createOffer(){return new Promise(()=>{});}};
+  const started=f.session.start().then(()=> 'started',error=>error.code);
+  try {
+    const outcome=await Promise.race([started,new Promise(resolve=>setTimeout(()=>resolve('still_waiting'),100))]);
+    assert.equal(outcome,'connection_timeout');
+    assert.equal(f.requests.length,0);assert.ok(f.tracks.every(track=>track.stopped));
+  }finally{await f.session.end();}
+});
+test('ending during a pending microphone replacement stops the replacement immediately',async()=>{
+  const f=fixture();await f.session.start();const original=f.tracks[0];original.kind='audio';
+  const replacement={kind:'audio',enabled:true,stopped:false,stop(){this.stopped=true;}};
+  let finishSwap,swapping=false;
+  f.peer.getSenders=()=>[{track:original,replaceTrack(){swapping=true;return new Promise(resolve=>{finishSwap=resolve;});}}];
+  f.env.navigator.mediaDevices.getUserMedia=async()=>({getTracks:()=>[replacement],getAudioTracks:()=>[replacement]});
+  const change=f.session.selectMicrophone('replacement');
+  for(let i=0;i<20&&!swapping;i++)await new Promise(resolve=>setTimeout(resolve,1));
+  await f.session.end();
+  try {assert.equal(replacement.stopped,true);assert.equal(original.stopped,true);}
+  finally {finishSwap?.();await change;}
+});
+test('muting while the microphone is switching also mutes the pending replacement',async()=>{
+  const f=fixture();await f.session.start();const original=f.tracks[0];original.kind='audio';
+  const replacement={kind:'audio',enabled:true,stopped:false,stop(){this.stopped=true;}};
+  let finishSwap,swapping=false;
+  f.peer.getSenders=()=>[{track:original,replaceTrack(){swapping=true;return new Promise(resolve=>{finishSwap=resolve;});}}];
+  f.env.navigator.mediaDevices.getUserMedia=async()=>({getTracks:()=>[replacement],getAudioTracks:()=>[replacement]});
+  const change=f.session.selectMicrophone('replacement');
+  for(let i=0;i<20&&!swapping;i++)await new Promise(resolve=>setTimeout(resolve,1));
+  try {
+    f.session.setMuted(true);assert.equal(original.enabled,false);assert.equal(replacement.enabled,false);
+    finishSwap();await change;assert.equal(replacement.enabled,false);
+    f.session.setMuted(false);assert.equal(replacement.enabled,true);
+  }finally {finishSwap?.();await change;await f.session.end();}
+});
+test('unavailable capability storage fails before admitting an unrecoverable session',async()=>{
+  const f=fixture();f.env.sessionStorage.setItem=()=>{throw new Error('quota');};
+  try {
+    await assert.rejects(f.session.start(),error=>error.code==='storage_unavailable');
+    assert.equal(f.requests.filter(r=>r.body.action==='start').length,0);
+    assert.ok(f.tracks.every(track=>track.stopped));
+  }finally{await f.session.end();}
+});
 
 test('microphone denial never admits a provider session and gives an actionable error', async () => {
   const f=fixture({microphoneError:Object.assign(new Error('denied'),{name:'NotAllowedError'})});
   await assert.rejects(f.session.start());
   assert.equal(f.requests.length,0); assert.equal(f.session.getState(),'error');
   assert.equal(f.errors[0].code,'microphone_denied');
+});
+
+test('automatic termination keeps the connection failure visible until retry',async()=>{
+  let callbacks;const view={};
+  const bridge=createVoiceBridge({endpoint:'/api/sales-session',emit:patch=>Object.assign(view,patch),loadClient:async()=>({createSalesVoiceSession(options){callbacks=options;return{start:async()=>options.onState('listening')};}})});
+  await bridge.start();callbacks.onError({code:'connection_failed',message:'A conexão caiu. Tente novamente.'});callbacks.onState('ended',{providerTerminationState:'confirmed'});
+  assert.equal(view.state,'ended');assert.equal(view.error,'A conexão caiu. Tente novamente.');
+  await bridge.start();assert.equal(view.error,null);
 });
 
 test('mute affects the microphone and end requests server termination plus local release', async () => {

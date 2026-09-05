@@ -9,9 +9,21 @@ test('a malformed field cannot become displayed company data or imply callback p
 });
 
 test('confirmed contact and explicit permission are both required to display authorized follow-up',()=>{
-  const base={session_id:'test',fields:{email:{value:'owner@example.com'}},contact_confirmed:true};
+  const base={session_id:'test',fields:{email:{value:'owner@example.com'}},contact_confirmed:true,contact_confirmation:{channel:'email',value:'owner@example.com'},followup_consent_evidence:{channel:'email',granted:true}};
   assert.equal(projectSalesLead({...base,followup_consent:false}).canFollowUp,false);
   assert.equal(projectSalesLead({...base,followup_consent:true}).canFollowUp,true);
+});
+
+test('permission belongs to the exact confirmed contact and channel',()=>{
+  const base={fields:{email:{value:'owner@example.com'},phone:{value:'+14155550123'}},contact_confirmed:true,contact_confirmation:{channel:'email',value:'owner@example.com'},followup_consent:true,followup_consent_evidence:{channel:'email',granted:true}};
+  const good=projectSalesLead(base);assert.equal(good.confirmedChannel,'email');assert.equal(good.canFollowUp,true);
+  for(const patch of [
+    {contact_confirmation:{channel:'email',value:'different@example.com'}},
+    {contact_confirmation:null},
+    {followup_consent_evidence:{channel:'phone',granted:true}},
+    {followup_consent_evidence:{channel:'email',granted:false}},
+    {followup_consent_evidence:{channel:'unknown',granted:true}},
+  ])assert.equal(projectSalesLead({...base,...patch}).canFollowUp,false);
 });
 
 test('a denied database read surfaces failure instead of inventing an empty successful inbox',async()=>{

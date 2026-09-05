@@ -101,7 +101,7 @@ function createScheduler() {
   };
 }
 
-function createHookRuntime() {
+export function createHookRuntime() {
   const slots = [];
   let cursor = 0;
 
@@ -156,7 +156,7 @@ function createHookRuntime() {
   };
 }
 
-function createElement(type, props, ...children) {
+export function createElement(type, props, ...children) {
   const normalizedChildren = children.length <= 1 ? children[0] : children;
   return {
     type,
