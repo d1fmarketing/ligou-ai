@@ -1,0 +1,88 @@
+/* Keep the three-step scene at intermediate window widths; stack only on phones. */
+@media (min-width:768px) and (max-width:1023px) {
+  .iv {
+    background:linear-gradient(96deg,#041a2b 0%,#062231 40%,#40595a 54%,#d9decf 70%,#f6f7f0 84%);
+    padding:64px 0 48px;
+  }
+  .iv-head {max-width:58%;margin:0;padding:0;background:none}
+  .iv h2 {white-space:normal}
+  .iv-sub {max-width:100%}
+  .iv>.ct>.illustration-note {color:#c9ddd7}
+  .iv-steps {
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:16px;
+    max-width:none;
+    align-items:stretch;
+  }
+  .iv-col {min-width:0;padding:0}
+  .iv-col--2::before,.iv-col--3::before {display:none}
+  .iv-col--1 .iv-lab {color:var(--lg-teal-400)}
+  .iv-col--2 .iv-lab {color:var(--lg-paper)}
+  .iv-col--1 .iv-line,.iv-col--2 .iv-line {color:var(--lg-paper)}
+  .iv-lab {font-size:11px;gap:7px;letter-spacing:.08em}
+  .iv-line {font-size:14px;line-height:1.45;min-height:41px;margin:10px 0 14px;text-wrap:balance}
+  .iv-card {padding:14px;border-radius:18px;min-width:0}
+  .iv-card--dark {display:flex;flex-direction:column}
+  .iv-idrow {display:grid;grid-template-columns:40px minmax(0,1fr);gap:8px}
+  .iv-idrow>.wf {grid-column:2}
+  .iv-avatar {width:40px;height:40px}
+  .iv-id {min-width:0;margin:0}
+  .iv-id b {font-size:18px}
+  .iv-id i {font-size:12px;line-height:1.35}
+  .iv-q {font-size:16px;line-height:1.5;padding:12px;margin-top:16px}
+  .iv-callbar {height:44px;flex:none;margin-top:auto}
+  .iv-card--dark .iv-q {margin-bottom:18px}
+  .iv-rows {gap:10px}
+  .iv-row {padding:10px;gap:8px}
+  .iv-row>span:last-child {min-width:0}
+  .iv-ric {width:26px;height:28px;border-radius:8px}
+  .iv-ric svg {width:18px;height:18px}
+  .iv-row b {font-size:14px;line-height:1.35}
+  .iv-row p {font-size:14px;line-height:1.45}
+  .iv-node {left:-29px;right:auto;top:43%;width:40px;height:40px;border-width:3px}
+  .iv-node svg {width:27px;height:27px}
+  .iv-readyhead {gap:8px}
+  .iv-readyhead>span:last-child {min-width:0}
+  .iv-avatar--ring {width:40px;height:40px}
+  .iv-readytitle {font-size:18px;line-height:1.15}
+  .iv-pill {font-size:12px;padding:6px 10px;line-height:1.45}
+  .iv-pill svg {width:14px;height:14px}
+  .iv-divider {margin:16px 0 12px}
+  .iv-apr {font-size:15px}
+  .iv-owner {gap:8px}
+  .iv-rav {width:32px;height:32px}
+  .iv-own {max-width:calc(100% - 40px);margin-right:0}
+  .iv-own b {font-size:13px}
+  .iv-own i {font-size:12px}
+  .iv-approve {width:100%;font-size:13px;padding:12px 10px;margin-top:6px}
+  .iv-rail {flex-direction:row;align-items:center;gap:12px;padding:20px}
+  .iv-railitem {flex:1;min-width:0;font-size:11px;letter-spacing:.06em;white-space:normal}
+  .iv-dots {display:block;flex:0 0 12px;min-width:12px}
+  .iv-memory {grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);max-width:none;gap:24px;padding:24px}
+  .iv-memory h3 {font-size:28px}
+  .iv-memory__copy {padding-left:18px}
+  .iv-memory__copy p {font-size:15px}
+}
+
+@media (max-width:767px) {
+  .iv>.ct {padding-inline:clamp(22px,3.6vw,32px)!important}
+  .iv-steps {grid-template-columns:minmax(0,1fr);width:100%;max-width:480px;margin-inline:auto;gap:28px}
+  .iv-col {padding:0;min-width:0}
+  .iv-col--2::before,.iv-col--3::before {display:none}
+  .iv-card {padding:20px;min-width:0}
+  .iv-node {display:none}
+  .iv-idrow {display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:10px}
+  .iv-avatar {width:40px;height:40px}
+  .iv-id {min-width:0;margin:0}
+  .iv-id b {font-size:18px}
+  .iv-id i {font-size:12px}
+  .iv-q {font-size:17px;line-height:1.5;padding:14px}
+  .iv-callbar {height:44px}
+  .iv-row {padding:12px;gap:10px}
+  .iv-row>span:last-child {min-width:0}
+  .iv-ric {width:32px;height:34px;border-radius:9px}
+  .iv-readyhead {gap:12px}
+  .iv-readyhead>span:last-child {min-width:0}
+  .iv-avatar--ring {width:48px;height:48px}
+  .iv-rail,.iv-memory {max-width:480px;margin-inline:auto;box-sizing:border-box}
+}
