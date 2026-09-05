@@ -43,7 +43,7 @@ describe("responsive hero behavior", () => {
       1440,
     );
 
-    harness.media.update({ width: 1024, height: 768 });
+    harness.media.update({ width: 1023, height: 768 });
     assertMedia(
       "tabletLandscape",
       "assets/hero-loop-tablet-landscape-1440x1080.mp4",
@@ -52,7 +52,7 @@ describe("responsive hero behavior", () => {
       1080,
     );
 
-    harness.media.update({ width: 1199, height: 800 });
+    harness.media.update({ width: 1023, height: 800 });
     assertMedia(
       "tabletLandscape",
       "assets/hero-loop-tablet-landscape-1440x1080.mp4",
@@ -61,7 +61,7 @@ describe("responsive hero behavior", () => {
       1080,
     );
 
-    harness.media.update({ width: 1200, height: 800 });
+    harness.media.update({ width: 1024, height: 800 });
     assertMedia(
       "desktop",
       "assets/hero-loop-1080p.mp4",
@@ -69,6 +69,11 @@ describe("responsive hero behavior", () => {
       1920,
       1080,
     );
+
+    for (const width of [1199, 1200, 1280, 1440, 1920]) {
+      harness.media.update({ width, height: 1080 });
+      assertMedia("desktop", "assets/hero-loop-1080p.mp4", "assets/hero-poster.png", 1920, 1080);
+    }
 
     harness.media.update({ width: 1599, height: 700 });
     assertMedia(
@@ -108,7 +113,7 @@ describe("responsive hero behavior", () => {
     expect(findAll(hero, hasClass("h4-ghostbtn"))).toHaveLength(1);
     expect(findAll(findAll(hero, hasClass("hero4-artslot"))[0], hasClass("hero4-artlayer"))).toHaveLength(1);
 
-    harness.media.update({ width: 1200, height: 800 });
+    harness.media.update({ width: 1024, height: 800 });
     hero = harness.render(Hero);
     expect(findAll(hero, hasClass("hero4-artlayer"))).toHaveLength(1);
     expect(findAll(hero, hasClass("h4-ghostbtn"))).toHaveLength(1);

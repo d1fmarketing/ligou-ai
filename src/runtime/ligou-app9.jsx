@@ -139,7 +139,7 @@ const HERO_ULTRAWIDE_QUERY = '(min-width: 1600px) and (min-aspect-ratio: 2/1)';
 
 function getHeroMediaKey() {
   if (window.matchMedia('(max-width: 767px)').matches) return 'mobile';
-  if (window.matchMedia('(max-width: 1199px)').matches) {
+  if (window.matchMedia('(max-width: 1023px)').matches) {
     return window.matchMedia('(orientation: portrait)').matches ? 'tabletPortrait' : 'tabletLandscape';
   }
   if (window.matchMedia(HERO_ULTRAWIDE_QUERY).matches) return 'ultrawide';
@@ -151,7 +151,7 @@ function useHeroMedia() {
   React.useEffect(() => {
     const queries = [
       window.matchMedia('(max-width: 767px)'),
-      window.matchMedia('(max-width: 1199px)'),
+      window.matchMedia('(max-width: 1023px)'),
       window.matchMedia('(orientation: portrait)'),
       window.matchMedia(HERO_ULTRAWIDE_QUERY)
     ];
@@ -168,10 +168,10 @@ function HeroVideo() {
 }
 
 function useHeroBand() {
-  const get = () => window.matchMedia('(max-width: 767px)').matches ? 'mobile' : window.matchMedia('(max-width: 1199px)').matches ? 'mid' : 'desktop';
+  const get = () => window.matchMedia('(max-width: 767px)').matches ? 'mobile' : window.matchMedia('(max-width: 1023px)').matches ? 'mid' : 'desktop';
   const [band, setBand] = React.useState(get);
   React.useEffect(() => {
-    const qs = [window.matchMedia('(max-width: 767px)'), window.matchMedia('(max-width: 1199px)')];
+    const qs = [window.matchMedia('(max-width: 767px)'), window.matchMedia('(max-width: 1023px)')];
     const f = () => setBand(get());
     qs.forEach(q => q.addEventListener ? q.addEventListener('change', f) : q.addListener(f));
     return () => qs.forEach(q => q.removeEventListener ? q.removeEventListener('change', f) : q.removeListener(f));
@@ -185,8 +185,8 @@ function Hero() {
       {LGFX_REDUCED ?
       <picture>
         <source media="(max-width:767px)" srcSet="assets/hero-poster-mobile.png" width="1080" height="1920"></source>
-        <source media="(min-width:768px) and (max-width:1199px) and (orientation:portrait)" srcSet="assets/hero-poster-tablet-portrait-1080x1440.png" width="1080" height="1440"></source>
-        <source media="(min-width:768px) and (max-width:1199px)" srcSet="assets/hero-poster-tablet-landscape-1440x1080.png" width="1440" height="1080"></source>
+        <source media="(min-width:768px) and (max-width:1023px) and (orientation:portrait)" srcSet="assets/hero-poster-tablet-portrait-1080x1440.png" width="1080" height="1440"></source>
+        <source media="(min-width:768px) and (max-width:1023px)" srcSet="assets/hero-poster-tablet-landscape-1440x1080.png" width="1440" height="1080"></source>
         <source media={HERO_ULTRAWIDE_QUERY} srcSet="assets/hero-poster-ultrawide-3440x1476.webp" width="3440" height="1476"></source>
         <img src="assets/hero-poster.png" width="1920" height="1080" fetchpriority="high" alt=""/>
       </picture> :

@@ -1,0 +1,105 @@
+/* One desktop scene, with text wrapping and legible minimum sizes. */
+@media (min-width: 1024px) {
+  .p7-bar {
+    min-height: 64px;
+    gap: 10px;
+  }
+
+  .p7-blab,
+  .p7-en {
+    font-size: max(11px, .9cqw);
+  }
+
+  .p7-time,
+  .p7-ts {
+    font-size: max(12px, .96cqw);
+  }
+
+  .p7-again {
+    min-height: 44px;
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .p7-again svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .p7-b1,
+  .p7-b2 {
+    gap: 10px;
+  }
+
+  .p7-b1 {
+    max-width: 42.3%;
+  }
+
+  .p7-b2 {
+    max-width: 36.1%;
+  }
+
+  .p7-b1 .p7-ts,
+  .p7-b2 .p7-ts {
+    flex: none;
+  }
+
+  .p7-b1 .p7-bub,
+  .p7-b2 .p7-bub {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .p7-bub,
+  .p7-b3 .p7-bub {
+    width: 100%;
+    box-sizing: border-box;
+    padding: max(10px, 1.03cqw) max(12px, 1.32cqw);
+    font-size: max(12px, .97cqw);
+    white-space: normal;
+  }
+
+  .p7-blbl {
+    font-size: 11px;
+  }
+
+  .p7-clabel,
+  .p7-cmuted {
+    font-size: max(10px, .8cqw);
+    line-height: 1.4;
+    white-space: normal;
+  }
+
+  .p7-clabel {
+    align-items: flex-start;
+  }
+
+  .p7-clabel .p7-cd {
+    margin-top: 4px;
+  }
+
+  .p7-crule,
+  .p7-cval {
+    font-size: max(11px, .92cqw);
+  }
+
+  .p7-strow .p7-cmuted {
+    font-size: 10px !important;
+  }
+
+  .p7-dhead {
+    white-space: normal;
+  }
+
+  .p7-apr,
+  .p7-adj {
+    min-height: 44px;
+    padding: 8px 4px;
+    line-height: 1.25;
+    white-space: normal;
+  }
+  .p7-b1 .p7-bub,
+  .p7-b2 .p7-bub {
+    font-size: max(12px, 1.25cqw);
+  }
+}

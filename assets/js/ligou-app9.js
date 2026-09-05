@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 87559fd1006e1342bf6b8e496e7cbd655565ef2b12d5afbb6d7b15404f149ed9
+ * Source SHA-256: 7c64961effa78c116906864c5905c1530c3530a9d9ec06aef561251c6827ec96
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -276,7 +276,7 @@ const HERO_ULTRAWIDE_QUERY = "(min-width: 1600px) and (min-aspect-ratio: 2/1)";
 function getHeroMediaKey() {
   if (window.matchMedia("(max-width: 767px)").matches)
     return "mobile";
-  if (window.matchMedia("(max-width: 1199px)").matches) {
+  if (window.matchMedia("(max-width: 1023px)").matches) {
     return window.matchMedia("(orientation: portrait)").matches ? "tabletPortrait" : "tabletLandscape";
   }
   if (window.matchMedia(HERO_ULTRAWIDE_QUERY).matches)
@@ -288,7 +288,7 @@ function useHeroMedia() {
   React.useEffect(() => {
     const queries = [
       window.matchMedia("(max-width: 767px)"),
-      window.matchMedia("(max-width: 1199px)"),
+      window.matchMedia("(max-width: 1023px)"),
       window.matchMedia("(orientation: portrait)"),
       window.matchMedia(HERO_ULTRAWIDE_QUERY)
     ];
@@ -325,10 +325,10 @@ function HeroVideo() {
   });
 }
 function useHeroBand() {
-  const get = () => window.matchMedia("(max-width: 767px)").matches ? "mobile" : window.matchMedia("(max-width: 1199px)").matches ? "mid" : "desktop";
+  const get = () => window.matchMedia("(max-width: 767px)").matches ? "mobile" : window.matchMedia("(max-width: 1023px)").matches ? "mid" : "desktop";
   const [band, setBand] = React.useState(get);
   React.useEffect(() => {
-    const qs = [window.matchMedia("(max-width: 767px)"), window.matchMedia("(max-width: 1199px)")];
+    const qs = [window.matchMedia("(max-width: 767px)"), window.matchMedia("(max-width: 1023px)")];
     const f = () => setBand(get());
     qs.forEach((q) => q.addEventListener ? q.addEventListener("change", f) : q.addListener(f));
     return () => qs.forEach((q) => q.removeEventListener ? q.removeEventListener("change", f) : q.removeListener(f));
@@ -346,12 +346,12 @@ function Hero() {
     width: "1080",
     height: "1920"
   }), React.createElement("source", {
-    media: "(min-width:768px) and (max-width:1199px) and (orientation:portrait)",
+    media: "(min-width:768px) and (max-width:1023px) and (orientation:portrait)",
     srcSet: "assets/hero-poster-tablet-portrait-1080x1440.png",
     width: "1080",
     height: "1440"
   }), React.createElement("source", {
-    media: "(min-width:768px) and (max-width:1199px)",
+    media: "(min-width:768px) and (max-width:1023px)",
     srcSet: "assets/hero-poster-tablet-landscape-1440x1080.png",
     width: "1440",
     height: "1080"

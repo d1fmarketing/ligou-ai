@@ -9,6 +9,7 @@ function createMediaEnvironment(initialViewport) {
 
   const evaluate = (query) => {
     if (query === "(max-width: 767px)") return viewport.width <= 767;
+    if (query === "(max-width: 1023px)") return viewport.width <= 1023;
     if (query === "(max-width: 1199px)") return viewport.width <= 1199;
     if (query === "(orientation: portrait)") return viewport.height >= viewport.width;
     if (query === "(min-width: 1600px) and (min-aspect-ratio: 2/1)") {
