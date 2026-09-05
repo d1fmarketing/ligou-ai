@@ -51,6 +51,8 @@ export function isSalesSessionIntact(session:any, model:string) {
 export class SalesConversation {
   private evidence = new Map<string,Evidence>();
   private fields = new Map<string,string>();
+  private fieldEvidence = new Map<string,Evidence>();
+  private leadPersistenceUnknown = false;
   private contactEvidenceSequence = new Map<string,number>();
   private consentDecision: {seq:number;id:string;granted:boolean} | null = null;
   private confirmed: {channel:string;value:string;seq:number} | null = null;
@@ -78,7 +80,19 @@ export class SalesConversation {
     if(this.responseRequested||this.responses.size||this.userSpeaking||this.pendingAudio.size)return;
     this.responseRequested=true;this.send({type:'response.create'});
   }
-  private async write(op:string,payload:Record<string,unknown>) { this.row=await this.store.apply(this.row,op,payload); }
+  private async write(op:string,payload:Record<string,unknown>) {
+    if(op==='lead_patch'&&this.leadPersistenceUnknown)throw new Error('lead_persistence_unknown');
+    try {this.row=await this.store.apply(this.row,op,payload);}
+    catch(error) {
+      // A lost acknowledgement can follow a successful commit. Stop before a
+      // later tool overwrites durable fields using an incomplete local recap.
+      if(op==='lead_patch') {
+        this.leadPersistenceUnknown=true;
+        await this.stop('lead_persistence_unknown');
+      }
+      throw error;
+    }
+  }
   private async queueTranscript(id:string,role:'user'|'assistant',text:string,usage?:unknown) {
     const pending=this.transcriptQueue.find(item=>item.id===id);
     if(pending) {
@@ -134,14 +148,16 @@ export class SalesConversation {
     this.tools.add(call.call_id);
     let result:any;
     try {
+      if(this.leadPersistenceUnknown)throw new Error('lead_persistence_unknown');
       if(typeof call.arguments!=='string' || call.arguments.length>8000) throw new Error('invalid_arguments');
       const a=JSON.parse(call.arguments);
       if(!a || typeof a!=='object' || Array.isArray(a)) throw new Error('invalid_arguments');
       switch(call.name) {
         case 'save_lead_fact': {
-          const allowed=['name','company','website','industry','region','language','call_volume','current_tools','main_need','contact_preference','phone','email','pilot_interest'];
+          const allowed=['name','company','website','industry','region','language','call_volume','current_tools','main_need','contact_preference','phone','email','pilot_interest','next_step'];
           if(!allowed.includes(a.field)||typeof a.value!=='string'||!a.value.trim()||a.value.length>1000) throw new Error('invalid_fact');
           const e=this.item(a.evidence_item_id,'user');
+          if(e.seq<(this.fieldEvidence.get(a.field)?.seq??0))throw new Error('stale_fact_evidence');
           const channel=['phone','email'].includes(a.field)?a.field:null;
           if(channel&&e.seq<(this.contactEvidenceSequence.get(channel)??0))throw new Error('stale_contact_evidence');
           const needle=channel?contact(a.value,channel):norm(a.value);
@@ -149,10 +165,25 @@ export class SalesConversation {
           if(!needle || !haystack.includes(needle)) throw new Error('value_not_in_evidence');
           if(a.field==='phone' && !/^\+?[\d\s().-]{7,30}$/.test(a.value)) throw new Error('invalid_phone');
           if(a.field==='email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.value)) throw new Error('invalid_email');
-          await this.write('lead_patch',{fields:{[a.field]:{value:a.value,evidence_item_ids:[e.id]}}});
+          const candidateFields=new Map(this.fields).set(a.field,a.value);
+          const candidateEvidence=new Map(this.fieldEvidence).set(a.field,e);
+          // A compact projection of saved facts, never a model-authored assertion.
+          // Keep each excerpt visibly bounded so the DB's 2,000-character limit
+          // cannot prevent saving a legitimate long fact or its evidence.
+          const recapFields=[['company','Empresa'],['industry','Ramo'],['region','Região'],['main_need','Necessidade'],['pilot_interest','Interesse no piloto'],['next_step','Próximo passo']];
+          const recap=recapFields.filter(([field])=>candidateFields.has(field));
+          const summary=recap.map(([field,label])=>{
+            const value=candidateFields.get(field)!;
+            const excerpt=value.slice(0,300).replace(/[\uD800-\uDBFF]$/,'');
+            return `${label}: ${value.length>300?`${excerpt}…`:value}`;
+          }).join('\n');
+          const patch:Record<string,unknown>={[a.field]:{value:a.value,evidence_item_ids:[e.id]}};
+          if(summary)patch.summary={value:summary,evidence_item_ids:[...new Set(recap.map(([field])=>candidateEvidence.get(field)!.id))]};
+          await this.write('lead_patch',{fields:patch});
           if(channel && this.fields.get(a.field)!==a.value) this.confirmed=null;
           if(channel)this.contactEvidenceSequence.set(channel,e.seq);
-          this.fields.set(a.field,a.value); result={ok:true,saved_field:a.field}; break;
+          this.fields=candidateFields;this.fieldEvidence=candidateEvidence;
+          result={ok:true,saved_field:a.field,...(summary?{saved_summary:summary}:{}),...(candidateFields.has('next_step')?{saved_next_step:candidateFields.get('next_step')}: {})}; break;
         }
         case 'confirm_contact': {
           if(!['phone','email'].includes(a.channel)||typeof a.value!=='string'||this.fields.get(a.channel)!==a.value) throw new Error('saved_contact_required');

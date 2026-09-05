@@ -2,9 +2,9 @@ import { expect, test } from 'bun:test';
 import { SalesConversation, isSalesSessionIntact } from '../src/sales/conversation.ts';
 import { salesSessionConfig } from '../src/sales/provider.ts';
 const row: any = { session_id: 's', claim_token:'c', model:'gpt-realtime-2.1', observed_cost_usd:0, reserved_cost_usd:1.5 };
-function fixture(failTranscript = false) {
+function fixture(failTranscript = false, failLead: boolean|'after' = false) {
   const writes: any[] = [], sent: any[] = [], stops: string[] = [];
-  const store: any = { apply: async (_s: any, op: string, payload: any) => { if (op === 'transcript' && failTranscript) throw new Error('db_down'); writes.push({op,payload}); return row; } };
+  const store: any = { apply: async (_s: any, op: string, payload: any) => { if ((op === 'transcript' && failTranscript) || (op === 'lead_patch' && failLead===true)) throw new Error('db_down'); writes.push({op,payload}); if(op==='lead_patch'&&failLead==='after')throw new Error('sales_store_timeout');return row; } };
   const c = new SalesConversation(row, store, e => sent.push(e), async reason => { stops.push(reason); });
   const user = (id: string, text: string) => c.handle({type:'conversation.item.input_audio_transcription.completed',item_id:id,transcript:text});
   const assistant = (id: string, text: string) => c.handle({type:'response.output_audio_transcript.done',item_id:id,transcript:text});
@@ -30,6 +30,56 @@ test('failed transcript persistence never creates lead evidence', async () => {
   const f = fixture(true);
   await expect(f.user('u1','ACME')).rejects.toThrow('db_down');
   expect(JSON.parse((await f.tool('save_lead_fact',{field:'company',value:'ACME',evidence_item_id:'u1'})).item.output).ok).toBe(false);
+});
+test('lead recap and agreed next step persist progressively with literal real evidence', async () => {
+  const f=fixture();
+  await f.user('business','Minha empresa é ACME e perco ligações enquanto trabalho.');
+  await f.tool('save_lead_fact',{field:'company',value:'ACME',evidence_item_id:'business'});
+  await f.tool('save_lead_fact',{field:'main_need',value:'perco ligações enquanto trabalho',evidence_item_id:'business'});
+  await f.user('next','Quero conversar com a equipe antes de decidir.');
+  const result=JSON.parse((await f.tool('save_lead_fact',{field:'next_step',value:'conversar com a equipe antes de decidir',evidence_item_id:'next'})).item.output);
+  expect(result.ok).toBe(true);
+  const fields=f.writes.filter(w=>w.op==='lead_patch').at(-1).payload.fields;
+  expect(fields.next_step.evidence_item_ids).toEqual(['next']);
+  expect(fields.summary).toEqual({value:'Empresa: ACME\nNecessidade: perco ligações enquanto trabalho\nPróximo passo: conversar com a equipe antes de decidir',evidence_item_ids:['business','next']});
+  expect(result.saved_summary).toBe(fields.summary.value);
+  expect(f.writes.some(w=>w.payload.followup_consent)).toBe(false);
+  await f.assistant('simulation','Vamos começar a simulação.');
+  await f.user('fake','Ligue amanhã para Fake Company.');
+  const count=f.writes.length;
+  expect(JSON.parse((await f.tool('save_lead_fact',{field:'next_step',value:'Ligue amanhã',evidence_item_id:'fake'})).item.output).ok).toBe(false);
+  expect(f.writes).toHaveLength(count);
+});
+test('recap cannot be supplied by the model, include unsaved facts, or roll back a newer fact',async()=>{
+  const f=fixture();
+  await f.user('old','Minha empresa é Antiga');await f.user('new','Minha empresa é Nova');
+  await f.tool('save_lead_fact',{field:'company',value:'Nova',evidence_item_id:'new'});
+  expect(JSON.parse((await f.tool('save_lead_fact',{field:'company',value:'Antiga',evidence_item_id:'old'})).item.output).ok).toBe(false);
+  expect(JSON.parse((await f.tool('save_lead_fact',{field:'summary',value:'Cliente aprovado',evidence_item_id:'new'})).item.output).ok).toBe(false);
+  expect(f.writes.filter(w=>w.op==='lead_patch').at(-1).payload.fields.summary.value).toBe('Empresa: Nova');
+  const fail=fixture(false,true);await fail.user('u','Minha empresa é ACME');
+  const result=JSON.parse((await fail.tool('save_lead_fact',{field:'company',value:'ACME',evidence_item_id:'u'})).item.output);
+  expect(result.ok).toBe(false);expect(result.saved_summary).toBeUndefined();
+  expect(fail.writes.filter(w=>w.op==='lead_patch')).toHaveLength(0);
+});
+test('a lost lead write acknowledgement stops further tools without overwriting committed facts',async()=>{
+  const f=fixture(false,'after');await f.user('old','Antiga');await f.user('new','Nova');
+  expect(JSON.parse((await f.tool('save_lead_fact',{field:'company',value:'Nova',evidence_item_id:'new'})).item.output).ok).toBe(false);
+  expect(f.stops).toEqual(['lead_persistence_unknown']);
+  const count=f.writes.length;
+  expect(JSON.parse((await f.tool('save_lead_fact',{field:'company',value:'Antiga',evidence_item_id:'old'})).item.output).ok).toBe(false);
+  expect(f.writes).toHaveLength(count);
+  expect(f.writes.at(-1).payload.fields.company.value).toBe('Nova');
+});
+test('bounded recap keeps supplementary unicode intact and stays within the JSONB limit',async()=>{
+  const f=fixture();const value='a'.repeat(299)+'😀'+'b'.repeat(650);
+  for(const field of ['company','industry','region','main_need','pilot_interest','next_step']) {
+    await f.user(field,value);expect(JSON.parse((await f.tool('save_lead_fact',{field,value,evidence_item_id:field})).item.output).ok).toBe(true);
+  }
+  const summary=f.writes.at(-1).payload.fields.summary;
+  expect(summary.value.length).toBeLessThanOrEqual(2000);
+  expect(summary.value.isWellFormed()).toBe(true);
+  expect(summary.evidence_item_ids).toHaveLength(6);
 });
 test('contact confirmation and channel specific followup require separate ordered evidence', async () => {
   const f = fixture();
