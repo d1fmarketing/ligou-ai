@@ -5,7 +5,7 @@ const root = new URL("../", import.meta.url);
 const html = await readFile(new URL("index.html", root), "utf8");
 const application = await readFile(new URL("src/runtime/ligou-app9.jsx", root), "utf8");
 const fontFaces = await readFile(
-  new URL("_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/tokens/fonts.css", root),
+  new URL("assets/fonts-optimized.css", root),
   "utf8",
 );
 const noScript = html.match(/<noscript>([\s\S]*?)<\/noscript>/)?.[1] ?? "";
@@ -28,10 +28,10 @@ test("client-area links exist in both React surfaces without claiming a bundled 
   expect(noScript.match(/href="\/dashboard\/"/g)).toHaveLength(1);
 });
 
-test("placeholder and label-cleanup boundaries stay explicit", () => {
-  // Termos/Privacidade have no pages yet: they must stay visible but must not be dead links (L24).
-  expect(application).toContain('<span style={a}>Termos</span>');
-  expect(application).toContain('<span style={a}>Privacidade</span>');
+test("legal destinations and label-cleanup boundaries stay explicit", () => {
+  // The preview now has real reviewable legal destinations.
+  expect(application).toContain('<a href="/termos/" style={a}>Termos</a>');
+  expect(application).toContain('<a href="/privacidade/" style={a}>Privacidade</a>');
   expect(application).not.toContain('href="#"');
   expect(application).not.toMatch(/<Eyebrow[^>]*>\s*A dor\s*<\/Eyebrow>/);
   expect(application).not.toMatch(/<Eyebrow[^>]*>\s*Prova do produto\s*<\/Eyebrow>/);
@@ -44,17 +44,25 @@ test("share metadata points at the existing 1200x630 card with an absolute URL",
   expect(html).toContain('<meta property="og:title" content="Ligou? Atendido. — Agente operacional de inteligência artificial">');
 });
 
-test("mockup controls carry no false affordance and the pricing primary routes to the proof", () => {
+test("mockup controls carry no false affordance and the pricing primary starts the shared voice conversation", () => {
   expect(application).not.toMatch(/<button className="(?:iv-approve|p7-apr|p7-adj|lc-apr|lc-adj)"/);
   expect(application).toContain('<span className="lc-apr">Aprovar encaixe</span>');
   expect(application).toContain('<button className="p7-again" type="button" onClick={replay}>');
-  expect(application).toContain('href="#prova" onClick={replayDemo} style={{marginTop: 8}}>Quero aproveitar a oferta</Button>');
+  expect(application).toContain('href="#prova" onClick={openSalesConversation} style={{marginTop: 8}}>Quero aproveitar a oferta</Button>');
   expect(application).not.toContain('href="#preco"');
 });
 
 test("display typography maps static Familjen files to their exact weights", () => {
-  expect(fontFaces).toContain("font-weight:600;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-600.ttf')");
-  expect(fontFaces).toContain("font-weight:700;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-700.ttf')");
-  expect(fontFaces).not.toContain("font-weight:400 900;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-600.ttf')");
-  expect(fontFaces).not.toContain("font-weight:700 900;font-display:swap;src:url('../../../assets/fonts/familjen-grotesk-700.ttf')");
+  expect(fontFaces).toContain("font-weight:600;font-display:swap;src:url('fonts/familjen-grotesk-600.woff2')");
+  expect(fontFaces).toContain("font-weight:700;font-display:swap;src:url('fonts/familjen-grotesk-700.woff2')");
+  expect(fontFaces).not.toContain("font-weight:400 900;font-display:swap;src:url('fonts/familjen-grotesk-600.woff2')");
+  expect(fontFaces).not.toContain("font-weight:700 900;font-display:swap;src:url('fonts/familjen-grotesk-700.woff2')");
+});
+
+test("fallback includes native FAQ, onboarding and support without a conversion form", () => {
+  expect((noScript.match(/<details>/g) || []).length).toBe(5);
+  expect(noScript).toContain('id="nojs-comecar"');
+  expect(noScript).toContain('id="nojs-capacidades"');
+  expect(noScript).toContain('suporte@ligou.ai');
+  expect(noScript).not.toContain('<form');
 });

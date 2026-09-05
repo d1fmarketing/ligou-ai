@@ -55,7 +55,7 @@ assert(normalizeNbsp(html).includes("Agente operacional de inteligência artific
 assert(applicationSource.includes("Você ensina em português · Ele atende em inglês, espanhol e português"), "owner-taught multilingual hero claim missing");
 assert(applicationSource.includes("Preciso falar inglês ou espanhol para ensinar o Ligou?"), "owner-taught multilingual FAQ missing");
 assert(applicationSource.includes("Memória permanente do seu negócio"), "permanent business memory message missing");
-assert(applicationSource.includes("depois que você aprova, a resposta vira uma regra permanente"), "owner-approved learning message missing");
+assert(applicationSource.includes("Uma nova orientação só vira regra depois da sua aprovação"), "owner-approved learning message missing");
 assert(applicationSource.includes("Quando a regra permite, ele resolve sozinho. Quando não permite, traz o caso pronto para você decidir."), "autonomy and exception bridge missing");
 assert(applicationSource.includes("Contrate até 31 de dezembro de 2026 por $299/mês."), "dated launch offer missing");
 assert(applicationSource.includes("mantém o valor base de $299/mês enquanto a assinatura permanecer ativa"), "active-subscription base price promise missing");

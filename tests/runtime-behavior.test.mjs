@@ -29,7 +29,7 @@ describe("responsive hero behavior", () => {
     assertMedia(
       "mobile",
       "assets/hero-loop-mobile-1080x1920.mp4",
-      "assets/hero-poster-mobile.png",
+      "assets/optimized/hero-poster-mobile.webp",
       1080,
       1920,
     );
@@ -38,7 +38,7 @@ describe("responsive hero behavior", () => {
     assertMedia(
       "tabletPortrait",
       "assets/hero-loop-tablet-portrait-1080x1440.mp4",
-      "assets/hero-poster-tablet-portrait-1080x1440.png",
+      "assets/optimized/hero-poster-tablet-portrait-1080x1440.webp",
       1080,
       1440,
     );
@@ -47,7 +47,7 @@ describe("responsive hero behavior", () => {
     assertMedia(
       "tabletLandscape",
       "assets/hero-loop-tablet-landscape-1440x1080.mp4",
-      "assets/hero-poster-tablet-landscape-1440x1080.png",
+      "assets/optimized/hero-poster-tablet-landscape-1440x1080.webp",
       1440,
       1080,
     );
@@ -56,7 +56,7 @@ describe("responsive hero behavior", () => {
     assertMedia(
       "tabletLandscape",
       "assets/hero-loop-tablet-landscape-1440x1080.mp4",
-      "assets/hero-poster-tablet-landscape-1440x1080.png",
+      "assets/optimized/hero-poster-tablet-landscape-1440x1080.webp",
       1440,
       1080,
     );
@@ -65,21 +65,21 @@ describe("responsive hero behavior", () => {
     assertMedia(
       "desktop",
       "assets/hero-loop-1080p.mp4",
-      "assets/hero-poster.png",
+      "assets/optimized/hero-poster.webp",
       1920,
       1080,
     );
 
     for (const width of [1199, 1200, 1280, 1440, 1920]) {
       harness.media.update({ width, height: 1080 });
-      assertMedia("desktop", "assets/hero-loop-1080p.mp4", "assets/hero-poster.png", 1920, 1080);
+      assertMedia("desktop", "assets/hero-loop-1080p.mp4", "assets/optimized/hero-poster.webp", 1920, 1080);
     }
 
     harness.media.update({ width: 1599, height: 700 });
     assertMedia(
       "desktop",
       "assets/hero-loop-1080p.mp4",
-      "assets/hero-poster.png",
+      "assets/optimized/hero-poster.webp",
       1920,
       1080,
     );
@@ -88,7 +88,7 @@ describe("responsive hero behavior", () => {
     assertMedia(
       "ultrawide",
       "assets/hero-loop-ultrawide-3440x1476.mp4",
-      "assets/hero-poster-ultrawide-3440x1476.webp",
+      "assets/optimized/hero-poster-ultrawide-3440x1476.webp",
       3440,
       1476,
     );
@@ -240,10 +240,10 @@ describe("intro and reduced-motion fallbacks", () => {
     expect(
       findAll(hero, (node) => node.type === "source").map((source) => source.props.srcSet),
     ).toEqual([
-      "assets/hero-poster-mobile.png",
-      "assets/hero-poster-tablet-portrait-1080x1440.png",
-      "assets/hero-poster-tablet-landscape-1440x1080.png",
-      "assets/hero-poster-ultrawide-3440x1476.webp",
+      "assets/optimized/hero-poster-mobile.webp",
+      "assets/optimized/hero-poster-tablet-portrait-1080x1440.webp",
+      "assets/optimized/hero-poster-tablet-landscape-1440x1080.webp",
+      "assets/optimized/hero-poster-ultrawide-3440x1476.webp",
     ]);
   });
 

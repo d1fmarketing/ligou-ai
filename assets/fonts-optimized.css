@@ -1,0 +1,16 @@
+/* Archivo v25, self-hosted from the exact Google Fonts files used by the v9 export. */
+@font-face{font-family:'Archivo';font-style:normal;font-weight:400;font-display:swap;src:url('fonts/archivo-v25-400.woff2') format('woff2')}
+@font-face{font-family:'Archivo';font-style:normal;font-weight:500;font-display:swap;src:url('fonts/archivo-v25-500.woff2') format('woff2')}
+@font-face{font-family:'Archivo';font-style:normal;font-weight:600;font-display:swap;src:url('fonts/archivo-v25-600.woff2') format('woff2')}
+@font-face{font-family:'Archivo';font-style:normal;font-weight:700;font-display:swap;src:url('fonts/archivo-v25-700.woff2') format('woff2')}
+@font-face{font-family:'Archivo';font-style:normal;font-weight:800;font-display:swap;src:url('fonts/archivo-v25-800.woff2') format('woff2')}
+@font-face{font-family:'Archivo';font-style:normal;font-weight:900;font-display:swap;src:url('fonts/archivo-v25-900.woff2') format('woff2')}
+@font-face{font-family:'Archivo';font-style:italic;font-weight:400;font-display:swap;src:url('fonts/archivo-v25-italic-400.woff2') format('woff2')}
+@font-face{font-family:'Archivo';font-style:italic;font-weight:500;font-display:swap;src:url('fonts/archivo-v25-italic-500.woff2') format('woff2')}
+@font-face{font-family:'Archivo';font-style:italic;font-weight:600;font-display:swap;src:url('fonts/archivo-v25-italic-600.woff2') format('woff2')}
+@font-face{font-family:'Archivo';font-style:italic;font-weight:700;font-display:swap;src:url('fonts/archivo-v25-italic-700.woff2') format('woff2')}
+@font-face{font-family:'Archivo';font-style:italic;font-weight:800;font-display:swap;src:url('fonts/archivo-v25-italic-800.woff2') format('woff2')}
+@font-face{font-family:'Archivo';font-style:italic;font-weight:900;font-display:swap;src:url('fonts/archivo-v25-italic-900.woff2') format('woff2')}
+/* Familjen Grotesk, display face per .impeccable.md contract; each static file declares its supplied weight. */
+@font-face{font-family:'Familjen Grotesk';font-style:normal;font-weight:600;font-display:swap;src:url('fonts/familjen-grotesk-600.woff2') format('woff2')}
+@font-face{font-family:'Familjen Grotesk';font-style:normal;font-weight:700;font-display:swap;src:url('fonts/familjen-grotesk-700.woff2') format('woff2')}

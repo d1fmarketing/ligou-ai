@@ -25,6 +25,18 @@ function replayDemo() {
   try { window.dispatchEvent(new CustomEvent('ligou:replay')); } catch (e) {}
 }
 
+let salesModule;
+function openSalesConversation(event) {
+  event?.preventDefault?.();
+  const status = document.getElementById('sales-load-status');
+  if (status) { status.hidden = true; status.textContent = ''; }
+  salesModule ||= import('/assets/js/sales-demo.js');
+  salesModule.then(module => module.openSalesDemo({endpoint: '/api/sales-session'})).catch(() => {
+    salesModule = null;
+    if (status) { status.hidden = false; status.textContent = 'Não foi possível abrir a conversa. Confira a conexão e clique em Falar com o Ligou para tentar novamente.'; }
+  });
+}
+
 function Intro4({onDone}) {
   const [txt, setTxt] = useState(0);
   const [out, setOut] = useState(false);
@@ -96,7 +108,7 @@ function Nav() {
           <span className="nav4-client-long">Área do cliente</span>
           <span className="nav4-client-short" aria-hidden="true">Área</span>
         </a>
-        <span className="nav4-cta"><Button size="sm" variant="accent" href="#prova" onClick={replayDemo} style={{whiteSpace: 'nowrap'}}>Falar com o Ligou</Button></span>
+        <span className="nav4-cta"><Button size="sm" variant="accent" href="#prova" onClick={openSalesConversation} style={{whiteSpace: 'nowrap'}}>Falar com o Ligou</Button></span>
       </div>
     </Container>
   </header>;
@@ -105,31 +117,31 @@ function Nav() {
 const HERO_MEDIA = {
   ultrawide: {
     src: 'assets/hero-loop-ultrawide-3440x1476.mp4',
-    poster: 'assets/hero-poster-ultrawide-3440x1476.webp',
+    poster: 'assets/optimized/hero-poster-ultrawide-3440x1476.webp',
     width: 3440,
     height: 1476
   },
   desktop: {
     src: 'assets/hero-loop-1080p.mp4',
-    poster: 'assets/hero-poster.png',
+    poster: 'assets/optimized/hero-poster.webp',
     width: 1920,
     height: 1080
   },
   tabletLandscape: {
     src: 'assets/hero-loop-tablet-landscape-1440x1080.mp4',
-    poster: 'assets/hero-poster-tablet-landscape-1440x1080.png',
+    poster: 'assets/optimized/hero-poster-tablet-landscape-1440x1080.webp',
     width: 1440,
     height: 1080
   },
   tabletPortrait: {
     src: 'assets/hero-loop-tablet-portrait-1080x1440.mp4',
-    poster: 'assets/hero-poster-tablet-portrait-1080x1440.png',
+    poster: 'assets/optimized/hero-poster-tablet-portrait-1080x1440.webp',
     width: 1080,
     height: 1440
   },
   mobile: {
     src: 'assets/hero-loop-mobile-1080x1920.mp4',
-    poster: 'assets/hero-poster-mobile.png',
+    poster: 'assets/optimized/hero-poster-mobile.webp',
     width: 1080,
     height: 1920
   }
@@ -184,11 +196,11 @@ function Hero() {
   const art = <div className="hero4-artlayer" aria-hidden="true">
       {LGFX_REDUCED ?
       <picture>
-        <source media="(max-width:767px)" srcSet="assets/hero-poster-mobile.png" width="1080" height="1920"></source>
-        <source media="(min-width:768px) and (max-width:1023px) and (orientation:portrait)" srcSet="assets/hero-poster-tablet-portrait-1080x1440.png" width="1080" height="1440"></source>
-        <source media="(min-width:768px) and (max-width:1023px)" srcSet="assets/hero-poster-tablet-landscape-1440x1080.png" width="1440" height="1080"></source>
-        <source media={HERO_ULTRAWIDE_QUERY} srcSet="assets/hero-poster-ultrawide-3440x1476.webp" width="3440" height="1476"></source>
-        <img src="assets/hero-poster.png" width="1920" height="1080" fetchpriority="high" alt=""/>
+        <source media="(max-width:767px)" srcSet="assets/optimized/hero-poster-mobile.webp" width="1080" height="1920"></source>
+        <source media="(min-width:768px) and (max-width:1023px) and (orientation:portrait)" srcSet="assets/optimized/hero-poster-tablet-portrait-1080x1440.webp" width="1080" height="1440"></source>
+        <source media="(min-width:768px) and (max-width:1023px)" srcSet="assets/optimized/hero-poster-tablet-landscape-1440x1080.webp" width="1440" height="1080"></source>
+        <source media={HERO_ULTRAWIDE_QUERY} srcSet="assets/optimized/hero-poster-ultrawide-3440x1476.webp" width="3440" height="1476"></source>
+        <img src="assets/optimized/hero-poster.webp" width="1920" height="1080" fetchpriority="high" alt=""/>
       </picture> :
       <HeroVideo/>}
     </div>;
@@ -202,15 +214,16 @@ function Hero() {
           <span className="lmask"><span className="ln" style={{'--d': '260ms'}}><span className="acc">Atendido.</span></span></span>
         </h1>
         <svg className="hero-wave h4-wave" viewBox="0 0 200 16" fill="none" preserveAspectRatio="none" aria-hidden="true"><path pathLength="1" d="M0 8c12-9 25-9 37 0s25 9 37 0 25-9 37 0 25 9 37 0 25-9 37 0" stroke="currentColor" strokeWidth="3" strokeLinecap="round"></path></svg>
-        <p className="hd h4-lede" style={{'--d': '380ms'}}>Seu cliente liga. O Ligou consulta suas regras, agenda o trabalho e só te chama quando precisa de aprovação.</p>
+        <p className="hd h4-lede" style={{'--d': '380ms'}}>Seu funcionário de IA para atender, conversar com clientes e ajudar a organizar sua operação — com os limites que você aprova.</p>
         <div className="hd h4-ctas" style={{'--d': '480ms'}}>
-          <Button variant="accent" size="lg" href="#prova" onClick={replayDemo}>Falar com o Ligou</Button>
+          <Button variant="accent" size="lg" href="#prova" onClick={openSalesConversation}>Falar com o Ligou</Button>
           {band !== 'mobile' && <a className="h4-ghostbtn" href="#diferenca">Ver uma operação completa</a>}
         </div>
         <p className="hd h4-trust" style={{'--d': '560ms'}}>Você ensina em português · Ele atende em inglês, espanhol e português</p>
       </div>
       <div className="hero4-artslot">{band === 'mid' ? art : null}</div>
     </Container>
+    <button type="button" className="motion-toggle" data-motion-toggle aria-pressed="false"><span data-motion-label>Pausar animações</span></button>
   </section>;
 }
 
@@ -230,9 +243,10 @@ function Scene() {
       <div className="iv-head">
         <Reveal><span className="h4-eyebrow eyebrow-mark" aria-hidden="true"></span></Reveal>
         <Reveal delay={80}><h2>O Ligou não é configurado.<br/>Ele é contratado.</h2></Reveal>
-        <Reveal delay={150}><p className="iv-sub">Você conversa. O Ligou transforma suas respostas em atendimento.</p></Reveal>
+        <Reveal delay={150}><p className="iv-sub">Você ensina o trabalho. Ele conhece a sua operação.</p></Reveal>
         <Reveal delay={220}><div className="iv-word">Em português.</div></Reveal>
       </div>
+      <p className="illustration-note">Exemplo ilustrativo da configuração e aprovação.</p>
       <div className="iv-steps">
         <Reveal className="iv-col iv-col--1" delay={0}>
           <div className="iv-lab"><b>01</b><span>Conversa</span></div>
@@ -268,7 +282,7 @@ function Scene() {
                 <span className="wf-teal"><Waveform playing={true}/></span>
               </span>
             </div>
-            <span className="iv-pill">Regras ativas e validadas <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="m8.5 12 2.5 2.5 4.5-5"></path></svg></span>
+            <span className="iv-pill">Regras prontas para sua aprovação <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="m8.5 12 2.5 2.5 4.5-5"></path></svg></span>
             <div className="iv-divider"></div>
             <b className="iv-apr">Aprovação para ativar</b>
             <div className="iv-owner">
@@ -292,7 +306,7 @@ function Scene() {
         <div className="iv-memory__copy">
           <span className="iv-memory__approval">Aprovação de nova regra</span>
           <p><strong>Não é uma secretária eletrônica.</strong> É um agente de inteligência artificial com memória operacional permanente.</p>
-          <p>Cada atendimento amplia o histórico do Ligou. Quando aparece uma situação nova, ele pergunta; depois que você aprova, a resposta vira uma regra permanente do seu negócio — até você decidir alterar ou apagar.</p>
+          <p>Cada atendimento compõe o histórico do negócio. Uma nova orientação só vira regra depois da sua aprovação — e você pode alterá-la ou apagá-la.</p>
         </div>
       </aside></Reveal>
     </Container>
@@ -316,6 +330,7 @@ function CallDemo() {
       <h2 className="p7-title">Quando a regra exige decisão, <br/>ele traz a exceção pronta.</h2>
       <p className="p7-sub p7-bridge">Quando a regra permite, ele resolve sozinho. Quando não permite, traz o caso pronto para você decidir.</p>
       <p className="p7-langnote">Este exemplo está em inglês. O Ligou também atende em espanhol.</p>
+      <p className="illustration-note">Cena ilustrativa · os controles abaixo mostram exemplos de ações.</p>
       <div className="p7-cq" ref={boardRef}><div className={'p7-board' + (boardOn ? ' on' : '')} key={mrun}>
         <div className="p7-bar">
           <span className="p7-dot"></span>
@@ -337,7 +352,7 @@ function CallDemo() {
           <circle cx="372" cy="551" r="26" fill="#fff" stroke="#dcebe3" strokeWidth="2"></circle>
         </svg>
         <span className="p7-check" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><path d="m5.5 12.5 4 4 9-9.5"></path></svg></span>
-        <div className="p7-agent" aria-hidden="true"><img src="assets/agent-ligou.png" alt=""/></div>
+        <div className="p7-agent" aria-hidden="true"><img src="assets/optimized/agent-ligou.webp" alt="" loading="lazy" decoding="async"/></div>
         <div className="p7-card p7-c1 p7-i" style={{'--lcd': '.45s'}}>
           <span className="p7-clabel"><i className="p7-cd p7-cd--coral"></i>Urgência identificada</span>
           <p className="p7-crule">Possível vazamento ativo</p>
@@ -441,12 +456,19 @@ function Dor() {
 
 function Faz() {
   const mobile = useHeroBand() === 'mobile';
-  const items = ['Entende o que o cliente precisa e coleta nome, endereço e detalhes importantes', 'Aplica as regras que você definiu sem prometer o que não está autorizado', 'Verifica disponibilidade e agenda dentro das suas regras', 'Transfere urgências ou envia um aviso, conforme você definiu', 'Envia um resumo em português e registra a ligação para você revisar'];
-  const item = t => <div className="checkitem"><b>→</b>{t}</div>;
+  const items = [
+    ['Atende e qualifica', 'Entende o pedido, coleta os detalhes e identifica o que precisa de atenção.'],
+    ['Organiza agendamentos', 'Consulta disponibilidade e agenda conforme as regras e conexões validadas no piloto.'],
+    ['Conversa com clientes', 'Responde em inglês, espanhol ou português usando informações que você aprovou.'],
+    ['Mantém você no controle', 'Traz exceções para sua decisão e registra o histórico de cada atendimento.'],
+    ['Recebe tarefas do dono', 'A delegação de novas tarefas está em desenvolvimento e será validada caso a caso.', 'Em desenvolvimento'],
+    ['Faz ligações por você', 'Ligações operacionais a pedido do dono estão em desenvolvimento. A demonstração não liga para terceiros.', 'Em desenvolvimento'],
+  ];
+  const item = ([title, description, status]) => <div className="checkitem"><b aria-hidden="true">→</b><div><strong>{title}</strong>{status && <span className="capability-status">{status}</span>}<p>{description}</p></div></div>;
   return <section data-screen-label="O que ele faz" style={{marginTop: 116}}>
     <Container>
-      <SectionHead title="O que ele faz quando o telefone toca."/>
-      {mobile ? <Reveal><div className="checklist">{items.map(t => <React.Fragment key={t}>{item(t)}</React.Fragment>)}</div></Reveal> : <div className="checklist">{items.map((t, i) => <Reveal key={t} delay={(i % 2) * 70}>{item(t)}</Reveal>)}</div>}
+      <SectionHead title="Um funcionário. Vários trabalhos." lede="O telefone é o começo. O Ligou conecta conversas, agenda e decisões da sua operação."/>
+      {mobile ? <Reveal><div className="checklist">{items.map(t => <React.Fragment key={t[0]}>{item(t)}</React.Fragment>)}</div></Reveal> : <div className="checklist">{items.map((t, i) => <Reveal key={t[0]} delay={(i % 2) * 70}>{item(t)}</Reveal>)}</div>}
     </Container>
   </section>;
 }
@@ -455,7 +477,7 @@ function Comecar() {
   const mobile = useHeroBand() === 'mobile';
   const steps = [
     ['01', 'Fale com o Ligou', 'Comece pela demonstração.'],
-    ['02', 'Contrate o Ligou', 'Plano mês a mês, sem fidelidade.'],
+    ['02', 'Combine o piloto', 'Converse sobre seu caso e confirme as condições com a equipe.'],
     ['03', 'Ensine sua operação', 'Em uma conversa curta, ele te entrevista em português e cria a primeira versão do atendimento.'],
     ['04', 'Teste e aprove', 'Ajuste o que quiser e só aprove quando estiver satisfeito.'],
     ['05', 'Coloque no ar', 'Use o número do Ligou ou redirecione o seu para começar a atender.']
@@ -463,7 +485,7 @@ function Comecar() {
   const card = ([n, t, d]) => <div className="startcard"><span className="sn">{n}</span><b>{t}</b><p>{d}</p></div>;
   return <section id="comecar" data-screen-label="Como começar" style={{marginTop: 116}}>
     <Container>
-      <SectionHead eyebrow="Como começar" title="Conheça o Ligou. Ensine sua operação. Só coloque no ar depois de aprovar."/>
+      <SectionHead eyebrow="Como começar" title="Do primeiro papo ao piloto na sua empresa."/>
       {mobile ? <Reveal><div className="startgrid">{steps.map(step => <React.Fragment key={step[0]}>{card(step)}</React.Fragment>)}</div></Reveal> : <div className="startgrid">{steps.map((step, i) => <Reveal key={step[0]} delay={i * 70}>{card(step)}</Reveal>)}</div>}
     </Container>
   </section>;
@@ -473,11 +495,11 @@ function Faq() {
   const [open, setOpen] = useState(0);
   const mobile = useHeroBand() === 'mobile';
   const qs = [
-    ['Ele pode inventar um preço ou uma resposta?', 'Não. O Ligou só informa preços, condições e políticas que você aprovou. Quando não tem uma resposta autorizada, coleta as informações, avisa que a equipe confirma e pergunta para você. A resposta só vira regra depois da sua aprovação.'],
+    ['Ele pode inventar um preço ou uma resposta?', 'Ele deve usar os preços, condições e políticas que você aprovou. Quando falta informação ou autorização, deve encaminhar a decisão para você. No piloto, testamos esses limites juntos antes de colocar o atendimento em operação.'],
     ['E se o cliente quiser falar comigo?', 'Você escolhe: quando transferir na hora, quando só receber aviso, e quando deixar o Ligou concluir sozinho.'],
     ['Ele fala que é inteligência artificial?', <React.Fragment>Sim. Ele se apresenta como o agente de inteligência artificial da sua empresa: "<span lang="en-US">Hi, you’ve reached [Your Business]. I’m their AI assistant — how can I help?</span>" A conversa é natural, e a confiança do seu cliente não depende de fingir que existe uma pessoa do outro lado.</React.Fragment>],
     ['Preciso falar inglês ou espanhol para ensinar o Ligou?', 'Não. A entrevista, os ajustes e a aprovação são em português. O Ligou atende em inglês, espanhol ou português e envia o resumo para você em português.'],
-    ['E se eu quiser cancelar?', 'Você cancela pelo painel, sem multa e sem precisar falar com vendedor.']
+    ['Como funciona o piloto?', 'A conversa de demonstração não contrata nem ativa o serviço. A equipe avalia sua operação com você e confirma escopo, integrações e próximo passo. A oferta comercial continua mês a mês, sem fidelidade.']
   ];
   const item = ([q, a], i) => <div className={`faq-item ${open === i ? 'open' : ''}`}>
     <button className="faq-q" onClick={() => setOpen(open === i ? -1 : i)} aria-expanded={open === i}>{q}<span className="pm">+</span></button>
@@ -509,7 +531,7 @@ function Pricing() {
             {inc.map(t => <div key={t} className="incitem"><b>→</b>{t}</div>)}
           </div>
           <p className="price-mobile-normal">Para novas assinaturas após a oferta: $499/mês + ativação de $499.</p>
-          <Button variant="accent" href="#prova" onClick={replayDemo} style={{marginTop: 8}}>Quero aproveitar a oferta</Button>
+          <Button variant="accent" href="#prova" onClick={openSalesConversation} style={{marginTop: 8}}>Quero aproveitar a oferta</Button>
         </Card></Reveal>
         <Reveal className="price-regular-reveal" delay={220}><div className="pricecard--ghost" style={{display: 'flex', flexDirection: 'column', gap: 18, alignItems: 'flex-start', justifyContent: 'center', height: '100%', boxSizing: 'border-box'}}>
           <span style={{...label, color: 'var(--text-inverse-secondary)'}}>Depois da oferta</span>
@@ -533,10 +555,10 @@ function Cta() {
         <span className="lmask"><span className="ln acc" style={{'--d': '220ms'}}>Atendido.</span></span>
       </h2>
       <Reveal delay={380}><div style={{display: 'flex', gap: 12, marginTop: 34, flexWrap: 'wrap'}}>
-        <Button variant="accent" size="lg" href="#prova" onClick={replayDemo}>Falar com o Ligou agora</Button>
+        <Button variant="accent" size="lg" href="#prova" onClick={openSalesConversation}>Falar com o Ligou agora</Button>
       </div></Reveal>
     </Container>
-    <img className="cta-robot floaty" src="assets/crop-robot.png" alt=""/>
+    <img className="cta-robot floaty" src="assets/crop-robot.png" alt="" loading="lazy" decoding="async"/>
   </section>;
 }
 
@@ -551,8 +573,8 @@ function Footer() {
         <span className="footer-links" style={{display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 'var(--t-small)', alignItems: 'center'}}>
           <a href="https://ligou.ai" style={a}>ligou.ai</a><span style={{opacity: .4}}>·</span>
           <a href="mailto:suporte@ligou.ai" style={a}>suporte@ligou.ai</a><span style={{opacity: .4}}>·</span>
-          <span style={a}>Termos</span><span style={{opacity: .4}}>·</span>
-          <span style={a}>Privacidade</span>
+          <a href="/termos/" style={a}>Termos</a><span style={{opacity: .4}}>·</span>
+          <a href="/privacidade/" style={a}>Privacidade</a>
         </span>
       </div>
       <p style={{margin: '16px 0 0', maxWidth: 440, color: 'var(--text-inverse-secondary)', fontSize: 15}}>Feito por um brasileiro nos EUA que cansou de ver conterrâneo perdendo venda no telefone.</p>
@@ -571,7 +593,7 @@ function App() {
       <Hero/>
       <div className="mqwrap" aria-hidden="true">
         <Marquee rev items={['Limpeza', 'Pintura', 'Roofing', 'Landscaping', 'HVAC', 'Junk removal', 'Pavers', 'Piscinas', 'Remodeling', 'Elétrica', 'Encanamento']}/>
-        <div className="mq-claims"><Marquee small items={['Atende em inglês, espanhol e português', 'Você ensina em português', 'Agenda dentro das suas regras', 'Não inventa preço', 'Resume em português', 'Pergunta antes de aprender']}/></div>
+        <div className="mq-claims"><Marquee small items={['Atende em inglês, espanhol e português', 'Você ensina em português', 'Agenda dentro das suas regras', 'Usa preços aprovados', 'Resume em português', 'Pergunta antes de aprender']}/></div>
       </div>
       <Dor/>
       <CallDemo/>
@@ -583,6 +605,7 @@ function App() {
       <Pricing/>
       <Cta/>
     </main>
+    <p id="sales-load-status" className="sales-load-status" role="alert" hidden></p>
     <Footer/>
   </React.Fragment>;
 }

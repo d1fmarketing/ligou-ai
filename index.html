@@ -4,25 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ligou — Agente operacional de inteligência artificial</title>
-<link rel="preload" as="image" href="assets/hero-poster-ultrawide-3440x1476.webp" media="(min-width:1600px) and (min-aspect-ratio:2/1)">
-<link rel="preload" as="image" href="assets/hero-poster.png" media="(min-width:1024px) and (max-width:1599px), (min-width:1600px) and (max-aspect-ratio:1999/1000)">
-<link rel="preload" as="image" href="assets/hero-poster-tablet-landscape-1440x1080.png" media="(min-width:768px) and (max-width:1023px) and (orientation:landscape)">
-<link rel="preload" as="image" href="assets/hero-poster-tablet-portrait-1080x1440.png" media="(min-width:768px) and (max-width:1023px) and (orientation:portrait)">
-<link rel="preload" as="image" href="assets/hero-poster-mobile.png" media="(max-width:767px)">
+<link rel="preload" as="image" href="assets/optimized/hero-poster-ultrawide-3440x1476.webp" media="(min-width:1600px) and (min-aspect-ratio:2/1)">
+<link rel="preload" as="image" href="assets/optimized/hero-poster.webp" media="(min-width:1024px) and (max-width:1599px), (min-width:1600px) and (max-aspect-ratio:1999/1000)">
+<link rel="preload" as="image" href="assets/optimized/hero-poster-tablet-landscape-1440x1080.webp" media="(min-width:768px) and (max-width:1023px) and (orientation:landscape)">
+<link rel="preload" as="image" href="assets/optimized/hero-poster-tablet-portrait-1080x1440.webp" media="(min-width:768px) and (max-width:1023px) and (orientation:portrait)">
+<link rel="preload" as="image" href="assets/optimized/hero-poster-mobile.webp" media="(max-width:767px)">
 <link rel="icon" type="image/png" href="assets/crop-logo-mark.png">
 <meta name="robots" content="noindex, nofollow">
-<meta name="description" content="O Ligou é um agente operacional de inteligência artificial: atende seus clientes em inglês, espanhol ou português, agenda dentro das suas regras e te manda o resumo em português. Veja a demonstração ilustrativa na página.">
+<meta name="description" content="Seu funcionário de inteligência artificial para atender, conversar com clientes e ajudar a organizar sua operação. Fale com o Ligou por voz e conheça o piloto.">
 <meta property="og:type" content="website">
 <meta property="og:locale" content="pt_BR">
 <meta property="og:site_name" content="Ligou">
 <meta property="og:title" content="Ligou? Atendido. — Agente operacional de inteligência artificial">
-<meta property="og:description" content="O Ligou é um agente operacional de inteligência artificial: atende seus clientes em inglês, espanhol ou português, agenda dentro das suas regras e te manda o resumo em português. Veja a demonstração ilustrativa na página.">
+<meta property="og:description" content="Seu funcionário de inteligência artificial para atender, conversar com clientes e ajudar a organizar sua operação. Fale com o Ligou por voz e conheça o piloto.">
 <meta property="og:image" content="https://client-nine-taupe-24.vercel.app/og-ligou.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Ligou? Atendido. — Agente operacional de inteligência artificial">
-<meta name="twitter:description" content="O Ligou é um agente operacional de inteligência artificial: atende seus clientes em inglês, espanhol ou português, agenda dentro das suas regras e te manda o resumo em português. Veja a demonstração ilustrativa na página.">
+<meta name="twitter:description" content="Seu funcionário de inteligência artificial para atender, conversar com clientes e ajudar a organizar sua operação. Fale com o Ligou por voz e conheça o piloto.">
 <meta name="twitter:image" content="https://client-nine-taupe-24.vercel.app/og-ligou.png">
 <link rel="stylesheet" href="_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/styles.css">
 <script src="assets/vendor/react-18.3.1.production.min.js"></script>
@@ -31,7 +31,7 @@
 html{scroll-behavior:smooth}
 body{overflow-x:hidden}
 :root{--t-h2-quiet:clamp(30px,calc(20px + 1.7vw),44px);--t-h2-price:clamp(34px,calc(24px + 2vw),52px);--t-h3:clamp(21px,calc(16px + .6vw),24px);--t-lede:clamp(17px,1.35vw,19px);--t-body:16px;--t-small:15px;--t-caption:13px;--t-label:var(--size-caption);--t-label-track:var(--track-caps);--t-label-weight:var(--weight-bold)}
-#prova,#diferenca,#comecar,#faq,#preco{scroll-margin-top:93px}
+#top,#prova,#diferenca,#comecar,#faq,#preco{scroll-margin-top:93px}
 .prog{position:fixed;top:0;left:0;height:3px;background:var(--accent);z-index:80;width:0}
 .nav{position:sticky;top:0;z-index:40;background:rgba(251,252,248,.9);backdrop-filter:blur(12px);border-bottom:1px solid var(--border-soft);transition:box-shadow var(--dur-med) var(--ease-out)}
 .nav.scrolled{box-shadow:var(--shadow-soft)}
@@ -662,6 +662,7 @@ noscript{display:block}
 @media (max-width:767px){.nojs-v9__flow{grid-template-columns:1fr}.nojs-v9__hero{min-height:62vh}.nojs-v9__client{margin-left:0;margin-top:10px}}
 </style>
 <link rel="stylesheet" href="assets/desktop-compact-demo.css">
+<link rel="stylesheet" href="assets/site-polish.css">
 </head>
 <body>
 <div id="root"></div>
@@ -671,7 +672,7 @@ noscript{display:block}
       <div class="nojs-v9__inner">
         <p>Agente operacional de inteligência artificial</p>
         <h1>Ligou?<span>Atendido.</span></h1>
-        <p class="nojs-v9__lede">Seu cliente liga em inglês, espanhol ou português. O Ligou consulta suas regras, agenda o trabalho e só te chama quando precisa de aprovação.</p>
+        <p class="nojs-v9__lede">Seu funcionário de IA para atender, conversar com clientes e ajudar a organizar sua operação — com os limites que você aprova.</p>
         <a class="nojs-v9__button" href="#nojs-proof">Ver demonstração ilustrativa</a>
         <a class="nojs-v9__client" href="/dashboard/">Área do cliente</a>
       </div>
@@ -686,7 +687,7 @@ noscript{display:block}
           <div class="nojs-v9__step"><b>Regra e ação</b>Consulta a política e avisa o responsável.</div>
           <div class="nojs-v9__step"><b>Resumo · Português</b>Entrega a exceção pronta e aguarda a decisão.</div>
         </div>
-        <p>A demonstração interativa desta versão exige JavaScript; este fallback mantém a narrativa essencial disponível.</p>
+        <p>A conversa por voz exige JavaScript e microfone. Esta cena é ilustrativa; seus controles não executam ações reais.</p>
       </div>
     </section>
     <section class="nojs-v9__proof" id="nojs-diferenca">
@@ -697,8 +698,29 @@ noscript{display:block}
         <div class="nojs-v9__scenes">
           <div class="nojs-v9__scene"><b>01 Conversa</b><p>Ele te liga primeiro.</p>Quais serviços vocês oferecem?</div>
           <div class="nojs-v9__scene"><b>02 Suas regras</b><p>Suas respostas viram regras de operação.</p><ul><li>Serviços — Instalação, manutenção e reparos.</li><li>Cidades atendidas — San Francisco, Los Angeles, San Diego e região.</li><li>Emergências — 24h para vazamentos e falta de água.</li></ul></div>
-          <div class="nojs-v9__scene"><b>03 Em operação</b><p>Ele atende com suas regras.</p>Regras ativas e validadas · Aprovação para ativar</div>
+          <div class="nojs-v9__scene"><b>03 Em operação</b><p>Ele atende com suas regras.</p>Regras prontas para sua aprovação · Aprovação para ativar</div>
         </div>
+      </div>
+    </section>
+    <section class="nojs-v9__proof" id="nojs-capacidades">
+      <div class="nojs-v9__inner"><h2>Um funcionário. Vários trabalhos.</h2>
+        <p>O Ligou atende e qualifica ligações, conversa com clientes e ajuda a organizar agendamentos conforme as regras e conexões validadas no piloto.</p>
+        <p>Delegação de novas tarefas e ligações operacionais a pedido do dono estão em desenvolvimento. A demonstração não executa ações reais.</p>
+      </div>
+    </section>
+    <section class="nojs-v9__proof" id="nojs-comecar">
+      <div class="nojs-v9__inner"><h2>Do primeiro papo ao piloto na sua empresa.</h2>
+        <ol><li>Fale com o Ligou e conheça a demonstração.</li><li>Combine o piloto e confirme as condições com a equipe.</li><li>Ensine sua operação em português.</li><li>Teste o atendimento e aprove os limites.</li><li>Coloque no ar somente depois de validar a operação.</li></ol>
+        <p>A conversa por voz precisa de JavaScript e permissão de microfone. Participar da demonstração não contrata nem ativa o serviço.</p>
+      </div>
+    </section>
+    <section class="nojs-v9__proof" id="nojs-faq">
+      <div class="nojs-v9__inner"><h2>O que todo dono pergunta.</h2>
+        <details><summary>Ele pode inventar um preço ou uma resposta?</summary><p>Ele deve usar os preços, condições e políticas aprovados. Quando falta informação ou autorização, deve encaminhar a decisão para você. Esses limites são testados no piloto.</p></details>
+        <details><summary>E se o cliente quiser falar comigo?</summary><p>Você define quando transferir, quando receber um aviso e quando o Ligou pode concluir o atendimento.</p></details>
+        <details><summary>Ele fala que é inteligência artificial?</summary><p>Sim. Ele se apresenta como o agente de inteligência artificial da sua empresa.</p></details>
+        <details><summary>Preciso falar inglês ou espanhol para ensinar o Ligou?</summary><p>Não. Você ensina em português; o Ligou atende em inglês, espanhol ou português e envia o resumo para você em português.</p></details>
+        <details><summary>Como funciona o piloto?</summary><p>A equipe avalia sua operação e confirma escopo, integrações e próximo passo. A demonstração não contrata nem ativa o serviço.</p></details>
       </div>
     </section>
     <section class="nojs-v9__price" id="nojs-preco">
@@ -719,6 +741,7 @@ noscript{display:block}
         <p>Plano mês a mês. Sem fidelidade.</p>
       </div>
     </section>
+    <footer class="nojs-v9__proof"><div class="nojs-v9__inner"><h2>Ligou? Atendido.</h2><p>Informações e suporte: <a href="mailto:suporte@ligou.ai">suporte@ligou.ai</a></p><p><a href="/termos/">Termos</a> · <a href="/privacidade/">Privacidade</a></p></div></footer>
   </main>
 </noscript>
 <script>
@@ -737,5 +760,6 @@ window.addEventListener('error',function(e){
 <script src="_ds/ligou-design-system-a33905fc-3bee-481b-b797-48c2b57eab4c/_ds_bundle.js"></script>
 <script src="assets/js/ligou-fx2.js"></script>
 <script src="assets/js/ligou-app9.js"></script>
+<script type="module" src="assets/js/site-motion.js"></script>
 </body>
 </html>

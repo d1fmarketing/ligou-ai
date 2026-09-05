@@ -35,3 +35,5 @@ for (const { input, output } of sources) {
     banner + transpiler.transformSync(source),
   );
 }
+
+await Bun.write(path.join(outputDirectory, "site-motion.js"), await readFile(path.join(root, "src/runtime/site-motion.js"), "utf8"));

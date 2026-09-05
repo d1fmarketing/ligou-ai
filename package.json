@@ -6,7 +6,7 @@
   "scripts": {
     "build": "bun run scripts/build-claude-v9.mjs",
     "test": "bun test",
-    "check": "bun run build && node --check assets/js/ligou-fx2.js && node --check assets/js/ligou-app9.js && node --check dev-server.mjs && bun test tests/frontend-contract.test.mjs tests/runtime-behavior.test.mjs && bun run secrets:scan && node scripts/verify-claude-v9.mjs",
+    "check": "bun run build && bun run build:sales && bun run build:commercial && node --check assets/js/ligou-fx2.js && node --check assets/js/ligou-app9.js && node --check dev-server.mjs && bun test tests/frontend-contract.test.mjs tests/runtime-behavior.test.mjs tests/site-motion.test.mjs tests/sales-demo-voice-client.test.mjs && node --test tests/sales-proxy.test.mjs tests/sales-commercial.test.mjs tests/site-build.test.mjs && bun run secrets:scan && node scripts/verify-claude-v9.mjs",
     "site:build": "node scripts/build-site.mjs",
     "secrets:scan": "node scripts/scan-secrets.mjs",
     "test:security": "node scripts/test-security.mjs",
@@ -14,7 +14,9 @@
     "test:backup-restore": "node --test infra/test/backup-restore.test.mjs",
     "test:deploy-release": "node --test infra/test/deploy-release.test.mjs",
     "test:edge-functions": "node scripts/check-edge-functions.mjs",
-    "db:gate:local": "node scripts/local-db-gate.mjs"
+    "db:gate:local": "node scripts/local-db-gate.mjs",
+    "build:sales": "bun scripts/build-sales-demo.mjs",
+    "build:commercial": "bun scripts/build-commercial.mjs"
   },
   "devDependencies": {
     "supabase": "2.115.0"
