@@ -158,9 +158,13 @@ body{overflow-x:hidden}
 .price-mobile-normal{display:none;margin:0;color:var(--text-secondary);font-size:var(--t-small);font-weight:700}
 .pricecard--ghost{background:transparent;border:1px solid rgba(251,252,248,.18);border-radius:var(--radius-lg);padding:36px;color:var(--text-inverse)}
 @media (min-width:1200px){
+.pricegrid{grid-template-columns:minmax(0,1fr);gap:16px}
+.pricegrid .lg-card{display:grid!important;grid-template-columns:minmax(0,.95fr) minmax(0,1.05fr);column-gap:clamp(36px,4vw,64px)!important;align-items:start!important}
+.pricegrid .lg-card>.lg-badge,.pricegrid .lg-card>div:not(.inclist),.pricegrid .lg-card>p:not(.price-mobile-normal),.pricegrid .lg-card>.lg-btn{grid-column:1;justify-self:start}
+.pricegrid .lg-card>.inclist{grid-column:2;grid-row:1 / span 4;align-self:center;margin-top:0}
 .price-regular-reveal{align-self:start}
-.pricecard--ghost{padding:28px;gap:12px!important}
-.pricecard--ghost>div{font-size:clamp(32px,3vw,40px)!important}
+.pricecard--ghost{padding:18px 24px;flex-direction:row!important;align-items:center!important;justify-content:flex-start!important;gap:24px!important}
+.pricecard--ghost>div{font-size:36px!important;flex:none;white-space:nowrap}
 }
 .inclist{width:100%;margin-top:6px}
 .incitem{display:flex;gap:10px;padding:8px 0;border-top:1px solid var(--border-soft);font-size:var(--t-small);color:var(--text-secondary);align-items:baseline}
