@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 8f7c2bfa96ef19c0335baf9c85d3134fd0dcf010b73273510420284352faa891
+ * Source SHA-256: 87559fd1006e1342bf6b8e496e7cbd655565ef2b12d5afbb6d7b15404f149ed9
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -635,17 +635,17 @@ function Scene() {
     className: "iv-rail"
   }, React.createElement("span", {
     className: "iv-railitem"
-  }, React.createElement("b", null, "01"), "Ele te liga primeiro"), React.createElement("span", {
+  }, "Ele te liga primeiro"), React.createElement("span", {
     className: "iv-dots",
     "aria-hidden": "true"
   }), React.createElement("span", {
     className: "iv-railitem"
-  }, React.createElement("b", null, "02"), "Ele atende com suas regras"), React.createElement("span", {
+  }, "Ele atende com suas regras"), React.createElement("span", {
     className: "iv-dots",
     "aria-hidden": "true"
   }), React.createElement("span", {
     className: "iv-railitem"
-  }, React.createElement("b", null, "03"), "Ele pergunta antes de aprender"))), React.createElement(Reveal, {
+  }, "Ele pergunta antes de aprender"))), React.createElement(Reveal, {
     delay: 220
   }, React.createElement("aside", {
     className: "iv-memory",

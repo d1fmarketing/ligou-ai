@@ -280,9 +280,9 @@ function Scene() {
         </Reveal>
       </div>
       <Reveal delay={150}><div className="iv-rail">
-        <span className="iv-railitem"><b>01</b>Ele te liga primeiro</span><span className="iv-dots" aria-hidden="true"></span>
-        <span className="iv-railitem"><b>02</b>Ele atende com suas regras</span><span className="iv-dots" aria-hidden="true"></span>
-        <span className="iv-railitem"><b>03</b>Ele pergunta antes de aprender</span>
+        <span className="iv-railitem">Ele te liga primeiro</span><span className="iv-dots" aria-hidden="true"></span>
+        <span className="iv-railitem">Ele atende com suas regras</span><span className="iv-dots" aria-hidden="true"></span>
+        <span className="iv-railitem">Ele pergunta antes de aprender</span>
       </div></Reveal>
       <Reveal delay={220}><aside className="iv-memory" aria-label="Memória operacional do Ligou">
         <div className="iv-memory__lead">
