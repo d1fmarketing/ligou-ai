@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 4a1652ac6f37fadecc0a584baab525a8f0b132690aa6b93b151e5a869ca09d37
+ * Source SHA-256: 9b840f3f0e28e42d59bf95cd40605eb1a1afc1bb44e979578ef08c89ca7c009c
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -1713,39 +1713,144 @@ function Dor() {
     style: { margin: 0, fontFamily: "var(--font-display)", fontWeight: 800, fontSize: "var(--t-h3)", letterSpacing: "var(--track-tight)", maxWidth: 680 }
   }, "Para quem ligou, a próxima empresa está a um toque de distância. Em inglês ou espanhol, essa oportunidade fica ainda mais difícil de disputar."))));
 }
-function Faz() {
-  const mobile = useHeroBand() === "mobile";
-  const items = [
-    ["Atende e qualifica", "Entende o pedido, coleta os detalhes e identifica o que precisa de atenção."],
-    ["Organiza agendamentos", "Consulta disponibilidade e agenda conforme as regras e conexões validadas no piloto."],
-    ["Conversa com clientes", "Responde em inglês, espanhol ou português usando informações que você aprovou."],
-    ["Mantém você no controle", "Traz exceções para sua decisão e registra o histórico de cada atendimento."],
-    ["Recebe tarefas do dono", "A delegação de novas tarefas está em desenvolvimento e será validada caso a caso.", "Em desenvolvimento"],
-    ["Faz ligações por você", "Ligações operacionais a pedido do dono estão em desenvolvimento. A demonstração não liga para terceiros.", "Em desenvolvimento"]
-  ];
-  const item = ([title, description, status]) => React.createElement("div", {
-    className: "checkitem"
-  }, React.createElement("b", {
+function CapabilityIcon({ kind }) {
+  const paths = {
+    phone: React.createElement("path", {
+      d: "M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a14 14 0 0 1-7-7l2-2-2-5Z"
+    }),
+    calendar: React.createElement(React.Fragment, null, React.createElement("rect", {
+      x: "3",
+      y: "5",
+      width: "18",
+      height: "16",
+      rx: "3"
+    }), React.createElement("path", {
+      d: "M7 3v4m10-4v4M3 11h18m-13 5 2 2 5-5"
+    })),
+    conversation: React.createElement(React.Fragment, null, React.createElement("path", {
+      d: "M21 11a8 8 0 0 1-8 8H5l-3 3V11a9 9 0 0 1 18-4"
+    }), React.createElement("path", {
+      d: "M7 11h8m-8 4h5"
+    })),
+    control: React.createElement(React.Fragment, null, React.createElement("path", {
+      d: "m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"
+    }), React.createElement("path", {
+      d: "m8 12 3 3 5-6"
+    })),
+    task: React.createElement(React.Fragment, null, React.createElement("rect", {
+      x: "5",
+      y: "4",
+      width: "14",
+      height: "17",
+      rx: "2"
+    }), React.createElement("path", {
+      d: "M9 3h6v4H9zm0 9h6m-6 4h4"
+    })),
+    outbound: React.createElement(React.Fragment, null, React.createElement("path", {
+      d: "M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a14 14 0 0 1-7-7l2-2-2-5Z"
+    }), React.createElement("path", {
+      d: "M15 3h6v6m0-6-7 7"
+    }))
+  };
+  return React.createElement("svg", {
+    viewBox: "0 0 24 24",
+    width: "24",
+    height: "24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.6",
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
     "aria-hidden": "true"
-  }, "→"), React.createElement("div", null, React.createElement("strong", null, title), status && React.createElement("span", {
-    className: "capability-status"
-  }, status), React.createElement("p", null, description)));
+  }, paths[kind]);
+}
+function Faz() {
+  const [selected, setSelected] = useState(0);
+  const items = [
+    { title: "Atende e qualifica", short: "Entende o pedido e o que importa.", icon: "phone", request: "“Preciso de alguém para verificar um vazamento.”", action: "Entende o problema e coleta os detalhes.", result: "Um pedido organizado para seguir suas regras." },
+    { title: "Organiza agendamentos", short: "Sua agenda, com as suas regras.", icon: "calendar", request: "“Pode ser amanhã de manhã?”", action: "Consulta disponibilidade e as regras aprovadas.", result: "Agenda quando autorizado. Nas exceções, pede sua decisão." },
+    { title: "Conversa com clientes", short: "Inglês, espanhol ou português.", icon: "conversation", request: "“Do you cover San Rafael?”", action: "Consulta a região atendida pela sua empresa.", result: "Uma resposta no idioma do cliente, com as informações aprovadas." },
+    { title: "Mantém você no controle", short: "A exceção chega pronta para decidir.", icon: "control", request: "“Consegue me atender ainda hoje?”", action: "Identifica que o encaixe exige aprovação.", result: "Você recebe o contexto e decide o próximo passo." },
+    { title: "Recebe tarefas do dono", short: "Você orienta o próximo trabalho.", icon: "task", future: true, request: "“Confirme se alguém estará no imóvel.”", action: "Delegação de uma tarefa, com objetivo e limites.", result: "Em desenvolvimento. Será validada caso a caso." },
+    { title: "Faz ligações por você", short: "Uma ligação com objetivo definido.", icon: "outbound", future: true, request: "“Ligue para confirmar o acesso ao imóvel.”", action: "O dono define para quem ligar e o que resolver.", result: "Em desenvolvimento. Esta cena não faz ligações." }
+  ];
+  const current = items[selected];
+  const routes = ["M292 68 C380 68 375 168 475 168", "M708 68 C620 68 625 168 525 168", "M292 170 H475", "M708 170 H525", "M292 272 C380 272 375 174 475 174", "M708 272 C620 272 625 174 525 174"];
   return React.createElement("section", {
+    id: "trabalhos",
     "data-screen-label": "O que ele faz",
+    className: "capabilities",
     style: { marginTop: 116 }
   }, React.createElement(Container, null, React.createElement(SectionHead, {
     title: "Um funcionário. Vários trabalhos.",
     lede: "O telefone é o começo. O Ligou conecta conversas, agenda e decisões da sua operação."
-  }), mobile ? React.createElement(Reveal, null, React.createElement("div", {
-    className: "checklist"
-  }, items.map((t) => React.createElement(React.Fragment, {
-    key: t[0]
-  }, item(t))))) : React.createElement("div", {
-    className: "checklist"
-  }, items.map((t, i) => React.createElement(Reveal, {
-    key: t[0],
-    delay: i % 2 * 70
-  }, item(t))))));
+  }), React.createElement("div", {
+    className: "capabilities-canvas"
+  }, React.createElement("div", {
+    className: "capabilities-stage"
+  }, React.createElement("svg", {
+    className: "capabilities-links",
+    viewBox: "0 0 1000 340",
+    preserveAspectRatio: "none",
+    fill: "none",
+    "aria-hidden": "true"
+  }, routes.map((route, i) => React.createElement("path", {
+    key: i + "-" + (selected === i),
+    d: route,
+    pathLength: "1",
+    className: "capability-route" + (selected === i ? " is-selected" : "") + (items[i].future ? " is-future" : "")
+  }))), React.createElement("div", {
+    className: "capabilities-agent",
+    "aria-hidden": "true"
+  }, React.createElement("div", {
+    className: "capabilities-orbit"
+  }), React.createElement("img", {
+    src: "assets/optimized/agent-ligou.webp",
+    width: "1254",
+    height: "1254",
+    alt: "",
+    loading: "lazy",
+    decoding: "async"
+  }), React.createElement("span", {
+    className: "capabilities-agent-name"
+  }, "Ligou", React.createElement("span", null, "Você define os limites."))), items.map((item, i) => React.createElement("button", {
+    key: item.title,
+    type: "button",
+    className: "capability-task capability-task--" + i + (selected === i ? " is-selected" : "") + (item.future ? " is-future" : ""),
+    "aria-pressed": selected === i,
+    "aria-controls": "capability-example",
+    onClick: () => setSelected(i)
+  }, React.createElement("span", {
+    className: "capability-icon"
+  }, React.createElement(CapabilityIcon, {
+    kind: item.icon
+  })), React.createElement("span", {
+    className: "capability-task-copy"
+  }, React.createElement("strong", null, item.title), React.createElement("span", {
+    className: "capability-task-short"
+  }, item.short), item.future && React.createElement("span", {
+    className: "capability-status"
+  }, "Em desenvolvimento"))))), React.createElement("div", {
+    className: "capabilities-example-heading"
+  }, React.createElement("span", null, "EXEMPLO ILUSTRATIVO"), React.createElement("span", null, "Selecione um trabalho para explorar.")), React.createElement("div", {
+    id: "capability-example",
+    className: "capability-example" + (current.future ? " is-future" : ""),
+    role: "region",
+    "aria-label": "Exemplo: " + current.title,
+    "aria-live": "polite",
+    "aria-atomic": "true"
+  }, React.createElement("div", {
+    className: "capability-example-grid",
+    key: selected
+  }, React.createElement("div", null, React.createElement("span", {
+    className: "capability-example-label"
+  }, "O pedido"), React.createElement("p", null, current.request)), React.createElement("div", null, React.createElement("span", {
+    className: "capability-example-label"
+  }, "O Ligou em ação"), React.createElement("p", null, current.action)), React.createElement("div", null, React.createElement("span", {
+    className: "capability-example-label"
+  }, "O resultado"), React.createElement("p", null, current.result)))), React.createElement("p", {
+    className: "capabilities-limit"
+  }, "Agendamentos dependem das regras e conexões validadas no piloto. Os exemplos não executam ações reais."))));
 }
 function Comecar() {
   const mobile = useHeroBand() === "mobile";

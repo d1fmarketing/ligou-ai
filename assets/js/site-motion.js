@@ -14,6 +14,7 @@ export function createSiteMotion({window: win, document: doc, IntersectionObserv
   }
   function sync() {
     doc.documentElement.dataset.ligouMotion = paused() ? 'paused' : 'playing';
+    doc.documentElement.dataset.ligouVisibility = doc.hidden ? 'hidden' : 'visible';
     for (const video of videos.keys()) syncVideo(video);
     for (const button of doc.querySelectorAll('[data-motion-toggle]')) {
       button.setAttribute('aria-pressed', String(paused()));
@@ -35,8 +36,12 @@ export function createSiteMotion({window: win, document: doc, IntersectionObserv
     for (const video of doc.querySelectorAll('.hero4 video')) if (!videos.has(video)) {
       videos.set(video, inViewport(video)); observer?.observe(video);
     }
-    for (const section of doc.querySelectorAll('.mqwrap,.p7,.iv,.cta')) if (!sections.has(section)) {
-      sections.add(section); observer?.observe(section);
+    for (const section of doc.querySelectorAll('.mqwrap,.p7,.iv,.cta,.wavedraw,.capabilities,.p7-wf')) if (!sections.has(section)) {
+      sections.add(section);
+      if (observer) {
+        section.classList.toggle('motion-outside', !inViewport(section));
+        observer.observe(section);
+      }
     }
     sync();
   }

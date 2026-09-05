@@ -308,3 +308,23 @@ describe("intro and reduced-motion fallbacks", () => {
     expect(ignoredCompletions).toBe(0);
   });
 });
+
+
+test("capability scene changes only its illustrated example and preserves future limits", async () => {
+  const harness = await createRuntimeHarness();
+  const {Faz} = harness.bindings;
+  let scene=harness.render(Faz);
+  const tasks=tree=>findAll(tree,node=>node.type==='button' && node.props['aria-controls']==='capability-example');
+  expect(tasks(scene)).toHaveLength(6);
+  expect(tasks(scene).filter(node=>node.props['aria-pressed'])).toHaveLength(1);
+  tasks(scene)[1].props.onClick();scene=harness.render(Faz);
+  expect(tasks(scene)[1].props['aria-pressed']).toBe(true);
+  expect(textContent(findAll(scene,node=>node.props?.id==='capability-example')[0])).toContain('Agenda quando autorizado. Nas exceções, pede sua decisão.');
+  tasks(scene)[5].props.onClick();scene=harness.render(Faz);
+  expect(textContent(scene)).toContain('Em desenvolvimento. Esta cena não faz ligações.');
+  expect(findAll(scene,hasClass('capability-status'))).toHaveLength(2);
+  expect(findAll(scene,node=>node.type==='a'||node.type==='form'||node.type==='audio')).toHaveLength(0);
+  harness.media.update({width:390,height:844});scene=harness.render(Faz);
+  expect(tasks(scene)[5].props['aria-pressed']).toBe(true);
+
+});

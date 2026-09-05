@@ -246,6 +246,7 @@ export async function createRuntimeHarness({
     "Hero",
     "Intro4",
     "CallDemo",
+    "Faz",
     "Faq",
   ];
   const instrumentedSource = `${source}\nglobalThis.__LIGOU_RUNTIME_TESTS__ = { ${exports.join(", ")} };`;
