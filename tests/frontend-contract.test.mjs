@@ -47,7 +47,8 @@ test("share metadata points at the existing 1200x630 card with an absolute URL",
 test("mockup controls carry no false affordance and the pricing primary starts the shared voice conversation", () => {
   expect(application).not.toMatch(/<button className="(?:iv-approve|p7-apr|p7-adj|lc-apr|lc-adj)"/);
   expect(application).toContain('<span className="lc-apr">Aprovar encaixe</span>');
-  expect(application).toContain('<button className="p7-again" type="button" onClick={replay}>');
+  expect(application).not.toContain("Ver de novo");
+  expect(application).not.toContain("motion-toggle");
   expect(application).toContain('href="#prova" onClick={openSalesConversation} style={{marginTop: 8}}>Quero aproveitar a oferta</Button>');
   expect(application).not.toContain('href="#preco"');
 });

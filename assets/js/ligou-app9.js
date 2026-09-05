@@ -1,6 +1,6 @@
 /*
  * Generated from src/runtime/ligou-app9.jsx
- * Source SHA-256: 9b840f3f0e28e42d59bf95cd40605eb1a1afc1bb44e979578ef08c89ca7c009c
+ * Source SHA-256: f0fb1425dea538e7e8c029a683ede2e8ab9c19e6e7f683f94e421c46e3aad27b
  * Rebuild with: bun run build
  */
 const DS = window.LigouDesignSystem_a33905;
@@ -39,11 +39,6 @@ function readIntroSeen() {
 function markIntroSeen() {
   try {
     window.sessionStorage.setItem(INTRO_SEEN_KEY, "1");
-  } catch (e) {}
-}
-function replayDemo() {
-  try {
-    window.dispatchEvent(new CustomEvent("ligou:replay"));
   } catch (e) {}
 }
 let salesModule;
@@ -442,14 +437,7 @@ function Hero() {
     style: { "--d": "560ms" }
   }, "Você ensina em português · Ele atende em inglês, espanhol e português")), React.createElement("div", {
     className: "hero4-artslot"
-  }, band === "mid" ? art : null)), React.createElement("button", {
-    type: "button",
-    className: "motion-toggle",
-    "data-motion-toggle": true,
-    "aria-pressed": "false"
-  }, React.createElement("span", {
-    "data-motion-label": true
-  }, "Pausar animações")));
+  }, band === "mid" ? art : null)));
 }
 function Scene() {
   const rows = [
@@ -687,20 +675,9 @@ function Scene() {
   }, "Aprovação de nova regra"), React.createElement("p", null, React.createElement("strong", null, "Não é uma secretária eletrônica."), " É um agente de inteligência artificial com memória operacional permanente."), React.createElement("p", null, "Cada atendimento compõe o histórico do negócio. Uma nova orientação só vira regra depois da sua aprovação — e você pode alterá-la ou apagá-la."))))));
 }
 function CallDemo() {
-  const [mrun, setMrun] = React.useState(0);
   const [mrel, setMrel] = React.useState(false);
   const [boardRef, boardOn] = useInView({ threshold: 0.35 });
   const [shellRef, shellOn] = useInView({ threshold: 0.3 });
-  const replay = () => {
-    setMrel(false);
-    setMrun((m) => m + 1);
-  };
-  React.useEffect(() => {
-    if (typeof window.addEventListener !== "function")
-      return;
-    window.addEventListener("ligou:replay", replay);
-    return () => window.removeEventListener("ligou:replay", replay);
-  }, []);
   return React.createElement("section", {
     id: "prova",
     "data-screen-label": "Prova do produto",
@@ -722,8 +699,7 @@ function CallDemo() {
     className: "p7-cq",
     ref: boardRef
   }, React.createElement("div", {
-    className: "p7-board" + (boardOn ? " on" : ""),
-    key: mrun
+    className: "p7-board" + (boardOn ? " on" : "")
   }, React.createElement("div", {
     className: "p7-bar"
   }, React.createElement("span", {
@@ -961,22 +937,7 @@ function CallDemo() {
     "aria-hidden": "true"
   }), React.createElement("span", {
     className: "p7-time"
-  }, "00:12"), React.createElement("button", {
-    className: "p7-again",
-    type: "button",
-    onClick: replay
-  }, React.createElement("svg", {
-    width: "14",
-    height: "14",
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: "2.2",
-    strokeLinecap: "round",
-    strokeLinejoin: "round"
-  }, React.createElement("path", {
-    d: "M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"
-  })), " Ver de novo")), React.createElement("svg", {
+  }, "00:12")), React.createElement("svg", {
     className: "p7-trail",
     viewBox: "0 0 1360 660",
     preserveAspectRatio: "none",
@@ -1313,8 +1274,7 @@ function CallDemo() {
     className: "p7m",
     ref: shellRef
   }, React.createElement("div", {
-    className: "lc-shell" + (shellOn ? " on" : ""),
-    key: mrun
+    className: "lc-shell" + (shellOn ? " on" : "")
   }, React.createElement("div", {
     className: "lc-head lc-i",
     style: { "--lcd": "0s" }
@@ -1485,23 +1445,7 @@ function CallDemo() {
     opacity: ".45"
   })))), React.createElement("span", {
     className: "lc-htime"
-  }, "00:12"), React.createElement("button", {
-    className: "lc-again",
-    type: "button",
-    onClick: replay
-  }, React.createElement("svg", {
-    width: "14",
-    height: "14",
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: "2.2",
-    strokeLinecap: "round",
-    strokeLinejoin: "round",
-    "aria-hidden": "true"
-  }, React.createElement("path", {
-    d: "M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"
-  })), React.createElement("span", null, "Ver de novo"))), React.createElement("div", {
+  }, "00:12")), React.createElement("div", {
     className: "lc-convo"
   }, React.createElement("div", {
     className: "lc-row lc-row--cust lc-i",

@@ -21,9 +21,6 @@ function readIntroSeen() {
 function markIntroSeen() {
   try { window.sessionStorage.setItem(INTRO_SEEN_KEY, '1'); } catch (e) {}
 }
-function replayDemo() {
-  try { window.dispatchEvent(new CustomEvent('ligou:replay')); } catch (e) {}
-}
 
 let salesModule;
 function openSalesConversation(event) {
@@ -223,7 +220,6 @@ function Hero() {
       </div>
       <div className="hero4-artslot">{band === 'mid' ? art : null}</div>
     </Container>
-    <button type="button" className="motion-toggle" data-motion-toggle aria-pressed="false"><span data-motion-label>Pausar animações</span></button>
   </section>;
 }
 
@@ -314,16 +310,9 @@ function Scene() {
 }
 
 function CallDemo() {
-  const [mrun, setMrun] = React.useState(0);
   const [mrel, setMrel] = React.useState(false);
   const [boardRef, boardOn] = useInView({threshold: .35});
   const [shellRef, shellOn] = useInView({threshold: .3});
-  const replay = () => { setMrel(false); setMrun(m => m + 1); };
-  React.useEffect(() => {
-    if (typeof window.addEventListener !== 'function') return;
-    window.addEventListener('ligou:replay', replay);
-    return () => window.removeEventListener('ligou:replay', replay);
-  }, []);
   return <section id="prova" data-screen-label="Prova do produto" className="p7">
     <Container style={{maxWidth: 1500}}>
       <Eyebrow className="eyebrow-mark" aria-hidden="true"/>
@@ -331,7 +320,7 @@ function CallDemo() {
       <p className="p7-sub p7-bridge">Quando a regra permite, ele resolve sozinho. Quando não permite, traz o caso pronto para você decidir.</p>
       <p className="p7-langnote">Este exemplo está em inglês. O Ligou também atende em espanhol.</p>
       <p className="illustration-note">Cena ilustrativa · os controles abaixo mostram exemplos de ações.</p>
-      <div className="p7-cq" ref={boardRef}><div className={'p7-board' + (boardOn ? ' on' : '')} key={mrun}>
+      <div className="p7-cq" ref={boardRef}><div className={'p7-board' + (boardOn ? ' on' : '')}>
         <div className="p7-bar">
           <span className="p7-dot"></span>
           <span className="p7-blab">Chamada · Exemplo</span>
@@ -339,7 +328,6 @@ function CallDemo() {
           <svg className="p7-wf" width="210" height="26" viewBox="0 0 210 26" aria-hidden="true"><rect x="0" y="10" width="3.4" height="6" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="7" y="8" width="3.4" height="10" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="14" y="5.5" width="3.4" height="15" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="21" y="8.5" width="3.4" height="9" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="28" y="4" width="3.4" height="18" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="35" y="7" width="3.4" height="12" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="42" y="3" width="3.4" height="20" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="49" y="9" width="3.4" height="8" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="56" y="6" width="3.4" height="14" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="63" y="4.5" width="3.4" height="17" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="70" y="9.5" width="3.4" height="7" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="77" y="7" width="3.4" height="12" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="84" y="3.5" width="3.4" height="19" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="91" y="8" width="3.4" height="10" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="98" y="10" width="3.4" height="6" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="105" y="5.5" width="3.4" height="15" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="112" y="7.5" width="3.4" height="11" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="119" y="4" width="3.4" height="18" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="126" y="9" width="3.4" height="8" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="133" y="6.5" width="3.4" height="13" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="140" y="5" width="3.4" height="16" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="147" y="10" width="3.4" height="6" rx="1.7" fill="var(--lg-teal-500)"></rect><rect x="154" y="8" width="3.4" height="10" rx="1.7" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="161" y="6" width="3.4" height="14" rx="1.7" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="168" y="9.5" width="3.4" height="7" rx="1.7" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="175" y="7.5" width="3.4" height="11" rx="1.7" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="182" y="4.5" width="3.4" height="17" rx="1.7" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="189" y="8.5" width="3.4" height="9" rx="1.7" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="196" y="6.5" width="3.4" height="13" rx="1.7" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="203" y="10" width="3.4" height="6" rx="1.7" fill="var(--lg-teal-500)" opacity=".45"></rect></svg>
           <span className="p7-lead" aria-hidden="true"></span>
           <span className="p7-time">00:12</span>
-          <button className="p7-again" type="button" onClick={replay}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"></path></svg> Ver de novo</button>
         </div>
         <svg className="p7-trail" viewBox="0 0 1360 660" preserveAspectRatio="none" aria-hidden="true">
           <path d="M279 168 C 325 168, 352 162, 374 154" stroke="#c9d4cb" strokeWidth="2" strokeDasharray="3 7" fill="none"></path>
@@ -392,12 +380,11 @@ function CallDemo() {
         </aside>
       </div></div>
       <div className="p7m" ref={shellRef}>
-        <div className={'lc-shell' + (shellOn ? ' on' : '')} key={mrun}>
+        <div className={'lc-shell' + (shellOn ? ' on' : '')}>
           <div className="lc-head lc-i" style={{'--lcd': '0s'}}>
             <span className="lc-avatar lc-avatar--head"><img className="ligou-avatar" src="assets/ligou-avatar-v1.png" alt=""/></span>
             <span className="lc-id"><b>Ligou em chamada</b><span className="lc-idsub"><i className="lc-en">EN</i><i className="lc-en lc-ex">Chamada · Exemplo</i><svg className="lc-wf" width="120" height="22" viewBox="0 0 120 22" aria-hidden="true"><rect x="0" y="8.5" width="3" height="5" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="6" y="6.5" width="3" height="9" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="12" y="4.5" width="3" height="13" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="18" y="7.5" width="3" height="7" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="24" y="3.5" width="3" height="15" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="30" y="6" width="3" height="10" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="36" y="3" width="3" height="16" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="42" y="8" width="3" height="6" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="48" y="5" width="3" height="12" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="54" y="4" width="3" height="14" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="60" y="8" width="3" height="6" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="66" y="6" width="3" height="10" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="72" y="3.5" width="3" height="15" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="78" y="7" width="3" height="8" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="84" y="8.5" width="3" height="5" rx="1.5" fill="var(--lg-teal-500)"></rect><rect x="90" y="5" width="3" height="12" rx="1.5" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="96" y="6.5" width="3" height="9" rx="1.5" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="102" y="4" width="3" height="14" rx="1.5" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="108" y="7.5" width="3" height="7" rx="1.5" fill="var(--lg-teal-500)" opacity=".45"></rect><rect x="114" y="5.5" width="3" height="11" rx="1.5" fill="var(--lg-teal-500)" opacity=".45"></rect></svg></span></span>
             <span className="lc-htime">00:12</span>
-            <button className="lc-again" type="button" onClick={replay}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"></path></svg><span>Ver de novo</span></button>
           </div>
           <div className="lc-convo">
             <div className="lc-row lc-row--cust lc-i" style={{'--lcd': '.1s'}}>

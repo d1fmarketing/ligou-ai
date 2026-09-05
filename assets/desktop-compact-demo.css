@@ -15,16 +15,7 @@
     font-size: max(12px, .96cqw);
   }
 
-  .p7-again {
-    min-height: 44px;
-    padding: 8px 12px;
-    font-size: 12px;
-  }
 
-  .p7-again svg {
-    width: 14px;
-    height: 14px;
-  }
 
   .p7-b1,
   .p7-b2 {

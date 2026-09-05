@@ -171,54 +171,37 @@ describe("interactive and accessible state", () => {
     expect(harness.media.listenerCount()).toBe(0);
   });
 
-  test("toggles the full mobile report and replay resets the disclosure", async () => {
+  test("mobile report disclosure remains usable without replay controls", async () => {
     const harness = await createRuntimeHarness();
     const { CallDemo } = harness.bindings;
-    const reportToggle = (tree) =>
-      findAll(tree, (node) => node.props?.id === "lc-rel-toggle")[0];
-    const report = (tree) => findAll(tree, (node) => node.props?.id === "lc-relato-full");
-    const replay = (tree) => findAll(tree, hasClass("lc-again"))[0];
-    // The keyed node is the shell (the .p7m wrapper stays mounted so its in-view observer survives a replay).
-    const mobileDemo = (tree) => findAll(tree, hasClass("lc-shell"))[0];
-
-    let demo = harness.render(CallDemo);
-    expect(reportToggle(demo).props["aria-controls"]).toBe("lc-relato-full");
-    expect(reportToggle(demo).props["aria-expanded"]).toBe("false");
-    expect(textContent(reportToggle(demo))).toContain("Ver relato completo");
+    const toggle = tree => findAll(tree,node=>node.props?.id==='lc-rel-toggle')[0];
+    const report = tree => findAll(tree,node=>node.props?.id==='lc-relato-full');
+    let demo=harness.render(CallDemo);
+    expect(toggle(demo).props['aria-controls']).toBe('lc-relato-full');
     expect(report(demo)).toHaveLength(0);
-    expect(mobileDemo(demo).props.key).toBe(0);
-
-    reportToggle(demo).props.onClick();
-    demo = harness.render(CallDemo);
-    expect(reportToggle(demo).props["aria-expanded"]).toBe("true");
-    expect(textContent(reportToggle(demo))).toContain("Ocultar relato");
+    toggle(demo).props.onClick();demo=harness.render(CallDemo);
+    expect(toggle(demo).props['aria-expanded']).toBe('true');
+    expect(textContent(toggle(demo))).toContain('Ocultar relato');
     expect(report(demo)).toHaveLength(1);
-
-    replay(demo).props.onClick();
-    demo = harness.render(CallDemo);
-    expect(reportToggle(demo).props["aria-expanded"]).toBe("false");
+    harness.media.update({width:390,height:844});demo=harness.render(CallDemo);
+    expect(report(demo)).toHaveLength(1);
+    toggle(demo).props.onClick();demo=harness.render(CallDemo);
     expect(report(demo)).toHaveLength(0);
-    expect(mobileDemo(demo).props.key).toBe(1);
-    expect(findAll(demo, hasClass("p7-board"))[0].props.key).toBe(1);
-    expect(textContent(replay(demo))).toContain("Ver de novo");
   });
 
-  test("desktop replay control is a real button and re-keys the board", async () => {
+  test("demo headers retain waveforms without replay buttons at every layout", async () => {
     const harness = await createRuntimeHarness();
-    const { CallDemo } = harness.bindings;
-    const again = (tree) => findAll(tree, hasClass("p7-again"))[0];
-    const board = (tree) => findAll(tree, hasClass("p7-board"))[0];
-
-    let demo = harness.render(CallDemo);
-    expect(again(demo).type).toBe("button");
-    expect(board(demo).props.key).toBe(0);
-    expect(findAll(demo, hasClass("p7-i"))).toHaveLength(7);
-    expect(findAll(demo, (node) => node.props?.lang === "en-US")).toHaveLength(6);
-
-    again(demo).props.onClick();
-    demo = harness.render(CallDemo);
-    expect(board(demo).props.key).toBe(1);
+    for(const width of [320,919,1440]) {
+      harness.media.update({width,height:900});
+      const demo=harness.render(harness.bindings.CallDemo);
+      expect(findAll(demo,hasClass('p7-again'))).toHaveLength(0);
+      expect(findAll(demo,hasClass('lc-again'))).toHaveLength(0);
+      expect(findAll(demo,hasClass('p7-wf'))).toHaveLength(1);
+      expect(findAll(demo,hasClass('lc-wf'))).toHaveLength(1);
+      expect(findAll(demo,hasClass('p7-i'))).toHaveLength(7);
+    }
   });
+
 });
 
 describe("intro and reduced-motion fallbacks", () => {

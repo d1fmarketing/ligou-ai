@@ -1,9 +1,7 @@
 export function createSiteMotion({window: win, document: doc, IntersectionObserver: IO, MutationObserver: MO}) {
   const media = win.matchMedia('(prefers-reduced-motion: reduce)');
-  let preference = false;
-  try { preference = win.localStorage.getItem('ligou-motion-paused') === '1'; } catch {}
   const videos = new Map(), sections = new Set();
-  const paused = () => preference || media.matches;
+  const paused = () => media.matches;
   const inViewport = element => {
     const r = element.getBoundingClientRect();
     return r.bottom > 0 && r.top < win.innerHeight && r.right > 0 && r.left < win.innerWidth;
@@ -16,13 +14,6 @@ export function createSiteMotion({window: win, document: doc, IntersectionObserv
     doc.documentElement.dataset.ligouMotion = paused() ? 'paused' : 'playing';
     doc.documentElement.dataset.ligouVisibility = doc.hidden ? 'hidden' : 'visible';
     for (const video of videos.keys()) syncVideo(video);
-    for (const button of doc.querySelectorAll('[data-motion-toggle]')) {
-      button.setAttribute('aria-pressed', String(paused()));
-      button.disabled = media.matches;
-      const label = button.querySelector('[data-motion-label]');
-      const text = media.matches ? 'Movimento reduzido' : paused() ? 'Retomar animações' : 'Pausar animações';
-      if (label && label.textContent !== text) label.textContent = text;
-    }
   }
   const observer = IO ? new IO(entries => {
     for (const entry of entries) {
@@ -36,7 +27,7 @@ export function createSiteMotion({window: win, document: doc, IntersectionObserv
     for (const video of doc.querySelectorAll('.hero4 video')) if (!videos.has(video)) {
       videos.set(video, inViewport(video)); observer?.observe(video);
     }
-    for (const section of doc.querySelectorAll('.mqwrap,.p7,.iv,.cta,.wavedraw,.capabilities,.p7-wf')) if (!sections.has(section)) {
+    for (const section of doc.querySelectorAll('.mqwrap,.p7,.iv,.cta,.wavedraw,.capabilities,.p7-wf,.lc-wf')) if (!sections.has(section)) {
       sections.add(section);
       if (observer) {
         section.classList.toggle('motion-outside', !inViewport(section));
@@ -45,13 +36,6 @@ export function createSiteMotion({window: win, document: doc, IntersectionObserv
     }
     sync();
   }
-  function toggle(event) {
-    if (!event.target.closest?.('[data-motion-toggle]') || media.matches) return;
-    preference = !preference;
-    try { win.localStorage.setItem('ligou-motion-paused', preference ? '1' : '0'); } catch {}
-    sync();
-  }
-  doc.addEventListener('click', toggle);
   doc.addEventListener('visibilitychange', sync);
   media.addEventListener?.('change', sync);
   const mutations = MO ? new MO(refresh) : null;
@@ -59,7 +43,7 @@ export function createSiteMotion({window: win, document: doc, IntersectionObserv
   refresh();
   return {refresh, isPaused: paused, destroy() {
     observer?.disconnect(); mutations?.disconnect();
-    doc.removeEventListener('click', toggle); doc.removeEventListener('visibilitychange', sync);
+    doc.removeEventListener('visibilitychange', sync);
     media.removeEventListener?.('change', sync);
   }};
 }
