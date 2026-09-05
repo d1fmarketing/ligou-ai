@@ -18,7 +18,7 @@ Goal: prepare one explicitly assigned US local voice number for one pilot busine
 - [x] Implement and test the signed HTTP boundary and phone controller's explicit route handling.
 - [x] Implement and test the read-only setup checker, including failure paths and no provider mutations.
 - [x] Run relevant existing voice, Edge, database and release verification; independently review the changes.
-- [ ] Install only safe inactive preparation where the live account/runtime preconditions are verified. Preserve rollback and all existing records. Leave number purchase and traffic activation untouched.
+- [x] Install only safe inactive preparation where the live account/runtime preconditions are verified. Preserve rollback and all existing records. Leave number purchase and traffic activation untouched.
 - [ ] Deliver exact readiness, verified receipts and remaining external inputs.
 
 ## Verified before release
@@ -29,3 +29,17 @@ Goal: prepare one explicitly assigned US local voice number for one pilot busine
 - No real Twilio number, carrier call or incoming OpenAI webhook registration is represented by these tests.
 
 The inactive deployment and final readiness receipt are recorded separately so release evidence cannot be confused with source-level test evidence.
+
+## Inactive installation receipt — 2026-09-05
+
+- Controller source commit: `8de9bc2c63bb17de04ac993257dded4dbfec9cf6`.
+- Authenticated release artifact SHA-256: `04976beee3b8997da991f7b0f74921adfbc830be28d76e43a31d29832d0e5255`.
+- Installed on the existing Ligou host; health readback reports controller, Supabase and Hermes ready. Sales remains active; previously inactive discovery supervisor remains inactive. Previous controller release is preserved.
+- Migration `20260905215424_first_phone_number_binding.sql` applied. Live readback: disabled, no tenant, no phone number, max five minutes, forced RLS, no anon/authenticated table access or configuration execution.
+- `accept-call` Edge version 8 active with its explicit import map and signature authentication (gateway JWT verification disabled). Provider bundle SHA-256: `d5fd6525e089242fc509b70f8e601608ad107e092ab1ee94d3419812dcfbf5f5`.
+- Live probes: GET → 405; unsigned POST while signing secret absent → 503 `phone_webhook_unavailable`. No event or call generated.
+- Stable contact-hashing key prepared in the private parameter store, Edge secrets and controller environment. Existing environment preserved; mode 0600. No secret values in receipts.
+- Setup still needs dedicated Twilio access, the matching OpenAI project ID and incoming webhook signing secret, selected business, and an authorized number purchase/connection. No number acquired, bound or activated by this task.
+- Real carrier call acceptance and database-outage duration/failover behavior remain unverified. See the runbook before enabling customer traffic.
+
+Detailed sanitized receipts: `output/first-phone/`. The full schema gate retains one existing lint warning and 152 informational advisor notices; no advisor warnings/errors were introduced. Source tests and live deployment health are distinct from carrier acceptance.
