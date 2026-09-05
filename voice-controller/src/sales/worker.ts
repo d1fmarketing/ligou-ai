@@ -9,21 +9,29 @@ export interface SalesWorkerDependencies {
 export async function runSalesSession(initial:WorkerSession,d:SalesWorkerDependencies):Promise<void> {
  let row=initial,socket:SalesSocket|null=null,knownId=row.provider_call_id;
  let stopping:Promise<void>|null=null;
+ let stoppingCallId:string|null=null;
  let tickRunning=false,done!:()=>void;
  const finished=new Promise<void>(r=>{done=r;});
  const write=async(op:string,payload:Record<string,unknown>={})=>{row=await d.store.apply(row,op,payload);return row;};
  const expired=()=>Date.now()>=Math.min(Date.parse(row.expires_at),Date.parse(row.created_at)+300000);
  const stop=(reason:string):Promise<void>=>{
-   if(stopping)return stopping;
+   const callId=knownId;
+   if(stopping&&stoppingCallId===callId)return stopping;
+   const previous=stopping;stoppingCallId=callId;
+   // Stop conversation processing immediately, before any network/persistence wait.
+   socket?.close();
    stopping=(async()=>{
+     // A late accepted ID is a new target; drain any earlier no-ID cancellation
+     // first so its delayed quarantine cannot overwrite the hangup receipt.
+     await previous?.catch(()=>{});
      try{
-       if(knownId){
-         if(row.provider_call_id!==knownId)try{await write('quarantine',{error:reason,provider_call_id:knownId});}catch{}
+       if(callId){
+         if(row.provider_call_id!==callId)try{await write('quarantine',{error:reason,provider_call_id:callId});}catch{}
          // An emergency hangup is still required if persistence/lease was lost.
          // The known identity is only from this claimed row or this create receipt.
          try{await write('termination',{state:'requested',error:reason});}catch{}
          let result:SalesTerminationResult;
-         try{result=await (d.terminate??requestSalesTermination)({openaiCallId:knownId,mode:'hangup',requestId:`sales-${row.session_id}-${row.claim_token}`,fetchImpl:d.fetchImpl});}
+         try{result=await (d.terminate??requestSalesTermination)({openaiCallId:callId,mode:'hangup',requestId:`sales-${row.session_id}-${row.claim_token}`,fetchImpl:d.fetchImpl});}
          catch{result={confirmed:false,error:'provider_hangup_transport_unknown'};}
          console.info(JSON.stringify({event:'sales_provider_termination',session_id:row.session_id,confirmed:result.confirmed,...(result.receipt?{receipt:result.receipt}:{}),...(result.error?{error:result.error}:{} )}));
          try{await write('termination',{state:result.confirmed?'confirmed':'unknown',error:result.error??reason});}catch{}
@@ -56,18 +64,25 @@ export async function runSalesSession(initial:WorkerSession,d:SalesWorkerDepende
      beforeAttempt:async model=>{
        if(stopping||d.signal?.aborted||row.stop_requested||expired())throw new Error('sales_cancelled');
        await write('create_intent',{model});
+       if(stopping||d.signal?.aborted||row.stop_requested||expired()){
+         // This hook has not returned to provider.ts, so no POST was dispatched.
+         // Recovered/ambiguous attempts never enter this cleanup path.
+         await stopping?.catch(()=>{});
+         try{await write('provider_rejected',{error:'cancelled_before_dispatch'});}catch{}
+         await write('fail',{error:'cancelled_before_dispatch'});
+         throw new Error('sales_cancelled');
+       }
      },
      rejected:async()=>{await write('provider_rejected',{error:'explicit_nonacceptance'});},
    });
    // Capture identity even if cancellation happened while provider POST was in flight.
    knownId=outcome.callId;
    if(outcome.outcome==='unknown'){
-     await write('quarantine',{error:outcome.error,...(knownId?{provider_call_id:knownId}:{})});
-     if(knownId){stopping=null;await stop('provider_create_unknown');}return;
+     await stop('provider_create_unknown');return;
    }
    if(outcome.outcome==='rejected'){if(!stopping)await stop('realtime_unavailable');return;}
    await write('provider_ready',{provider_call_id:knownId,answer_sdp:outcome.answer,model:outcome.model,ready:false});
-   if(stopping||d.signal?.aborted||row.stop_requested||expired()){stopping=null;await stop('cancelled_after_create');return;}
+   if(stopping||d.signal?.aborted||row.stop_requested||expired()){await stop('cancelled_after_create');return;}
    socket=await (d.attach??attachSalesSocket)(row,d.store,stop);
    if(stopping){socket.close();return;}
    await write('activate');
@@ -86,13 +101,13 @@ export async function runSalesSession(initial:WorkerSession,d:SalesWorkerDepende
    socket.greet();
    await finished;
  }catch{
-   if(knownId&&stopping){stopping=null;}
    await stop('sales_runtime_failed').catch(()=>{});
  }finally{
    if(timer)clearInterval(timer);
    if(deadline)clearTimeout(deadline);
    d.signal?.removeEventListener('abort',aborted);
    socket?.close();
+   await stopping?.catch(()=>{});
  }
 }
 

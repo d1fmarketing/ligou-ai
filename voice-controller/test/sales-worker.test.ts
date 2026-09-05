@@ -1,6 +1,9 @@
 import {expect,test} from 'bun:test';
 import {runSalesSession} from '../src/sales/worker.ts';
 import {createSalesStore} from '../src/sales/store.ts';
+import {attachSalesSocket} from '../src/sales/socket.ts';
+import {salesSessionConfig} from '../src/sales/provider.ts';
+class Socket extends EventTarget {sent:any[]=[];closed=false;send(s:string){this.sent.push(JSON.parse(s));}close(){this.closed=true;this.dispatchEvent(new Event('close'));}event(type:string,data?:any){this.dispatchEvent(data?new MessageEvent(type,{data:JSON.stringify(data)}):new Event(type));}}
 function fixture(overrides:any={}) {
  let row:any={session_id:'s',request_id:'r',claim_token:'c',status:'starting',client_connected_at:new Date().toISOString(),offer_sdp:'offer',provider_call_id:null,model:null,expires_at:new Date(Date.now()+300000).toISOString(),created_at:new Date().toISOString(),stop_requested:false,create_intent_at:null,observed_cost_usd:0,reserved_cost_usd:1.5,...overrides};
  const log:string[]=[];
@@ -86,4 +89,62 @@ test('unexpected termination transport rejection is persisted as unknown and nev
  f.deps.terminate=async()=>{throw Error('network failure');};
  await runSalesSession(f.row,f.deps);
  expect(states).toEqual(['requested','unknown']);expect(f.log).not.toContain('usage');
+});
+
+test('shutdown closes the sideband before waiting for provider hangup and blocks new audio',async()=>{
+ const f=fixture(),raw=new Socket(),abort=new AbortController();f.deps.signal=abort.signal;
+ let finishHangup!:()=>void;f.deps.terminate=()=>new Promise(resolve=>{finishHangup=()=>resolve({confirmed:true});});
+ f.deps.attach=(row:any,store:any,stop:any)=>{const pending=attachSalesSocket(row,store,stop,()=>raw as any);raw.event('open');raw.event('message',{type:'session.updated',session:salesSessionConfig('gpt-realtime-2.1')});return pending;};
+ const running=runSalesSession(f.row,f.deps);
+ for(let i=0;i<50&&!raw.sent.some(e=>e.type==='response.create');i++)await Bun.sleep(1);
+ raw.event('message',{type:'response.created',response:{id:'greeting'}});raw.event('message',{type:'response.done',response:{id:'greeting',output:[]}});await Bun.sleep(1);
+ const before=raw.sent.filter(e=>e.type==='response.create').length;abort.abort();
+ raw.event('message',{type:'input_audio_buffer.committed',item_id:'late'});raw.event('message',{type:'conversation.item.input_audio_transcription.completed',item_id:'late',transcript:'Minha empresa é Teste.'});
+ for(let i=0;i<50&&!finishHangup;i++)await Bun.sleep(1);
+ try {await Bun.sleep(2);expect(raw.closed).toBe(true);expect(raw.sent.filter(e=>e.type==='response.create')).toHaveLength(before);}
+ finally {finishHangup();await running;}
+});
+
+test('sideband failure shares one in-flight hangup with the outer error handler',async()=>{
+ const f=fixture(),raw=new Socket();
+ f.deps.attach=(row:any,store:any,stop:any)=>{const pending=attachSalesSocket(row,store,stop,()=>raw as any);queueMicrotask(()=>raw.close());return pending;};
+ f.deps.terminate=async()=>{f.log.push('hangup');await Bun.sleep(5);return{confirmed:true};};
+ await runSalesSession(f.row,f.deps);
+ expect(f.log.filter(x=>x==='hangup')).toHaveLength(1);expect(f.log).not.toContain('activate');
+});
+
+test('abort while provider-intent acknowledgement is pending prevents the provider POST',async()=>{
+ const f=fixture(),abort=new AbortController();f.deps.signal=abort.signal;let finishIntent!:()=>void,latest=f.row;
+ const apply=f.deps.store.apply;
+ f.deps.store.apply=async(r:any,op:string,p:any)=>{
+   if(op==='fail'&&latest.create_intent_at)throw Error('ambiguous_failure_requires_quarantine');
+   if(op==='provider_rejected')latest.create_intent_at=null;
+   const next=await apply(r,op,p);latest=next;
+   if(op==='create_intent')await new Promise<void>(resolve=>{finishIntent=resolve;});
+   return next;
+ };
+ const running=runSalesSession(f.row,f.deps);for(let i=0;i<50&&!finishIntent;i++)await Bun.sleep(1);
+ abort.abort();await Bun.sleep(1);finishIntent();await running;
+ expect(f.log).not.toContain('provider_create');expect(f.log).not.toContain('hangup');expect(f.log).toContain('provider_rejected');expect(f.log).toContain('fail');
+});
+
+test('a late provider identity waits for the earlier no-ID stop before its single hangup',async()=>{
+ const f=fixture(),abort=new AbortController();f.deps.signal=abort.signal;let releaseQuarantine!:()=>void;
+ const apply=f.deps.store.apply;f.deps.store.apply=async(r:any,op:string,p:any)=>{if(op==='quarantine')await new Promise<void>(resolve=>{releaseQuarantine=resolve;});return apply(r,op,p);};
+ f.deps.create=async(_s:any,_r:any,_f:any,h:any)=>{await h.beforeAttempt('gpt-realtime-2.1');abort.abort();await Bun.sleep(1);return{outcome:'accepted',callId:'late-provider',answer:'answer',model:'gpt-realtime-2.1'};};
+ const running=runSalesSession(f.row,f.deps);for(let i=0;i<50&&!releaseQuarantine;i++)await Bun.sleep(1);
+ try {await Bun.sleep(5);expect(f.log).not.toContain('hangup');}
+ finally {releaseQuarantine();await running;}
+ expect(f.log.filter(x=>x==='hangup')).toHaveLength(1);expect(f.log).not.toContain('activate');
+});
+
+test('unknown-create quarantine shares the stop path so it cannot overwrite confirmed hangup',async()=>{
+ const f=fixture(),abort=new AbortController();f.deps.signal=abort.signal;let releaseQuarantine!:()=>void,quarantines=0;
+ const apply=f.deps.store.apply;f.deps.store.apply=async(r:any,op:string,p:any)=>{if(op==='quarantine'&&++quarantines===1)await new Promise<void>(resolve=>{releaseQuarantine=resolve;});return apply(r,op,p);};
+ f.deps.create=async(_s:any,_r:any,_f:any,h:any)=>{await h.beforeAttempt('gpt-realtime-2.1');return{outcome:'unknown',callId:'known-unknown',error:'transport_unknown',model:'gpt-realtime-2.1'};};
+ const running=runSalesSession(f.row,f.deps);for(let i=0;i<50&&!releaseQuarantine;i++)await Bun.sleep(1);
+ abort.abort();
+ try {await Bun.sleep(5);expect(quarantines).toBe(1);expect(f.log).not.toContain('hangup');}
+ finally {releaseQuarantine();await running;}
+ expect(f.log.filter(x=>x==='hangup')).toHaveLength(1);expect(f.log.at(-2)).toBe('hangup');
 });
