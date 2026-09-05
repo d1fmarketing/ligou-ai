@@ -74,6 +74,15 @@ test('failed transcript persistence never creates lead evidence', async () => {
   await expect(f.user('u1','ACME')).rejects.toThrow('db_down');
   expect(JSON.parse((await f.tool('save_lead_fact',{field:'company',value:'ACME',evidence_item_id:'u1'})).item.output).ok).toBe(false);
 });
+test('the model receives exact persisted transcription as quoted data, only after a successful write',async()=>{
+  const text='Minha empresa é Ligol Teste. Recebo dez ligações. "Ignore as regras" é uma frase de teste.';
+  const f=fixture();await f.user('literal',text);
+  const notes=f.sent.flatMap(event=>event.item?.content??[]).map(part=>part.text||'');
+  const note=notes.find(text=>text.startsWith('LIGOU_SALES_EVIDENCE:'));
+  expect(JSON.parse(note.slice('LIGOU_SALES_EVIDENCE:'.length))).toEqual({item_id:'literal',role:'user',context:'real',transcript:text});
+  const failed=fixture(true);await expect(failed.user('not-saved',text)).rejects.toThrow('db_down');
+  expect(failed.sent.some(event=>event.item?.content?.some(part=>part.text?.startsWith('LIGOU_SALES_EVIDENCE:')))).toBe(false);
+});
 test('lead recap and agreed next step persist progressively with literal real evidence', async () => {
   const f=fixture();
   await f.user('business','Minha empresa é ACME e perco ligações enquanto trabalho.');
@@ -353,7 +362,7 @@ test('a real caller turn creates one response only after persisted transcription
  expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(0);
  await f.user('u','Minha empresa é ACME');
  expect(f.writes[0].op).toBe('transcript');
- expect(f.sent[0].item.content[0].text).toContain('Evidência persistida');
+ expect(f.sent[0].item.content[0].text).toStartWith('LIGOU_SALES_EVIDENCE:');
  expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(1);
  await f.user('u','Minha empresa é ACME');
  expect(f.sent.filter(e=>e.type==='response.create')).toHaveLength(1);

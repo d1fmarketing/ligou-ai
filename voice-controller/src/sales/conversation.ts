@@ -122,7 +122,9 @@ export class SalesConversation {
     this.evidence.set(id,item); // Never expose unsaved evidence to tool validation/model.
     if(item.role==='user')this.continuationPending=true;
     if(item.role==='user'&&item.context==='real'&&this.isWithdrawal(item)) await this.revoke(item);
-    this.send({type:'conversation.item.create',item:{type:'message',role:'system',content:[{type:'input_text',text:`Evidência persistida: item_id=${id}, role=${role}, contexto=${item.context}. Use este identificador para referenciar a fala correspondente nas ferramentas. Não confunda contexto de simulação com fato real.`}]}});
+    // Audio understanding and the transcription model can differ. Supply the
+    // exact durable wording; tool validation still checks the stored evidence.
+    this.send({type:'conversation.item.create',item:{type:'message',role:'system',content:[{type:'input_text',text:`LIGOU_SALES_EVIDENCE:${JSON.stringify({item_id:id,role,context:item.context,transcript:text})}`}]}});
   }
   private item(id:unknown,role:'user'|'assistant'):Evidence {
     if(typeof id!=='string') throw new Error('evidence_required');
