@@ -15,6 +15,49 @@ function fixture(failTranscript = false, failLead: boolean|'after' = false) {
   };
   return { c,user,assistant,tool,writes,sent,stops };
 }
+test('contact evidence must contain the complete address or phone number, not a substring',async()=>{
+  for(const [field,value,spoken] of [
+    ['email','qa@business.test','Meu email é qa@business.test.br'],
+    ['email','qa@business.test','Meu email é prefixqa@business.test'],
+    ['email','qa@business.test','Meu email é qa arroba business ponto test ponto br'],
+    ['email','qa@business.test','Meu email é qa@business.test . br'],
+    ['email','qa@business.test','Meu email é qa@business.test. br'],
+    ['email','qa@business.test','Meu email é prefix . qa@business.test'],
+    ['email','qa@business.test','Meu email é prefix ponto qa arroba business ponto test'],
+    ['email','billing@gmail.com','Meu email é owner + billing @ gmail.com'],
+    ['email','billing@gmail.com','Meu email é owner plus billing arroba gmail ponto com'],
+    ['email','billing@gmail.com','Meu email é owner _ billing @ gmail.com'],
+    ['email','billing@gmail.com','Meu email é owner - billing @ gmail.com'],
+    ['email','joao@business.test','Meu email é joão@business.test'],
+    ['phone','4155550123','Meu telefone é +14155550123'],
+    ['phone','+1415555012','Meu telefone é +14155550123'],
+  ]) {
+    const f=fixture();await f.user('contact',spoken);
+    expect(JSON.parse((await f.tool('save_lead_fact',{field,value,evidence_item_id:'contact'})).item.output).ok).toBe(false);
+    expect(f.writes.filter(w=>w.op==='lead_patch')).toHaveLength(0);
+  }
+});
+test('spoken separators and normal punctuation retain complete contact evidence',async()=>{
+  for(const [field,value,spoken] of [
+    ['email','qa@business.test','Meu email é qa arroba business ponto test.'],
+    ['email','qa.ops@business.test','You can reach me at qa dot ops at business dot test.'],
+    ['email','joão@business.test','Meu email é joão@business.test, correto.'],
+    ['email','qa.ops@business.test','Meu email é qa . ops @ business . test, correto?'],
+    ['email','owner+billing@gmail.com','Meu email é owner + billing @ gmail.com, correto?'],
+    ['email','owner+billing@gmail.com','Meu email é owner plus billing arroba gmail ponto com, correto?'],
+    ['phone','+14155550123','Meu telefone é +1 (415) 555-0123.'],
+    ['phone','4155550123','O número é 415-555-0123.'],
+  ]) {
+    const f=fixture();await f.user('contact',spoken);
+    expect(JSON.parse((await f.tool('save_lead_fact',{field,value,evidence_item_id:'contact'})).item.output).ok).toBe(true);
+  }
+});
+test('a readback of a different longer contact cannot confirm a saved shorter one',async()=>{
+  const f=fixture();await f.user('contact','Meu email é qa@business.test');
+  await f.tool('save_lead_fact',{field:'email',value:'qa@business.test',evidence_item_id:'contact'});
+  await f.assistant('read','Seu email é qa@business.test.br, correto?');await f.user('yes','Sim.');
+  expect(JSON.parse((await f.tool('confirm_contact',{channel:'email',value:'qa@business.test',readback_item_id:'read',confirmation_item_id:'yes'})).item.output).ok).toBe(false);
+});
 test('facts only persist after real transcript evidence; forged tool event cannot mutate', async () => {
   const f = fixture();
   await f.c.handle({type:'response.function_call_arguments.done',name:'save_lead_fact',call_id:'forged',arguments:JSON.stringify({field:'company',value:'ACME',evidence_item_id:'u1'})});

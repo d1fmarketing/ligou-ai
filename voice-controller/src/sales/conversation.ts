@@ -1,13 +1,13 @@
 import { config, emptyUsage, sessionCostUsd } from '../config.ts';
 import { parseSalesUsage, salesSessionConfig } from './provider.ts';
 import type { SalesStore, WorkerSession } from './store.ts';
+import { hasCompleteContact } from './contact-evidence.ts';
 
 type Evidence = { id: string; role:'user'|'assistant'; text:string; context:'real'|'roleplay'; seq:number };
 export function salesDiagnosticEvent(code:'no_speech_detected'|'transcription_timeout') {
   return {type:'conversation.item.create',item:{type:'message',role:'system',content:[{type:'input_text',text:`LIGOU_SALES_DIAGNOSTIC:${JSON.stringify({code})}`}]}};
 }
 const norm = (v: string) => v.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[’‘]/g,"'").replace(/\s+/g,' ').trim();
-const contact = (v: string, channel: string) => channel === 'phone' ? v.replace(/\D/g,'') : norm(v).replace(/\s*(?:arroba|\bat\b)\s*/g,'@').replace(/\s*(?:ponto|punto|\bdot\b)\s*/g,'.').replace(/\s/g,'');
 const affirmative = (v:string) => /^(sim\b|confirmo\b|correto\b|esta correto\b|autorizo\b|eu autorizo\b|pode (sim|entrar|me contatar|enviar|ligar)\b|yes\b|correct\b|i (?:confirm|authorize)\b|si\b|correcto\b|es correcto\b)/.test(norm(v)) && !/\b(nao|talvez|mas|porem|se|depois|ainda|no|not|never|maybe|but|if|later|yet|quizas|pero|despues)\b/.test(norm(v));
 const negative = (v:string) => /^(nao\b|nao autorizo\b|prefiro nao\b|no\b|i do not\b|i don't\b)/.test(norm(v));
 // Revocations do not need a contact, a model tool call, or a new permission question.
@@ -160,9 +160,7 @@ export class SalesConversation {
           if(e.seq<(this.fieldEvidence.get(a.field)?.seq??0))throw new Error('stale_fact_evidence');
           const channel=['phone','email'].includes(a.field)?a.field:null;
           if(channel&&e.seq<(this.contactEvidenceSequence.get(channel)??0))throw new Error('stale_contact_evidence');
-          const needle=channel?contact(a.value,channel):norm(a.value);
-          const haystack=channel?contact(e.text,channel):norm(e.text);
-          if(!needle || !haystack.includes(needle)) throw new Error('value_not_in_evidence');
+          if(channel ? !hasCompleteContact(e.text,a.value,channel) : !norm(a.value)||!norm(e.text).includes(norm(a.value))) throw new Error('value_not_in_evidence');
           if(a.field==='phone' && !/^\+?[\d\s().-]{7,30}$/.test(a.value)) throw new Error('invalid_phone');
           if(a.field==='email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.value)) throw new Error('invalid_email');
           const candidateFields=new Map(this.fields).set(a.field,a.value);
@@ -188,7 +186,7 @@ export class SalesConversation {
         case 'confirm_contact': {
           if(!['phone','email'].includes(a.channel)||typeof a.value!=='string'||this.fields.get(a.channel)!==a.value) throw new Error('saved_contact_required');
           const read=this.item(a.readback_item_id,'assistant'), reply=this.item(a.confirmation_item_id,'user');
-          if(read.seq<=(this.contactEvidenceSequence.get(a.channel)??0)||reply.seq!==read.seq+1||!contact(read.text,a.channel).includes(contact(a.value,a.channel))||!/corret|correct|confirm|certo/.test(norm(read.text))||!affirmative(reply.text)) throw new Error('explicit_contact_confirmation_required');
+          if(read.seq<=(this.contactEvidenceSequence.get(a.channel)??0)||reply.seq!==read.seq+1||!hasCompleteContact(read.text,a.value,a.channel)||!/corret|correct|confirm|certo/.test(norm(read.text))||!affirmative(reply.text)) throw new Error('explicit_contact_confirmation_required');
           await this.write('lead_patch',{fields:{},contact_confirmation:a});
           this.confirmed={channel:a.channel,value:a.value,seq:reply.seq}; result={ok:true,contact_confirmed:true}; break;
         }
