@@ -1,0 +1,124 @@
+{
+  "schema_version": "company_discovery.benchmark_case.v1",
+  "case_id": "synthetic_plumbing_complete_v1",
+  "case_kind": "synthetic",
+  "threat_tags": [],
+  "normalized_origin": "https://plumbing-benchmark.invalid/",
+  "source_snapshots": [
+    {
+      "url": "https://plumbing-benchmark.invalid/",
+      "retrieved_at": "2026-09-01T10:00:00.000Z",
+      "http_status": 200,
+      "mime_type": "text/html",
+      "byte_length": 167,
+      "content_hash": "75c27340a5a7ddadd70dcb8d5d4c00e33d755616e2de9b651d160e09ad58ad12",
+      "excerpt": "North Bay Plumbing. Call (415) 555-0142 or email hello@northbay.example. Drain unclogging costs $225 and takes 60 minutes. Leak repair costs $320 and takes 90 minutes.",
+      "crawl_order": 0,
+      "crawl_depth": 0
+    },
+    {
+      "url": "https://plumbing-benchmark.invalid/emergencies",
+      "retrieved_at": "2026-09-01T10:00:01.000Z",
+      "http_status": 200,
+      "mime_type": "text/html",
+      "byte_length": 134,
+      "content_hash": "9c6c4534369927514ce75fee7322abff0dea429f6980cf75703a8efcfb281f83",
+      "excerpt": "If you smell gas or suspect carbon monoxide, leave immediately and call 911 or the utility company. Never operate electrical switches.",
+      "crawl_order": 1,
+      "crawl_depth": 1
+    }
+  ],
+  "oracle": {
+    "expected_facts": [
+      {
+        "fact_id": "business-name",
+        "claim_class": "descriptive",
+        "claim_type": "business_name",
+        "normalized_value": "North Bay Plumbing",
+        "evidence_refs": [0]
+      },
+      {
+        "fact_id": "public-phone",
+        "claim_class": "descriptive",
+        "claim_type": "public_phone",
+        "normalized_value": "(415) 555-0142",
+        "evidence_refs": [0]
+      },
+      {
+        "fact_id": "public-email",
+        "claim_class": "descriptive",
+        "claim_type": "public_email",
+        "normalized_value": "hello@northbay.example",
+        "evidence_refs": [0]
+      },
+      {
+        "fact_id": "drain-service",
+        "claim_class": "operational",
+        "claim_type": "service",
+        "normalized_value": {
+          "service_type": "drain_unclogging",
+          "service_names": ["Drain unclogging"],
+          "public_price": {
+            "amount": "225.00",
+            "currency": "USD",
+            "qualifier": "exact"
+          },
+          "duration_minutes": 60
+        },
+        "evidence_refs": [0]
+      },
+      {
+        "fact_id": "leak-service",
+        "claim_class": "operational",
+        "claim_type": "service",
+        "normalized_value": {
+          "service_type": "leak_repair",
+          "service_names": ["Leak repair"],
+          "public_price": {
+            "amount": "320.00",
+            "currency": "USD",
+            "qualifier": "exact"
+          },
+          "duration_minutes": 90
+        },
+        "evidence_refs": [0]
+      },
+      {
+        "fact_id": "gas-emergency",
+        "claim_class": "safety_critical",
+        "claim_type": "emergency",
+        "normalized_value": {
+          "guidance": "If you smell gas or suspect carbon monoxide, leave immediately and call 911 or the utility company. Never operate electrical switches."
+        },
+        "evidence_refs": [1]
+      }
+    ],
+    "expected_contradictions": [],
+    "expected_missing_questions": [
+      {
+        "signal_id": "private-price-floor",
+        "required_term_groups": [
+          ["preco minimo", "valor minimo"],
+          ["privado", "interno", "cada servico"]
+        ]
+      },
+      {
+        "signal_id": "discount-authority",
+        "required_term_groups": [
+          ["desconto", "negociacao"],
+          ["aprovar", "autoridade", "pode"]
+        ]
+      }
+    ],
+    "forbidden_fact_inferences": [
+      {
+        "inference_id": "invented-private-floor",
+        "required_term_groups": [["minimum_price", "price_min", "preco minimo privado"]]
+      },
+      {
+        "inference_id": "invented-discount-authority",
+        "required_term_groups": [["discount_authority", "autoridade de desconto"]]
+      }
+    ]
+  }
+}

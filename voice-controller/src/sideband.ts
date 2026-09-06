@@ -15,7 +15,7 @@ import {
   type Capability,
 } from "./tools.ts";
 import { supa } from "./rules.ts";
-import { finalizeTerminalBudget, type BudgetOutcome } from "./budget.ts";
+import { finalizeTerminalBudget, readWebsiteTerminalProof, type BudgetOutcome } from "./budget.ts";
 import { requestProviderTermination, type FetchLike } from "./provider-termination.ts";
 import { admitToolCall, evt, requestResponse, setPhase } from "./response-coordinator.ts";
 import {
@@ -45,6 +45,10 @@ import {
   type OnboardingOpeningPayload,
   type OnboardingOpeningResumeContext,
 } from "./onboarding-greeting.ts";
+import { createWebsiteInterviewRuntime, type WebsiteInterviewRuntimeConfig } from "./onboarding-website-runtime.ts";
+import { createOnboardingAgendaStore } from "./onboarding-agenda-store.ts";
+import { createInterviewEvidenceStore } from "./onboarding-interview-evidence-store.ts";
+import { speechPayloadIsInternallyValid, synthesizeOnboardingSpeech } from "./onboarding-speech.ts";
 
 type RequestResponseCommand = Extract<
   OnboardingCommand,
@@ -234,6 +238,8 @@ export interface SessionLedger {
   applicationOpening?: ApplicationOpeningHandshake;
   /** Onboarding-only reducer/transport state. It survives sideband socket reattachment. */
   onboarding?: OnboardingAdapterState;
+  /** V3 mode uses the same adapter queue, not the legacy response lifecycle. */
+  websiteInterviewRuntime?: ReturnType<typeof createWebsiteInterviewRuntime>;
 }
 
 /** Plan v4 §8: reserving quota only gates FUTURE sessions — a live session that runs up the bill must be cut.
@@ -265,6 +271,7 @@ export interface SidebandOptions {
     resume?: OnboardingResumeSuccess;
     reactivationTimeoutMs?: number;
     transportAckTimeoutMs?: number;
+    websiteInterview?: WebsiteInterviewRuntimeConfig;
   };
   externalCostUsd?: number;
   fetchImpl?: FetchLike;
@@ -367,12 +374,25 @@ function resumeRuntimeState(
       question_pt: nextQuestion?.questionPt ?? "",
     },
   };
+  const discoveryContext = coverage.discovery_context &&
+      typeof coverage.discovery_context === "object" &&
+      !Array.isArray(coverage.discovery_context)
+    ? coverage.discovery_context as Record<string, unknown>
+    : null;
+  const originValid = resume.status === "discovery_prefill"
+    ? coverage.transition_kind === "discovery_prefill" &&
+      discoveryContext?.draft_id === resume.draftId &&
+      discoveryContext?.draft_hash === resume.draftHash &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        resume.draftId,
+      ) && /^[0-9a-f]{64}$/.test(resume.draftHash)
+    : (resume.status === "initialized" || resume.status === "reused") &&
+      coverage.transition_kind === "resume_checkpoint";
   if (
     cap.sessionType !== "onboarding" ||
-    (resume.status !== "initialized" && resume.status !== "reused") ||
+    !originValid ||
     resume.revision !== 1 ||
     coverage.schema_version !== 2 ||
-    coverage.transition_kind !== "resume_checkpoint" ||
     coverage.tenant_id !== cap.tenantId ||
     coverage.call_id !== cap.callId ||
     coverage.revision !== 1 ||
@@ -781,6 +801,8 @@ function pendingResponseCommandIsCurrent(
   adapter: OnboardingAdapterState,
   command: RequestResponseCommand,
 ): boolean {
+  if (adapter.lifecycle.responseIntents[command.intentKey]?.state !== "queued")
+    return false;
   if (command.purpose === "summary")
     return Boolean(
       command.snapshotDigest &&
@@ -1680,6 +1702,10 @@ async function attachOnboardingSocket(
   context: OnboardingCommandContext,
 ): Promise<void> {
   const adapter = ensureOnboardingAdapter(context.ledger);
+  if (context.ledger.websiteInterviewRuntime) {
+    await context.ledger.websiteInterviewRuntime.attach();
+    return;
+  }
   clearApplicationReactivationTimer(adapter);
   clearTransportAckTimers(adapter);
   const pendingBeforeAttach = Object.values(adapter.pendingResponseCommands)
@@ -1772,6 +1798,37 @@ function enqueueOnboardingRawEvent(
 ): Promise<void> {
   const adapter = ensureOnboardingAdapter(context.ledger);
   if (!context.isCurrent()) return Promise.resolve();
+  if (context.ledger.websiteInterviewRuntime) {
+    const task = adapter.queue.then(async () => {
+      if (!context.isCurrent()) return;
+      const ledger = context.ledger;
+      if (msg?.type === "session.ended") {
+        ledger.providerTerminalEvidence = { observed: true, reason: "provider_session_ended", receivedAt: new Date().toISOString() };
+        const usage = validatedProviderUsage(msg.usage);
+        if (usage) { ledger.usage = usage; ledger.providerUsageEvidence.terminal = true; ledger.providerUsageEvidence.lastReceivedAt = new Date().toISOString(); }
+        ledger.status = "ended";
+      }
+      await ledger.websiteInterviewRuntime!.handleEvent(msg);
+      if (msg?.type === "error") {
+        const actionId = ledger.websiteInterviewRuntime!.state.speech?.action.actionId ?? ledger.websiteInterviewRuntime!.state.openingAction.actionId;
+        const noticeEvent = typeof msg.error?.event_id === "string" &&
+          msg.error.event_id === `website-notice-${actionId.slice(0,24)}`;
+        const expectedSpeechRetrieveMiss = ledger.websiteInterviewRuntime!.ownsSpeechRetrieveMiss(msg);
+        if (!expectedSpeechRetrieveMiss && !(noticeEvent && msg.error?.code === "conversation_item_already_exists")) {
+          ledger.providerUsageEvidence.continuous = false; ledger.agentEnded = true; ledger.status = "error";
+        }
+      }
+      if (["response.output_audio.delta", "response.audio.delta"].includes(msg?.type)) {
+        ledger.providerUsageEvidence.continuous = false; ledger.agentEnded = true; ledger.status = "error";
+      }
+    });
+    adapter.queue = task.catch(() => {
+      adapter.interrupted = true; context.ledger.agentEnded = true;
+      if (context.ledger.status === "active") context.ledger.status = "error";
+      context.ledger.providerUsageEvidence.continuous = false;
+    });
+    return adapter.queue;
+  }
   if (msg?.type === "input_audio_buffer.speech_started") {
     adapter.speechGeneration += 1;
     adapter.speechPending = true;
@@ -3214,6 +3271,13 @@ export function attachSideband(
     ? options.onboarding?.openingMode ?? "provider_model_v1"
     : "provider_model_v1";
   const openingPayload = options.onboarding?.openingPayload;
+  const websiteInterview = options.onboarding?.websiteInterview;
+  if (websiteInterview && (cap.sessionType !== "onboarding" || openingMode !== "application_tts_v1" ||
+    openingPayload || options.onboarding?.resume || websiteInterview.prepared.scope.callId !== cap.callId ||
+    websiteInterview.prepared.scope.ownerId !== cap.ownerUserId ||
+    websiteInterview.openingAction.callId !== cap.callId ||
+    !speechPayloadIsInternallyValid(websiteInterview.openingPayload, websiteInterview.openingAction)))
+    throw new Error("website_sideband_scope_invalid");
   const applicationReactivationTimeoutMs =
     options.onboarding?.reactivationTimeoutMs ?? 5_000;
   if (
@@ -3236,7 +3300,9 @@ export function attachSideband(
   const externalCostUsd = options.externalCostUsd ?? 0;
   if (!Number.isFinite(externalCostUsd) || externalCostUsd < 0)
     throw new Error("external_cost_invalid");
-  if (openingMode === "application_tts_v1") {
+  if (websiteInterview) {
+    if (externalCostUsd !== websiteInterview.openingPayload.cost_usd) throw new Error("website_opening_cost_mismatch");
+  } else if (openingMode === "application_tts_v1") {
     const expectedText = onboardingOpeningText(
       expectedOnboardingBusinessName!,
       resumeState.openingContext,
@@ -3286,7 +3352,7 @@ export function attachSideband(
           ),
         }
       : {}),
-    ...(openingMode === "application_tts_v1"
+    ...(openingMode === "application_tts_v1" && !websiteInterview
       ? {
           applicationOpening: {
             payload: structuredClone(openingPayload!),
@@ -3356,6 +3422,7 @@ export function attachSideband(
     cancelled = true;
     terminal = true;
     phoneActive = false;
+    ledger.websiteInterviewRuntime?.stop();
     clearRuntimeTimers();
     if (live.get(cap.callId) === ledger) live.delete(cap.callId);
     if (!openedSettled) {
@@ -3393,10 +3460,17 @@ export function attachSideband(
     // does not authorize another provider request and must not hide already durable
     // provider+call completion from the onboarding lifecycle.
     if (
-      cap.sessionType === "onboarding" &&
+      cap.sessionType === "onboarding" && !ledger.websiteInterviewRuntime &&
       await onboardingTerminationIsDurable(cap, ledger)
     )
       confirmOnboardingTermination(ledger);
+    if (ledger.websiteInterviewRuntime) {
+      try {
+        const proof = await readWebsiteTerminalProof(cap.callId);
+        if (proof) await ledger.websiteInterviewRuntime.finalized(proof);
+      } catch { /* Durable closing state is retried by budget reconciliation. */ }
+      finally { ledger.websiteInterviewRuntime.stop(); }
+    }
     if (!persisted && options.phone) {
       await supa().rpc("defer_phone_sideband_finalization", {
         p_event_id: options.phone.eventId,
@@ -3406,6 +3480,53 @@ export function attachSideband(
     }
     if (live.get(cap.callId) === ledger) live.delete(cap.callId);
   };
+
+  if (websiteInterview) {
+    const enforceWebsiteHardBudget = () => {
+      const ceiling = ledger.budgetEnvelope?.hardLimitUsd ?? config.sessionCostCeilingUsd;
+      if (totalSessionCostUsd(ledger) >= ceiling) {
+        ledger.agentEnded = true; ledger.status = "killed_budget";
+        throw new Error("website_hard_budget_reached");
+      }
+    };
+    ledger.websiteInterviewRuntime = createWebsiteInterviewRuntime(websiteInterview, {
+      agendaStore: createOnboardingAgendaStore(supa()),
+      evidenceStore: createInterviewEvidenceStore(supa()),
+      synthesize: (action, signal) => synthesizeOnboardingSpeech(action, { openaiKey: config.openaiKey, signal, fetchImpl: options.fetchImpl }),
+      enqueue: (task) => {
+        const adapter = ensureOnboardingAdapter(ledger);
+        const queued = adapter.queue.then(async () => {
+          if (cancelled || terminal || live.get(cap.callId) !== ledger) return;
+          await task();
+          if (ledger.status !== "active") await finalize("website_runtime_terminal");
+        });
+        adapter.queue = queued.catch(async () => {
+          ledger.agentEnded = true; if (ledger.status === "active") ledger.status = "error"; ledger.providerUsageEvidence.continuous = false;
+          await finalize("website_runtime_failure");
+        });
+        return adapter.queue;
+      },
+      send: (event) => { if (!ws || !ownsLiveLedger()) throw new Error("website_sideband_unavailable"); ws.send(JSON.stringify(event)); },
+      onTranscript: (entry) => ledger.transcript.push(entry),
+      onCost: (cost) => {
+        if (!Number.isFinite(cost) || cost < 0) throw new Error("website_tts_cost_invalid");
+        ledger.externalCostUsd = Number(((ledger.externalCostUsd ?? 0) + cost).toFixed(8));
+        enforceWebsiteHardBudget();
+      },
+      onUsage: (response: any) => {
+        const usage = validatedProviderUsage(response?.usage);
+        if (!usage) { ledger.providerUsageEvidence.continuous = false; return; }
+        for (const key of Object.keys(usage) as Array<keyof UsageTotals>) ledger.usage[key] += usage[key];
+        ledger.providerUsageEvidence.eventCount += 1;
+        ledger.providerUsageEvidence.lastResponseId = response.id;
+        ledger.providerUsageEvidence.lastReceivedAt = new Date().toISOString();
+        enforceWebsiteHardBudget();
+      },
+      onUsageUnknown: () => { ledger.providerUsageEvidence.continuous = false; },
+      onTerminate: (command) => { ledger.agentEnded = true; if (ledger.status === "active") ledger.status = command.outcome === "complete" ? "ended" : "error"; },
+      onState: (state) => { ledger.phase = state.phase; },
+    });
+  }
 
   const startHeartbeat = () => {
     if (!options.phone || heartbeat || !phoneActive || !ownsLiveLedger()) return;
@@ -3454,7 +3575,7 @@ export function attachSideband(
       startHeartbeat();
     }
     if (!ownsSocket(sock)) return;
-    sock.send(JSON.stringify({
+    if (!ledger.websiteInterviewRuntime) sock.send(JSON.stringify({
       type: "session.update",
       // turn_detection is re-asserted here because session.update semantics for nested
       // audio.input objects are not merge-guaranteed — both sites carry the same config.
@@ -3496,7 +3617,7 @@ export function attachSideband(
       ledger.pendingToolCalls = 0;
       maybeContinueResponse(ledger, sock);
       if (!ownsSocket(sock)) return;
-      if (!options.phone && requestResponse(ledger, sock, "greeting"))
+      if (requestResponse(ledger, sock, "greeting"))
         setPhase(ledger, "greeting");
     }
     if (!ownsSocket(sock)) return;
@@ -3555,7 +3676,7 @@ export function attachSideband(
       const wasCurrent = ws === sock;
       if (wasCurrent) ws = null;
       if (cancelled || !wasCurrent || live.get(cap.callId) !== ledger) return;
-      if (cap.sessionType === "onboarding") {
+      if (cap.sessionType === "onboarding" && !ledger.websiteInterviewRuntime) {
         const adapter = ensureOnboardingAdapter(ledger);
         clearApplicationReactivationTimer(adapter);
         clearTransportAckTimers(adapter);
@@ -3807,7 +3928,8 @@ export async function persistLedger(
   const providerTerminalObserved =
     ledger.providerTerminalEvidence?.observed === true;
   const providerNeedsTermination = !providerTerminalObserved &&
-    (ledger.status !== "ended" || ledger.agentEnded === true);
+    (ledger.status !== "ended" || ledger.agentEnded === true ||
+      ledger.websiteInterviewRuntime !== undefined);
   const terminationReason = ledger.agentEnded === true
     ? "agent_ended_session"
     : providerTerminalObserved

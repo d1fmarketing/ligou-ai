@@ -3,7 +3,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { config } from "./config.ts";
 import { buildInstructions } from "./instructions.ts";
-import { loadTenant, supa } from "./rules.ts";
+import { loadTenantById, supa } from "./rules.ts";
 import { makeCapability, toolSchemas } from "./tools.ts";
 import { attachSideband, type SidebandControl } from "./sideband.ts";
 import {
@@ -17,9 +17,10 @@ type PhoneRuntime = {
   workerId?: string;
   fetchImpl?: FetchLike;
   attachSidebandImpl?: typeof attachSideband;
+  sidebandOpenTimeoutMs?: number;
 };
 
-type PhoneClaim = { id: string; claim_token: string; openai_call_id: string };
+type PhoneClaim = { id: string; claim_token: string; openai_call_id: string;tenant_id:string|null;max_minutes:number;route_error:string|null };
 type PhoneTerminationClaim = {
   event_id: string;
   claim_token: string;
@@ -33,8 +34,17 @@ function runtimeError(message: string, status: number, detail?: string) {
   return Object.assign(new Error(message), { status, detail });
 }
 
+async function phoneRpc(name:string,args:Record<string,unknown>){
+  const abort=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined;
+  try{
+    const query=supa().rpc(name,args);
+    const request=typeof query.abortSignal==='function'?query.abortSignal(abort.signal):query;
+    return await Promise.race([Promise.resolve(request),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{abort.abort();reject(runtimeError('phone_lifecycle_timeout',503));},4000);})]);
+  }finally{if(timer)clearTimeout(timer);abort.abort();}
+}
+
 async function requiredRpc<T>(name: string, args: Record<string, unknown>, message: string): Promise<T> {
-  const { data, error } = await supa().rpc(name, args);
+  const { data, error } = await phoneRpc(name, args);
   if (error || data === null || data === false) {
     throw runtimeError(message, 503, error?.message ?? "lifecycle_write_failed");
   }
@@ -42,7 +52,7 @@ async function requiredRpc<T>(name: string, args: Record<string, unknown>, messa
 }
 
 async function claimPhoneEvent(eventId: string, workerId: string): Promise<PhoneClaim | null> {
-  const { data, error } = await supa().rpc("claim_phone_event", { p_event_id: eventId, p_worker: workerId });
+  const { data, error } = await phoneRpc("claim_phone_event", { p_event_id: eventId, p_worker: workerId });
   if (error) throw runtimeError("phone_claim_failed", 503, error.message);
   return data ? data as PhoneClaim : null;
 }
@@ -132,18 +142,25 @@ export async function handleIncoming(row: any, runtime: PhoneRuntime = {}) {
     acceptState: PhoneAcceptState,
   ) => await terminatePhoneLifecycle({ ...context, mode, reason, acceptState, fetchImpl });
 
+  if(claim.route_error || !claim.tenant_id || !Number.isInteger(claim.max_minutes) || claim.max_minutes<1 || claim.max_minutes>5){
+    const reason=['phone_not_configured','phone_number_unassigned','phone_busy','phone_tenant_unavailable'].includes(claim.route_error??'')?claim.route_error!:'phone_route_unavailable';
+    await terminate('reject',reason,'not_attempted');return;
+  }
+
   let tenant: any;
   let rules: any[];
   try {
-    ({ tenant, rules } = await loadTenant(config.defaultTenantSlug));
+    ({ tenant, rules } = await loadTenantById(claim.tenant_id));
   } catch (error) {
     await terminate("reject", "tenant_load_failed_before_accept", "not_attempted");
     throw error;
   }
-  if (!tenant.owner_user_id) {
+  if (!tenant.owner_user_id || tenant.id!==claim.tenant_id || tenant.status!=='active') {
     await terminate("reject", "tenant_provisioning_required", "not_attempted");
     throw runtimeError("tenant_provisioning_required", 409);
   }
+  const maxMinutes=Math.min(tenant.session_max_minutes??claim.max_minutes,claim.max_minutes,config.sessionMaxMinutes);
+  if(!Number.isInteger(maxMinutes)||maxMinutes<1){await terminate('reject','phone_duration_invalid','not_attempted');return;}
 
   let callId: string;
   try {
@@ -181,6 +198,7 @@ export async function handleIncoming(row: any, runtime: PhoneRuntime = {}) {
     throw error;
   }
 
+  const providerDeadline=Date.now()+maxMinutes*60_000;
   let accept: Response;
   try {
     accept = await fetchImpl(`https://api.openai.com/v1/realtime/calls/${encodeURIComponent(context.openaiCallId ?? "")}/accept`, {
@@ -192,17 +210,20 @@ export async function handleIncoming(row: any, runtime: PhoneRuntime = {}) {
         instructions,
         tools: toolSchemas,
         tool_choice: "auto",
-        audio: { output: { voice: config.voice } },
+        output_modalities: ['audio'],
+        audio: { input:{turn_detection:{type:'semantic_vad',eagerness:'low',create_response:false,interrupt_response:true}},output: { voice: config.voice } },
       }),
+      signal:AbortSignal.timeout(config.realtimeCreateTimeoutMs),
     });
   } catch (error) {
     await terminate("hangup", "phone_accept_transport_unknown", "unknown");
     throw error;
   }
+  void accept.body?.cancel().catch(()=>{});
   if (!accept.ok) {
     const definitive = accept.status >= 400 && accept.status < 500;
     await terminate(definitive ? "reject" : "hangup", "phone_accept_failed", definitive ? "failed" : "unknown");
-    throw runtimeError("accept_failed", 502, `${accept.status} ${await accept.text()}`);
+    throw runtimeError("accept_failed", 502, String(accept.status));
   }
 
   try {
@@ -221,7 +242,7 @@ export async function handleIncoming(row: any, runtime: PhoneRuntime = {}) {
       tenant.slug,
       tenant.id,
       callId,
-      tenant.session_max_minutes ?? config.sessionMaxMinutes,
+      maxMinutes,
       "customer",
       {
         authEpoch: tenant.auth_epoch,
@@ -229,6 +250,8 @@ export async function handleIncoming(row: any, runtime: PhoneRuntime = {}) {
         simulation: tenant.operational_mode === "simulation_only",
       },
     );
+    cap.expiresAt=Math.min(cap.expiresAt,providerDeadline);
+    if(cap.expiresAt<=Date.now())throw new Error('phone_setup_deadline_exceeded');
     await requiredRpc<boolean>("begin_phone_sideband", {
       p_event_id: context.eventId,
       p_claim_token: context.claimToken,
@@ -245,7 +268,9 @@ export async function handleIncoming(row: any, runtime: PhoneRuntime = {}) {
       fetchImpl,
     });
     if (!sideband?.opened || typeof sideband.cancel !== "function") throw new Error("phone_sideband_control_invalid");
-    await sideband.opened;
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{await Promise.race([sideband.opened,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('phone_sideband_open_timeout')),runtime.sidebandOpenTimeoutMs??config.sidebandOpenTimeoutMs);})]);}
+    finally{if(timer)clearTimeout(timer);}
   } catch (error) {
     sideband?.cancel("phone_hangup_before_sideband_active");
     await terminate("hangup", "sideband_attach_failed", "accepted");
@@ -256,7 +281,7 @@ export async function handleIncoming(row: any, runtime: PhoneRuntime = {}) {
 export async function reconcilePhoneLifecycles(runtime: Pick<PhoneRuntime, "workerId" | "fetchImpl"> = {}): Promise<number> {
   const workerId = runtime.workerId ?? `phone-reconciliation-${process.pid}`;
   const fetchImpl = runtime.fetchImpl ?? fetch;
-  const { data, error } = await supa().rpc("claim_phone_lifecycle_reconciliation", { p_worker: workerId });
+  const { data, error } = await phoneRpc("claim_phone_lifecycle_reconciliation", { p_worker: workerId });
   if (error || !data) return 0;
   const claim = data as PhoneTerminationClaim;
   if (claim.action === "resolve_not_applicable") {

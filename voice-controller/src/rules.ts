@@ -6,6 +6,7 @@ import {
   isExecutableBusinessHours,
   type CanonicalLocality,
 } from "./onboarding-coverage.ts";
+import { materializationProvenance } from "./onboarding-materialization.ts";
 
 export interface VerifiedLocality extends CanonicalLocality {
   aliases: string[];
@@ -126,6 +127,11 @@ export interface ServicePolicy {
   amarelo_above?: number;
   description: string;
   schema?: "ligou.rule.service.v2";
+  public_price?: {
+    amount: string;
+    currency: string;
+    qualifier: "exact" | "starting_at";
+  } | null;
 }
 
 function finiteNonnegative(value: unknown): value is number {
@@ -197,6 +203,7 @@ function parseV2Service(rule: Rule): ServicePolicy | null {
   const structured = rule.structured;
   const serviceType = v2ServiceSubject(rule);
   if (!structured || !serviceType) return null;
+  const provenance = materializationProvenance(structured);
   const names = Array.isArray(structured.service_names)
     ? structured.service_names.filter(
         (name): name is string => typeof name === "string" && name.trim().length > 0,
@@ -209,13 +216,51 @@ function parseV2Service(rule: Rule): ServicePolicy | null {
     structured.materialization_eligible !== true ||
     structured.review_ready !== true ||
     !/^[0-9a-f]{64}$/.test(String(structured.materialization_hash ?? "")) ||
-    !Number.isSafeInteger(structured.coverage_revision) ||
-    typeof structured.source_call_id !== "string" ||
+    provenance === null ||
     names.length === 0 ||
     !["fixed", "starting_at", "estimate", "owner_review"].includes(String(mode)) ||
     !["active", "owner_review_required", "disabled"].includes(String(state))
   ) return null;
   if (state === "disabled") return null;
+  let publicPrice: ServicePolicy["public_price"] | undefined;
+  if (provenance.kind === "company_discovery") {
+    if (
+      mode !== "owner_review" || state !== "owner_review_required" ||
+      structured.quoteable !== false || structured.negotiable !== false ||
+      ["price_target", "price_min", "negotiation_mode"].some((key) =>
+        Object.prototype.hasOwnProperty.call(structured, key)
+      ) ||
+      !Array.isArray(structured.owner_review_fields) ||
+      JSON.stringify(structured.owner_review_fields) !== JSON.stringify([
+        "service.negotiation",
+        "service.price_mode",
+        "service.private_pricing",
+      ])
+    ) return null;
+    if (structured.public_price === null) {
+      publicPrice = null;
+    } else {
+      const price = structured.public_price;
+      if (
+        !price || typeof price !== "object" || Array.isArray(price) ||
+        Object.keys(price as Record<string, unknown>).sort().join(",") !==
+          "amount,currency,qualifier"
+      ) return null;
+      const candidate = price as Record<string, unknown>;
+      if (
+        typeof candidate.amount !== "string" ||
+        !/^(0|[1-9][0-9]{0,8})[.][0-9]{2}$/.test(candidate.amount) ||
+        typeof candidate.currency !== "string" ||
+        !/^[A-Z]{3}$/.test(candidate.currency) ||
+        !["exact", "starting_at"].includes(String(candidate.qualifier))
+      ) return null;
+      publicPrice = {
+        amount: candidate.amount,
+        currency: candidate.currency,
+        qualifier: candidate.qualifier as "exact" | "starting_at",
+      };
+    }
+  }
   const pricingMode = mode === "fixed" || mode === "starting_at";
   const quoteable = structured.quoteable === true;
   const target = structured.price_target;
@@ -259,6 +304,9 @@ function parseV2Service(rule: Rule): ServicePolicy | null {
     ...(finitePositive(duration) ? { duration_min: duration } : {}),
     description: rule.text,
     schema: "ligou.rule.service.v2",
+    ...(provenance.kind === "company_discovery"
+      ? { public_price: publicPrice ?? null }
+      : {}),
   };
 }
 
@@ -407,6 +455,10 @@ function canonicalV2DomainRule(
       String(structured.operational_state),
     ) ||
     !/^[0-9a-f]{64}$/.test(String(structured.materialization_hash ?? ""))
+  ) return false;
+  if (
+    Object.prototype.hasOwnProperty.call(structured, "source_kind") &&
+    materializationProvenance(structured) === null
   ) return false;
   if (
     structured.operational_state === "active" && key === "domain:area"

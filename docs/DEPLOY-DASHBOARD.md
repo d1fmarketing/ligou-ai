@@ -1,45 +1,34 @@
-# Deploy — landing + dashboard unificados (Vercel)
+# Production release — Ligou landing, sales demo and dashboard
 
-**URL:** https://client-nine-taupe-24.vercel.app · **Projeto Vercel:** `client` (`prj_lWeapZCZqtv32BlfHAuylDzqO20g`, team `team_Kt6PAU2cglJsc1PmybP6F5Oh`) · **Conta:** `d1fdmarketing-8096`
+Vercel project: `client` (`prj_lWeapZCZqtv32BlfHAuylDzqO20g`). Team: `team_Kt6PAU2cglJsc1PmybP6F5Oh`.
+Production alias: https://client-nine-taupe-24.vercel.app
 
-Um deploy só serve os dois:
+## Source and scope
 
-- `/` — landing v9 (fonte `src/runtime/ligou-app9.jsx` → `bun run build` → `assets/js/ligou-app9.js`);
-- `/dashboard/` — painel do cliente em modo remoto (login Supabase; sessões de voz via Edge Function `browser-session`, EC2 sem porta de entrada).
+The September 6 release consolidates the approved original landing and responsive correction (`d92b315`) with the deployed phone/backend and current dashboard/onboarding (`880be86`). Keep this integrated source on `main` after verification. Preserved preview branches remain historical references; they are not interchangeable deploy roots.
 
-**A fonte de tudo é o branch `main` deste repositório** (desde 2026-09-01; antes estava dividida entre `codex/ligou-dashboard`, `codex/ligou-mvp` e `codex/v0.2-browser-pilot`, o que fez a copy aprovada em 22/08 não ir ao ar).
+The composed artifact serves `/`, `/dashboard/`, `/comercial/`, `/termos/`, `/privacidade/`, and the server-only `/api/sales-session` adapter. It does not redeploy EC2, Supabase migrations or Edge functions. Those releases have independent receipts. The project has no Git integration as verified on September 6: pushing Git alone does not publish.
 
-## Republicar
+## Build and configuration
 
-```bash
-cd /Users/d1f/Desktop/Ligou.AI            # worktree do main
-# Exporte as QUATRO entradas públicas, com os valores de dashboard/.env.local (arquivo local, fora do git;
-# chaves VITE_SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY, VITE_SUPABASE_FUNCTIONS_URL, VITE_SESSION_URL):
-#   LIGOU_PUBLIC_SUPABASE_URL, LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
-#   LIGOU_PUBLIC_SUPABASE_FUNCTIONS_URL, LIGOU_PUBLIC_SESSION_URL
-# SEM LIGOU_PUBLIC_SESSION_URL o botão de voz é compilado apontando para http://127.0.0.1:8790/session
-# (dashboard/src/voice/session.js) — aconteceu num deploy de 2026-09-01, corrigido em minutos por redeploy.
-# Use um PATH curto (< 4096 chars): production-env.mjs descarta PATH longo e cai em /usr/bin:/bin, sem bun.
-PATH="/usr/bin:/bin:$HOME/.bun/bin" bun run site:build   # bun run check + build do dashboard + dist/client
-cd dist/client && vercel deploy --prod --yes --token "$VERCEL_TOKEN"
-```
+1. Use a clean committed source. Run `npm ci` in `dashboard/` and ensure the pinned Bun/Node toolchain is on a short PATH.
+2. Provide all four public build inputs: `LIGOU_PUBLIC_SUPABASE_URL`, `LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `LIGOU_PUBLIC_SUPABASE_FUNCTIONS_URL`, `LIGOU_PUBLIC_SESSION_URL`. The voice endpoint must resolve to the intended authenticated Edge `browser-session`, never localhost. Public keys must not be service-role credentials.
+3. Run `npm run test:dashboard --prefix dashboard`, `bun run site:build`, and `npm run test:sites --prefix dashboard`. `site:build` includes landing checks and assembles `dist/client` without private env files or symlinks.
+4. Set Vercel server-only `LIGOU_SALES_EDGE_URL` and encrypted `LIGOU_SALES_PROXY_SECRET` for the target environment. They are read at invocation time and never embedded into public JavaScript. The Supabase `SALES_ALLOWED_ORIGINS` list must include each exact production alias and any deployment URL being tested. Preserve existing allowed origins when extending it; verify the local source against the live digest first.
+5. Verify Supabase authentication redirect URLs admit `/dashboard/` and `/comercial/` on the final alias. Do not send login messages as part of deployment without explicit authorization.
 
-- `site:build` **não lê** `.env`/`.env.local` do Vite nem herda `VITE_*`/`SUPABASE_*` do shell (`scripts/production-env.mjs`). Só as quatro entradas públicas `LIGOU_PUBLIC_*` são mapeadas para `VITE_*`. Ausência de URL de funções falha fechada.
-- `site:build` apaga e recria `dist/client/`, levando o `.vercel/project.json`. O relink funciona pelo nome da pasta `client`; para não haver ambiguidade recrie antes do deploy:
-  `{"projectId":"prj_lWeapZCZqtv32BlfHAuylDzqO20g","orgId":"team_Kt6PAU2cglJsc1PmybP6F5Oh","projectName":"client"}`.
-- Passe sempre `--token` (lido de `~/Library/Application Support/com.vercel.cli/auth.json`, campo `token`; confira `expiresAt`). Com token explícito o CLI nunca abre navegador. Se expirou, renove via `POST https://api.vercel.com/login/oauth/token` com `grant_type=refresh_token`, `client_id=cl_HYyOPBNtFMfHhaUn9L4QPfTZz6TP47bp` e o `refreshToken` do mesmo arquivo.
-- O projeto `client` **não tem git link**: push no GitHub nunca publica. Só este comando publica.
-- Depois de editar `index.html`, `src/runtime/ligou-app9.jsx` ou qualquer arquivo pinado: `bun run build` e regenerar `docs/CLAUDE-V9-RUNTIME.sha256` (mesmos paths, hashes novos), senão `bun run check` quebra. `scripts/verify-claude-v9.mjs` também trava a premissa de marca (eyebrow "Agente operacional de inteligência artificial"; rótulo "assistente virtual" proibido).
+## Staged production deployment
 
-## Prova de que foi ao ar
+`site:build` recreates `dist/client`, so restore its ignored `.vercel/project.json` only after building, with the exact project/team IDs above. Do not let the CLI create a new project implicitly.
 
-1. `curl -sI https://client-nine-taupe-24.vercel.app/dashboard/assets/index-<hash>.js` → `last-modified` recente;
-2. o mesmo `index-<hash>.js` existe byte a byte em `dist/client/dashboard/assets/`;
-3. `grep -c 'Agente operacional de inteligência artificial' <(curl -s https://client-nine-taupe-24.vercel.app/)` → 1.
+Deploy the artifact using `vercel deploy --prod --skip-domain --yes` from `dist/client`. This builds with production runtime configuration but leaves the previous production alias intact. Record the returned deployment ID/URL. If deployment protection applies, use the authenticated CLI or authorized access rather than weakening protection.
 
-## Notas
+Verify HTML, compiled JS/CSS, media responses, dashboard nested routes, commercial and legal routes, public configuration, API method/origin behavior and the same-origin sales proxy. Use a non-creating status request to exercise the proxy without spending on a voice call. Inspect the final browser rendering at the responsive regression viewport.
 
-- Com as 4 variáveis acima o build reproduz byte a byte o bundle validado em 2026-09-01 01:25 (`dashboard/assets/index-BD5I2sSu.js`); prova rápida de que nada mudou no dashboard além do pretendido.
-- Cosmético conhecido: em produção o app dispara `POST http://127.0.0.1:8795/claim` (handshake do modo local, fire-and-forget) que o navegador bloqueia com `ERR_BLOCKED_BY_CLIENT`. Não afeta login nem voz.
-- Domínio próprio depois: `vercel domains add <dominio>` e alias no projeto.
-- Mapa do repositório: `docs/REPO-MAPA-2026-09-01.md`.
+Promote the verified deployment with `vercel promote <deployment-url> --yes`. Repeat route/hash and proxy checks on the stable production alias. Save a sanitized receipt with source commit, deployment ID, previous deployment, bundle hashes and validation results.
+
+## Rollback and repository hygiene
+
+Preserve the prior deployment ID/URL before promotion. `vercel rollback <previous-deployment-url> --yes` restores its production alias without rebuilding. Preserve call/lead records and existing backend configuration; never delete database records or release budget holds to make a deploy appear clean.
+
+Push the integrated main commit and verify local/remote HEAD agree. Preserve original uncommitted work in a named branch or verified snapshot before changing its checkout. Keep useful worktrees and agents; repository cleanliness means no unintended working-tree changes or unexplained source divergence, not deleting history, backups or review artifacts.

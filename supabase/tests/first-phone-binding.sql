@@ -1,0 +1,42 @@
+begin;
+create function pg_temp.phone_assert(ok boolean,label text) returns void language plpgsql as $$begin if ok is distinct from true then raise exception 'phone_assert:%',label;end if;end;$$;
+set local request.jwt.claim.role='service_role';
+insert into auth.users(id) values('11000000-0000-4000-8000-000000000001') on conflict do nothing;
+insert into auth.users(id) values('11000000-0000-4000-8000-000000000002') on conflict do nothing;
+insert into public.tenants(id,slug,name,owner_user_id,status,operational_mode) values
+ ('22000000-0000-4000-8000-000000000001','first-phone-a','Phone QA A','11000000-0000-4000-8000-000000000001','active','simulation_only'),
+ ('22000000-0000-4000-8000-000000000002','first-phone-b','Phone QA B','11000000-0000-4000-8000-000000000002','active','simulation_only');
+select pg_temp.phone_assert((select not enabled and phone_number is null and tenant_id is null from public.phone_inbound_configuration),'initially unassigned and disabled');
+do $$declare c jsonb; caught boolean:=false;cid uuid;begin
+ insert into public.phone_events(id,openai_call_id,called_number) values('33000000-0000-4000-8000-000000000001','first-phone-disabled','+14155550123');
+ c:=public.claim_phone_event('33000000-0000-4000-8000-000000000001','first-phone-qa');
+ perform pg_temp.phone_assert(c->>'tenant_id' is null and c->>'route_error'='phone_not_configured','disabled route has no tenant');
+ begin perform public.persist_phone_call('33000000-0000-4000-8000-000000000001',(c->>'claim_token')::uuid,'22000000-0000-4000-8000-000000000001','gpt-realtime-2.1');exception when others then caught:=SQLERRM='phone_route_unavailable';end;
+ perform pg_temp.phone_assert(caught,'disabled route cannot create a customer call');
+ perform public.configure_first_phone_number('22000000-0000-4000-8000-000000000001','+14155550123',true,5);
+ insert into public.phone_events(id,openai_call_id,called_number) values('33000000-0000-4000-8000-000000000002','first-phone-wrong','+14155550125');
+ c:=public.claim_phone_event('33000000-0000-4000-8000-000000000002','first-phone-qa');
+ perform pg_temp.phone_assert(c->>'tenant_id' is null and c->>'route_error'='phone_number_unassigned','unknown number has no default tenant');
+ insert into public.phone_events(id,openai_call_id,called_number) values('33000000-0000-4000-8000-000000000003','first-phone-good','+14155550123');
+ c:=public.claim_phone_event('33000000-0000-4000-8000-000000000003','first-phone-qa');
+ perform pg_temp.phone_assert(c->>'tenant_id'='22000000-0000-4000-8000-000000000001' and (c->>'max_minutes')::int=5 and c->>'route_error' is null,'exact number resolves authoritative tenant');
+ caught:=false;begin perform public.persist_phone_call('33000000-0000-4000-8000-000000000003',(c->>'claim_token')::uuid,'22000000-0000-4000-8000-000000000002','gpt-realtime-2.1');exception when others then caught:=SQLERRM='phone_route_unavailable';end;
+ perform pg_temp.phone_assert(caught,'caller cannot substitute another tenant');
+ cid:=public.persist_phone_call('33000000-0000-4000-8000-000000000003',(c->>'claim_token')::uuid,'22000000-0000-4000-8000-000000000001','gpt-realtime-2.1');
+ perform pg_temp.phone_assert((select tenant_id='22000000-0000-4000-8000-000000000001' from public.calls where id=cid),'call stays with assigned tenant');
+ insert into public.phone_events(id,openai_call_id,called_number) values('33000000-0000-4000-8000-000000000004','first-phone-busy','+14155550123');
+ perform pg_temp.phone_assert(public.claim_phone_event('33000000-0000-4000-8000-000000000004','second-worker')->>'route_error'='phone_busy','only one pilot call can occupy the route');
+ caught:=false;begin perform public.configure_first_phone_number('22000000-0000-4000-8000-000000000002','+14155550125',true,5);exception when others then caught:=SQLERRM='phone_calls_active';end;
+ perform pg_temp.phone_assert(caught,'active call blocks reassignment');
+ perform public.configure_first_phone_number('22000000-0000-4000-8000-000000000001','+14155550123',false,5);
+ update public.phone_events set lifecycle_state='budget_reserved' where id='33000000-0000-4000-8000-000000000003';
+ caught:=false;begin perform public.begin_phone_provider_accept('33000000-0000-4000-8000-000000000003',(c->>'claim_token')::uuid);exception when others then caught:=SQLERRM='phone_route_unavailable';end;
+ perform pg_temp.phone_assert(caught,'disable prevents acceptance after claim');
+ perform pg_temp.phone_assert((select provider_accept_state='not_attempted' from public.phone_events where id='33000000-0000-4000-8000-000000000003'),'disabled call has no provider intent');
+end;$$;
+select pg_temp.phone_assert(not has_function_privilege('anon','public.configure_first_phone_number(uuid,text,boolean,integer)','execute'),'anon cannot configure route');
+select pg_temp.phone_assert(not has_function_privilege('authenticated','public.configure_first_phone_number(uuid,text,boolean,integer)','execute'),'browser cannot configure route');
+select pg_temp.phone_assert(has_function_privilege('service_role','public.configure_first_phone_number(uuid,text,boolean,integer)','execute'),'service may configure route');
+select pg_temp.phone_assert(not has_table_privilege('anon','public.phone_inbound_configuration','select') and not has_table_privilege('authenticated','public.phone_inbound_configuration','select'),'route configuration is private');
+rollback;
+select 'first_phone_binding_passed';

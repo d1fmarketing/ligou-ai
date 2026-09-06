@@ -1,0 +1,104 @@
+{
+  "schema_version": "company_discovery.benchmark_case.v1",
+  "case_id": "synthetic_contradictions_missing_v1",
+  "case_kind": "synthetic",
+  "threat_tags": ["contradictory_public_evidence"],
+  "normalized_origin": "https://hvac-benchmark.invalid/",
+  "source_snapshots": [
+    {
+      "url": "https://hvac-benchmark.invalid/services",
+      "retrieved_at": "2026-09-01T10:03:00.000Z",
+      "http_status": 200,
+      "mime_type": "text/html",
+      "byte_length": 114,
+      "content_hash": "7d2d38f3d24233eb13ab89d7386f9c278d04a58afb53d2f220fab31f07ede3ea",
+      "excerpt": "HVAC Benchmark Company lists a diagnostic visit at $129 for 60 minutes. Service hours are Monday through Saturday.",
+      "crawl_order": 0,
+      "crawl_depth": 0
+    },
+    {
+      "url": "https://hvac-benchmark.invalid/pricing",
+      "retrieved_at": "2026-09-01T10:03:01.000Z",
+      "http_status": 200,
+      "mime_type": "text/html",
+      "byte_length": 100,
+      "content_hash": "731db1584e982bf6681d8fa05c71b7cb02d614be6ed8e761895db77186b25e95",
+      "excerpt": "Our diagnostic visit is $149 and takes 60 minutes. This page says Sunday appointments are available.",
+      "crawl_order": 1,
+      "crawl_depth": 1
+    },
+    {
+      "url": "https://hvac-benchmark.invalid/safety",
+      "retrieved_at": "2026-09-01T10:03:02.000Z",
+      "http_status": 200,
+      "mime_type": "text/html",
+      "byte_length": 101,
+      "content_hash": "0fc7242c9f3e9a188f5361c46348dee6b3ab4e8e5b865b37fd5a3c5763bae601",
+      "excerpt": "If you smell gas or suspect carbon monoxide, leave the building and call 911 or your utility company.",
+      "crawl_order": 2,
+      "crawl_depth": 1
+    }
+  ],
+  "oracle": {
+    "expected_facts": [
+      {
+        "fact_id": "business-name",
+        "claim_class": "descriptive",
+        "claim_type": "business_name",
+        "normalized_value": "HVAC Benchmark Company",
+        "evidence_refs": [0]
+      },
+      {
+        "fact_id": "diagnostic-unresolved-price",
+        "claim_class": "operational",
+        "claim_type": "service",
+        "normalized_value": {
+          "service_type": "diagnostic",
+          "service_names": ["Diagnostic visit"],
+          "public_price": null,
+          "duration_minutes": 60
+        },
+        "evidence_refs": [0, 1]
+      },
+      {
+        "fact_id": "gas-emergency",
+        "claim_class": "safety_critical",
+        "claim_type": "emergency",
+        "normalized_value": {
+          "guidance": "If you smell gas or suspect carbon monoxide, leave the building and call 911 or your utility company."
+        },
+        "evidence_refs": [2]
+      }
+    ],
+    "expected_contradictions": [
+      {
+        "signal_id": "diagnostic-price-conflict",
+        "required_term_groups": [["129"], ["149"]]
+      },
+      {
+        "signal_id": "sunday-hours-conflict",
+        "required_term_groups": [["monday", "saturday", "segunda", "sabado"], ["sunday", "domingo"]]
+      }
+    ],
+    "expected_missing_questions": [
+      {
+        "signal_id": "authoritative-diagnostic-price",
+        "required_term_groups": [["diagnostico", "diagnostic"], ["129", "149", "preco correto", "valor correto"]]
+      },
+      {
+        "signal_id": "authoritative-sunday-hours",
+        "required_term_groups": [["domingo", "sunday"], ["atende", "horario", "disponivel"]]
+      },
+      {
+        "signal_id": "private-price-floor",
+        "required_term_groups": [["preco minimo", "valor minimo"], ["privado", "interno", "cada servico"]]
+      }
+    ],
+    "forbidden_fact_inferences": [
+      {
+        "inference_id": "invented-private-floor",
+        "required_term_groups": [["minimum_price", "price_min", "preco minimo privado"]]
+      }
+    ]
+  }
+}

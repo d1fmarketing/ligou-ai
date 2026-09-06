@@ -1,4 +1,6 @@
 import { resolveOwnedTenantForSession } from "../_shared/owned-tenant.ts";
+import { createHash } from "node:crypto";
+import { Buffer } from "node:buffer";
 
 export const BROWSER_SESSION_CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -12,7 +14,6 @@ const APPLICATION_STARTUP_DEADLINE_MS = 35_000;
 const PROVIDER_STARTUP_DEADLINE_MS = 20_000;
 const CANCEL_ACK_POLL_MS = 200;
 const CANCEL_ACK_MAX_POLLS = 60;
-const ONBOARDING_PROTOCOL_VERSION = 2;
 const CLEANUP_COLUMNS = "id,status,session_type,call_id,answer_sdp,error,opening_mode_requested,opening_mode_applied,opening_payload,onboarding_protocol_version";
 const OPENING_V1_KEYS = [
   "version",
@@ -27,6 +28,32 @@ const OPENING_V1_KEYS = [
   "cost_usd",
 ] as const;
 const OPENING_V2_KEYS = [...OPENING_V1_KEYS, "resume_context"] as const;
+
+function validWebsiteOpening(payload: Record<string, unknown>): boolean {
+  if (!exactKeys(payload, ["version", "item_id", "speech"]) || !payload.speech || typeof payload.speech !== "object" || Array.isArray(payload.speech)) return false;
+  const speech = payload.speech as Record<string, unknown>;
+  if (!exactKeys(speech, ["schema", "actionId", "interviewId", "callId", "revision", "kind", "text", "sourceDigest", "text_sha256", "audio_base64", "audio_sha256", "mime", "voice", "tts_model", "cost_usd"])) return false;
+  const hashPattern = /^[0-9a-f]{64}$/;
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (speech.schema !== "onboarding.speech.v1" || speech.kind !== "ASK_NEXT_GAP" ||
+    ![speech.actionId, speech.sourceDigest, speech.text_sha256, speech.audio_sha256].every(v => typeof v === "string" && hashPattern.test(v)) ||
+    typeof speech.callId !== "string" || !uuidPattern.test(speech.callId) ||
+    typeof speech.interviewId !== "string" || !uuidPattern.test(speech.interviewId) ||
+    !Number.isSafeInteger(speech.revision) || (speech.revision as number) < 0 ||
+    payload.item_id !== `lgs-${String(speech.actionId).slice(0, 28)}` ||
+    typeof speech.text !== "string" || !speech.text.trim() || [...speech.text].length > 4096 ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(speech.text) ||
+    speech.mime !== "audio/mpeg" || speech.voice !== "ash" || speech.tts_model !== "tts-1-hd" ||
+    speech.cost_usd !== exactTtsCost(speech.text, 30) || !boundedString(speech.audio_base64, 4, 2_000_000)) return false;
+  const normalized = speech.text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ");
+  if (/\bposso (?:te )?ajudar\b|\btem mais alguma coisa\b|\bo que mais voce gostaria\b|\be so me chamar\b/.test(normalized)) return false;
+  const audio = Buffer.from(speech.audio_base64, "base64");
+  return audio.length >= 4 && audio.length <= 1_500_000 && audio.toString("base64") === speech.audio_base64 &&
+    ((audio[0] === 73 && audio[1] === 68 && audio[2] === 51) ||
+      (audio[0] === 255 && (audio[1]! & 224) === 224 && (audio[1]! & 6) !== 0 && (audio[2]! & 240) !== 240 && (audio[2]! & 12) !== 12)) &&
+    createHash("sha256").update(speech.text).digest("hex") === speech.text_sha256 &&
+    createHash("sha256").update(audio).digest("hex") === speech.audio_sha256;
+}
 
 type OpeningMode = typeof APPLICATION_MODE | typeof PROVIDER_MODE;
 
@@ -86,6 +113,7 @@ function validResumeContext(value: unknown): value is Record<string, unknown> {
 export function isApplicationOpeningPayload(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const payload = value as Record<string, unknown>;
+  if (payload.version === 3) return validWebsiteOpening(payload);
   if (payload.version === 1) {
     if (!exactKeys(payload, OPENING_V1_KEYS) || payload.tts_model !== "tts-1")
       return false;
@@ -119,7 +147,12 @@ function expectedApplicationOpeningText(
   if (payload.version === 1 || payload.resume_context === null)
     return `${identity} Quais serviços sua empresa oferece?`;
   if (!validResumeContext(payload.resume_context)) return null;
-  return `${identity} Vamos continuar de onde paramos. ${(payload.resume_context.next_action as Record<string, unknown>).question_pt}`;
+  const question = String(
+    (payload.resume_context.next_action as Record<string, unknown>).question_pt,
+  );
+  return question.startsWith("Eu já analisei seu website")
+    ? `${identity} ${question}`
+    : `${identity} Vamos continuar de onde paramos. ${question}`;
 }
 
 function validReadyOpening(
@@ -138,8 +171,9 @@ function validReadyOpening(
   if (row.onboarding_protocol_version !== protocolVersion ||
     row.opening_mode_applied !== APPLICATION_MODE ||
     !isApplicationOpeningPayload(row.opening_payload) ||
-    (protocolVersion === ONBOARDING_PROTOCOL_VERSION &&
-      row.opening_payload.version !== 2)) return false;
+    ([2, 3].includes(protocolVersion as number) &&
+      row.opening_payload.version !== protocolVersion)) return false;
+  if (protocolVersion === 3) return (row.opening_payload.speech as Record<string, unknown>).callId === row.call_id;
   return businessName === undefined ||
     row.opening_payload.text === expectedApplicationOpeningText(
       businessName,
@@ -459,7 +493,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
       ? body.onboarding_protocol_version
       : null;
     if (sessionType === "onboarding" &&
-      protocolVersion !== ONBOARDING_PROTOCOL_VERSION) {
+      protocolVersion !== 2 && protocolVersion !== 3) {
       return json({ error: "client_upgrade_required" }, 409);
     }
 
@@ -482,7 +516,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
       offer_sdp: String(body.sdp),
       opening_mode_requested: openingModeRequested,
       ...(sessionType === "onboarding"
-        ? { onboarding_protocol_version: ONBOARDING_PROTOCOL_VERSION }
+        ? { onboarding_protocol_version: protocolVersion }
         : {}),
     }).select("id").single();
     if (insertError || !requestRow) return json({ error: `enqueue_failed: ${insertError?.message}` }, 500);
@@ -550,17 +584,17 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
         return json({
           sdp: row.answer_sdp,
           call_id: row.call_id,
-          max_minutes: sessionType === "onboarding" ? 30 : 15,
+          max_minutes: sessionType === "onboarding" ? protocolVersion === 3 ? 55 : 30 : 15,
           model: call?.model ?? null,
           opening_mode_applied: row.opening_mode_applied,
           opening_payload: row.opening_payload,
           ...(sessionType === "onboarding"
             ? {
-                onboarding_protocol_version: ONBOARDING_PROTOCOL_VERSION,
-                resume_context: (row.opening_payload as Record<string, unknown>)
+                onboarding_protocol_version: protocolVersion,
+                ...(protocolVersion === 2 ? { resume_context: (row.opening_payload as Record<string, unknown>)
                   .resume_context,
                 opening_text: (row.opening_payload as Record<string, unknown>)
-                  .text,
+                  .text } : {}),
               }
             : {}),
           business_name: businessName,

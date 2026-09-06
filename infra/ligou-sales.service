@@ -1,0 +1,31 @@
+[Unit]
+Description=Ligou Website V2 isolated sales voice worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/ligou-sales/current
+EnvironmentFile=/opt/ligou/env
+Environment=LIGOU_SALES_ENABLED=1
+Environment=BUN_RUNTIME_TRANSPILER_CACHE_PATH=/tmp/ligou-sales-transpiler
+ExecStart=/usr/local/bin/bun /opt/ligou-sales/current/server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=25
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M
+TasksMax=64
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

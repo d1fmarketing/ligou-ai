@@ -108,6 +108,61 @@ export async function finalizeTerminalBudget(args: {
 const UNRESOLVED_SETTLEMENT_MIN_ATTEMPTS = 20;
 const ABANDONED_CALL_GRACE_MINUTES = 120;
 
+async function boundedWebsiteProof<T>(operation: () => PromiseLike<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try { return await Promise.race([operation(), new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("website_terminal_proof_timeout")), 8_000);
+  })]); } finally { if (timer) clearTimeout(timer); }
+}
+
+/** Read actual terminal storage; response.done or a successful hangup request is
+ * not a budget receipt. Used by the live runtime and existing reconciliation. */
+export async function readWebsiteTerminalProof(callId: string): Promise<{ providerReceiptId: string; budgetReceiptId: string } | null> {
+  try {
+    const s = supa();
+    const [callResult, budgetResult] = await boundedWebsiteProof(() => Promise.all([
+      s.from("calls").select("id,tenant_id,status,ended_at,provider_termination_state,provider_termination_attempt_id").eq("id", callId).maybeSingle(),
+      s.from("budget_reservations").select("id,call_id,tenant_id,status").eq("call_id", callId).maybeSingle(),
+    ]));
+    const call = callResult.data, budget = budgetResult.data;
+    if (callResult.error || budgetResult.error || call?.id !== callId || !call.ended_at ||
+      !["ended", "error", "killed_budget", "killed_deadline"].includes(call.status) ||
+      call.provider_termination_state !== "confirmed" || budget?.call_id !== callId ||
+      budget.tenant_id !== call.tenant_id || budget.status !== "settled" || !budget.id) return null;
+    return { providerReceiptId: String(call.provider_termination_attempt_id ?? call.id), budgetReceiptId: String(budget.id) };
+  } catch { return null; }
+}
+
+async function reconcileWebsiteInterviewTerminals(): Promise<void> {
+  try {
+    // SQL selects only current, provider-confirmed, budget-settled calls with no
+    // terminal receipt. Recording unfinished also removes stale calls from this
+    // scan without changing their canonical agenda, so later calls cannot starve.
+    const result = await boundedWebsiteProof(() => supa().rpc("list_website_interview_terminal_candidates", { p_limit: 4 }));
+    if (result.error || !Array.isArray(result.data) || result.data.length > 4) return;
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    for (const row of result.data) {
+      if (!row || typeof row !== "object" || Array.isArray(row) ||
+        ![row.ownerId, row.requestId, row.interviewId, row.callId, row.tenantId].every(id => typeof id === "string" && uuid.test(id)) ||
+        !["unfinished", "reviewing", "closing"].includes(row.state) ||
+        !["ended", "error", "killed_budget", "killed_deadline"].includes(row.callStatus) ||
+        typeof row.canComplete !== "boolean" ||
+        !(row.approvalReceiptId === null || (typeof row.approvalReceiptId === "string" && uuid.test(row.approvalReceiptId)))) continue;
+      const outcome = row.canComplete && row.state === "closing" && row.callStatus === "ended" &&
+        row.providerTerminationReason === "agent_ended_session" && row.approvalReceiptId !== null
+        ? "complete" : "unfinished";
+      try {
+        // canComplete is SQL-derived, including exact played signoff. The
+        // mutation independently rechecks every proof and binding under lock.
+        await boundedWebsiteProof(() => supa().rpc("record_website_interview_completion", {
+          p_owner: row.ownerId, p_call: row.callId, p_request: row.requestId,
+          p_outcome: outcome, p_approval: row.approvalReceiptId,
+        }));
+      } catch { /* No mutation retry here; the next readonly scan reconciles. */ }
+    }
+  } catch { /* Existing reconciliation retries later; no separate worker. */ }
+}
+
 // A controller restart leaves its in-flight calls in 'active' forever: nothing
 // transitions them, so budget reconciliation (which only claims terminal calls)
 // never reaches their reservations and the dashboard shows them as in progress.
@@ -125,7 +180,7 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
   const { data: claim, error } = await supa().rpc("claim_budget_reconciliation", {
     p_worker: `budget-${process.pid}`,
   });
-  if (error || !claim) return 0;
+  if (error || !claim) { await reconcileWebsiteInterviewTerminals(); return 0; }
 
   const row = claim as any;
   const providerState = String(row.provider_termination_state ?? "not_required");
@@ -200,10 +255,11 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
       await deferBudgetReconciliation(String(row.call_id), settleError.message ?? "unresolved_settlement_failed");
       return 0;
     }
+    await reconcileWebsiteInterviewTerminals();
     return 1;
   }
 
-  return await finalizeTerminalBudget({
+  const settled = await finalizeTerminalBudget({
     tenantId: String(row.tenant_id),
     callId: String(row.call_id),
     actualCostUsd: Number(row.actual_cost_usd ?? 0),
@@ -213,7 +269,9 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
     provider,
     fetchImpl,
     usageResolved,
-  }) ? 1 : 0;
+  });
+  if (settled) await reconcileWebsiteInterviewTerminals();
+  return settled ? 1 : 0;
 }
 
 export async function reconcileProviderTerminations(fetchImpl?: FetchLike): Promise<number> {
@@ -237,5 +295,6 @@ export async function reconcileProviderTerminations(fetchImpl?: FetchLike): Prom
     provider_termination_reconcile_lease_until: null,
     provider_termination_reconcile_worker: null,
   }).eq("id", String(row.call_id));
+  await reconcileWebsiteInterviewTerminals();
   return 1;
 }

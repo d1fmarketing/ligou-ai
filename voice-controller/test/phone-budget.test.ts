@@ -5,7 +5,7 @@ import { _setClient, invalidateTenant } from "../src/rules.ts";
 const TENANT = {
   id: "tenant-1", slug: "rocha-plumbing", name: "Rocha Plumbing", vertical: "plumbing",
   languages: ["en", "es"], timezone: "America/Los_Angeles", session_max_minutes: 15,
-  owner_user_id: "owner-1", auth_epoch: 2, policy_epoch: 3,
+  owner_user_id: "owner-1", auth_epoch: 2, policy_epoch: 3,status:'active',operational_mode:'simulation_only',
 };
 const EVENT = { id: "event-1", openai_call_id: "rtc-1" };
 
@@ -48,6 +48,9 @@ class SyntheticPhoneStore {
     hangup: new Response(null, { status: 200 }),
   };
   private claimSequence = 0;
+  boundTenantId:string|null=TENANT.id;
+  routeError:string|null=null;
+  acceptedPayload:any=null;
 
   constructor() { this.record(); }
 
@@ -64,6 +67,7 @@ class SyntheticPhoneStore {
     const action = String(input).split("/").at(-1) as ProviderAction;
     if (!(["accept", "reject", "hangup"] as string[]).includes(action)) throw new Error(`unexpected_provider_action:${action}`);
     this.providerCalls.push(action);
+    if(action==='accept')this.acceptedPayload=JSON.parse(String(init?.body));
     const plan = this.providerPlan[action];
     if (plan instanceof Error) throw plan;
     return typeof plan === "function" ? await plan() : plan.clone();
@@ -98,7 +102,7 @@ class SyntheticPhoneStore {
       if (this.event.status !== "pending" || this.event.lifecycle_state !== "pending") return { data: null, error: null };
       const token = `00000000-0000-4000-8000-${String(++this.claimSequence).padStart(12, "0")}`;
       this.mutateEvent({ lifecycle_state: "claimed", lifecycle_owner: worker, lifecycle_claim_token: token });
-      return { data: { id: this.event.id, claim_token: token, openai_call_id: this.event.openai_call_id }, error: null };
+      return { data: { id: this.event.id, claim_token: token, openai_call_id: this.event.openai_call_id,tenant_id:this.boundTenantId,route_error:this.routeError,max_minutes:5 }, error: null };
     }
     if (name === "persist_phone_call") {
       if (this.failures.has(name)) return { data: null, error: { message: "synthetic call insert failure" } };
@@ -257,7 +261,7 @@ class SyntheticQuery {
 
   private async execute(single: boolean) {
     if (this.operation === "select") {
-      if (this.table === "tenants") return { data: { ...this.store.tenant }, error: null };
+      if (this.table === "tenants") return { data: this.matches(this.store.tenant)?{ ...this.store.tenant }:null, error: null };
       if (this.table === "effective_rules") return { data: [], error: null };
       if (this.table === "phone_events") {
         const rows = this.matches(this.store.event) ? [{ ...this.store.event }] : [];
@@ -559,4 +563,45 @@ describe("durable inbound phone lifecycle", () => {
     expect(activeStore.providerCalls).toEqual(["hangup"]);
     expect(activeStore.event).toMatchObject({ lifecycle_state: "terminated", provider_termination_state: "confirmed" });
   });
+});
+
+describe('first-number route preparation',()=>{
+ test('unassigned, disabled and busy routes reject without loading a default business',async()=>{
+  for(const reason of ['phone_not_configured','phone_number_unassigned','phone_busy']){const store=activate();store.boundTenantId=null;store.routeError=reason;await runPhone(store);expect(store.providerCalls).toEqual(['reject']);expect(store.calls.size).toBe(0);expect(store.reservations.size).toBe(0);}
+ });
+ test('the authoritative route can select a business other than the legacy default',async()=>{
+  const store=activate();store.tenant={...store.tenant,id:'tenant-other',slug:'different-business'};store.boundTenantId='tenant-other';await runPhone(store);
+  expect(store.rpcCalls.find(r=>r.name==='persist_phone_call')?.args.p_tenant_id).toBe('tenant-other');
+ });
+ test('a mismatch between routed and loaded tenant is rejected before provider acceptance',async()=>{
+  const store=activate();store.boundTenantId='not-this-business';await runPhone(store);expect(store.providerCalls).toEqual(['reject']);expect(store.calls.size).toBe(0);
+ });
+ test('initial phone acceptance suppresses automatic audio until the sideband is attached',async()=>{
+  const store=activate();await runPhone(store);expect(store.acceptedPayload.audio.input.turn_detection.create_response).toBe(false);expect(store.acceptedPayload.output_modalities).toEqual(['audio']);
+ });
+ test('the first pilot call capability cannot exceed five minutes',async()=>{
+  const store=activate();let duration=0;await runPhone(store,{attachSidebandImpl:(cap:any)=>{duration=Math.round((cap.expiresAt-Date.now())/60000);return{opened:Promise.resolve(),cancel(){}};}});expect(duration).toBeGreaterThan(0);expect(duration).toBeLessThanOrEqual(5);
+ });
+ test('a stalled phone sideband is cancelled and hung up within its setup deadline',async()=>{
+  const store=activate();let cancelled=false;const started=Date.now();await runPhone(store,{sidebandOpenTimeoutMs:10,attachSidebandImpl:()=>({opened:new Promise(()=>{}),cancel(){cancelled=true;}})});expect(cancelled).toBe(true);expect(store.providerCalls).toEqual(['accept','hangup']);expect(Date.now()-started).toBeLessThan(500);
+ });
+});
+
+test('the pilot deadline includes time already spent waiting for acceptance confirmation',async()=>{
+ const store=activate(),originalNow=Date.now;let now=originalNow(),acceptedAt=0,expiresAt=0;Date.now=()=>now;
+ const client=store.client(),rpc=client.rpc.bind(client);client.rpc=async(name:string,args:any)=>{const result=await rpc(name,args);if(name==='confirm_phone_provider_accept')now+=20_000;return result;};_setClient(client);
+ store.providerPlan.accept=async()=>{acceptedAt=now;return new Response(null,{status:200});};
+ try{await runPhone(store,{attachSidebandImpl:(cap:any)=>{expiresAt=cap.expiresAt;return{opened:Promise.resolve(),cancel(){}};}});expect(expiresAt-acceptedAt).toBe(300_000);}finally{Date.now=originalNow;}
+});
+
+test('a timed-out confirmation cancels its RPC and cannot resume setup after a late reply',async()=>{
+ const store=activate(),client=store.client(),rpc=client.rpc.bind(client),originalTimeout=globalThis.setTimeout;
+ let aborted=false,lateResolve:any,attached=false;
+ globalThis.setTimeout=((callback:any,ms:any,...args:any[])=>originalTimeout(callback,Math.min(ms,15),...args)) as any;
+ client.rpc=(name:string,args:any)=>{if(name!=='confirm_phone_provider_accept')return rpc(name,args);const promise=new Promise(resolve=>{lateResolve=resolve});return{abortSignal(signal:AbortSignal){signal.addEventListener('abort',()=>{aborted=true});return this;},then:promise.then.bind(promise)} as any};_setClient(client);
+ try{await runPhone(store,{attachSidebandImpl:()=>{attached=true;return{opened:Promise.resolve(),cancel(){}};}});expect(aborted).toBe(true);expect(store.providerCalls).toEqual(['accept','hangup']);lateResolve({data:true,error:null});await Promise.resolve();expect(attached).toBe(false);}finally{globalThis.setTimeout=originalTimeout;}
+});
+
+test('failed termination authorization never becomes an unfenced provider action',async()=>{
+ for(const committed of [false,true]){const store=activate(),client=store.client(),rpc=client.rpc.bind(client);store.failures.add('confirm_phone_provider_accept');client.rpc=async(name:string,args:any)=>{if(name==='begin_phone_termination'){if(committed)await rpc(name,args);return{data:null,error:{message:'acknowledgement unavailable'}};}return rpc(name,args);};_setClient(client);await runPhone(store);expect(store.providerCalls).toEqual(['accept']);expect([...store.reservations.values()][0]?.status).toBe('active');await runPhone(store);expect(store.providerCalls).toEqual(['accept']);}
 });

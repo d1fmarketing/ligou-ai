@@ -24,6 +24,7 @@ import {
   type MaterializedRuleV2,
 } from "./onboarding-materialization.ts";
 import type { Capability } from "./tools.ts";
+import { buildCompanyDiscoveryPrefill } from "./company-discovery-prefill.ts";
 
 const DEFAULT_TIMEOUT_MS = 1_500;
 const MAX_COVERAGE_RECEIPTS = 512;
@@ -140,7 +141,7 @@ export interface FollowupSuccess {
 }
 export type RecordedFollowup = FollowupSuccess | StoreFailure;
 
-export interface OnboardingResumeSuccess {
+export interface OnboardingVoiceResumeSuccess {
   ok: true;
   status: "initialized" | "reused";
   sourceCallId: string;
@@ -152,6 +153,21 @@ export interface OnboardingResumeSuccess {
   coverage: Record<string, unknown>;
   durationMs: number;
 }
+export interface OnboardingDiscoveryPrefillSuccess {
+  ok: true;
+  status: "discovery_prefill";
+  draftId: string;
+  draftHash: string;
+  coverageReceiptId: string;
+  revision: 1;
+  digest: string;
+  nextAction: Record<string, unknown>;
+  coverage: Record<string, unknown>;
+  durationMs: number;
+}
+export type OnboardingResumeSuccess =
+  | OnboardingVoiceResumeSuccess
+  | OnboardingDiscoveryPrefillSuccess;
 export interface OnboardingResumeNone {
   ok: true;
   status: "none";
@@ -343,7 +359,7 @@ function boundOwner(cap: Capability): boolean {
   );
 }
 
-function cleanFact(
+export function cleanFact(
   args: OnboardingAnswerArgs,
 ): Record<string, unknown> | null {
   const topic = typeof args.topic === "string" ? args.topic : "";
@@ -1051,6 +1067,291 @@ export function createOnboardingStore(
     };
   };
 
+  const initializeDiscoveryPrefill = async (
+    cap: Capability,
+    started: number,
+    requireDraft = false,
+  ): Promise<OnboardingResume> => {
+    const preparationFailure = (
+      error: unknown,
+      safeDetail: string,
+    ): StoreFailure => {
+      const boundary = error && typeof error === "object"
+        ? error as BoundaryError
+        : {};
+      const message = String(boundary.message ?? "").toLowerCase();
+      if (boundary.code === "42501" || message.includes("not_owner_bound")) {
+        return failure("not_owner_bound", safeDetail, now, started);
+      }
+      return failure(
+        ambiguousBoundaryFailure(error) ? "indeterminate" : "query_error",
+        safeDetail,
+        now,
+        started,
+      );
+    };
+    let draftResult: BoundaryResult<unknown>;
+    try {
+      draftResult = await bounded((signal) =>
+        abortable<BoundaryResult<unknown>>(client.rpc(
+          "read_company_discovery_onboarding_draft",
+          { p_tenant: cap.tenantId, p_owner: cap.ownerUserId! },
+        ), signal)
+      );
+    } catch (error) {
+      return preparationFailure(
+        error,
+        "company discovery onboarding draft could not be read",
+      );
+    }
+    if (draftResult.error) {
+      return preparationFailure(
+        draftResult.error,
+        "company discovery onboarding draft could not be read",
+      );
+    }
+    if (draftResult.data === null) {
+      return requireDraft
+        ? failure(
+            "changed",
+            "latest onboarding state cannot be replaced without a discovery draft",
+            now,
+            started,
+          )
+        : { ok: true, status: "none", durationMs: elapsed(now, started) };
+    }
+    let registry: LocalityRegistryEntry[];
+    try {
+      const [registryResult, aliasesResult] = await Promise.all([
+        bounded(localityRegistry),
+        bounded(localityAliases),
+      ]);
+      if (registryResult.error || aliasesResult.error) {
+        return preparationFailure(
+          registryResult.error ?? aliasesResult.error,
+          "company discovery onboarding localities could not be read",
+        );
+      }
+      if (!Array.isArray(registryResult.data) || !Array.isArray(aliasesResult.data)) {
+        return failure(
+          "changed",
+          "company discovery onboarding locality readback is invalid",
+          now,
+          started,
+        );
+      }
+      const aliasesByLocality = new Map<string, string[]>();
+      for (const alias of aliasesResult.data) {
+        const current = aliasesByLocality.get(alias.locality_id) ?? [];
+        current.push(alias.alias_normalized);
+        aliasesByLocality.set(alias.locality_id, current);
+      }
+      registry = registryResult.data.map((entry) => ({
+        ...entry,
+        aliases: aliasesByLocality.get(entry.locality_id) ?? [],
+      }));
+    } catch (error) {
+      return preparationFailure(
+        error,
+        "company discovery onboarding localities could not be read",
+      );
+    }
+    let projection: ReturnType<typeof buildCompanyDiscoveryPrefill>;
+    try {
+      projection = buildCompanyDiscoveryPrefill({
+        tenant_id: cap.tenantId,
+        call_id: cap.callId,
+        draft_readback: draftResult.data,
+        localities: registry,
+      });
+    } catch {
+      return failure(
+        "changed",
+        "company discovery onboarding draft is invalid",
+        now,
+        started,
+      );
+    }
+    const completePrefill = (
+      raw: unknown,
+    ): OnboardingResume => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        return failure(
+          "changed",
+          "company discovery onboarding prefill readback is invalid",
+          now,
+          started,
+        );
+      }
+      const data = raw as Record<string, unknown>;
+      const coverage = data.coverage && typeof data.coverage === "object" &&
+          !Array.isArray(data.coverage)
+        ? data.coverage as Record<string, unknown>
+        : null;
+      const receiptId = String(data.coverage_receipt_id ?? "");
+      const digest = String(data.snapshot_digest ?? "");
+      const draftId = String(data.draft_id ?? "");
+      const draftHash = String(data.draft_hash ?? "");
+      const nextAction = data.next_action && typeof data.next_action === "object" &&
+          !Array.isArray(data.next_action)
+        ? data.next_action as Record<string, unknown>
+        : null;
+      if ((data.status !== "initialized" && data.status !== "reused") ||
+          draftId !== projection.draft_id || draftHash !== projection.draft_hash ||
+          !UUID_RE.test(receiptId) || data.revision !== 1 ||
+          !/^[0-9a-f]{64}$/.test(digest) || !coverage || !nextAction ||
+          coverage.snapshot_digest !== digest ||
+          canonicalJson({ ...coverage, snapshot_digest: undefined }) !==
+            canonicalJson(projection.coverage) ||
+          canonicalJson(nextAction) !== canonicalJson(projection.coverage.next_action)) {
+        return failure(
+          "changed",
+          "company discovery onboarding prefill readback is invalid",
+          now,
+          started,
+        );
+      }
+      return {
+        ok: true,
+        status: "discovery_prefill",
+        draftId,
+        draftHash,
+        coverageReceiptId: receiptId,
+        revision: 1,
+        digest,
+        nextAction,
+        coverage,
+        durationMs: elapsed(now, started),
+      };
+    };
+    const reconcilePrefill = async (): Promise<OnboardingResume> => {
+      try {
+        const context = projection.coverage.discovery_context;
+        const reconciled = await bounded((signal) =>
+          abortable<BoundaryResult<unknown>>(client.rpc(
+            requireDraft
+              ? "reconcile_discovery_prefill_after_empty_opening"
+              : "reconcile_company_discovery_onboarding_prefill",
+            {
+              p_tenant: cap.tenantId,
+              p_target_call: cap.callId,
+              p_owner: cap.ownerUserId!,
+              p_draft: projection.draft_id,
+              p_expected_draft_version: context.draft_version,
+              p_expected_draft_hash: projection.draft_hash,
+              p_source_job: context.source_job_id,
+              p_source_attempt: context.source_attempt_id,
+              p_source_result: context.source_result_id,
+              p_expected_result_hash: context.source_result_hash,
+              p_expected_result_schema: context.source_result_schema,
+            },
+          ), signal)
+        );
+        if (reconciled.error || !reconciled.data ||
+            typeof reconciled.data !== "object" ||
+            Array.isArray(reconciled.data)) {
+          return failure(
+            "indeterminate",
+            "company discovery onboarding prefill is indeterminate",
+            now,
+            started,
+          );
+        }
+        const data = reconciled.data as Record<string, unknown>;
+        if (data.status === "safe_fallback") {
+          return data.reason ===
+              "prefill_not_committed_after_locked_reconciliation"
+            ? { ok: true, status: "none", durationMs: elapsed(now, started) }
+            : failure(
+                "indeterminate",
+                "company discovery onboarding prefill is indeterminate",
+                now,
+                started,
+              );
+        }
+        if (data.status === "indeterminate") {
+          return failure(
+            "indeterminate",
+            "company discovery onboarding prefill is indeterminate",
+            now,
+            started,
+          );
+        }
+        return completePrefill(data);
+      } catch {
+        return failure(
+          "indeterminate",
+          "company discovery onboarding prefill is indeterminate",
+          now,
+          started,
+        );
+      }
+    };
+    try {
+      const initialized = await bounded((signal) =>
+        abortable<BoundaryResult<unknown>>(client.rpc(
+          requireDraft
+            ? "initialize_discovery_prefill_after_empty_opening"
+            : "initialize_company_discovery_onboarding_prefill",
+          {
+            p_tenant: cap.tenantId,
+            p_target_call: cap.callId,
+            p_owner: cap.ownerUserId!,
+            p_draft: projection.draft_id,
+            p_coverage: projection.coverage,
+          },
+        ), signal)
+      );
+      if (initialized.error) {
+        if (ambiguousBoundaryFailure(initialized.error)) {
+          return await reconcilePrefill();
+        }
+        const message = String(initialized.error.message ?? "").toLowerCase();
+        if (
+          initialized.error.code === "42501" ||
+          message.includes("not_owner_bound")
+        ) {
+          return failure(
+            "not_owner_bound",
+            "company discovery onboarding prefill is not owner-bound",
+            now,
+            started,
+          );
+        }
+        return failure(
+          "changed",
+          "company discovery onboarding prefill was rejected",
+          now,
+          started,
+        );
+      }
+      if (initialized.data && typeof initialized.data === "object" &&
+          !Array.isArray(initialized.data) &&
+          (initialized.data as Record<string, unknown>).status ===
+            "safe_fallback") {
+        return (initialized.data as Record<string, unknown>).reason ===
+            "prefill_not_committed_after_locked_reconciliation"
+          ? { ok: true, status: "none", durationMs: elapsed(now, started) }
+          : failure(
+              "indeterminate",
+              "company discovery onboarding prefill is indeterminate",
+              now,
+              started,
+            );
+      }
+      return completePrefill(initialized.data);
+    } catch (error) {
+      return ambiguousBoundaryFailure(error)
+        ? await reconcilePrefill()
+        : failure(
+          "query_error",
+          "company discovery onboarding prefill failed",
+          now,
+          started,
+        );
+    }
+  };
+
   const initializeOnboardingResume = async (
     cap: Capability,
   ): Promise<OnboardingResume> => {
@@ -1081,15 +1382,12 @@ export function createOnboardingStore(
       if (result.error) {
         const message = String(result.error.message ?? "").toLowerCase();
         if (message.includes("onboarding_resume_source_missing"))
-          return {
-            ok: true,
-            status: "none",
-            durationMs: elapsed(now, started),
-          };
+          return await initializeDiscoveryPrefill(cap, started);
         if (
-          message.includes("onboarding_resume_latest_ineligible") ||
-          message.includes("onboarding_resume_source_consumed")
-        )
+          result.error.code === "55000" &&
+          message === "onboarding_resume_latest_ineligible"
+        ) return await initializeDiscoveryPrefill(cap, started, true);
+        if (message.includes("onboarding_resume_source_consumed"))
           return failure(
             "changed",
             "latest onboarding state cannot be resumed safely",

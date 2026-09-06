@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+export type DiscoveryOwnerQuestionField =
+  `discovery.owner_question.${string}`;
 export type CoverageField =
   | "business.customer_types"
   | "business.excluded_work"
@@ -38,7 +40,8 @@ export type CoverageField =
   | "service.materials_parts"
   | "service.warranty"
   | "service.emergency_eligibility"
-  | "service.escalation";
+  | "service.escalation"
+  | DiscoveryOwnerQuestionField;
 export type CoverageDisposition =
   | "answered"
   | "not_applicable"
@@ -225,7 +228,7 @@ const textFields = new Set<CoverageField>([
   "service.escalation",
 ]);
 const customerTypes = new Set(["residencial", "comercial", "ambos"]);
-const restrictionSubjects: Record<CoverageField, string> = {
+const restrictionSubjects: Partial<Record<CoverageField, string>> = {
   "business.customer_types": "tipos de clientes",
   "business.excluded_work": "serviços excluídos",
   "business.languages_tone": "idioma e tom",
@@ -266,10 +269,10 @@ const restrictionSubjects: Record<CoverageField, string> = {
   "service.escalation": "escalonamento do serviço",
 };
 const safeRestrictionFor = (field: CoverageField) =>
-  `Não executar nem confirmar ${restrictionSubjects[field]} autonomamente; encaminhar a decisão ao dono.`;
+  `Não executar nem confirmar ${restrictionSubjects[field] ?? "esta informação"} autonomamente; encaminhar a decisão ao dono.`;
 const catalogOverflowRestriction =
   "Não aceitar, precificar ou agendar serviços além dos vinte primeiros autonomamente; encaminhar o catálogo ao dono.";
-const templates: Record<CoverageField, string> = {
+const templates: Partial<Record<CoverageField, string>> = {
   "service.catalog_closure":
     "Há mais algum serviço que devemos cadastrar antes de encerrar o catálogo?",
   "business.customer_types": "Quais tipos de clientes vocês atendem?",
@@ -328,8 +331,16 @@ const templates: Record<CoverageField, string> = {
   "service.escalation": "Em que situação este serviço exige aprovação do dono?",
 };
 const inputFields = new Set<string>(Object.keys(templates));
+const DISCOVERY_OWNER_QUESTION_RE =
+  /^discovery[.]owner_question[.][0-9a-f]{32}$/;
+export function isDiscoveryOwnerQuestionField(
+  value: unknown,
+): value is DiscoveryOwnerQuestionField {
+  return typeof value === "string" && DISCOVERY_OWNER_QUESTION_RE.test(value);
+}
 export function isCoverageField(value: unknown): value is CoverageField {
-  return typeof value === "string" && inputFields.has(value);
+  return typeof value === "string" &&
+    (inputFields.has(value) || isDiscoveryOwnerQuestionField(value));
 }
 export const isServiceCoverageField = (field: CoverageField) =>
   field.startsWith("service.") && field !== "service.catalog_closure";
@@ -392,7 +403,14 @@ function activeFields(snapshot: CoverageSnapshot): {
   required: CoverageRef[];
   conditional: CoverageRef[];
 } {
-  const required: CoverageRef[] = [{ field: "service.catalog_closure" }];
+  const discoveryQuestions = Object.keys(snapshot.cells)
+    .filter(isDiscoveryOwnerQuestionField)
+    .sort()
+    .map((field) => ({ field }));
+  const required: CoverageRef[] = [
+    ...discoveryQuestions,
+    { field: "service.catalog_closure" },
+  ];
   const conditional: CoverageRef[] = [];
   for (const subject of snapshot.services) {
     const mode = snapshot.cells[keyFor("service.price_mode", subject)];
@@ -854,6 +872,10 @@ function validAnswer(
     return typeof value === "boolean"
       ? null
       : "emergency_eligibility_must_be_boolean";
+  if (isDiscoveryOwnerQuestionField(field))
+    return typeof value === "string" && value.trim().length > 0
+      ? null
+      : "discovery_owner_answer_must_be_nonempty_text";
   if (field === "schedule.business_hours")
     return isExecutableBusinessHours(value) ? null : "must_be_business_hours";
   if (field === "business.customer_types")
@@ -877,7 +899,7 @@ function applyOne(
   snapshot: CoverageSnapshot,
   fact: CoverageFact,
 ): CoverageSnapshot {
-  if (!inputFields.has(fact.field)) return snapshot;
+  if (!isCoverageField(fact.field)) return snapshot;
   let subject: string | undefined;
   try {
     coverageKey(fact.field, fact.subject);
@@ -1097,22 +1119,21 @@ export function applyCoverageFact(
     summaryInvalidated: ready(snapshot) || snapshot.summaryInvalidated,
   };
 }
-function questionFor(
+export function questionFor(
   ref: CoverageRef,
   snapshot: CoverageSnapshot,
 ): CoverageQuestion {
+  const cell = snapshot.cells[keyFor(ref.field, ref.subject)];
   return {
     ...ref,
     questionPt:
-      ref.field === "area.coverage" &&
-          snapshot.cells["area.coverage"]?.state === "ambiguous" &&
-          snapshot.cells["area.coverage"].questionPt
-        ? snapshot.cells["area.coverage"].questionPt
+      cell?.state === "ambiguous" && cell.questionPt
+        ? cell.questionPt
         : ref.field === "service.catalog_closure" && snapshot.services.length === 0
         ? INITIAL_SERVICE_DISCOVERY_QUESTION_PT
         : ref.subject
-          ? `${templates[ref.field]} (${ref.subject.replace(/_/g, " ")})`
-          : templates[ref.field],
+          ? `${templates[ref.field] ?? "Confirme esta informação"} (${ref.subject.replace(/_/g, " ")})`
+          : templates[ref.field] ?? "Confirme esta informação com o dono.",
   };
 }
 export function evaluateCoverage(snapshot: CoverageSnapshot): CoverageProgress {
@@ -1138,12 +1159,16 @@ export function evaluateCoverage(snapshot: CoverageSnapshot): CoverageProgress {
     (ref) => ref.field === "area.coverage" && state(ref).state === "ambiguous",
   );
   const catalog = unresolved([{ field: "service.catalog_closure" }]);
+  const discoveryQuestions = unresolved(
+    active.required.filter((ref) => isDiscoveryOwnerQuestionField(ref.field)),
+  );
   const service = snapshot.services.flatMap((subject) =>
     active.required.filter((ref) => ref.subject === subject),
   );
   const ordered = [
     ...currentAmbiguity,
     ...localityAmbiguity,
+    ...discoveryQuestions,
     ...catalog,
     ...unresolved(service),
     ...unresolved(safetyAuthorityFields.map((field) => ({ field }))),

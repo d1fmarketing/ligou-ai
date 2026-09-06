@@ -16,14 +16,21 @@ import { statusLineFor } from "./panel-copy.js";
 
 // Live voice panel: role-play a caller or run the Portuguese onboarding interview.
 // Cases and interview suggestions created mid-call surface here in realtime.
-export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
+export function VoicePanel({
+  onClose,
+  initialSessionType = "owner_browser",
+  lockedOnboarding = false,
+  onboardingProtocolVersion = 2,
+}) {
   const [status, setStatus] = useState("idle"); // idle | connecting | live | ended | error
   const [error, setError] = useState(null);
   const [lines, setLines] = useState([]);
   const [liveCases, setLiveCases] = useState([]);
   const [liveSuggestions, setLiveSuggestions] = useState([]);
   const [model, setModel] = useState("gpt-realtime-2.1");
-  const [sessionType, setSessionType] = useState(initialSessionType);
+  const [sessionType, setSessionType] = useState(
+    lockedOnboarding ? "onboarding" : initialSessionType,
+  );
   const [onboardingOutcome, setOnboardingOutcome] = useState(null);
   const [endedSessionType, setEndedSessionType] = useState(null);
   const sessionRef = useRef(null);
@@ -84,6 +91,7 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
       client: supabase,
       reason: end.reason,
       callId: end.callId,
+      onboardingProtocolVersion,
       signal: outcomeAbort.signal,
       isCancelled: () => sessionRunRef.current !== runId,
       onOutcome: (outcome) => applyCurrentSessionRun({
@@ -121,6 +129,8 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
         accessToken: token,
         model,
         sessionType: startedSessionType,
+        onboardingProtocolVersion,
+        speechClient: supabase,
         signal: startAbort.signal,
         onEvent: (ev) => applyCurrentSessionRun({
           runId,
@@ -181,21 +191,25 @@ export function VoicePanel({ onClose, initialSessionType = "owner_browser" }) {
       <div className="voice-live">
         {status === "idle" || status === "error" || status === "ended" ? (
           <div className="voice-live-start">
-            <label>
-              Tipo de conversa
-              <select value={sessionType} onChange={(e) => setSessionType(e.target.value)}>
-                <option value="owner_browser">Testar como cliente (EN/ES)</option>
-                <option value="onboarding">Entrevista de onboarding (PT)</option>
-              </select>
-            </label>
-            <label>
-              Modelo
-              <select value={model} onChange={(e) => setModel(e.target.value)}>
-                <option value="gpt-realtime-2.1">gpt-realtime-2.1 (padrão; cai pro mini se falhar)</option>
-                <option value="gpt-realtime-2.1-mini">gpt-realtime-2.1-mini (fallback/econômico)</option>
-                <option value="gpt-realtime">gpt-realtime (GA)</option>
-              </select>
-            </label>
+            {!lockedOnboarding ? (
+              <>
+                <label>
+                  Tipo de conversa
+                  <select value={sessionType} onChange={(e) => setSessionType(e.target.value)}>
+                    <option value="owner_browser">Testar como cliente (EN/ES)</option>
+                    <option value="onboarding">Entrevista de onboarding (PT)</option>
+                  </select>
+                </label>
+                <label>
+                  Modelo
+                  <select value={model} onChange={(e) => setModel(e.target.value)}>
+                    <option value="gpt-realtime-2.1">gpt-realtime-2.1 (padrão; cai pro mini se falhar)</option>
+                    <option value="gpt-realtime-2.1-mini">gpt-realtime-2.1-mini (fallback/econômico)</option>
+                    <option value="gpt-realtime">gpt-realtime (GA)</option>
+                  </select>
+                </label>
+              </>
+            ) : null}
             <button type="button" className="voice-live-button" onClick={begin}>
               <IconMicrophone2 aria-hidden="true" /> {status === "ended"
                 ? voiceSessionRestartLabel({ endedSessionType, onboardingOutcome })

@@ -47,7 +47,8 @@ export const config = {
   supabaseUrl: need("SUPABASE_URL"),
   supabaseSecretKey: need("SUPABASE_SECRET_KEY"),
   supabasePublishableKey: need("SUPABASE_PUBLISHABLE_KEY"),
-  openaiKey: process.env.OPENAI_API_KEY ?? "", // empty => live sessions disabled, tools/tests still run
+  // Realtime voice/TTS only. Text reasoning and summaries use Codex subscription OAuth.
+  openaiKey: process.env.OPENAI_API_KEY ?? "", // empty => live voice sessions disabled
   model: process.env.LIGOU_MODEL ?? "gpt-realtime-2.1",
   fallbackModel: process.env.LIGOU_FALLBACK_MODEL ?? "gpt-realtime-2.1-mini",
   sessionMaxMinutes: Number(process.env.SESSION_MAX_MINUTES ?? 15),

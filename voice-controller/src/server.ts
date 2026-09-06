@@ -26,8 +26,63 @@ import {
   initializeOnboardingResume,
   type OnboardingResumeSuccess,
 } from "./onboarding-store.ts";
+import { prepareWebsiteInterview, type PreparedWebsiteInterview } from "./onboarding-website-bootstrap.ts";
+import { buildWebsiteOpeningAction, createWebsiteAgendaCoordinator } from "./onboarding-agenda-coordinator.ts";
+import { createInterviewEvidenceStore } from "./onboarding-interview-evidence-store.ts";
+import { synthesizeOnboardingSpeech, speechPayloadIsInternallyValid, type OnboardingSpeechAction, type OnboardingSpeechPayload } from "./onboarding-speech.ts";
+
+export interface WebsiteOpeningEnvelope { version: 3; item_id: string; speech: OnboardingSpeechPayload }
+
+export async function prepareRequiredWebsiteInterview(
+  scope: Parameters<typeof prepareWebsiteInterview>[0],
+  client: Parameters<typeof prepareWebsiteInterview>[1],
+): Promise<PreparedWebsiteInterview> {
+  const prepared = await prepareWebsiteInterview(scope, client);
+  if (!prepared) throw new Error("website_interview_prepared_source_required");
+  return prepared;
+}
+
+export async function synthesizeClaimedWebsiteOpening(
+  prepared: PreparedWebsiteInterview,
+  tenantName: string,
+  dependencies: {
+    evidence: ReturnType<typeof createInterviewEvidenceStore>;
+    synthesize: (action: OnboardingSpeechAction) => Promise<OnboardingSpeechPayload>;
+  },
+) {
+  const openingAction = buildWebsiteOpeningAction(prepared.stored, tenantName);
+  createWebsiteAgendaCoordinator(prepared.stored, { nowMs: Date.now(), openingAction });
+  let claim;
+  try { claim = await dependencies.evidence.claimSpeech({ ...prepared.scope, action: openingAction }); }
+  catch (error) { throw Object.assign(new Error("website_opening_claim_unproven", { cause: error }), { usageResolved: true, costUsd: 0 }); }
+  if (claim.status === "ready" && !claim.claimed && speechPayloadIsInternallyValid(claim.payload, openingAction))
+    return { prepared, openingAction, openingPayload: claim.payload };
+  if (claim.status !== "preparing" || claim.claimed !== true)
+    throw Object.assign(new Error("website_opening_attempt_not_owned"), { usageResolved: false, costUsd: null });
+  let openingPayload: OnboardingSpeechPayload;
+  try { openingPayload = await dependencies.synthesize(openingAction); }
+  catch (error) {
+    // A claimed attempt is never automatically retried, including unknown usage.
+    await dependencies.evidence.failSpeech({ ...prepared.scope, actionId: openingAction.actionId, reason: "tts_failed" }).catch(() => {});
+    throw error;
+  }
+  try {
+    const completed = await dependencies.evidence.completeSpeech({ ...prepared.scope, actionId: openingAction.actionId, payload: openingPayload });
+    if (completed.status !== "ready" || !speechPayloadIsInternallyValid(completed.payload, openingAction))
+      throw new Error("website_opening_completion_mismatch");
+    return { prepared, openingAction, openingPayload: completed.payload };
+  } catch (error) {
+    throw Object.assign(new Error("website_opening_completion_unproven", { cause: error }), { usageResolved: true, costUsd: openingPayload.cost_usd });
+  }
+}
 
 export { synthesizeOnboardingOpening } from "./onboarding-greeting.ts";
+
+/** Leave five minutes below the provider's 60-minute session ceiling for
+ * termination/reconciliation. The existing $7.50 reservation/hard cap is unchanged. */
+export function onboardingSessionMaxMinutes(protocolVersion?: 2 | 3): number {
+  return protocolVersion === 3 ? 55 : 30;
+}
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -77,7 +132,7 @@ type DirectSessionResult = {
   sdp: string;
   call_id: string;
   opening_mode_applied?: OnboardingOpeningMode;
-  opening_payload?: OnboardingOpeningPayload | null;
+  opening_payload?: OnboardingOpeningPayload | WebsiteOpeningEnvelope | null;
   [key: string]: unknown;
 };
 export interface DirectSessionCleanup {
@@ -99,6 +154,7 @@ export interface StartSessionOptions {
   browserRequestId?: string;
   openingModeRequested?: OnboardingOpeningMode;
   requestedCallId?: string;
+  onboardingProtocolVersion?: 2 | 3;
 }
 
 export function resolvedOnboardingTtsFailureCost(error: unknown): number | null {
@@ -472,6 +528,10 @@ export async function startSession(
     (!options.requestedCallId || !UUID_PATTERN.test(options.requestedCallId)))
     throw Object.assign(new Error("browser_call_id_required"), { status: 409 });
   const openingMode = options.openingModeRequested ?? "provider_model_v1";
+  const websiteProtocol = sessionType === "onboarding" && options.onboardingProtocolVersion === 3;
+  if (options.onboardingProtocolVersion !== undefined &&
+    (sessionType !== "onboarding" || ![2, 3].includes(options.onboardingProtocolVersion)))
+    throw Object.assign(new Error("client_upgrade_required"), { status: 409 });
   if (!isOnboardingOpeningMode(openingMode) ||
     (openingMode === "application_tts_v1" && sessionType !== "onboarding"))
     throw Object.assign(new Error("opening_mode_invalid"), { status: 409 });
@@ -546,6 +606,8 @@ export async function startSession(
   let startupPhase: StartupPhase = "before_tts";
   let startupCancelled = false;
   let openingPayload: OnboardingOpeningPayload | null = null;
+  let websiteInterview: Awaited<ReturnType<typeof synthesizeClaimedWebsiteOpening>> | undefined;
+  let preparedWebsite: PreparedWebsiteInterview | null = null;
   let externalCostUsd = 0;
   let openaiCallId = "";
   let ttsAbortController: AbortController | null = null;
@@ -633,7 +695,7 @@ export async function startSession(
   }
 
   const instructions = buildInstructions(tenant, rules, sessionType);
-  const maxMinutes = sessionType === "onboarding" ? 30 : (tenant.session_max_minutes ?? config.sessionMaxMinutes);
+  const maxMinutes = sessionType === "onboarding" ? onboardingSessionMaxMinutes(options.onboardingProtocolVersion) : (tenant.session_max_minutes ?? config.sessionMaxMinutes);
   const cap = makeBrowserSessionCapability({
     tenant,
     callId: call.id,
@@ -642,7 +704,16 @@ export async function startSession(
     maxMinutes,
   });
   let onboardingResume: OnboardingResumeSuccess | undefined;
-  if (sessionType === "onboarding") {
+  if (websiteProtocol) {
+    try {
+      if (!options.browserRequestId || !UUID_PATTERN.test(options.browserRequestId)) throw new Error("website_interview_request_identity_required");
+      preparedWebsite = await prepareRequiredWebsiteInterview({ ownerId: userId, tenantId: tenant.id, callId: call.id, requestId: options.browserRequestId }, supa());
+    } catch (error: any) {
+      await settleStartupFailure(String(error?.message ?? "website_interview_prepare_failed"), "not_applicable");
+      throw Object.assign(error, { status: 503 });
+    }
+    await stopIfCancelled();
+  } else if (sessionType === "onboarding") {
     const resumeResult = await initializeOnboardingResume(cap);
     await stopIfCancelled();
     if (!resumeResult.ok) {
@@ -686,7 +757,14 @@ export async function startSession(
       resolveTtsFinished = resolve;
     });
     try {
-      openingPayload = await synthesizeOnboardingOpening(
+      if (preparedWebsite) {
+        websiteInterview = await synthesizeClaimedWebsiteOpening(preparedWebsite, tenant.name, {
+          evidence: createInterviewEvidenceStore(supa()),
+          synthesize: (action) => synthesizeOnboardingSpeech(action, { openaiKey: config.openaiKey, signal: ttsAbortController!.signal }),
+        });
+        externalCostUsd = websiteInterview.openingPayload.cost_usd;
+      } else {
+        openingPayload = await synthesizeOnboardingOpening(
         {
           tenantName: tenant.name,
           browserRequestId: options.browserRequestId,
@@ -699,6 +777,7 @@ export async function startSession(
         },
       );
       externalCostUsd = openingPayload.cost_usd;
+      }
       startupPhase = "tts_resolved";
       resolveTtsFinished?.();
       await stopIfCancelled();
@@ -792,6 +871,7 @@ export async function startSession(
         tools: toolSchemasForSessionType(sessionType),
         voice: sessionType === "onboarding" ? "ash" : config.voice,
         openingMode,
+        ...(websiteProtocol ? { onboardingProtocolVersion: 3 as const } : {}),
       })));
       const callRes = await fetch("https://api.openai.com/v1/realtime/calls", {
         method: "POST",
@@ -890,6 +970,7 @@ export async function startSession(
             onboarding: {
               expectedBusinessName: tenant.name,
               openingMode,
+              ...(websiteInterview ? { websiteInterview } : {}),
               ...(openingPayload ? { openingPayload } : {}),
               ...(onboardingResume ? { resume: onboardingResume } : {}),
             },
@@ -941,7 +1022,7 @@ export async function startSession(
     model: usedModel,
     fell_back: usedModel !== primary,
     opening_mode_applied: openingMode,
-    opening_payload: openingPayload,
+    opening_payload: websiteInterview ? { version: 3 as const, item_id: `lgs-${websiteInterview.openingAction.actionId.slice(0, 28)}`, speech: websiteInterview.openingPayload } : openingPayload,
   };
 }
 
@@ -951,14 +1032,15 @@ export function buildRealtimeSessionConfig(args: {
   tools: unknown[];
   voice: string;
   openingMode: OnboardingOpeningMode;
+  onboardingProtocolVersion?: 2 | 3;
 }) {
   const applicationOwned = args.openingMode === "application_tts_v1";
   return {
     type: "realtime",
     model: args.model,
     instructions: args.instructions,
-    tools: args.tools,
-    tool_choice: "auto",
+    tools: args.onboardingProtocolVersion === 3 ? [] : args.tools,
+    tool_choice: args.onboardingProtocolVersion === 3 ? "none" : "auto",
     output_modalities: applicationOwned ? ["text"] : ["audio"],
     audio: {
       input: {

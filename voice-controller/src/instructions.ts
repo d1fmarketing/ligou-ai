@@ -170,6 +170,7 @@ export function buildInstructions(tenant: Tenant, rules: Rule[], sessionType: Se
       `Persista cada fato em silêncio com record_interview_answer, usando um fato por chamada: topic, field, disposition, rule_text, structured e owner_words. ` +
       `rule_text é somente uma paráfrase de evidência; a aplicação cria a política canônica e nunca usa esse texto como autoridade operacional. ` +
       `Para qualquer field service.* exceto service.catalog_closure, envie subject=<serviço_normalizado> no nível superior; em toda chamada envie structured={value:...}. ` +
+      `Quando next_action.field for discovery.owner_question.<id>, copie o field exatamente, use topic=outro e structured={value:<resposta textual do dono>}; essa é uma pergunta não operacional e nunca cria regra nem poder. ` +
       `Use service.name_synonyms com uma lista não vazia; service.price_mode com fixed, starting_at, estimate ou owner_review; service.price_target com número não negativo; service.negotiation com structured={value:{floor:n}} quando negociável, structured={value:"non_negotiable"} quando não negociável ou disposition=owner_review_required quando depender do dono; service.duration com minutos positivos; service.emergency_eligibility somente com boolean true ou false. ` +
       `Envie service.price_target e service.negotiation somente para price_mode fixed ou starting_at; para estimate ou owner_review, não envie esses dois campos. ` +
       `Use business.* com structured={value:...} tipado como lista permitida ou texto não vazio. ` +

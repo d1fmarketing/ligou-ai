@@ -1110,6 +1110,7 @@ function queueTruthfulRecovery(
     );
   const intentKey = `recovery:${reason}:${recoveryKey}`;
   if (lifecycle.responseIntents[intentKey]) return;
+  if (lifecycle.recoverySpeech) return;
   const recoveryAlreadyOwed = Object.values(lifecycle.responseIntents).some(
     (intent) => intent.purpose === "recovery" && intent.state !== "terminal",
   );
@@ -1202,7 +1203,10 @@ function maybeAdvanceCoverage(
     maybeStartBudgetPause(lifecycle, commands, event);
     return;
   }
-  if (lifecycle.snapshotRefresh || lifecycle.pendingFollowup) return;
+  if (
+    lifecycle.snapshotRefresh || lifecycle.pendingFollowup ||
+    lifecycle.recoverySpeech
+  ) return;
   const readyBatches = Object.values(lifecycle.toolBatches).filter(
     (batch) => batchIsReady(lifecycle, batch) && !batch.continuationRequested,
   );
@@ -1868,6 +1872,7 @@ function maybeFinishRecoverySpeech(
   else {
     lifecycle.phase = "collecting";
     delete lifecycle.recoverySpeech;
+    maybeAdvanceCoverage(lifecycle, commands, event);
   }
 }
 
@@ -3488,6 +3493,16 @@ export function reduceOnboarding(
         lifecycle.invalidatedSummaryRevision = lifecycle.summary.revision;
       const invalidatedFollowupIntentKey =
         lifecycle.followupSpeech?.intentKey;
+      // A new owner answer supersedes an unsent next-question recovery, not an
+      // unrelated persistence/correlation failure that still needs delivery.
+      // Sent speech (including response.done awaiting playback) still owns its
+      // bounded delivery proof and must fence new authority until it resolves.
+      const invalidatedRecoveryIntentKey = lifecycle.recoverySpeech &&
+          lifecycle.recoverySpeech.intentKey.startsWith("recovery:next_question_unavailable:") &&
+          lifecycle.responseIntents[lifecycle.recoverySpeech.intentKey]?.state === "queued"
+        ? lifecycle.recoverySpeech.intentKey
+        : undefined;
+      if (invalidatedRecoveryIntentKey) delete lifecycle.recoverySpeech;
       delete lifecycle.pendingFollowup;
       delete lifecycle.followupSpeech;
       terminalizeAuthorityResponseIntents(
@@ -3495,6 +3510,7 @@ export function reduceOnboarding(
         (intent) =>
           intent.purpose === "final_signoff" ||
           intent.intentKey === invalidatedFollowupIntentKey ||
+          intent.intentKey === invalidatedRecoveryIntentKey ||
           (
             intent.purpose === "summary" &&
             intent.intentKey !== `summary:${event.digest}`
@@ -3523,9 +3539,9 @@ export function reduceOnboarding(
           ? { nextQuestion: structuredClone(event.nextQuestion) }
           : {}),
       };
-      lifecycle.phase = lifecycle.coverage.complete
-        ? "coverage_check"
-        : "collecting";
+      lifecycle.phase = lifecycle.recoverySpeech
+        ? "follow_up"
+        : lifecycle.coverage.complete ? "coverage_check" : "collecting";
       commands.push(
         telemetry(lifecycle, "onboarding.coverage.changed", event, {
           outcome: lifecycle.coverage.complete ? "complete" : "incomplete",

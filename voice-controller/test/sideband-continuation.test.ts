@@ -1307,6 +1307,64 @@ describe("onboarding raw correlation and durable tool outbox", () => {
     expect(adapter.lifecycle.requestedHangupKeys).toEqual([]);
   });
 
+  test("coverage progress prunes deferred recovery and retires its obligation while speech is still pending", async () => {
+    const cap = onboardingCap("call-obsolete-recovery-command");
+    const boundary = sequentialAnswerBoundary([
+      { status: "recorded", revision: 1, digest: "b".repeat(64) },
+    ]);
+    _setClient(boundary.client);
+    const l = ledger(cap.callId);
+    const ws = socket();
+    await completeGreetingTrace(cap, l, ws);
+    const adapter = l.onboarding!;
+    const oldIntent = "recovery:next_question_unavailable:old-followup:interrupted";
+    const expectedTranscript = "Sua resposta foi salva, mas não consegui preparar a próxima pergunta. Encerre este teste e tente novamente.";
+    adapter.lifecycle.phase = "follow_up";
+    adapter.lifecycle.recoverySpeech = {
+      intentKey: oldIntent, expectedTranscript, terminalAfterPlayback: true,
+      transcript: "", transcriptFinal: false, audioDone: false,
+      responseDone: false, playbackStopped: false, interrupted: false, attempt: 0,
+    };
+    adapter.lifecycle.responseIntents[oldIntent] = {
+      intentKey: oldIntent, purpose: "recovery", state: "queued",
+    };
+    adapter.pendingResponseCommands[oldIntent] = {
+      type: "request_response", intentKey: oldIntent, purpose: "recovery",
+      instructions: expectedTranscript,
+    };
+    expect(adapter.pendingResponseCommands[oldIntent]).toBeDefined();
+    expect(adapter.lifecycle.responseIntents[oldIntent]?.state).toBe("queued");
+
+    await completeOwnerTurnTrace(cap, l, ws, "turn-progress", "Atendemos Anaheim.");
+    await handleEvent(cap, l, ws as any, responseCreated("resp-progress"));
+    await handleEvent(cap, l, ws as any, functionCallDone(
+      "resp-progress", "fc-progress", "record_interview_answer",
+      JSON.stringify({
+        topic: "area", field: "area.coverage", disposition: "answered",
+        rule_text: "Atende Anaheim.", structured: { value: ["Anaheim"] },
+        owner_words: "Atendemos Anaheim.",
+      }), 0,
+    ));
+    await handleEvent(cap, l, ws as any, {
+      type: "input_audio_buffer.speech_started", item_id: "next-owner-turn-pending",
+    });
+    await handleEvent(cap, l, ws as any, responseDone("resp-progress"));
+    expect(adapter.speechPending).toBe(true);
+    expect(adapter.lifecycle.coverage.revision).toBe(1);
+    expect(adapter.lifecycle.recoverySpeech).toBeUndefined();
+    expect(adapter.lifecycle.responseIntents[oldIntent]?.state).toBe("terminal");
+    expect(adapter.pendingResponseCommands[oldIntent]).toBeUndefined();
+    expect(framesOfType(ws, "response.create").filter((frame) =>
+      frame.response?.metadata?.purpose === "recovery"
+    )).toHaveLength(0);
+    const beforeLate = adapter.lifecycle;
+    await handleEvent(cap, l, ws as any, responseCreated("late-recovery", oldIntent));
+    expect(adapter.lifecycle).toBe(beforeLate);
+    expect(adapter.lifecycle.activeResponseId).toBeUndefined();
+    expect(adapter.lifecycle.requestedRecoveryHangupKeys).toEqual([]);
+    expect(adapter.lifecycle.approval).toBeUndefined();
+  });
+
   test("exact duplicated provider items execute and send once", async () => {
     const cap = onboardingCap();
     const l = ledger(cap.callId);
@@ -1546,10 +1604,19 @@ describe("onboarding raw correlation and durable tool outbox", () => {
         },
       ]),
     );
+    // Pending commands must carry real queued reducer obligations; unowned
+    // commands are stale and pruned before capacity is evaluated.
+    for (const intentKey of Object.keys(pendingLedger.onboarding!.pendingResponseCommands))
+      pendingLedger.onboarding!.lifecycle.responseIntents[intentKey] = {
+        intentKey, purpose: "tool_continuation", state: "queued",
+      };
     await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
       responseCreated("resp-pending-overflow"));
     await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
       functionCallDone("resp-pending-overflow", "fc-pending-overflow", "end_session"));
+    await handleEvent(pendingCap, pendingLedger, pendingSocket as any, {
+      type: "input_audio_buffer.speech_started", item_id: "pending-overflow-owner-turn",
+    });
     await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
       responseDone("resp-pending-overflow"));
     await handleEvent(pendingCap, pendingLedger, pendingSocket as any,
@@ -4126,6 +4193,31 @@ describe("physical socket attach and reconnect", () => {
     } as any;
   }
 
+  function discoveryPrefillApplicationOptions(callId: string) {
+    const options = resumedApplicationOptions(callId);
+    options.onboarding.resume = {
+      ...options.onboarding.resume,
+      status: "discovery_prefill",
+      draftId: "77777777-7777-4777-8777-777777777777",
+      draftHash: "f".repeat(64),
+      sourceCallId: undefined,
+      sourceReceiptId: undefined,
+      coverage: {
+        ...options.onboarding.resume.coverage,
+        transition_kind: "discovery_prefill",
+        resume_context: undefined,
+        discovery_context: {
+          draft_id: "77777777-7777-4777-8777-777777777777",
+          draft_version: 1,
+          draft_hash: "f".repeat(64),
+          source_job_id: "88888888-8888-4888-8888-888888888888",
+          source_result_id: "99999999-9999-4999-8999-999999999999",
+        },
+      },
+    };
+    return options;
+  }
+
   function applicationOpeningCreated(
     overrides: Record<string, unknown> = {},
   ) {
@@ -4631,6 +4723,41 @@ describe("physical socket attach and reconnect", () => {
       )).toHaveLength(1);
       expect(payload.text.split(payload.resume_context.next_action.question_pt))
         .toHaveLength(2);
+      control.cancel("test_cleanup");
+    } finally {
+      liveSessions.delete(cap.callId);
+      globalThis.WebSocket = original;
+    }
+  });
+
+  test("website prefill hydrates the same revision-one lifecycle without inventing a prior call", async () => {
+    const original = globalThis.WebSocket;
+    SyntheticWebSocket.instances = [];
+    globalThis.WebSocket = SyntheticWebSocket as any;
+    const cap = onboardingCap("call-stage0b-discovery-prefill");
+    const options = discoveryPrefillApplicationOptions(cap.callId);
+    try {
+      const control = attachSideband(
+        cap,
+        "rtc-stage0b-discovery-prefill",
+        "gpt-realtime-2.1",
+        options,
+      );
+      const socket = SyntheticWebSocket.instances[0]!;
+      socket.emit("open");
+      await control.opened;
+      expect(control.ledger.onboarding!.lifecycle.coverage).toMatchObject({
+        revision: 1,
+        digest: "c".repeat(64),
+        complete: false,
+        nextQuestion: {
+          field: "area.coverage",
+          questionPt: "Quais cidades e regiões sua empresa atende?",
+        },
+      });
+      expect(options.onboarding.resume.sourceCallId).toBeUndefined();
+      expect(options.onboarding.resume.coverage.transition_kind).toBe("discovery_prefill");
+      expect(framesOfType(socket, "response.create")).toEqual([]);
       control.cancel("test_cleanup");
     } finally {
       liveSessions.delete(cap.callId);

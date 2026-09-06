@@ -7,6 +7,7 @@ NODE_BIN="${LIGOU_NODE_BIN:-node}"
 BUN_BIN="${LIGOU_BUN_BIN:-/usr/local/bin/bun}"
 DEPLOY_ROOT="${LIGOU_DEPLOY_ROOT:-/opt/ligou}"
 SERVICE="${LIGOU_SERVICE_NAME:-ligou-controller}"
+DISCOVERY_SERVICE="${LIGOU_DISCOVERY_SERVICE_NAME:-ligou-discovery-supervisor}"
 RESULTS_FILE="${LIGOU_DEPLOY_RESULTS_FILE:-${DEPLOY_ROOT}/deploy-results.jsonl}"
 ARTIFACT=""
 MANIFEST=""
@@ -23,6 +24,9 @@ done
 
 [[ "$DEPLOY_ROOT" = /* && "$DEPLOY_ROOT" != "/" && "$DEPLOY_ROOT" != "/opt" ]] || { echo "deploy_root_invalid" >&2; exit 2; }
 [[ "$SERVICE" =~ ^[A-Za-z0-9@_.-]{1,80}$ ]] || { echo "service_name_invalid" >&2; exit 2; }
+[[ "$DISCOVERY_SERVICE" =~ ^[A-Za-z0-9@_.-]{1,80}$ ]] \
+  && [ "$DISCOVERY_SERVICE" != "$SERVICE" ] \
+  || { echo "discovery_service_name_invalid" >&2; exit 2; }
 [[ "$COMMIT" =~ ^[a-f0-9]{40}$ ]] || { echo "release_commit_invalid" >&2; exit 2; }
 [ -f "$ARTIFACT" ] && [ -f "$MANIFEST" ] || { echo "release_inputs_required" >&2; exit 1; }
 [ -n "${LIGOU_RELEASE_MANIFEST_KEY:-}" ] || { echo "release_manifest_key_required" >&2; exit 1; }
@@ -85,11 +89,15 @@ mkdir "$STAGING"
 
 tar -xzf "$ARTIFACT" -C "$STAGING"
 [ -f "$STAGING/voice-controller/package.json" ] \
+  && [ -f "$STAGING/discovery-supervisor/package.json" ] \
+  && [ -f "$STAGING/discovery-supervisor/bun.lock" ] \
   && [ -f "$STAGING/hermes-cell/validate-config.mjs" ] \
+  && [ -f "$STAGING/infra/ligou-discovery-supervisor.service" ] \
   && [ -f "$STAGING/infra/release-health.sh" ] \
   || { echo "release_content_invalid" >&2; exit 1; }
 "$NODE_BIN" "$STAGING/hermes-cell/validate-config.mjs" --root "$STAGING" --json >/dev/null
 (cd "$STAGING/voice-controller" && "$BUN_BIN" install --production --frozen-lockfile >/dev/null)
+(cd "$STAGING/discovery-supervisor" && "$BUN_BIN" install --production --frozen-lockfile >/dev/null)
 cp "$MANIFEST" "$STAGING/.ligou-release-manifest.json"
 chmod 600 "$STAGING/.ligou-release-manifest.json"
 mv "$STAGING" "$FINAL"
@@ -156,17 +164,34 @@ current_points_to() {
       = "$("$NODE_BIN" -e 'const fs=require("node:fs");process.stdout.write(fs.realpathSync(process.argv[1]));' "$1" 2>/dev/null || true)" ]
 }
 
+DISCOVERY_WAS_ACTIVE=0
+if systemctl is-active --quiet "$DISCOVERY_SERVICE"; then
+  DISCOVERY_WAS_ACTIVE=1
+fi
+
+release_services_active() {
+  systemctl is-active --quiet "$SERVICE" \
+    && { [ "$DISCOVERY_WAS_ACTIVE" = 0 ] \
+      || systemctl is-active --quiet "$DISCOVERY_SERVICE"; }
+}
+
+restart_release_services() {
+  systemctl restart "$SERVICE" >/dev/null \
+    && { [ "$DISCOVERY_WAS_ACTIVE" = 0 ] \
+      || systemctl restart "$DISCOVERY_SERVICE" >/dev/null; }
+}
+
 release_smoke() {
   local release="$1"
   release_identity_matches "$release" \
     && current_points_to "$release" \
-    && systemctl is-active --quiet "$SERVICE" \
+    && release_services_active \
     && LIGOU_ENV_FILE="${LIGOU_ENV_FILE:-${DEPLOY_ROOT}/env}" "$release/infra/release-health.sh" >/dev/null
 }
 
 rollback_recovered() {
   atomic_link "$PREVIOUS" "$CURRENT_LINK" \
-    && systemctl restart "$SERVICE" >/dev/null \
+    && restart_release_services \
     && release_smoke "$PREVIOUS"
 }
 
@@ -186,7 +211,7 @@ if ! atomic_link "$FINAL" "$CURRENT_LINK"; then
   exit 1
 fi
 
-if ! systemctl restart "$SERVICE" >/dev/null || ! systemctl is-active --quiet "$SERVICE"; then
+if ! restart_release_services || ! release_services_active; then
   if rollback_recovered; then
     write_result "$RELEASE_ID" rolled_back service_failed not_run not_run
     echo "release_service_failed_rollback_applied" >&2

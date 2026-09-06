@@ -10,6 +10,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { runConcurrencySuite } from "../supabase/tests/local-db-concurrency.mjs";
 import { runAuthenticatedRlsSuite } from "../supabase/tests/local-db-rls.mjs";
 import { runUpgradeRehearsal } from "../supabase/tests/local-db-upgrade-rehearsal.mjs";
+import { runWebsiteInterviewActualSchemaSuite } from "../supabase/tests/local-website-interview-actual-schema.mjs";
+import { runSalesPersistenceSuite } from "../supabase/tests/local-sales-persistence.mjs";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 const LOCAL_PROJECT_ID = "ligou-v0-1-rc1";
@@ -569,6 +571,7 @@ async function runBunTestFile(file, expectedPasses, environment, cwd) {
   const output = successful(result, `Bun integration test ${path.basename(file)}`, [
     environment.SUPABASE_SECRET_KEY,
     environment.SUPABASE_PUBLISHABLE_KEY,
+    environment.PGPASSWORD,
   ]);
   const passCount = Number(/\b(\d+) pass\b/.exec(`${output}\n${result.stderr}`)?.[1]);
   assert.equal(passCount, expectedPasses, `${path.basename(file)} did not execute every required test`);
@@ -770,6 +773,8 @@ export async function runLocalDatabaseGate() {
       LIGOU_DOCKER_HOST: colima.dockerHost,
     };
     const concurrency = await runConcurrencySuite(testEnvironment);
+    const websiteInterview = await runWebsiteInterviewActualSchemaSuite(testEnvironment);
+    const salesPersistence = await runSalesPersistenceSuite(testEnvironment);
     const upgrade = await runUpgradeRehearsal(testEnvironment, {
       beforeDestructive: async ({ rehearsalRoot }) => {
         if (!allowedWorkdirs.includes(rehearsalRoot)) allowedWorkdirs.push(rehearsalRoot);
@@ -834,6 +839,13 @@ export async function runLocalDatabaseGate() {
       LIGOU_TEST_PRESEEDED_TENANT_ID: fixture.tenantId,
       LIGOU_TEST_PRESEEDED_TENANT_SLUG: fixture.slug,
       LIGOU_LOCAL_DB_TEST: "1",
+      LIGOU_LOCAL_PROJECT_ID: LOCAL_PROJECT_ID,
+      LIGOU_PSQL_BIN: psqlBin,
+      PGHOST: connection.hostname,
+      PGPORT: connection.port,
+      PGDATABASE: connection.pathname.slice(1),
+      PGUSER: decodeURIComponent(connection.username),
+      PGPASSWORD: databaseSecret,
     };
     await mkdir(applicationEnv.HOME, { recursive: true });
     const applicationIntegrationTests = await runBunTestFile(
@@ -842,10 +854,23 @@ export async function runLocalDatabaseGate() {
     const onboardingPolicyIntegrationTests = await runBunTestFile(
       path.join(repoRoot, "voice-controller/test/onboarding-policy.local.integration.test.ts"), 1, applicationEnv, runnerRoot,
     );
+    const companyDiscoveryIntegrationTests = await runBunTestFile(
+      path.join(repoRoot, "voice-controller/test/company-discovery-migration.test.ts"), 31, applicationEnv, runnerRoot,
+    );
+    const summarySubscriptionIntegrationTests = await runBunTestFile(
+      path.join(repoRoot, "voice-controller/test/summary-subscription.test.ts"), 16, applicationEnv, runnerRoot,
+    );
     const budgetRuntimeTests = await runBunTestFile(
       path.join(repoRoot, "voice-controller/test/budget.local.integration.test.ts"), 2, applicationEnv, runnerRoot,
     );
     const startupTests = await runVoiceControllerStartup(repoRoot, runtime, fixture, runnerRoot);
+
+    // Test-only fixtures, after verifying the exact disposable database identity.
+    await verifyIdentity([repoRoot]);
+    successful(await runPsql(connection, psqlBin, isolatedHome, "delete from public.phone_events;"), "first-phone fixture isolation", [databaseSecret]);
+    const firstPhoneSql=successful(await runPsql(connection, psqlBin, isolatedHome, await readFile(path.join(repoRoot,"supabase/tests/first-phone-binding.sql"),"utf8")), "first-phone binding SQL", [databaseSecret]);
+    assert.match(firstPhoneSql,/first_phone_binding_passed/);
+    const firstPhoneIntegration=await runBunTestFile(path.join(repoRoot,"voice-controller/test/first-phone.local.integration.test.ts"),3,applicationEnv,runnerRoot);
 
     const beforeNoop = successful(await runPsql(connection, psqlBin, isolatedHome, `
       select version from supabase_migrations.schema_migrations order by version;
@@ -884,11 +909,16 @@ export async function runLocalDatabaseGate() {
       extensionStatementsWithoutVersionClauses: extensionStatements,
       sqlAssertions: pgTapCount,
       concurrencyTests: concurrency.tests,
+      websiteInterview,
+      salesPersistence,
       upgradeTests: upgrade.tests,
       applicationIntegrationTests,
       onboardingPolicyIntegrationTests,
+      companyDiscoveryIntegrationTests,
+      summarySubscriptionIntegrationTests,
       budgetRuntimeTests,
       startupTests,
+      firstPhone: { bindingSql: "passed", integrationTests: firstPhoneIntegration },
       authenticatedRlsTests: authenticatedRls.tests,
       migrationNoop: true,
       lint: assertExpectedLegacyLint(lintRows),
@@ -943,7 +973,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   try {
     console.log(JSON.stringify(await runLocalDatabaseGate(), null, 2));
   } catch (error) {
-    console.error(error instanceof Error ? error.message : "Local database gate failed");
+    console.error(error instanceof Error ? (error.stack ?? error.message) : "Local database gate failed");
     process.exitCode = 1;
   }
 }

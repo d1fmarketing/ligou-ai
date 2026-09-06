@@ -9,6 +9,8 @@ import { supabaseGateway } from "./data/gateway.supabase.js";
 import { requireSuccess } from "./data/gateway-outcome.js";
 import { ApprovalsView } from "./views/ApprovalsView.jsx";
 import { ChatView } from "./views/ChatView.jsx";
+import { DiscoveryReviewView } from "./views/DiscoveryReviewView.jsx";
+import { WebsiteSetupView } from "./views/WebsiteSetupView.jsx";
 import { MemoryView } from "./views/MemoryView.jsx";
 import { PowersView } from "./views/PowersView.jsx";
 import { SettingsView } from "./views/SettingsView.jsx";
@@ -20,6 +22,10 @@ import { runOwnerBootstrap } from "./auth/bootstrap.js";
 import { defaultSessionType, onboardingCta } from "./voice/panel-copy.js";
 import { signInWithGoogle } from "./auth/google.js";
 import { stripProviderFields } from "./auth/session-storage.js";
+import {
+  preserveWebsiteSetupAfterReadFailure,
+  websiteSetupOwnsScreen,
+} from "./website-setup-model.js";
 
 const ROUTES = new Set(["ligou", "memoria", "aprovacoes", "poderes", "conta"]);
 
@@ -184,6 +190,15 @@ export function App() {
 
 const gateway = supabaseConfigured ? supabaseGateway : dashboardGateway;
 
+export function LigouWorkspace({ showDiscovery = false, discoveryProps = {}, chatProps = {} }) {
+  return (
+    <>
+      {showDiscovery ? <DiscoveryReviewView {...discoveryProps} /> : null}
+      <ChatView {...chatProps} />
+    </>
+  );
+}
+
 function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
   const [route, setRoute] = useState(routeFromHash);
   const [state, setState] = useState(null);
@@ -194,6 +209,34 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
   const [memoryQuery, setMemoryQuery] = useState("");
   const [memoryFilter, setMemoryFilter] = useState("all");
   const [selectedApprovalId, setSelectedApprovalId] = useState(null);
+  const [discovery, setDiscovery] = useState({ phase: supabaseConfigured ? "loading" : "hidden" });
+  const [discoveryBusy, setDiscoveryBusy] = useState(false);
+  const [websiteSetup, setWebsiteSetup] = useState({
+    state: supabaseConfigured ? "loading" : "onboarding_complete",
+  });
+  const [websiteSetupBusy, setWebsiteSetupBusy] = useState(false);
+  const [websiteSetupLoadError, setWebsiteSetupLoadError] = useState(null);
+
+  const refreshWebsiteSetup = useCallback(async () => {
+    if (typeof gateway.loadWebsiteSetup !== "function") return null;
+    try {
+      const next = await gateway.loadWebsiteSetup();
+      setWebsiteSetup(next);
+      setWebsiteSetupLoadError(null);
+      return next;
+    } catch {
+      setWebsiteSetup((current) => preserveWebsiteSetupAfterReadFailure(current));
+      setWebsiteSetupLoadError("Não foi possível atualizar agora. Tentaremos novamente.");
+      return null;
+    }
+  }, []);
+
+  const refreshDiscovery = useCallback(async () => {
+    if (typeof gateway.loadCompanyDiscovery !== "function") return null;
+    const next = await gateway.loadCompanyDiscovery();
+    setDiscovery(next);
+    return next;
+  }, []);
 
   const refresh = useCallback(async () => {
     const result = await gateway.loadState();
@@ -201,8 +244,10 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
     setState(nextState);
     if (result?.warning) setToast({ kind: "warning", text: result.warning });
     setLoading(false);
+    void refreshDiscovery(nextState);
+    void refreshWebsiteSetup();
     return nextState;
-  }, []);
+  }, [refreshDiscovery, refreshWebsiteSetup]);
 
   useEffect(() => {
     refresh().catch(() => {
@@ -230,11 +275,31 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
       setDialog((current) => (current && current.type !== "voice" ? null : current));
     };
     window.addEventListener("hashchange", handleHashChange);
-    if (!window.location.hash || !ROUTES.has(window.location.hash.slice(1))) {
+    if (!window.location.pathname.endsWith("/setup/website") &&
+        (!window.location.hash || !ROUTES.has(window.location.hash.slice(1)))) {
       window.history.replaceState(null, "", "#ligou");
     }
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
+
+  useEffect(() => {
+    if (!supabaseConfigured || !tenant || websiteSetup.state === "loading") return;
+    const ownsSetup = websiteSetupOwnsScreen(websiteSetup, tenant.status);
+    if (ownsSetup && !window.location.pathname.endsWith("/setup/website")) {
+      window.history.replaceState(null, "", "/dashboard/setup/website");
+    } else if (!ownsSetup && window.location.pathname.endsWith("/setup/website")) {
+      window.history.replaceState(null, "", "/dashboard/#ligou");
+      setRoute("ligou");
+    }
+  }, [tenant, websiteSetup]);
+
+  useEffect(() => {
+    if (websiteSetup.state !== "learning") return undefined;
+    const timer = window.setInterval(() => {
+      void refreshWebsiteSetup();
+    }, 2_000);
+    return () => window.clearInterval(timer);
+  }, [refreshWebsiteSetup, websiteSetup.state]);
 
   const approvals = state?.approvals || [];
   const pendingApprovals = useMemo(
@@ -290,6 +355,70 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
   const openMemoryEdit = (entry) => setDialog({ type: "memory-edit", entry });
   const openMemoryRevoke = (entry) => setDialog({ type: "memory-revoke", entry });
 
+  const startDiscovery = async (url) => {
+    if (discoveryBusy || typeof gateway.startCompanyDiscovery !== "function") return;
+    setDiscoveryBusy(true);
+    try {
+      await gateway.startCompanyDiscovery(url);
+      setDiscovery({ phase: "working", interviewAvailable: true });
+      await refreshDiscovery(state);
+    } catch (error) {
+      setDiscovery({
+        phase: "fallback",
+        reason: error?.code || "failed",
+        interviewAvailable: true,
+      });
+      throw error;
+    } finally {
+      setDiscoveryBusy(false);
+    }
+  };
+
+  const confirmDiscoveryReview = async ({ review, reviewState }) => {
+    if (discoveryBusy || typeof gateway.reviewCompanyDiscovery !== "function") return;
+    setDiscoveryBusy(true);
+    try {
+      await gateway.reviewCompanyDiscovery(review, reviewState);
+      await refresh();
+      setToast({ kind: "success", text: "Revisão confirmada em um lote. Só suas decisões viraram perfil ou regra." });
+    } catch (error) {
+      setToast({ kind: "warning", text: error?.message || "A revisão não foi confirmada." });
+      await refreshDiscovery(state).catch(() => {});
+      throw error;
+    } finally {
+      setDiscoveryBusy(false);
+    }
+  };
+
+  const startWebsiteSetup = async (url) => {
+    if (websiteSetupBusy || typeof gateway.startWebsiteSetup !== "function") return;
+    setWebsiteSetupBusy(true);
+    try {
+      await gateway.startWebsiteSetup(url);
+      await refreshWebsiteSetup();
+    } catch (error) {
+      await refreshWebsiteSetup().catch(() => {});
+      throw error;
+    } finally {
+      setWebsiteSetupBusy(false);
+    }
+  };
+
+  const retryWebsiteSetup = async () => {
+    if (websiteSetupBusy || !websiteSetup.job ||
+        typeof gateway.retryWebsiteSetup !== "function") return;
+    setWebsiteSetupBusy(true);
+    try {
+      await gateway.retryWebsiteSetup(websiteSetup.job.id, websiteSetup.job.version);
+      await refreshWebsiteSetup();
+    } catch (error) {
+      await refreshWebsiteSetup().catch(() => {});
+      throw error;
+    } finally {
+      setWebsiteSetupBusy(false);
+    }
+  };
+
   if (loading) {
     return <LoadingScreen>Preparando o painel do Ligou…</LoadingScreen>;
   }
@@ -301,6 +430,50 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
           Tentar novamente
         </button>
       </ErrorScreen>
+    );
+  }
+
+  if (supabaseConfigured && tenant && websiteSetupOwnsScreen(websiteSetup, tenant.status)) {
+    if (websiteSetup.state === "loading") {
+      if (websiteSetupLoadError) {
+        return (
+          <ErrorScreen title="Não foi possível preparar o onboarding" detail={websiteSetupLoadError}>
+            <button className="button button--primary" type="button" onClick={() => void refreshWebsiteSetup()}>
+              Tentar novamente
+            </button>
+          </ErrorScreen>
+        );
+      }
+      return <LoadingScreen>Preparando o onboarding…</LoadingScreen>;
+    }
+    return (
+      <>
+        <WebsiteSetupView
+          setup={websiteSetup}
+          busy={websiteSetupBusy}
+          loadError={websiteSetupLoadError}
+          onSubmit={startWebsiteSetup}
+          onRetry={retryWebsiteSetup}
+          onStartOnboarding={() => setDialog({
+            type: "voice",
+            sessionType: "onboarding",
+            lockedOnboarding: true,
+            onboardingProtocolVersion: websiteSetup.voiceProtocolVersion ?? 2,
+          })}
+        />
+        <DashboardDialog
+          dialog={dialog}
+          onClose={() => setDialog(null)}
+          onSendVoice={(text) => perform(() => gateway.sendMessage(text), "Frase demonstrativa enviada ao Ligou.")}
+          onApprove={() => {}}
+          onAdjust={() => {}}
+          onReject={() => {}}
+          onUpdateMemory={() => {}}
+          onRevokeMemory={() => {}}
+          onReset={() => {}}
+        />
+        <Toast toast={toast} onClose={() => setToast(null)} />
+      </>
     );
   }
 
@@ -331,19 +504,29 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
         onReset={() => setDialog({ type: "reset" })}
       >
         {route === "ligou" ? (
-          <ChatView
-            messages={state.messages}
-            callContext={state.callContext}
-            pendingApproval={pendingApproval}
-            sending={sending}
-            onSend={sendMessage}
-            onVoice={() => setDialog({ type: "voice", sessionType: defaultSessionType(tenant?.status) })}
-            onboardingCtaLabel={onboardingCta(tenant?.status)}
-            onStartOnboarding={() => setDialog({ type: "voice", sessionType: "onboarding" })}
-            prototype={!supabaseConfigured}
-            onApprove={openApproval}
-            onAdjust={openAdjustment}
-            onReject={openRejection}
+          <LigouWorkspace
+            showDiscovery={false}
+            discoveryProps={{
+              discovery,
+              busy: discoveryBusy,
+              onDiscover: startDiscovery,
+              onReview: confirmDiscoveryReview,
+              onStartInterview: () => setDialog({ type: "voice", sessionType: "onboarding" }),
+            }}
+            chatProps={{
+              messages: state.messages,
+              callContext: state.callContext,
+              pendingApproval,
+              sending,
+              onSend: sendMessage,
+              onVoice: () => setDialog({ type: "voice", sessionType: defaultSessionType(tenant?.status) }),
+              onboardingCtaLabel: onboardingCta(tenant?.status),
+              onStartOnboarding: () => setDialog({ type: "voice", sessionType: "onboarding" }),
+              prototype: !supabaseConfigured,
+              onApprove: openApproval,
+              onAdjust: openAdjustment,
+              onReject: openRejection,
+            }}
           />
         ) : null}
         {route === "memoria" ? (
@@ -479,7 +662,14 @@ function DashboardDialog({
         </Dialog>
       );
     }
-    return <VoicePanel onClose={onClose} initialSessionType={dialog.sessionType ?? "owner_browser"} />;
+    return (
+      <VoicePanel
+        onClose={onClose}
+        initialSessionType={dialog.sessionType ?? "owner_browser"}
+        lockedOnboarding={dialog.lockedOnboarding === true}
+        onboardingProtocolVersion={dialog.onboardingProtocolVersion ?? 2}
+      />
+    );
   }
 
   if (dialog.type === "approve") {

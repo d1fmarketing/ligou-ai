@@ -13,6 +13,8 @@ import type {
   OnboardingOpeningMode,
   OnboardingOpeningPayload,
 } from "./onboarding-greeting.ts";
+import type { WebsiteOpeningEnvelope } from "./server.ts";
+import { isApplicationOpeningPayload } from "../../supabase/functions/browser-session/core.ts";
 
 type StartSession = (
   userId: string,
@@ -28,12 +30,14 @@ type StartSession = (
   options?: {
     browserRequestId?: string;
     openingModeRequested?: OnboardingOpeningMode;
+    requestedCallId?: string;
+    onboardingProtocolVersion?: 2 | 3;
   },
 ) => Promise<{
   sdp: string;
   call_id: string;
   opening_mode_applied?: OnboardingOpeningMode;
-  opening_payload?: OnboardingOpeningPayload | null;
+  opening_payload?: OnboardingOpeningPayload | WebsiteOpeningEnvelope | null;
 }>;
 
 interface BrowserLiveControl {
@@ -99,7 +103,7 @@ function registerBrowserLiveControl(
 ): boolean {
   if (!requestId.trim() || !cleanup.callId?.trim() || !binding.userId.trim() ||
     !binding.tenantId.trim() ||
-    ![null, 2].includes(binding.onboardingProtocolVersion)) return false;
+    ![null, 2, 3].includes(binding.onboardingProtocolVersion)) return false;
   pruneTerminalBrowserControls();
   const existing = browserLiveControls.get(requestId);
   if (existing)
@@ -258,7 +262,7 @@ function exactReadyReceiptMatches(
     answerSdp: string;
     callId: string;
     openingMode: OnboardingOpeningMode;
-    openingPayload: OnboardingOpeningPayload | null;
+    openingPayload: OnboardingOpeningPayload | WebsiteOpeningEnvelope | null;
   },
 ): boolean {
   return receipt?.id === expected.requestId &&
@@ -326,7 +330,7 @@ type CancellationRequestKind = "processing" | "ready";
 function cancellationRequestKind(row: any): CancellationRequestKind | null {
   if (row?.session_type !== "onboarding" ||
     row?.opening_mode_requested !== "application_tts_v1" ||
-    ![null, undefined, 2].includes(row?.onboarding_protocol_version) ||
+    ![null, undefined, 2, 3].includes(row?.onboarding_protocol_version) ||
     typeof row?.call_id !== "string" || !row.call_id.trim()) return null;
   if (row.answer_sdp == null && row.opening_mode_applied == null &&
     row.opening_payload == null) return "processing";
@@ -334,8 +338,8 @@ function cancellationRequestKind(row: any): CancellationRequestKind | null {
   if (typeof row.answer_sdp === "string" && row.answer_sdp.trim() &&
     row.opening_mode_applied === "application_tts_v1" && payload &&
     typeof payload === "object" && !Array.isArray(payload) &&
-    (row.onboarding_protocol_version === 2
-      ? payload.version === 2
+    ([2, 3].includes(row.onboarding_protocol_version)
+      ? payload.version === row.onboarding_protocol_version
       : payload.version === 1 || payload.version === 2)) return "ready";
   return null;
 }
@@ -697,6 +701,7 @@ async function handle(
           (row.opening_mode_requested ?? "provider_model_v1") as
             OnboardingOpeningMode,
         ...(requestedCallId ? { requestedCallId } : {}),
+        ...([2, 3].includes(row.onboarding_protocol_version) ? { onboardingProtocolVersion: row.onboarding_protocol_version } : {}),
       },
     );
     if (needsDurableCancelControl &&
@@ -715,6 +720,11 @@ async function handle(
       out.opening_payload != null
     ) throw new Error("browser_request_provider_opening_payload_forbidden");
     const expectedOpeningPayload = out.opening_payload ?? null;
+    if (row.onboarding_protocol_version === 3 && (!isApplicationOpeningPayload(expectedOpeningPayload) ||
+      expectedOpeningPayload.version !== 3 || (expectedOpeningPayload.speech as Record<string, unknown>).callId !== out.call_id))
+      throw new Error("browser_request_website_opening_invalid");
+    if (row.onboarding_protocol_version === 2 && expectedOpeningPayload?.version !== 2)
+      throw new Error("browser_request_opening_protocol_mismatch");
     let ready: Array<{ id: string }> | null = null;
     let readyError: unknown = null;
     try {

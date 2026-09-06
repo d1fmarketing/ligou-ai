@@ -9,6 +9,186 @@ import {
   projectRowsAfterTestReset,
   scopeUsageAlertQuery,
 } from "./gateway-rule-mapping.js";
+import { buildDiscoveryReviewRequest, mapDiscoveryRead } from "../discovery-model.js";
+import { mapWebsiteSetupStatus, mapWebsiteSetupPublicDetails, validateWebsiteUrl } from "../website-setup-model.js";
+
+const DISCOVERY_ERROR_COPY = {
+  company_discovery_stale_version: "A descoberta mudou enquanto você revisava. Recarregue antes de confirmar.",
+  company_discovery_review_result_not_owner: "Este resultado não é mais a revisão atual. Recarregue o painel.",
+  company_discovery_claim_already_reviewed: "Uma destas sugestões já foi revisada. Recarregue o painel para ver o estado atual.",
+  company_discovery_review_not_awaiting: "Esta descoberta não está mais aguardando revisão. Recarregue o painel.",
+  company_discovery_review_claim_set_invalid: "O conjunto de sugestões mudou. Recarregue o painel antes de confirmar.",
+  company_discovery_review_claim_set_mismatch: "O conjunto de sugestões mudou. Recarregue o painel antes de confirmar.",
+  company_discovery_review_nonce_invalid: "A confirmação expirou ou foi invalidada. Recarregue o painel e confirme novamente.",
+  company_discovery_review_nonce_race_lost: "Esta confirmação já foi usada. Recarregue o painel antes de tentar novamente.",
+  company_discovery_operational_confirmation_required: "Confirme explicitamente o grupo operacional.",
+  company_discovery_safety_evidence_ack_required: "Confirme a evidência exata de cada item de segurança.",
+  company_discovery_owner_private_fact_forbidden: "Assuntos privados só podem ser respondidos na entrevista.",
+  company_discovery_disabled: "A leitura automática do site está desativada. A entrevista continua disponível.",
+  company_discovery_tenant_not_allowlisted: "A leitura automática do site não está disponível para esta empresa. A entrevista continua disponível.",
+  company_discovery_deadline_expired: "O tempo da leitura terminou. A entrevista continua disponível.",
+  company_discovery_url_change_blocked: "Uma análise já está em andamento. Aguarde a conclusão antes de trocar o endereço.",
+  company_discovery_candidate_context_empty: "O site não produziu informações nem perguntas utilizáveis.",
+};
+
+function discoveryError(error) {
+  const code = error?.message || "company_discovery_failed";
+  const mapped = new Error(DISCOVERY_ERROR_COPY[code] || code);
+  mapped.code = code;
+  return mapped;
+}
+
+async function discoveryRpc(client, name, payload) {
+  const { data, error } = await client.rpc(name, payload);
+  if (error) throw discoveryError(error);
+  return data;
+}
+
+export async function submitCompanyDiscoveryVia(client, url, idempotencyKey) {
+  return discoveryRpc(client, "submit_company_discovery", {
+    p_url: url,
+    p_idempotency_key: idempotencyKey,
+  });
+}
+
+export async function loadWebsiteSetupVia(client) {
+  const data = await discoveryRpc(client, "company_discovery_setup_status");
+  const setup = mapWebsiteSetupStatus(data);
+  if (!setup.startOnboardingEnabled) return setup;
+  try {
+    // Owner RLS chooses the tenant; only the authoritative ready proof chooses the result.
+    const claims = discoveryData(await client.from("discovery_claims")
+      .select("job_id,result_id,claim_class,claim_type,claim_schema_version,normalized_value,uncertainty,ambiguous_fields,contradiction_status")
+      .eq("job_id", setup.readyProof.jobId)
+      .eq("result_id", setup.readyProof.resultId)
+      .eq("claim_class", "operational")
+      .in("claim_type", ["service", "service_territory", "business_hours", "booking_restriction"])
+      .order("created_at", { ascending: true })
+      .limit(100));
+    return Object.freeze({ ...setup, publicDetails: mapWebsiteSetupPublicDetails(setup, claims) });
+  } catch {
+    // Optional details must not revoke a ready result or leak transport/provider diagnostics.
+    return Object.freeze({ ...setup, publicDetailsUnavailable: true });
+  }
+}
+
+export async function startWebsiteSetupVia(client, url) {
+  return discoveryRpc(client, "start_company_discovery_setup", {
+    p_url: validateWebsiteUrl(url),
+  });
+}
+
+export async function retryWebsiteSetupVia(client, jobId, expectedVersion) {
+  return discoveryRpc(client, "retry_company_discovery_setup", {
+    p_job: jobId,
+    p_expected_version: expectedVersion,
+  });
+}
+
+export async function cancelCompanyDiscoveryVia(client, jobId, expectedVersion) {
+  return discoveryRpc(client, "cancel_company_discovery", {
+    p_job: jobId,
+    p_expected_version: expectedVersion,
+  });
+}
+
+export async function retryCompanyDiscoveryVia(client, jobId, expectedVersion) {
+  return discoveryRpc(client, "retry_company_discovery", {
+    p_job: jobId,
+    p_expected_version: expectedVersion,
+  });
+}
+
+export async function reviewCompanyDiscoveryVia(client, review, reviewState) {
+  // Validate the complete visible draft before minting a nonce. An invalid
+  // editor must produce zero server calls and can never fall back to a prior
+  // valid value held elsewhere.
+  const payload = buildDiscoveryReviewRequest(review, reviewState, "preflight-only");
+  const claimIds = payload.p_decisions.map((decision) => decision.claim_id);
+  const stage0b = review?.result?.schema === "company_discovery.result.v2";
+  const nonce = await discoveryRpc(client, stage0b
+    ? "create_company_discovery_review_nonce_v2"
+    : "create_company_discovery_review_nonce", {
+    p_job: review.job.id,
+    p_result: review.result.id,
+    p_claim_ids: claimIds,
+  });
+  const reviewRpc = stage0b
+    ? "review_company_discovery_claims_v2"
+    : "review_company_discovery_claims";
+  return discoveryRpc(client, reviewRpc, {
+    ...payload,
+    p_confirmation_nonce: nonce,
+  });
+}
+
+function discoveryData(result) {
+  if (result?.error) throw discoveryError(result.error);
+  return result?.data ?? null;
+}
+
+export async function loadCompanyDiscoveryVia(client, tenantId, {
+  now = new Date().toISOString(),
+} = {}) {
+  if (typeof tenantId !== "string" || !tenantId) throw new Error("active_tenant_required");
+  const ownerStatus = discoveryData(await client.rpc("company_discovery_owner_status"));
+  const availability = mapDiscoveryRead({ ownerStatus, now });
+  if (availability.phase === "unavailable") return availability;
+  const jobResult = await client
+    .from("worker_jobs")
+    .select("id,tenant_id,version,status,processing_stage,current_attempt_id,selected_attempt_id,deadline_at,fallback_state,normalized_origin,updated_at")
+    .eq("tenant_id", tenantId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const job = discoveryData(jobResult);
+  if (!job?.selected_attempt_id) {
+    return mapDiscoveryRead({ ownerStatus, job, now });
+  }
+
+  const result = discoveryData(await client
+    .from("worker_results")
+    .select("id,tenant_id,job_id,attempt_id,result_schema,result_hash,candidate_result,validation_state,validated_at")
+    .eq("tenant_id", tenantId)
+    .eq("job_id", job.id)
+    .eq("attempt_id", job.selected_attempt_id)
+    .eq("validation_state", "validated")
+    .maybeSingle());
+  if (!result) return mapDiscoveryRead({ ownerStatus, job, now });
+
+  const [claimsResult, sourcesResult, decisionsResult] = await Promise.all([
+    client
+      .from("discovery_claims")
+      .select("id,tenant_id,job_id,result_id,claim_class,claim_type,normalized_value,evidence_refs,adapter_id,provider,model,confidence,contradiction_status,missing_fields,ambiguous_fields,contradictions,uncertainty,claim_schema_version,claim_version,created_at")
+      .eq("tenant_id", tenantId)
+      .eq("job_id", job.id)
+      .eq("result_id", result.id)
+      .order("created_at", { ascending: true }),
+    client
+      .from("discovery_source_snapshots")
+      .select("id,tenant_id,job_id,result_id,url,retrieved_at,http_status,mime_type,byte_length,content_hash,excerpt,crawl_order,crawl_depth")
+      .eq("tenant_id", tenantId)
+      .eq("job_id", job.id)
+      .eq("result_id", result.id)
+      .order("crawl_order", { ascending: true }),
+    client
+      .from("discovery_decisions")
+      .select("id,tenant_id,job_id,result_id,claim_id,decision,decided_at")
+      .eq("tenant_id", tenantId)
+      .eq("job_id", job.id)
+      .eq("result_id", result.id)
+      .order("decided_at", { ascending: true }),
+  ]);
+  return mapDiscoveryRead({
+    ownerStatus,
+    job,
+    result,
+    claims: discoveryData(claimsResult) ?? [],
+    sources: discoveryData(sourcesResult) ?? [],
+    decisions: discoveryData(decisionsResult) ?? [],
+    now,
+  });
+}
 
 const SCOPE_TO_DB = {
   service: "servico", "serviço": "servico", servico: "servico",
@@ -158,6 +338,48 @@ export function createSupabaseGateway() {
       try { return await fetchAll(); } catch (e) { return { state: null, warning: e.message }; }
     },
 
+    async loadCompanyDiscovery() {
+      try {
+        return await loadCompanyDiscoveryVia(supabase, activeTenantId);
+      } catch (error) {
+        return {
+          phase: "fallback",
+          reason: error?.code || "load_failed",
+          message: error?.message,
+          interviewAvailable: true,
+        };
+      }
+    },
+
+    async loadWebsiteSetup() {
+      return loadWebsiteSetupVia(supabase);
+    },
+
+    async startWebsiteSetup(url) {
+      return startWebsiteSetupVia(supabase, url);
+    },
+
+    async retryWebsiteSetup(jobId, expectedVersion) {
+      return retryWebsiteSetupVia(supabase, jobId, expectedVersion);
+    },
+
+    async startCompanyDiscovery(url) {
+      const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      return submitCompanyDiscoveryVia(supabase, url, `dashboard-${suffix}`);
+    },
+
+    async cancelCompanyDiscovery(jobId, expectedVersion) {
+      return cancelCompanyDiscoveryVia(supabase, jobId, expectedVersion);
+    },
+
+    async retryCompanyDiscovery(jobId, expectedVersion) {
+      return retryCompanyDiscoveryVia(supabase, jobId, expectedVersion);
+    },
+
+    async reviewCompanyDiscovery(review, reviewState) {
+      return reviewCompanyDiscoveryVia(supabase, review, reviewState);
+    },
+
     subscribe(onChange) {
       if (channel || !supabase) return () => {};
       channel = supabase
@@ -166,6 +388,11 @@ export function createSupabaseGateway() {
         .on("postgres_changes", { event: "*", schema: "public", table: "rules" }, onChange)
         .on("postgres_changes", { event: "*", schema: "public", table: "calls" }, onChange)
         .on("postgres_changes", { event: "*", schema: "public", table: "notifications" }, onChange)
+        .on("postgres_changes", { event: "*", schema: "public", table: "worker_jobs" }, onChange)
+        .on("postgres_changes", { event: "*", schema: "public", table: "worker_results" }, onChange)
+        .on("postgres_changes", { event: "*", schema: "public", table: "discovery_claims" }, onChange)
+        .on("postgres_changes", { event: "*", schema: "public", table: "discovery_decisions" }, onChange)
+        .on("postgres_changes", { event: "INSERT", schema: "public", table: "company_discovery_onboarding_drafts" }, onChange)
         .subscribe();
       return () => { supabase.removeChannel(channel); channel = null; };
     },

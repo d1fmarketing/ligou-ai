@@ -16,7 +16,10 @@
     "test:edge-functions": "node scripts/check-edge-functions.mjs",
     "db:gate:local": "node scripts/local-db-gate.mjs",
     "build:sales": "bun scripts/build-sales-demo.mjs",
-    "build:commercial": "bun scripts/build-commercial.mjs"
+    "build:commercial": "bun scripts/build-commercial.mjs",
+    "phone:plan": "node scripts/first-phone-number.mjs plan",
+    "phone:inspect": "node scripts/first-phone-number.mjs inspect",
+    "test:phone-setup": "node --test scripts/first-phone-number.test.mjs"
   },
   "devDependencies": {
     "supabase": "2.115.0"
