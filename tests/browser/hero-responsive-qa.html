@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+  <title>Ligou responsive QA</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#f6f7f2;color:#092f35;font:14px/1.5 system-ui,sans-serif}main{padding:24px;max-width:1400px;margin:auto}h1{font-size:25px;margin:0 0 6px}p{margin:0 0 16px;color:#415955}button,select{font:inherit;min-height:42px;border:1px solid #8da49f;border-radius:7px;padding:8px 12px;background:#fff;color:#092f35}button{cursor:pointer}button:disabled,select:disabled{opacity:.5;cursor:default}#run{background:#092f35;color:#fff;border-color:#092f35}button:focus-visible,select:focus-visible,a:focus-visible{outline:3px solid #e96438;outline-offset:3px}.controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-block:18px}nav{display:flex;flex-wrap:wrap;gap:14px;margin:12px 0}a{color:#075f56}.status{min-height:24px;font-weight:650}table{width:100%;border-collapse:collapse;background:#fff;font-size:13px}caption{text-align:left;font-weight:650;padding:8px 0}th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #d8e2dd}th{color:#415955}td:first-child,td:nth-child(2){white-space:nowrap}.pass{color:#09674e;font-weight:750}.fail{color:#a52c16;font-weight:750}.table-scroll{overflow:auto;max-height:240px;margin:12px 0 20px}.stage{width:100%;overflow:auto;border:1px solid #a9bab3;background:#e6ece7;padding:10px;margin-bottom:20px}iframe{display:block;box-sizing:content-box;border:0;width:1280px;max-width:none;height:900px;background:#fff}summary{cursor:pointer;font-weight:650;padding:10px 0}pre{overflow:auto;max-height:560px;white-space:pre-wrap;overflow-wrap:anywhere;background:#082832;color:#f5faf7;border-radius:8px;padding:16px;font:12px/1.5 ui-monospace,monospace}small{color:#415955}nav[aria-disabled="true"]{pointer-events:none;opacity:.5}@media(max-width:600px){main{padding:14px}.controls{align-items:stretch}.controls label{width:100%}}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Ligou responsive QA</h1>
+  <p>One local iframe. Full-page width sweep plus height/orientation matrix and hero scale checks. Checks inspect completed content and horizontal bounds; no sales controls are activated.</p>
+  <div class="controls">
+    <button id="run" type="button">Run full-page checks</button>
+    <button id="run-one" type="button">Check reported 816 × 791</button><button id="sweep" type="button">Sweep every width 320–3840</button>
+    <button id="stop" type="button" disabled>Stop after this width</button>
+    <label for="source">Source</label>
+    <select id="source"><option value="current">Current page</option><option value="baseline">Saved baseline (before.html)</option></select>
+    <label for="width">Inspect width</label>
+    <select id="width"></select>
+    <button id="show" type="button">Show selected width</button>
+  </div>
+  <nav id="sections" aria-label="Inspect sections in the preview">
+    <a href="/?responsiveQA=1280#top" target="preview" data-section="top">Hero</a>
+    <a href="/?responsiveQA=1280#prova" target="preview" data-section="prova">Demo</a>
+    <a href="/?responsiveQA=1280#diferenca" target="preview" data-section="diferenca">How it works</a>
+    <a href="/?responsiveQA=1280#trabalhos" target="preview" data-section="trabalhos">Capabilities</a>
+    <a href="/?responsiveQA=1280#comecar" target="preview" data-section="comecar">Getting started</a>
+    <a href="/?responsiveQA=1280#faq" target="preview" data-section="faq">FAQ</a>
+    <a href="/?responsiveQA=1280#preco" target="preview" data-section="preco">Price</a>
+  </nav>
+  <div id="status" class="status" role="status" aria-live="polite">Ready. The preview remains blank until you choose a width or run the checks.</div>
+  <div class="table-scroll">
+    <table>
+      <caption>Results by requested CSS width</caption>
+      <thead><tr><th scope="col">Width</th><th scope="col">Result</th><th scope="col">Findings</th></tr></thead>
+      <tbody id="results"></tbody>
+    </table>
+  </div>
+  <div class="stage" role="region" aria-label="Scrollable preview at its exact test width" tabindex="0">
+    <iframe id="preview" name="preview" title="Ligou local responsive preview" width="1280" height="900" src="about:blank" allow="microphone 'none'; camera 'none'; autoplay 'none'" referrerpolicy="same-origin"></iframe>
+  </div>
+  <small>The QA-only style finishes reveal states and disables motion without changing layout, breakpoints, or display rules. Hero videos are paused. Text checks ignore decorative/hidden content, but do not ignore overflow-hidden containers.</small>
+  <details open>
+    <summary>Full JSON report</summary>
+    <pre id="report" role="region" aria-label="Full responsive QA JSON report" tabindex="0">{"status":"not-run","results":[]}</pre>
+  </details>
+</main>
+<script type="module">
+const WIDTHS = [320,360,390,430,600,601,673,767,768,820,900,919,920,921,1023,1024,1123,1280,1440,1920,2560,3440];
+let HEIGHT = 791; const TOLERANCE = 1;
+const frame = document.getElementById('preview');
+const select = document.getElementById('width');
+const sourceSelect = document.getElementById('source'), runOneButton = document.getElementById('run-one');
+const runButton = document.getElementById('run'), stopButton = document.getElementById('stop'), showButton = document.getElementById('show');
+const status = document.getElementById('status'), tbody = document.getElementById('results'), report = document.getElementById('report'), sectionLinks = document.getElementById('sections');
+let running = false, stopRequested = false, loading = false;
+let state = {status:'not-run',height:HEIGHT,widths:WIDTHS,results:[]};
+for (const width of WIDTHS) { const option = new Option(`${width} px`,width); option.selected = width === 1280; select.add(option); }
+const round = number => Math.round(number * 100) / 100;
+const rectData = rect => ({left:round(rect.left),right:round(rect.right),top:round(rect.top),bottom:round(rect.bottom),width:round(rect.width),height:round(rect.height)});
+const twoFrames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+function deadline(promise, milliseconds, message) {
+  let timer;
+  return Promise.race([promise,new Promise((_,reject) => {timer = setTimeout(() => reject(new Error(message)),milliseconds);})]).finally(() => clearTimeout(timer));
+}
+function previewURL(width, hash = '') {
+  const url = new URL(sourceSelect.value === 'baseline' ? '/output/hero-qa-20260906/before.html' : '/', location.origin);
+  url.searchParams.set('responsiveQA', String(width));
+  url.hash = hash;
+  return url;
+}
+function refreshLinks() { for (const link of sectionLinks.querySelectorAll('a')) link.href = previewURL(Number(select.value),link.dataset.section).href; }
+function controls(disabled) {
+  runButton.disabled = disabled; runOneButton.disabled = disabled; showButton.disabled = disabled; select.disabled = disabled; sourceSelect.disabled = disabled;
+  stopButton.disabled = !running; sectionLinks.setAttribute('aria-disabled',String(disabled));
+}
+function publish() { report.textContent = JSON.stringify(state,null,2); }
+function qaPresentation(doc) {
+  doc.documentElement.dataset.responsiveQa = 'true';
+  const style = doc.createElement('style');
+  style.id = 'responsive-qa-only';
+  style.textContent = `
+    html[data-responsive-qa="true"],html[data-responsive-qa="true"] *{scroll-behavior:auto!important;animation:none!important;transition:none!important;caret-color:transparent!important}
+    html[data-responsive-qa="true"] :is(.rv,.hd,.ln,.p7-i,.lc-i){opacity:1!important;transform:none!important}
+    html[data-responsive-qa="true"] :is(.hero-wave,.wavedraw,.p7-trail) path{stroke-dashoffset:0!important}
+    html[data-responsive-qa="true"] .intro{display:none!important}
+  `;
+  doc.head.append(style);
+  for (const video of doc.querySelectorAll('.hero4 video')) {
+    video.autoplay = false; video.pause();
+    video.addEventListener('play', () => video.pause());
+  }
+}
+let navigationSequence = 0;
+async function loadPreview(width, hash = '') {
+  if (loading) throw new Error('A preview navigation is already in progress.');
+  loading = true;
+  // Both dimensions are set before navigating; the host scrollport must not shrink the iframe.
+  frame.style.setProperty('width', `${width}px`, 'important');
+  frame.style.setProperty('max-width', 'none', 'important');
+  frame.style.setProperty('height', `${HEIGHT}px`, 'important');
+  frame.width = String(width); frame.height = String(HEIGHT);
+  select.value = String(width); refreshLinks();
+  let onLoad, onError;
+  try {
+    await twoFrames();
+    await deadline(new Promise((resolve,reject) => {
+      onLoad = () => resolve(); onError = () => reject(new Error('Preview navigation failed.'));
+      frame.addEventListener('load',onLoad,{once:true}); frame.addEventListener('error',onError,{once:true});
+      const destination = previewURL(width,hash);
+      destination.searchParams.set('qaNavigation',String(++navigationSequence));
+      frame.src = destination.href;
+    }),20000,'Preview load timed out.');
+    const win = frame.contentWindow, doc = frame.contentDocument;
+    if (!doc || win.location.origin !== location.origin) throw new Error('Preview must remain same-origin.');
+    await deadline(doc.fonts?.ready || Promise.resolve(),10000,'Fonts did not finish loading.');
+    await twoFrames();
+    if (!doc.querySelector('.nav4') || !doc.querySelector('#diferenca')) throw new Error('The landing application did not render.');
+    qaPresentation(doc);
+    await twoFrames();
+    if (hash) doc.getElementById(hash)?.scrollIntoView({block:'start',behavior:'instant'});
+    else win.scrollTo({top:0,left:0,behavior:'instant'});
+    await twoFrames();
+    return {win,doc};
+  } finally {
+    if (onLoad) frame.removeEventListener('load',onLoad);
+    if (onError) frame.removeEventListener('error',onError);
+    loading = false;
+  }
+}
+
+function collect(width, win, doc) {
+  const viewportWidth = doc.documentElement.clientWidth;
+  const styles = new WeakMap(), visible = new WeakMap();
+  const css = element => { if (!styles.has(element)) styles.set(element,win.getComputedStyle(element)); return styles.get(element); };
+  function rendered(element) {
+    if (!element) return false;
+    if (visible.has(element)) return visible.get(element);
+    const style = css(element);
+    const result = !element.hidden && style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse' && Number(style.opacity) !== 0 && (!element.parentElement || rendered(element.parentElement));
+    visible.set(element,result); return result;
+  }
+  function pathFor(element) {
+    const parts = [];
+    for (let current = element; current && parts.length < 4; current = current.parentElement) {
+      if (current.id) {parts.unshift('#'+CSS.escape(current.id));break;}
+      parts.unshift(current.tagName.toLowerCase()+[...current.classList].filter(name => name !== 'motion-outside').slice(0,3).map(name => '.'+CSS.escape(name)).join(''));
+    }
+    return parts.join(' > ');
+  }
+  const outside = rect => rect.left < -TOLERANCE || rect.right > viewportWidth + TOLERANCE;
+  const controlBounds = selector => {
+    const element = doc.querySelector(selector);
+    if (!element || !rendered(element) || !element.getClientRects().length) return {pass:false,selector,error:'Missing or hidden control'};
+    const rect = element.getBoundingClientRect();
+    return {pass:rect.width > 0 && rect.height > 0 && !outside(rect),selector,text:element.textContent.trim().replace(/\s+/g,' '),rect:rectData(rect)};
+  };
+  const navCTA = controlBounds('.nav4-cta .lg-btn');
+  const navClient = controlBounds('.nav4-client');
+  const priceCTA = controlBounds('#preco .lg-btn[href="#prova"]');
+  if (navCTA.rect) navCTA.pass &&= navCTA.rect.top >= -TOLERANCE && navCTA.rect.bottom <= HEIGHT + TOLERANCE;
+
+  const overflow = [], cardOverflow = []; let textNodesChecked = 0, textRectsChecked = 0;
+  const walker = doc.createTreeWalker(doc.body,win.NodeFilter.SHOW_TEXT);
+  const excluded = '[aria-hidden="true"],[hidden],.intro,.mqwrap,.mq,.sr-only,script,style,noscript,template';
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const parent = node.parentElement, text = node.textContent.trim();
+    if (!text || !parent || parent.closest(excluded) || !rendered(parent)) continue;
+    const range = doc.createRange(); range.selectNodeContents(node);
+    let counted = false;
+    for (const rect of range.getClientRects()) {
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      counted = true; textRectsChecked++;
+      // Full-page means any vertical position; only horizontal viewport escape fails.
+      // Do not exclude overflow:hidden ancestors: body/section clipping can hide the defect.
+      if (outside(rect)) overflow.push({element:pathFor(parent),text:text.replace(/\s+/g,' ').slice(0,180),rect:rectData(rect)});
+      const card = parent.closest('.iv-card');
+      if (card) { const bounds=card.getBoundingClientRect(); if(rect.left<bounds.left-TOLERANCE||rect.right>bounds.right+TOLERANCE||rect.top<bounds.top-TOLERANCE||rect.bottom>bounds.bottom+TOLERANCE) cardOverflow.push({element:pathFor(parent),text:text.slice(0,180),rect:rectData(rect),card:rectData(bounds)}); }
+    }
+    if (counted) textNodesChecked++;
+    range.detach?.();
+  }
+
+  const columns = [...doc.querySelectorAll('.iv-steps > .iv-col')].filter(rendered);
+  const lefts = [];
+  for (const column of columns) {const left = column.getBoundingClientRect().left;if (!lefts.some(value => Math.abs(value-left) <= TOLERANCE)) lefts.push(left);}
+  const expectedColumns = width >= 768 ? 3 : 1;
+  const ivColumns = {pass:columns.length === 3 && lefts.length === expectedColumns,expected:expectedColumns,actual:lefts.length,cardGroups:columns.length,gridTemplate:doc.querySelector('.iv-steps') ? css(doc.querySelector('.iv-steps')).gridTemplateColumns : null};
+  const cards = [...doc.querySelectorAll('.iv .iv-card')].filter(rendered).map(element => ({element:pathFor(element),rect:rectData(element.getBoundingClientRect())}));
+  const mobileCards = {pass:width >= 768 || (cards.length === 3 && cards.every(card => card.rect.width <= 480+TOLERANCE)),requiredBelow:768,maximum:480,cards};
+  const connectors = [...doc.querySelectorAll('.iv-col--2,.iv-col--3')].filter(rendered).map(element => {
+    const style = win.getComputedStyle(element,'::before');
+    const displayed = style.display !== 'none' && !['none','normal',''].includes(style.content) && parseFloat(style.width) > 0 && parseFloat(style.height) > 0;
+    return {element:pathFor(element),displayed,display:style.display,content:style.content,width:style.width,height:style.height};
+  });
+  const ivConnectors = {pass:connectors.length === 2 && (width > 1023 || connectors.every(connector => !connector.displayed)),expectedThrough1023:'none',items:connectors};
+  const tasks = [...doc.querySelectorAll('.capabilities .capability-task')].filter(rendered);
+  const capabilityControls = {count:tasks.length,selected:tasks.filter(task => task.getAttribute('aria-pressed') === 'true').length,selectedClass:tasks.filter(task => task.classList.contains('is-selected')).length,future:tasks.filter(task => task.classList.contains('is-future')).length,visibleFutureLabels:tasks.filter(task => task.classList.contains('is-future')).filter(task => {const label = task.querySelector('.capability-status');return label && rendered(label);}).length};
+  capabilityControls.pass = capabilityControls.count === 6 && capabilityControls.selected === 1 && capabilityControls.selectedClass === 1 && capabilityControls.future === 2 && capabilityControls.visibleFutureLabels === 2;
+  const sections = [...doc.querySelectorAll('main > section,main > .wavedraw,main > .mqwrap,footer')].filter(rendered).map(element => ({id:element.id || null,label:element.dataset.screenLabel || element.className || element.tagName.toLowerCase(),rect:rectData(element.getBoundingClientRect())}));
+  const resourceURLs = win.performance.getEntriesByType('resource').map(resource => new URL(resource.name,win.location.href));
+  const externalResources = [...new Set(resourceURLs.filter(url => !['data:','blob:'].includes(url.protocol) && url.origin !== location.origin).map(url => url.href))];
+  const salesRequestsObserved = resourceURLs.filter(url => url.pathname === '/api/sales-session' || url.pathname === '/functions/v1/sales-session').map(url => url.href);
+  const actualFrameWidth = frame.getBoundingClientRect().width;
+  const hero = doc.querySelector('.hero4').getBoundingClientRect();
+  const art = doc.querySelector('.hero4-artlayer').getBoundingClientRect();
+  const media = doc.querySelector('.hero4-artlayer video,.hero4-artlayer img');
+  const compact = width >= 768 && width <= 1023;
+  const heroScale = {art:rectData(art),hero:rectData(hero),mediaRect:rectData(media.getBoundingClientRect()),widthShare:round(art.width/viewportWidth),heightShare:round(art.height/hero.height),media:media?.dataset.heroMedia || 'poster'};
+  const mediaRect = media.getBoundingClientRect();
+  const wideMediaFits = width < 1600 || (mediaRect.top >= hero.top-1 && mediaRect.bottom <= hero.bottom+1);
+  const expectedMedia = width < 768 ? 'mobile' : width < 1024 ? (win.matchMedia('(orientation:portrait)').matches ? 'tabletPortrait' : 'tabletLandscape') : win.matchMedia('(min-width:1600px) and (min-aspect-ratio:2/1)').matches ? 'ultrawide' : 'desktop';
+  const heroCopy = doc.querySelector('.hero4-copy').getBoundingClientRect();
+  const heroScalePass = !compact || (art.width/viewportWidth >= .55 && art.height/hero.height >= .5 && art.left >= heroCopy.right-1);
+  const checks = {
+    heroScale:heroScalePass,wideMediaFits,correctMedia:media.tagName!=='VIDEO'||media.dataset.heroMedia===expectedMedia,
+    heroBounds:art.width > 0 && art.height > 0 && art.left >= -1 && art.right <= viewportWidth+1 && art.top >= hero.top-1 && art.bottom <= hero.bottom+1,
+    exactWidth:Math.abs(actualFrameWidth-width) <= TOLERANCE && win.innerWidth === width,
+    navCTA:navCTA.pass,navClient:navClient.pass,priceCTA:priceCTA.pass,
+    visibleText:overflow.length === 0,cardContents:cardOverflow.length===0,ivColumns:ivColumns.pass,mobileCards:mobileCards.pass,
+    ivConnectors:ivConnectors.pass,capabilityControls:capabilityControls.pass,
+    localResourcesOnly:externalResources.length === 0,noSalesRequests:salesRequestsObserved.length === 0,
+  };
+  return {width,height:HEIGHT,status:Object.values(checks).every(Boolean) ? 'PASS' : 'FAIL',failed:Object.entries(checks).filter(([,pass]) => !pass).map(([name]) => name),checks,
+    viewport:{requestedCSSWidth:width,frameCSSWidth:round(actualFrameWidth),innerWidth:win.innerWidth,clientWidth:viewportWidth,innerHeight:win.innerHeight,fullPageHeight:Math.max(doc.documentElement.scrollHeight,doc.body.scrollHeight)},
+    heroScale,navCTA,navClient,priceCTA,text:{nodesChecked:textNodesChecked,rectsChecked:textRectsChecked,overflow,cardOverflow},ivColumns,mobileCards,ivConnectors,capabilityControls,sections,
+    resources:{externalResources,salesRequestsObserved},fontStatus:doc.fonts?.status || 'unavailable'};
+}
+function row(result) {
+  const tr = document.createElement('tr');
+  for (const value of [`${result.width}px`,result.status,result.error || result.failed.join(', ') || 'All checks passed']) {
+    const cell = document.createElement('td'); cell.textContent = value; tr.append(cell);
+  }
+  tr.children[1].className = result.status === 'PASS' ? 'pass' : 'fail'; tbody.append(tr);
+}
+async function inspect(hash = '') {
+  if (running || loading) return;
+  controls(true); const width = Number(select.value); status.textContent = `Loading ${width}px preview…`;
+  try {await loadPreview(width,hash);status.textContent = `Inspecting ${width} × ${HEIGHT}px${hash ? ' at #'+hash : ''}. QA-only motion freeze is active.`;}
+  catch (error) {status.textContent = `Preview error: ${error.message}`;}
+  finally {controls(false);}
+}
+async function runChecks(widths) {
+  if (running || loading) return;
+  running = true; stopRequested = false; controls(true); tbody.replaceChildren();
+  state = {status:'running',startedAt:new Date().toISOString(),source:sourceSelect.value,sourceURL:previewURL(widths[0]).href,height:HEIGHT,widths,tolerance:TOLERANCE,scope:'Horizontal full-page layout. Completed reveals, unchanged display rules, paused hero videos; no sales interactions.',results:[]}; publish();
+  try {
+    for (const width of widths) {
+      if (stopRequested) break;
+      status.textContent = `Checking ${width}px (${state.results.length+1}/${widths.length})…`;
+      let result;
+      try {const {win,doc} = await loadPreview(width);result = collect(width,win,doc);}
+      catch (error) {result = {width,height:HEIGHT,status:'ERROR',failed:['measurement'],error:error.message};}
+      state.results.push(result); row(result); publish();
+    }
+    state.status = stopRequested ? 'stopped' : 'complete'; state.finishedAt = new Date().toISOString();
+    state.summary = {checked:state.results.length,passed:state.results.filter(result => result.status === 'PASS').length,failed:state.results.filter(result => result.status !== 'PASS').length};
+    status.textContent = `${state.status === 'stopped' ? 'Stopped' : 'Complete'}: ${state.summary.passed} PASS, ${state.summary.failed} FAIL/ERROR across ${state.summary.checked} widths. Full results are below.`;
+  } finally {running = false;controls(false);publish();}
+}
+runButton.addEventListener('click',() => runMatrix(false));
+runOneButton.addEventListener('click',() => runMatrix('reported'));
+stopButton.addEventListener('click',() => {stopRequested = true;stopButton.disabled = true;status.textContent = 'Stopping after the current width…';});
+showButton.addEventListener('click',() => inspect());
+select.addEventListener('change',() => {refreshLinks();inspect();});
+sourceSelect.addEventListener('change',() => {refreshLinks();inspect();});
+sectionLinks.addEventListener('click',event => {const link = event.target.closest('a[data-section]');if (!link) return;event.preventDefault();if (!running && !loading) inspect(link.dataset.section);});
+
+async function runMatrix(mode) {
+ if(running||loading)return;
+ running=true;stopRequested=false;controls(true);document.querySelector('#sweep').disabled=true;tbody.replaceChildren();
+ const widths=[320,360,375,390,414,430,540,599,600,601,673,767,768,769,800,815,816,817,820,900,919,920,921,1023,1024,1025,1123,1159,1199,1200,1279,1280,1366,1440,1536,1599,1600,1601,1728,1920,2048,2560,3440,3840];
+ let sizes=mode==='reported'?[[816,791]]:widths.flatMap(w=>[360,600,791,900,1080,1440].map(h=>[w,h]));
+ if(mode===true)sizes=Array.from({length:3521},(_,i)=>[320+i,900]);
+ if(mode===false)sizes.push(...[768,816,920,1023,1600,1920,2560,3440].flatMap(w=>[[w,w-1],[w,w],[w,w+1],[w,Math.floor(w/2)-1],[w,Math.floor(w/2)],[w,Math.floor(w/2)+1]]));
+ state={status:'running',source:sourceSelect.value,startedAt:new Date().toISOString(),scope:'Actual layout/media resizing; completed reveal states; full-page text/control bounds and hero scale; no sales activation.',requested:sizes.length,results:[]};publish();
+ try{
+ HEIGHT=sizes[0][1];frame.height=HEIGHT;frame.style.height=HEIGHT+'px';
+ const {win,doc}=await loadPreview(sizes[0][0]);
+ for(const [width,height] of sizes){
+  if(stopRequested)break;
+  HEIGHT=height;frame.width=width;frame.height=height;frame.style.width=width+'px';frame.style.height=height+'px';
+  await twoFrames();
+  // Resize/media events schedule React work: allow a second paint before measuring.
+  await twoFrames();
+  for(const v of doc.querySelectorAll('video'))v.pause();
+  win.scrollTo({top:0,left:0,behavior:'instant'});
+  const result=collect(width,win,doc);
+  if(mode===true){const {checks,failed,status,heroScale}=result;state.results.push({width,height,status,failed,checks,heroScale,...(failed.length?{text:result.text}: {})});}
+  else state.results.push(result);
+  if(mode!==true || result.status!=='PASS')row(result);
+  if(state.results.length%25===0||mode!==true){status.textContent=`Checked ${state.results.length}/${sizes.length}; ${state.results.filter(r=>r.status!=='PASS').length} findings`;publish();}
+ }
+ state.status=stopRequested?'stopped':'complete';state.finishedAt=new Date().toISOString();state.summary={checked:state.results.length,passed:state.results.filter(r=>r.status==='PASS').length,failed:state.results.filter(r=>r.status!=='PASS').length};
+ status.textContent=JSON.stringify(state.summary);
+ }catch(e){state.status='error';state.error=e.message;status.textContent=e.message;}finally{running=false;controls(false);document.querySelector('#sweep').disabled=false;publish();}
+}
+document.querySelector('#sweep').addEventListener('click',()=>runMatrix(true));
+
+refreshLinks();
+</script>
+</body>
+</html>
