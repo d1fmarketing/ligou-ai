@@ -1,33 +1,30 @@
-# Ligou.AI — V0.1 RC1
+# Ligou.AI
 
-Ligou é um agente operacional de IA para negócios de serviços. Este repositório reúne a landing em `/`, o dashboard em `/dashboard/`, a autoridade no Supabase, o controlador de voz, a célula Hermes e a infraestrutura de suporte.
+Ligou is an AI operational employee for service businesses: a public voice demonstration, an authenticated owner dashboard, business rules and approvals, and controlled voice/booking infrastructure.
 
-## Estado honesto
+## Current release
 
-RC1 é um candidato local com código implementado, testes unitários e contratos locais, além de um gate de integração isolado para banco. Não foi implantado, não foi validado em staging ou produção e não comprova provedores externos.
+The approved original website and current dashboard are deployed at **https://client-nine-taupe-24.vercel.app**. The September 6, 2026 release consolidates the website, responsive fixes, sales runtime source, and first-phone preparation on `main`.
 
-## Comece aqui
+- [Production release receipt and verification](docs/release/VERCEL-2026-09-06.md)
+- [Build, deploy and rollback](docs/DEPLOY-DASHBOARD.md)
+- [Repository map](docs/REPOSITORY-MAP.md)
+- [Responsive QA](docs/HERO-RESPONSIVE-QA-20260906.md)
+- [First phone number setup](docs/RUNBOOK-TELEFONE-F6.md)
+- [Security and authority boundaries](docs/SECURITY-RULEBOOK.md)
 
-- [Escopo V0.1](docs/V0.1-SCOPE.md)
-- [Status e limites de evidência](docs/STATUS.md)
-- [Notas de RC1](docs/release/V0.1-RC1.md)
-- [Mapa do repositório](docs/REPOSITORY-MAP.md)
-- [Regra de segurança](docs/SECURITY-RULEBOOK.md)
-- [Verificação local e gate de banco](docs/VERIFICATION.md) e [runbook de migrações](docs/runbooks/MIGRATION-VERIFICATION.md)
-- [Proveniência do replay](docs/release/V0.1-HARDENING-REPLAY-MAP.md)
-- [QA visual estático](docs/release/V0.1-VISUAL-QA.md)
-- [Retenção futura](docs/runbooks/RETENTION.md)
+Website deployment and passing automated tests do not establish real phone-number activation or human voice acceptance. Phone intake remains a separate rollout; see its runbook and dated installation receipt.
 
-## Verificação local
+## Local verification
 
 ```sh
 bun run check
-bun run test:security
-bun run test:hermes-config
-bun run test:backup-restore
-bun run test:deploy-release
-bun run test:edge-functions
-node scripts/local-db-gate.mjs
+npm run test:dashboard --prefix dashboard
+npm run build --prefix dashboard
+npm run test:sites --prefix dashboard
+bun voice-controller/scripts/run-unit-tests.mjs
 ```
 
-O gate de banco gerencia exclusivamente sua pilha descartável e não lê arquivos `.env` do projeto. Consulte os runbooks antes de qualquer operação futura de Edge, host ou backup/restore.
+Production composition uses `bun run site:build` with the four explicit public build inputs described in the deployment runbook. Provider credentials stay server-side. Database changes additionally require the isolated gate described in [VERIFICATION.md](docs/VERIFICATION.md).
+
+Older V0.1/RC1 documents are dated historical evidence, not the current deployment inventory. Keep preserved versions and backups; use `main` for the integrated release source.

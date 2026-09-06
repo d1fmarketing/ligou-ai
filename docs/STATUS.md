@@ -1,3 +1,5 @@
+> Historical V0.1 RC1 snapshot. For the current deployed website and integrated repository state, see [the September 6, 2026 production receipt](release/VERCEL-2026-09-06.md). The statements below describe the earlier RC boundary.
+
 # Status V0.1 RC1
 
 ## Classificação da evidência
