@@ -10,6 +10,7 @@ import {
   settleStartedSession,
   startVoiceSession,
   voiceSessionRestartLabel,
+  voiceSessionErrorMessage,
   watchOnboardingOutcome,
 } from "./session.js";
 import { statusLineFor } from "./panel-copy.js";
@@ -159,7 +160,7 @@ export function VoicePanel({
       if (sessionRunRef.current !== runId || cancelledRef.current || endedRef.current) return;
       const upgrade = handleClientUpgradeRequired(e);
       if (upgrade.reloaded) return;
-      setError(upgrade.handled ? upgrade.message : e.message);
+      setError(upgrade.handled ? upgrade.message : voiceSessionErrorMessage(e));
       setStatus("error");
     } finally {
       if (startAbortRef.current === startAbort) startAbortRef.current = null;

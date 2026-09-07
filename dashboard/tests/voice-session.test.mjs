@@ -1917,3 +1917,10 @@ test("ended copy follows the ended run type rather than the next-run selector", 
     onboardingOutcome: null,
   }), "Verificando conclusão…");
 });
+
+
+test("onboarding recovery errors give owner-safe instructions instead of SQL identifiers", () => {
+  assert.equal(sessionModule.voiceSessionErrorMessage(new Error("interview_resume_source_not_settled")), "A entrevista anterior ainda está sendo encerrada. Aguarde um momento e tente novamente. Se continuar, fale com o suporte; suas respostas estão preservadas.");
+  assert.equal(sessionModule.voiceSessionErrorMessage(new Error("interview_prior_not_settled")), sessionModule.voiceSessionErrorMessage(new Error("interview_resume_source_not_settled")));
+  assert.equal(sessionModule.voiceSessionErrorMessage(new Error("Microfone indisponível")), "Microfone indisponível");
+});

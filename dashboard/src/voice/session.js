@@ -970,3 +970,11 @@ export async function startVoiceSession({
     throw error;
   }
 }
+
+export function voiceSessionErrorMessage(error) {
+  const message = typeof error?.message === "string" ? error.message : "Não foi possível iniciar a chamada. Tente novamente.";
+  if (["interview_resume_source_not_settled", "interview_prior_not_settled"].includes(message)) {
+    return "A entrevista anterior ainda está sendo encerrada. Aguarde um momento e tente novamente. Se continuar, fale com o suporte; suas respostas estão preservadas.";
+  }
+  return message;
+}
