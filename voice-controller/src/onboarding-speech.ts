@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   onboardingTtsCostUsd,
+  isOnboardingTtsModel,
   synthesizeExactOnboardingText,
   type ExactOnboardingAudio,
   type OnboardingOpeningFailure,
@@ -115,11 +116,11 @@ export function speechPayloadIsInternallyValid(
   if (!speechActionIsInternallyValid(expectedAction) || !exactObject(payload, PAYLOAD_KEYS)) return false;
   if (ACTION_KEYS.some(key => payload[key] !== expectedAction[key]) ||
     payload.schema !== ONBOARDING_SPEECH_SCHEMA || payload.mime !== "audio/mpeg" ||
-    payload.voice !== "ash" || payload.tts_model !== "tts-1-hd" ||
+    payload.voice !== "ash" || !isOnboardingTtsModel(payload.tts_model) ||
     payload.text_sha256 !== hash(expectedAction.text) ||
     typeof payload.audio_sha256 !== "string" || !SHA256.test(payload.audio_sha256) ||
     typeof payload.audio_base64 !== "string" || payload.audio_base64.length > MAX_AUDIO_BASE64 ||
-    payload.cost_usd !== onboardingTtsCostUsd(expectedAction.text)) return false;
+    payload.cost_usd !== onboardingTtsCostUsd(expectedAction.text, payload.tts_model)) return false;
   const audio = Buffer.from(payload.audio_base64, "base64");
   return audio.byteLength > 0 && audio.byteLength <= MAX_AUDIO_BYTES &&
     audio.toString("base64") === payload.audio_base64 &&

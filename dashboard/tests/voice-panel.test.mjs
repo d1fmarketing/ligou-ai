@@ -74,6 +74,9 @@ function moduleSource() {
         const channel = new EventTarget();
         channel.readyState = 'open';
         channel.send = (body) => queueMicrotask(() => {
+          if(JSON.parse(body).item?.content?.[0]?.text?.startsWith('ligou.website_stop:')) {
+            setTimeout(()=>{channel.readyState='closed';channel.onclose?.();},20);return;
+          }
           channel.onmessage?.({data:JSON.stringify({type:'conversation.item.done',item:JSON.parse(body).item})});
           channel.onmessage?.({data:JSON.stringify(vad)});
         });

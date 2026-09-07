@@ -378,7 +378,7 @@ describe("session budget lifecycle", () => {
     expect(await outcome).toBe("browser_request_cancelled");
     expect(staleWritesRejected).toBe(2);
     expect(row.status).toBe("ended");expect(row.provider_termination_state).toBe("confirmed");
-    expect(row.cost_estimate_usd).toBe(0.00324);
+    expect(row.cost_estimate_usd).toBe(0.00162);
     expect(rpcCalls.filter(call=>call.name==="settle_call_budget")).toHaveLength(0);
   });
 
@@ -504,9 +504,9 @@ describe("session budget lifecycle", () => {
     expect(result.sdp).toBe("answer-sdp");
     expect(publishedBeforeAudio).toBe(false);
     expect(providerStartedBeforeAudio).toBe(1);
-    expect(durableFloor).toBe(0.00324);
-    expect(callUpdates.filter((row) => row.cost_estimate_usd === 0.00324 && row.status === undefined))
-      .toContainEqual({ cost_estimate_usd: 0.00324 });
+    expect(durableFloor).toBe(0.00162);
+    expect(callUpdates.filter((row) => row.cost_estimate_usd === 0.00162 && row.status === undefined))
+      .toContainEqual({ cost_estimate_usd: 0.00162 });
   });
 
   test("a failed terminal write still terminates an accepted provider and defers budget settlement", async () => {
@@ -695,7 +695,7 @@ describe("session budget lifecycle", () => {
           "initialize_onboarding_resume",
         ]);
         expect(JSON.parse(String(init?.body))).toEqual({
-          model: "tts-1-hd",
+          model: "tts-1",
           voice: "ash",
           input: "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Quais serviços sua empresa oferece?",
           response_format: "mp3",
@@ -741,11 +741,11 @@ describe("session budget lifecycle", () => {
       session_type: "onboarding",
     });
     expect(rpcCalls.find((call) => call.name === "settle_call_budget")?.args)
-      .toMatchObject({ p_actual_cost: 0.00324, p_outcome: "startup_error" });
-    expect(durableFloor).toBe(0.00324);
+      .toMatchObject({ p_actual_cost: 0.00162, p_outcome: "startup_error" });
+    expect(durableFloor).toBe(0.00162);
     expect(callUpdates).toContainEqual(expect.objectContaining({
       provider_usage_state: "resolved",
-      cost_estimate_usd: 0.00324,
+      cost_estimate_usd: 0.00162,
     }));
   });
 
@@ -788,7 +788,7 @@ describe("session budget lifecycle", () => {
       .toHaveLength(1);
   });
 
-  test("resume initialization selects the exact persisted question before tts-1-hd", async () => {
+  test("resume initialization selects the exact persisted question before tts-1", async () => {
     config.openaiKey = "synthetic-openai-key";
     (config as any).voice = "cedar";
     const callId = "11111111-1111-4111-8111-111111111119";
@@ -824,7 +824,7 @@ describe("session budget lifecycle", () => {
       },
     )).rejects.toMatchObject({ message: "realtime_unavailable" });
     expect(ttsBody).toEqual({
-      model: "tts-1-hd",
+      model: "tts-1",
       voice: "ash",
       input:
         "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Vamos continuar de onde paramos. Quais cidades e regiões sua empresa atende?",
@@ -874,7 +874,7 @@ describe("session budget lifecycle", () => {
     );
     expect(result.opening_payload).toMatchObject({
       version: 2,
-      tts_model: "tts-1-hd",
+      tts_model: "tts-1",
       resume_context: {
         coverage_receipt_id: "55555555-5555-4555-8555-555555555555",
         revision: 1,
@@ -1014,7 +1014,7 @@ describe("session budget lifecycle", () => {
       },
     )).rejects.toMatchObject({ message: "realtime_unavailable" });
     expect(recoveredTtsBody).toMatchObject({
-      model: "tts-1-hd",
+      model: "tts-1",
       input:
         "Oi! Aqui é o Ligou, agente de inteligência artificial da Rocha Plumbing. Vamos continuar de onde paramos. Quais cidades e regiões sua empresa atende?",
     });
@@ -1110,7 +1110,7 @@ describe("session budget lifecycle", () => {
       "https://api.openai.com/v1/realtime/calls/rtc-late-accept/hangup",
     ]);
     expect(callUpdates).toContainEqual(expect.objectContaining({
-      status: "error", cost_estimate_usd: 0.00324,
+      status: "error", cost_estimate_usd: 0.00162,
       provider_usage_state: "unknown",
     }));
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
@@ -1156,7 +1156,7 @@ describe("session budget lifecycle", () => {
     expect(fetchUrls).toEqual(["https://api.openai.com/v1/audio/speech"]);
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
-      cost_estimate_usd: 0.00324,
+      cost_estimate_usd: 0.00162,
       provider_usage_state: "resolved",
       provider_termination_state: "not_required",
     }));
@@ -1196,7 +1196,7 @@ describe("session budget lifecycle", () => {
     expect(fetchUrls).toEqual(["https://api.openai.com/v1/audio/speech"]);
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
-      cost_estimate_usd: 0.00324,
+      cost_estimate_usd: 0.00162,
       provider_usage_state: "resolved",
       provider_termination_state: "not_required",
     }));
@@ -1239,7 +1239,7 @@ describe("session budget lifecycle", () => {
     expect(providerCreationRequests()).toHaveLength(1);
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
-      cost_estimate_usd: 0.00324,
+      cost_estimate_usd: 0.00162,
       provider_usage_state: "unknown",
     }));
   });
@@ -1282,7 +1282,7 @@ describe("session budget lifecycle", () => {
       "https://api.openai.com/v1/realtime/calls/rtc-unproven-floor/hangup",
     ]);
     expect(callUpdates).toContainEqual(expect.objectContaining({
-      status: "error", cost_estimate_usd: 0.00324, provider_usage_state: "unknown",
+      status: "error", cost_estimate_usd: 0.00162, provider_usage_state: "unknown",
     }));
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
   });
@@ -1369,7 +1369,7 @@ describe("session budget lifecycle", () => {
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
       provider_usage_state: "unknown",
-      cost_estimate_usd: 0.00324,
+      cost_estimate_usd: 0.00162,
     }));
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget"))
       .toHaveLength(0);
@@ -1408,7 +1408,7 @@ describe("session budget lifecycle", () => {
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
       provider_usage_state: "unknown",
-      cost_estimate_usd: 0.00324,
+      cost_estimate_usd: 0.00162,
     }));
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget"))
       .toHaveLength(0);
@@ -1778,7 +1778,7 @@ describe("session budget lifecycle", () => {
     expect(callUpdates).toContainEqual(expect.objectContaining({
       status: "error",
       provider_usage_state: "unknown",
-      cost_estimate_usd: 0.00324,
+      cost_estimate_usd: 0.00162,
     }));
   });
 

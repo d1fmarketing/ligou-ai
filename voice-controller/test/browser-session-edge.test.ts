@@ -189,7 +189,7 @@ function request(body: Record<string, unknown>, signal?: AbortSignal) {
   return new Request("https://example.supabase.co/functions/v1/browser-session", {
     method: "POST",
     headers: { authorization: "Bearer owner-token", "content-type": "application/json" },
-    body: JSON.stringify({ sdp: "offer-sdp", ...body }),
+    body: JSON.stringify({ sdp: "offer-sdp", ...(body.session_type === "onboarding" ? { speech_contract_version: 2 } : {}), ...body }),
     signal,
   });
 }
@@ -905,4 +905,48 @@ describe("browser-session opening contract", () => {
     expect(currentClient.selections.some(({ columns, operation }) =>
       operation === "select" && columns.startsWith("status,answer_sdp"))).toBe(false);
   });
+});
+
+
+test("Edge accepts only the model-specific rate for V2 and V3 opening receipts", () => {
+  const validate = (edgeModule as any).isApplicationOpeningPayload;
+  const speech = {schema:"onboarding.speech.v1",actionId:"a".repeat(64),interviewId:"33333333-3333-4333-8333-333333333333",callId:"33333333-3333-4333-8333-333333333333",revision:0,kind:"ASK_NEXT_GAP",sourceDigest:"b".repeat(64),text:PAYLOAD.text,text_sha256:PAYLOAD.text_sha256,audio_base64:PAYLOAD.audio_base64,audio_sha256:PAYLOAD.audio_sha256,mime:"audio/mpeg",voice:"ash"};
+  for(const [model,rate] of [["tts-1",15],["tts-1-hd",30]] as const){
+    const cost=Number(([...PAYLOAD.text].length*rate/1_000_000).toFixed(8));
+    const v2={...PAYLOAD,tts_model:model,cost_usd:cost};
+    const v3={version:3,item_id:`lgs-${speech.actionId.slice(0,28)}`,speech:{...speech,tts_model:model,cost_usd:cost}};
+    expect(validate(v2)).toBe(true);expect(validate(v3)).toBe(true);
+    const wrong=Number(([...PAYLOAD.text].length*(rate===15?30:15)/1_000_000).toFixed(8));
+    expect(validate({...v2,cost_usd:wrong})).toBe(false);
+    expect(validate({...v3,speech:{...v3.speech,cost_usd:wrong}})).toBe(false);
+    expect(validate({...v3,speech:{...v3.speech,tts_model:"constructor"}})).toBe(false);
+  }
+});
+
+
+test("old open dashboards cannot enqueue onboarding before upgrading their speech contract", async () => {
+  for (const protocol of [2, 3]) {
+    for (const capability of [undefined, null, 1, "2", 3, true]) {
+      currentClient = edgeClient();
+      const oldRequest = request({session_type:"onboarding",opening_mode_requested:"application_tts_v1",onboarding_protocol_version:protocol,speech_contract_version:capability});
+      if (capability === undefined) expect(await oldRequest.clone().json()).not.toHaveProperty("speech_contract_version");
+      const response = await handler!(oldRequest);
+      expect(response.status).toBe(409); expect(await response.json()).toEqual({error:"client_upgrade_required"});
+      expect(currentClient.inserts).toHaveLength(0); expect(currentClient.updates).toHaveLength(0);
+      expect(currentClient.selections).toHaveLength(0);
+    }
+  }
+});
+
+test("declared speech contract admits fast V2 and V3 payloads without storing a new capability field", async () => {
+  const fast = {...PAYLOAD,tts_model:"tts-1",cost_usd:0.001605};
+  const callId="33333333-3333-4333-8333-333333333333";
+  const speech={schema:"onboarding.speech.v1",actionId:"a".repeat(64),interviewId:callId,callId,revision:0,kind:"ASK_NEXT_GAP",text:fast.text,sourceDigest:"b".repeat(64),text_sha256:fast.text_sha256,audio_base64:fast.audio_base64,audio_sha256:fast.audio_sha256,mime:"audio/mpeg",voice:"ash",tts_model:fast.tts_model,cost_usd:fast.cost_usd};
+  for (const protocol of [2,3]) {
+    const payload=protocol===2?fast:{version:3,item_id:`lgs-${speech.actionId.slice(0,28)}`,speech};
+    currentClient=edgeClient({readyRow:{status:"ready",answer_sdp:"answer",call_id:callId,error:null,opening_mode_applied:"application_tts_v1",opening_payload:payload,onboarding_protocol_version:protocol}});
+    const response=await handler!(request({session_type:"onboarding",opening_mode_requested:"application_tts_v1",onboarding_protocol_version:protocol,speech_contract_version:2}));
+    expect(response.status).toBe(200);expect((await response.json()).opening_payload).toEqual(payload);
+    expect(currentClient.inserts).toHaveLength(1);expect(currentClient.inserts[0]).not.toHaveProperty("speech_contract_version");
+  }
 });

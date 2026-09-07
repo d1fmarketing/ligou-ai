@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import * as speech from "../src/onboarding-speech";
-import { synthesizeOnboardingOpening } from "../src/onboarding-greeting";
+import { synthesizeOnboardingOpening, openingPayloadIsInternallyValid } from "../src/onboarding-greeting";
 
 const audio = new Uint8Array([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0, 0xff, 0xfb, 0x90, 0x64]);
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -40,10 +40,10 @@ describe("application-owned onboarding speech", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]!.url).toBe("https://api.openai.com/v1/audio/speech");
     expect(requests[0]!.init.method).toBe("POST");
-    expect(JSON.parse(String(requests[0]!.init.body))).toEqual({ model: "tts-1-hd", voice: "ash", input: action.text, response_format: "mp3" });
+    expect(JSON.parse(String(requests[0]!.init.body))).toEqual({ model: "tts-1", voice: "ash", input: action.text, response_format: "mp3" });
     expect(payload).toEqual({ ...action, schema: "onboarding.speech.v1", text_sha256: hash(action.text),
       audio_base64: "SUQzBAAAAAAAAP/7kGQ=", audio_sha256: "b15db04aea85ebd3f59185796229df945e67f42931c7e9da411e97b83c856ce8",
-      mime: "audio/mpeg", voice: "ash", tts_model: "tts-1-hd", cost_usd: 0.00099 });
+      mime: "audio/mpeg", voice: "ash", tts_model: "tts-1", cost_usd: 0.000495 });
     expect(speech.speechPayloadIsInternallyValid(payload, action)).toBe(true);
   });
 
@@ -86,7 +86,7 @@ describe("application-owned onboarding speech", () => {
       { callId: "other" }, { revision: 1 }, { sourceDigest: "b".repeat(64) }, { kind: "CLARIFY_CURRENT_GAP" },
       { text: action.text + "?" }, { text_sha256: "b".repeat(64) }, { audio_sha256: "b".repeat(64) },
       { audio_base64: payload.audio_base64 + "=" }, { audio_base64: "" }, { audio_base64: "bm90LW1wMw==", audio_sha256: hash("not-mp3") },
-      { mime: "audio/wav" }, { voice: "alloy" }, { tts_model: "tts-1" }, { cost_usd: 0 }, { cost_usd: NaN }, { extra: true }]) {
+      { mime: "audio/wav" }, { voice: "alloy" }, { tts_model: "tts-1-hd" }, { cost_usd: 0 }, { cost_usd: NaN }, { extra: true }]) {
       expect(speech.speechPayloadIsInternallyValid({ ...payload, ...changed }, action)).toBe(false);
     }
     for (const changed of [{ actionId: "2".repeat(64) }, { interviewId: "33333333-3333-4333-8333-333333333333" }, { callId: "33333333-3333-4333-8333-333333333333" }, { revision: 1 },
@@ -100,10 +100,10 @@ describe("application-owned onboarding speech", () => {
       { fetchImpl: async () => new Response("no", { status: 400 }), want: { message: "onboarding_tts_rejected", usageResolved: true, costUsd: 0 } },
       { fetchImpl: async () => new Response("no", { status: 503 }), want: { message: "onboarding_tts_outcome_unknown", usageResolved: false, costUsd: null } },
       { fetchImpl: async () => { throw new Error("network"); }, want: { message: "onboarding_tts_outcome_unknown", usageResolved: false, costUsd: null } },
-      { fetchImpl: async () => new Response("not-mp3", { headers: { "content-type": "audio/mpeg" } }), want: { message: "onboarding_tts_invalid_response", usageResolved: true, costUsd: 0.00099 } },
-      { fetchImpl: async () => new Response(audio, { headers: { "content-type": "text/plain" } }), want: { message: "onboarding_tts_invalid_response", usageResolved: true, costUsd: 0.00099 } },
-      { fetchImpl: async () => new Response(new Uint8Array(1_500_001), { headers: { "content-type": "audio/mpeg" } }), want: { message: "onboarding_tts_invalid_response", usageResolved: true, costUsd: 0.00099 } },
-      { fetchImpl: async () => new Response(audio, { headers: { "content-type": "audio/mpeg", "content-length": "1500001" } }), want: { message: "onboarding_tts_invalid_response", usageResolved: true, costUsd: 0.00099 } },
+      { fetchImpl: async () => new Response("not-mp3", { headers: { "content-type": "audio/mpeg" } }), want: { message: "onboarding_tts_invalid_response", usageResolved: true, costUsd: 0.000495 } },
+      { fetchImpl: async () => new Response(audio, { headers: { "content-type": "text/plain" } }), want: { message: "onboarding_tts_invalid_response", usageResolved: true, costUsd: 0.000495 } },
+      { fetchImpl: async () => new Response(new Uint8Array(1_500_001), { headers: { "content-type": "audio/mpeg" } }), want: { message: "onboarding_tts_invalid_response", usageResolved: true, costUsd: 0.000495 } },
+      { fetchImpl: async () => new Response(audio, { headers: { "content-type": "audio/mpeg", "content-length": "1500001" } }), want: { message: "onboarding_tts_invalid_response", usageResolved: true, costUsd: 0.000495 } },
     ];
     for (const entry of cases) {
       let calls = 0;
@@ -146,7 +146,7 @@ describe("application-owned onboarding speech", () => {
 
   test("legacy opening identity failure after accepted audio retains known incurred cost", async () => {
     await expect(synthesizeOnboardingOpening({ tenantName: "D1F Marketing", browserRequestId: "", callId: "call-legacy" }, deps))
-      .rejects.toMatchObject({ message: "onboarding_tts_invalid_response", usageResolved: true, costUsd: 0.00321 });
+      .rejects.toMatchObject({ message: "onboarding_tts_invalid_response", usageResolved: true, costUsd: 0.001605 });
   });
 
   test("accepted response body deadline retains known cost", async () => {
@@ -154,7 +154,7 @@ describe("application-owned onboarding speech", () => {
       new Response(new ReadableStream({ start(controller) {
         init!.signal!.addEventListener("abort", () => controller.error(new Error("aborted")));
       } }), { headers: { "content-type": "audio/mpeg" } }) }))
-      .rejects.toMatchObject({ usageResolved: true, costUsd: 0.00099 });
+      .rejects.toMatchObject({ usageResolved: true, costUsd: 0.000495 });
   });
 
   test("4096 codepoints remain exact and Unicode cost remains codepoint based", async () => {
@@ -162,7 +162,7 @@ describe("application-owned onboarding speech", () => {
     const payload = await speech.synthesizeOnboardingSpeech({ ...action, text }, { ...deps, fetchImpl: async (_url, init) => {
       expect(JSON.parse(String(init!.body)).input).toBe(text); return response();
     } });
-    expect(payload.cost_usd).toBe(0.12288);
+    expect(payload.cost_usd).toBe(0.06144);
     expect(payload.text).toBe(text);
   });
 
@@ -184,4 +184,41 @@ describe("application-owned onboarding speech", () => {
     }
     expect(speech.speechActionIsInternallyValid({ ...action, kind: "TERMINATE_SESSION" })).toBe(false);
   });
+});
+
+
+test("fixed model rates preserve historical HD and reject forged costs before speech publication", async () => {
+  const fast = await speech.synthesizeOnboardingSpeech(action, deps);
+  expect(fast.tts_model).toBe("tts-1");
+  expect(fast.cost_usd).toBe(Number(([...action.text].length * 15 / 1_000_000).toFixed(8)));
+  const hd = { ...fast, tts_model: "tts-1-hd", cost_usd: Number(([...action.text].length * 30 / 1_000_000).toFixed(8)) };
+  expect(speech.speechPayloadIsInternallyValid(hd, action)).toBe(true);
+  for (const forged of [{ ...fast, cost_usd: hd.cost_usd }, { ...hd, cost_usd: fast.cost_usd },
+    { ...fast, tts_model: "gpt-4o-mini-tts" }, { ...fast, tts_model: "constructor" }, { ...fast, tts_model: null }])
+    expect(speech.speechPayloadIsInternallyValid(forged, action)).toBe(false);
+  let body: any;
+  const rollback = await speech.synthesizeOnboardingSpeech(action, { ...deps, model: "tts-1-hd", fetchImpl: async (_url, init) => {
+    body = JSON.parse(String(init?.body)); return response();
+  } } as any);
+  expect(body.model).toBe("tts-1-hd"); expect(rollback).toEqual(hd);
+  for (const model of ["gpt-4o-mini-tts", "constructor", null, 15]) {
+    let calls = 0;
+    await expect(speech.synthesizeOnboardingSpeech(action, { ...deps, model, fetchImpl: async () => { calls++; return response(); } } as any))
+      .rejects.toMatchObject({ usageResolved: true, costUsd: 0 });
+    expect(calls).toBe(0);
+  }
+});
+
+test("V2 opening and accepted-invalid usage retain the selected model's exact rate", async () => {
+  for (const [model, rate] of [["tts-1", 15], ["tts-1-hd", 30]] as const) {
+    const payload = await synthesizeOnboardingOpening({ tenantName: "Empresa São Luís 🏠", browserRequestId: "request-rate", callId: action.callId }, { ...deps, model });
+    expect(payload.version).toBe(2); expect(payload.tts_model).toBe(model);
+    expect(payload.cost_usd).toBe(Number(([...payload.text].length * rate / 1e6).toFixed(8)));
+    expect(openingPayloadIsInternallyValid(payload, payload.text, null)).toBe(true);
+    expect(openingPayloadIsInternallyValid({ ...payload, tts_model: model === "tts-1" ? "tts-1-hd" : "tts-1" }, payload.text, null)).toBe(false);
+    await expect(speech.synthesizeOnboardingSpeech(action, { ...deps, model, fetchImpl: async () => new Response(audio, { headers: { "content-type": "text/plain" } }) }))
+      .rejects.toMatchObject({ usageResolved: true, costUsd: Number(([...action.text].length * rate / 1e6).toFixed(8)) });
+    await expect(speech.synthesizeOnboardingSpeech(action, { ...deps, model, fetchImpl: async () => { throw new Error("network unavailable"); } }))
+      .rejects.toMatchObject({ usageResolved: false, costUsd: null });
+  }
 });

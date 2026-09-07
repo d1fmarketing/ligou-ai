@@ -32,6 +32,7 @@ const OPENING_V2_KEYS = [...OPENING_V1_KEYS, "resume_context"] as const;
 function validWebsiteOpening(payload: Record<string, unknown>): boolean {
   if (!exactKeys(payload, ["version", "item_id", "speech"]) || !payload.speech || typeof payload.speech !== "object" || Array.isArray(payload.speech)) return false;
   const speech = payload.speech as Record<string, unknown>;
+  const rate = ttsRate(speech.tts_model);
   if (!exactKeys(speech, ["schema", "actionId", "interviewId", "callId", "revision", "kind", "text", "sourceDigest", "text_sha256", "audio_base64", "audio_sha256", "mime", "voice", "tts_model", "cost_usd"])) return false;
   const hashPattern = /^[0-9a-f]{64}$/;
   const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -43,8 +44,8 @@ function validWebsiteOpening(payload: Record<string, unknown>): boolean {
     payload.item_id !== `lgs-${String(speech.actionId).slice(0, 28)}` ||
     typeof speech.text !== "string" || !speech.text.trim() || [...speech.text].length > 4096 ||
     /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(speech.text) ||
-    speech.mime !== "audio/mpeg" || speech.voice !== "ash" || speech.tts_model !== "tts-1-hd" ||
-    speech.cost_usd !== exactTtsCost(speech.text, 30) || !boundedString(speech.audio_base64, 4, 2_000_000)) return false;
+    speech.mime !== "audio/mpeg" || speech.voice !== "ash" || rate === null ||
+    speech.cost_usd !== exactTtsCost(speech.text, rate) || !boundedString(speech.audio_base64, 4, 2_000_000)) return false;
   const normalized = speech.text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ");
   if (/\bposso (?:te )?ajudar\b|\btem mais alguma coisa\b|\bo que mais voce gostaria\b|\be so me chamar\b/.test(normalized)) return false;
   const audio = Buffer.from(speech.audio_base64, "base64");
@@ -78,6 +79,10 @@ function exactKeys(value: Record<string, unknown>, expected: readonly string[]) 
   const wanted = [...expected].sort();
   return keys.length === wanted.length &&
     wanted.every((key, index) => keys[index] === key);
+}
+
+function ttsRate(model: unknown): 15 | 30 | null {
+  return model === "tts-1" ? 15 : model === "tts-1-hd" ? 30 : null;
 }
 
 function exactTtsCost(text: string, rate: 15 | 30): number {
@@ -119,7 +124,7 @@ export function isApplicationOpeningPayload(value: unknown): value is Record<str
       return false;
   } else if (payload.version === 2) {
     if (!exactKeys(payload, OPENING_V2_KEYS) ||
-      payload.tts_model !== "tts-1-hd" ||
+      ttsRate(payload.tts_model) === null ||
       !(payload.resume_context === null ||
         validResumeContext(payload.resume_context))) return false;
   } else return false;
@@ -130,11 +135,12 @@ export function isApplicationOpeningPayload(value: unknown): value is Record<str
   if (payload.audio_base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(payload.audio_base64)) return false;
   if (!boundedString(payload.audio_sha256, 64, 64) || !/^[0-9a-f]{64}$/.test(payload.audio_sha256)) return false;
   if (payload.mime !== "audio/mpeg" || payload.voice !== "ash") return false;
-  return typeof payload.cost_usd === "number"
+  const rate = ttsRate(payload.tts_model);
+  return rate !== null && typeof payload.cost_usd === "number"
     && Number.isFinite(payload.cost_usd)
     && payload.cost_usd === exactTtsCost(
       String(payload.text),
-      payload.version === 2 ? 30 : 15,
+      rate,
     );
 }
 
@@ -494,6 +500,11 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
       : null;
     if (sessionType === "onboarding" &&
       protocolVersion !== 2 && protocolVersion !== 3) {
+      return json({ error: "client_upgrade_required" }, 409);
+    }
+    // An already-open older dashboard cannot consume the new tts-1/rate pair.
+    // Require declared support before tenant reads, enqueue, or provider work.
+    if (sessionType === "onboarding" && body.speech_contract_version !== 2) {
       return json({ error: "client_upgrade_required" }, 409);
     }
 

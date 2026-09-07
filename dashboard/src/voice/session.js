@@ -568,6 +568,10 @@ function exactKeys(value, keys) {
   return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
+function ttsRate(model) {
+  return model === "tts-1" ? 15 : model === "tts-1-hd" ? 30 : null;
+}
+
 function exactTtsCost(text, rate) {
   return Number(([...text].length * rate / 1_000_000).toFixed(8));
 }
@@ -667,10 +671,11 @@ async function validateApplicationOpening(response) {
     || !/^[0-9a-f]{64}$/.test(payload.audio_sha256 ?? "")
     || payload.mime !== "audio/mpeg"
     || payload.voice !== "ash"
-    || payload.tts_model !== (currentV2 ? "tts-1-hd" : "tts-1")
+    || ttsRate(payload.tts_model) === null
+    || (legacyV1 && payload.tts_model !== "tts-1")
     || typeof payload.cost_usd !== "number"
     || !Number.isFinite(payload.cost_usd)
-    || payload.cost_usd !== exactTtsCost(payload.text, currentV2 ? 30 : 15)
+    || payload.cost_usd !== exactTtsCost(payload.text, ttsRate(payload.tts_model))
     || (currentV2 && !(payload.resume_context === null
       || validOpeningResumeContext(payload.resume_context)))) {
     throw safeOpeningError("contrato do payload inválido");
@@ -877,6 +882,7 @@ export async function startVoiceSession({
   signal,
   permissionTimeoutMs = 60_000,
   connectionTimeoutMs = 30_000,
+  stopTimeoutMs = 10_000,
   openingTimeoutMs,
   openingPlaybackTimeoutMs,
   onboardingProtocolVersion = ONBOARDING_PROTOCOL_VERSION,
@@ -885,8 +891,9 @@ export async function startVoiceSession({
   const timing = createVoiceSessionTiming({ onTiming, startedAt, attemptId });
   if (!Number.isFinite(startedAt)) timing.mark("start");
   let currentStage;
+  let stopRequested = false;
   const stage = (value) => {
-    if (currentStage === value || signal?.aborted) return;
+    if (currentStage === value || ((signal?.aborted || stopRequested) && value !== "stopping")) return;
     currentStage = value;
     notifyVoiceObserver(onStage, value);
   };
@@ -926,6 +933,17 @@ export async function startVoiceSession({
   let deadline = null;
   let endedOnce = false;
   let stopped = false;
+  let mediaSilenced = false;
+  let stopSent = false;
+  let requestedStopReason = null;
+  let requestedStopMessage;
+  let stopTechnical = false;
+  let remoteAnswerSdp = null;
+  let remoteDescriptionPromise = null;
+  let remoteDescriptionApplied = false;
+  let stopTimer = null;
+  let resolveStop;
+  const stopCompleted = new Promise((resolve) => { resolveStop = resolve; });
   let callId = null;
   let openingPayload = null;
   let openingItemAcked = false;
@@ -944,7 +962,7 @@ export async function startVoiceSession({
     connectionDeadline = null;
   };
   const ready = () => {
-    if (stopped || signal?.aborted) return;
+    if (stopped || stopRequested || signal?.aborted) return;
     clearConnectionDeadline();
     stage("ready");
     timing.mark("ready");
@@ -971,6 +989,7 @@ export async function startVoiceSession({
 
   function setSpeechCustody(active) {
     if (!onboarding) return;
+    active = active && !stopRequested;
     for (const track of media.getTracks()) track.enabled = active;
     if (remoteAudio) remoteAudio.muted = websiteInterview || !active;
   }
@@ -991,11 +1010,32 @@ export async function startVoiceSession({
     reject(error);
   }
 
+  function silenceMedia() {
+    if (mediaSilenced) return;
+    mediaSilenced = true;
+    websitePlayer?.stop();
+    setSpeechCustody(false);
+    if (remoteAudio) {
+      try { remoteAudio.pause(); } catch { /* noop */ }
+      remoteAudio.srcObject = null;
+    }
+    if (openingAudio) {
+      try { openingAudio.pause(); } catch { /* noop */ }
+      openingAudio.removeAttribute?.("src");
+      try { openingAudio.load?.(); } catch { /* noop */ }
+    }
+    releaseOpeningObjectUrl();
+    for (const track of media.getTracks()) track.stop();
+  }
+
   function stop() {
     if (stopped) return;
     stopped = true;
+    silenceMedia();
     websitePlayer?.stop();
     setupAbort.abort("voice_session_stopped");
+    if (stopTimer) clearTimeout(stopTimer);
+    stopTimer = null;
     clearConnectionDeadline();
     if (externalAbort) signal?.removeEventListener("abort", externalAbort);
     externalAbort = null;
@@ -1012,31 +1052,69 @@ export async function startVoiceSession({
     if (pc) pc.onconnectionstatechange = null;
     if (pc) pc.ontrack = null;
     if (remoteAudio) remoteAudio.onplaying = null;
-    if (remoteAudio) {
-      try { remoteAudio.pause(); } catch { /* noop */ }
-      remoteAudio.srcObject = null;
-    }
-    setSpeechCustody(false);
-    if (openingAudio) {
-      try { openingAudio.pause(); } catch { /* noop */ }
-      openingAudio.removeAttribute?.("src");
-      try { openingAudio.load?.(); } catch { /* noop */ }
-    }
-    releaseOpeningObjectUrl();
-    for (const track of media.getTracks()) track.stop();
     try { pc?.close(); } catch { /* noop */ }
   }
-  function end(reason = "user", message) {
+  function finishEnd(reason, message) {
     if (endedOnce) return;
     endedOnce = true;
+    reason = requestedStopReason ?? reason;
+    message = requestedStopMessage ?? message;
     timing.mark("session_ended", { reason });
     stop();
     onEnd?.({ reason, callId, ...(message ? { message } : {}) });
+    resolveStop();
+  }
+  function sendStopIfOpen() {
+    if (!stopRequested || stopSent || stopped || channel?.readyState !== "open") return;
+    stopSent = true;
+    try {
+      channel.send(JSON.stringify({ type: "conversation.item.create", item: {
+        id: `lgt-${callId.replaceAll("-", "").slice(0, 28)}`, type: "message", role: "system", status: "completed",
+        content: [{ type: "input_text", text: `ligou.website_stop:${callId}${stopTechnical ? ":technical_failure" : ""}` }],
+      } }));
+      timing.mark("stop_control_sent");
+    } catch {
+      timing.mark("stop_control_unavailable");
+      finishEnd(requestedStopReason);
+    }
+  }
+  function applyRemoteDescription() {
+    if (!remoteDescriptionPromise) remoteDescriptionPromise = abortableVoiceOperation(
+      pc.setRemoteDescription({ type: "answer", sdp: remoteAnswerSdp }), setupAbort.signal,
+    ).then(() => { remoteDescriptionApplied = true; timing.mark("remote_sdp_applied"); });
+    return remoteDescriptionPromise;
+  }
+  function end(reason = "user", message) {
+    if (endedOnce) return;
+    const technical = ["application_speech_error", "startup_failed"].includes(reason);
+    if (websiteInterview && (MANUAL_END_REASONS.has(reason) || (technical && remoteDescriptionApplied && channel?.readyState === "open"))
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(callId ?? "")
+      && channel?.readyState !== "closed" && !["failed", "closed"].includes(pc?.connectionState)) {
+      if (stopRequested) return;
+      stopRequested = true; requestedStopReason = reason; requestedStopMessage = message; stopTechnical = technical;
+      silenceMedia(); clearConnectionDeadline();
+      if (deadline) clearTimeout(deadline);
+      deadline = null;
+      stage("stopping");
+      const timeout = Number.isFinite(stopTimeoutMs) && stopTimeoutMs > 0 ? Math.min(stopTimeoutMs, 10_000) : 10_000;
+      stopTimer = setTimeout(() => {
+        timing.mark("stop_control_deadline");
+        finishEnd(reason);
+      }, timeout);
+      sendStopIfOpen();
+      if (!remoteDescriptionApplied && remoteAnswerSdp) void applyRemoteDescription()
+        .then(sendStopIfOpen).catch(() => finishEnd(reason, message));
+      return;
+    }
+    finishEnd(reason, message);
   }
 
   try {
     if (signal) {
-      externalAbort = () => stop();
+      externalAbort = () => {
+        if (websiteInterview && callId) end("manual_hangup");
+        else stop();
+      };
       signal.addEventListener("abort", externalAbort, { once: true });
       if (signal.aborted) throw safeOpeningError("abertura cancelada");
     }
@@ -1077,9 +1155,10 @@ export async function startVoiceSession({
       channelOpenReported = true;
       timing.mark("data_channel_open");
     };
-    channel.onopen = channelOpened;
+    channel.onopen = () => { channelOpened(); sendStopIfOpen(); };
     if (channel.readyState === "open") channelOpened();
     channel.onmessage = (msg) => {
+      if (stopRequested || stopped) return;
       try {
         const ev = JSON.parse(msg.data);
         if (ev.type === "input_audio_buffer.speech_started") timing.mark("transport_owner_speech_started");
@@ -1147,6 +1226,7 @@ export async function startVoiceSession({
     if (onboarding) {
       requestBody.opening_mode_requested = APPLICATION_OPENING_MODE;
       requestBody.onboarding_protocol_version = onboardingProtocolVersion;
+      requestBody.speech_contract_version = 2;
     }
     timing.mark("bootstrap_started");
     const res = await abortableVoiceOperation(fetch(SESSION_URL, {
@@ -1161,10 +1241,19 @@ export async function startVoiceSession({
     }
     const response = await abortableVoiceOperation(res.json(), setupAbort.signal);
     const { sdp, call_id, max_minutes } = response;
+    remoteAnswerSdp = sdp;
     callId = call_id;
     timing.mark("bootstrap_response", /^[0-9a-f-]{36}$/i.test(callId ?? "") ? { callId } : {});
     if(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(callId??""))
       notifyVoiceObserver(onCallCreated,{callId,end,maxMinutes:max_minutes});
+    // A known-call Stop may arrive before SDP/channel readiness. Negotiate only
+    // the authenticated control path; never restart opening audio or microphone.
+    if (stopRequested) {
+      await applyRemoteDescription();
+      sendStopIfOpen();
+      await stopCompleted;
+      throw voiceAbortError(signal);
+    }
     let opening = null;
     if (websiteInterview) {
       const envelope = response.opening_payload;
@@ -1212,11 +1301,15 @@ export async function startVoiceSession({
       if(earlyWebsiteVad)websitePlayer.handleEvent(earlyWebsiteVad);
       opening=envelope;
     } else if (onboarding) opening = await validateApplicationOpening(response);
-    if (stopped || signal?.aborted) throw safeOpeningError("abertura cancelada");
-    await abortableVoiceOperation(pc.setRemoteDescription({ type: "answer", sdp }), setupAbort.signal);
-    timing.mark("remote_sdp_applied");
+    if (stopped || (signal?.aborted && !stopRequested)) throw safeOpeningError("abertura cancelada");
+    await applyRemoteDescription();
+    if (stopRequested) {
+      websitePlayer?.stop(); sendStopIfOpen(); await stopCompleted;
+      throw voiceAbortError(signal);
+    }
     if (websiteInterview) {
       await waitForDataChannelOpen(channel,boundedOpeningTimeout,setupAbort.signal);
+      if (stopRequested) { sendStopIfOpen(); await stopCompleted; throw voiceAbortError(signal); }
       const played=websitePlayer.start(opening.speech);
       if(earlyWebsiteNotice)websitePlayer.handleEvent(earlyWebsiteNotice);
       await played;
@@ -1269,10 +1362,15 @@ export async function startVoiceSession({
     if (!endedOnce) deadline = setTimeout(() => end("deadline"), max_minutes * 60_000);
     return { end, callId, maxMinutes: max_minutes };
   } catch (error) {
+    if (stopRequested) {
+      await stopCompleted;
+      throw error;
+    }
     timing.mark(signal?.aborted ? "start_cancelled" : "start_failed");
     if (!signal?.aborted && !endedOnce) stage("failed");
     if(!endedOnce && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(callId??""))
       end(signal?.aborted?"manual_hangup":"startup_failed",voiceSessionErrorMessage(error));
+    if (stopRequested) { await stopCompleted; throw error; }
     stop();
     throw error;
   }

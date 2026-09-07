@@ -167,7 +167,7 @@ export function VoicePanel({
         onStage: (stage) => applyCurrentSessionRun({
           runId,
           currentRunId: sessionRunRef.current,
-          onCurrent: () => { if (!cancelledRef.current && !endedRef.current) setStatus(stage); },
+          onCurrent: () => { if (!endedRef.current && (!cancelledRef.current || stage === "stopping")) setStatus(stage); },
         }),
         onEvent: (ev) => applyCurrentSessionRun({
           runId,
@@ -208,8 +208,10 @@ export function VoicePanel({
     cancelledRef.current = true;
     startTimingRef.current?.mark("stop_requested");
     const session = sessionRef.current;
-    sessionRef.current = null;
-    if (session?.end) session.end("manual_hangup");
+    if (session?.end) {
+      if (sessionType === "onboarding" && onboardingProtocolVersion === 3) setStatus("stopping");
+      session.end("manual_hangup");
+    }
     else handleEnd({ reason: "manual_hangup", callId: null }, sessionType, runId);
     startAbortRef.current?.abort("manual_hangup");
     startAbortRef.current = null;
@@ -223,6 +225,7 @@ export function VoicePanel({
     connecting: ["Conectando o áudio…", "Preparando a conversa. Você pode cancelar a qualquer momento."],
     playing: ["Ligou está falando", "Você pode interromper para responder ou corrigir."],
     closing: ["Encerrando a conversa…", "Concluindo a despedida. O painel confirma quando você pode retomar."],
+    stopping: ["Encerrando a chamada…", "O microfone foi desligado. Aguardando a confirmação do encerramento."],
     "verifying-playback": ["Confirmando a fala…", "Concluindo a confirmação do áudio."],
     processing: ["Preparando a próxima resposta…", "O Ligou está processando sua resposta."],
     retrying: ["Tentando novamente…", "Houve uma falha técnica. O Ligou está tentando continuar."],

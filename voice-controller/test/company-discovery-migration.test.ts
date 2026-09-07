@@ -47,7 +47,7 @@ function applicationOpeningPayload(args: {
     mime: "audio/mpeg",
     voice: "ash",
     tts_model: "tts-1-hd",
-    cost_usd: 0.001,
+    cost_usd: Number(([...text].length * 30 / 1e6).toFixed(8)),
     resume_context: args.resumeContext,
   };
 }

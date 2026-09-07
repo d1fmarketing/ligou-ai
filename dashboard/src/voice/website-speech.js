@@ -1,4 +1,5 @@
 const HASH = /^[0-9a-f]{64}$/;
+const ttsRate = model => model === 'tts-1' ? 15 : model === 'tts-1-hd' ? 30 : null;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const KEYS = ['schema','actionId','interviewId','callId','revision','kind','text','sourceDigest',
   'text_sha256','audio_base64','audio_sha256','mime','voice','tts_model','cost_usd'];
@@ -25,8 +26,8 @@ export async function validateWebsiteSpeech(value, { callId, interviewId, action
     || !Number.isSafeInteger(value.revision) || value.revision<0 || !KINDS.has(value.kind)
     || typeof value.text!=='string' || !value.text.trim() || [...value.text].length>4096
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.text)
-    || value.mime!=='audio/mpeg' || value.voice!=='ash' || value.tts_model!=='tts-1-hd'
-    || value.cost_usd!==Number(([...value.text].length*30/1e6).toFixed(8))
+    || value.mime!=='audio/mpeg' || value.voice!=='ash' || ttsRate(value.tts_model)===null
+    || value.cost_usd!==Number(([...value.text].length*ttsRate(value.tts_model)/1e6).toFixed(8))
     || (value.kind==='SPEAK_FINAL_SIGNOFF' && value.text!==SIGNOFF)
     || typeof value.audio_base64!=='string' || value.audio_base64.length>2_000_000
     || value.audio_base64.length<4 || value.audio_base64.length%4!==0

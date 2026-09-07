@@ -1818,7 +1818,7 @@ describe("durable browser cancel_requested handshake", () => {
 });
 
 describe("application-owned Test 10 opening", () => {
-  test("one bounded fresh tts-1-hd request emits payload v2 with null resume context and exact USD 30/M cost", async () => {
+  test("one bounded fresh tts-1 request emits payload v2 with null resume context and exact USD 15/M cost", async () => {
     const synthesize = (serverModule as any).synthesizeOnboardingOpening;
     expect(synthesize).toBeFunction();
     const calls: Array<{ url: string; init: RequestInit }> = [];
@@ -1852,7 +1852,7 @@ describe("application-owned Test 10 opening", () => {
     expect(calls[0]!.url).toBe("https://api.openai.com/v1/audio/speech");
     expect(calls[0]!.init.method).toBe("POST");
     expect(JSON.parse(String(calls[0]!.init.body))).toEqual({
-      model: "tts-1-hd",
+      model: "tts-1",
       voice: "ash",
       input: "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Quais serviços sua empresa oferece?",
       response_format: "mp3",
@@ -1879,8 +1879,8 @@ describe("application-owned Test 10 opening", () => {
       audio_sha256: "b15db04aea85ebd3f59185796229df945e67f42931c7e9da411e97b83c856ce8",
       mime: "audio/mpeg",
       voice: "ash",
-      tts_model: "tts-1-hd",
-      cost_usd: 0.00321,
+      tts_model: "tts-1",
+      cost_usd: 0.001605,
       resume_context: null,
     });
     expect(payload.item_id).toHaveLength(32);
@@ -1933,7 +1933,7 @@ describe("application-owned Test 10 opening", () => {
     const exactText =
       "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Vamos continuar de onde paramos. Quais cidades e regiões sua empresa atende?";
     expect(body).toEqual({
-      model: "tts-1-hd",
+      model: "tts-1",
       voice: "ash",
       input: exactText,
       response_format: "mp3",
@@ -1947,8 +1947,8 @@ describe("application-owned Test 10 opening", () => {
       audio_sha256: "b15db04aea85ebd3f59185796229df945e67f42931c7e9da411e97b83c856ce8",
       mime: "audio/mpeg",
       voice: "ash",
-      tts_model: "tts-1-hd",
-      cost_usd: 0.00444,
+      tts_model: "tts-1",
+      cost_usd: 0.00222,
       resume_context: resumeContext,
     });
     expect(payload.text.split("Vamos continuar de onde paramos.")).toHaveLength(2);
@@ -2003,7 +2003,7 @@ describe("application-owned Test 10 opening", () => {
     } catch (error: any) {
       expect(error.message).toBe("onboarding_tts_invalid_response");
       expect(error.usageResolved).toBe(true);
-      expect(error.costUsd).toBe(0.00321);
+      expect(error.costUsd).toBe(0.001605);
     }
 
     try {
@@ -2031,7 +2031,7 @@ describe("application-owned Test 10 opening", () => {
     } catch (error: any) {
       expect(error.message).toBe("onboarding_tts_invalid_response");
       expect(error.usageResolved).toBe(true);
-      expect(error.costUsd).toBe(0.00321);
+      expect(error.costUsd).toBe(0.001605);
     }
 
     const timeoutDependency = {
@@ -2082,7 +2082,7 @@ describe("application-owned Test 10 opening", () => {
     } catch (error: any) {
       expect(error.message).toBe("onboarding_tts_invalid_response");
       expect(error.usageResolved).toBe(true);
-      expect(error.costUsd).toBe(0.00321);
+      expect(error.costUsd).toBe(0.001605);
     }
   });
 

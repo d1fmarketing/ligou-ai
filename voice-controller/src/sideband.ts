@@ -16,7 +16,7 @@ import {
 } from "./tools.ts";
 import { supa } from "./rules.ts";
 import { finalizeTerminalBudget, readWebsiteTerminalProof, type BudgetOutcome } from "./budget.ts";
-import { requestProviderTermination, type FetchLike } from "./provider-termination.ts";
+import { requestProviderTermination, terminateProviderCall, type FetchLike } from "./provider-termination.ts";
 import { admitToolCall, evt, requestResponse, setPhase } from "./response-coordinator.ts";
 import {
   bindVerifiedOnboardingToolArgs,
@@ -205,6 +205,8 @@ export interface SessionLedger {
     reason: "provider_session_ended";
     receivedAt: string;
   };
+  /** Exact owner control on this protocol-3 call; never configuration approval. */
+  websiteStopReason?: "owner_requested_stop" | "website_client_failure";
   transcript: Array<{ role: "caller" | "agent" | "system"; text: string; at: string }>;
   toolLog: Array<{ name: string; ok: boolean; durationMs: number }>;
   status: "active" | "ended" | "killed_deadline" | "killed_budget" | "error";
@@ -283,6 +285,35 @@ export function terminalStatusForReason(
 ): SessionLedger["status"] {
   if (current !== "active") return current;
   return reason === "caller_hung_up" ? "ended" : "error";
+}
+
+function websiteStopControlReason(event: any, callId: string): SessionLedger["websiteStopReason"] | null {
+  if (!["conversation.item.created", "conversation.item.done"].includes(event?.type)
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(callId)) return null;
+  const item = event.item;
+  if (!item || typeof item !== "object" || Array.isArray(item)
+    || Object.keys(item).some(key => !["id", "object", "type", "role", "status", "content"].includes(key))
+    || (item.object !== undefined && item.object !== "realtime.item")
+    || item.id !== `lgt-${callId.replaceAll("-", "").slice(0, 28)}`
+    || item.type !== "message" || item.role !== "system" || item.status !== "completed"
+    || !Array.isArray(item.content) || item.content.length !== 1) return null;
+  const content = item.content[0];
+  if (!content || typeof content !== "object" || Array.isArray(content)
+    || Object.keys(content).length !== 2 || content.type !== "input_text") return null;
+  if (content.text === `ligou.website_stop:${callId}`) return "owner_requested_stop";
+  if (content.text === `ligou.website_stop:${callId}:technical_failure`) return "website_client_failure";
+  return null;
+}
+
+function observeWebsiteTerminalEvidence(ledger: SessionLedger, event: any): void {
+  if (event?.type !== "session.ended") return;
+  ledger.providerTerminalEvidence = { observed: true, reason: "provider_session_ended", receivedAt: new Date().toISOString() };
+  const usage = validatedProviderUsage(event.usage);
+  if (usage) {
+    ledger.usage = usage;
+    ledger.providerUsageEvidence.terminal = true;
+    ledger.providerUsageEvidence.lastReceivedAt = new Date().toISOString();
+  }
 }
 
 function onboardingProviderTerminationPhase(phase: string): boolean {
@@ -3446,16 +3477,45 @@ export function attachSideband(
       rejectOpened(new Error("phone_sideband_closed_before_open"));
     }
     const socket = ws;
-    ws = null;
-    try { socket?.close(); } catch {}
+    const holdWebsiteTransport = ledger.websiteInterviewRuntime !== undefined;
+    if (!holdWebsiteTransport) {
+      ws = null;
+      try { socket?.close(); } catch {}
+    }
     console.log(`sideband finalize call=${cap.callId.slice(0, 8)} reason=${reason} status=${ledger.status} tools=${ledger.toolLog.length}`);
     if (cap.sessionType !== "onboarding") setPhase(ledger, "closed");
     ledger.status = terminalStatusForReason(ledger.status, reason);
     let persisted = false;
+    const holdDeadline = performance.now() + 9_000;
+    const persist = async () => {
+      if (!holdWebsiteTransport) return await persistLedger(cap, ledger, options.fetchImpl, options.phone);
+      const remaining = Math.max(0, holdDeadline - performance.now());
+      if (!remaining) return false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          persistLedger(cap, ledger, options.fetchImpl, options.phone),
+          new Promise<false>(resolve => { timer = setTimeout(() => {
+            console.warn(`sideband terminal hold expired call=${cap.callId.slice(0, 8)}`);
+            resolve(false);
+          }, remaining); }),
+        ]);
+      } finally { if (timer) clearTimeout(timer); }
+    };
+    const hadTerminalEvidence = ledger.providerTerminalEvidence?.observed === true;
     try {
-      persisted = await persistLedger(cap, ledger, options.fetchImpl, options.phone);
+      persisted = await persist();
+      // Real terminal evidence may arrive while the audited hangup is in flight.
+      // Persist that stronger evidence without inventing usage or another POST.
+      if (holdWebsiteTransport && !persisted && !hadTerminalEvidence
+        && ledger.providerTerminalEvidence?.observed) persisted = await persist();
     } catch (error) {
       console.error("persist failed", error);
+    } finally {
+      if (holdWebsiteTransport) {
+        if (ws === socket) ws = null;
+        try { socket?.close(); } catch {}
+      }
     }
     // Budget settlement may be deferred when terminal usage is unresolved. That
     // does not authorize another provider request and must not hide already durable
@@ -3502,6 +3562,7 @@ export function attachSideband(
           if (ledger.status !== "active") await finalize("website_runtime_terminal");
         });
         adapter.queue = queued.catch(async () => {
+          if (ledger.websiteStopReason) return;
           ledger.agentEnded = true; if (ledger.status === "active") ledger.status = "error"; ledger.providerUsageEvidence.continuous = false;
           await finalize("website_runtime_failure");
         });
@@ -3654,15 +3715,35 @@ export function attachSideband(
     });
 
     sock.addEventListener("message", (ev) => {
+      const ownsWire = () => openedThisAttempt && !cancelled && ws === sock && live.get(cap.callId) === ledger;
+      if (!ownsWire()) return;
+      let msg: any;
+      try { msg = JSON.parse(String(ev.data)); } catch { return; }
+      if (ledger.websiteInterviewRuntime) {
+        // Evidence remains observable while finalization fences application work.
+        // Capturing here also prevents a queued terminal event being lost to close.
+        observeWebsiteTerminalEvidence(ledger, msg);
+        const stopReason = websiteStopControlReason(msg, cap.callId);
+        if (stopReason) {
+          if (!terminal && !finalizing && !ledger.websiteStopReason) {
+            if (ledger.agentEnded && ledger.status !== "active") {
+              void finalize("website_runtime_terminal");
+              return;
+            }
+            ledger.websiteStopReason = stopReason;
+            if (ledger.status === "active") ledger.status = stopReason === "owner_requested_stop" ? "ended" : "error";
+            ledger.websiteInterviewRuntime.stop();
+            void finalize(stopReason);
+          }
+          return;
+        }
+      }
       const canHandleMessage = () => (
         openedThisAttempt
         && ledger.status === "active"
         && ownsSocket(sock)
         && (!options.phone || phoneActive)
       );
-      if (!canHandleMessage()) return;
-      let msg: any;
-      try { msg = JSON.parse(String(ev.data)); } catch { return; }
       if (!canHandleMessage()) return;
       void handleEvent(cap, ledger, sock, msg, canHandleMessage).then(() => {
         if (!openedThisAttempt || !ownsSocket(sock) || (options.phone && !phoneActive)) return;
@@ -3686,6 +3767,10 @@ export function attachSideband(
       }
       console.log(`sideband CLOSE call=${cap.callId.slice(0, 8)} code=${ev?.code} attempt=${attempt} opened=${openedThisAttempt} terminal=${terminal}`);
       if (terminal || ledger.status !== "active") { clearTimeout(deadline); void finalize("terminal_close"); return; }
+      if (ledger.websiteInterviewRuntime && ledger.providerTerminalEvidence?.observed) {
+        ledger.status = "ended";
+        clearTimeout(deadline); void finalize("provider_terminal_close"); return;
+      }
       ledger.providerUsageEvidence.continuous = false;
       // 1002 after a healthy session means OpenAI no longer knows this call: the caller hung up.
       // Retrying then just delays the summary (45s of pointless reattaches on RJ's first real call).
@@ -3932,11 +4017,11 @@ export async function persistLedger(
   const providerNeedsTermination = !providerTerminalObserved &&
     (ledger.status !== "ended" || ledger.agentEnded === true ||
       ledger.websiteInterviewRuntime !== undefined);
-  const terminationReason = ledger.agentEnded === true
+  const terminationReason = ledger.websiteStopReason ?? (ledger.agentEnded === true
     ? "agent_ended_session"
     : providerTerminalObserved
       ? ledger.providerTerminalEvidence!.reason
-      : `sideband_${ledger.status}`;
+      : `sideband_${ledger.status}`);
   const outcome: BudgetOutcome = ledger.status === "ended"
     ? "ended"
     : ledger.status === "killed_deadline"
@@ -3995,7 +4080,22 @@ export async function persistLedger(
     return true;
   }
 
-  const terminalWrite = await s.from("calls").update({
+  // Audited teardown must not wait behind unrelated terminal bookkeeping.
+  // In particular, a failed or held calls UPDATE cannot leave a known provider
+  // active. Admission and at-most-once confirmation remain in the existing RPC.
+  let providerConfirmed = !providerNeedsTermination || ledger.budgetFinalized === true;
+  let providerError = "provider_termination_unconfirmed";
+  if (!providerConfirmed) {
+    try {
+      const result = await terminateProviderCall({ callId: cap.callId, openaiCallId: ledger.openaiCallId,
+        mode: "hangup", reason: terminationReason, fetchImpl });
+      providerConfirmed = result.confirmed;
+      providerError = result.error ?? providerError;
+    } catch {
+      providerError = "provider_termination_work_failed";
+    }
+  }
+  const terminalQuery = s.from("calls").update({
     status: ledger.status,
     ended_at: new Date().toISOString(),
     duration_seconds: durationS,
@@ -4015,7 +4115,31 @@ export async function persistLedger(
     provider_usage_state: usageResolved ? "resolved" : "unknown",
     provider_usage_evidence: providerUsageEvidence,
   }).eq("id", cap.callId);
-  if (terminalWrite.error) return false;
+  const writeAbort = new AbortController();
+  let writeTimer: ReturnType<typeof setTimeout> | undefined;
+  let terminalWrite: { error: unknown } | undefined;
+  try {
+    const query = typeof terminalQuery.abortSignal === "function" ? terminalQuery.abortSignal(writeAbort.signal) : terminalQuery;
+    terminalWrite = await Promise.race([
+      Promise.resolve(query),
+      new Promise<{ error: unknown }>(resolve => { writeTimer = setTimeout(() => {
+        writeAbort.abort(); resolve({ error: "terminal_status_write_timeout" });
+      }, 2_000); }),
+    ]);
+  } catch (error) {
+    terminalWrite = { error };
+  } finally { if (writeTimer) clearTimeout(writeTimer); }
+  if (!terminalWrite || terminalWrite.error) {
+    console.warn(`sideband terminal bookkeeping unresolved call=${cap.callId.slice(0, 8)}`);
+    return false;
+  }
+  if (!providerConfirmed) {
+    await s.from("budget_reservations").update({
+      reconcile_last_error: providerError.slice(0, 400), reconcile_after: new Date(Date.now() + 5_000).toISOString(),
+      reconcile_lease_until: null,
+    }).eq("call_id", cap.callId).eq("status", "active");
+    return false;
+  }
   if (ledger.budgetFinalized === true) return true;
   const finalized = await finalizeTerminalBudget({
     tenantId: cap.tenantId,
@@ -4028,9 +4152,7 @@ export async function persistLedger(
       model: ledger.model,
       external_cost_usd: ledger.externalCostUsd ?? 0,
     },
-    provider: providerNeedsTermination
-      ? { openaiCallId: ledger.openaiCallId, mode: "hangup", reason: terminationReason }
-      : undefined,
+    // Provider work already completed above; settlement cannot issue another POST.
     fetchImpl,
     usageResolved,
   });

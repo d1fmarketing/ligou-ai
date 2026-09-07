@@ -183,7 +183,7 @@ export function buildAnswerPlan(projection, fixtureHash) {
       recovery: { failOneSpeechReadAfterAnswers: 1, resumeThroughUi: true } } };
 }
 
-function wavSignal(buffer) {
+function wavSignal(buffer, expectedRate = 48000) {
   if (buffer.toString('ascii', 0, 4) !== 'RIFF' || buffer.toString('ascii', 8, 12) !== 'WAVE') fail('not_pcm_wav');
   let offset = 12, rate, channels, bits, pcm;
   while (offset + 8 <= buffer.length) {
@@ -192,7 +192,7 @@ function wavSignal(buffer) {
     if (tag === 'data') pcm = buffer.subarray(start, start + length);
     offset = start + length + (length % 2);
   }
-  if (!pcm || channels !== 1 || bits !== 16 || rate !== 48000) fail('unexpected_wav_format');
+  if (!pcm || channels !== 1 || bits !== 16 || rate !== expectedRate) fail('unexpected_wav_format');
   const count = pcm.length / 2;
   let first = null, last = null, peak = 0;
   for (let index = 0; index < count; index++) {
@@ -304,6 +304,30 @@ export function installBrowserHarness(settings) {
     state.inputs.push(input); state.input = input; stamp('synthetic_input_acquired');
     return destination.stream;
   } });
+  // Edge can starve the first capture when a second observer calls the native
+  // method. Keep one root for this playback and give every observer a clone;
+  // ending an observer must not end another observer's audio source.
+  const capturedElements = new WeakMap(), captureRoots = new Set();
+  const nativeCapture = HTMLMediaElement.prototype.captureStream;
+  if (typeof nativeCapture === 'function') {
+    HTMLMediaElement.prototype.captureStream = function (...args) {
+      let capture = capturedElements.get(this);
+      if (capture && !capture.stream.getTracks().some(track => track.readyState === 'live')) { capture.release(); capture = null; }
+      if (!capture) {
+        const element = this, stream = nativeCapture.apply(element, args);
+        const release = () => {
+          for (const event of ['ended', 'emptied', 'error']) element.removeEventListener(event, release);
+          if (capturedElements.get(element)?.stream === stream) capturedElements.delete(element);
+          captureRoots.delete(release);
+          for (const track of stream.getTracks()) track.stop();
+        };
+        capture = { stream, release };
+        capturedElements.set(element, capture); captureRoots.add(release);
+        for (const event of ['ended', 'emptied', 'error']) element.addEventListener(event, release, { once: true });
+      }
+      return capture.stream.clone();
+    };
+  }
   function observeOutput(audio) {
     if (audio.__ligouAcceptanceObserved) return;
     audio.__ligouAcceptanceObserved = true;
@@ -364,7 +388,10 @@ export function installBrowserHarness(settings) {
   HTMLMediaElement.prototype.play = function (...args) { if (this instanceof HTMLAudioElement) observeOutput(this); return nativePlay.apply(this, args); };
   document.addEventListener('click', event => {
     if (event.target.closest?.('.voice-live-button')) {
-      state.clickAt = now(); state.speech = null; state.callId = null; state.bootstrap = null; stamp('start_clicked');
+      const observedBrowserMs = now();
+      state.clickAt = Number.isFinite(event.timeStamp) && event.timeStamp >= 0 && event.timeStamp <= observedBrowserMs ? event.timeStamp : observedBrowserMs;
+      state.speech = null; state.callId = null; state.bootstrap = null;
+      stamp('start_clicked', { browserMs: state.clickAt, observedBrowserMs, trusted: event.isTrusted });
       void context().resume();
     }
   }, true);
@@ -403,6 +430,7 @@ export function installBrowserHarness(settings) {
       state.closed = true;
       for (const source of state.sources) { try { source.stop(); } catch {} }
       for (const stop of [...state.observers]) stop();
+      for (const release of [...captureRoots]) release();
       for (const input of state.inputs) if (input.track.readyState !== 'ended') input.track.stop();
       for (const peer of state.peers) if (peer.connectionState !== 'closed') peer.close();
       await state.context?.close(); await new Promise(resolve => setTimeout(resolve, 100));
@@ -470,7 +498,7 @@ async function openRealBrowser(config, session) {
     await send('Page.addScriptToEvaluateOnNewDocument', { source });
     await send('Page.navigate', { url: config.targetUrl });
     const click = async selector => {
-      const target = await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e||e.disabled)return null;const r=e.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};})()`);
+      const target = await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e||e.disabled)return null;e.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});const r=e.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;if(r.width<=0||r.height<=0||x<0||y<0||x>=innerWidth||y>=innerHeight||!e.contains(document.elementFromPoint(x,y)))return null;return {x,y};})()`);
       if (!target) fail('rendered_control_unavailable');
       await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...target });
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...target });
@@ -763,6 +791,9 @@ async function attempt(browser, config, session, options, plan, output, label) {
     result.verdict = result.mode === 'start-sample' ? 'startup_observed_pending_cleanup_and_alignment' : 'ended_pending_durable_verification';
   } catch (error) {
     result.verdict = 'failed'; result.failureCode = /^[a-z0-9_]+$/.test(error.message) ? error.message : 'browser_audio_attempt_failed';
+    try {
+      result.failureUi = await browser.evaluate(`({path:location.pathname,text:document.body.innerText.slice(0,16000),buttons:Array.from(document.querySelectorAll('button')).map(button=>({text:button.innerText,disabled:button.disabled,className:button.className})),headings:Array.from(document.querySelectorAll('h1,h2')).map(node=>node.innerText)})`);
+    } catch { /* Preserve the original failure when the browser is unavailable. */ }
   } finally {
     try { if (await browser.evaluate('Boolean(document.querySelector(".voice-live-hangup"))')) await browser.click('.voice-live-hangup'); } catch {}
     try { await sleep(100); await saveDrain(browser, result, directory); } catch {}
@@ -820,43 +851,74 @@ function firstVerifiedPhrase(words, expectedText) {
   return null;
 }
 
-async function alignRecordings(result, plan) {
+export async function alignRecordings(result, plan) {
   const directory = path.join(result.artifactDirectory, 'alignment');
   await mkdir(directory, { recursive: true });
+  const status = { available: false, toolingAvailable: false, recordingCount: result.recordings.length,
+    alignedRecordingCount: 0, model: 'cached local Whisper small', downloads: 0, paidApiCalls: 0 };
+  for (const recording of result.recordings) recording.alignment = { available: false,
+    reason: recording.bytes > 0 && recording.nonzeroObserved ? 'alignment_pending' : 'no_captured_audio_samples' };
   const model = path.join(process.env.HOME ?? '/Users/d1f', '.cache/whisper/small.pt');
-  try { await access(model, constants.R_OK); await access('/opt/homebrew/bin/whisper', constants.X_OK); }
-  catch { return { available: false, reason: 'cached_local_whisper_small_unavailable' }; }
-  const files = [];
+  try { await access(model, constants.R_OK); await access('/opt/homebrew/bin/whisper', constants.X_OK); await access('/opt/homebrew/bin/ffmpeg', constants.X_OK); }
+  catch { return { ...status, reason: 'cached_local_alignment_tools_unavailable' }; }
+  status.toolingAvailable = true;
+  const eligible = [], pending = [];
   for (const recording of result.recordings) {
-    if (!recording.bytes || !recording.nonzeroObserved) continue;
+    if (!(recording.bytes > 0) || !recording.nonzeroObserved) continue;
     const wav = path.join(directory, `${path.basename(recording.filename, '.webm')}.wav`);
-    await localCommand('/opt/homebrew/bin/ffmpeg', ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i',
-      path.join(result.artifactDirectory, recording.filename), '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav]);
     const transcriptFile = path.join(directory, `${path.basename(wav, '.wav')}.json`);
-    try { await access(transcriptFile); } catch { files.push(wav); }
+    let recordingHash;
+    try {
+      const bytes = await readFile(path.join(result.artifactDirectory, recording.filename));
+      recordingHash = sha(bytes);
+      if (bytes.length !== recording.bytes || (recording.sha256 && recording.sha256 !== recordingHash)) throw new Error('recording_changed');
+      await localCommand('/opt/homebrew/bin/ffmpeg', ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i',
+        path.join(result.artifactDirectory, recording.filename), '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav]);
+      if (wavSignal(await readFile(wav), 16000).signalFirstMs === null) throw new Error('silent_recording');
+    } catch { recording.alignment = { available: false, reason: 'recording_missing_changed_or_undecodable' }; continue; }
+    const entry = { recording, wav, transcriptFile, recordingHash };
+    eligible.push(entry);
+    let cached;
+    try { cached = JSON.parse(await readFile(transcriptFile, 'utf8')); } catch {}
+    if (cached?.sourceRecordingSha256 !== recordingHash) {
+      // File names recur across attempts. Reuse only a transcript bound to these
+      // exact media bytes, never a stale JSON file left by an earlier run.
+      await rm(transcriptFile, { force: true }); pending.push(entry);
+    }
   }
-  if (files.length) {
-    process.stdout.write(`Aligning ${files.length} actual output recordings with the cached local Whisper model.\n`);
+  if (pending.length) {
+    process.stdout.write(`Aligning ${pending.length} actual output recordings with the cached local Whisper model.\n`);
     // An absolute existing model path prevents model download and uses no API.
-    await localCommand('/opt/homebrew/bin/whisper', [...files, '--model', model, '--language', 'Portuguese', '--word_timestamps', 'True',
-      '--condition_on_previous_text', 'False', '--temperature', '0', '--fp16', 'False', '--output_format', 'json', '--output_dir', directory],
-    { timeoutMs: Math.max(120_000, files.length * 90_000), maxBytes: 20_000_000 });
+    try {
+      await localCommand('/opt/homebrew/bin/whisper', [...pending.map(entry => entry.wav), '--model', model, '--language', 'Portuguese', '--word_timestamps', 'True',
+        '--condition_on_previous_text', 'False', '--temperature', '0', '--fp16', 'False', '--output_format', 'json', '--output_dir', directory],
+      { timeoutMs: Math.max(120_000, pending.length * 90_000), maxBytes: 20_000_000 });
+    } catch { for (const entry of pending) entry.failed = true; }
   }
-  for (const recording of result.recordings) {
+  for (const { recording, transcriptFile, recordingHash, failed } of eligible) {
+    if (failed) { recording.alignment = { available: false, reason: 'local_alignment_failed' }; continue; }
     let transcript;
-    try { transcript = JSON.parse(await readFile(path.join(directory, `${path.basename(recording.filename, '.webm')}.json`), 'utf8')); }
-    catch { recording.alignment = { available: false }; continue; }
-    const words = (transcript.segments ?? []).flatMap(segment => segment.words ?? []).filter(word => normalize(word.word) && Number.isFinite(word.start));
+    try {
+      transcript = JSON.parse(await readFile(transcriptFile, 'utf8'));
+      transcript.sourceRecordingSha256 = recordingHash;
+      await writeFile(transcriptFile, json(transcript), { mode: 0o600 });
+    } catch { recording.alignment = { available: false, reason: 'local_transcript_unavailable' }; continue; }
+    const words = (transcript.segments ?? []).flatMap(segment => segment.words ?? [])
+      .filter(word => normalize(word.word) && Number.isFinite(word.start) && Number.isFinite(word.end) && word.start >= 0 && word.end >= word.start);
+    if (!words.length) { recording.alignment = { available: false, reason: 'no_aligned_words' }; continue; }
     const item = matchQuestion(plan, { text: recording.expectedText });
     const question = alignedQuestion(words, questionPhrase(item?.questionPt));
     const firstPhrase = firstVerifiedPhrase(words, recording.expectedText);
-    recording.alignment = { available: true, transcript: transcript.text, firstAsrTokenOffsetMs: words.length ? words[0].start * 1000 : null,
+    recording.alignment = { available: true, sourceRecordingSha256: recordingHash, transcript: transcript.text, firstAsrTokenOffsetMs: words[0].start * 1000,
       firstVerifiedPhrase: firstPhrase,
       firstIntelligibleBrowserMs: firstPhrase ? recording.startedBrowserMs + firstPhrase.offsetMs : null,
       actionableQuestion: question ? { ...question, browserMs: recording.startedBrowserMs + question.offsetMs } : null,
       limitation: 'Word timestamps estimate intelligibility in captured browser output; physical speaker audibility and human comprehension require live acceptance.' };
+    status.alignedRecordingCount++;
   }
-  return { available: true, model: 'cached local Whisper small', downloads: 0, paidApiCalls: 0 };
+  status.available = status.alignedRecordingCount > 0;
+  return { ...status, allRecordingsAligned: status.available && status.alignedRecordingCount === status.recordingCount,
+    ...(!status.available ? { reason: 'no_recordings_with_aligned_words' } : {}) };
 }
 
 export function summarizeAttempt(result) {
@@ -865,15 +927,19 @@ export function summarizeAttempt(result) {
   const nextStartMs = result.events.find(event => event.event === 'start_clicked' && event.browserMs > startMs)?.browserMs ?? Infinity;
   const afterStart = event => Number.isFinite(startMs) && event.browserMs >= startMs && event.browserMs < nextStartMs;
   const app = name => result.events.find(event => afterStart(event) && event.event === 'application_timing' && event.timingEvent === name);
-  const recording = result.recordings.find(row => row.startedBrowserMs >= startMs && row.startedBrowserMs < nextStartMs && row.alignment?.firstIntelligibleBrowserMs);
-  const question = result.recordings.find(row => row.startedBrowserMs >= startMs && row.startedBrowserMs < nextStartMs && row.alignment?.actionableQuestion);
-  const firstSample = result.events.find(event => afterStart(event) && event.event === 'output_first_nonzero_sample');
+  const alignedRecordings = result.recordings.filter(row => row.bytes > 0 && row.nonzeroObserved && row.alignment?.available === true);
+  const recording = alignedRecordings.find(row => row.startedBrowserMs >= startMs && row.startedBrowserMs < nextStartMs && row.alignment.firstIntelligibleBrowserMs);
+  const question = alignedRecordings.find(row => row.startedBrowserMs >= startMs && row.startedBrowserMs < nextStartMs && row.alignment.actionableQuestion);
+  const harnessSample = result.events.find(event => afterStart(event) && event.event === 'output_first_nonzero_sample');
+  const appSample = result.events.find(event => afterStart(event) && event.event === 'application_timing'
+    && event.timingEvent === 'speech_first_nonzero_sample' && event.evidence === 'media_element_capture');
+  const firstSample = harnessSample ?? appSample;
   const difference = (end, start) => Number.isFinite(end) && Number.isFinite(start) ? end - start : null;
   const turns = result.events.filter(event => event.event === 'caller_audio_start').map((caller, index, all) => {
     const nextCaller = all[index + 1]?.browserMs ?? Infinity;
     const final = result.events.find(event => event.event === 'provider_event' && event.type === 'conversation.item.input_audio_transcription.completed'
       && event.browserMs >= caller.sourceSignalLastBrowserMs && event.browserMs < nextCaller);
-    const response = result.recordings.find(row => row.alignment?.firstIntelligibleBrowserMs >= caller.sourceSignalLastBrowserMs
+    const response = alignedRecordings.find(row => row.alignment?.firstIntelligibleBrowserMs >= caller.sourceSignalLastBrowserMs
       && row.alignment.firstIntelligibleBrowserMs < nextCaller);
     const selected = result.events.find(event => event.event === 'selected_speech' && event.browserMs >= final?.browserMs && event.browserMs < nextCaller);
     const audioLatency = difference(response?.alignment?.firstIntelligibleBrowserMs, caller.sourceSignalLastBrowserMs);
@@ -890,10 +956,13 @@ export function summarizeAttempt(result) {
   return { label: result.label, mode: result.mode, scenario: result.scenario, condition: result.condition, verdict: result.verdict,
     callId: result.callId, browser: result.browser, model: result.bootstrapProofs?.[0]?.model ?? null,
     returnedMaxMinutes: result.bootstrapProofs?.[0]?.maxMinutes ?? null, coldDefinition: result.coldDefinition,
-    visibleResponseMs: app('visible_response')?.sourceElapsedMs ?? null,
+    visibleResponseMs: difference(app('visible_response')?.browserMs, startMs),
+    visibleResponseHandlerRelativeMs: app('visible_response')?.sourceElapsedMs ?? null,
     authenticationMs: difference(app('auth_completed')?.browserMs, app('auth_started')?.browserMs),
     microphonePermissionMs: difference(app('microphone_ready')?.browserMs, app('microphone_requested')?.browserMs),
     startToFirstNonzeroCapturedSampleMs: difference(firstSample?.browserMs, startMs),
+    firstNonzeroSampleObserver: harnessSample ? 'harness_media_capture' : appSample ? 'application_media_capture' : null,
+    firstNonzeroSampleHandlerRelativeMs: appSample?.sourceElapsedMs ?? null,
     startToFirstIntelligibleAudioMs: difference(recording?.alignment?.firstIntelligibleBrowserMs, startMs),
     startToFirstActionableQuestionMs: difference(question?.alignment?.actionableQuestion?.browserMs, startMs),
     startupIncludesPermissionWaiting: true, turns, cleanupConfirmed: result.cleanup?.clean === true,
@@ -1052,12 +1121,23 @@ async function browserSmoke(options, assert) {
     if (request.url === '/caller.wav') { response.setHeader('Content-Type', 'audio/wav'); response.end(bytes); return; }
     response.setHeader('Content-Type', 'text/html');
     response.end(`<!doctype html><html lang="pt-BR"><body><main class="voice-live" data-voice-stage="idle"><h1>Offline harness smoke test</h1>
-      <p>Local synthetic audio only. No backend or provider connection.</p><button class="voice-live-button">Start local media check</button>
+      <p>Local synthetic audio only. No backend or provider connection.</p><div style="height:200vh">A faithful setup summary can put its Start control below the fold.</div><button class="voice-live-button">Start local media check</button>
       <button class="voice-live-hangup">Stop</button></main><script>
-      let stream,audio;document.querySelector('.voice-live-button').onclick=async()=>{
+      let stream,audio;window.__captureSmoke={sampleObserved:false,cloneStopped:false};document.querySelector('.voice-live-button').onclick=async()=>{
         stream=await navigator.mediaDevices.getUserMedia({audio:true});
         document.querySelector('.voice-live').dataset.voiceStage='ready';
-        audio=document.createElement('audio');audio.src='/caller.wav';await audio.play();
+        audio=document.createElement('audio');audio.src='/caller.wav';
+        // Reproduce the app's independent first-sample observer after the
+        // harness recorder already captured this exact media element.
+        audio.addEventListener('playing',()=>{
+          const observer=audio.captureStream(),ctx=new AudioContext(),analyser=ctx.createAnalyser();analyser.fftSize=256;
+          const source=ctx.createMediaStreamSource(observer);source.connect(analyser);const samples=new Float32Array(256);
+          const inspect=()=>{analyser.getFloatTimeDomainData(samples);if(samples.some(value=>Math.abs(value)>0.0001)){
+            window.__captureSmoke.sampleObserved=true;source.disconnect();for(const track of observer.getTracks())track.stop();
+            window.__captureSmoke.cloneStopped=observer.getTracks().every(track=>track.readyState==='ended');
+            window.__captureSmoke.cloneStoppedBrowserMs=performance.now();void ctx.close();
+          }else requestAnimationFrame(inspect);};void ctx.resume().then(inspect);
+        },{once:true});audio.addEventListener('ended',()=>{window.__captureSmoke.playbackEnded=true;},{once:true});await audio.play();
       };document.querySelector('.voice-live-hangup').onclick=()=>{
         for(const track of stream?.getTracks()??[])track.stop();
         if(audio){audio.pause();audio.removeAttribute('src');audio.load();}
@@ -1071,14 +1151,29 @@ async function browserSmoke(options, assert) {
   try {
     browser = await openRealBrowser({ targetUrl: `http://127.0.0.1:${port}/`, supabaseUrl: 'https://local.invalid', recordSyntheticTestAudio: true }, {});
     await waitFor(browser, 'Boolean(window.__voiceAcceptance && document.querySelector(".voice-live-button"))');
+    assert.ok(await browser.evaluate('document.querySelector(".voice-live-button").getBoundingClientRect().top>innerHeight'),'exercise a real offscreen control');
     await browser.click('.voice-live-button');
     await waitFor(browser, 'document.querySelector(".voice-live").dataset.voiceStage === "ready"');
     await playClip(browser, plan, clip.id, options.output, evidence);
     const deadline = performance.now() + 5000;
     while (performance.now() < deadline) { await saveDrain(browser, evidence, directory); if (evidence.recordings.length) break; await sleep(50); }
     assert.ok(evidence.events.some(event => event.event === 'caller_audio_start'));
+    evidence.independentObserver=await browser.evaluate('window.__captureSmoke');
+    assert.equal(evidence.independentObserver.sampleObserved,true,'second observer must see real samples');
+    assert.equal(evidence.independentObserver.cloneStopped,true,'stopping the second observer must not starve the recorder');
+    assert.equal(evidence.independentObserver.playbackEnded,true,'the actual unmuted media element must finish playback');
     assert.ok(evidence.events.some(event => event.event === 'output_first_nonzero_sample'), 'actual local media output must expose a nonzero sample');
     assert.ok(evidence.recordings.some(recording => recording.bytes > 100 && recording.nonzeroObserved));
+    const recorded = evidence.recordings.find(recording => recording.bytes > 100 && recording.nonzeroObserved);
+    const decodedFile = path.join(directory, 'captured-output.wav');
+    await localCommand('/opt/homebrew/bin/ffmpeg', ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i',
+      path.join(directory, recorded.filename), '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', decodedFile]);
+    evidence.decodedOutput = wavSignal(await readFile(decodedFile), 16000);
+    assert.ok(evidence.decodedOutput.signalLastMs > clip.audio.durationMs * 0.6, 'record the continuing audio, not only an initial chunk');
+    assert.ok(recorded.startedBrowserMs + evidence.decodedOutput.signalLastMs > evidence.independentObserver.cloneStoppedBrowserMs + 300,
+      'real recorded samples must continue well after the other observer stops its clone');
+    assert.equal(await browser.evaluate('audio.muted'),false);
+    assert.equal(await browser.evaluate('audio.volume'),1);
     await browser.click('.voice-live-hangup'); await browser.evaluate('window.__voiceAcceptance.cleanup()');
     await saveDrain(browser, evidence, directory); evidence.verdict = 'PASS';
   } catch (error) {
@@ -1110,6 +1205,47 @@ async function selfTest(options) {
   assert.equal(summarizeSample(complete).startupTargetsPass, true);
   complete[0].startToFirstIntelligibleAudioMs = null;
   assert.equal(summarizeSample(complete).startupTargetsPass, false);
+  const timingEvidence = { events: [
+    { event: 'start_clicked', browserMs: 100 },
+    { event: 'application_timing', timingEvent: 'start_clicked', browserMs: 250, sourceElapsedMs: 0 },
+    { event: 'application_timing', timingEvent: 'visible_response', browserMs: 260, sourceElapsedMs: 10 },
+    { event: 'application_timing', timingEvent: 'speech_first_nonzero_sample', browserMs: 1200, sourceElapsedMs: 950, evidence: 'media_element_capture' },
+  ], recordings: [{ bytes: 0, nonzeroObserved: false, startedBrowserMs: 1100,
+    alignment: { available: true, firstIntelligibleBrowserMs: 1300, actionableQuestion: { browserMs: 1400 } } }] };
+  const clickTiming = summarizeAttempt(timingEvidence);
+  assert.equal(clickTiming.visibleResponseMs, 160, 'visible feedback includes delay before the app handler');
+  assert.equal(clickTiming.visibleResponseHandlerRelativeMs, 10);
+  assert.equal(clickTiming.startToFirstNonzeroCapturedSampleMs, 1100, 'captured app samples retain the real click origin');
+  assert.equal(clickTiming.firstNonzeroSampleObserver, 'application_media_capture');
+  assert.equal(clickTiming.firstNonzeroSampleHandlerRelativeMs, 950);
+  assert.equal(clickTiming.startToFirstIntelligibleAudioMs, null, 'app telemetry or an empty recording cannot prove words');
+  assert.equal(clickTiming.startToFirstActionableQuestionMs, null);
+  const noCapture = structuredClone(timingEvidence);
+  noCapture.events.at(-1).evidence = 'html_media_playing';
+  assert.equal(summarizeAttempt(noCapture).startToFirstNonzeroCapturedSampleMs, null);
+  const capturedTiming = structuredClone(timingEvidence);
+  capturedTiming.events.push({ event: 'output_first_nonzero_sample', browserMs: 1190 });
+  Object.assign(capturedTiming.recordings[0], { bytes: 500, nonzeroObserved: true });
+  const verifiedTiming = summarizeAttempt(capturedTiming);
+  assert.equal(verifiedTiming.startToFirstNonzeroCapturedSampleMs, 1090);
+  assert.equal(verifiedTiming.firstNonzeroSampleObserver, 'harness_media_capture');
+  assert.equal(verifiedTiming.startToFirstIntelligibleAudioMs, 1200);
+  assert.equal(verifiedTiming.startToFirstActionableQuestionMs, 1300);
+  const alignmentDirectory = await mkdtemp(path.join(tmpdir(), 'ligou-voice-alignment-self-test-'));
+  try {
+    await mkdir(path.join(alignmentDirectory, 'alignment'));
+    await writeFile(path.join(alignmentDirectory, 'output-0001.webm'), '');
+    // A stale transcript must never turn an empty media file into aligned audio.
+    await writeFile(path.join(alignmentDirectory, 'alignment/output-0001.json'), json({ text: 'Oi aqui',
+      segments: [{ words: [{ word: 'Oi', start: 0, end: 0.2, probability: 1 }, { word: 'aqui', start: 0.2, end: 0.4, probability: 1 }] }] }));
+    const emptyMedia = { artifactDirectory: alignmentDirectory, recordings: [{ filename: 'output-0001.webm', bytes: 0,
+      nonzeroObserved: false, startedBrowserMs: 100, expectedText: 'Oi aqui' }] };
+    const aligned = await alignRecordings(emptyMedia, plan);
+    assert.equal(aligned.available, false, 'installed tools do not prove any recording was aligned');
+    assert.equal(typeof aligned.toolingAvailable, 'boolean');
+    assert.equal(emptyMedia.recordings[0].alignment.available, false);
+    assert.equal((await alignRecordings({ artifactDirectory: alignmentDirectory, recordings: [] }, plan)).available, false);
+  } finally { await rm(alignmentDirectory, { recursive: true, force: true }); }
   assert.throws(() => validateExecution({}, {}, plan, {}), /execution_not_requested/);
   // A completed setup intentionally hides ready_proof. Its immutable source
   // and tenant binding must remain verifiable without pretending it is ready.

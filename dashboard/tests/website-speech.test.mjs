@@ -163,3 +163,15 @@ test('valid retry progress updates display only; malformed progress cannot read 
     {...item,content:[{type:'input_text',text:'ligou.website_progress:{bad'}]}])player.handleEvent({type:'conversation.item.done',item:bad});
   assert.equal(progress.length,1);assert.deepEqual(effects,[]);player.stop();
 });
+
+
+test('speech payload accepts each fixed model at its own rate and refuses substituted costs',async()=>{
+ const original=speech('model-rate');
+ for(const [model,rate] of [['tts-1',15],['tts-1-hd',30]]){
+  const payload={...original,tts_model:model,cost_usd:Number(([...original.text].length*rate/1e6).toFixed(8))};
+  const validate=p=>validateWebsiteSpeech(p,{callId,interviewId:callId,actionId:p.actionId});
+  await validate(payload);
+  await assert.rejects(validate({...payload,cost_usd:Number(([...original.text].length*(rate===15?30:15)/1e6).toFixed(8))}));
+  for(const tts_model of ['gpt-4o-mini-tts','constructor',null,15])await assert.rejects(validate({...payload,tts_model}));
+ }
+});

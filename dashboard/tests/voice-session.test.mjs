@@ -630,6 +630,7 @@ test("Test 10 invariant: verified application MP3 is the only audible onboarding
       session_type: "onboarding",
       opening_mode_requested: "application_tts_v1",
       onboarding_protocol_version: 2,
+      speech_contract_version: 2,
     }]);
     assert.equal(browser.actions.includes("peer:addTrack:enabled=false"), true);
     assert.equal(browser.actions.includes("audio:1:play:remote-muted=true:mic=false"), true);
@@ -673,6 +674,7 @@ test("protocol v2 fresh opening validates exact HD Ash cost and service question
       session_type: "onboarding",
       opening_mode_requested: "application_tts_v1",
       onboarding_protocol_version: 2,
+      speech_contract_version: 2,
     }]);
     assert.equal(browser.audios[1].playCalls, 1);
     assert.equal(browser.actions.includes("audio:1:play:remote-muted=true:mic=false"), true);
@@ -697,6 +699,88 @@ function websiteOpeningResponse() {
   delete response.opening_text;delete response.resume_context;
   return {...response,onboarding_protocol_version:3,opening_payload:{version:3,item_id:`lgs-${speech.actionId.slice(0,28)}`,speech}};
 }
+test('protocol3 Stop silences immediately and retains peer until one control request is closed by provider', async () => {
+  const response=websiteOpeningResponse(),safeVad=structuredClone(LIVE_VAD_EVENT);
+  safeVad.session.audio.input.turn_detection.create_response=false;safeVad.session.audio.input.turn_detection.interrupt_response=false;
+  const browser=installVoiceBrowser({response,vadEvent:safeVad});const ended=[],stages=[];const abort=new AbortController();
+  try {
+    const session=await startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
+      signal:abort.signal,onStage:stage=>stages.push(stage),onEnd:event=>ended.push(event),
+      speechClient:{rpc:async()=>({data:response.opening_payload.speech,error:null})}});
+    session.end('manual_hangup');session.end('manual_hangup');abort.abort('manual_hangup');
+    assert.equal(browser.tracks[0].stopped,true);
+    assert.equal(browser.peers[0].closeCalls,0,'provider must still have the browser leg when it receives audited Stop');
+    const controls=browser.channel.sent.filter(event=>event.item?.content?.[0]?.text===`ligou.website_stop:${CALL_ID}`);
+    assert.equal(controls.length,1);
+    assert.deepEqual(controls[0],{type:'conversation.item.create',item:{id:`lgt-${CALL_ID.replaceAll('-','').slice(0,28)}`,type:'message',role:'system',status:'completed',content:[{type:'input_text',text:`ligou.website_stop:${CALL_ID}`}]}});
+    assert.equal(stages.at(-1),'stopping');assert.equal(ended.length,0);
+    browser.channel.close();
+    assert.equal(browser.peers[0].closeCalls,1);assert.deepEqual(ended,[{reason:'manual_hangup',callId:CALL_ID}]);
+  } finally { browser.restore(); }
+});
+
+test('known protocol3 call cancelled before data channel open keeps its control path and sends Stop on open', async () => {
+  const response=websiteOpeningResponse();const browser=installVoiceBrowser({response,channelInitiallyOpen:false});
+  const abort=new AbortController();let partial;const ended=[];
+  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
+    signal:abort.signal,onCallCreated:session=>{partial=session;session.end('manual_hangup');abort.abort('manual_hangup');},
+    onEnd:event=>ended.push(event),speechClient:{rpc:async()=>({data:response.opening_payload.speech,error:null})}});
+  starting.catch(()=>{});
+  try {
+    await waitUntil(()=>Boolean(partial),'call identity');
+    await waitUntil(()=>browser.actions.includes('peer:setRemoteDescription'),'remote control path negotiation');
+    assert.equal(browser.peers[0].closeCalls,0);assert.equal(browser.tracks[0].stopped,true);
+    browser.channel.open();
+    assert.equal(browser.channel.sent.filter(event=>event.item?.role==='system').length,1);
+    assert.equal(browser.audios.slice(1).every(audio=>audio.playCalls===0),true);
+    browser.channel.close();await starting.catch(()=>{});
+    assert.equal(ended.length,1);assert.equal(browser.peers[0].closeCalls,1);
+  } finally { browser.channel.close();await starting.catch(()=>{});browser.restore(); }
+});
+
+test('protocol3 Stop has a bounded local escape when provider never closes', async () => {
+  const response=websiteOpeningResponse(),safeVad=structuredClone(LIVE_VAD_EVENT);
+  safeVad.session.audio.input.turn_detection.create_response=false;safeVad.session.audio.input.turn_detection.interrupt_response=false;
+  const browser=installVoiceBrowser({response,vadEvent:safeVad}),ended=[];
+  try {
+    const session=await startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,stopTimeoutMs:5,
+      onEnd:event=>ended.push(event),speechClient:{rpc:async()=>({data:response.opening_payload.speech,error:null})}});
+    session.end('manual_hangup');assert.equal(browser.peers[0].closeCalls,0);
+    // Event-loop turns need not advance a wall-clock timer. Wait beyond the
+    // configured deadline, then assert its effect instead of racing 100 spins.
+    await new Promise(resolve=>setTimeout(resolve,20));
+    assert.equal(browser.peers[0].closeCalls,1);
+    assert.equal(ended.length,1);assert.equal(ended[0].reason,'manual_hangup');
+  } finally { browser.restore(); }
+});
+
+test('protocol3 audio read failure requests controlled technical teardown without becoming owner pause', async () => {
+  const response=websiteOpeningResponse(),safeVad=structuredClone(LIVE_VAD_EVENT);
+  safeVad.session.audio.input.turn_detection.create_response=false;safeVad.session.audio.input.turn_detection.interrupt_response=false;
+  const browser=installVoiceBrowser({response,vadEvent:safeVad}),ended=[];let reads=0;
+  try {
+    await startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
+      onEnd:event=>ended.push(event),speechClient:{rpc:async()=>++reads===1?{data:response.opening_payload.speech,error:null}:{data:null,error:{message:'network failure'}}}});
+    const action='b'.repeat(64);
+    browser.channel.emit({type:'conversation.item.done',item:{id:`lsn-${action.slice(0,28)}`,type:'message',role:'system',status:'completed',content:[{type:'input_text',text:`ligou.website_speech:${action}`}]}});
+    await waitUntil(()=>browser.channel.sent.some(event=>event.item?.content?.[0]?.text===`ligou.website_stop:${CALL_ID}:technical_failure`),'technical Stop control');
+    assert.equal(browser.peers[0].closeCalls,0);assert.equal(browser.tracks[0].stopped,true);assert.equal(ended.length,0);
+    browser.channel.close();assert.equal(ended[0].reason,'application_speech_error');
+    assert.match(ended[0].message,/falha técnica/);assert.equal(browser.peers[0].closeCalls,1);
+  }finally{browser.restore();}
+});
+
+test('protocol3 lost data transport uses immediate truthful fallback without a fabricated Stop request', async () => {
+  const response=websiteOpeningResponse(),safeVad=structuredClone(LIVE_VAD_EVENT);
+  safeVad.session.audio.input.turn_detection.create_response=false;safeVad.session.audio.input.turn_detection.interrupt_response=false;
+  const browser=installVoiceBrowser({response,vadEvent:safeVad}),ended=[];
+  try{
+    await startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
+      onEnd:event=>ended.push(event),speechClient:{rpc:async()=>({data:response.opening_payload.speech,error:null})}});
+    browser.channel.close();assert.equal(browser.peers[0].closeCalls,1);
+    assert.equal(ended[0].reason,'remote_hangup');assert.equal(browser.channel.sent.some(event=>event.item?.role==='system'),false);
+  }finally{browser.restore();}
+});
 test('website protocol3 uses owner-scoped application speech and never unmutes Realtime',async()=>{
   const response=websiteOpeningResponse(),reads=[],events=[],stages=[];
   const safeVad=structuredClone(LIVE_VAD_EVENT);
@@ -708,6 +792,7 @@ test('website protocol3 uses owner-scoped application speech and never unmutes R
       speechClient:{rpc:async(name,args)=>{reads.push({name,args});return{data:response.opening_payload.speech,error:null};}},
       onEvent:event=>events.push(event),onStage:stage=>stages.push(stage)});
     assert.equal(browser.requestBodies[0].onboarding_protocol_version,3);
+    assert.equal(browser.requestBodies[0].speech_contract_version,2);
     assert.deepEqual(reads,[{name:'read_website_interview_speech',args:{p_call:CALL_ID,p_action:'a'.repeat(64)}}]);
     assert.equal(browser.audios[0].muted,true);assert.equal(browser.tracks[0].enabled,true);
     assert.equal(browser.audios[1].playCalls,1);assert.equal(browser.channel.sent[0].item.id,response.opening_payload.item_id);
@@ -2129,4 +2214,15 @@ test("onboarding recovery errors give owner-safe instructions instead of SQL ide
   assert.equal(sessionModule.voiceSessionErrorMessage(new Error("interview_resume_source_not_settled")), "A entrevista anterior ainda está sendo encerrada. Aguarde um momento e tente novamente. Se continuar, fale com o suporte; suas respostas estão preservadas.");
   assert.equal(sessionModule.voiceSessionErrorMessage(new Error("interview_prior_not_settled")), sessionModule.voiceSessionErrorMessage(new Error("interview_resume_source_not_settled")));
   assert.equal(sessionModule.voiceSessionErrorMessage(new Error("Microfone indisponível")), "Microfone indisponível");
+});
+
+
+test("V2 startup accepts fast or historical HD audio only at the model's exact cost", async () => {
+ for(const [model,rate] of [["tts-1",15],["tts-1-hd",30]]){
+  const cost=Number(([...OPENING_TEXT].length*rate/1e6).toFixed(8));
+  const browser=installVoiceBrowser({response:openingResponseV2({opening_payload:{tts_model:model,cost_usd:cost}})});
+  try{const session=await startVoiceSession({accessToken:"owner-token",sessionType:"onboarding"});assert.equal(browser.audios[1].playCalls,1);session.end();}finally{browser.restore();}
+  const forged=installVoiceBrowser({response:openingResponseV2({opening_payload:{tts_model:model,cost_usd:Number(([...OPENING_TEXT].length*(rate===15?30:15)/1e6).toFixed(8))}})});
+  try{await assert.rejects(startVoiceSession({accessToken:"owner-token",sessionType:"onboarding"}));assert.equal(forged.audios.slice(1).some(a=>a.playCalls>0),false);}finally{forged.restore();}
+ }
 });

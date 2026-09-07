@@ -38,7 +38,7 @@ export interface OnboardingOpeningPayloadV1
 export interface OnboardingOpeningPayloadV2
   extends OnboardingOpeningPayloadBase {
   version: 2;
-  tts_model: "tts-1-hd";
+  tts_model: OnboardingTtsModel;
   resume_context: OnboardingOpeningResumeContext | null;
 }
 
@@ -61,18 +61,21 @@ export interface OnboardingTtsDependencies {
   fetchImpl?: FetchLike;
   timeoutMs?: number;
   signal?: AbortSignal;
+  model?: OnboardingTtsModel;
 }
 
 export type ExactOnboardingAudio = Omit<OnboardingOpeningPayloadBase, "item_id"> & {
-  tts_model: "tts-1-hd";
+  tts_model: OnboardingTtsModel;
 };
 
-const TTS_MODEL = "tts-1-hd" as const;
-const LEGACY_TTS_MODEL = "tts-1" as const;
+export type OnboardingTtsModel = "tts-1" | "tts-1-hd";
+export const DEFAULT_ONBOARDING_TTS_MODEL: OnboardingTtsModel = "tts-1";
+const TTS_RATES = Object.freeze({ "tts-1": 15, "tts-1-hd": 30 });
+export function isOnboardingTtsModel(value: unknown): value is OnboardingTtsModel {
+  return value === "tts-1" || value === "tts-1-hd";
+}
 const TTS_VOICE = "ash" as const;
 const TTS_MIME = "audio/mpeg" as const;
-const TTS_COST_PER_MILLION_CHARACTERS_USD = 30;
-const LEGACY_TTS_COST_PER_MILLION_CHARACTERS_USD = 15;
 const DEFAULT_TTS_TIMEOUT_MS = 8_000;
 const MAX_TTS_TIMEOUT_MS = 15_000;
 // The DB/Edge contract bounds base64 at 2,000,000 characters. A decoded body
@@ -165,18 +168,9 @@ export function onboardingOpeningText(
   return `${identity} Vamos continuar de onde paramos. ${resumeContext.next_action.question_pt}`;
 }
 
-export function onboardingTtsCostUsd(text: string): number {
-  const characters = [...text].length;
-  return Number((
-    characters * TTS_COST_PER_MILLION_CHARACTERS_USD / 1_000_000
-  ).toFixed(8));
-}
-
-function legacyOnboardingTtsCostUsd(text: string): number {
-  const characters = [...text].length;
-  return Number((
-    characters * LEGACY_TTS_COST_PER_MILLION_CHARACTERS_USD / 1_000_000
-  ).toFixed(8));
+export function onboardingTtsCostUsd(text: string, model: OnboardingTtsModel = DEFAULT_ONBOARDING_TTS_MODEL): number {
+  if (!isOnboardingTtsModel(model)) throw openingFailure("onboarding_tts_model_invalid", true, 0);
+  return Number(([...text].length * TTS_RATES[model] / 1_000_000).toFixed(8));
 }
 
 export function onboardingOpeningItemId(args: {
@@ -272,7 +266,8 @@ export async function synthesizeExactOnboardingText(
   text: string,
   dependencies: OnboardingTtsDependencies,
 ): Promise<ExactOnboardingAudio> {
-  const costUsd = onboardingTtsCostUsd(text);
+  const model = dependencies.model === undefined ? DEFAULT_ONBOARDING_TTS_MODEL : dependencies.model;
+  const costUsd = onboardingTtsCostUsd(text, model);
   const timeoutMs = dependencies.timeoutMs ?? DEFAULT_TTS_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
     timeoutMs > MAX_TTS_TIMEOUT_MS)
@@ -298,7 +293,7 @@ export async function synthesizeExactOnboardingText(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: TTS_MODEL,
+          model,
           voice: TTS_VOICE,
           input: text,
           response_format: "mp3",
@@ -329,7 +324,7 @@ export async function synthesizeExactOnboardingText(
       audio_sha256: audioSha256,
       mime: TTS_MIME,
       voice: TTS_VOICE,
-      tts_model: TTS_MODEL,
+      tts_model: model,
       cost_usd: costUsd,
     };
   } catch (error) {
@@ -377,8 +372,7 @@ export function openingPayloadIsInternallyValid(
   if (JSON.stringify(keys) !== JSON.stringify(expectedKeys) ||
     (!currentV2 && !legacyV1) || value.text !== expectedText ||
     value.mime !== TTS_MIME || value.voice !== TTS_VOICE ||
-    (currentV2 ? value.tts_model !== TTS_MODEL :
-      value.tts_model !== LEGACY_TTS_MODEL) ||
+    (!isOnboardingTtsModel(value.tts_model) || (legacyV1 && value.tts_model !== "tts-1")) ||
     (legacyV1 && expectedResumeContext !== undefined &&
       expectedResumeContext !== null) ||
     (currentV2 && !(
@@ -397,9 +391,7 @@ export function openingPayloadIsInternallyValid(
     typeof value.audio_base64 !== "string" ||
     typeof value.audio_sha256 !== "string" ||
     typeof value.cost_usd !== "number" ||
-    value.cost_usd !== (currentV2
-      ? onboardingTtsCostUsd(expectedText)
-      : legacyOnboardingTtsCostUsd(expectedText))) return false;
+    value.cost_usd !== onboardingTtsCostUsd(expectedText, value.tts_model as OnboardingTtsModel)) return false;
   let audio: Buffer;
   try {
     audio = Buffer.from(value.audio_base64, "base64");

@@ -247,18 +247,18 @@ test("real onboarding RPC approval reloads into servicePolicies and quote_price"
 
     const resumedV2Request = randomUUID();
     const resumedV2Call = randomUUID();
+    const resumedV2Text = "Oi! Aqui é o Ligou, agente de inteligência artificial da Runtime Onboarding Integration. Vamos continuar de onde paramos. Qual é a área atendida?";
     const resumedV2Payload = {
       version: 2,
       item_id: `lgo-${"d".repeat(28)}`,
-      text:
-        "Oi! Aqui é o Ligou, agente de inteligência artificial da Runtime Onboarding Integration. Vamos continuar de onde paramos. Qual é a área atendida?",
+      text: resumedV2Text,
       text_sha256: "c".repeat(64),
       audio_base64: "SUQzBA==",
       audio_sha256: "d".repeat(64),
       mime: "audio/mpeg",
       voice: "ash",
       tts_model: "tts-1-hd",
-      cost_usd: 0.004,
+      cost_usd: Number(([...resumedV2Text].length * 30 / 1e6).toFixed(8)),
       resume_context: {
         coverage_receipt_id: randomUUID(),
         revision: 1,
