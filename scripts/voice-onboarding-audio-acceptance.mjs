@@ -993,6 +993,7 @@ function alignedQuestion(words, phrase) {
   const actual = words.map(word => normalize(word.word));
   for (let index = 0; index <= actual.length - target.length; index++) {
     if (target.every((word, offset) => word === actual[index + offset] && (words[index + offset].probability ?? 0) >= 0.5)) return { offsetMs: words[index].start * 1000,
+      endOffsetMs: words[index].end * 1000,
       matchedWords: words.slice(index, index + target.length).map(word => word.word).join(''), evidence: 'local_whisper_word_alignment' };
   }
   return null;
@@ -1004,9 +1005,53 @@ function firstVerifiedPhrase(words, expectedText) {
     if ((words[index].probability ?? 0) < 0.5 || (words[index + 1].probability ?? 0) < 0.5) continue;
     const first = normalize(words[index].word), second = normalize(words[index + 1].word);
     if (expected.some((word, offset) => word === first && expected[offset + 1] === second)) return { offsetMs: words[index].start * 1000,
+      endOffsetMs: words[index].end * 1000,
       matchedWords: words[index].word + words[index + 1].word, evidence: 'local_asr_matches_known_speech_prefix' };
   }
   return null;
+}
+
+function recordingSample(recording, events) {
+  if (!(recording.bytes > 0) || recording.nonzeroObserved !== true || !Number.isSafeInteger(recording.outputIndex)
+    || !recording.actionId || !Number.isFinite(recording.startedBrowserMs) || !Number.isFinite(recording.stoppedBrowserMs)) return null;
+  const streamed = recording.captureEvidence === 'actual_remote_stream_with_observed_output_gate';
+  if (streamed ? !recording.responseId || !recording.dispatchId : recording.captureEvidence !== 'actual_html_media_capture') return null;
+  return (events ?? []).filter(event => event.event === 'output_first_nonzero_sample'
+    && event.evidence === (streamed ? 'remote_webrtc_media' : 'media_element_capture')
+    && event.outputIndex === recording.outputIndex && event.actionId === recording.actionId
+    && (event.responseId ?? null) === (recording.responseId ?? null) && (event.dispatchId ?? null) === (recording.dispatchId ?? null)
+    && Number.isFinite(event.browserMs) && event.browserMs >= recording.startedBrowserMs && event.browserMs <= recording.stoppedBrowserMs)
+    .toSorted((left, right) => left.browserMs - right.browserMs)[0] ?? null;
+}
+
+export function alignCapturedWords(recording, events, waveform, words, questionPt) {
+  const firstPhrase = firstVerifiedPhrase(words, recording.expectedText);
+  const question = alignedQuestion(words, questionPhrase(questionPt));
+  const alignment = { firstAsrTokenOffsetMs: words.length ? words[0].start * 1000 : null, firstVerifiedPhrase: firstPhrase,
+    browserClock: { available: false, reason: 'matching_capture_sample_or_waveform_missing' },
+    firstIntelligibleBrowserMs: null, actionableQuestion: null };
+  const sample = recordingSample(recording, events);
+  if (!sample || !Number.isFinite(waveform?.signalFirstMs) || waveform.signalFirstMs < 0
+    || !Number.isFinite(waveform.signalLastMs) || waveform.signalLastMs < waveform.signalFirstMs
+    || !Number.isFinite(waveform.durationMs) || waveform.durationMs < waveform.signalLastMs) return alignment;
+  // Recorder start is not speech start. ASR may assign a word to leading
+  // silence. Anchor to the same capture's observed signal without moving the
+  // recording clock earlier; polling, codec and ASR timing remain estimates.
+  const originBrowserMs = Math.max(recording.startedBrowserMs, sample.browserMs - waveform.signalFirstMs);
+  alignment.browserClock = { available: true, method: 'conservative_captured_media_alignment',
+    observedFirstNonzeroBrowserMs: sample.browserMs, waveformSignalFirstMs: waveform.signalFirstMs,
+    waveformSignalLastMs: waveform.signalLastMs, waveformDurationMs: waveform.durationMs,
+    waveformSha256: waveform.sha256, waveformSignalThreshold: waveform.signalThreshold,
+    originBrowserMs, originAdjustmentMs: originBrowserMs - recording.startedBrowserMs };
+  const browserTime = phrase => {
+    if (!phrase || phrase.endOffsetMs < waveform.signalFirstMs || phrase.offsetMs > waveform.signalLastMs) return null;
+    const time = originBrowserMs + Math.max(phrase.offsetMs, waveform.signalFirstMs);
+    return Number.isFinite(time) && time <= recording.stoppedBrowserMs ? time : null;
+  };
+  alignment.firstIntelligibleBrowserMs = browserTime(firstPhrase);
+  const questionMs = browserTime(question);
+  alignment.actionableQuestion = questionMs === null ? null : { ...question, browserMs: questionMs };
+  return alignment;
 }
 
 export async function alignRecordings(result, plan) {
@@ -1025,16 +1070,17 @@ export async function alignRecordings(result, plan) {
     if (!(recording.bytes > 0) || !recording.nonzeroObserved) continue;
     const wav = path.join(directory, `${path.basename(recording.filename, '.webm')}.wav`);
     const transcriptFile = path.join(directory, `${path.basename(wav, '.wav')}.json`);
-    let recordingHash;
+    let recordingHash, waveform;
     try {
       const bytes = await readFile(path.join(result.artifactDirectory, recording.filename));
       recordingHash = sha(bytes);
       if (bytes.length !== recording.bytes || (recording.sha256 && recording.sha256 !== recordingHash)) throw new Error('recording_changed');
       await localCommand('/opt/homebrew/bin/ffmpeg', ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i',
         path.join(result.artifactDirectory, recording.filename), '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav]);
-      if (wavSignal(await readFile(wav), 16000).signalFirstMs === null) throw new Error('silent_recording');
+      waveform = wavSignal(await readFile(wav), 16000);
+      if (waveform.signalFirstMs === null) throw new Error('silent_recording');
     } catch { recording.alignment = { available: false, reason: 'recording_missing_changed_or_undecodable' }; continue; }
-    const entry = { recording, wav, transcriptFile, recordingHash };
+    const entry = { recording, wav, transcriptFile, recordingHash, waveform };
     eligible.push(entry);
     let cached;
     try { cached = JSON.parse(await readFile(transcriptFile, 'utf8')); } catch {}
@@ -1053,7 +1099,7 @@ export async function alignRecordings(result, plan) {
       { timeoutMs: Math.max(120_000, pending.length * 90_000), maxBytes: 20_000_000 });
     } catch { for (const entry of pending) entry.failed = true; }
   }
-  for (const { recording, transcriptFile, recordingHash, failed } of eligible) {
+  for (const { recording, transcriptFile, recordingHash, waveform, failed } of eligible) {
     if (failed) { recording.alignment = { available: false, reason: 'local_alignment_failed' }; continue; }
     let transcript;
     try {
@@ -1065,18 +1111,14 @@ export async function alignRecordings(result, plan) {
       .filter(word => normalize(word.word) && Number.isFinite(word.start) && Number.isFinite(word.end) && word.start >= 0 && word.end >= word.start);
     if (!words.length) { recording.alignment = { available: false, reason: 'no_aligned_words' }; continue; }
     const item = matchQuestion(plan, { text: recording.expectedText });
-    const question = alignedQuestion(words, questionPhrase(item?.questionPt));
-    const firstPhrase = firstVerifiedPhrase(words, recording.expectedText);
-    recording.alignment = { available: true, sourceRecordingSha256: recordingHash, transcript: transcript.text, firstAsrTokenOffsetMs: words[0].start * 1000,
-      firstVerifiedPhrase: firstPhrase,
-      firstIntelligibleBrowserMs: firstPhrase ? recording.startedBrowserMs + firstPhrase.offsetMs : null,
-      actionableQuestion: question ? { ...question, browserMs: recording.startedBrowserMs + question.offsetMs } : null,
-      limitation: 'Word timestamps estimate intelligibility in captured browser output; physical speaker audibility and human comprehension require live acceptance.' };
-    status.alignedRecordingCount++;
+    const captured = alignCapturedWords(recording, result.events, waveform, words, item?.questionPt);
+    recording.alignment = { available: captured.browserClock.available, sourceRecordingSha256: recordingHash, transcript: transcript.text, ...captured,
+      limitation: 'Conservative estimate of recognizable speech in captured browser media, bounded by waveform onset and its matching browser sample observation. Recorder, codec, polling and ASR timing are not a calibrated physical speaker clock; audibility and comprehension require live acceptance.' };
+    if (recording.alignment.available) status.alignedRecordingCount++;
   }
   status.available = status.alignedRecordingCount > 0;
   return { ...status, allRecordingsAligned: status.available && status.alignedRecordingCount === status.recordingCount,
-    ...(!status.available ? { reason: 'no_recordings_with_aligned_words' } : {}) };
+    ...(!status.available ? { reason: 'no_recordings_with_browser_aligned_words' } : {}) };
 }
 
 export function summarizeAttempt(result) {
@@ -1085,10 +1127,24 @@ export function summarizeAttempt(result) {
   const nextStartMs = result.events.find(event => event.event === 'start_clicked' && event.browserMs > startMs)?.browserMs ?? Infinity;
   const afterStart = event => Number.isFinite(startMs) && event.browserMs >= startMs && event.browserMs < nextStartMs;
   const app = name => result.events.find(event => afterStart(event) && event.event === 'application_timing' && event.timingEvent === name);
-  const alignedRecordings = result.recordings.filter(row => row.bytes > 0 && row.nonzeroObserved && row.alignment?.available === true);
+  const alignedRecordings = result.recordings.filter(row => {
+    const clock = row.alignment?.browserClock, sample = recordingSample(row, result.events);
+    return row.alignment?.available === true && row.alignment.sourceRecordingSha256 === row.sha256 && sample
+      && clock?.available === true && clock.method === 'conservative_captured_media_alignment'
+      && clock.observedFirstNonzeroBrowserMs === sample.browserMs && Number.isFinite(clock.waveformSignalFirstMs)
+      && clock.waveformSignalFirstMs >= 0 && clock.originBrowserMs === Math.max(row.startedBrowserMs, sample.browserMs - clock.waveformSignalFirstMs);
+  }).map(row => {
+    const clock = row.alignment.browserClock;
+    const bounded = time => Number.isFinite(time) && time >= Math.max(clock.observedFirstNonzeroBrowserMs, row.startedBrowserMs + clock.waveformSignalFirstMs)
+      && time <= row.stoppedBrowserMs;
+    return { ...row, alignment: { ...row.alignment,
+      firstIntelligibleBrowserMs: bounded(row.alignment.firstIntelligibleBrowserMs) ? row.alignment.firstIntelligibleBrowserMs : null,
+      actionableQuestion: bounded(row.alignment.actionableQuestion?.browserMs) ? row.alignment.actionableQuestion : null } };
+  });
   const recording = alignedRecordings.find(row => row.startedBrowserMs >= startMs && row.startedBrowserMs < nextStartMs && row.alignment.firstIntelligibleBrowserMs);
   const question = alignedRecordings.find(row => row.startedBrowserMs >= startMs && row.startedBrowserMs < nextStartMs && row.alignment.actionableQuestion);
-  const harnessSample = result.events.find(event => afterStart(event) && event.event === 'output_first_nonzero_sample');
+  const harnessSample = result.events.find(event => afterStart(event) && event.event === 'output_first_nonzero_sample'
+    && ['media_element_capture','remote_webrtc_media'].includes(event.evidence));
   const appSample = result.events.find(event => afterStart(event) && event.event === 'application_timing'
     && event.timingEvent === 'speech_first_nonzero_sample' && ['media_element_capture','remote_webrtc_media'].includes(event.evidence));
   const firstSample = harnessSample ?? appSample;
@@ -1123,6 +1179,7 @@ export function summarizeAttempt(result) {
     firstNonzeroSampleHandlerRelativeMs: appSample?.sourceElapsedMs ?? null,
     startToFirstIntelligibleAudioMs: difference(recording?.alignment?.firstIntelligibleBrowserMs, startMs),
     startToFirstActionableQuestionMs: difference(question?.alignment?.actionableQuestion?.browserMs, startMs),
+    audioTimingEvidence: alignedRecordings.length ? 'conservative_captured_media_alignment' : null, physicalSpeakerVerified: false,
     startupIncludesPermissionWaiting: true, turns, cleanupConfirmed: result.cleanup?.clean === true,
     backendTimingLimitation: 'Join server monotonic stage durations using callId separately; browser and server wall clocks are never subtracted.' };
 }
@@ -1488,8 +1545,14 @@ async function selfTest(options) {
   noCapture.events.at(-1).evidence = 'html_media_playing';
   assert.equal(summarizeAttempt(noCapture).startToFirstNonzeroCapturedSampleMs, null);
   const capturedTiming = structuredClone(timingEvidence);
-  capturedTiming.events.push({ event: 'output_first_nonzero_sample', browserMs: 1190 });
-  Object.assign(capturedTiming.recordings[0], { bytes: 500, nonzeroObserved: true });
+  capturedTiming.events.push({ event: 'output_first_nonzero_sample', browserMs: 1190, outputIndex: 1, actionId: 'speech-1', evidence: 'media_element_capture' });
+  const capturedRow = Object.assign(capturedTiming.recordings[0], { bytes: 500, nonzeroObserved: true, outputIndex: 1, actionId: 'speech-1',
+    sha256: 'a'.repeat(64), captureEvidence: 'actual_html_media_capture', stoppedBrowserMs: 2000, expectedText: 'Oi aqui' });
+  capturedRow.alignment = { available: true, sourceRecordingSha256: capturedRow.sha256,
+    ...alignCapturedWords(capturedRow, capturedTiming.events, { signalFirstMs: 100, signalLastMs: 800, durationMs: 900 },
+      [{ word: 'Oi', start: 0.2, end: 0.25, probability: 1 }, { word: 'aqui', start: 0.25, end: 0.3, probability: 1 },
+        ...['Quais', 'cidades', 'exatas', 'sua'].map((word, index) => ({ word, start: 0.3 + index * 0.1, end: 0.4 + index * 0.1, probability: 1 }))],
+      'Quais cidades exatas sua empresa atende?') };
   const verifiedTiming = summarizeAttempt(capturedTiming);
   assert.equal(verifiedTiming.startToFirstNonzeroCapturedSampleMs, 1090);
   assert.equal(verifiedTiming.firstNonzeroSampleObserver, 'harness_media_capture');

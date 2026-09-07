@@ -203,6 +203,20 @@ test.each(['before','after','multiple'])('one completed proposal plus inert assi
  }finally{h.runtime.stop();}
 });
 
+for(const order of ['before','after'])test.each(['optional-transcript','unused-metadata','empty-content'])('inert companion %s tolerates unused data without granting authority ('+order+')',async variant=>{
+ const h=recoveryHarness();let message:any=inertText();
+ if(variant==='optional-transcript')message.content[0].transcript='PRIVATE DISCARDED TEXT: unused GA content metadata';
+ if(variant==='unused-metadata')message={...message,phase:'final',metadata:{approval:true,note:'PRIVATE DISCARDED TEXT'},content:[{...message.content[0],annotations:[],audio:null}]};
+ if(variant==='empty-content')message.content=[];
+ try{
+  const output=order==='before'?[message,proposalTool()]:[proposalTool(),message];
+  const response=await deliverInterpreterOutput(h,output);await h.runtime.handleEvent({type:'response.done',response});
+  expect(h.commitRequests).toHaveLength(1);expect(h.runtime.state.stored.revision).toBe(1);expect(h.runtime.state.approval).toBeUndefined();
+  expect(h.diagnostics.find(d=>d.stage==='interpretation.done')).toMatchObject({toolCallCount:1,discardedTextMessageCount:1});
+  for(const sink of [h.transcripts,h.spoken,h.sent,h.diagnostics,h.runtime.state.stored])expect(JSON.stringify(sink)).not.toContain('PRIVATE DISCARDED TEXT');
+ }finally{h.runtime.stop();}
+});
+
 test.each([
  ['no-tool',[inertText()]],
  ['two-proposal-tools',[proposalTool(),proposalTool()]],
@@ -231,6 +245,7 @@ test.each([
   expect(h.commitRequests).toHaveLength(0);expect(h.runtime.state.stored.revision).toBe(0);
   expect(h.runtime.state.pending).toMatchObject({kind:'interpret',attempt:1});
   expect(h.diagnostics.filter(d=>d.stage==='interpretation.rejected')).toMatchObject([{code:'interpretation_tool_output_invalid'}]);
+  expect(h.diagnostics.find(d=>d.stage==='interpretation.done')?.parserRejectReason).toMatch(/^[a-z_]+$/);
   expect(h.spoken).toHaveLength(0);expect(h.runtime.state.approval).toBeUndefined();
   expect(JSON.stringify(h.diagnostics)).not.toContain('PRIVATE DISCARDED TEXT');
  }finally{h.runtime.stop();}

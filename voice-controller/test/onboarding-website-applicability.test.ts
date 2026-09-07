@@ -3,9 +3,10 @@ import fixture from "./fixtures/foghorn-website-first-voice.json";
 import { buildWebsiteAgendaSeeds } from "../src/onboarding-agenda-seed.ts";
 import { applyVerifiedOwnerTurn, createOnboardingAgenda, getAgendaAction, type AgendaProposal, type OnboardingAgenda } from "../src/onboarding-agenda.ts";
 import { validateWebsiteAnswerApplicability } from "../src/onboarding-website-applicability.ts";
-import { createWebsiteAgendaCoordinator, parseWebsiteInterpretation, reduceWebsiteAgenda, type WebsiteAgendaCommand, type WebsiteAgendaEvent } from "../src/onboarding-agenda-coordinator.ts";
+import { buildWebsiteOpeningAction, createWebsiteAgendaCoordinator, parseWebsiteInterpretation, reduceWebsiteAgenda, type WebsiteAgendaCommand, type WebsiteAgendaEvent } from "../src/onboarding-agenda-coordinator.ts";
 import { onboardingAgendaDigest, type StoredWebsiteInterview } from "../src/onboarding-agenda-store.ts";
 import type { CoverageSnapshot } from "../src/onboarding-coverage.ts";
+import type { StreamAuthorization } from "../src/onboarding-stream.ts";
 
 const { tenant_id: _tenant, ...draftReadback } = fixture.draft_row;
 const projection = buildWebsiteAgendaSeeds({ draftReadback, initialCoverage: fixture.initial_coverage.snapshot as CoverageSnapshot });
@@ -24,11 +25,96 @@ function at(id: string): OnboardingAgenda {
   return agenda;
 }
 const answer = (itemId: string, relatedItemIds: string[] = []): AgendaProposal => ({ kind: "answer", itemId, relatedItemIds });
+const recordedStreamingTerritory = "Hum, olha, atendi só novato, San Rafael e Petaluma, nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?";
 function checked(agenda: OnboardingAgenda, text: string, proposal: AgendaProposal) {
   return validateWebsiteAnswerApplicability({ agenda, currentItemId: getAgendaAction(agenda).itemId!, ownerTranscript: text, proposal });
 }
 
 describe("verified owner answer applicability", () => {
+  test("the recorded streaming ASR resolves only the two territory questions and preserves exact evidence", () => {
+    const item = byRef("area.coverage"), agenda = at(item.id);
+    const related = "92b3f78b-12b9-4f1d-81f2-db03bc2c0732";
+    expect(item.relatedItemIds).toEqual([related]);
+    const proposal = checked(agenda, recordedStreamingTerritory, answer(item.id, [related]));
+    const result = applyVerifiedOwnerTurn(agenda, { type: "verified_owner_turn", binding, turnId: "recorded-stream-territory", text: recordedStreamingTerritory, proposal });
+    expect(result.accepted).toBe(true);
+    const changed = result.agenda.items.filter(target => target.evidence.at(-1)?.turnId === "recorded-stream-territory");
+    expect(changed.map(target => target.id)).toEqual([item.id, related]);
+    expect(changed.every(target => target.status === "answered" && target.evidence.at(-1)?.text === recordedStreamingTerritory)).toBe(true);
+    expect(result.action?.itemId).toBe("ff9fa80b-12d5-4afa-85e2-a17a937aceca");
+    for (const field of ["area.out_of_area_policy", "authority.out_of_area"]) {
+      expect(result.agenda.items.find(target => target.coverageRefs.includes(field))!.status).toBe("open");
+      expect(() => checked(agenda, recordedStreamingTerritory, answer(item.id, [related, byRef(field).id]))).toThrow("website_applicability_target_not_eligible");
+    }
+  });
+
+  test("the streaming coordinator persists the exact territory answer with empty facts without an interpreter retry", () => {
+    const item = byRef("area.coverage"), agenda = at(item.id);
+    const stored: StoredWebsiteInterview = { agenda, revision: agenda.revision, storeVersion: 0, digest: onboardingAgendaDigest(agenda), receiptId: "receipt", nextAction: getAgendaAction(agenda), state: "unfinished", replayed: false };
+    const id = (n: number) => `79000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    const openingStream: StreamAuthorization = { schema: "onboarding.stream.v1", action: buildWebsiteOpeningAction(stored, "Foghorn Air"), dispatchId: id(1), receiptId: id(2) };
+    let state = createWebsiteAgendaCoordinator(stored, { nowMs: 0, openingAction: openingStream.action, openingStream });
+    let commands: WebsiteAgendaCommand[] = [];
+    let nowMs = 1;
+    const event = (value: Record<string, unknown>) => { const result = reduceWebsiteAgenda(state, { ...value, nowMs: nowMs++ } as WebsiteAgendaEvent); state = result.state; commands = result.commands; };
+    event({ type: "stream.played", actionId: openingStream.action.actionId, dispatchId: openingStream.dispatchId, status: "played", responseId: "opening-response", itemId: "opening-item", generationReceiptId: id(3), playoutReceiptId: id(4), receiptId: id(5) });
+    event({ type: "owner.transcript", providerItemId: "recorded-stream-territory", text: recordedStreamingTerritory });
+    const record = commands.find(command => command.type === "record_owner_turn") as Extract<WebsiteAgendaCommand, { type: "record_owner_turn" }>;
+    event({ type: "owner_turn.recorded", requestId: record.requestId, providerItemId: record.providerItemId, turnId: record.turnId, text: recordedStreamingTerritory });
+    const interpret = commands.find(command => command.type === "interpret_owner_turn") as Extract<WebsiteAgendaCommand, { type: "interpret_owner_turn" }>;
+    event({ type: "interpretation.created", requestId: interpret.requestId, responseId: "territory-response" });
+    event({ type: "interpretation.completed", requestId: interpret.requestId, responseId: "territory-response", turnId: interpret.turnId, itemId: interpret.itemId, digest: interpret.digest, result: { proposal: answer(item.id, [...item.relatedItemIds]), facts: [] } });
+    const persist = commands.find(command => command.type === "persist_agenda") as Extract<WebsiteAgendaCommand, { type: "persist_agenda" }>;
+    expect(persist).toBeDefined();
+    expect(persist.facts).toEqual([]);
+    expect(persist.ownerTranscript).toBe(recordedStreamingTerritory);
+    expect(persist.nextAction.itemId).toBe("ff9fa80b-12d5-4afa-85e2-a17a937aceca");
+    expect(commands.some(command => ["interpret_owner_turn", "persist_approval", "terminate_session"].includes(command.type))).toBe(false);
+    expect(state.stored.agenda).toEqual(agenda); // Progress waits for the actual commit receipt.
+  });
+
+  test.each([
+    "Atendi somente Recife e Olinda. Fora dessas cidades, não é para atender.",
+    "Eu atendi apenas Santos e Guarujá. Quando chegar um pedido fora, será somente com minha autorização explícita.",
+    "Olha, atendi só Curitiba e Pinhais. Se surgir alguma demanda fora, é apenas com aprovação explícita do proprietário.",
+  ])("past-tense ASR needs an explicit present or future outside-area restriction: %s", text => {
+    const item = byRef("area.coverage");
+    expect(checked(at(item.id), text, answer(item.id, [...item.relatedItemIds]))).toEqual(answer(item.id, [...item.relatedItemIds]));
+  });
+
+  test.each([
+    "Atendi só Recife e Olinda.",
+    "Atendi só Recife e Olinda. Nada além dessas duas.",
+    "Ontem atendi só Recife e Olinda. Se chegar algo fora, é só com minha aprovação.",
+    "Atendi só Recife e Olinda no ano passado. Fora dessas cidades, não é para atender.",
+    "Atendi só Recife e Olinda. Fora dessas cidades, era só com minha aprovação.",
+    "Não atendi só Recife e Olinda. Se chegar algo fora, é só com minha aprovação.",
+    "Eu nunca atendi só Recife e Olinda. Fora dessas cidades, não é para atender.",
+    "Atendi só Recife e Olinda. Talvez essa seja nossa área. Se chegar algo fora, é só com minha aprovação.",
+    "Atendi só Recife e Olinda. Não tenho certeza da área atual. Se chegar algo fora, é só com minha aprovação.",
+    "Atendi só Recife e Olinda. Se chegar algo fora, não é só com minha aprovação.",
+    "Atendi só Recife e Olinda. Se chegar algo fora, é só com minha aprovação?",
+    "O site diz: “Atendi só Recife e Olinda”. Fora dessas cidades, não é para atender.",
+  ])("historical, negated, uncertain or quoted coverage cannot close a related question: %s", text => {
+    const item = byRef("area.coverage"), agenda = at(item.id);
+    const before = JSON.stringify(agenda);
+    expect(() => checked(agenda, text, answer(item.id, [...item.relatedItemIds]))).toThrow();
+    expect(JSON.stringify(agenda)).toBe(before);
+  });
+
+  test.each([
+    "Quando eu estiver fora, será somente com minha autorização explícita.",
+    "Se o gerente estiver fora, é só com aprovação explícita do dono.",
+    "Quando chegar o gerente fora, será somente com minha autorização explícita.",
+  ])("staff availability is not an outside-territory policy: %s", condition => {
+    const item = byRef("area.coverage"), agenda = at(item.id);
+    const before = JSON.stringify(agenda);
+    expect(() => checked(agenda, `Atendi só Recife e Olinda. ${condition}`, answer(item.id, [...item.relatedItemIds])))
+      .toThrow("website_applicability_owner_evidence_missing");
+    expect(agenda.items.filter(target => item.relatedItemIds.includes(target.id)).every(target => target.status === "open" && target.evidence.length === 0)).toBe(true);
+    expect(JSON.stringify(agenda)).toBe(before);
+  });
+
   test('the September 6 territory answer can resolve related territory gaps despite its polite combinado tag',()=>{
     const item=byRef('area.coverage'),agenda=at(item.id);
     const text='Olha, atende só Novato, San Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?';

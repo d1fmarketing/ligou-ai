@@ -70,6 +70,24 @@ function explicitOutsidePolicy(text: string): boolean {
     (/\bnao (?:e atendido|sao atendidos|atendemos|aceitamos)\b/.test(text) || /\b(?:eu aprove|minha aprovacao|aprovacao do dono)\b/.test(text)) &&
     /\b(?:excecao|excecoes|nunca|nenhuma excecao|sem excecoes)\b/.test(text);
 }
+function explicitTerritoryCoverage(text: string): boolean {
+  if (/\b(?:atendemos|atende|atendimento)\b/.test(text) && /\b(?:somente|so|apenas|cidades)\b/.test(text)) return true;
+  // A past-tense ASR inflection alone describes past work. Accept it for the
+  // related coverage question only when a current/future outside-area rule
+  // reaffirms the exclusive scope. This never answers the authority question.
+  const sentences = text.replace(/^(?:(?:uhum|aham|hum|ah|entendi|olha)[.!?, ]+)*/, "").split(/[.;\n]/).map(sentence => sentence.trim()).filter(Boolean);
+  const declaration = sentences[0] ?? "";
+  if (!/^(?:eu )?atendi (?:somente|so|apenas) \S/.test(declaration) ||
+    /\b(?:ontem|anteontem|antigamente|anteriormente|antes|no passado|na epoca|naquele tempo|no ano passado|no mes passado|na semana passada|em \d{4})\b|\bha [a-z\d ]{1,30}\b(?:dias?|semanas?|meses?|anos?)\b/.test(declaration)) return false;
+  return sentences.slice(1).some(sentence => {
+    const policy = sentence.match(/^(fora (?:dessas cidades|destas cidades|da area|da cobertura)|(?:se|quando) [^,.;\n]{1,100}\bfora)\s*,?\s+(.+)$/);
+    if (!policy || /\b(?:nao|nunca|jamais)\b/.test(policy[1]!)) return false;
+    // An unqualified "fora" needs an incoming request/event subject to link it
+    // to the listed territory; a person's absence supplies no coverage evidence.
+    if (/^(?:se|quando)\b/.test(policy[1]!) && !/^(?:se|quando) (?:pintar|surgir|aparecer|chegar|houver) (?:(?:(?:um|uma|algum|alguma) )?(?:pedido|demanda|solicitacao)|algo|alguma coisa) fora$/.test(policy[1]!)) return false;
+    return /^(?:nao (?:e|sera) (?:pra|para) atender|(?:e|sera) (?:somente|so|apenas) com (?:a )?(?:minha (?:aprovacao|autorizacao)(?: (?:explicita|expressa))?|(?:aprovacao|autorizacao)(?: (?:explicita|expressa))? (?:do dono|do proprietario)))$/.test(policy[2]!);
+  });
+}
 function negotiationRestricted(text: string): boolean {
   return /\bnao (?:negociamos|negociar|ha negociacao|damos descontos|concedemos descontos)\b|\bsem (?:negociacao|descontos?)\b|\bnao negociave(?:l|is)\b/.test(text) ||
     clauses(text).some(clause => namedActions["authority.negotiate_floor"].test(clause) && ownerRequired(clause));
@@ -136,7 +154,7 @@ function supportedTarget(current: AgendaSeed, target: AgendaSeed, text: string):
     if (serviceFamilies.has(field)) return familyContent(field, text);
     if (field.startsWith("authority.") || field === "emergency.fee_authority") return privateRestriction(field, text);
     if (field === "area.out_of_area_policy") return explicitOutsidePolicy(text);
-    if (field === "area.coverage" || (field.startsWith("discovery.owner_question.") && /limites|cidades|territorio/.test(normalized(target.questionPt)))) return /\b(?:atendemos|atende|atendimento)\b/.test(text) && /\b(?:somente|so|apenas|cidades)\b/.test(text);
+    if (field === "area.coverage" || (field.startsWith("discovery.owner_question.") && /limites|cidades|territorio/.test(normalized(target.questionPt)))) return explicitTerritoryCoverage(text);
     return false;
   });
 }

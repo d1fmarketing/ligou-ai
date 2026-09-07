@@ -13,7 +13,7 @@ import {requestResponse,type CoordinatedLedger} from './response-coordinator.ts'
 type Interpret = Extract<WebsiteAgendaCommand,{type:"interpret_owner_turn"}>;
 type DiagnosticDetail = {code?:string;attempt?:number;durationMs?:number;effectId?:string;
   proposalKind?:AgendaProposal['kind'];factCount?:number;targetCount?:number;outputCount?:number;
-  toolCallCount?:number;discardedTextMessageCount?:number};
+  toolCallCount?:number;discardedTextMessageCount?:number;parserRejectReason?:string};
 interface WebsiteInterviewRuntimeBase {
   prepared: PreparedWebsiteInterview;
   openingAction: OnboardingSpeechAction;
@@ -77,39 +77,42 @@ export async function prepareWebsiteStreamOpening(prepared:PreparedWebsiteInterv
  * completed tool can propose an effect; inert text is discarded at this boundary
  * and never reaches transcripts, captions, speech generation or commands. */
 function websiteProposalOutput(output:unknown,toolName:string):{
-  arguments?:string;toolCallCount?:number;discardedTextMessageCount?:number;
+  arguments?:string;toolCallCount?:number;discardedTextMessageCount?:number;parserRejectReason?:string;
 }{
-  if(!Array.isArray(output) || output.length<1 || output.length>5)return {};
+  if(!Array.isArray(output) || output.length<1 || output.length>5)return {parserRejectReason:'item_count'};
   const object=(value:unknown):value is Record<string,unknown>=>Boolean(value) && typeof value==='object' && !Array.isArray(value);
+  const nonempty=(value:unknown)=>value!==undefined&&value!==null&&value!==''&&!(Array.isArray(value)&&value.length===0);
+  const embeddedTool=(value:Record<string,unknown>)=>['tool_calls','tool_call','function_calls','function_call'].some(key=>nonempty(value[key]));
   const toolCallCount=output.filter(item=>object(item) && item.type==='function_call').length;
   let discardedTextMessageCount=0,textBytes=0,args:string|undefined;
   const counts=()=>({toolCallCount,discardedTextMessageCount});
+  const reject=(parserRejectReason:string)=>({...counts(),parserRejectReason});
   // Preserve the existing 64 KiB proposal boundary as a whole-output bound;
   // at most four ignored messages/parts per message and 16 KiB combined text.
-  try{if(Buffer.byteLength(JSON.stringify(output))>65_536)return counts();}catch{return counts();}
+  try{if(Buffer.byteLength(JSON.stringify(output))>65_536)return reject('serialized_output_limit');}catch{return reject('serialization_failed');}
   for(const item of output){
-    if(!object(item))return counts();
+    if(!object(item))return reject('item_shape');
     if(item.type==='function_call'){
       if(item.name!==toolName || item.status!=='completed' || typeof item.arguments!=='string'
-        || Buffer.byteLength(item.arguments)>65_536)return counts();
+        || Buffer.byteLength(item.arguments)>65_536)return reject('tool_contract');
       args=item.arguments;
       continue;
     }
-    if(item.type!=='message' || item.role!=='assistant'
-      || Object.keys(item).some(key=>!['type','role','content','id','object','status'].includes(key))
-      || (item.id!==undefined && (typeof item.id!=='string' || item.id.length>512))
-      || (item.object!==undefined && item.object!=='realtime.item')
-      || (item.status!==undefined && !['completed','incomplete','in_progress'].includes(item.status as string))
-      || !Array.isArray(item.content) || item.content.length<1 || item.content.length>4)return counts();
+    if(item.type!=='message' || item.role!=='assistant')return reject('message_role_or_type');
+    if(!Array.isArray(item.content)||item.content.length>4)return reject('content_shape');
+    if(embeddedTool(item))return reject('embedded_tool');
+    // Only the text payload's kind and bounds matter here. Optional provider
+    // metadata is discarded with the message; none of it can propose an effect.
     for(const part of item.content){
-      if(!object(part) || part.type!=='output_text' || typeof part.text!=='string'
-        || Object.keys(part).some(key=>!['type','text'].includes(key)))return counts();
+      if(!object(part)||part.type!=='output_text'||typeof part.text!=='string')return reject('text_part_contract');
+      if(embeddedTool(part))return reject('embedded_tool');
+      if(['audio','audio_base64'].some(key=>nonempty(part[key])))return reject('hidden_audio');
       textBytes+=Buffer.byteLength(part.text);
-      if(textBytes>16_384)return counts();
+      if(textBytes>16_384)return reject('text_limit');
     }
     discardedTextMessageCount++;
   }
-  return {...counts(),...(toolCallCount===1?{arguments:args}:{})};
+  return toolCallCount===1?{...counts(),arguments:args}:reject('tool_count');
 }
 
 export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfig,deps:WebsiteInterviewRuntimeDependencies) {
@@ -746,6 +749,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
         ...(timing?{durationMs:Math.max(0,now()-timing.requestedAtMs)}:{}),
         ...(Array.isArray(output)?{outputCount:output.length}:{}),
         ...(selectedOutput.toolCallCount!==undefined?{toolCallCount:selectedOutput.toolCallCount,discardedTextMessageCount:selectedOutput.discardedTextMessageCount}:{}),
+        ...(selectedOutput.parserRejectReason?{parserRejectReason:selectedOutput.parserRejectReason}:{}),
         ...(typeof kind==='string' && ['answer','clarification','defer','not_applicable','off_scope','correction'].includes(kind)?{proposalKind:kind as AgendaProposal['kind']}:{}),
         ...(Array.isArray(shape?.facts)?{factCount:shape.facts.length}:{})});
       if(!result)await dispatch({type:'interpretation.failed',requestId:command.requestId,code:rejectionCode,nowMs:now()});
