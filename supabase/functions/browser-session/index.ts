@@ -14,4 +14,6 @@ Deno.serve(createBrowserSessionHandler({
   fetch: (input, init) => globalThis.fetch(input, init),
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   now: () => Date.now(),
+  monotonic: () => performance.now(),
+  onTiming: (event) => console.log(JSON.stringify(event)),
 }));

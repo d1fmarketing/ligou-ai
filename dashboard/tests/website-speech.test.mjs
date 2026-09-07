@@ -123,6 +123,21 @@ test('stop aborts pending read and late completion produces no audio',async()=>{
   const p=speech();let resolve;const h=harness([p],{read:()=>new Promise(r=>resolve=r)});
   const done=h.player.start(p);await tick();h.player.stop();resolve(p);await assert.rejects(done);assert.equal(h.plays.length,0);assert.equal(h.sends.length,0);
 });
+test('opening readiness gates only the opening; later notices read their current speech afresh',async()=>{
+  const first=speech('overlapped-opening'),next=speech('next-after-overlap','CONFIRM_AND_ASK_NEXT',1);
+  const h=harness([first,next]);let release;
+  const opening=h.player.start(first,new Promise(resolve=>{release=resolve;}));
+  try {
+    await until(()=>h.reads.length===1);
+    assert.equal(h.plays.length,0);assert.equal(h.mics.at(-1),false);
+    h.player.handleEvent(notice(first));
+    release();await opening;
+    h.player.handleEvent(notice(next));await h.player.idle();
+    assert.deepEqual(h.reads,[first.actionId,next.actionId]);
+    assert.equal(h.plays.length,2);assert.equal(h.sends.length,2);
+    assert.deepEqual(h.captions,[{kind:'agent',text:first.text},{kind:'agent',text:next.text}]);
+  }finally{release();h.player.stop();await opening.catch(()=>{});await h.player.idle().catch(()=>{});}
+});
 test('unsafe automatic responses terminate custody even after successful opening',async()=>{
   const p=speech(),h=harness([p]);await h.player.start(p);
   const changed=structuredClone(vad);changed.session.audio.input.turn_detection.create_response=true;

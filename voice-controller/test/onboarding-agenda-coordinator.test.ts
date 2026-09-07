@@ -181,16 +181,85 @@ test("wrong response, digest, proposal and timeout cannot strand the current que
   const retry = h.last("interpret_owner_turn");
   expect(retry.attempt).toBe(1);
   h.interpret(retry, { kind: "answer", itemId: "not-current", narrative: "Posso te ajudar com propaganda?" });
-  const commit = h.last("persist_agenda");
-  expect(commit.proposal).toEqual({ kind: "clarification", itemId: "territory" });
-  h.persist(commit);
-  expect(h.state.speech?.action.kind).toBe("CLARIFY_CURRENT_GAP");
-  expect(h.state.speech?.action.text).toContain(seeds[0].questionPt);
+  expect(h.last("persist_agenda")).toBeUndefined();
+  expect(h.state.error).toBe("interpretation_exhausted");
+  expect(h.state.speech?.action.kind).toBe("SPEAK_TERMINAL_ERROR");
+  expect(h.state.speech?.action.text).toContain("falha técnica");
   expect(h.state.speech?.action.text).not.toContain("propaganda");
   h.event({ type: "interpretation.completed", requestId: retry.requestId, responseId: `response:${retry.requestId}`,
     turnId: retry.turnId, itemId: retry.itemId, digest: retry.digest, proposal: answer("territory") });
   expect(h.commands).toEqual([]);
+  expect(h.state.stored.agenda.items[0].status).toBe("open");
+});
+
+test("each advertised proposal variant permits only the fields accepted by the parser", () => {
+  const h = harness(); h.event({ type: "opening.played" });
+  const command = h.owner("schema", "Somente Novato.");
+  const schema = command.toolSchema as any;
+  const variants = schema.properties.proposal.anyOf;
+  const expected = {
+    answer: ["kind", "itemId", "relatedItemIds"],
+    clarification: ["kind", "itemId", "questionPt"],
+    defer: ["kind", "itemId"], not_applicable: ["kind", "itemId"],
+    off_scope: ["kind"], correction: ["kind", "affectedItems", "affectedCandidates"],
+  };
+  for (const [kind, allowed] of Object.entries(expected)) {
+    const variant = variants.find((entry: any) => entry.properties.kind.const === kind);
+    expect(variant, `missing discriminated ${kind} variant`).toBeDefined();
+    expect(variant.additionalProperties).toBe(false);
+    expect(Object.keys(variant.properties).sort()).toEqual(allowed.toSorted());
+    if (["answer", "defer", "not_applicable"].includes(kind)) expect(variant.properties.itemId.type).toBe("string");
+    if (kind === "clarification") expect(variant.properties.itemId.type).toEqual(["string", "null"]);
+  }
+  for (const proposal of [
+    { kind: "answer", itemId: "territory", questionPt: "Qual cidade?" },
+    { kind: "defer", itemId: "territory", relatedItemIds: [] },
+    { kind: "not_applicable", itemId: null },
+  ]) expect(coordinator.parseWebsiteInterpretation({ proposal })).toBeNull();
+});
+
+test("two unusable outputs after an acknowledgment never defer the owner's valid territory answer", () => {
+  const h = harness(); h.event({ type: "opening.played" });
+  h.persist(h.interpret(h.owner("ack", "Ah, entendi."), { kind: "clarification", itemId: "territory" }));
+  h.play();
+  const before = structuredClone(h.state.stored);
+  const text = "Hum, olha, atendi só novato, San Rafael e Petaluma, nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?";
+  const first = h.owner("valid-answer", text);
+  h.interpret(first, { kind: "answer", itemId: "territory", questionPt: "Quais cidades?" });
+  const retry = h.last("interpret_owner_turn");
+  expect(retry.attempt).toBe(1);
+  expect(retry.transcript).toBe(text);
+  h.interpret(retry, { kind: "answer", itemId: "territory", questionPt: "Quais cidades?" });
+  expect(h.state.stored).toEqual(before);
+  expect(h.state.stored.agenda.items[0].clarificationCount).toBe(1);
   expect(h.state.stored.agenda.items[0].status).toBe("awaiting_clarification");
+  expect(h.state.turns.at(-1)).toMatchObject({ text, recorded: true, processed: false });
+  expect(h.all.filter(command => command.type === "persist_agenda")).toHaveLength(1);
+  expect(h.state.error).toBe("interpretation_exhausted");
+  expect(h.last("persist_approval")).toBeUndefined();
+});
+
+test("the single interpreter retry receives a bounded reason without private error suffixes", () => {
+  const h = harness(); h.event({ type: "opening.played" });
+  const first = h.owner("repair", "Somente Novato.");
+  h.event({ type: "interpretation.failed", requestId: first.requestId,
+    code: "website_facts_typed_value_invalid:private-item-123:private owner words" });
+  const retry = h.last("interpret_owner_turn");
+  expect(retry.instructions).toContain("website_facts_typed_value_invalid");
+  expect(retry.instructions).not.toContain("private-item");
+  expect(retry.instructions).not.toContain("private owner words");
+  h.event({ type: "interpretation.failed", requestId: retry.requestId, code: "private-provider-error" });
+  expect(h.all.filter(command => command.type === "interpret_owner_turn")).toHaveLength(2);
+  expect(h.all.filter(command => command.type === "persist_agenda")).toHaveLength(0);
+  expect(h.state.error).toBe("interpretation_exhausted");
+});
+
+test.each([
+  { kind: { toString: null }, itemId: "territory" },
+  { kind: "correction", affectedItems: [{ itemId: "territory", disposition: { toString: null } }] },
+])("malformed JSON discriminants reject without throwing outside bounded recovery", proposal => {
+  expect(() => coordinator.parseWebsiteInterpretation({ proposal })).not.toThrow();
+  expect(coordinator.parseWebsiteInterpretation({ proposal })).toBeNull();
 });
 
 test.each(["Não confirmo.", "Está correto, mas mude os preços.", "Não tenho certeza se está correto.", "Está correto?", "Sim, mas mude os preços."])("model approval cannot replace explicit fresh assent: %s", text => {

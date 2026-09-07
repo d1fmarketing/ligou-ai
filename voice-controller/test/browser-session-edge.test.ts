@@ -950,3 +950,39 @@ test("declared speech contract admits fast V2 and V3 payloads without storing a 
     expect(currentClient.inserts).toHaveLength(1);expect(currentClient.inserts[0]).not.toHaveProperty("speech_contract_version");
   }
 });
+
+test("Edge startup timings distinguish nested polling from the elapsed request without private content", async () => {
+  let clock=0; const timings:any[]=[];
+  const ready={status:"ready",answer_sdp:"answer-sdp",call_id:"33333333-3333-4333-8333-333333333333",error:null,
+    opening_mode_applied:"application_tts_v1",opening_payload:PAYLOAD,onboarding_protocol_version:2};
+  currentClient=edgeClient({readyRows:[{...ready,status:"processing",answer_sdp:null,opening_payload:null},ready]});
+  const timed=buildHandler({monotonic:()=>clock,now:()=>clock,
+    fetch:async()=>{clock+=25;return Response.json({id:"owner-a"});},
+    sleep:async(ms:number)=>{clock+=ms;},onTiming:(event:any)=>timings.push(event)});
+  const response=await timed!(request({session_type:"onboarding",opening_mode_requested:"application_tts_v1",onboarding_protocol_version:2}));
+  expect(response.status).toBe(200);
+  expect(response.headers.get("Access-Control-Expose-Headers")).toContain("Server-Timing");
+  const header=response.headers.get("Server-Timing");
+  expect(header).toContain("edge_auth;dur=25");
+  expect(header).toContain("edge_wait_ready;dur=600");
+  expect(header).toContain("edge_poll_sleep;dur=600");
+  expect(header).toContain("edge_total;dur=625");
+  expect(timings).toHaveLength(1);
+  expect(timings[0]).toMatchObject({event:"voice.edge.startup",status:200,pollCount:2,firstProcessingMs:325,firstReadyMs:625});
+  expect(timings[0].durations.edge_total).toBe(625);
+  for(const secret of ["owner-token","test-secret","offer-sdp","answer-sdp","D1F Marketing",PAYLOAD.audio_base64])
+    expect(JSON.stringify(timings)).not.toContain(secret);
+  expect((await response.json()).opening_payload).toEqual(PAYLOAD);
+});
+
+test("failed timing observers cannot change owner authentication or successful startup", async () => {
+  for(const authorized of [true,false]){
+    currentClient=edgeClient();
+    const timed=buildHandler({monotonic:()=>{throw new Error("broken-clock");},
+      onTiming:()=>{throw new Error("broken-observer");},
+      fetch:async()=>Response.json(authorized?{id:"owner-a"}:{error:"denied"},{status:authorized?200:401})});
+    const response=await timed!(request({session_type:"onboarding",opening_mode_requested:"application_tts_v1",onboarding_protocol_version:2}));
+    expect(response.status).toBe(authorized?200:401);
+    expect(currentClient.inserts).toHaveLength(authorized?1:0);
+  }
+});

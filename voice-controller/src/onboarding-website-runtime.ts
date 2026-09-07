@@ -1,14 +1,16 @@
-import { createWebsiteAgendaCoordinator, reduceWebsiteAgenda, type WebsiteAgendaCommand, type WebsiteAgendaEvent, type WebsiteAgendaState } from "./onboarding-agenda-coordinator.ts";
+import { createWebsiteAgendaCoordinator, reduceWebsiteAgenda, parseWebsiteInterpretation, websiteInterpretationFailureCode, type WebsiteAgendaCommand, type WebsiteAgendaEvent, type WebsiteAgendaState } from "./onboarding-agenda-coordinator.ts";
 import { createOnboardingAgendaStore, onboardingAgendaDigest } from "./onboarding-agenda-store.ts";
 import { createInterviewEvidenceStore } from "./onboarding-interview-evidence-store.ts";
 import { synthesizeOnboardingSpeech, speechPayloadIsInternallyValid, type OnboardingSpeechAction, type OnboardingSpeechPayload } from "./onboarding-speech.ts";
 import type { PreparedWebsiteInterview } from "./onboarding-website-bootstrap.ts";
 import { generateWebsiteSummaryParts } from "./onboarding-website-summary.ts";
 import { validateWebsiteInterpretationFacts } from "./onboarding-website-facts.ts";
-import { getAgendaItems, getAgendaAction } from "./onboarding-agenda.ts";
+import { getAgendaItems, getAgendaAction, type AgendaProposal } from "./onboarding-agenda.ts";
 import { randomUUID } from "node:crypto";
 
 type Interpret = Extract<WebsiteAgendaCommand,{type:"interpret_owner_turn"}>;
+type DiagnosticDetail = {code?:string;attempt?:number;durationMs?:number;effectId?:string;
+  proposalKind?:AgendaProposal['kind'];factCount?:number;targetCount?:number;outputCount?:number};
 export interface WebsiteInterviewRuntimeConfig {
   prepared: PreparedWebsiteInterview;
   openingAction: OnboardingSpeechAction;
@@ -27,7 +29,7 @@ export interface WebsiteInterviewRuntimeDependencies {
   onUsageUnknown():void;
   onTerminate(command:Extract<WebsiteAgendaCommand,{type:"terminate_session"}>):void;
   onState(state:WebsiteAgendaState):void;
-  onDiagnostic?(event:{callId:string;requestId:string;stage:string;elapsedMs:number;code?:string;attempt?:number;durationMs?:number;effectId?:string}):void;
+  onDiagnostic?(event:{callId:string;requestId:string;stage:string;elapsedMs:number}&DiagnosticDetail):void;
   now?:()=>number;
 }
 
@@ -63,6 +65,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
   const terminalResponses=new Set<string>(),callerItems=new Set<string>(),ownerTranscripts=new Map<string,string>();
   const retiredInterpretations=new Set<string>();
   let interpreter:Interpret|undefined,activeResponseId:string|undefined,ttsInFlight=false;
+  let interpretationTiming:{requestId:string;requestedAtMs:number;created:boolean}|undefined;
   let speechAbort:AbortController|undefined;
   const observedCommands:WebsiteAgendaCommand[]=[];
   const retiredSpeech=new Set<string>();
@@ -81,8 +84,9 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
     if(typeof e?.message==='string' && /fetch failed|network request failed|failed to fetch|connection reset|timed out/i.test(e.message))return 'ETIMEDOUT';
     return 'unclassified_effect_error';
   }
-  function diagnostic(stage:string,detail:{code?:string;attempt?:number;durationMs?:number;effectId?:string}={}){
-    deps.onDiagnostic?.({callId:scope.callId,requestId:scope.requestId,stage,elapsedMs:Math.max(0,now()-startedAt),...detail});
+  function diagnostic(stage:string,detail:DiagnosticDetail={}){
+    // Observability cannot change a selected effect or suppress incurred cost.
+    try{deps.onDiagnostic?.({callId:scope.callId,requestId:scope.requestId,stage,elapsedMs:Math.max(0,now()-startedAt),...detail});}catch{}
   }
   function clearAsrWait(itemId:string){const wait=asrWaiting.get(itemId);if(wait){clearTimeout(wait.retry);clearTimeout(wait.deadline);asrWaiting.delete(itemId);}}
   function clearTimers(){if(deadline)clearTimeout(deadline);if(noticeTimer)clearTimeout(noticeTimer);deadline=undefined;noticeTimer=undefined;for(const itemId of asrWaiting.keys())clearAsrWait(itemId);}
@@ -281,7 +285,10 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
             if(activeResponseId)deps.send({type:'response.cancel',response_id:activeResponseId});
           }
           activeResponseId=undefined;
-          interpreter=command;deps.send(websiteInterpretationRequest(command));break;
+          interpreter=command;
+          interpretationTiming={requestId:command.requestId,requestedAtMs:now(),created:false};
+          diagnostic('interpretation.requested',{attempt:command.attempt,effectId:command.requestId});
+          deps.send(websiteInterpretationRequest(command));break;
         case 'persist_agenda':{
           const ownerTranscript=state.turns.find(turn=>turn.turnId===command.turnId)?.text;
           if(!ownerTranscript)throw new Error('website_owner_transcript_missing');
@@ -321,7 +328,9 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
           if(claim.status==='preparing' && claim.claimed){
             try{
               ttsInFlight=true;
+              const synthesisStartedAt=now();diagnostic('tts.requested');
               ready=await deps.synthesize(command.action,AbortSignal.any([abort.signal,renditionAbort.signal]));requireLive();ttsInFlight=false;
+              diagnostic('tts.ready',{durationMs:Math.max(0,now()-synthesisStartedAt)});
               deps.onCost(ready.cost_usd);
               if(retiredSpeech.has(command.action.actionId))return;
               const completed=await bounded(()=>deps.evidenceStore.completeSpeech({...scope,actionId:command.action.actionId,payload:ready!}));
@@ -351,7 +360,11 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
           const receipt=await bounded(()=>deps.evidenceStore.recordCompletion({...scope,outcome:command.outcome,approvalReceiptId:command.approvalReceiptId}));
           await dispatch({type:'completion.recorded',requestId:command.requestId,...receipt,nowMs:now()});break;
         }
-        case 'telemetry':break;
+        case 'telemetry':
+          diagnostic(command.code,{attempt:command.attempt,effectId:command.requestId,
+            ...(command.reason?{code:websiteInterpretationFailureCode(command.reason)}:{}),
+            ...(command.proposalKind?{proposalKind:command.proposalKind,factCount:command.factCount,targetCount:command.targetCount}:{})});
+          break;
       }
     }catch(error){
       diagnostic('effect.failed',{code:errorCode(error),...('requestId'in command?{effectId:command.requestId}:{})});
@@ -432,25 +445,44 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
         await dispatch({type:'adapter.failed',code:'unsolicited_website_response',nowMs:now()});return;
       }
       const command=interpreter;
-      activeResponseId=response.id;
+      const timing=interpretationTiming?.requestId===command.requestId?interpretationTiming:undefined;
+      if(event.type==='response.created'){
+        activeResponseId=response.id;
+        if(timing && !timing.created){
+          timing.created=true;
+          diagnostic('interpretation.created',{attempt:command.attempt,effectId:command.requestId,durationMs:Math.max(0,now()-timing.requestedAtMs)});
+        }
+      }else{terminalResponses.add(response.id);activeResponseId=undefined;deps.onUsage(response);}
       await dispatch({type:'interpretation.created',requestId:command.requestId,responseId:response.id,nowMs:now()});
       if(event.type==='response.created')return;
-      terminalResponses.add(response.id);activeResponseId=undefined;deps.onUsage(response);
+      if(state.pending?.kind!=='interpret' || state.pending.requestId!==command.requestId)return;
       const output=response.output;
-      let result:unknown;
-      if(response.status==='completed' && Array.isArray(output) && output.length===1
+      let raw:unknown,result:ReturnType<typeof parseWebsiteInterpretation>=null;
+      let rejectionCode='interpretation_tool_output_invalid';
+      if(['failed','cancelled','incomplete'].includes(response.status))rejectionCode=`interpretation_provider_${response.status}`;
+      else if(response.status==='completed' && Array.isArray(output) && output.length===1
         && output[0]?.type==='function_call' && output[0].name===command.toolName && output[0].status==='completed'
-        && typeof output[0].arguments==='string' && Buffer.byteLength(output[0].arguments)<=65_536){try{result=JSON.parse(output[0].arguments);}catch{}}
-      if(result!==undefined){
-        try{
-          const raw=result as {proposal:any;facts?:unknown};
+        && typeof output[0].arguments==='string' && Buffer.byteLength(output[0].arguments)<=65_536){
+        try{raw=JSON.parse(output[0].arguments);}catch{rejectionCode='interpretation_json_invalid';}
+      }
+      if(raw!==undefined){
+        result=parseWebsiteInterpretation(raw);
+        if(!result)rejectionCode='interpretation_shape_invalid';
+        else try{
           // Validate before the reducer commits the proposal so a bad optional
           // typed shape gets the same single bounded interpreter repair.
-          validateWebsiteInterpretationFacts({facts:raw.facts??[],proposal:raw.proposal,currentItemId:command.itemId,
+          validateWebsiteInterpretationFacts({facts:result.facts??[],proposal:result.proposal,currentItemId:command.itemId,
             agenda:state.stored.agenda,ownerTranscript:command.transcript});
-        }catch{result=undefined;}
+        }catch(error){rejectionCode=websiteInterpretationFailureCode(error);result=null;}
       }
-      if(result===undefined)await dispatch({type:'interpretation.failed',requestId:command.requestId,code:'invalid_interpretation_output',nowMs:now()});
+      const shape=raw as {proposal?:{kind?:unknown};facts?:unknown}|null;
+      const kind=shape?.proposal?.kind;
+      diagnostic('interpretation.done',{attempt:command.attempt,effectId:command.requestId,
+        ...(timing?{durationMs:Math.max(0,now()-timing.requestedAtMs)}:{}),
+        ...(Array.isArray(output)?{outputCount:output.length}:{}),
+        ...(typeof kind==='string' && ['answer','clarification','defer','not_applicable','off_scope','correction'].includes(kind)?{proposalKind:kind as AgendaProposal['kind']}:{}),
+        ...(Array.isArray(shape?.facts)?{factCount:shape.facts.length}:{})});
+      if(!result)await dispatch({type:'interpretation.failed',requestId:command.requestId,code:rejectionCode,nowMs:now()});
       else await dispatch({type:'interpretation.completed',requestId:command.requestId,responseId:response.id,
         turnId:command.turnId,itemId:command.itemId,digest:command.digest,result,nowMs:now()});
       return;

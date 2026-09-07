@@ -260,6 +260,7 @@ function queryClient({
 function installVoiceBrowser({
   fetchImpl,
   remoteDescriptionError,
+  remoteDescriptionWait,
   response = openingResponse(),
   channelInitiallyOpen = true,
   autoPlayback = "ended",
@@ -384,6 +385,7 @@ function installVoiceBrowser({
     async setLocalDescription() {}
     async setRemoteDescription() {
       actions.push("peer:setRemoteDescription");
+      if (remoteDescriptionWait) await remoteDescriptionWait;
       if (remoteDescriptionError) throw remoteDescriptionError;
       if (!audios[0].muted) {
         this.ontrack?.({ streams: [{ getAudioTracks: () => [{}] }] });
@@ -699,6 +701,183 @@ function websiteOpeningResponse() {
   delete response.opening_text;delete response.resume_context;
   return {...response,onboarding_protocol_version:3,opening_payload:{version:3,item_id:`lgs-${speech.actionId.slice(0,28)}`,speech}};
 }
+
+function websiteSafeVad() {
+  const event=structuredClone(LIVE_VAD_EVENT);
+  event.session.audio.input.turn_detection.create_response=false;
+  event.session.audio.input.turn_detection.interrupt_response=false;
+  return event;
+}
+
+for (const firstReady of ['read','channel']) test(`website opening overlaps its one authenticated read with connection setup (${firstReady} ready first)`,async()=>{
+  const response=websiteOpeningResponse(),reads=[],stages=[];
+  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,vadEvent:websiteSafeVad()});
+  const abort=new AbortController();let resolveRead,session;
+  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
+    signal:abort.signal,onStage:stage=>stages.push(stage),
+    speechClient:{rpc:(name,args)=>{
+      reads.push({name,args});return new Promise(resolve=>{resolveRead=resolve;});
+    }}});
+  starting.catch(()=>{});
+  try {
+    await waitUntil(()=>browser.actions.includes('peer:setRemoteDescription'),'SDP negotiation');
+    await waitUntil(()=>reads.length===1,'authenticated opening read while data channel is still connecting');
+    assert.equal(browser.channel.readyState,'connecting');
+    browser.channel.emit(websiteSafeVad());
+    const action=response.opening_payload.speech.actionId;
+    browser.channel.emit({type:'conversation.item.done',item:{id:`lsn-${action.slice(0,28)}`,type:'message',role:'system',status:'completed',content:[{type:'input_text',text:`ligou.website_speech:${action}`}]}});
+    if(firstReady==='read')resolveRead({data:response.opening_payload.speech,error:null});
+    else browser.channel.open();
+    await nextTurn();await nextTurn();
+    assert.equal(browser.audios.length,1,'neither readiness branch alone authorizes opening audio');
+    assert.equal(browser.channel.sent.length,0);
+    assert.equal(browser.tracks[0].enabled,false);
+    assert.equal(stages.includes('ready'),false);
+    if(firstReady==='read')browser.channel.open();
+    else resolveRead({data:response.opening_payload.speech,error:null});
+    session=await starting;
+    assert.deepEqual(reads,[{name:'read_website_interview_speech',args:{p_call:CALL_ID,p_action:response.opening_payload.speech.actionId}}]);
+    assert.equal(browser.audios[1].playCalls,1);
+    assert.equal(browser.channel.sent.filter(event=>event.item?.role==='assistant').length,1);
+    assert.equal(browser.tracks[0].enabled,true);
+  } finally {
+    abort.abort('manual_hangup');session?.end();browser.channel.close();
+    resolveRead?.({data:response.opening_payload.speech,error:null});
+    await starting.catch(()=>{});browser.restore();
+  }
+});
+
+test('opening read overlaps held SDP, and SDP failure aborts that read before a late rejection',async()=>{
+  const response=websiteOpeningResponse(),stages=[];
+  let finishSdp,rejectRead,readSignal;
+  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,remoteDescriptionError:new Error('SDP failure'),
+    remoteDescriptionWait:new Promise(resolve=>{finishSdp=resolve;})});
+  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
+    onStage:stage=>stages.push(stage),speechClient:{rpc:()=>{
+      const request=new Promise((resolve,reject)=>{rejectRead=reject;});
+      request.abortSignal=signal=>{readSignal=signal;return request;};return request;
+    }}});
+  starting.catch(()=>{});
+  try {
+    await waitUntil(()=>browser.actions.includes('peer:setRemoteDescription'),'held SDP negotiation');
+    await waitUntil(()=>Boolean(rejectRead),'opening read overlapping unresolved SDP');
+    assert.equal(browser.audios.length,1);assert.equal(browser.tracks[0].enabled,false);
+    finishSdp();await assert.rejects(starting,/SDP failure/);
+    assert.equal(readSignal.aborted,true);
+    rejectRead(new Error('late failed read'));
+    await nextTurn();await nextTurn();
+    assert.equal(browser.audios.length,1);assert.equal(browser.channel.sent.length,0);
+    assert.equal(browser.peers[0].closeCalls,1);assert.equal(browser.tracks[0].stopped,true);
+    assert.equal(browser.tracks[0].enabled,false);assert.equal(stages.includes('ready'),false);
+  } finally {
+    finishSdp();browser.channel.close();rejectRead?.(new Error('cleanup'));
+    await starting.catch(()=>{});browser.restore();
+  }
+});
+
+test('overlapped read does not charge SDP negotiation against the later channel control deadline',async()=>{
+  const response=websiteOpeningResponse(),stages=[];
+  let finishSdp,reads=0,session;
+  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,vadEvent:websiteSafeVad(),
+    remoteDescriptionWait:new Promise(resolve=>{finishSdp=resolve;})});
+  const abort=new AbortController();
+  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
+    signal:abort.signal,openingTimeoutMs:15,connectionTimeoutMs:500,onStage:stage=>stages.push(stage),
+    speechClient:{rpc:async()=>{reads++;return{data:response.opening_payload.speech,error:null};}}});
+  starting.catch(()=>{});
+  try {
+    await waitUntil(()=>reads===1,'overlapping opening read');
+    await new Promise(resolve=>setTimeout(resolve,35));
+    assert.equal(browser.tracks[0].stopped,false,'SDP remains inside its existing connection budget');
+    assert.equal(browser.audios.length,1);assert.equal(stages.includes('ready'),false);
+    finishSdp();browser.channel.open();session=await starting;
+    assert.equal(browser.audios[1].playCalls,1);assert.equal(reads,1);
+  } finally {
+    abort.abort('manual_hangup');session?.end();finishSdp();browser.channel.close();
+    await starting.catch(()=>{});browser.restore();
+  }
+});
+
+test('existing connection deadline aborts the overlapped opening gate while SDP remains pending',async()=>{
+  const response=websiteOpeningResponse();let finishSdp,reads=0;
+  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,
+    remoteDescriptionWait:new Promise(resolve=>{finishSdp=resolve;})});
+  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
+    connectionTimeoutMs:20,speechClient:{rpc:async()=>{reads++;return{data:response.opening_payload.speech,error:null};}}});
+  starting.catch(()=>{});
+  try {
+    await waitUntil(()=>reads===1,'overlapped read before connection deadline');
+    await assert.rejects(starting);
+    finishSdp();await nextTurn();
+    assert.equal(browser.audios.length,1);assert.equal(browser.channel.sent.length,0);
+    assert.equal(browser.tracks[0].enabled,false);assert.equal(browser.tracks[0].stopped,true);
+    assert.equal(browser.peers[0].closeCalls,1);
+  }finally{finishSdp();browser.channel.close();await starting.catch(()=>{});browser.restore();}
+});
+
+for(const invalid of ['owner-read-error','foreign-call','bad-audio-hash','changed-source','changed-revision'])test(`overlapped opening refuses ${invalid} before audio, ACK or microphone`,async()=>{
+  const response=websiteOpeningResponse(),stages=[];
+  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,vadEvent:websiteSafeVad()});
+  const abort=new AbortController();let resolveRead,reads=0;
+  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
+    signal:abort.signal,onStage:stage=>stages.push(stage),
+    speechClient:{rpc:()=>{reads++;return new Promise(resolve=>{resolveRead=resolve;});}}});
+  starting.catch(()=>{});
+  try {
+    await waitUntil(()=>reads===1,'opening read before channel readiness');
+    const data={...response.opening_payload.speech};
+    if(invalid==='foreign-call')data.callId=APPROVAL_ID;
+    if(invalid==='bad-audio-hash')data.audio_sha256='0'.repeat(64);
+    if(invalid==='changed-source')data.sourceDigest='c'.repeat(64);
+    if(invalid==='changed-revision')data.revision++;
+    resolveRead(invalid==='owner-read-error'?{data:null,error:{code:'42501',message:'owner changed'}}:{data,error:null});
+    await nextTurn();await nextTurn();
+    assert.equal(browser.audios.length,1);assert.equal(browser.tracks[0].enabled,false);
+    browser.channel.open();browser.channel.emit(websiteSafeVad());
+    await waitUntil(()=>browser.channel.sent.some(event=>event.item?.content?.[0]?.text===`ligou.website_stop:${CALL_ID}:technical_failure`),'controlled technical Stop');
+    browser.channel.close();await assert.rejects(starting);
+    assert.equal(reads,1);assert.equal(browser.audios.length,1);
+    assert.equal(browser.channel.sent.some(event=>event.item?.role==='assistant'),false);
+    assert.equal(browser.tracks[0].enabled,false);assert.equal(stages.includes('ready'),false);
+  } finally {
+    abort.abort('manual_hangup');browser.channel.close();resolveRead?.({data:null,error:{message:'cancelled'}});
+    await starting.catch(()=>{});browser.restore();
+  }
+});
+
+for(const readyBeforeStop of ['neither','read','channel'])test(`Stop during overlapped opening keeps audio, ACK and microphone off (${readyBeforeStop} ready)`,async()=>{
+  const response=websiteOpeningResponse(),stages=[];
+  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,vadEvent:websiteSafeVad()});
+  const abort=new AbortController();let resolveRead,readSignal;
+  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
+    signal:abort.signal,onStage:stage=>stages.push(stage),speechClient:{rpc:()=>{
+      const request=new Promise(resolve=>{resolveRead=resolve;});
+      request.abortSignal=signal=>{readSignal=signal;return request;};return request;
+    }}});
+  starting.catch(()=>{});
+  try {
+    await waitUntil(()=>Boolean(resolveRead),'pending authenticated opening read');
+    if(readyBeforeStop==='read')resolveRead({data:response.opening_payload.speech,error:null});
+    if(readyBeforeStop==='channel')browser.channel.open();
+    await nextTurn();
+    abort.abort('manual_hangup');
+    assert.equal(readSignal.aborted,true);
+    assert.equal(browser.tracks[0].stopped,true);assert.equal(browser.tracks[0].enabled,false);
+    if(browser.channel.readyState!=='open')browser.channel.open();
+    resolveRead({data:response.opening_payload.speech,error:null});
+    browser.channel.emit(websiteSafeVad());
+    await nextTurn();await nextTurn();
+    assert.equal(browser.audios.length,1);assert.equal(stages.includes('ready'),false);
+    assert.equal(browser.channel.sent.filter(event=>event.item?.role==='system').length,1);
+    assert.equal(browser.channel.sent.some(event=>event.item?.role==='assistant'),false);
+    browser.channel.close();await assert.rejects(starting);
+    assert.equal(browser.peers[0].closeCalls,1);assert.equal(browser.tracks[0].enabled,false);
+  } finally {
+    abort.abort('manual_hangup');browser.channel.close();resolveRead?.({data:response.opening_payload.speech,error:null});
+    await starting.catch(()=>{});browser.restore();
+  }
+});
+
 test('protocol3 Stop silences immediately and retains peer until one control request is closed by provider', async () => {
   const response=websiteOpeningResponse(),safeVad=structuredClone(LIVE_VAD_EVENT);
   safeVad.session.audio.input.turn_detection.create_response=false;safeVad.session.audio.input.turn_detection.interrupt_response=false;

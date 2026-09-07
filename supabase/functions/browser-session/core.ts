@@ -6,6 +6,7 @@ export const BROWSER_SESSION_CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Expose-Headers": "Server-Timing",
 };
 
 const APPLICATION_MODE = "application_tts_v1";
@@ -64,10 +65,69 @@ interface BrowserSessionDependencies {
   fetch(input: string, init?: RequestInit): Promise<Response>;
   sleep(milliseconds: number): Promise<void>;
   now(): number;
+  monotonic?(): number;
+  onTiming?(event: BrowserSessionTiming): void;
 }
 
-function json(body: Record<string, unknown>, status = 200): Response {
-  return Response.json(body, { status, headers: BROWSER_SESSION_CORS });
+interface BrowserSessionTiming {
+  event: "voice.edge.startup";
+  timingVersion: 1;
+  timingAvailable: boolean;
+  status: number;
+  requestId?: string;
+  callId?: string;
+  pollCount: number;
+  firstProcessingMs?: number;
+  firstReadyMs?: number;
+  durations: Record<string, number>;
+}
+
+type StartupStage = "edge_config" | "edge_auth" | "edge_body_contract" | "edge_tenant" |
+  "edge_enqueue" | "edge_wait_ready" | "edge_opening_validate" | "edge_call_model" |
+  "edge_cleanup" | "edge_serialize";
+
+/** Per-request monotonic timings only; nested poll durations are subdivisions
+ * of wait_ready, never extra serial work. Observers cannot alter admission. */
+function startupTiming(dependencies: BrowserSessionDependencies) {
+  let available=true,last=0,reported=false;
+  const clock=()=>{
+    try {
+      const value=(dependencies.monotonic??(()=>performance.now()))();
+      if(!Number.isFinite(value))throw new Error("timing_clock_invalid");
+      last=Math.max(last,value);return last;
+    } catch {available=false;return last;}
+  };
+  const began=clock(),durations:Record<string,number>={};
+  let stage:StartupStage="edge_config",stageAt=began;
+  let requestId:string|undefined,callId:string|undefined,pollCount=0;
+  let firstProcessingMs:number|undefined,firstReadyMs:number|undefined;
+  const safeId=(id:unknown)=>typeof id==="string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)?id:undefined;
+  const add=(name:string,elapsed:number)=>{durations[name]=(durations[name]??0)+Math.max(0,elapsed);};
+  const enter=(next:StartupStage)=>{const at=clock();add(stage,at-stageAt);stage=next;stageAt=at;};
+  const report=(status:number,response?:Response)=>{
+    if(reported)return;reported=true;
+    const at=clock();add(stage,at-stageAt);durations.edge_total=at-began;
+    const rounded=available?Object.fromEntries(Object.entries(durations).map(([key,value])=>[key,Number(value.toFixed(2))])):{};
+    if(available && response)response.headers.set("Server-Timing",Object.entries(rounded).map(([key,value])=>`${key};dur=${value}`).join(", "));
+    try {dependencies.onTiming?.({event:"voice.edge.startup",timingVersion:1,timingAvailable:available,status,
+      ...(requestId?{requestId}:{}),...(callId?{callId}:{}),pollCount,
+      ...(available && firstProcessingMs!==undefined?{firstProcessingMs}:{}),
+      ...(available && firstReadyMs!==undefined?{firstReadyMs}:{}),durations:rounded});} catch { /* Timing is never a control-plane dependency. */ }
+  };
+  return {enter,report,
+    bindRequest(id:unknown){requestId=safeId(id);},
+    observe(row:Record<string,unknown>|null){
+      pollCount++;callId=safeId(row?.call_id)??callId;
+      if(row?.status==="processing")firstProcessingMs??=Number((clock()-began).toFixed(2));
+      if(row?.status==="ready")firstReadyMs??=Number((clock()-began).toFixed(2));
+    },
+    async poll<T>(name:"edge_poll_sleep"|"edge_poll_read",work:()=>PromiseLike<T>):Promise<T>{
+      const at=clock();try{return await work();}finally{add(name,clock()-at);}
+    },
+    json(body:Record<string,unknown>,status=200){
+      enter("edge_serialize");const response=Response.json(body,{status,headers:BROWSER_SESSION_CORS});report(status,response);return response;
+    },
+  };
 }
 
 function boundedString(value: unknown, min: number, max: number): value is string {
@@ -460,6 +520,8 @@ async function cancelInvalidApplicationReady(
 export function createBrowserSessionHandler(dependencies: BrowserSessionDependencies) {
   return async (request: Request): Promise<Response> => {
     if (request.method === "OPTIONS") return new Response(null, { headers: BROWSER_SESSION_CORS });
+    const timing=startupTiming(dependencies),json=timing.json;
+    const run=async()=>{
     if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
     if (request.signal.aborted) return json({ error: "request_aborted" }, 499);
 
@@ -471,6 +533,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
     const auth = request.headers.get("authorization") ?? "";
     if (!auth.startsWith("Bearer ")) return json({ error: "unauthorized" }, 401);
     let userResponse: Response;
+    timing.enter("edge_auth");
     try {
       userResponse = await dependencies.fetch(`${url}/auth/v1/user`, {
         headers: { apikey: serviceKey, Authorization: auth },
@@ -485,6 +548,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
     const user = await userResponse.json().catch(() => null);
     if (!user?.id) return json({ error: "unauthorized" }, 401);
 
+    timing.enter("edge_body_contract");
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
     if (!body.sdp) return json({ error: "sdp_required" }, 400);
     const sessionType = typeof body.session_type === "string" ? body.session_type : "owner_browser";
@@ -510,6 +574,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
 
     const defaultTenant = dependencies.env("LIGOU_TENANT") ?? "rocha-plumbing";
     let tenant;
+    timing.enter("edge_tenant");
     try {
       tenant = await resolveOwnedTenantForSession(client, String(user.id), defaultTenant);
     } catch (error: any) {
@@ -519,6 +584,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
     const businessName = typeof tenant.name === "string" ? tenant.name.trim() : "";
     if (!businessName || businessName.length > 256) return json({ error: "tenant_identity_invalid" }, 503);
 
+    timing.enter("edge_enqueue");
     const { data: requestRow, error: insertError } = await client.from("browser_session_requests").insert({
       tenant_id: tenant.id,
       user_id: user.id,
@@ -531,11 +597,13 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
         : {}),
     }).select("id").single();
     if (insertError || !requestRow) return json({ error: `enqueue_failed: ${insertError?.message}` }, 500);
+    timing.bindRequest(requestRow.id);
 
     const stopOpenRequest = async (
       reason: "request_aborted" | "controller_timeout",
       status: 499 | 504,
     ) => {
+      timing.enter("edge_cleanup");
       const expired = await expireOpenRequest(
         dependencies,
         client,
@@ -557,17 +625,20 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
       ? APPLICATION_STARTUP_DEADLINE_MS
       : PROVIDER_STARTUP_DEADLINE_MS;
     const deadline = dependencies.now() + startupDeadline;
+    timing.enter("edge_wait_ready");
     while (dependencies.now() < deadline) {
-      await waitForPollOrAbort(request.signal, dependencies.sleep);
+      await timing.poll("edge_poll_sleep",()=>waitForPollOrAbort(request.signal, dependencies.sleep));
       if (request.signal.aborted) return stopOpenRequest("request_aborted", 499);
       if (dependencies.now() >= deadline) break;
-      const { data: row } = await client.from("browser_session_requests")
+      const { data: row } = await timing.poll<{data:any}>("edge_poll_read",()=>client.from("browser_session_requests")
         .select(CLEANUP_COLUMNS)
         .eq("id", requestRow.id)
-        .single();
+        .single());
+      timing.observe(row);
       if (request.signal.aborted) return stopOpenRequest("request_aborted", 499);
       if (!row) break;
       if (row.status === "ready") {
+        timing.enter("edge_opening_validate");
         if (!validReadyOpening(
           openingModeRequested,
           row,
@@ -578,6 +649,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
             ? "invalid_application_opening_contract"
             : "invalid_provider_opening_contract";
           if (openingModeRequested === APPLICATION_MODE) {
+            timing.enter("edge_cleanup");
             const cleaned = await cancelInvalidApplicationReady(
               dependencies,
               client,
@@ -590,6 +662,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
           }
           return json({ error }, 502);
         }
+        timing.enter("edge_call_model");
         const { data: call } = await client.from("calls").select("model").eq("id", row.call_id).single();
         if (request.signal.aborted) return stopOpenRequest("request_aborted", 499);
         return json({
@@ -617,5 +690,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
       }
     }
     return stopOpenRequest("controller_timeout", 504);
+    };
+    try {return await run();} catch(error){timing.report(500);throw error;}
   };
 }

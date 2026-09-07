@@ -77,24 +77,34 @@ export function createWebsiteSpeechPlayer({ callId, interviewId, readSpeech, pla
       let done=false;
       const finish=(reason,value)=>{if(done)return;done=true;clearTimeout(timer);controller.signal.removeEventListener('abort',abort);reason?reject(reason):resolve(value);};
       const abort=()=>finish(error('sessão encerrada'));
-      const timer=setTimeout(()=>finish(error('confirmação excedeu o tempo')),timeout);
+      const timer=timeout===null?null:setTimeout(()=>finish(error('confirmação excedeu o tempo')),timeout);
       controller.signal.addEventListener('abort',abort,{once:true});
       if(controller.signal.aborted){abort();return;}
       Promise.resolve().then(operation).then(value=>finish(null,value),reason=>finish(reason));
     });
   }
-  async function run(actionId,boot) {
+  async function run(actionId,boot,playbackReady) {
     live();phase='loading';reportPhase(phase);active={actionId};microphone(false);
     const currentRendition={controller:new AbortController(),interrupted:false};rendition=currentRendition;
     try {
-      const checked=await bounded(async()=>{
+      const loading=bounded(async()=>{
         const value=await readSpeech(actionId,controller.signal);
         if(value===null && !boot)return null;
-        return validateWebsiteSpeech(value,{callId,interviewId,actionId});
+        const checked=await validateWebsiteSpeech(value,{callId,interviewId,actionId});
+        if(boot && canonical(checked.payload)!==canonical(boot))throw error('fala desatualizada');
+        return checked;
       });
+      // The opening's authenticated read can overlap connection setup. Keep
+      // custody closed until the session releases its data-channel gate, even
+      // when the read rejects first; late read rejection must stay observed.
+      loading.catch(()=>{});
+      // Session connection/channel deadlines own this gate. Applying the
+      // speech timeout here would incorrectly include SDP negotiation too.
+      if(boot && playbackReady)await bounded(()=>playbackReady,null);
+      const checked=await loading;
       if(!checked){live();seen.add(actionId);active=null;phase='idle';reportPhase('processing');microphone(safeVad);return;}
       live();const p=checked.payload;
-      if ((boot && canonical(p)!==canonical(boot)) || p.revision<lastRevision) throw error('fala desatualizada');
+      if (p.revision<lastRevision) throw error('fala desatualizada');
       active=p;seen.add(actionId);phase='playing';reportPhase(phase);
       microphone(safeVad && !['SPEAK_TERMINAL_ERROR','SPEAK_AMENDMENT_SIGNOFF'].includes(p.kind));
       await bounded(()=>play(checked.audioBytes,AbortSignal.any([controller.signal,currentRendition.controller.signal]),p),180_000);live();
@@ -121,14 +131,14 @@ export function createWebsiteSpeechPlayer({ callId, interviewId, readSpeech, pla
       if(phase==='idle' && !callerItems.size && pending){const next=pending;pending=null;enqueue(next);}
     }
   }
-  function enqueue(actionId,boot) {
+  function enqueue(actionId,boot,playbackReady) {
     if(phase==='stopped' || seen.has(actionId) || active?.actionId===actionId)return task;
     if(phase!=='idle' || callerItems.size>0){
       if(pending && pending!==actionId){fail(error('mais de uma fala pendente'));return task;}
       pending=actionId;return task;
     }
     // Set loading synchronously; duplicate provider created/done cannot start a second read.
-    phase='loading';active={actionId};task=run(actionId,boot);task.catch(()=>{});return task;
+    phase='loading';active={actionId};task=run(actionId,boot,playbackReady);task.catch(()=>{});return task;
   }
   function handleEvent(event) {
     if(phase==='stopped')return;
@@ -188,5 +198,5 @@ export function createWebsiteSpeechPlayer({ callId, interviewId, readSpeech, pla
   }
   signal?.addEventListener('abort',stop,{once:true});
   if(signal?.aborted)stop();else microphone(false);
-  return {start:p=>enqueue(p.actionId,p),handleEvent,stop,idle:()=>task};
+  return {start:(p,playbackReady)=>enqueue(p.actionId,p,playbackReady),handleEvent,stop,idle:()=>task};
 }

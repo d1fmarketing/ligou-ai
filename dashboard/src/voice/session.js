@@ -953,6 +953,8 @@ export async function startVoiceSession({
   let openingGateReject = null;
   let openingGateTimer = null;
   let websitePlayer = null;
+  let websiteOpeningPlayback = null;
+  let releaseWebsiteOpening = null;
   let websitePhase = "idle";
   let earlyWebsiteVad = null;
   let earlyWebsiteNotice = null;
@@ -1298,6 +1300,11 @@ export async function startVoiceSession({
         onProgress:()=>{stage("retrying");timing.mark("backend_retrying");},
         onCaption:onEvent,onFailure:(error)=>{stage("failed");end("application_speech_error",voiceSessionErrorMessage(error));},
       });
+      // Start the single exact, owner-scoped opening read while SDP and the
+      // control channel connect. No audio or microphone custody passes this
+      // gate until channel readiness and the cancellation check below succeed.
+      const playbackReady=new Promise(resolve=>{releaseWebsiteOpening=resolve;});
+      websiteOpeningPlayback=websitePlayer.start(envelope.speech,playbackReady);
       if(earlyWebsiteVad)websitePlayer.handleEvent(earlyWebsiteVad);
       opening=envelope;
     } else if (onboarding) opening = await validateApplicationOpening(response);
@@ -1310,9 +1317,9 @@ export async function startVoiceSession({
     if (websiteInterview) {
       await waitForDataChannelOpen(channel,boundedOpeningTimeout,setupAbort.signal);
       if (stopRequested) { sendStopIfOpen(); await stopCompleted; throw voiceAbortError(signal); }
-      const played=websitePlayer.start(opening.speech);
+      releaseWebsiteOpening();
       if(earlyWebsiteNotice)websitePlayer.handleEvent(earlyWebsiteNotice);
-      await played;
+      await websiteOpeningPlayback;
       if(stopped || signal?.aborted)throw safeOpeningError("entrevista encerrada");
       openingActivated=true;
     } else if (onboarding) {

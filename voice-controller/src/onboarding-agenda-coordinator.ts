@@ -87,7 +87,8 @@ export type WebsiteAgendaCommand =
       reason: string; approvalReceiptId?: string }
   | { type: "record_completion"; requestId: string; interviewId: string; callId: string;
       outcome: "complete" | "unfinished"; providerReceiptId: string; budgetReceiptId: string; approvalReceiptId?: string }
-  | { type: "telemetry"; code: string; requestId?: string };
+  | { type: "telemetry"; code: "interpretation.selected" | "interpretation.rejected"; requestId: string;
+      attempt: number; reason?: string; proposalKind?: AgendaProposal["kind"]; factCount?: number; targetCount?: number };
 
 type Timed = { nowMs: number };
 export type WebsiteAgendaEvent = Timed & (
@@ -207,11 +208,11 @@ export function parseWebsiteInterpretation(value: unknown): WebsiteInterpretatio
       if (targets === undefined) continue;
       if (!Array.isArray(targets) || targets.length < 1 || targets.length > MAX_AGENDA_ITEMS || targets.some(item => !record(item) ||
         !keys(item, [idKey, "disposition"], [idKey, "disposition"]) || !nonblank(item[idKey]) ||
-        !["corrected", "reopen"].includes(String(item.disposition)))) return null;
+        typeof item.disposition !== "string" || !["corrected", "reopen"].includes(item.disposition))) return null;
       targetCount += targets.length;
     }
     if (targetCount < 1 || targetCount > MAX_AGENDA_ITEMS) return null;
-  } else if (["answer", "clarification", "defer", "not_applicable"].includes(String(p.kind))) {
+  } else if (typeof p.kind === "string" && ["answer", "clarification", "defer", "not_applicable"].includes(p.kind)) {
     if (!(p.kind === "clarification" && p.itemId === null) && !nonblank(p.itemId)) return null;
     const optional = p.kind === "answer" ? ["relatedItemIds"] : p.kind === "clarification" ? ["questionPt"] : [];
     if (!keys(p, ["kind", "itemId", ...optional], ["kind", "itemId"])) return null;
@@ -229,34 +230,76 @@ export function parseWebsiteInterpretation(value: unknown): WebsiteInterpretatio
   return structuredClone({ proposal: p as unknown as AgendaProposal, facts: facts as WebsiteInterpretationFact[] });
 }
 
+const boundedInterpretationText = (maxLength = 512) => ({ type: "string", minLength: 1, maxLength, pattern: "\\S" });
 const PROPOSAL_SCHEMA = {
   type: "object", additionalProperties: false, required: ["proposal"], properties: {
     proposal: { anyOf: [
       { type: "object", additionalProperties: false, required: ["kind", "itemId"], properties: {
-        kind: { enum: ["answer", "clarification", "defer", "not_applicable"] }, itemId: { type: ["string", "null"] },
-        relatedItemIds: { type: "array", maxItems: MAX_AGENDA_ITEMS, items: { type: "string" } }, questionPt: { type: "string" },
+        kind: { const: "answer" }, itemId: boundedInterpretationText(),
+        relatedItemIds: { type: "array", maxItems: MAX_AGENDA_ITEMS, items: boundedInterpretationText() },
+      } },
+      { type: "object", additionalProperties: false, required: ["kind", "itemId"], properties: {
+        kind: { const: "clarification" }, itemId: { ...boundedInterpretationText(), type: ["string", "null"] },
+        questionPt: boundedInterpretationText(4096),
+      } },
+      { type: "object", additionalProperties: false, required: ["kind", "itemId"], properties: {
+        kind: { const: "defer" }, itemId: boundedInterpretationText(),
+      } },
+      { type: "object", additionalProperties: false, required: ["kind", "itemId"], properties: {
+        kind: { const: "not_applicable" }, itemId: boundedInterpretationText(),
       } },
       { type: "object", additionalProperties: false, required: ["kind"], properties: { kind: { const: "off_scope" } } },
       { type: "object", additionalProperties: false, required: ["kind"], anyOf: [{ required: ["affectedItems"] }, { required: ["affectedCandidates"] }], properties: {
         kind: { const: "correction" }, affectedItems: { type: "array", minItems: 1, maxItems: MAX_AGENDA_ITEMS, items: {
           type: "object", additionalProperties: false, required: ["itemId", "disposition"], properties: {
-            itemId: { type: "string" }, disposition: { enum: ["corrected", "reopen"] },
+            itemId: boundedInterpretationText(), disposition: { enum: ["corrected", "reopen"] },
           },
         } },
         affectedCandidates: { type: "array", minItems: 1, maxItems: MAX_AGENDA_ITEMS, items: {
           type: "object", additionalProperties: false, required: ["candidateId", "disposition"], properties: {
-            candidateId: { type: "string" }, disposition: { enum: ["corrected", "reopen"] },
+            candidateId: boundedInterpretationText(), disposition: { enum: ["corrected", "reopen"] },
           },
         } },
       } },
     ] },
     facts: { type: "array", maxItems: 16, items: { type: "object", additionalProperties: false,
       required: ["topic", "field", "disposition", "rule_text", "structured"], properties: {
-        topic: { type: "string" }, field: { type: "string" }, subject: { type: "string" },
-        disposition: { type: "string" }, rule_text: { type: "string" }, structured: { type: "object" },
+        topic: boundedInterpretationText(), field: boundedInterpretationText(), subject: boundedInterpretationText(),
+        disposition: boundedInterpretationText(), rule_text: boundedInterpretationText(8192), structured: { type: "object" },
       } } },
   },
 };
+
+const INTERPRETATION_FAILURE_CODES = new Set([
+  "invalid_interpretation_output", "interpretation_shape_invalid", "interpretation_json_invalid",
+  "interpretation_tool_output_invalid", "interpretation_provider_failed", "interpretation_provider_cancelled",
+  "interpretation_provider_incomplete", "interpretation_response_conflict", "interpretation_timeout",
+  "interpretation_proposal_binding_invalid", "interpretation_transition_invalid",
+  "website_facts_invalid_batch", "website_facts_owner_evidence_invalid", "website_facts_proposal_cannot_stage",
+  "website_facts_correction_targets_invalid", "website_facts_unknown_correction_target",
+  "website_facts_current_item_mismatch", "website_facts_current_item_unknown", "website_facts_related_target_not_explicit",
+  "website_facts_unrecognized_fields", "website_facts_policy_shape_invalid", "website_facts_ref_not_allowed",
+  "website_facts_private_evidence_undecided", "website_facts_duplicate_ref", "website_facts_disposition_mismatch",
+  "website_facts_typed_value_invalid", "website_applicability_current_item_mismatch", "website_applicability_owner_text_invalid",
+  "website_applicability_targets_invalid", "website_applicability_current_graph_missing", "website_applicability_scope_unsupported",
+  "website_applicability_target_not_eligible", "website_applicability_owner_evidence_missing",
+]);
+/** Parser errors may append an item/ref and private values. Only a known static
+ * reason can enter diagnostics or the single provider repair request. */
+export function websiteInterpretationFailureCode(value: unknown): string {
+  const message = typeof value === "string" ? value : (value as { message?: unknown })?.message;
+  const code = typeof message === "string" ? message.split(":", 1)[0] : "";
+  return INTERPRETATION_FAILURE_CODES.has(code) ? code : "invalid_interpretation_output";
+}
+
+function interpretationSelected(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], result: WebsiteInterpretationResult): void {
+  if (state.pending?.kind !== "interpret") return;
+  const p = result.proposal;
+  commands.push({ type: "telemetry", code: "interpretation.selected", requestId: state.pending.requestId,
+    attempt: state.pending.attempt, proposalKind: p.kind, factCount: result.facts?.length ?? 0,
+    targetCount: p.kind === "correction" ? (p.affectedItems?.length ?? 0) + (p.affectedCandidates?.length ?? 0)
+      : p.kind === "answer" ? 1 + (p.relatedItemIds?.length ?? 0) : "itemId" in p && p.itemId !== null ? 1 : 0 });
+}
 
 function effect(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], command: WebsiteAgendaCommand & { requestId: string },
   kind: PendingEffect["kind"], nowMs: number, turn?: OwnerTurn, attempt = 0): void {
@@ -355,7 +398,7 @@ function agendaSpeech(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[
     ? state.fieldGuidance[current.id] ?? websiteQuestionGuidance(current) : "";
   speak(state, commands, action.type, `${guidance ? `${guidance} ` : ""}${action.spokenPt}`, "owner", nowMs, action.actionId);
 }
-function interpret(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], turn: OwnerTurn, nowMs: number, attempt = 0): void {
+function interpret(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], turn: OwnerTurn, nowMs: number, attempt = 0, repairCode?: string): void {
   state.phase = "interpreting";
   const command: Extract<WebsiteAgendaCommand, { type: "interpret_owner_turn" }> = {
     type: "interpret_owner_turn", requestId: requestId(state, "interpret", [turn.turnId, state.stored.digest, attempt]),
@@ -364,6 +407,7 @@ function interpret(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], 
     toolName: "submit_website_interview_proposal", toolSchema: PROPOSAL_SCHEMA, agenda: state.stored.agenda,
     instructions: "Interpret only the stored owner transcript into the single proposal tool. Never produce speech, chat, offers or approval. Bind the proposal to the captured current item; only explicitly related items may share an answer. Preserve business values as bounded facts without owner_words. Website candidates are not owner approval. Questions about meaning require clarification, using only application field guidance. In correction mode, a question or unclear statement without an actual factual correction returns clarification with itemId:null and facts:[]; never invent a changed target. Copywriting/off-scope requests are off_scope. Corrections require explicit affected item or candidate IDs. Do not invent facts, prices, authority or approval.",
   };
+  if (attempt === 1) command.instructions += ` The previous output was rejected (${websiteInterpretationFailureCode(repairCode)}). Repair the tool output, not the owner's intent. Return exactly one proposal variant and only its allowed fields: relatedItemIds belongs only to answer; questionPt and null itemId belong only to clarification. Preserve the captured item and explicit related graph. Do not turn a valid answer into clarification or defer to fix an output error. Omit unsupported optional typed facts instead of guessing their schema.`;
   effect(state, commands, command, "interpret", nowMs, turn, attempt);
 }
 function persistProposal(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], turn: OwnerTurn,
@@ -376,6 +420,7 @@ function persistProposal(state: WebsiteAgendaState, commands: WebsiteAgendaComma
       turnId: turn.turnId, text: turn.text, proposal: result.proposal });
   } catch { return false; }
   if (!transition.accepted || transition.replayed || !transition.action) return false;
+  interpretationSelected(state, commands, result);
   state.phase = "persisting_agenda";
   effect(state, commands, { type: "persist_agenda", requestId: requestId(state, "persist", [turn.turnId, state.stored.digest]),
     turnId: turn.turnId, providerItemId: turn.providerItemId, expectedRevision: state.stored.revision,
@@ -384,15 +429,15 @@ function persistProposal(state: WebsiteAgendaState, commands: WebsiteAgendaComma
     proposal: result.proposal, facts: result.facts ?? [], agenda: transition.agenda, nextAction: transition.action }, "persist_agenda", nowMs, turn);
   return true;
 }
-function interpretationFailure(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], nowMs: number): void {
+function interpretationFailure(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], nowMs: number, reason = "invalid_interpretation_output"): void {
   const pending = state.pending;
   const turn = state.turns.find(turn => turn.turnId === pending?.turnId);
   if (!pending || !turn) return;
-  if (pending.attempt === 0) { interpret(state, commands, turn, nowMs, 1); return; }
-  const itemId = getAgendaAction(state.stored.agenda).itemId;
-  if (!state.correctionRequired && itemId && persistProposal(state, commands, turn, {
-    proposal: { kind: "clarification", itemId }, facts: [],
-  }, nowMs)) return;
+  const code = websiteInterpretationFailureCode(reason);
+  commands.push({ type: "telemetry", code: "interpretation.rejected", requestId: pending.requestId, attempt: pending.attempt, reason: code });
+  if (pending.attempt === 0) { interpret(state, commands, turn, nowMs, 1, code); return; }
+  // Invalid provider output is technical failure, never evidence that the
+  // owner requested clarification/defer. Keep the raw recorded turn untouched.
   fail(state, commands, "interpretation_exhausted", nowMs);
 }
 function repeatApproval(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], turn: OwnerTurn, nowMs: number):void {
@@ -562,7 +607,7 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
     }
     case "interpretation.created":
       if (pending?.kind !== "interpret" || pending.requestId !== event.requestId || !nonblank(event.responseId)) break;
-      if (pending.responseId && pending.responseId !== event.responseId) { interpretationFailure(state, commands, event.nowMs); break; }
+      if (pending.responseId && pending.responseId !== event.responseId) { interpretationFailure(state, commands, event.nowMs, "interpretation_response_conflict"); break; }
       state.pending!.responseId = event.responseId; break;
     case "interpretation.completed": {
       if (pending?.kind !== "interpret" || pending.requestId !== event.requestId || pending.responseId !== event.responseId ||
@@ -573,16 +618,18 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
         const proposal=result.proposal;
         if((proposal.affectedItems??[]).some(target=>!state.stored.agenda.items.some(item=>item.id===target.itemId)) ||
           (proposal.affectedCandidates??[]).some(target=>!state.stored.agenda.candidateContext.some(item=>item.id===target.candidateId))){
-          interpretationFailure(state,commands,event.nowMs);break;
+          interpretationFailure(state,commands,event.nowMs,"interpretation_proposal_binding_invalid");break;
         }
         const reopen:Extract<AgendaProposal,{kind:"correction"}>={kind:"correction",
           ...(proposal.affectedItems?{affectedItems:proposal.affectedItems.map(target=>({...target,disposition:"reopen" as const}))}:{}),
           ...(proposal.affectedCandidates?{affectedCandidates:proposal.affectedCandidates.map(target=>({...target,disposition:"reopen" as const}))}:{})};
+        interpretationSelected(state,commands,result);
         effect(state,commands,{type:"request_amendment",requestId:requestId(state,"amendment",[state.approval.receiptId,turn.turnId]),
           approvalReceiptId:state.approval.receiptId,providerItemId:turn.providerItemId,proposal:reopen},"request_amendment",event.nowMs,turn);break;
       }
       if(state.correctionRequired && result && (result.facts?.length ?? 0)===0 &&
         (result.proposal.kind==="off_scope" || (result.proposal.kind==="clarification" && result.proposal.itemId===null))){
+        interpretationSelected(state,commands,result);
         if(state.deferredAfterPlayback || state.deferredSpeech){turn.processed=true;delete state.pending;state.correctionRequired=false;continueDeferredSpeech(state,commands,event.nowMs);}
         else if(state.interruptedSpeech)resumeInterruptedSpeech(state,commands,turn.providerItemId,event.nowMs,turn);
         else repeatApproval(state,commands,turn,event.nowMs);break;
@@ -590,14 +637,17 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
       if (copyRequest(turn.text) && !state.correctionRequired) result = { proposal: { kind: "off_scope" }, facts: [] };
       else if ((explanationRequest(turn.text) || explicitlyUnknown(turn.text) || acknowledgment(turn.text)) && !state.correctionRequired && turn.capturedItemId)
         result = { proposal: { kind: "clarification", itemId: turn.capturedItemId }, facts: [] };
-      if (!result || (state.correctionRequired && result.proposal.kind !== "correction") ||
+      if (!result) interpretationFailure(state, commands, event.nowMs, "interpretation_shape_invalid");
+      else if ((state.correctionRequired && result.proposal.kind !== "correction") ||
         (!state.correctionRequired && result.proposal.kind === "correction" && replyKind(turn.text) !== "correction") ||
-        ("itemId" in result.proposal && result.proposal.itemId !== turn.capturedItemId) ||
-        !persistProposal(state, commands, turn, result, event.nowMs)) interpretationFailure(state, commands, event.nowMs);
+        ("itemId" in result.proposal && result.proposal.itemId !== turn.capturedItemId))
+        interpretationFailure(state, commands, event.nowMs, "interpretation_proposal_binding_invalid");
+      else if (!persistProposal(state, commands, turn, result, event.nowMs))
+        interpretationFailure(state, commands, event.nowMs, "interpretation_transition_invalid");
       break;
     }
     case "interpretation.failed":
-      if (pending?.kind === "interpret" && pending.requestId === event.requestId) interpretationFailure(state, commands, event.nowMs);
+      if (pending?.kind === "interpret" && pending.requestId === event.requestId) interpretationFailure(state, commands, event.nowMs, event.code);
       break;
     case "agenda.persisted": {
       if (pending?.kind !== "persist_agenda" || pending.requestId !== event.requestId || pending.command.type !== "persist_agenda") break;
@@ -709,7 +759,7 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
             turnId: turn.turnId, text: turn.text, attempt: 1 });
         } else fail(state, commands, "owner_transcript_persistence_exhausted", event.nowMs);
       } else if (pending?.requestId === event.requestId && (due || event.nowMs >= pending.deadlineAtMs)) {
-        if (pending.kind === "interpret") interpretationFailure(state, commands, event.nowMs);
+        if (pending.kind === "interpret") interpretationFailure(state, commands, event.nowMs, due ? "invalid_interpretation_output" : "interpretation_timeout");
         else if (pending.kind === "record_completion") { state.phase = "failed"; state.error = "completion_receipt_missing"; delete state.pending; }
         else fail(state, commands, `${pending.kind}_failed`, event.nowMs);
       } else if (state.speech?.action.actionId === event.requestId && (due || event.nowMs >= state.speech.deadlineAtMs)) {

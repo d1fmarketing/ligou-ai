@@ -125,9 +125,9 @@ describe('website interview serialized transport adapter',()=>{
  });
 });
 
-function recoveryHarness(options:{commitFailure?:'transient'|'after_commit'|'auth'|'exhausted'|'http_unavailable';holdPlaybackReceipt?:boolean;holdNextQuestion?:boolean}={}){
+function recoveryHarness(options:{commitFailure?:'transient'|'after_commit'|'auth'|'exhausted'|'http_unavailable';holdPlaybackReceipt?:boolean;holdNextQuestion?:boolean;throwDiagnostics?:boolean}={}){
  const b=base(),sent:any[]=[],spoken:any[]=[],receipts:any[]=[],transcripts:any[]=[],terminations:any[]=[],completions:any[]=[];
- const diagnostics:any[]=[],commitRequests:any[]=[],interruptions:any[]=[],emptyInputs:any[]=[],resumptions:any[]=[];let reads=0;
+ const diagnostics:any[]=[],commitRequests:any[]=[],interruptions:any[]=[],emptyInputs:any[]=[],resumptions:any[]=[],costs:number[]=[];let reads=0;
  let releasePlayback=()=>{};
  let releaseQuestion=()=>{};
  let stored:any=b.stored,clock=Date.now(),sequence=0;
@@ -159,7 +159,8 @@ function recoveryHarness(options:{commitFailure?:'transient'|'after_commit'|'aut
    approveSummary:async(x:any)=>({approvalReceiptId:requestId,turnId:`${callId}:${x.providerItemId}`,summaryId:x.summaryId,summaryHash:x.summaryHash,revision:x.expectedRevision,digest:x.expectedDigest,storeVersion:x.expectedStoreVersion+1}),
    recordCompletion:async(x:any)=>{completions.push(x);return{receiptId:requestId,interviewId:callId,callId,outcome:x.outcome,approvalReceiptId:x.approvalReceiptId};}} as any,
   synthesize:async(a:any)=>{spoken.push(a);if(options.holdNextQuestion && a.kind==='CONFIRM_AND_ASK_NEXT')await new Promise<void>(resolve=>{releaseQuestion=resolve;});const p=b.payload(a);payloads.set(a.actionId,p);return p as any;},
-  send:e=>sent.push(e),enqueue:async f=>f(),onTranscript:t=>transcripts.push(t),onCost:()=>{},onUsage:()=>{},onUsageUnknown:()=>{},onTerminate:t=>terminations.push(t),onState:()=>{},onDiagnostic:d=>diagnostics.push(d),now:()=>clock,
+  send:e=>sent.push(e),enqueue:async f=>f(),onTranscript:t=>transcripts.push(t),onCost:cost=>costs.push(cost),onUsage:()=>{},onUsageUnknown:()=>{},onTerminate:t=>terminations.push(t),onState:()=>{},
+  onDiagnostic:d=>{diagnostics.push(d);if(options.throwDiagnostics)throw new Error('diagnostic observer unavailable');},now:()=>clock,
  });
  const current=()=>runtime.state.phase==='opening'?b.openingPayload:payloads.get(runtime.state.speech!.action.actionId);
  async function play(deliver=true){const p=current(),id=`lgs-${p.actionId.slice(0,28)}`;if(providerItems.has(id))throw new Error('browser must never replay');
@@ -172,8 +173,108 @@ function recoveryHarness(options:{commitFailure?:'transient'|'after_commit'|'aut
   await runtime.handleEvent({type:'response.done',response:{id:`response-${sequence}`,status:'completed',metadata:request.response.metadata,output:[{type:'function_call',name:'submit_website_interview_proposal',status:'completed',call_id:`tool-${sequence}`,arguments:JSON.stringify({proposal:{kind:'answer',itemId},facts:[]})}]}});}
  async function recover(){const frame=sent.filter(e=>e.type==='conversation.item.retrieve' && e.item_id?.startsWith('lgs-')).at(-1);expect(frame).toBeDefined();
   const item=providerItems.get(frame.item_id);expect(item).toBeDefined();await runtime.handleEvent({type:'conversation.item.retrieved',event_id:'provider-generated-event',item});return {frame,item};}
- return{runtime,sent,spoken,receipts,transcripts,terminations,completions,plays,current,play,answer,recover,diagnostics,commitRequests,interruptions,emptyInputs,resumptions,releasePlayback:()=>releasePlayback(),releaseQuestion:()=>releaseQuestion(),get reads(){return reads;},advance:(ms:number)=>{clock+=ms;}};
+ return{runtime,sent,spoken,receipts,transcripts,terminations,completions,plays,current,play,answer,recover,diagnostics,costs,commitRequests,interruptions,emptyInputs,resumptions,releasePlayback:()=>releasePlayback(),releaseQuestion:()=>releaseQuestion(),get reads(){return reads;},advance:(ms:number)=>{clock+=ms;}};
 }
+
+test('a throwing diagnostic observer cannot alter accepted TTS accounting or owner progress',async()=>{
+ const h=recoveryHarness({throwDiagnostics:true});try{
+  await h.runtime.attach();await h.play();await h.answer('cities');
+  expect(h.runtime.state.stored.revision).toBe(1);expect(h.commitRequests).toHaveLength(1);
+  expect(h.runtime.state.error).toBeUndefined();expect(h.runtime.state.speech?.action.kind).toBe('CONFIRM_AND_ASK_NEXT');
+  expect(h.diagnostics.some(d=>d.stage==='tts.ready')).toBe(true);
+  expect(h.costs).toEqual([h.current().cost_usd]);expect(h.costs[0]).toBeGreaterThan(0);
+  expect(h.sent.filter(e=>e.type==='response.create')).toHaveLength(1);
+ }finally{h.runtime.stop();}
+});
+
+test('interpreter diagnostics separate rejected output, selected proposal and TTS time without owner data',async()=>{
+ const h=recoveryHarness({holdNextQuestion:true});
+ const text='Somente Novato. Fora da cidade, só com autorização do dono.';
+ try{
+  await h.runtime.attach();await h.play();
+  await h.runtime.handleEvent({type:'input_audio_buffer.speech_started',item_id:'private-owner-123'});
+  await h.runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:'private-owner-123',transcript:text});
+  const first=h.sent.filter(e=>e.type==='response.create').at(-1);
+  h.advance(5);
+  await h.runtime.handleEvent({type:'response.created',response:{id:'private-response-1',metadata:first.response.metadata}});
+  h.advance(7);
+  await h.runtime.handleEvent({type:'response.done',response:{id:'private-response-1',status:'completed',metadata:first.response.metadata,
+   output:[{type:'function_call',name:'submit_website_interview_proposal',status:'completed',arguments:JSON.stringify({
+    proposal:{kind:'answer',itemId:'cities',questionPt:'private-output-456'},facts:[]})}]}});
+  const retry=h.sent.filter(e=>e.type==='response.create').at(-1);
+  expect(retry.response.metadata.website_request_id).not.toBe(first.response.metadata.website_request_id);
+  expect(retry.response.instructions).toContain('interpretation_shape_invalid');
+  expect(retry.response.instructions).not.toContain('private-output-456');
+  expect(h.commitRequests).toHaveLength(0);
+  h.advance(3);
+  const completed=h.runtime.handleEvent({type:'response.done',response:{id:'private-response-2',status:'completed',metadata:retry.response.metadata,
+   output:[{type:'function_call',name:'submit_website_interview_proposal',status:'completed',arguments:JSON.stringify({proposal:{kind:'answer',itemId:'cities'},facts:[]})}]}});
+  for(let i=0;i<100 && !h.spoken.length;i++)await Promise.resolve();
+  expect(h.spoken).toHaveLength(1);h.advance(23);h.releaseQuestion();await completed;
+  const stages=h.diagnostics.map(d=>d.stage);
+  expect(stages.filter(s=>s==='interpretation.requested')).toHaveLength(2);
+  expect(h.diagnostics.find(d=>d.stage==='interpretation.created')).toMatchObject({attempt:0,durationMs:5});
+  expect(h.diagnostics.filter(d=>d.stage==='interpretation.done')).toMatchObject([
+   {attempt:0,durationMs:12,proposalKind:'answer',factCount:0,outputCount:1},
+   {attempt:1,durationMs:3,proposalKind:'answer',factCount:0,outputCount:1},
+  ]);
+  expect(h.diagnostics.filter(d=>d.stage==='interpretation.rejected')).toMatchObject([{attempt:0,code:'interpretation_shape_invalid'}]);
+  expect(h.diagnostics.filter(d=>d.stage==='interpretation.selected')).toMatchObject([{attempt:1,proposalKind:'answer',factCount:0,targetCount:1}]);
+  expect(stages.indexOf('interpretation.selected')).toBeLessThan(stages.indexOf('answer.commit'));
+  expect(stages).toContain('tts.requested');
+  expect(h.diagnostics.find(d=>d.stage==='tts.ready')).toMatchObject({durationMs:23});
+  expect(h.runtime.state.stored.revision).toBe(1);
+  for(const secret of [text,'private-owner-123','private-response-1','private-output-456','owner_transcript','arguments'])
+   expect(JSON.stringify(h.diagnostics)).not.toContain(secret);
+  expect(h.diagnostics.every((entry,index)=>index===0 || entry.elapsedMs>=h.diagnostics[index-1].elapsedMs)).toBe(true);
+ }finally{h.releaseQuestion();h.runtime.stop();}
+});
+
+test('failed interpreter responses exhaust technically without inventing a clarification or changing the agenda',async()=>{
+ const h=recoveryHarness();try{
+  await h.runtime.attach();await h.play();
+  const before=structuredClone(h.runtime.state.stored),text='Atendemos somente Novato, San Rafael e Petaluma.';
+  await h.runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:'preserved-owner',transcript:text});
+  for(let attempt=0;attempt<2;attempt++){
+   const request=h.sent.filter(e=>e.type==='response.create').at(-1);
+   await h.runtime.handleEvent({type:'response.done',response:{id:`failed-${attempt}`,metadata:request.response.metadata,status:'failed',
+    status_details:{error:{code:'private-code-secret',message:'private provider response'}},output:[]}});
+  }
+  expect(h.sent.filter(e=>e.type==='response.create')).toHaveLength(2);
+  expect(h.commitRequests).toHaveLength(0);expect(h.runtime.state.stored).toEqual(before);
+  expect(h.runtime.state.turns.at(-1)).toMatchObject({text,recorded:true,processed:false});
+  expect(h.runtime.state.error).toBe('interpretation_exhausted');
+  expect(h.runtime.state.speech?.action.kind).toBe('SPEAK_TERMINAL_ERROR');
+  expect(h.diagnostics.filter(d=>d.stage==='interpretation.rejected')).toMatchObject([
+   {attempt:0,code:'interpretation_provider_failed'},{attempt:1,code:'interpretation_provider_failed'},
+  ]);
+  expect(JSON.stringify(h.diagnostics)).not.toContain('private');
+  await h.play();expect(h.terminations).toHaveLength(1);
+  expect(h.terminations[0]).toMatchObject({outcome:'unfinished',reason:'interpretation_exhausted'});
+ }finally{h.runtime.stop();}
+});
+
+test.each(['clarification','invalid_kind'])('diagnostics distinguish a selected clarification from malformed output: %s',async variant=>{
+ const h=recoveryHarness();try{
+  await h.runtime.attach();await h.play();
+  await h.runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:'owner-unclear',transcript:'Ainda preciso entender esse ponto.'});
+  const request=h.sent.filter(e=>e.type==='response.create').at(-1);
+  const proposal=variant==='clarification'?{kind:'clarification',itemId:'cities'}:{kind:{toString:null},itemId:'cities'};
+  await h.runtime.handleEvent({type:'response.done',response:{id:'response-unclear',status:'completed',metadata:request.response.metadata,
+   output:[{type:'function_call',name:'submit_website_interview_proposal',status:'completed',arguments:JSON.stringify({proposal,facts:[]})}]}});
+  if(variant==='clarification'){
+   expect(h.commitRequests).toHaveLength(1);expect(h.commitRequests[0].proposal).toEqual(proposal);
+   expect(h.runtime.state.stored.agenda.items[0].clarificationCount).toBe(1);
+   expect(h.diagnostics.filter(d=>d.stage==='interpretation.selected')).toMatchObject([{attempt:0,proposalKind:'clarification',factCount:0}]);
+   expect(h.diagnostics.filter(d=>d.stage==='interpretation.rejected')).toHaveLength(0);
+  }else{
+   expect(h.commitRequests).toHaveLength(0);
+   expect(h.diagnostics.filter(d=>d.stage==='interpretation.selected')).toHaveLength(0);
+   expect(h.diagnostics.filter(d=>d.stage==='interpretation.rejected')).toMatchObject([{attempt:0,code:'interpretation_shape_invalid'}]);
+   expect(h.sent.filter(e=>e.type==='response.create')).toHaveLength(2);
+  }
+ }finally{h.runtime.stop();}
+});
 
 test('barge-in answer to the published next question binds to that question before its played ACK',async()=>{
  const h=recoveryHarness();try{

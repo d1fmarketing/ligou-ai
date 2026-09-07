@@ -57,8 +57,9 @@ test("a failed commit cannot emit the prospective territory confirmation", () =>
   event({ type: "interpretation.created", requestId: interpret.requestId, responseId: "response" });
   const commands = event({ type: "interpretation.completed", requestId: interpret.requestId, responseId: "response", turnId: interpret.turnId,
     itemId: interpret.itemId, digest: interpret.digest, result: { proposal: { kind: "answer", itemId: "area" }, facts: [] } });
-  expect(commands.map(command => command.type)).toEqual(["persist_agenda"]);
-  const failed = event({ type: "effect.failed", requestId: (commands[0] as any).requestId, code: "42501" });
+  const effects = commands.filter(command => command.type !== "telemetry");
+  expect(effects.map(command => command.type)).toEqual(["persist_agenda"]);
+  const failed = event({ type: "effect.failed", requestId: (effects[0] as any).requestId, code: "42501" });
   expect(failed.filter(command => command.type === "request_speech").every(command => !(command as any).action.text.includes("Novato"))).toBe(true);
   expect(state.stored.agenda.items[0].status).toBe("open");
   expect(state.stored.agenda.ownerTurns).toEqual([]);
@@ -73,7 +74,7 @@ test('a committed owner contact condition advances instead of becoming an invali
  const interpret=event({type:'owner_turn.recorded',requestId:write.requestId,providerItemId:write.providerItemId,turnId:write.turnId,text})[0] as any;
  event({type:'interpretation.created',requestId:interpret.requestId,responseId:'response'});
  const commit=event({type:'interpretation.completed',requestId:interpret.requestId,responseId:'response',turnId:interpret.turnId,itemId:interpret.itemId,digest:interpret.digest,
-  result:{proposal:{kind:'answer',itemId:'area'},facts:[]}})[0] as any;
+  result:{proposal:{kind:'answer',itemId:'area'},facts:[]}}).find(command=>command.type==='persist_agenda') as any;
  expect(commit.type).toBe('persist_agenda');
  const after=event({type:'agenda.persisted',requestId:commit.requestId,stored:stored(commit.agenda,commit.nextAction)});
  expect(state.stored.revision).toBe(1);expect(state.phase).toBe('speaking');

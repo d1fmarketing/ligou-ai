@@ -246,18 +246,33 @@ export function installBrowserHarness(settings) {
   window.fetch = async (...args) => {
     const pathname = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href).pathname;
     const isSpeechRead = pathname.endsWith('/rpc/read_website_interview_speech');
+    const isBootstrap = /\/(?:session|voice-session|browser-session)$/.test(pathname);
     if (isSpeechRead && state.faultArmed && !state.faultInjected) {
       state.faultInjected = true; stamp('isolated_fault_injected', { kind: 'one_browser_speech_read_network_failure' });
       throw new TypeError('Synthetic isolated acceptance network failure');
     }
     const began = now();
+    if (isSpeechRead || isBootstrap) stamp(isSpeechRead ? 'opening_or_next_speech_read_started' : 'bootstrap_fetch_started');
     const response = await nativeFetch(...args);
-    if (isSpeechRead || /\/(?:session|voice-session|browser-session)$/.test(pathname)) {
+    const headersMs = now() - began;
+    const edgeServerTiming = {};
+    if (isBootstrap) {
+      // Only fixed numeric Edge metric names enter the diagnostic artifact.
+      // Never copy arbitrary headers, which may contain session credentials.
+      for (const part of (response.headers.get('Server-Timing') ?? '').split(',')) {
+        const match = part.trim().match(/^(edge_(?:config|auth|body_contract|tenant|enqueue|wait_ready|opening_validate|call_model|cleanup|serialize|poll_sleep|poll_read|total));dur=(\d+(?:\.\d+)?)$/);
+        if (match && Number(match[2]) <= 300_000) edgeServerTiming[match[1]] = Number(match[2]);
+      }
+    }
+    if (isSpeechRead || isBootstrap) {
+      stamp(isSpeechRead ? 'opening_or_next_speech_read_headers' : 'bootstrap_response_headers', { status: response.status, headersMs, ...(isBootstrap ? { edgeServerTiming } : {}) });
       void response.clone().json().then(data => {
+        stamp(isSpeechRead ? 'opening_or_next_speech_read_body' : 'bootstrap_response_body', { bodyCompleteMs: now() - began });
         if (isSpeechRead) speech(data);
         else if (data?.call_id) {
           state.callId = cleanId(data.call_id);
           state.bootstrap = { callId: state.callId, roundTripMs: now() - began, status: response.status, maxMinutes: data.max_minutes,
+            responseHeadersMs: headersMs, edgeServerTiming,
             model: data.model, protocolVersion: data.onboarding_protocol_version, openingVersion: data.opening_payload?.version,
             speechCallId: cleanId(data.opening_payload?.speech?.callId) };
           stamp('bootstrap_observed', state.bootstrap);
