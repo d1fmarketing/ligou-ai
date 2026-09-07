@@ -94,7 +94,7 @@ export function requestResponse(ledger: CoordinatedLedger, ws: WsLike, intent: R
           // interpreting owner answers separate, and preserve older models.
           ...(applicationIntent.websiteStream && ["gpt-realtime-2.1", "gpt-realtime-2.1-mini"].includes(ledger.model ?? "")
             ? { reasoning: { effort: "minimal" } } : {}),
-          ...(applicationIntent.websiteStream?{conversation:'none',tools:[],input:[{type:'message',role:'user',content:[{type:'input_text',text:applicationIntent.websiteStream.action.text}]}]}:{}),
+          ...(applicationIntent.websiteStream?{conversation:'none',tools:[],input:[{type:'message',role:'user',content:[{type:'input_text',text:JSON.stringify({fala_selecionada:applicationIntent.websiteStream.action.text})}]}]}:{}),
           ...(applicationIntent.instructions
             ? { instructions: applicationIntent.instructions }
             : {}),

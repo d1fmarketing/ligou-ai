@@ -77,6 +77,7 @@ test('stream opening waits for browser readiness, dispatches once with no TTS, a
   expect(h.sent.find(e=>e.type==='session.update')?.session.audio.input.transcription).toEqual({model:'gpt-live-transcribe',languages:['pt']});
   const frame=await h.ready();await h.ready();
   expect(frame.response).toMatchObject({conversation:'none',output_modalities:['audio'],tools:[],tool_choice:'none'});
+  expect(JSON.parse(frame.response.input[0].content[0].text)).toEqual({fala_selecionada:h.openingStream.action.text});
   expect(h.calls.filter(x=>x==='authorizeStream')).toHaveLength(1);
   await h.generation(frame);expect(h.runtime.state.phase).toBe('opening');
   expect(h.transcripts).toHaveLength(0);await h.played();

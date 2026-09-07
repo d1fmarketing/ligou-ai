@@ -518,6 +518,29 @@ const DEFAULT_OPENING_TIMEOUT_MS = 15_000;
 function safeOpeningError(detail) {
   return new Error(`Abertura segura indisponível — sessão encerrada (${detail}).`);
 }
+export async function readWebsiteInterviewStream({client,callId,actionId,dispatchId,signal,onRetry,onAttemptFailure}) {
+  const args={p_call:callId,p_action:actionId,p_dispatch:dispatchId};
+  for(let attempt=0;attempt<2;attempt++){
+    if(signal?.aborted)throw voiceAbortError(signal);
+    let result,failure;
+    try{
+      const request=client.rpc('read_website_interview_stream',args);
+      result=await abortableVoiceOperation(typeof request.abortSignal==='function'?request.abortSignal(signal):request,signal);
+      if(result&&!result.error)return result.data;
+      failure=result?.error;
+    }catch(error){failure=error;}
+    if(signal?.aborted)throw voiceAbortError(signal);
+    const status=Number.isSafeInteger(result?.status)?result.status:null;
+    const authFailure=[401,403].includes(status)||['42501','PGRST301','PGRST302','PGRST303'].includes(failure?.code);
+    const networkFailure=status===0||/failed to fetch|fetch failed|network(?:error| request failed| failure)|load failed|connection reset/i.test(String(failure?.message??''));
+    const transient=!authFailure&&(networkFailure||[408,429,500,502,503,504].includes(status));
+    const detail={attempt:attempt+1,status,code:authFailure?'authorization':transient?(networkFailure?'network':'transient_http'):'non_transient'};
+    notifyVoiceObserver(onAttemptFailure,detail);
+    if(!transient||attempt===1)throw safeOpeningError('fala atual indisponível');
+    notifyVoiceObserver(onRetry,detail);
+    if(!await pause(150,{signal}))throw voiceAbortError(signal);
+  }
+}
 export function resolveOpeningTimeouts(openingTimeoutMs, openingPlaybackTimeoutMs) {
   const bounded = (value, fallback) => Number.isFinite(value) && value >= 1 && value <= 60_000 ? value : fallback;
   const controlMs = bounded(openingTimeoutMs, DEFAULT_OPENING_TIMEOUT_MS);
@@ -875,12 +898,9 @@ export async function startVoiceSession({
         throw safeOpeningError("identidade da entrevista divergente");
       websitePlayer = createWebsiteStreamPlayer({ callId, interviewId: authorization.action.interviewId,
         signal: setupAbort.signal, controlTimeoutMs: boundedOpeningTimeout,
-        readStream: async (actionId, dispatchId, abortSignal) => {
-          const request = speechClient.rpc("read_website_interview_stream", { p_call: callId, p_action: actionId, p_dispatch: dispatchId });
-          const result = await (typeof request.abortSignal === "function" ? request.abortSignal(abortSignal) : request);
-          if (result.error) throw safeOpeningError("fala atual indisponível");
-          return result.data;
-        },
+        readStream: (actionId, dispatchId, signal) => readWebsiteInterviewStream({client:speechClient,callId,actionId,dispatchId,signal,
+          onAttemptFailure:detail=>timing.mark('speech_read_failed',detail),
+          onRetry:detail=>{stage('retrying');timing.mark('speech_read_retry',detail);}}),
         prepareOutput: async () => {
           await abortableVoiceOperation(remoteTrackReady, setupAbort.signal);
           if (stopped || stopRequested || !remoteAudio.srcObject) throw safeOpeningError("áudio remoto indisponível");

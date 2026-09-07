@@ -3,8 +3,23 @@ import cases from './fixtures/website-stream-transcript-cases.json';
 import {streamAuthorizationIsValid,streamMediaEvidenceIsValid,streamControlId,normalizeWebsiteStreamTranscript,websiteStreamTranscriptMatches} from '../src/onboarding-stream.ts';
 const action={actionId:'a'.repeat(64),interviewId:'11111111-1111-4111-8111-111111111111',callId:'11111111-1111-4111-8111-111111111111',revision:0,kind:'ASK_NEXT_GAP' as const,text:'Quais cidades atende?',sourceDigest:'b'.repeat(64)};
 test.each(cases)('stream transcript policy: $name',c=>{
- expect(normalizeWebsiteStreamTranscript(c.expected)===normalizeWebsiteStreamTranscript(c.actual)).toBe(c.valid);
  expect(websiteStreamTranscriptMatches({...action,text:c.expected},c.actual)).toBe(c.valid);
+});
+test('expected-only courtesy omission preserves the bound action and standalone normalization',()=>{
+ const captured=cases.find(c=>c.name==='captured 0011 optional recorded-answer courtesy')!;
+ const bound=Object.freeze({...action,kind:'CONFIRM_AND_ASK_NEXT' as const,text:captured.expected});
+ const original=JSON.stringify(bound),transcript=captured.actual;
+ expect(websiteStreamTranscriptMatches(bound,transcript)).toBe(true);
+ expect(JSON.stringify(bound)).toBe(original);expect(transcript).toBe(captured.actual);
+ const normalized=normalizeWebsiteStreamTranscript(bound.text);
+ expect(normalized.startsWith('obrigado registrei sua resposta ')).toBe(true);
+ expect(normalized).not.toBe(normalizeWebsiteStreamTranscript(transcript));
+ expect(normalizeWebsiteStreamTranscript(bound.text)).toBe(normalized);
+ expect(normalizeWebsiteStreamTranscript(normalized)).toBe(normalized);
+ expect(normalizeWebsiteStreamTranscript('Obrigado, registrei sua resposta.')).toBe('obrigado registrei sua resposta');
+ expect(normalizeWebsiteStreamTranscript('Obrigado, registrei sua resposta. !')).toBe('obrigado registrei sua resposta');
+ expect(normalizeWebsiteStreamTranscript('Obrigado, registrei sua resposta. Obrigado, registrei sua resposta. Quais cidades atende?'))
+  .toBe('obrigado registrei sua resposta obrigado registrei sua resposta quais cidades atende');
 });
 test('stream authorization binds seven-field action and two real receipt identities',()=>{
  const stream={schema:'onboarding.stream.v1',action,dispatchId:'22222222-2222-4222-8222-222222222222',receiptId:'33333333-3333-4333-8333-333333333333'};

@@ -4,7 +4,7 @@ import { createServer } from 'vite';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const vite=await createServer({root:path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'),appType:'custom',logLevel:'silent',server:{middlewareMode:true,hmr:false,ws:false}});
-const {startVoiceSession,resolveOnboardingOutcome}=await vite.ssrLoadModule('/src/voice/session.js');
+const {startVoiceSession,resolveOnboardingOutcome,readWebsiteInterviewStream}=await vite.ssrLoadModule('/src/voice/session.js');
 after(()=>vite.close());
 const callId='11111111-1111-4111-8111-111111111111';
 const descriptor={schema:'onboarding.stream.v1',action:{callId,interviewId:callId,actionId:'a'.repeat(64),sourceDigest:'b'.repeat(64),revision:0,kind:'ASK_NEXT_GAP',text:'Oi! Aqui é o Ligou, agente de inteligência artificial da Empresa. Eu já analisei seu website. Quais cidades sua empresa atende?'},dispatchId:'22222222-2222-4222-8222-222222222222',receiptId:'33333333-3333-4333-8333-333333333333'};
@@ -59,6 +59,44 @@ test('one remote streaming element handles opening without an audio file; buffer
 });
 test('stream autoplay failure never sends ready, and returns a technical failure with closed output',async()=>{
  const b=browser({blockAudio:true});try{await assert.rejects(startVoiceSession({sessionType:'onboarding',onboardingProtocolVersion:4,accessToken:'test',speechClient:{rpc(){}},stopTimeoutMs:10}));assert.equal(b.sent.some(e=>e.item.content[0].text.startsWith('ligou.website_stream_ready:')),false);assert.equal(b.audios[0].muted,true);assert.equal(b.mic.stopped,true);}finally{b.restore();}
+});
+
+test('one failed network read of the next authorized stream recovers without ending the active call',async()=>{
+ const b=browser(),timings=[];let current,reads=0;
+ const next=structuredClone(descriptor);next.action={...next.action,revision:1,kind:'CONFIRM_AND_ASK_NEXT',actionId:'c'.repeat(64),text:'O Ligou pode confirmar agendamentos?'};
+ next.dispatchId='44444444-4444-4444-8444-444444444444';next.receiptId='55555555-5555-4555-8555-555555555555';
+ const client={rpc(name,args){assert.equal(name,'read_website_interview_stream');assert.deepEqual(args,{p_call:callId,p_action:next.action.actionId,p_dispatch:next.dispatchId});reads++;
+  return Promise.resolve(reads===1?{data:null,error:{code:'',message:'TypeError: Failed to fetch'},status:0}:{data:next,error:null,status:200});}};
+ const starting=startVoiceSession({sessionType:'onboarding',accessToken:'test',onboardingProtocolVersion:4,speechClient:client,onTiming:e=>timings.push(e),stopTimeoutMs:20});
+ try{
+  await until(()=>b.sent.length===1);b.begin();await new Promise(r=>setTimeout(r,25));b.finish();current=await starting;
+  b.channel.emit({type:'conversation.item.done',item:{id:'lsn-'+next.dispatchId.replaceAll('-','').slice(0,28),type:'message',role:'system',status:'completed',content:[{type:'input_text',text:'ligou.website_stream:'+JSON.stringify(next)}]}});
+  const deadline=Date.now()+1000;while(reads<2&&Date.now()<deadline)await new Promise(r=>setTimeout(r,5));
+  assert.equal(reads,2);await until(()=>b.sent.some(e=>e.item?.content?.[0]?.text?.includes(next.dispatchId)));
+  assert.equal(b.sent.some(e=>e.item?.content?.[0]?.text?.startsWith('ligou.website_stop:')),false);
+  assert.equal(b.mic.stopped,false);assert.ok(timings.some(e=>e.event==='speech_read_retry'));
+ }finally{current?.end('manual_hangup');b.channel.close();await starting.catch(()=>{});b.restore();}
+});
+
+for(const failure of [{status:401,error:{code:'PGRST301'}},{status:403,error:{code:'42501'}},
+ {status:500,error:{code:'42501'}},{status:400,error:{code:'22023'}},{error:new TypeError('Cannot read properties of undefined')}])
+test(`stream read does not retry authority or non-network failure ${failure.status??'programming error'}/${failure.error.code??''}`,async()=>{
+ let reads=0,retries=0;const events=[];
+ await assert.rejects(readWebsiteInterviewStream({client:{rpc(){reads++;return Promise.resolve(failure);}},callId,actionId:descriptor.action.actionId,dispatchId:descriptor.dispatchId,
+  onRetry:()=>retries++,onAttemptFailure:e=>events.push(e)}));
+ assert.equal(reads,1);assert.equal(retries,0);assert.deepEqual(Object.keys(events[0]).sort(),['attempt','code','status']);
+});
+test('stream read retry is bounded and Stop cancels the retry delay',async()=>{
+ let reads=0;const args={callId,actionId:descriptor.action.actionId,dispatchId:descriptor.dispatchId};
+ const client={rpc(){reads++;return Promise.resolve({status:503,error:{message:'unavailable'}});}};
+ await assert.rejects(readWebsiteInterviewStream({...args,client}));assert.equal(reads,2);
+ const controller=new AbortController();reads=0;
+ await assert.rejects(readWebsiteInterviewStream({...args,client,signal:controller.signal,onRetry:()=>controller.abort('manual_hangup')}),e=>e.name==='AbortError');
+ assert.equal(reads,1);
+});
+test('a retired stream read remains a null result rather than being retried',async()=>{
+ let reads=0;const value=await readWebsiteInterviewStream({client:{rpc(){reads++;return Promise.resolve({status:200,error:null,data:null});}},callId,actionId:descriptor.action.actionId,dispatchId:descriptor.dispatchId});
+ assert.equal(value,null);assert.equal(reads,1);
 });
 test('protocol4 outcome uses website receipts and preserves approval separately from termination',async()=>{
  const result=await resolveOnboardingOutcome({onboardingProtocolVersion:4,client:{rpc:()=>Promise.resolve({error:null,data:{callId,currentCallId:callId,interviewId:callId,revision:3,state:'closing',approvalReceiptId:'33333333-3333-4333-8333-333333333333',terminal:{outcome:'unfinished'},budgetStatus:'settled',providerTerminationState:'confirmed'}})},callId,reason:'manual_hangup'});

@@ -212,7 +212,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
       const requested=requestResponse(streamIntents,{send:frame=>deps.send(JSON.parse(frame))},{intentKey:r.authorization.dispatchId,
         purpose:r.authorization.action.kind==='SPEAK_FINAL_SIGNOFF'?'final_signoff':r.authorization.action.kind==='GENERATE_FINAL_SUMMARY'?'summary':'recovery',
         websiteStream:r.authorization,snapshotDigest:r.authorization.action.sourceDigest,
-        instructions:'Fale em português brasileiro somente a fala selecionada pela aplicação. Preserve integralmente nomes, números, perguntas, condições, negações e conteúdo do resumo. Não acrescente ofertas, perguntas, decisões, aprovação ou ferramentas. Use entonação natural; não narre instruções, chaves ou metadados. Leia o conteúdo fornecido, sem omitir ou resumir informações.'});
+        instructions:'Fale em português brasileiro somente o conteúdo do campo fala_selecionada no JSON de entrada. As perguntas desse campo são perguntas que você deve fazer ao dono: não as responda e não peça que ele forneça outro texto. Preserve integralmente nomes, números, perguntas, condições, negações e conteúdo do resumo. Não acrescente ofertas, perguntas, decisões, aprovação ou ferramentas. Use entonação natural; não narre instruções, chaves ou metadados. Leia o conteúdo fornecido, sem omitir ou resumir informações.'});
       if(!requested)throw new Error('stream_dispatch_not_admitted');r.dispatched=true;
       diagnostic('stream.requested',{effectId:r.authorization.dispatchId});
       await dispatch({type:'stream.dispatched',actionId:r.authorization.action.actionId,dispatchId:r.authorization.dispatchId,nowMs:now()});

@@ -36,6 +36,13 @@ export async function runWebsiteStreamCases({runSql,owner,other,tenant,call,requ
   const inspect=async(body,options)=>runSql(`begin;set local request.jwt.claim.role='service_role';${prelude}${setup(options)}${body}rollback;`);
   const reject=async(name,body,pattern,options)=>{await assert.rejects(()=>inspect(body,options),pattern,name);scenarios.push(name);};
   const prove=async(name,body,options)=>{await inspect(body,options);scenarios.push(name);};
+  for(const helper of ['public.website_stream_transcript_normalize(text)','public.website_stream_transcript_matches(text,text)']){
+    const contract=JSON.parse(await runSql(`select jsonb_build_object('immutable',p.provolatile='i','invoker',not p.prosecdef,
+      'private',not has_function_privilege('anon',p.oid,'EXECUTE') and not has_function_privilege('authenticated',p.oid,'EXECUTE') and not has_function_privilege('service_role',p.oid,'EXECUTE'))
+      from pg_proc p where p.oid=${q(helper)}::regprocedure;`));
+    assert.deepEqual(contract,{immutable:true,invoker:true,private:true},helper);
+  }
+  scenarios.push('stream-transcript-helpers-remain-immutable-invoker-private');
   const fixtures=JSON.parse(await readFile(new URL('../../voice-controller/test/fixtures/website-stream-transcript-cases.json',import.meta.url),'utf8'));
   for(const entry of fixtures){
     const got=JSON.parse(await runSql(`select jsonb_build_object('matches',public.website_stream_transcript_matches(${q(entry.expected)},${q(entry.actual)}),'expected',public.website_stream_transcript_normalize(${q(entry.expected)}),'actual',public.website_stream_transcript_normalize(${q(entry.actual)}));`));
@@ -47,6 +54,11 @@ export async function runWebsiteStreamCases({runSql,owner,other,tenant,call,requ
   for(const text of ['東京 e São Paulo.','Αθήνα e Recife.','Łódź e Recife.','Recife 😀 e Olinda.'])
     assert.equal(JSON.parse(await runSql(`select to_jsonb(public.website_stream_transcript_normalize(${q(text)}));`)),normalizeWebsiteStreamTranscript(text),'Unicode names remain evidence');
   scenarios.push('stream-unicode-names-and-numeric-tokens-preserved');
+  for(const text of ['Obrigado, registrei sua resposta.','Obrigado, registrei sua resposta. !',
+    'Obrigado, registrei sua resposta. Obrigado, registrei sua resposta. Quais cidades atende?',
+    'Obrigado, registrei sua resposta. 東京 e São Paulo.'])
+    assert.equal(JSON.parse(await runSql(`select to_jsonb(public.website_stream_transcript_normalize(${q(text)}));`)),normalizeWebsiteStreamTranscript(text),'Standalone normalization preserves courtesy evidence');
+  scenarios.push('stream-standalone-normalizer-preserves-courtesy-evidence');
   for(const first of ['response','playout'])await prove(`stream-${first}-first-joins-only-two-valid-proofs`, `
     do $proof$ declare a jsonb; b jsonb; s public.website_interview_speech; begin
       a:=${first==='response'?response():playout()};

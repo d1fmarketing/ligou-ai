@@ -55,6 +55,11 @@ export function normalizeWebsiteStreamTranscript(text:string):string {
   return (t.match(/[+-]?\d+(?:[.,:]\d+)*(?:[%°])?|[\p{L}][\p{L}\p{N}]*|[%$€£<>≤≥=]/gu)??[]).join(' ');
 }
 export function websiteStreamTranscriptMatches(action:OnboardingSpeechAction,transcript:unknown):boolean {
-  return speechActionIsInternallyValid(action)&&typeof transcript==='string'&&transcript.trim().length>0&&transcript.length<=8192
-    &&normalizeWebsiteStreamTranscript(action.text)===normalizeWebsiteStreamTranscript(transcript);
+  if(!speechActionIsInternallyValid(action)||typeof transcript!=='string'||!transcript.trim()||transcript.length>8192)return false;
+  const actual=normalizeWebsiteStreamTranscript(transcript);
+  if(normalizeWebsiteStreamTranscript(action.text)===actual)return true;
+  // Only the selected action can authorize this saved-answer claim. The
+  // renderer may omit its exact leading courtesy, but may never add it.
+  const withoutCourtesy=action.text.replace(/^\s*obrigado[\s,.!:;]+registrei\s+sua\s+resposta\s*[,!.:;]+\s*(?=[\s\S]*[\p{L}\p{N}])/iu,'');
+  return withoutCourtesy!==action.text&&normalizeWebsiteStreamTranscript(withoutCourtesy)===actual;
 }
