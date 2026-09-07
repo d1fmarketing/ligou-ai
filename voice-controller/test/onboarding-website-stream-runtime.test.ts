@@ -8,10 +8,11 @@ import {streamControlId,websiteStreamTranscriptMatches,type StreamAuthorization}
 import {createWebsiteStreamPlayer} from '../../dashboard/src/voice/website-stream.js';
 const id=(n:number)=>`77000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const hash=(x:unknown)=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
-function harness(model?:string){
+function harness(model?:string,relatedTerritory=false){
  const scope={ownerId:id(1),callId:id(2),requestId:id(3)};
  const agenda=createOnboardingAgenda({callId:scope.callId,interviewId:scope.callId,draftId:id(4),draftHash:'a'.repeat(64),sourceResultId:id(5),sourceResultHash:'b'.repeat(64)},[
-  {id:'cities',source:'ambiguity',subject:'area',questionPt:'Quais cidades atende?',coverageRefs:['area.coverage'],relatedItemIds:[],blocking:true},
+  {id:'cities',source:'ambiguity',subject:'area',questionPt:'Quais cidades atende?',coverageRefs:['area.coverage'],relatedItemIds:relatedTerritory?['source-area']:[],blocking:true},
+  ...(relatedTerritory?[{id:'source-area',source:'ambiguity' as const,subject:'area',questionPt:'Quais são os limites do território?',coverageRefs:['discovery.owner_question.area'],relatedItemIds:['cities'],blocking:true}]:[]),
   {id:'hours',source:'ambiguity',subject:'schedule',questionPt:'Qual o horário de sábado?',coverageRefs:['schedule.business_hours'],relatedItemIds:[],blocking:true},
  ]);
  let stored:any={agenda,revision:0,storeVersion:0,digest:onboardingAgendaDigest(agenda),receiptId:id(6),nextAction:getAgendaAction(agenda),state:'unfinished',replayed:false};
@@ -62,11 +63,11 @@ function harness(model?:string){
    mediaEvidence:{schema:'onboarding.stream.media.v1',nonzeroSamples:100,observedMs:1000,firstSampleAtMs:10,lastSampleAtMs:1010,unmuted:true,playbackStarted:true}}));}
  const current=()=>streams.get(runtime.state.speech?.action.actionId??runtime.state.openingAction.actionId)!;
  async function say(stream=current()){const frame=await ready(stream);await generation(frame,stream);await played(stream);}
- async function owner(text:string,proposal?:unknown){const item=`owner-${next++}`;
+ async function owner(text:string,proposal?:unknown,facts:unknown[]=[]){const item=`owner-${next++}`;
   await runtime.handleEvent({type:'input_audio_buffer.speech_started',item_id:item});
   await runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:item,transcript:text});
   if(proposal){const frame=sent.filter(e=>e.type==='response.create'&&e.response.output_modalities[0]==='text').at(-1);
-   await runtime.handleEvent({type:'response.done',response:{id:'interpret-'+item,metadata:frame.response.metadata,status:'completed',output:[{type:'function_call',name:'submit_website_interview_proposal',status:'completed',arguments:JSON.stringify({proposal,facts:[]})}]}});}
+   await runtime.handleEvent({type:'response.done',response:{id:'interpret-'+item,metadata:frame.response.metadata,status:'completed',output:[{type:'function_call',name:'submit_website_interview_proposal',status:'completed',arguments:JSON.stringify({proposal,facts})}]}});}
  }
  return{runtime,prepared,openingAction,openingStream,streams,sent,calls,transcripts,commits,terminations,diagnostics,usages,ready,generation,played,evidence,agendaStore,current,say,owner,control};
 }
@@ -101,6 +102,31 @@ for(const model of [undefined,'gpt-realtime','gpt-realtime-mini','gpt-realtime-2
   await h.runtime.attach();const frame=await h.ready();
   expect(frame.response).not.toHaveProperty('reasoning');
  }finally{h.runtime.stop();}
+});
+
+test('an unsupported optional territory expansion keeps the literal primary answer and asks the still-open related question',async()=>{
+ const h=harness(undefined,true);try{
+  const text='Hã, atendi só Recife e Olinda. Fora dessas cidades, não é para atender.';
+  await h.runtime.attach();await h.say();await h.owner(text,{kind:'answer',itemId:'cities',relatedItemIds:['source-area']});
+  expect(h.commits).toHaveLength(1);expect(h.commits[0].proposal).toEqual({kind:'answer',itemId:'cities',relatedItemIds:[]});
+  expect(h.commits[0].ownerTranscript).toBe(text);expect(h.commits[0].facts).toEqual([]);
+  expect(h.commits[0].nextAction.itemId).toBe('source-area');
+  expect(h.runtime.state.stored.agenda.items.find(i=>i.id==='source-area')?.status).toBe('open');
+  expect(h.sent.filter(e=>e.type==='response.create'&&e.response.output_modalities[0]==='text')).toHaveLength(1);
+  expect(h.diagnostics.some(d=>d.stage==='interpretation.related_targets_narrowed'&&d.targetCount===1)).toBe(true);
+  expect(h.terminations).toHaveLength(0);
+ }finally{h.runtime.stop();}
+});
+
+test('optional narrowing does not conceal a later illegal target or discard nonempty typed facts',async()=>{
+ for(const [relatedItemIds,facts] of [[['source-area','hours'],[]],[['source-area'],[{}]]] as const){
+  const h=harness(undefined,true);try{
+   await h.runtime.attach();await h.say();await h.owner('Hã, atendi só Recife e Olinda. Fora dessas cidades, não é para atender.',
+    {kind:'answer',itemId:'cities',relatedItemIds:[...relatedItemIds]},[...facts]);
+   expect(h.commits).toHaveLength(0);expect(h.diagnostics.some(d=>d.stage==='interpretation.related_targets_narrowed')).toBe(false);
+   expect(h.sent.filter(e=>e.type==='response.create'&&e.response.output_modalities[0]==='text')).toHaveLength(2);
+  }finally{h.runtime.stop();}
+ }
 });
 
 test('client playout can arrive before generation, but only the joined proof advances',async()=>{

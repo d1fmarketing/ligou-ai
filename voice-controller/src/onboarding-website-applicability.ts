@@ -75,7 +75,8 @@ function explicitTerritoryCoverage(text: string): boolean {
   // A past-tense ASR inflection alone describes past work. Accept it for the
   // related coverage question only when a current/future outside-area rule
   // reaffirms the exclusive scope. This never answers the authority question.
-  const sentences = text.replace(/^(?:(?:uhum|aham|hum|ah|entendi|olha)[.!?, ]+)*/, "").split(/[.;\n]/).map(sentence => sentence.trim()).filter(Boolean);
+  const sentences = text.replace(/^\s*\d{1,2}\s*[.,)]\s*/, "")
+    .replace(/^(?:(?:uhum|aham|hum|ah|entendi|olha)[.!?, ]+)*/, "").split(/[.;\n]/).map(sentence => sentence.trim()).filter(Boolean);
   const declaration = sentences[0] ?? "";
   if (!/^(?:eu )?atendi (?:somente|so|apenas) \S/.test(declaration) ||
     /\b(?:ontem|anteontem|antigamente|anteriormente|antes|no passado|na epoca|naquele tempo|no ano passado|no mes passado|na semana passada|em \d{4})\b|\bha [a-z\d ]{1,30}\b(?:dias?|semanas?|meses?|anos?)\b/.test(declaration)) return false;
@@ -185,4 +186,27 @@ export function validateWebsiteAnswerApplicability(input: {
     if (!supportedTarget(current, target, text)) throw new Error(`website_applicability_owner_evidence_missing:${id}`);
   }
   return proposal;
+}
+
+/** Optional ordinary targets may remain open without losing the current answer.
+ * Admission only: durable applicability validation still runs unchanged. */
+export function retainSupportedWebsiteAnswerTargets(input: Parameters<typeof validateWebsiteAnswerApplicability>[0]): AgendaProposal {
+  const {agenda,proposal,currentItemId}=input;
+  if(proposal.kind!=="answer" || !proposal.relatedItemIds?.length)return proposal;
+  const privateItem=(item:AgendaSeed)=>item.source==="owner_private_requirement" || control(item) || has(item,"area.out_of_area_policy");
+  const missingEvidence=(error:unknown)=>error instanceof Error && error.message.startsWith("website_applicability_owner_evidence_missing:");
+  try{return validateWebsiteAnswerApplicability(input);}catch(error){if(!missingEvidence(error))throw error;}
+  const current=agenda.items.find(item=>item.id===currentItemId);
+  if(!current || privateItem(current))return validateWebsiteAnswerApplicability(input);
+  const retained:string[]=[];
+  for(const id of proposal.relatedItemIds){
+    // Validate every original target, including targets after the first failure.
+    // Structural/authority errors are never converted into optional omissions.
+    try{validateWebsiteAnswerApplicability({...input,proposal:{...proposal,relatedItemIds:[id]}});retained.push(id);}
+    catch(error){
+      const target=agenda.items.find(item=>item.id===id);
+      if(!missingEvidence(error) || !target || privateItem(target))throw error;
+    }
+  }
+  return validateWebsiteAnswerApplicability({...input,proposal:{...proposal,relatedItemIds:retained}});
 }

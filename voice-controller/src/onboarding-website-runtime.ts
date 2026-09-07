@@ -5,6 +5,7 @@ import { synthesizeOnboardingSpeech, speechPayloadIsInternallyValid, type Onboar
 import type { PreparedWebsiteInterview } from "./onboarding-website-bootstrap.ts";
 import { generateWebsiteSummaryParts } from "./onboarding-website-summary.ts";
 import { validateWebsiteInterpretationFacts } from "./onboarding-website-facts.ts";
+import { retainSupportedWebsiteAnswerTargets } from "./onboarding-website-applicability.ts";
 import { getAgendaItems, getAgendaAction, type AgendaProposal } from "./onboarding-agenda.ts";
 import { randomUUID } from "node:crypto";
 import {streamAuthorizationIsValid,streamControlId,streamResponseMatches,streamMediaEvidenceIsValid,normalizeWebsiteStreamTranscript,type StreamAuthorization,type StreamMediaEvidence,type StreamProof} from './onboarding-stream.ts';
@@ -739,6 +740,16 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
         result=parseWebsiteInterpretation(raw);
         if(!result)rejectionCode='interpretation_shape_invalid';
         else try{
+          if(streaming && command.mode==='answer' && !state.correctionRequired && !state.summary && !state.approval
+            && result.proposal.kind==='answer' && (result.facts??[]).length===0){
+            const proposedCount=result.proposal.relatedItemIds?.length??0;
+            const proposal=retainSupportedWebsiteAnswerTargets({agenda:state.stored.agenda,currentItemId:command.itemId,
+              ownerTranscript:command.transcript,proposal:result.proposal});
+            if(proposal.kind==='answer' && (proposal.relatedItemIds?.length??0)<proposedCount)
+              diagnostic('interpretation.related_targets_narrowed',{attempt:command.attempt,effectId:command.requestId,
+                targetCount:proposedCount-(proposal.relatedItemIds?.length??0)});
+            result={...result,proposal};
+          }
           // Validate before the reducer commits the proposal so a bad optional
           // typed shape gets the same single bounded interpreter repair.
           validateWebsiteInterpretationFacts({facts:result.facts??[],proposal:result.proposal,currentItemId:command.itemId,

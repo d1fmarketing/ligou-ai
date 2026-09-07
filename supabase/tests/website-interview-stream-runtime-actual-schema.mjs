@@ -12,7 +12,18 @@ const jq=value=>`${q(JSON.stringify(value))}::jsonb`;
 // Actual runtime/store/RPC calls against the disposable production-shaped DB.
 // Provider generation and browser media evidence below are explicit simulations;
 // this does not claim a real voice/audio test. Old completed evidence is retained.
-export async function runWebsiteStreamRuntimeActualSchemaProbe({runSql,rpc,owner,other,tenant,priorCall,source,initialAgenda,projection}){
+export async function runWebsiteStreamRuntimeActualSchemaProbe(input){
+  const numbered=await runWebsiteStreamRuntimeCase(input,{
+    text:'1, olha, atendi só novato, San Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?',
+    relatedAnswered:true,
+  });
+  const primaryOnly=await runWebsiteStreamRuntimeCase(input,{
+    text:'Hã, atendi só Recife e Olinda. Fora dessas cidades, não é para atender.',relatedAnswered:false,
+  });
+  return {...numbered,tests:numbered.tests+1,scenarios:[...numbered.scenarios,'actual-unknown-filler-primary-commits-related-stays-open-without-retry'],primaryOnly};
+}
+
+async function runWebsiteStreamRuntimeCase({runSql,rpc,owner,other,tenant,priorCall,source,initialAgenda,projection},{text,relatedAnswered}){
   const call=randomUUID(),request=randomUUID(),preparation=randomUUID(),scope={ownerId:owner,callId:call,requestId:request};
   let callCreated=false,reserved=false,runtime,lostPlayout=false,playoutInvocations=0;
   const sent=[],transcripts=[],diagnostics=[],invocations=[];
@@ -119,7 +130,6 @@ export async function runWebsiteStreamRuntimeActualSchemaProbe({runSql,rpc,owner
     const acknowledgment=await answer('stream-ack','Ah, entendi.',[],{directAcknowledgment:true});
     assert.equal(runtime.state.stored.agenda.items[0].status,'awaiting_clarification');
     await speech(runtime.state.speech.stream);
-    const text='Hum, olha, atendi só novato, San Rafael e Petaluma, nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?';
     const beforeTerritory=runtime.state.stored;
     const territory=beforeTerritory.agenda.items.find(item=>item.coverageRefs.includes('area.coverage'));assert.ok(territory);
     assert.equal(getAgendaAction(beforeTerritory.agenda).itemId,territory.id);
@@ -129,13 +139,17 @@ export async function runWebsiteStreamRuntimeActualSchemaProbe({runSql,rpc,owner
     const durable=await store.readWebsiteInterview(scope);
     assert.deepEqual(durable.agenda,runtime.state.stored.agenda);assert.equal(durable.digest,runtime.state.stored.digest);
     assert.equal(durable.receiptId,runtime.state.stored.receiptId);assert.equal(durable.revision,2);
-    const answeredIds=[territory.id,...related.map(item=>item.id)],turn={turnId:call+':stream-territory',text};
+    const answeredIds=[territory.id,...(relatedAnswered?related.map(item=>item.id):[])],turn={turnId:call+':stream-territory',text};
     for(const id of answeredIds){
       const item=durable.agenda.items.find(item=>item.id===id);
       assert.equal(item.status,'answered');assert.equal(item.answerRevision,1);assert.deepEqual(item.evidence.at(-1),turn);
     }
     for(const item of durable.agenda.items.filter(item=>!answeredIds.includes(item.id)))
       assert.deepEqual(item,beforeTerritory.agenda.items.find(before=>before.id===item.id),'unrelated policy/authority item unchanged');
+    if(!relatedAnswered)for(const item of related){
+      const preserved=durable.agenda.items.find(value=>value.id===item.id);
+      assert.equal(preserved.status,'open');assert.equal(preserved.answerRevision,0);assert.deepEqual(preserved.evidence,[]);
+    }
     assert.deepEqual(durable.agenda.ownerTurns.at(-1),turn);
     const next=getAgendaAction(durable.agenda);assert.match(next.questionPt,/fuso horário oficial/);
     assert.equal(durable.nextAction.itemId,next.itemId);assert.equal(runtime.state.speech.action.kind,'CONFIRM_AND_ASK_NEXT');
@@ -150,7 +164,8 @@ export async function runWebsiteStreamRuntimeActualSchemaProbe({runSql,rpc,owner
     const facts=JSON.parse(await runSql(`select jsonb_build_object('receiptId',agenda_receipt_id,'ownerText',owner_text,'refs',coverage_refs,'facts',facts)
       from public.website_interview_fact_batches where call_id=${q(call)} and provider_item_id='stream-territory';`));
     assert.equal(facts.receiptId,durable.receiptId);assert.equal(facts.ownerText,text);assert.deepEqual(facts.facts,[]);
-    for(const ref of [territory,...related].flatMap(item=>item.coverageRefs))assert.ok(facts.refs.includes(ref));
+    for(const ref of [territory,...(relatedAnswered?related:[])].flatMap(item=>item.coverageRefs))assert.ok(facts.refs.includes(ref));
+    if(!relatedAnswered)for(const ref of related.flatMap(item=>item.coverageRefs))assert.equal(facts.refs.includes(ref),false);
     await speech(runtime.state.speech.stream);
     assert.equal(playoutInvocations,4);assert.equal(diagnostics.filter(event=>event.stage==='stream.receipt_retry').length,1);
     assert.equal(await runSql(`select count(*) from public.website_interview_speech where call_id=${q(call)} and transport='realtime_stream_v1' and status='played';`),'3');
@@ -165,9 +180,13 @@ export async function runWebsiteStreamRuntimeActualSchemaProbe({runSql,rpc,owner
     for(const receipt of speechReceipts){assert.equal(receipt.acceptedReceipts,4);assert.equal(new Set([receipt.authorization,receipt.generation,receipt.playout,receipt.played]).size,4);}
     assert.equal(invocations.some(({name})=>name==='approve_website_interview_summary'),false);
     assert.equal(sent.filter(event=>event.type==='response.create'&&event.response.output_modalities[0]==='text').length,1);
+    assert.equal(diagnostics.filter(event=>event.stage==='interpretation.requested').length,1);
+    assert.equal(diagnostics.filter(event=>event.stage==='interpretation.rejected'||(event.stage?.startsWith('interpretation.')&&event.attempt>0)).length,0);
     assert.deepEqual(JSON.parse(await preservedState()),JSON.parse(sourceBefore));
     return {tests:4,scenarios:['actual-runtime-store-sql-stream-opening-with-zero-tts','actual-stream-playout-commit-response-loss-reconciled','actual-stream-ack-and-related-territory-durable-next-timezone','actual-stream-source-and-approval-boundaries-preserved'],providerCalls:0,browserMedia:'explicit synthetic attestation',agendaItems:114,callId:call,
-      acknowledgment,territoryInterpretation,answeredItemIds:answeredIds,nextItemId:next.itemId,nextQuestionPt:next.questionPt,agendaReceiptId:durable.receiptId,speechReceipts};
+      acknowledgment,territoryInterpretation,relatedOutcome:relatedAnswered?'answered':'left_open',relatedItemIds:related.map(item=>item.id),
+      interpreterRetries:diagnostics.filter(event=>event.stage==='interpretation.requested'&&event.attempt>0).length,
+      answeredItemIds:answeredIds,nextItemId:next.itemId,nextQuestionPt:next.questionPt,agendaReceiptId:durable.receiptId,speechReceipts};
   }finally{
     runtime?.stop();
     if(callCreated)await runSql(`update public.calls set status='error',ended_at=clock_timestamp(),provider_termination_state='confirmed',provider_termination_reason='isolated_stream_probe_finished',provider_usage_state='resolved',cost_estimate_usd=0.025 where id=${q(call)};`);

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import fixture from "./fixtures/foghorn-website-first-voice.json";
 import { buildWebsiteAgendaSeeds } from "../src/onboarding-agenda-seed.ts";
 import { applyVerifiedOwnerTurn, createOnboardingAgenda, getAgendaAction, type AgendaProposal, type OnboardingAgenda } from "../src/onboarding-agenda.ts";
-import { validateWebsiteAnswerApplicability } from "../src/onboarding-website-applicability.ts";
+import { retainSupportedWebsiteAnswerTargets, validateWebsiteAnswerApplicability } from "../src/onboarding-website-applicability.ts";
 import { buildWebsiteOpeningAction, createWebsiteAgendaCoordinator, parseWebsiteInterpretation, reduceWebsiteAgenda, type WebsiteAgendaCommand, type WebsiteAgendaEvent } from "../src/onboarding-agenda-coordinator.ts";
 import { onboardingAgendaDigest, type StoredWebsiteInterview } from "../src/onboarding-agenda-store.ts";
 import type { CoverageSnapshot } from "../src/onboarding-coverage.ts";
@@ -26,12 +26,39 @@ function at(id: string): OnboardingAgenda {
 }
 const answer = (itemId: string, relatedItemIds: string[] = []): AgendaProposal => ({ kind: "answer", itemId, relatedItemIds });
 const recordedStreamingTerritory = "Hum, olha, atendi só novato, San Rafael e Petaluma, nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?";
+const recordedNumberedTerritory = "1, olha, atendi só novato, San Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?";
 function checked(agenda: OnboardingAgenda, text: string, proposal: AgendaProposal) {
   return validateWebsiteAnswerApplicability({ agenda, currentItemId: getAgendaAction(agenda).itemId!, ownerTranscript: text, proposal });
 }
 
 describe("verified owner answer applicability", () => {
-  test("the recorded streaming ASR resolves only the two territory questions and preserves exact evidence", () => {
+  test('optional target admission keeps unsupported coverage open without changing the durable validator',()=>{
+    const item=byRef('area.coverage'),agenda=at(item.id),proposal=answer(item.id,[...item.relatedItemIds]);
+    const ownerTranscript='Hã, atendi só Recife e Olinda. Fora dessas cidades, não é para atender.';
+    const input={agenda,currentItemId:item.id,ownerTranscript,proposal};
+    expect(()=>validateWebsiteAnswerApplicability(input)).toThrow('website_applicability_owner_evidence_missing');
+    const narrowed=retainSupportedWebsiteAnswerTargets(input);
+    expect(narrowed).toEqual(answer(item.id,[]));expect(proposal).toEqual(answer(item.id,[...item.relatedItemIds]));
+    expect(validateWebsiteAnswerApplicability({...input,proposal:narrowed})).toEqual(narrowed);
+    expect(retainSupportedWebsiteAnswerTargets({...input,ownerTranscript:recordedNumberedTerritory})).toEqual(proposal);
+  });
+
+  test.each(['duplicate','outside_graph','resolved','private_primary','private_target','authority_target','unsafe_scope'])(
+    'optional target admission still rejects %s',kind=>{
+      const item=byRef('area.coverage'),agenda=structuredClone(at(item.id)),target=agenda.items.find(i=>i.id===item.relatedItemIds[0])!;
+      const proposal=answer(item.id,[...item.relatedItemIds]) as Extract<AgendaProposal,{kind:'answer'}>;
+      let ownerTranscript='Hã, atendi só Recife e Olinda. Fora dessas cidades, não é para atender.';
+      if(kind==='duplicate')proposal.relatedItemIds!.push(target.id);
+      if(kind==='outside_graph')proposal.relatedItemIds!.push(byRef('authority.out_of_area').id);
+      if(kind==='resolved')target.status='answered';
+      if(kind==='private_primary')agenda.items.find(i=>i.id===item.id)!.source='owner_private_requirement';
+      if(kind==='private_target')target.source='owner_private_requirement';
+      if(kind==='authority_target')target.coverageRefs=['authority.out_of_area'];
+      if(kind==='unsafe_scope')ownerTranscript='Talvez atendi só Recife e Olinda.';
+      expect(()=>retainSupportedWebsiteAnswerTargets({agenda,currentItemId:item.id,ownerTranscript,proposal})).toThrow();
+    });
+
+  test.each([recordedStreamingTerritory,recordedNumberedTerritory])("recorded streaming ASR resolves only the two territory questions and preserves exact evidence: %s", (recordedStreamingTerritory) => {
     const item = byRef("area.coverage"), agenda = at(item.id);
     const related = "92b3f78b-12b9-4f1d-81f2-db03bc2c0732";
     expect(item.relatedItemIds).toEqual([related]);
@@ -48,7 +75,7 @@ describe("verified owner answer applicability", () => {
     }
   });
 
-  test("the streaming coordinator persists the exact territory answer with empty facts without an interpreter retry", () => {
+  test.each([recordedStreamingTerritory,recordedNumberedTerritory])("the streaming coordinator persists exact territory evidence without an interpreter retry: %s", (recordedStreamingTerritory) => {
     const item = byRef("area.coverage"), agenda = at(item.id);
     const stored: StoredWebsiteInterview = { agenda, revision: agenda.revision, storeVersion: 0, digest: onboardingAgendaDigest(agenda), receiptId: "receipt", nextAction: getAgendaAction(agenda), state: "unfinished", replayed: false };
     const id = (n: number) => `79000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -77,6 +104,7 @@ describe("verified owner answer applicability", () => {
     "Atendi somente Recife e Olinda. Fora dessas cidades, não é para atender.",
     "Eu atendi apenas Santos e Guarujá. Quando chegar um pedido fora, será somente com minha autorização explícita.",
     "Olha, atendi só Curitiba e Pinhais. Se surgir alguma demanda fora, é apenas com aprovação explícita do proprietário.",
+    "2. Olha, atendi só Curitiba e Pinhais. Se surgir alguma demanda fora, é apenas com aprovação explícita do proprietário.",
   ])("past-tense ASR needs an explicit present or future outside-area restriction: %s", text => {
     const item = byRef("area.coverage");
     expect(checked(at(item.id), text, answer(item.id, [...item.relatedItemIds]))).toEqual(answer(item.id, [...item.relatedItemIds]));
@@ -86,6 +114,8 @@ describe("verified owner answer applicability", () => {
     "Atendi só Recife e Olinda.",
     "Atendi só Recife e Olinda. Nada além dessas duas.",
     "Ontem atendi só Recife e Olinda. Se chegar algo fora, é só com minha aprovação.",
+    "1, olha, ontem atendi só Recife e Olinda. Se chegar algo fora, é só com minha aprovação.",
+    "2. Não atendi só Recife e Olinda. Fora dessas cidades, não é para atender.",
     "Atendi só Recife e Olinda no ano passado. Fora dessas cidades, não é para atender.",
     "Atendi só Recife e Olinda. Fora dessas cidades, era só com minha aprovação.",
     "Não atendi só Recife e Olinda. Se chegar algo fora, é só com minha aprovação.",
