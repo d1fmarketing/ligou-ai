@@ -3554,6 +3554,7 @@ export function attachSideband(
       }
     };
     ledger.websiteInterviewRuntime = createWebsiteInterviewRuntime(websiteInterview, {
+      model: ledger.model,
       agendaStore: createOnboardingAgendaStore(supa()),
       evidenceStore: createInterviewEvidenceStore(supa()),
       synthesize: (action, signal) => synthesizeOnboardingSpeech(action, { openaiKey: config.openaiKey, signal, fetchImpl: options.fetchImpl }),

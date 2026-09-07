@@ -22,6 +22,8 @@ interface WebsiteInterviewRuntimeBase {
 export type WebsiteInterviewRuntimeConfig=WebsiteInterviewRuntimeBase&(
   {openingPayload:OnboardingSpeechPayload;openingStream?:never}|{openingStream:StreamAuthorization;openingPayload?:never});
 export interface WebsiteInterviewRuntimeDependencies {
+  /** Actual successfully created provider model, including a selected fallback. */
+  model?:string;
   agendaStore: ReturnType<typeof createOnboardingAgendaStore>;
   evidenceStore: ReturnType<typeof createInterviewEvidenceStore>;
   synthesize(action: OnboardingSpeechAction, signal: AbortSignal): ReturnType<typeof synthesizeOnboardingSpeech>;
@@ -139,7 +141,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
   let currentStream:Rendition|undefined=input.openingStream?{authorization:input.openingStream}:undefined;
   if(currentStream)streamRenditions.set(currentStream.authorization.dispatchId,currentStream);
   let clearBarrier:Rendition|undefined,clearTimer:ReturnType<typeof setTimeout>|undefined,interpreterInFlight=false;
-  const streamIntents:CoordinatedLedger={callId:scope.callId,status:'active',requestedResponseIntentKeys:[]};
+  const streamIntents:CoordinatedLedger={callId:scope.callId,model:deps.model,status:'active',requestedResponseIntentKeys:[]};
   const streamNotices=new Set<string>();
   const resumedStreams=new Map<string,StreamAuthorization>();
   const ownerContexts=new Map<string,{capturedItemId:string|null;approvalSummaryId:string|null}>();

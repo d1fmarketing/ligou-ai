@@ -15,6 +15,7 @@ import {streamAuthorizationIsValid,streamResponseMetadata,type StreamAuthorizati
 
 export interface CoordinatedLedger {
   callId: string;
+  model?: string;
   status: string;
   responseActive?: boolean;
   continuationWanted?: boolean;
@@ -89,6 +90,10 @@ export function requestResponse(ledger: CoordinatedLedger, ws: WsLike, intent: R
         response: {
           tool_choice: "none",
           output_modalities: ["audio"],
+          // The application already selected this speech. Keep reasoning for
+          // interpreting owner answers separate, and preserve older models.
+          ...(applicationIntent.websiteStream && ["gpt-realtime-2.1", "gpt-realtime-2.1-mini"].includes(ledger.model ?? "")
+            ? { reasoning: { effort: "minimal" } } : {}),
           ...(applicationIntent.websiteStream?{conversation:'none',tools:[],input:[{type:'message',role:'user',content:[{type:'input_text',text:applicationIntent.websiteStream.action.text}]}]}:{}),
           ...(applicationIntent.instructions
             ? { instructions: applicationIntent.instructions }

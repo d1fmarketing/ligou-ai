@@ -8,7 +8,7 @@ import {streamControlId,websiteStreamTranscriptMatches,type StreamAuthorization}
 import {createWebsiteStreamPlayer} from '../../dashboard/src/voice/website-stream.js';
 const id=(n:number)=>`77000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const hash=(x:unknown)=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
-function harness(){
+function harness(model?:string){
  const scope={ownerId:id(1),callId:id(2),requestId:id(3)};
  const agenda=createOnboardingAgenda({callId:scope.callId,interviewId:scope.callId,draftId:id(4),draftHash:'a'.repeat(64),sourceResultId:id(5),sourceResultHash:'b'.repeat(64)},[
   {id:'cities',source:'ambiguity',subject:'area',questionPt:'Quais cidades atende?',coverageRefs:['area.coverage'],relatedItemIds:[],blocking:true},
@@ -44,7 +44,7 @@ function harness(){
  const agendaStore:any={recordOwnerTranscript:async(x:any)=>({...x,turnId:`${scope.callId}:${x.providerItemId}`}),readWebsiteInterview:async()=>stored,
   commitOwnerTurn:async(x:any)=>{commits.push(x);stored={...stored,agenda:x.agenda,revision:x.agenda.revision,digest:onboardingAgendaDigest(x.agenda),storeVersion:stored.storeVersion+1,nextAction:x.nextAction,state:x.nextAction.type==='GENERATE_FINAL_SUMMARY'?'reviewing':'unfinished'};return stored;}};
  const runtime=createWebsiteInterviewRuntime({prepared,openingAction,openingStream} as any,{
-  evidenceStore:evidence,agendaStore,
+  model,evidenceStore:evidence,agendaStore,
   synthesize:async()=>{throw new Error('TTS forbidden');},enqueue:async f=>f(),send:e=>sent.push(e),onTranscript:e=>transcripts.push(e),onCost:()=>{throw new Error('TTS charge forbidden');},
   onUsage:r=>usages.push(r),onUsageUnknown:()=>{},onTerminate:c=>terminations.push(c),onState:()=>{},onDiagnostic:d=>diagnostics.push(d),
  });
@@ -81,6 +81,25 @@ test('stream opening waits for browser readiness, dispatches once with no TTS, a
   expect(h.transcripts).toHaveLength(0);await h.played();
   expect(h.runtime.state.phase).toBe('awaiting_owner');expect(h.transcripts).toHaveLength(1);
   await h.played();expect(h.transcripts).toHaveLength(1);expect(h.terminations).toHaveLength(0);
+ }finally{h.runtime.stop();}
+});
+
+for(const model of ['gpt-realtime-2.1','gpt-realtime-2.1-mini'])test(`selected streamed speech uses minimal reasoning on ${model}, without changing owner interpretation`,async()=>{
+ const h=harness(model);try{
+  await h.runtime.attach();const frame=await h.ready();
+  expect(frame.response.reasoning).toEqual({effort:'minimal'});
+  expect(h.sent.find(e=>e.type==='session.update')?.session).not.toHaveProperty('reasoning');
+  await h.generation(frame);await h.played();
+  await h.owner('Atendemos apenas Novato e Petaluma.');
+  const interpretation=h.sent.find(e=>e.type==='response.create'&&e.response.output_modalities[0]==='text');
+  expect(interpretation).toBeDefined();expect(interpretation.response).not.toHaveProperty('reasoning');
+ }finally{h.runtime.stop();}
+});
+
+for(const model of [undefined,'gpt-realtime','gpt-realtime-mini','gpt-realtime-2.1-unknown'])test(`selected streamed speech preserves compatibility with ${model??'unknown model'}`,async()=>{
+ const h=harness(model);try{
+  await h.runtime.attach();const frame=await h.ready();
+  expect(frame.response).not.toHaveProperty('reasoning');
  }finally{h.runtime.stop();}
 });
 
