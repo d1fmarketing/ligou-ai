@@ -1,4 +1,31 @@
 import { expect, test } from "bun:test";
+import {createInterviewEvidenceStore} from '../src/onboarding-interview-evidence-store.ts';
+const streamScope={ownerId:'22222222-2222-4222-8222-222222222222',callId:'11111111-1111-4111-8111-111111111111',requestId:'33333333-3333-4333-8333-333333333333'};
+const stream={schema:'onboarding.stream.v1' as const,action:{actionId:'a'.repeat(64),interviewId:streamScope.callId,callId:streamScope.callId,revision:0,kind:'ASK_NEXT_GAP' as const,text:'Quais cidades atende?',sourceDigest:'b'.repeat(64)},dispatchId:'44444444-4444-4444-8444-444444444444',receiptId:'55555555-5555-4555-8555-555555555555'};
+test('stream claim and one-time authorization pass exact owner/action/dispatch scope without media fields',async()=>{
+ const requests:any[]=[];const store=createInterviewEvidenceStore({rpc:async(name,args)=>{requests.push({name,args});return{data:stream,error:null};}});
+ expect(await store.claimStream({...streamScope,action:stream.action})).toEqual(stream);
+ expect(await store.authorizeStream({...streamScope,stream})).toEqual(stream);
+ expect(requests[0].args).toEqual({p_owner:streamScope.ownerId,p_call:streamScope.callId,p_request:streamScope.requestId,p_action:stream.action,p_summary:null,p_part:null,p_clarification_turn:null});
+ expect(requests[1].args).toEqual({p_owner:streamScope.ownerId,p_call:streamScope.callId,p_request:streamScope.requestId,p_action:stream.action.actionId,p_dispatch:stream.dispatchId});
+ const bad=createInterviewEvidenceStore({rpc:async()=>({data:{...stream,dispatchId:streamScope.callId},error:null})});
+ await expect(bad.authorizeStream({...streamScope,stream})).rejects.toThrow('stream_authorization_changed');
+});
+test('joined stream proof requires separate generation, playout and final receipts with exact response identity',async()=>{
+ const input={...streamScope,stream,responseId:'response',itemId:'item',transcript:stream.action.text,status:'completed' as const};
+ const proof={actionId:stream.action.actionId,dispatchId:stream.dispatchId,responseId:input.responseId,itemId:input.itemId,status:'played',
+  generationReceiptId:'66666666-6666-4666-8666-666666666666',playoutReceiptId:'77777777-7777-4777-8777-777777777777',receiptId:'88888888-8888-4888-8888-888888888888'};
+ for(const patch of [{},{itemId:'foreign'},{dispatchId:streamScope.callId},{generationReceiptId:undefined},{playoutReceiptId:proof.generationReceiptId},{receiptId:proof.playoutReceiptId}]){
+  const store=createInterviewEvidenceStore({rpc:async()=>({data:{...proof,...patch},error:null})});
+  if(Object.keys(patch).length)await expect(store.recordStreamResponse(input)).rejects.toThrow();
+  else expect(await store.recordStreamResponse(input)).toEqual(proof);
+ }
+});
+test('invalid stream media evidence is rejected before the playout RPC',async()=>{
+ let rpcs=0;const store=createInterviewEvidenceStore({rpc:async()=>{rpcs++;return{data:null,error:null};}});
+ await expect(store.recordStreamPlayout({...streamScope,stream,responseId:'response',itemId:'item',bufferStoppedEventId:'event',mediaEvidence:{schema:'onboarding.stream.media.v1',nonzeroSamples:0,observedMs:1,firstSampleAtMs:0,lastSampleAtMs:1,unmuted:true,playbackStarted:true}})).rejects.toThrow('stream_media_evidence_invalid');
+ expect(rpcs).toBe(0);
+});
 test("empty input receipt binds the exact interrupted action and item without owner words", async () => {
   const {createInterviewEvidenceStore}=await import('../src/onboarding-interview-evidence-store.ts');
   const input={ownerId:'22222222-2222-4222-8222-222222222222',callId:'11111111-1111-4111-8111-111111111111',requestId:'33333333-3333-4333-8333-333333333333',actionId:'a'.repeat(64),providerItemId:'empty-owner-input'};

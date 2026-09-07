@@ -343,10 +343,11 @@ function readyStatus() {
   });
 }
 
-test('prepared voice protocol is chosen only from durable setup readback and preserves unprepared legacy starts',()=>{
+test('prepared stream protocol is chosen from durable setup and historical status remains readable',()=>{
   assert.equal(mapWebsiteSetupStatus(readyStatus()).voiceProtocolVersion,2);
   assert.equal(mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:3}).voiceProtocolVersion,3);
-  assert.throws(()=>mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:4}),/protocol/i);
+  assert.equal(mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:4}).voiceProtocolVersion,4);
+  assert.throws(()=>mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:5}),/protocol/i);
 });
 
 function publicClaim(claim_type, normalized_value, overrides = {}) {

@@ -46,6 +46,7 @@ import {
   type OnboardingOpeningResumeContext,
 } from "./onboarding-greeting.ts";
 import { createWebsiteInterviewRuntime, type WebsiteInterviewRuntimeConfig } from "./onboarding-website-runtime.ts";
+import {streamAuthorizationIsValid} from './onboarding-stream.ts';
 import { createOnboardingAgendaStore } from "./onboarding-agenda-store.ts";
 import { createInterviewEvidenceStore } from "./onboarding-interview-evidence-store.ts";
 import { speechPayloadIsInternallyValid, synthesizeOnboardingSpeech } from "./onboarding-speech.ts";
@@ -1846,11 +1847,11 @@ function enqueueOnboardingRawEvent(
         const noticeEvent = typeof msg.error?.event_id === "string" &&
           msg.error.event_id === `website-notice-${actionId.slice(0,24)}`;
         const expectedSpeechRetrieveMiss = ledger.websiteInterviewRuntime!.ownsSpeechRetrieveMiss(msg);
-        if (!expectedSpeechRetrieveMiss && !(noticeEvent && msg.error?.code === "conversation_item_already_exists")) {
+        if (!expectedSpeechRetrieveMiss && !ledger.websiteInterviewRuntime!.ownsControlError(msg) && !(noticeEvent && msg.error?.code === "conversation_item_already_exists")) {
           ledger.providerUsageEvidence.continuous = false; ledger.agentEnded = true; ledger.status = "error";
         }
       }
-      if (["response.output_audio.delta", "response.audio.delta"].includes(msg?.type)) {
+      if (!ledger.websiteInterviewRuntime!.streaming&&["response.output_audio.delta", "response.audio.delta"].includes(msg?.type)) {
         ledger.providerUsageEvidence.continuous = false; ledger.agentEnded = true; ledger.status = "error";
       }
     });
@@ -3304,11 +3305,13 @@ export function attachSideband(
     : "provider_model_v1";
   const openingPayload = options.onboarding?.openingPayload;
   const websiteInterview = options.onboarding?.websiteInterview;
-  if (websiteInterview && (cap.sessionType !== "onboarding" || openingMode !== "application_tts_v1" ||
+  const websiteStreaming=Boolean(websiteInterview?.openingStream);
+  if(openingMode==='realtime_stream_v1'&&!websiteStreaming)throw new Error('website_sideband_scope_invalid');
+  if (websiteInterview && (cap.sessionType !== "onboarding" || openingMode !== (websiteStreaming?'realtime_stream_v1':"application_tts_v1") ||
     openingPayload || options.onboarding?.resume || websiteInterview.prepared.scope.callId !== cap.callId ||
     websiteInterview.prepared.scope.ownerId !== cap.ownerUserId ||
     websiteInterview.openingAction.callId !== cap.callId ||
-    !speechPayloadIsInternallyValid(websiteInterview.openingPayload, websiteInterview.openingAction)))
+    (websiteStreaming?!streamAuthorizationIsValid(websiteInterview.openingStream,websiteInterview.openingAction):!speechPayloadIsInternallyValid(websiteInterview.openingPayload, websiteInterview.openingAction))))
     throw new Error("website_sideband_scope_invalid");
   const applicationReactivationTimeoutMs =
     options.onboarding?.reactivationTimeoutMs ?? 5_000;
@@ -3333,7 +3336,7 @@ export function attachSideband(
   if (!Number.isFinite(externalCostUsd) || externalCostUsd < 0)
     throw new Error("external_cost_invalid");
   if (websiteInterview) {
-    if (externalCostUsd !== websiteInterview.openingPayload.cost_usd) throw new Error("website_opening_cost_mismatch");
+    if (externalCostUsd !== (websiteStreaming?0:websiteInterview.openingPayload!.cost_usd)) throw new Error("website_opening_cost_mismatch");
   } else if (openingMode === "application_tts_v1") {
     const expectedText = onboardingOpeningText(
       expectedOnboardingBusinessName!,

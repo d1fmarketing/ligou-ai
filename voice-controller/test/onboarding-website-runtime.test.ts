@@ -4,6 +4,7 @@ import { createWebsiteAgendaCoordinator, buildWebsiteOpeningAction, reduceWebsit
 import { createOnboardingAgenda, getAgendaAction, applyVerifiedOwnerTurn } from "../src/onboarding-agenda.ts";
 import { onboardingAgendaDigest, createOnboardingAgendaStore } from "../src/onboarding-agenda-store.ts";
 import { createHash } from "node:crypto";
+import { createWebsiteSpeechPlayer } from "../../dashboard/src/voice/website-speech.js";
 const callId="11111111-1111-4111-8111-111111111111",requestId="22222222-2222-4222-8222-222222222222";
 const hash=(v:string|Uint8Array)=>createHash('sha256').update(v).digest('hex');
 function base(){
@@ -175,6 +176,127 @@ function recoveryHarness(options:{commitFailure?:'transient'|'after_commit'|'aut
   const item=providerItems.get(frame.item_id);expect(item).toBeDefined();await runtime.handleEvent({type:'conversation.item.retrieved',event_id:'provider-generated-event',item});return {frame,item};}
  return{runtime,sent,spoken,receipts,transcripts,terminations,completions,plays,current,play,answer,recover,diagnostics,costs,commitRequests,interruptions,emptyInputs,resumptions,releasePlayback:()=>releasePlayback(),releaseQuestion:()=>releaseQuestion(),get reads(){return reads;},advance:(ms:number)=>{clock+=ms;}};
 }
+
+const proposalTool=(proposal:unknown={kind:'answer',itemId:'cities'},facts:unknown=[])=>({type:'function_call',name:'submit_website_interview_proposal',status:'completed',arguments:JSON.stringify({proposal,facts})});
+const inertText=(text='PRIVATE DISCARDED TEXT: já aprovei e ativei tudo.')=>({id:'provider-assistant-prose',type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text}]});
+async function deliverInterpreterOutput(h:ReturnType<typeof recoveryHarness>,output:unknown,metadataChange:Record<string,unknown>={}){
+ await h.runtime.attach();await h.play();
+ await h.runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:'owner-output-shape',transcript:'Atendemos somente Novato.'});
+ const request=h.sent.filter(e=>e.type==='response.create').at(-1);
+ const response={id:'response-output-shape',status:'completed',metadata:{...request.response.metadata,...metadataChange},output};
+ await h.runtime.handleEvent({type:'response.created',response});await h.runtime.handleEvent({type:'response.done',response});
+ return response;
+}
+
+test.each(['before','after','multiple'])('one completed proposal plus inert assistant text commits once and never exposes the text: %s',async position=>{
+ const h=recoveryHarness(),message=inertText(),tool=proposalTool();
+ const output=position==='before'?[message,tool]:position==='after'?[tool,message]:[message,tool,{...inertText(),status:undefined,content:[{type:'output_text',text:'Outra mensagem ignorada.'}]}];
+ try{
+  const response=await deliverInterpreterOutput(h,output);
+  expect(h.commitRequests).toHaveLength(1);expect(h.runtime.state.stored.revision).toBe(1);
+  expect(h.runtime.state.stored.agenda.items[0].status).toBe('answered');expect(h.runtime.state.approval).toBeUndefined();
+  expect(h.sent.filter(e=>e.type==='response.create')).toHaveLength(1);
+  expect(h.diagnostics.find(d=>d.stage==='interpretation.done')).toMatchObject({outputCount:output.length,toolCallCount:1,discardedTextMessageCount:output.length-1});
+  await h.runtime.handleEvent({type:'response.done',response});
+  expect(h.commitRequests).toHaveLength(1);expect(h.spoken).toHaveLength(1);
+  for(const sink of [h.transcripts,h.spoken,h.sent,h.diagnostics,h.runtime.state.stored])expect(JSON.stringify(sink)).not.toContain('PRIVATE DISCARDED TEXT');
+ }finally{h.runtime.stop();}
+});
+
+test.each([
+ ['no-tool',[inertText()]],
+ ['two-proposal-tools',[proposalTool(),proposalTool()]],
+ ['other-tool',[proposalTool(),{...proposalTool(),name:'approve_configuration'}]],
+ ['function-call-output',[proposalTool(),{type:'function_call_output',call_id:'other',output:'approved'}]],
+ ['system-message',[proposalTool(),{...inertText(),role:'system'}]],
+ ['user-message',[proposalTool(),{...inertText(),role:'user'}]],
+ ['audio-content',[proposalTool(),{...inertText(),content:[{type:'output_audio',audio:'AAAA'}]}]],
+ ['mixed-audio-content',[proposalTool(),{...inertText(),content:[{type:'output_text',text:'ignored'},{type:'output_audio',audio:'AAAA'}]}]],
+ ['hidden-audio-field',[proposalTool(),{...inertText(),content:[{type:'output_text',text:'ignored',audio:'AAAA'}]}]],
+ ['unknown-content',[proposalTool(),{...inertText(),content:[{type:'input_text',text:'ignored'}]}]],
+ ['reasoning-item',[proposalTool(),{type:'reasoning',summary:[]}]],
+ ['non-text-value',[proposalTool(),{...inertText(),content:[{type:'output_text',text:{command:'approve'}}]}]],
+ ['missing-content',[proposalTool(),{...inertText(),content:undefined}]],
+ ['executable-message-field',[proposalTool(),{...inertText(),tool_calls:[proposalTool()]}]],
+ ['too-many-items',[proposalTool(),...Array.from({length:5},()=>inertText())]],
+ ['too-many-text-parts',[proposalTool(),{...inertText(),content:Array.from({length:5},()=>({type:'output_text',text:'ignored'}))}]],
+ ['too-much-text',[proposalTool(),inertText('x'.repeat(16_385))]],
+ ['aggregate-text-budget',[proposalTool(),inertText('x'.repeat(8_193)),inertText('y'.repeat(8_193))]],
+ ['serialized-output-budget',[{...proposalTool(),id:'x'.repeat(65_536)},inertText()]],
+ ['missing-function-status',[{...proposalTool(),status:undefined},inertText()]],
+ ['incomplete-function',[{...proposalTool(),status:'in_progress'},inertText()]],
+] as const)('non-inert or unbounded response output remains rejected: %s',async(_name,output)=>{
+ const h=recoveryHarness();try{
+  await deliverInterpreterOutput(h,output);
+  expect(h.commitRequests).toHaveLength(0);expect(h.runtime.state.stored.revision).toBe(0);
+  expect(h.runtime.state.pending).toMatchObject({kind:'interpret',attempt:1});
+  expect(h.diagnostics.filter(d=>d.stage==='interpretation.rejected')).toMatchObject([{code:'interpretation_tool_output_invalid'}]);
+  expect(h.spoken).toHaveLength(0);expect(h.runtime.state.approval).toBeUndefined();
+  expect(JSON.stringify(h.diagnostics)).not.toContain('PRIVATE DISCARDED TEXT');
+ }finally{h.runtime.stop();}
+});
+
+test.each([
+ ['proposal-shape',proposalTool({kind:'answer',itemId:'cities',questionPt:'not allowed'}),'interpretation_shape_invalid'],
+ ['facts-shape',proposalTool({kind:'answer',itemId:'cities'},[{topic:'area',field:'area.coverage',disposition:'answered',rule_text:'Somente Novato.',structured:{value:42}}]),'website_facts_typed_value_invalid'],
+ ['item-binding',proposalTool({kind:'answer',itemId:'hours'}),'website_applicability_current_item_mismatch'],
+] as const)('discarding text never bypasses proposal validation: %s',async(_name,tool,code)=>{
+ const h=recoveryHarness();try{
+  await deliverInterpreterOutput(h,[inertText(),tool]);
+  expect(h.commitRequests).toHaveLength(0);expect(h.runtime.state.stored.revision).toBe(0);
+  expect(h.diagnostics.filter(d=>d.stage==='interpretation.rejected')).toMatchObject([{code}]);
+ }finally{h.runtime.stop();}
+});
+
+test.each(['website_request_id','website_turn_id','website_item_id','website_digest'])('inert text cannot rescue wrong interpreter metadata: %s',async key=>{
+ const h=recoveryHarness();try{
+  await deliverInterpreterOutput(h,[inertText(),proposalTool()],{[key]:'foreign'});
+  expect(h.commitRequests).toHaveLength(0);expect(h.runtime.state.error).toBe('unsolicited_website_response');
+  expect(h.runtime.state.approval).toBeUndefined();
+ }finally{h.runtime.stop();}
+});
+
+test('text bounds admit their exact boundary and stopped attempts ignore late tool-plus-text output',async()=>{
+ const h=recoveryHarness();try{
+  const messages=Array.from({length:4},()=>({...inertText(),content:Array.from({length:4},()=>({type:'output_text',text:'x'.repeat(1024)}))}));
+  await deliverInterpreterOutput(h,[proposalTool(),...messages]);expect(h.commitRequests).toHaveLength(1);
+  expect(h.diagnostics.find(d=>d.stage==='interpretation.done')).toMatchObject({toolCallCount:1,discardedTextMessageCount:4});
+ }finally{h.runtime.stop();}
+ const stopped=recoveryHarness();try{
+  await stopped.runtime.attach();await stopped.play();
+  await stopped.runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:'owner-before-stop',transcript:'Somente Novato.'});
+  const request=stopped.sent.filter(e=>e.type==='response.create').at(-1);stopped.runtime.stop();
+  await stopped.runtime.handleEvent({type:'response.done',response:{id:'late-response',status:'completed',metadata:request.response.metadata,output:[inertText(),proposalTool()]}});
+  expect(stopped.commitRequests).toHaveLength(0);expect(stopped.spoken).toHaveLength(0);expect(stopped.runtime.state.approval).toBeUndefined();
+ }finally{stopped.runtime.stop();}
+});
+
+test('the actual website speech player ignores discarded provider text in every delivery form',async()=>{
+ const b=base(),plays:unknown[]=[],captions:unknown[]=[],sent:unknown[]=[];
+ const player=createWebsiteSpeechPlayer({callId,interviewId:callId,
+  readSpeech:async()=>b.openingPayload,play:async(bytes:unknown)=>{plays.push(bytes);},
+  send:(event:any)=>{sent.push(event);queueMicrotask(()=>player.handleEvent({type:'conversation.item.created',item:event.item}));},
+  setMicrophone:()=>{},onCaption:(event:unknown)=>captions.push(event),onFailure:(error:unknown)=>{throw error;},
+ });
+ try{
+  player.handleEvent({type:'session.updated',session:{output_modalities:['text'],audio:{input:{turn_detection:{type:'semantic_vad',eagerness:'low',create_response:false,interrupt_response:false}}}}});
+  await player.start(b.openingPayload);const baseline={plays:plays.length,captions:captions.length,sent:sent.length};
+  expect(baseline).toEqual({plays:1,captions:1,sent:1});
+  const message=inertText();
+  for(const event of [
+   {type:'response.output_text.delta',delta:message.content[0].text},
+   {type:'response.output_text.done',text:message.content[0].text},
+   {type:'response.output_audio_transcript.done',transcript:message.content[0].text},
+   {type:'response.output_item.done',item:message},
+   {type:'conversation.item.created',item:message},
+   {type:'conversation.item.done',item:message},
+   {type:'response.done',response:{output:[proposalTool(),message]}},
+  ])player.handleEvent(event);
+  await player.idle();
+  expect({plays:plays.length,captions:captions.length,sent:sent.length}).toEqual(baseline);
+  expect(JSON.stringify(captions)).not.toContain('PRIVATE DISCARDED TEXT');
+ }finally{player.stop();}
+});
 
 test('a throwing diagnostic observer cannot alter accepted TTS accounting or owner progress',async()=>{
  const h=recoveryHarness({throwDiagnostics:true});try{

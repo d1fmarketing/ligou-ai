@@ -26,9 +26,10 @@ class Socket {
   message(event:any){this.emit("message",{data:JSON.stringify(event)});}
 }
 async function flush(){for(let i=0;i<30;i++)await new Promise<void>(resolve=>setImmediate(resolve));}
-function harness(options:{rpc?:(name:string,args:any)=>any;fetchImpl?:typeof fetch;callRow?:()=>Record<string,unknown>;legacy?:boolean;terminalWrite?:()=>any}={}){
+function harness(options:{rpc?:(name:string,args:any)=>any;fetchImpl?:typeof fetch;callRow?:()=>Record<string,unknown>;legacy?:boolean;stream?:boolean;terminalWrite?:()=>any}={}){
   const original=globalThis.WebSocket;Socket.instances=[];globalThis.WebSocket=Socket as any;
-  const updates:any[]=[],rpcs:any[]=[];const website=fixture();
+  const updates:any[]=[],rpcs:any[]=[];const website:any=fixture();
+  if(options.stream){website.openingStream={schema:'onboarding.stream.v1',action:website.openingAction,dispatchId:requestId,receiptId:ownerId};delete website.openingPayload;}
   _setClient({
     rpc:async(name:string,args:any)=>{rpcs.push({name,args});
       const override=options.rpc?.(name,args);if(override!==undefined)return await override;
@@ -40,8 +41,24 @@ function harness(options:{rpc?:(name:string,args:any)=>any;fetchImpl?:typeof fet
   } as any);
   const cap=makeCapability("foghorn-air",tenantId,callId,30,options.legacy?"customer":"onboarding",{authEpoch:1,policyEpoch:1,simulation:true},ownerId);
   let control:ReturnType<typeof attachSideband>|undefined;
-  return {website,updates,rpcs,attach(){control=attachSideband(cap,"rtc-test","gpt-realtime-2.1",{...(options.legacy?{}:{onboarding:{expectedBusinessName:"Foghorn Air",openingMode:"application_tts_v1",websiteInterview:website},externalCostUsd:website.openingPayload.cost_usd}),fetchImpl:options.fetchImpl??(async()=>{throw new Error("provider request forbidden");})} as any);return control;},restore(){control?.cancel();globalThis.WebSocket=original;_setClient(null);liveSessions.delete(callId);}};
+  return {website,updates,rpcs,attach(){control=attachSideband(cap,"rtc-test","gpt-realtime-2.1",{...(options.legacy?{}:{onboarding:{expectedBusinessName:"Foghorn Air",openingMode:options.stream?'realtime_stream_v1':"application_tts_v1",websiteInterview:website},externalCostUsd:options.stream?0:website.openingPayload.cost_usd}),fetchImpl:options.fetchImpl??(async()=>{throw new Error("provider request forbidden");})} as any);return control;},restore(){control?.cancel();globalThis.WebSocket=original;_setClient(null);liveSessions.delete(callId);}};
 }
+
+test('protocol4 sideband permits only authorized streamed audio with zero TTS cost',async()=>{
+ let h:ReturnType<typeof harness>;
+ h=harness({stream:true,rpc:name=>name==='authorize_website_interview_stream'?{data:h.website.openingStream,error:null}:undefined});
+ try{
+  const control=h.attach(),sock=Socket.instances[0]!;sock.emit('open');await control.opened;
+  expect(control.ledger.externalCostUsd).toBe(0);expect(sock.sent.some(e=>e.type==='response.create')).toBe(false);
+  const authorization=h.website.openingStream;
+  sock.message({type:'conversation.item.done',item:{id:'lsr-'+requestId.replaceAll('-','').slice(0,28),type:'message',role:'system',status:'completed',content:[{type:'input_text',text:'ligou.website_stream_ready:'+JSON.stringify({actionId:authorization.action.actionId,dispatchId:requestId})}]}});await flush();
+  const request=sock.sent.find(e=>e.type==='response.create');expect(request.response).toMatchObject({conversation:'none',tools:[],tool_choice:'none',output_modalities:['audio']});
+  sock.message({type:'response.created',response:{id:'stream-response',metadata:request.response.metadata}});
+  sock.message({type:'response.output_item.added',response_id:'stream-response',output_index:0,item:{id:'stream-item',type:'message',role:'assistant',status:'in_progress',content:[]}});
+  sock.message({type:'response.output_audio.delta',response_id:'stream-response',output_index:0,content_index:0,item_id:'stream-item',delta:'AAAA'});await flush();
+  expect(control.ledger.status).toBe('active');expect(control.ledger.externalCostUsd).toBe(0);
+ }finally{h.restore();}
+});
 
 const stopControl=()=>({type:'conversation.item.done',item:{id:`lgt-${callId.replaceAll('-','').slice(0,28)}`,type:'message',status:'completed',role:'system',content:[{type:'input_text',text:`ligou.website_stop:${callId}`}]}});
 test.each(['error','held'])('audited Stop hangup is independent of terminal bookkeeping %s',async mode=>{

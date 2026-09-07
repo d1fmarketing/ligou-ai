@@ -10,6 +10,7 @@ export const BROWSER_SESSION_CORS = {
 };
 
 const APPLICATION_MODE = "application_tts_v1";
+const STREAM_MODE = "realtime_stream_v1";
 const PROVIDER_MODE = "provider_model_v1";
 const APPLICATION_STARTUP_DEADLINE_MS = 35_000;
 const PROVIDER_STARTUP_DEADLINE_MS = 20_000;
@@ -57,7 +58,26 @@ function validWebsiteOpening(payload: Record<string, unknown>): boolean {
     createHash("sha256").update(audio).digest("hex") === speech.audio_sha256;
 }
 
-type OpeningMode = typeof APPLICATION_MODE | typeof PROVIDER_MODE;
+type OpeningMode = typeof APPLICATION_MODE | typeof STREAM_MODE | typeof PROVIDER_MODE;
+const controlledOpening=(mode:unknown)=>mode===APPLICATION_MODE || mode===STREAM_MODE;
+
+export function isStreamOpeningPayload(value:unknown):value is Record<string,unknown> {
+  if(!value || typeof value!=="object" || Array.isArray(value) || !exactKeys(value as Record<string,unknown>,["version","stream"]))return false;
+  const envelope=value as Record<string,unknown>,stream=envelope.stream as Record<string,unknown>;
+  if(envelope.version!==4 || !stream || typeof stream!=="object" || Array.isArray(stream) || !exactKeys(stream,["schema","action","dispatchId","receiptId"]))return false;
+  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,hash=/^[0-9a-f]{64}$/;
+  if(stream.schema!=="onboarding.stream.v1" || typeof stream.dispatchId!=="string" || !uuid.test(stream.dispatchId)
+    || typeof stream.receiptId!=="string" || !uuid.test(stream.receiptId))return false;
+  const action=stream.action as Record<string,unknown>;
+  return Boolean(action && typeof action==="object" && !Array.isArray(action)
+    && exactKeys(action,["actionId","interviewId","callId","revision","kind","text","sourceDigest"])
+    && [action.callId,action.interviewId].every(id=>typeof id==="string"&&uuid.test(id))
+    && [action.actionId,action.sourceDigest].every(id=>typeof id==="string"&&hash.test(id))
+    && Number.isSafeInteger(action.revision) && (action.revision as number)>=0
+    && typeof action.kind==="string" && ["ASK_NEXT_GAP","CLARIFY_CURRENT_GAP","CONFIRM_AND_ASK_NEXT","DEFER_OFF_SCOPE_AND_CONTINUE","GENERATE_FINAL_SUMMARY","REQUEST_FINAL_APPROVAL","HANDLE_OWNER_CORRECTION","SPEAK_FINAL_SIGNOFF","SPEAK_TERMINAL_ERROR","SPEAK_AMENDMENT_SIGNOFF"].includes(action.kind)
+    && typeof action.text==="string" && Boolean(action.text.trim()) && [...action.text].length<=4096
+    && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(action.text));
+}
 
 interface BrowserSessionDependencies {
   env(name: string): string | undefined;
@@ -234,6 +254,11 @@ function validReadyOpening(
       row.opening_mode_applied === PROVIDER_MODE &&
       row.opening_payload === null;
   }
+  if(requested===STREAM_MODE){
+    if(protocolVersion!==4 || row.onboarding_protocol_version!==4 || row.opening_mode_applied!==STREAM_MODE
+      || !isStreamOpeningPayload(row.opening_payload))return false;
+    return ((row.opening_payload.stream as Record<string,unknown>).action as Record<string,unknown>).callId===row.call_id;
+  }
   if (row.onboarding_protocol_version !== protocolVersion ||
     row.opening_mode_applied !== APPLICATION_MODE ||
     !isApplicationOpeningPayload(row.opening_payload) ||
@@ -268,13 +293,17 @@ function exactExpiredCleanup(
   row: Record<string, unknown>,
   requestId: string,
   expectedCallId: string | null,
+  requested: OpeningMode,
+  protocolVersion: number | null,
 ): boolean {
   return row.id === requestId
     && row.status === "expired"
     && row.call_id === expectedCallId
     && (expectedCallId === null || (
       row.session_type === "onboarding"
-      && row.opening_mode_requested === APPLICATION_MODE
+      && controlledOpening(requested)
+      && row.opening_mode_requested === requested
+      && row.onboarding_protocol_version === protocolVersion
     ))
     && row.answer_sdp === null
     && row.opening_mode_applied === null
@@ -291,7 +320,7 @@ function exactCancellableReady(
 ): boolean {
   return row.id === requestId
     && row.status === status
-    && requested === APPLICATION_MODE
+    && controlledOpening(requested)
     && row.session_type === "onboarding"
     && row.opening_mode_requested === requested
     && (expectedCallId === undefined || row.call_id === expectedCallId)
@@ -308,9 +337,9 @@ function exactCancellableProcessing(
 ): boolean {
   return row.id === requestId
     && row.status === status
-    && requested === APPLICATION_MODE
+    && controlledOpening(requested)
     && row.session_type === "onboarding"
-    && row.opening_mode_requested === APPLICATION_MODE
+    && row.opening_mode_requested === requested
     && row.onboarding_protocol_version === protocolVersion
     && typeof row.call_id === "string"
     && (expectedCallId === undefined || row.call_id === expectedCallId)
@@ -329,7 +358,7 @@ function exactInvalidApplicationReadyCleanupIdentity(
   return row.id === requestId
     && row.status === status
     && row.session_type === "onboarding"
-    && row.opening_mode_requested === APPLICATION_MODE
+    && row.opening_mode_requested === (protocolVersion===4?STREAM_MODE:APPLICATION_MODE)
     && row.onboarding_protocol_version === protocolVersion
     && row.call_id === expectedCallId
     && boundedString(row.answer_sdp, 1, 1_000_000);
@@ -359,14 +388,14 @@ async function expireOpenRequest(
     .select(CLEANUP_COLUMNS);
   if (expireError || !Array.isArray(expiredRows) || expiredRows.length > 1) return false;
   if (expiredRows.length === 1) {
-    return exactExpiredCleanup(expiredRows[0], requestId, null);
+    return exactExpiredCleanup(expiredRows[0], requestId, null, requested, protocolVersion);
   }
 
   let row = await readCleanupRow(client, requestId);
   if (!row) return false;
   if (row.status === "expired") {
     const retainedCallId = typeof row.call_id === "string" ? row.call_id : null;
-    return exactExpiredCleanup(row, requestId, retainedCallId);
+    return exactExpiredCleanup(row, requestId, retainedCallId, requested, protocolVersion);
   }
 
   let expectedCallId: string;
@@ -423,7 +452,7 @@ async function expireOpenRequest(
     } else {
       row = await readCleanupRow(client, requestId);
       if (!row) return false;
-      if (exactExpiredCleanup(row, requestId, expectedCallId)) return true;
+      if (exactExpiredCleanup(row, requestId, expectedCallId, requested, protocolVersion)) return true;
       const exact = boundKind === "ready"
         ? exactCancellableReady(
           row, requestId, requested, protocolVersion,
@@ -441,7 +470,7 @@ async function expireOpenRequest(
     await dependencies.sleep(CANCEL_ACK_POLL_MS);
     row = await readCleanupRow(client, requestId);
     if (!row) return false;
-    if (exactExpiredCleanup(row, requestId, expectedCallId)) return true;
+    if (exactExpiredCleanup(row, requestId, expectedCallId, requested, protocolVersion)) return true;
     const exact = boundKind === "ready"
       ? exactCancellableReady(
         row, requestId, requested, protocolVersion,
@@ -463,6 +492,7 @@ async function cancelInvalidApplicationReady(
   requestId: string,
   protocolVersion: number,
 ): Promise<boolean> {
+  const requested=protocolVersion===4?STREAM_MODE:APPLICATION_MODE;
   const expectedCallId = typeof observedRow.call_id === "string"
     ? observedRow.call_id
     : "";
@@ -475,7 +505,7 @@ async function cancelInvalidApplicationReady(
     expectedCallId,
   )) return false;
 
-  const reason = "invalid_application_opening_contract";
+  const reason = protocolVersion===4?"invalid_stream_opening_contract":"invalid_application_opening_contract";
   const { data: cancelRows, error: cancelError } = await client
     .from("browser_session_requests")
     .update({ status: "cancel_requested", error: reason })
@@ -490,7 +520,7 @@ async function cancelInvalidApplicationReady(
     ? cancelRows[0]
     : await readCleanupRow(client, requestId);
   if (!row) return false;
-  if (exactExpiredCleanup(row, requestId, expectedCallId) &&
+  if (exactExpiredCleanup(row, requestId, expectedCallId, requested, protocolVersion) &&
     row.onboarding_protocol_version === protocolVersion) return true;
   if (!exactInvalidApplicationReadyCleanupIdentity(
     row,
@@ -504,7 +534,7 @@ async function cancelInvalidApplicationReady(
     await dependencies.sleep(CANCEL_ACK_POLL_MS);
     row = await readCleanupRow(client, requestId);
     if (!row) return false;
-    if (exactExpiredCleanup(row, requestId, expectedCallId) &&
+    if (exactExpiredCleanup(row, requestId, expectedCallId, requested, protocolVersion) &&
       row.onboarding_protocol_version === protocolVersion) return true;
     if (!exactInvalidApplicationReadyCleanupIdentity(
       row,
@@ -555,20 +585,20 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
     if (!["customer", "owner_browser", "onboarding"].includes(sessionType)) {
       return json({ error: "invalid_session_type" }, 400);
     }
-    const openingModeRequested: OpeningMode = sessionType === "onboarding" ? APPLICATION_MODE : PROVIDER_MODE;
-    if (sessionType === "onboarding" && body.opening_mode_requested !== APPLICATION_MODE) {
+    const openingModeRequested: OpeningMode = sessionType === "onboarding" ? STREAM_MODE : PROVIDER_MODE;
+    if (sessionType === "onboarding" && body.opening_mode_requested !== STREAM_MODE) {
       return json({ error: "client_upgrade_required" }, 409);
     }
     const protocolVersion = sessionType === "onboarding"
       ? body.onboarding_protocol_version
       : null;
     if (sessionType === "onboarding" &&
-      protocolVersion !== 2 && protocolVersion !== 3) {
+      protocolVersion !== 4) {
       return json({ error: "client_upgrade_required" }, 409);
     }
-    // An already-open older dashboard cannot consume the new tts-1/rate pair.
-    // Require declared support before tenant reads, enqueue, or provider work.
-    if (sessionType === "onboarding" && body.speech_contract_version !== 2) {
+    // New onboarding is exclusively live streaming. Reject older MP3 clients
+    // before tenant reads, enqueue or provider work; never silently fall back.
+    if (sessionType === "onboarding" && body.speech_contract_version !== 3) {
       return json({ error: "client_upgrade_required" }, 409);
     }
 
@@ -621,7 +651,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
     };
     if (request.signal.aborted) return stopOpenRequest("request_aborted", 499);
 
-    const startupDeadline = openingModeRequested === APPLICATION_MODE
+    const startupDeadline = controlledOpening(openingModeRequested)
       ? APPLICATION_STARTUP_DEADLINE_MS
       : PROVIDER_STARTUP_DEADLINE_MS;
     const deadline = dependencies.now() + startupDeadline;
@@ -645,10 +675,10 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
           protocolVersion as number | null,
           businessName,
         )) {
-          const error = openingModeRequested === APPLICATION_MODE
-            ? "invalid_application_opening_contract"
+          const error = controlledOpening(openingModeRequested)
+            ? openingModeRequested===STREAM_MODE?"invalid_stream_opening_contract":"invalid_application_opening_contract"
             : "invalid_provider_opening_contract";
-          if (openingModeRequested === APPLICATION_MODE) {
+          if (controlledOpening(openingModeRequested)) {
             timing.enter("edge_cleanup");
             const cleaned = await cancelInvalidApplicationReady(
               dependencies,
@@ -668,7 +698,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
         return json({
           sdp: row.answer_sdp,
           call_id: row.call_id,
-          max_minutes: sessionType === "onboarding" ? protocolVersion === 3 ? 55 : 30 : 15,
+          max_minutes: sessionType === "onboarding" ? 55 : 15,
           model: call?.model ?? null,
           opening_mode_applied: row.opening_mode_applied,
           opening_payload: row.opening_payload,

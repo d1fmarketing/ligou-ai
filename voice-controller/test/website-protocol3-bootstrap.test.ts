@@ -6,10 +6,25 @@ import { synthesizeOnboardingSpeech } from "../src/onboarding-speech.ts";
 import { sessionBudgetEnvelope } from "../src/config.ts";
 
 test("full finite website interview has a bounded provider-safe window without raising the existing budget",()=>{
+  expect(server.onboardingSessionMaxMinutes(4)).toBe(55);
   expect(server.onboardingSessionMaxMinutes(3)).toBe(55);
   expect(server.onboardingSessionMaxMinutes(2)).toBe(30);
   expect(sessionBudgetEnvelope("onboarding").reservationUsd).toBe(7.5);
   expect(sessionBudgetEnvelope("onboarding").hardLimitUsd).toBe(7.5);
+});
+
+test("new streaming sessions keep model tools and automatic voice responses disabled",()=>{
+  const value=server.buildRealtimeSessionConfig({model:"gpt-realtime-2.1",instructions:"owned",tools:[{name:"unsafe"}],voice:"ash",openingMode:"realtime_stream_v1",onboardingProtocolVersion:4} as any);
+  expect(value.output_modalities).toEqual(["text"]);expect(value.tools).toEqual([]);expect(value.tool_choice).toBe("none");
+  expect(value.audio.input.turn_detection).toMatchObject({create_response:false,interrupt_response:false});
+});
+
+test("new onboarding rejects MP3 modes before any tenant or paid provider work",async()=>{
+  const {_setClient}=await import('../src/rules.ts');let reads=0;
+  _setClient({from(){reads++;throw new Error('must not read');}} as any);
+  for(const protocol of [undefined,2,3])
+    await expect(server.startSession('owner','onboarding','offer',undefined,undefined,undefined,{openingModeRequested:'application_tts_v1',onboardingProtocolVersion:protocol})).rejects.toMatchObject({status:409,message:'client_upgrade_required'});
+  expect(reads).toBe(0);
 });
 
 const callId = "33333333-3333-4333-8333-333333333333";

@@ -1,4 +1,4 @@
-import { createWebsiteAgendaCoordinator, reduceWebsiteAgenda, parseWebsiteInterpretation, websiteInterpretationFailureCode, type WebsiteAgendaCommand, type WebsiteAgendaEvent, type WebsiteAgendaState } from "./onboarding-agenda-coordinator.ts";
+import { createWebsiteAgendaCoordinator, reduceWebsiteAgenda, parseWebsiteInterpretation, websiteInterpretationFailureCode, buildWebsiteOpeningAction,buildWebsiteSummaryOpening,websiteSummaryPreparationId,type WebsiteSummaryReceipt,type WebsiteAgendaCommand, type WebsiteAgendaEvent, type WebsiteAgendaState } from "./onboarding-agenda-coordinator.ts";
 import { createOnboardingAgendaStore, onboardingAgendaDigest } from "./onboarding-agenda-store.ts";
 import { createInterviewEvidenceStore } from "./onboarding-interview-evidence-store.ts";
 import { synthesizeOnboardingSpeech, speechPayloadIsInternallyValid, type OnboardingSpeechAction, type OnboardingSpeechPayload } from "./onboarding-speech.ts";
@@ -7,15 +7,20 @@ import { generateWebsiteSummaryParts } from "./onboarding-website-summary.ts";
 import { validateWebsiteInterpretationFacts } from "./onboarding-website-facts.ts";
 import { getAgendaItems, getAgendaAction, type AgendaProposal } from "./onboarding-agenda.ts";
 import { randomUUID } from "node:crypto";
+import {streamAuthorizationIsValid,streamControlId,streamResponseMatches,streamMediaEvidenceIsValid,normalizeWebsiteStreamTranscript,type StreamAuthorization,type StreamMediaEvidence,type StreamProof} from './onboarding-stream.ts';
+import {requestResponse,type CoordinatedLedger} from './response-coordinator.ts';
 
 type Interpret = Extract<WebsiteAgendaCommand,{type:"interpret_owner_turn"}>;
 type DiagnosticDetail = {code?:string;attempt?:number;durationMs?:number;effectId?:string;
-  proposalKind?:AgendaProposal['kind'];factCount?:number;targetCount?:number;outputCount?:number};
-export interface WebsiteInterviewRuntimeConfig {
+  proposalKind?:AgendaProposal['kind'];factCount?:number;targetCount?:number;outputCount?:number;
+  toolCallCount?:number;discardedTextMessageCount?:number};
+interface WebsiteInterviewRuntimeBase {
   prepared: PreparedWebsiteInterview;
   openingAction: OnboardingSpeechAction;
-  openingPayload: OnboardingSpeechPayload;
+  initialSummary?:WebsiteSummaryReceipt;
 }
+export type WebsiteInterviewRuntimeConfig=WebsiteInterviewRuntimeBase&(
+  {openingPayload:OnboardingSpeechPayload;openingStream?:never}|{openingStream:StreamAuthorization;openingPayload?:never});
 export interface WebsiteInterviewRuntimeDependencies {
   agendaStore: ReturnType<typeof createOnboardingAgendaStore>;
   evidenceStore: ReturnType<typeof createInterviewEvidenceStore>;
@@ -54,11 +59,65 @@ export function websiteInterpretationRequest(command: Interpret) {
     input:[{type:'message',role:'user',content:[{type:'input_text',text:input}]}]}};
 }
 
+export async function prepareWebsiteStreamOpening(prepared:PreparedWebsiteInterview,tenantName:string,dependencies:{evidence:ReturnType<typeof createInterviewEvidenceStore>}):Promise<WebsiteInterviewRuntimeBase&{openingStream:StreamAuthorization}>{
+  let initialSummary:WebsiteSummaryReceipt|undefined;
+  if(prepared.stored.state==='reviewing'){
+    const stored=prepared.stored,parts=generateWebsiteSummaryParts({stored,projection:prepared.projection});
+    initialSummary=await dependencies.evidence.prepareSummary({...prepared.scope,summaryId:websiteSummaryPreparationId(stored),
+      expectedRevision:stored.revision,expectedStoreVersion:stored.storeVersion,expectedDigest:stored.digest,expectedReceiptId:stored.receiptId,parts});
+  }
+  const openingAction=initialSummary?buildWebsiteSummaryOpening(prepared.stored,initialSummary):buildWebsiteOpeningAction(prepared.stored,tenantName);
+  const openingStream=await dependencies.evidence.claimStream({...prepared.scope,action:openingAction,
+    ...(initialSummary?{summaryId:initialSummary.summaryId,partIndex:0}:{})});
+  createWebsiteAgendaCoordinator(prepared.stored,{nowMs:performance.now(),openingAction,openingStream,initialSummary});
+  return{prepared,openingAction,openingStream,...(initialSummary?{initialSummary}:{})};
+}
+
+/** Realtime may accompany a tool with assistant prose. Only the single named
+ * completed tool can propose an effect; inert text is discarded at this boundary
+ * and never reaches transcripts, captions, speech generation or commands. */
+function websiteProposalOutput(output:unknown,toolName:string):{
+  arguments?:string;toolCallCount?:number;discardedTextMessageCount?:number;
+}{
+  if(!Array.isArray(output) || output.length<1 || output.length>5)return {};
+  const object=(value:unknown):value is Record<string,unknown>=>Boolean(value) && typeof value==='object' && !Array.isArray(value);
+  const toolCallCount=output.filter(item=>object(item) && item.type==='function_call').length;
+  let discardedTextMessageCount=0,textBytes=0,args:string|undefined;
+  const counts=()=>({toolCallCount,discardedTextMessageCount});
+  // Preserve the existing 64 KiB proposal boundary as a whole-output bound;
+  // at most four ignored messages/parts per message and 16 KiB combined text.
+  try{if(Buffer.byteLength(JSON.stringify(output))>65_536)return counts();}catch{return counts();}
+  for(const item of output){
+    if(!object(item))return counts();
+    if(item.type==='function_call'){
+      if(item.name!==toolName || item.status!=='completed' || typeof item.arguments!=='string'
+        || Buffer.byteLength(item.arguments)>65_536)return counts();
+      args=item.arguments;
+      continue;
+    }
+    if(item.type!=='message' || item.role!=='assistant'
+      || Object.keys(item).some(key=>!['type','role','content','id','object','status'].includes(key))
+      || (item.id!==undefined && (typeof item.id!=='string' || item.id.length>512))
+      || (item.object!==undefined && item.object!=='realtime.item')
+      || (item.status!==undefined && !['completed','incomplete','in_progress'].includes(item.status as string))
+      || !Array.isArray(item.content) || item.content.length<1 || item.content.length>4)return counts();
+    for(const part of item.content){
+      if(!object(part) || part.type!=='output_text' || typeof part.text!=='string'
+        || Object.keys(part).some(key=>!['type','text'].includes(key)))return counts();
+      textBytes+=Buffer.byteLength(part.text);
+      if(textBytes>16_384)return counts();
+    }
+    discardedTextMessageCount++;
+  }
+  return {...counts(),...(toolCallCount===1?{arguments:args}:{})};
+}
+
 export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfig,deps:WebsiteInterviewRuntimeDependencies) {
-  if(!speechPayloadIsInternallyValid(input.openingPayload,input.openingAction))throw new Error('website_runtime_opening_invalid');
+  const streaming=Boolean(input.openingStream);
+  if(streaming?!streamAuthorizationIsValid(input.openingStream,input.openingAction):!speechPayloadIsInternallyValid(input.openingPayload,input.openingAction))throw new Error('website_runtime_opening_invalid');
   const now=deps.now??(()=>performance.now()),scope=input.prepared.scope,abort=new AbortController(),startedAt=now();
-  let state=createWebsiteAgendaCoordinator(input.prepared.stored,{nowMs:now(),openingAction:input.openingAction});
-  let payload:OnboardingSpeechPayload|null=input.openingPayload,stopped=false,deadline:ReturnType<typeof setTimeout>|undefined;
+  let state=createWebsiteAgendaCoordinator(input.prepared.stored,{nowMs:now(),openingAction:input.openingAction,openingStream:input.openingStream,initialSummary:input.initialSummary});
+  let payload:OnboardingSpeechPayload|null=input.openingPayload??null,stopped=false,deadline:ReturnType<typeof setTimeout>|undefined;
   let noticeTimer:ReturnType<typeof setTimeout>|undefined,noticeAttempts=0;
   let attachGeneration=0;
   let speechRetrieve:{actionId:string;eventId:string;generation:number}|undefined;
@@ -69,6 +128,17 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
   let speechAbort:AbortController|undefined;
   const observedCommands:WebsiteAgendaCommand[]=[];
   const retiredSpeech=new Set<string>();
+  type Rendition={authorization:StreamAuthorization;authorizationAttempted?:boolean;readyRequested?:boolean;dispatched?:boolean;responseId?:string;itemId?:string;
+    generationDone?:boolean;generationStatus?:string;transcript?:string;responseTranscript?:string;generationRecorded?:boolean;playoutRecorded?:boolean;played?:boolean;joinedProof?:StreamProof;
+    bufferStarted?:boolean;bufferStopped?:boolean;cleared?:boolean;retired?:boolean;clearSent?:boolean;cancelEventId?:string;clearEventId?:string;
+    clientPlayout?:{responseId:string;itemId:string;bufferStoppedEventId:string;mediaEvidence:StreamMediaEvidence};};
+  const streamRenditions=new Map<string,Rendition>();
+  let currentStream:Rendition|undefined=input.openingStream?{authorization:input.openingStream}:undefined;
+  if(currentStream)streamRenditions.set(currentStream.authorization.dispatchId,currentStream);
+  let clearBarrier:Rendition|undefined,clearTimer:ReturnType<typeof setTimeout>|undefined,interpreterInFlight=false;
+  const streamIntents:CoordinatedLedger={callId:scope.callId,status:'active',requestedResponseIntentKeys:[]};
+  const streamNotices=new Set<string>();
+  const resumedStreams=new Map<string,StreamAuthorization>();
   const ownerContexts=new Map<string,{capturedItemId:string|null;approvalSummaryId:string|null}>();
   const resumedClaims=new Map<string,Awaited<ReturnType<WebsiteInterviewRuntimeDependencies['evidenceStore']['resumeSpeech']>>>();
   let recordingPlaybackActionId:string|undefined;
@@ -88,9 +158,187 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
     // Observability cannot change a selected effect or suppress incurred cost.
     try{deps.onDiagnostic?.({callId:scope.callId,requestId:scope.requestId,stage,elapsedMs:Math.max(0,now()-startedAt),...detail});}catch{}
   }
+  function announceStream(r:Rendition){
+    if(stopped||r.retired||streamNotices.has(r.authorization.dispatchId))return;
+    streamNotices.add(r.authorization.dispatchId);
+    deps.send({type:'conversation.item.create',event_id:`website-stream-notice-${r.authorization.dispatchId}`,item:{id:streamControlId('notice',r.authorization.dispatchId),
+      type:'message',role:'system',status:'completed',content:[{type:'input_text',text:`ligou.website_stream:${JSON.stringify(r.authorization)}`}]}});
+  }
+  function clearStream(r:Rendition){
+    if(!r.dispatched||r.cleared||(r.generationDone&&r.bufferStopped))return;
+    clearBarrier=r;
+    if(!clearTimer)clearTimer=setTimeout(()=>{void deps.enqueue(async()=>{
+      if(clearBarrier===r&&!stopped){diagnostic('stream.clear_timeout');await dispatch({type:'stream.transport_failed',code:'stream_clear_unconfirmed',nowMs:now()});}
+    }).catch(()=>{});},3000);
+    if(!r.responseId||r.clearSent)return;
+    r.clearSent=true;r.cancelEventId=`website-stream-cancel-${r.authorization.dispatchId}`;r.clearEventId=`website-stream-clear-${r.authorization.dispatchId}`;
+    try{
+      if(!r.generationDone)deps.send({type:'response.cancel',response_id:r.responseId,event_id:r.cancelEventId});
+      deps.send({type:'output_audio_buffer.clear',event_id:r.clearEventId});
+    }catch{diagnostic('stream.clear_send_unconfirmed',{effectId:r.authorization.dispatchId});}
+  }
+  function retireStream(r:Rendition){r.retired=true;retiredSpeech.add(r.authorization.action.actionId);clearStream(r);}
+  async function streamFault(r:Rendition|undefined,code:string){
+    if(stopped)return;
+    if(r){retireStream(r);await bounded(()=>deps.evidenceStore.failSpeech({...scope,actionId:r.authorization.action.actionId,reason:code})).catch(()=>{});}
+    await dispatch({type:'adapter.failed',code,nowMs:now()});
+  }
+  async function unsafeStreamResponse(responseId:unknown,code:string){
+    if(typeof responseId==='string'&&responseId!==currentStream?.responseId)try{deps.send({type:'response.cancel',response_id:responseId});}catch{}
+    if(currentStream)retireStream(currentStream);
+    deps.onUsageUnknown();await dispatch({type:'stream.transport_failed',code,nowMs:now()});
+  }
+  async function releaseClear(r:Rendition){
+    if(clearBarrier!==r)return;clearBarrier=undefined;if(clearTimer)clearTimeout(clearTimer);clearTimer=undefined;
+    await maybeDispatchStream();
+  }
+  async function maybeDispatchStream(){
+    const r=currentStream;
+    if(!streaming||stopped||!r||r.retired||!r.readyRequested||r.authorizationAttempted||clearBarrier||interpreterInFlight
+      ||currentSpeechActionId()!==r.authorization.action.actionId)return;
+    if(!['error','amendment'].includes(state.speech?.after??'')&&(state.activeOwnerItemId||state.turns.some(turn=>!turn.processed)))return;
+    r.authorizationAttempted=true;
+    try{
+      const proof=await bounded(()=>deps.evidenceStore.authorizeStream({...scope,stream:r.authorization}));
+      if(stopped||r.retired||r!==currentStream||currentSpeechActionId()!==r.authorization.action.actionId)return;
+      if(!streamAuthorizationIsValid(proof,r.authorization.action)||proof.dispatchId!==r.authorization.dispatchId||proof.receiptId!==r.authorization.receiptId)throw new Error('stream_authorization_changed');
+      streamIntents.status='active';streamIntents.responseActive=interpreterInFlight;
+      const requested=requestResponse(streamIntents,{send:frame=>deps.send(JSON.parse(frame))},{intentKey:r.authorization.dispatchId,
+        purpose:r.authorization.action.kind==='SPEAK_FINAL_SIGNOFF'?'final_signoff':r.authorization.action.kind==='GENERATE_FINAL_SUMMARY'?'summary':'recovery',
+        websiteStream:r.authorization,snapshotDigest:r.authorization.action.sourceDigest,
+        instructions:'Fale em português brasileiro somente a fala selecionada pela aplicação. Preserve integralmente nomes, números, perguntas, condições, negações e conteúdo do resumo. Não acrescente ofertas, perguntas, decisões, aprovação ou ferramentas. Use entonação natural; não narre instruções, chaves ou metadados. Leia o conteúdo fornecido, sem omitir ou resumir informações.'});
+      if(!requested)throw new Error('stream_dispatch_not_admitted');r.dispatched=true;
+      diagnostic('stream.requested',{effectId:r.authorization.dispatchId});
+      await dispatch({type:'stream.dispatched',actionId:r.authorization.action.actionId,dispatchId:r.authorization.dispatchId,nowMs:now()});
+    }catch{await streamFault(r,'stream_dispatch_unconfirmed');}
+  }
+  async function acceptStreamProof(r:Rendition,proof:StreamProof){
+    if(stopped||r.retired||r!==currentStream)return;
+    if(proof.status==='rejected'){
+      // The browser needs to distinguish this durable rejection from an
+      // unexplained transport clear. It correlates the two in either order.
+      deps.send({type:'conversation.item.create',event_id:`website-stream-retire-${r.authorization.dispatchId}`,item:{id:streamControlId('retire',r.authorization.dispatchId),
+        type:'message',role:'system',status:'completed',content:[{type:'input_text',text:`ligou.website_stream_retire:${JSON.stringify({
+          actionId:r.authorization.action.actionId,dispatchId:r.authorization.dispatchId,responseId:r.responseId,
+          generationReceiptId:proof.generationReceiptId,reason:'transcript_mismatch'})}`}]}});
+      retireStream(r);diagnostic('stream.transcript_rejected',{effectId:r.authorization.dispatchId});
+      await dispatch({type:'stream.rejected',actionId:r.authorization.action.actionId,dispatchId:r.authorization.dispatchId,generationReceiptId:proof.generationReceiptId!,nowMs:now()});return;
+    }
+    if(proof.status==='played')r.joinedProof=proof;
+    if(!r.joinedProof||r.played||!r.generationRecorded||!r.generationDone||!r.clientPlayout)return;
+    r.played=true;
+    if(['ASK_NEXT_GAP','CLARIFY_CURRENT_GAP','CONFIRM_AND_ASK_NEXT','DEFER_OFF_SCOPE_AND_CONTINUE','HANDLE_OWNER_CORRECTION'].includes(r.authorization.action.kind))
+      lastHeardQuestionItemId=getAgendaAction(state.stored.agenda).itemId??null;
+    deps.onTranscript({role:'agent',text:r.transcript!,at:new Date().toISOString()});diagnostic('stream.played',{effectId:r.authorization.dispatchId});
+    await dispatch({type:'stream.played',...r.joinedProof,nowMs:now()});
+  }
+  async function writeStreamProof(operation:()=>Promise<StreamProof>,r:Rendition):Promise<StreamProof>{
+    for(let attempt=0;;attempt++)try{return await bounded(operation,2500);}catch(error){
+      requireLive();if(attempt>0||r.retired||!transientCodes.has(errorCode(error)))throw error;
+      diagnostic('stream.receipt_retry',{effectId:r.authorization.dispatchId,attempt:1,code:errorCode(error)});
+    }
+  }
+  async function persistStreamGeneration(r:Rendition){
+    if(r.retired||r.generationRecorded||!r.generationDone||!r.transcript||!r.responseId||!r.itemId)return;
+    if(r.generationStatus!=='completed'||typeof r.responseTranscript!=='string'
+      ||normalizeWebsiteStreamTranscript(r.responseTranscript)!==normalizeWebsiteStreamTranscript(r.transcript)){await streamFault(r,'stream_generation_invalid');return;}
+    r.generationRecorded=true;
+    if(r.clientPlayout)recordingPlaybackActionId=r.authorization.action.actionId;
+    try{const proof=await writeStreamProof(()=>deps.evidenceStore.recordStreamResponse({...scope,stream:r.authorization,responseId:r.responseId!,itemId:r.itemId!,transcript:r.transcript!,status:'completed'}),r);
+      await acceptStreamProof(r,proof);
+    }finally{if(recordingPlaybackActionId===r.authorization.action.actionId)recordingPlaybackActionId=undefined;}
+  }
+  async function persistStreamPlayout(r:Rendition){
+    if(r.retired||r.playoutRecorded||!r.clientPlayout||!r.responseId||!r.itemId)return;
+    if(r.clientPlayout.responseId!==r.responseId||r.clientPlayout.itemId!==r.itemId){await streamFault(r,'stream_client_playout_mismatch');return;}
+    r.playoutRecorded=true;
+    if(r.generationDone)recordingPlaybackActionId=r.authorization.action.actionId;
+    try{const proof=await writeStreamProof(()=>deps.evidenceStore.recordStreamPlayout({...scope,stream:r.authorization,...r.clientPlayout!}),r);await acceptStreamProof(r,proof);}
+    finally{if(recordingPlaybackActionId===r.authorization.action.actionId)recordingPlaybackActionId=undefined;}
+  }
+  function streamControl(event:any):{kind:'ready'|'played'|'interrupted';r:Rendition;value:any}|null{
+    if(!['conversation.item.created','conversation.item.done'].includes(event?.type))return null;
+    const item=event.item;
+    if(!item||item.type!=='message'||item.role!=='system'||item.status!=='completed'||!Array.isArray(item.content)||item.content.length!==1
+      ||Object.keys(item).some(key=>!['id','object','type','role','status','content'].includes(key))||item.content[0]?.type!=='input_text'
+      ||(item.object!==undefined&&item.object!=='realtime.item')
+      ||Object.keys(item.content[0]).some(key=>!['type','text'].includes(key))||typeof item.content[0].text!=='string'||item.content[0].text.length>4096)return null;
+    const match=/^ligou\.website_stream_(ready|played|interrupted):(.*)$/s.exec(item.content[0].text);if(!match)return null;
+    try{const value=JSON.parse(match[2]!),r=streamRenditions.get(value?.dispatchId),kind=match[1] as 'ready'|'played'|'interrupted';
+      if(!r||value.actionId!==r.authorization.action.actionId||item.id!==streamControlId(kind,r.authorization.dispatchId))return null;
+      return{kind,r,value};}catch{return null;}
+  }
+  async function handleStreamEvent(event:any):Promise<boolean>{
+    if(!streaming)return false;
+    const control=streamControl(event);
+    if(control){const {kind,r,value}=control;if(r.retired||r.played||r!==currentStream)return true;
+      if(kind==='ready'&&Object.keys(value).length===2){r.readyRequested=true;await maybeDispatchStream();}
+      else if(kind==='played'&&Object.keys(value).length===6&&typeof value.responseId==='string'&&typeof value.itemId==='string'
+        &&typeof value.bufferStoppedEventId==='string'&&value.bufferStoppedEventId.length>0&&value.bufferStoppedEventId.length<=512&&streamMediaEvidenceIsValid(value.mediaEvidence)){
+        const playout={responseId:value.responseId,itemId:value.itemId,bufferStoppedEventId:value.bufferStoppedEventId,mediaEvidence:value.mediaEvidence};
+        if(r.clientPlayout&&JSON.stringify(r.clientPlayout)!==JSON.stringify(playout)){await streamFault(r,'stream_playout_conflict');return true;}
+        r.clientPlayout=playout;await persistStreamPlayout(r);
+      }else if(kind==='interrupted'&&Object.keys(value).length===4&&typeof value.providerItemId==='string'&&value.providerItemId.length>0&&value.providerItemId.length<=400
+        &&(value.responseId===null||value.responseId===r.responseId)){
+        observeEvent({type:'input_audio_buffer.speech_started',item_id:value.providerItemId});
+        for(const command of observedCommands.splice(0))await execute(command);
+      }
+      return true;
+    }
+    if(event?.type==='response.created'||event?.type==='response.done'){
+      const response=event.response,metadata=response?.metadata;
+      const r=streamRenditions.get(metadata?.ligou_dispatch_id);
+      if(!r&&metadata?.ligou_transport!=='realtime_stream_v1')return false;
+      if(!r||!r.dispatched||!streamResponseMatches(metadata,r.authorization)||typeof response?.id!=='string'){
+        if(event.type==='response.done'&&!terminalResponses.has(response?.id)){terminalResponses.add(response?.id);deps.onUsage(response);}
+        await unsafeStreamResponse(response?.id,'unsolicited_stream_response');return true;
+      }
+      if(r.responseId&&r.responseId!==response.id){await unsafeStreamResponse(response.id,'concurrent_stream_response');return true;}
+      r.responseId=response.id;
+      if(event.type==='response.created'){if(r.retired)clearStream(r);diagnostic('stream.created',{effectId:r.authorization.dispatchId});return true;}
+      if(terminalResponses.has(response.id))return true;terminalResponses.add(response.id);deps.onUsage(response);
+      r.generationDone=true;r.generationStatus=response.status;streamIntents.responseActive=interpreterInFlight;
+      if(r.retired)return true;
+      const outputs=response.output,item=Array.isArray(outputs)&&outputs.length===1?outputs[0]:null,part=item?.content?.[0];
+      if(response.status!=='completed'||item?.type!=='message'||item.role!=='assistant'||item.status!=='completed'||typeof item.id!=='string'
+        ||!Array.isArray(item.content)||item.content.length!==1||part?.type!=='output_audio'||typeof part.transcript!=='string'||!part.transcript.trim()||part.transcript.length>8192
+        ||(r.itemId&&r.itemId!==item.id)){await streamFault(r,'stream_response_shape_invalid');return true;}
+      r.itemId=item.id;r.responseTranscript=part.transcript;
+      // response.done contains the final audio transcript too. Use that actual
+      // provider value if its standalone transcript-done event arrives later.
+      r.transcript??=part.transcript;diagnostic('stream.generated',{effectId:r.authorization.dispatchId});
+      await persistStreamGeneration(r);await persistStreamPlayout(r);return true;
+    }
+    const type=String(event?.type??'');
+    if(!type.startsWith('output_audio_buffer.')&&!type.startsWith('response.output_audio.')&&!type.startsWith('response.output_audio_transcript.')
+      &&!['response.output_item.added','response.output_item.done','response.content_part.added','response.content_part.done'].includes(type))return false;
+    const r=[...streamRenditions.values()].find(value=>value.responseId===event.response_id);
+    if(!r){if(type.startsWith('output_audio_buffer.')||type.startsWith('response.output_audio.')){await unsafeStreamResponse(event.response_id,'unbound_stream_audio');return true;}return false;}
+    if(type==='output_audio_buffer.cleared'){const expected=r.retired;r.cleared=true;r.retired=true;await releaseClear(r);if(!expected&&!r.played)await streamFault(r,'unexpected_stream_clear');return true;}
+    if(type==='output_audio_buffer.stopped'){r.bufferStopped=true;await releaseClear(r);return true;}
+    if(r.retired||r.played)return true;
+    if(type==='output_audio_buffer.started'){r.bufferStarted=true;diagnostic('stream.buffer_started',{effectId:r.authorization.dispatchId});return true;}
+    if(type==='response.output_item.added'||type==='response.output_item.done'){
+      if(event.output_index!==0||event.item?.type!=='message'||event.item.role!=='assistant'||typeof event.item.id!=='string'||(r.itemId&&r.itemId!==event.item.id)){
+        await streamFault(r,'stream_output_item_invalid');return true;}
+      r.itemId=event.item.id;await persistStreamPlayout(r);return true;
+    }
+    if(type==='response.content_part.added'||type==='response.content_part.done'){
+      // GA content-part events say "audio"; the final response item's content
+      // says "output_audio". They are distinct provider schemas.
+      if(event.output_index!==0||event.content_index!==0||event.item_id!==r.itemId||event.part?.type!=='audio')await streamFault(r,'stream_content_part_invalid');return true;
+    }
+    if(event.output_index!==0||event.content_index!==0||event.item_id!==r.itemId){await streamFault(r,'stream_audio_binding_invalid');return true;}
+    if(type==='response.output_audio_transcript.done'){
+      if(typeof event.transcript!=='string'||!event.transcript.trim()||event.transcript.length>8192
+        ||(r.transcript&&normalizeWebsiteStreamTranscript(r.transcript)!==normalizeWebsiteStreamTranscript(event.transcript))){await streamFault(r,'stream_transcript_conflict');return true;}
+      r.transcript=event.transcript;await persistStreamGeneration(r);
+    }
+    return true;
+  }
   function clearAsrWait(itemId:string){const wait=asrWaiting.get(itemId);if(wait){clearTimeout(wait.retry);clearTimeout(wait.deadline);asrWaiting.delete(itemId);}}
-  function clearTimers(){if(deadline)clearTimeout(deadline);if(noticeTimer)clearTimeout(noticeTimer);deadline=undefined;noticeTimer=undefined;for(const itemId of asrWaiting.keys())clearAsrWait(itemId);}
-  function stop(){if(ttsInFlight)deps.onUsageUnknown();stopped=true;speechRetrieve=undefined;clearTimers();abort.abort();}
+  function clearTimers(){if(deadline)clearTimeout(deadline);if(noticeTimer)clearTimeout(noticeTimer);if(clearTimer)clearTimeout(clearTimer);deadline=undefined;noticeTimer=undefined;clearTimer=undefined;for(const itemId of asrWaiting.keys())clearAsrWait(itemId);}
+  function stop(){if(stopped)return;if(ttsInFlight)deps.onUsageUnknown();if(streaming&&currentStream&&!currentStream.played)retireStream(currentStream);stopped=true;streamIntents.status='ended';speechRetrieve=undefined;clearTimers();abort.abort();}
   function requireLive(){if(stopped || abort.signal.aborted)throw new Error('website_runtime_stopped');}
   function currentSpeechActionId(){return state.phase==='opening'?state.openingAction.actionId:state.speech?.action.actionId;}
   function publish(){
@@ -143,7 +391,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
     const afterPlayedAck=Boolean(previousAction && recordingPlaybackActionId===previousAction);
     // The next question can be answered while its published audio is playing.
     // Until that audio exists, a continuation still belongs to the heard question.
-    const currentQuestionPublished=state.speech?.after==='owner' && payload?.actionId===previousAction;
+    const currentQuestionPublished=state.speech?.after==='owner' && (streaming?currentStream?.authorization.action.actionId===previousAction&&currentStream.bufferStarted:payload?.actionId===previousAction);
     ownerContexts.set(event.item_id,{capturedItemId:state.summary || currentQuestionPublished?getAgendaAction(state.stored.agenda).itemId??null:lastHeardQuestionItemId,
       approvalSummaryId:asrWaiting.size===0 && (state.phase==='awaiting_approval' || (afterPlayedAck && state.speech?.after==='approval'))?state.summary?.summaryId??null:null});
     callerItems.add(event.item_id);
@@ -151,6 +399,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
       ...(afterPlayedAck?{afterPlaybackActionId:previousAction}:{}),nowMs:now()});
     state=reduced.state;observedCommands.push(...reduced.commands);
     if(previousAction && reduced.commands.some(command=>command.type==='interrupt_speech')){
+      if(streaming&&currentStream&&currentStream.authorization.action.actionId===previousAction)retireStream(currentStream);
       retiredSpeech.add(previousAction);speechAbort?.abort();payload=null;speechRetrieve=undefined;
       if(noticeTimer)clearTimeout(noticeTimer);noticeTimer=undefined;
       diagnostic('speech.interrupted');
@@ -250,6 +499,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
     if(stopped)return;
     const reduced=reduceWebsiteAgenda(state,event);state=reduced.state;publish();
     for(const command of reduced.commands)await execute(command);
+    if(streaming)await maybeDispatchStream();
   }
   async function execute(command:WebsiteAgendaCommand):Promise<void>{
     if(stopped)return;
@@ -266,6 +516,11 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
           break;
         }
         case 'resume_speech':{
+          if(streaming){
+            const authorization=await bounded(()=>deps.evidenceStore.resumeStream({...scope,actionId:command.actionId,providerItemId:command.providerItemId}));
+            resumedStreams.set(authorization.action.actionId,authorization);
+            await dispatch({type:'speech.resumed',requestId:command.requestId,action:authorization.action,nowMs:now()});break;
+          }
           const receipt=await bounded(()=>deps.evidenceStore.resumeSpeech({...scope,actionId:command.actionId,providerItemId:command.providerItemId}));
           resumedClaims.set(receipt.action.actionId,receipt);
           await dispatch({type:'speech.resumed',requestId:command.requestId,action:receipt.action,nowMs:now()});break;
@@ -285,6 +540,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
             if(activeResponseId)deps.send({type:'response.cancel',response_id:activeResponseId});
           }
           activeResponseId=undefined;
+          interpreterInFlight=true;
           interpreter=command;
           interpretationTiming={requestId:command.requestId,requestedAtMs:now(),created:false};
           diagnostic('interpretation.requested',{attempt:command.attempt,effectId:command.requestId});
@@ -315,6 +571,14 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
         }
         case 'request_speech':{
           if(retiredSpeech.has(command.action.actionId))return;
+          if(streaming){
+            const authorization=resumedStreams.get(command.action.actionId)??await bounded(()=>deps.evidenceStore.claimStream({...scope,action:command.action,
+              summaryId:command.summaryId,partIndex:command.partIndex,clarificationTurnId:command.clarificationTurnId}));
+            resumedStreams.delete(command.action.actionId);
+            if(stopped||retiredSpeech.has(command.action.actionId))return;
+            const rendition={authorization};currentStream=rendition;streamRenditions.set(authorization.dispatchId,rendition);
+            await dispatch({type:'stream.authorized',stream:authorization,nowMs:now()});announceStream(rendition);break;
+          }
           const renditionAbort=new AbortController();speechAbort=renditionAbort;
           const summary=state.summary;
           const latestTurn=state.turns.at(-1);
@@ -374,9 +638,11 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
     }
   }
   async function handleEvent(event:any):Promise<void>{
-    if(stopped)return;
+    if(stopped){if(streaming&&event?.type==='response.done'&&typeof event.response?.id==='string'&&!terminalResponses.has(event.response.id)){
+      terminalResponses.add(event.response.id);deps.onUsage(event.response);}return;}
     observeEvent(event);
     for(const command of observedCommands.splice(0))await execute(command);
+    if(streaming){try{if(await handleStreamEvent(event))return;}catch{await streamFault(currentStream,'stream_evidence_unconfirmed');return;}}
     if(event?.type==='input_audio_buffer.speech_started'){
       return;
     }
@@ -411,7 +677,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
         diagnostic('owner.asr_retrieved',{code:item?.role==='user' && item.content?.some((c:any)=>c.type==='input_audio' && typeof c.transcript==='string')
           ?'attached_transcript_unverified':'attached_transcript_absent'});return;
       }
-      if(!p || item?.id!==`lgs-${p.actionId.slice(0,28)}`)return;
+      if(streaming||!p || item?.id!==`lgs-${p.actionId.slice(0,28)}`)return;
       if(item.type!=='message' || item.role!=='assistant' || item.status!=='completed'
         || item.content?.length!==1 || item.content[0]?.type!=='output_text' || item.content[0]?.text!==p.text){
         await dispatch({type:'adapter.failed',code:'website_speech_ack_mismatch',nowMs:now()});return;
@@ -452,18 +718,17 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
           timing.created=true;
           diagnostic('interpretation.created',{attempt:command.attempt,effectId:command.requestId,durationMs:Math.max(0,now()-timing.requestedAtMs)});
         }
-      }else{terminalResponses.add(response.id);activeResponseId=undefined;deps.onUsage(response);}
+      }else{terminalResponses.add(response.id);activeResponseId=undefined;interpreterInFlight=false;deps.onUsage(response);}
       await dispatch({type:'interpretation.created',requestId:command.requestId,responseId:response.id,nowMs:now()});
       if(event.type==='response.created')return;
       if(state.pending?.kind!=='interpret' || state.pending.requestId!==command.requestId)return;
       const output=response.output;
+      const selectedOutput=websiteProposalOutput(output,command.toolName);
       let raw:unknown,result:ReturnType<typeof parseWebsiteInterpretation>=null;
       let rejectionCode='interpretation_tool_output_invalid';
       if(['failed','cancelled','incomplete'].includes(response.status))rejectionCode=`interpretation_provider_${response.status}`;
-      else if(response.status==='completed' && Array.isArray(output) && output.length===1
-        && output[0]?.type==='function_call' && output[0].name===command.toolName && output[0].status==='completed'
-        && typeof output[0].arguments==='string' && Buffer.byteLength(output[0].arguments)<=65_536){
-        try{raw=JSON.parse(output[0].arguments);}catch{rejectionCode='interpretation_json_invalid';}
+      else if(response.status==='completed' && selectedOutput.arguments!==undefined){
+        try{raw=JSON.parse(selectedOutput.arguments);}catch{rejectionCode='interpretation_json_invalid';}
       }
       if(raw!==undefined){
         result=parseWebsiteInterpretation(raw);
@@ -480,6 +745,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
       diagnostic('interpretation.done',{attempt:command.attempt,effectId:command.requestId,
         ...(timing?{durationMs:Math.max(0,now()-timing.requestedAtMs)}:{}),
         ...(Array.isArray(output)?{outputCount:output.length}:{}),
+        ...(selectedOutput.toolCallCount!==undefined?{toolCallCount:selectedOutput.toolCallCount,discardedTextMessageCount:selectedOutput.discardedTextMessageCount}:{}),
         ...(typeof kind==='string' && ['answer','clarification','defer','not_applicable','off_scope','correction'].includes(kind)?{proposalKind:kind as AgendaProposal['kind']}:{}),
         ...(Array.isArray(shape?.facts)?{factCount:shape.facts.length}:{})});
       if(!result)await dispatch({type:'interpretation.failed',requestId:command.requestId,code:rejectionCode,nowMs:now()});
@@ -506,6 +772,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
     deps.send({type:'session.update',session:{type:'realtime',output_modalities:['text'],tools:[],tool_choice:'none',
       audio:{input:{transcription:{model:'gpt-live-transcribe'},turn_detection:{type:'semantic_vad',eagerness:'low',create_response:false,interrupt_response:false}}}}});
     publish();
+    if(streaming){if(currentStream)announceStream(currentStream);return;}
     if(attachGeneration>1 && payload && currentSpeechActionId()===payload.actionId){
       const eventId=`website-speech-retrieve-${payload.actionId.slice(0,24)}-${attachGeneration}`;
       speechRetrieve={actionId:payload.actionId,eventId,generation:attachGeneration};
@@ -519,5 +786,11 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
     await dispatch({type:'provider.termination_confirmed',requestId,receiptId:proof.providerReceiptId,nowMs:now()});
     await dispatch({type:'budget.settled',requestId,receiptId:proof.budgetReceiptId,nowMs:now()});
   }
-  return {observeEvent,handleEvent,attach,stop,finalized,ownsSpeechRetrieveMiss,get state(){return state;}};
+  function ownsControlError(event:any):boolean{
+    if(!streaming||event?.type!=='error')return false;
+    const eventId=event.error?.event_id;
+    if(event.error?.code==='conversation_item_already_exists'&&[...streamNotices].some(id=>eventId===`website-stream-notice-${id}`))return true;
+    return [...streamRenditions.values()].some(r=>r.retired&&r.generationDone&&eventId===r.cancelEventId&&event.error?.code==='response_cancel_not_active');
+  }
+  return {observeEvent,handleEvent,attach,stop,finalized,ownsSpeechRetrieveMiss,ownsControlError,streaming,get state(){return state;}};
 }

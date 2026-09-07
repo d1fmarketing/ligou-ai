@@ -61,6 +61,12 @@ const APPLICATION_OPENING_PAYLOAD_V2 = {
   },
 };
 
+function streamOpening(callId = "22222222-2222-4222-8222-222222222229") {
+  return {version:4,stream:{schema:"onboarding.stream.v1",dispatchId:"77777777-7777-4777-8777-777777777777",receiptId:"88888888-8888-4888-8888-888888888888",
+    action:{actionId:"a".repeat(64),interviewId:callId,callId,revision:0,kind:"ASK_NEXT_GAP",text:APPLICATION_OPENING_PAYLOAD.text,sourceDigest:"b".repeat(64)}}};
+}
+const STREAM_OPENING_PAYLOAD=streamOpening();
+
 function tenantClient() {
   return {
     from(table: string) {
@@ -114,6 +120,39 @@ describe("resolveSessionTenant", () => {
   test("without a tenant id a non-owner of the legacy tenant is still refused", async () => {
     await expect(resolveSessionTenant("owner-a", undefined)).rejects.toThrow(/not_tenant_owner/);
   });
+});
+
+test("queue diagnostics contain only fixed readiness states and winning claim identities", () => {
+  const events:any[]=[];let clock=10;
+  const observer=(browserRequestsModule as any).createBrowserQueueObserver((event:any)=>events.push(event),()=>clock);
+  observer.subscription("SUBSCRIBED");observer.subscription("SUBSCRIBED");
+  observer.subscription("raw token or unknown state");
+  observer.replication({extension:"postgres_changes",status:"ok",message:"private details",channel:"private channel"});
+  observer.replication({extension:"postgres_changes",status:"error",message:"private details"});
+  observer.replication({extension:"unexpected",status:"ok"});
+  clock=25;observer.claimed("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","poll",3);
+  observer.claimed("not-a-request-id-secret","realtime",3);
+  expect(events).toHaveLength(4);
+  expect(events[0]).toMatchObject({event:"browser.queue.subscription",state:"SUBSCRIBED",elapsedMs:0});
+  expect(events[3]).toMatchObject({event:"browser.queue.claimed",requestId:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",source:"poll",claimMs:3,elapsedMs:15});
+  for(const privateValue of ["private details","private channel","raw token","not-a-request-id-secret"])
+    expect(JSON.stringify(events)).not.toContain(privateValue);
+  const broken=(browserRequestsModule as any).createBrowserQueueObserver(()=>{throw new Error("log unavailable");});
+  expect(()=>broken.subscription("CLOSED")).not.toThrow();
+});
+
+test("losing queue claims never report that their notification dispatched the session", async () => {
+  const id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",events:any[]=[];let claimed=false;
+  _setClient({from(){let patch:any;const api:any={update(p:any){patch=p;return api;},eq(){return api;},select(){return api;},
+    then(resolve:any){const win=patch.status==='processing'&&!claimed;if(win)claimed=true;return Promise.resolve({data:win?[{id}]:[],error:null}).then(resolve);}};return api;}} as any);
+  const observer=(browserRequestsModule as any).createBrowserQueueObserver((event:any)=>events.push(event));
+  const row={id,user_id:"owner-a",tenant_id:V02_TENANT.id,session_type:"onboarding",offer_sdp:"private-sdp",opening_mode_requested:"provider_model_v1"};
+  const start=async()=>{throw new Error("stale client must not start");};
+  await _handleBrowserRequest(row,start,{dispatchSource:"realtime",queueObserver:observer} as any);
+  await _handleBrowserRequest(row,start,{dispatchSource:"poll",queueObserver:observer} as any);
+  expect(events.filter(event=>event.event==='browser.queue.claimed')).toHaveLength(1);
+  expect(events[0].source).toBe("realtime");
+  expect(JSON.stringify(events)).not.toContain("private-sdp");
 });
 
 describe("browser capability ownership", () => {
@@ -387,7 +426,7 @@ describe("browser request handling", () => {
     ]);
   });
 
-  test("application opening mode reaches startSession and is committed atomically with the ready SDP", async () => {
+  test("stream opening mode reaches startSession and is committed atomically with the ready SDP", async () => {
     const updates: Array<Record<string, unknown>> = [];
     const durableRow: Record<string, unknown> = {
       id: "request-test-10",
@@ -395,7 +434,8 @@ describe("browser request handling", () => {
       call_id: null,
       tenant_id: V02_TENANT.id,
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
+      opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
     };
     const rowClient = {
       from(table: string) {
@@ -421,18 +461,7 @@ describe("browser request handling", () => {
     };
     _setClient(rowClient as any);
     const starts: unknown[][] = [];
-    const openingPayload = {
-      version: 1,
-      item_id: "lgo-a89f1f9391ab7a82b4f27f198407",
-      text: "Oi! Aqui é o Ligou, agente de inteligência artificial da D1F Marketing. Quais serviços sua empresa oferece?",
-      text_sha256: "413f79d3d184ea3985fdb593f99ac331c612c157e871034df0135f06a7817e06",
-      audio_base64: "SUQzBAAAAAAAAP/7kGQ=",
-      audio_sha256: "b15db04aea85ebd3f59185796229df945e67f42931c7e9da411e97b83c856ce8",
-      mime: "audio/mpeg",
-      voice: "ash",
-      tts_model: "tts-1",
-      cost_usd: 0.001605,
-    };
+    const openingPayload = streamOpening("11111111-1111-4111-8111-111111111119");
 
     await _handleBrowserRequest(
       {
@@ -442,7 +471,8 @@ describe("browser request handling", () => {
         session_type: "onboarding",
         offer_sdp: "offer-test-10",
         model_override: null,
-        opening_mode_requested: "application_tts_v1",
+        opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
       },
       async (...args: unknown[]) => {
         starts.push(args);
@@ -453,7 +483,7 @@ describe("browser request handling", () => {
         return {
           sdp: "answer-test-10",
           call_id: "11111111-1111-4111-8111-111111111119",
-          opening_mode_applied: "application_tts_v1",
+          opening_mode_applied: "realtime_stream_v1",
           opening_payload: openingPayload,
         } as any;
       },
@@ -472,21 +502,22 @@ describe("browser request handling", () => {
     expect(typeof starts[0]?.[5]).toBe("function");
     expect(starts[0]?.[6]).toEqual({
       browserRequestId: "request-test-10",
-      openingModeRequested: "application_tts_v1",
+      openingModeRequested: "realtime_stream_v1",
+      onboardingProtocolVersion: 4,
       requestedCallId: "11111111-1111-4111-8111-111111111119",
     });
     expect(updates).toContainEqual({
       table: "browser_session_requests",
       patch: { call_id: "11111111-1111-4111-8111-111111111119" },
     });
-    expect(openingPayload.item_id).toHaveLength(32);
+    expect(openingPayload.stream.dispatchId).toHaveLength(36);
     expect(updates.at(-1)).toEqual({
       table: "browser_session_requests",
       patch: {
         status: "ready",
         answer_sdp: "answer-test-10",
         call_id: "11111111-1111-4111-8111-111111111119",
-        opening_mode_applied: "application_tts_v1",
+        opening_mode_applied: "realtime_stream_v1",
         opening_payload: openingPayload,
       },
     });
@@ -836,21 +867,19 @@ describe("browser request handling", () => {
 });
 
 describe("durable browser cancel_requested handshake", () => {
-  test("protocol3 forwards durable identity and preserves ready cancellation custody", async () => {
-    const b = boundary({ protocolVersion: 3 });
+  test("protocol4 forwards durable identity and preserves ready cancellation custody", async () => {
+    const b = boundary({ protocolVersion: 4 });
+    b.row.opening_mode_requested="realtime_stream_v1";
     _setClient(b.client as any);
     const reasons: string[] = [];
-    const payload = {
-      version: 3, item_id: `lgs-${"a".repeat(28)}`,
-      speech: { schema: "onboarding.speech.v1", actionId: "a".repeat(64), interviewId: "22222222-2222-4222-8222-222222222229", callId: "22222222-2222-4222-8222-222222222229", revision: 0, kind: "ASK_NEXT_GAP", sourceDigest: "b".repeat(64), text: APPLICATION_OPENING_PAYLOAD_V2.text, text_sha256: APPLICATION_OPENING_PAYLOAD_V2.text_sha256, audio_base64: APPLICATION_OPENING_PAYLOAD_V2.audio_base64, audio_sha256: APPLICATION_OPENING_PAYLOAD_V2.audio_sha256, mime: "audio/mpeg", voice: "ash", tts_model: "tts-1-hd", cost_usd: APPLICATION_OPENING_PAYLOAD_V2.cost_usd },
-    };
+    const payload = STREAM_OPENING_PAYLOAD;
     await _handleBrowserRequest(structuredClone(b.row), async (...args: any[]) => {
-      expect(args[6].onboardingProtocolVersion).toBe(3);
+      expect(args[6].onboardingProtocolVersion).toBe(4);
       expect(args[6].browserRequestId).toBe("request-cancel-1");
       args[5]({ callId: "22222222-2222-4222-8222-222222222229", startupComplete: true, cancel: async (reason: string) => {
         reasons.push(reason); Object.assign(b.call, { status: "error", provider_termination_state: "confirmed" });
       } });
-      return { sdp: "answer", call_id: "22222222-2222-4222-8222-222222222229", opening_mode_applied: "application_tts_v1", opening_payload: payload } as any;
+      return { sdp: "answer", call_id: "22222222-2222-4222-8222-222222222229", opening_mode_applied: "realtime_stream_v1", opening_payload: payload } as any;
     });
     expect(b.row.error).toBeUndefined();
     expect(b.row.status).toBe("ready");
@@ -923,8 +952,8 @@ describe("durable browser cancel_requested handshake", () => {
       answer_sdp: null,
       session_type: "onboarding",
       tenant_id: V02_TENANT.id,
-      opening_mode_requested: "application_tts_v1",
-      onboarding_protocol_version: options.protocolVersion ?? null,
+      opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: options.protocolVersion ?? 4,
       opening_mode_applied: null,
       opening_payload: null,
     };
@@ -1010,19 +1039,16 @@ describe("durable browser cancel_requested handshake", () => {
     };
   }
 
-  test("wrong-cost V2 Edge cancellation reaches controller cleanup and expires exactly once", async () => {
+  test("malformed stream descriptor cancellation reaches controller cleanup and expires exactly once", async () => {
     const poll = (browserRequestsModule as any)._pollBrowserCancellations;
     const reset = (browserRequestsModule as any)
       ._resetBrowserLiveControlsForTests;
     const size = (browserRequestsModule as any)._browserLiveControlCount;
     reset();
-    const b = boundary({ protocolVersion: 2 });
+    const b = boundary({ protocolVersion: 4 });
     _setClient(b.client as any);
     const reasons: string[] = [];
-    const wrongCostPayload = {
-      ...APPLICATION_OPENING_PAYLOAD_V2,
-      cost_usd: APPLICATION_OPENING_PAYLOAD_V2.cost_usd + 0.000001,
-    };
+    const opening = STREAM_OPENING_PAYLOAD;
     await _handleBrowserRequest(
       {
         id: "request-cancel-1",
@@ -1030,8 +1056,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-wrong-cost-v2",
-        opening_mode_requested: "application_tts_v1",
-        onboarding_protocol_version: 2,
+        opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
       },
       async (...args: unknown[]) => {
         (args[5] as any)?.({
@@ -1047,21 +1073,22 @@ describe("durable browser cancel_requested handshake", () => {
         return {
           sdp: "answer-wrong-cost-v2",
           call_id: "22222222-2222-4222-8222-222222222229",
-          opening_mode_applied: "application_tts_v1",
-          opening_payload: wrongCostPayload,
+          opening_mode_applied: "realtime_stream_v1",
+          opening_payload: opening,
         } as any;
       },
     );
     expect(size()).toBe(1);
     Object.assign(b.row, {
       status: "cancel_requested",
-      error: "invalid_application_opening_contract",
+      opening_payload: {...opening,stream:{...opening.stream,receiptId:"invalid"}},
+      error: "invalid_stream_opening_contract",
     });
 
     expect(await poll({
       loadRows: async () => [structuredClone(b.row)],
     })).toBe(1);
-    expect(reasons).toEqual(["invalid_application_opening_contract"]);
+    expect(reasons).toEqual(["invalid_stream_opening_contract"]);
     expect(b.expiredTransitions).toBe(1);
     expect(b.row).toMatchObject({
       status: "expired",
@@ -1069,7 +1096,7 @@ describe("durable browser cancel_requested handshake", () => {
       answer_sdp: null,
       opening_mode_applied: null,
       opening_payload: null,
-      onboarding_protocol_version: 2,
+      onboarding_protocol_version: 4,
     });
     expect(size()).toBe(0);
     reset();
@@ -1092,7 +1119,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-cancel",
-        opening_mode_requested: "application_tts_v1",
+        opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
       },
       async (...args: unknown[]) => {
         (args[5] as any)?.({
@@ -1108,8 +1136,8 @@ describe("durable browser cancel_requested handshake", () => {
         return {
           sdp: "answer-cancel",
           call_id: "22222222-2222-4222-8222-222222222229",
-          opening_mode_applied: "application_tts_v1",
-          opening_payload: APPLICATION_OPENING_PAYLOAD,
+          opening_mode_applied: "realtime_stream_v1",
+          opening_payload: STREAM_OPENING_PAYLOAD,
         } as any;
       },
     );
@@ -1150,7 +1178,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-cancel",
-        opening_mode_requested: "application_tts_v1",
+        opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
       },
       async (...args: unknown[]) => {
         (args[5] as any)?.({
@@ -1160,8 +1189,8 @@ describe("durable browser cancel_requested handshake", () => {
         return {
           sdp: "answer-cancel",
           call_id: "22222222-2222-4222-8222-222222222229",
-          opening_mode_applied: "application_tts_v1",
-          opening_payload: APPLICATION_OPENING_PAYLOAD,
+          opening_mode_applied: "realtime_stream_v1",
+          opening_payload: STREAM_OPENING_PAYLOAD,
         } as any;
       },
     );
@@ -1174,7 +1203,7 @@ describe("durable browser cancel_requested handshake", () => {
     b.row.user_id = "owner-a";
     b.row.onboarding_protocol_version = 2;
     expect(await cancel(structuredClone(b.row))).toBe(false);
-    b.row.onboarding_protocol_version = null;
+    b.row.onboarding_protocol_version = 4;
     expect(await cancel({
       ...b.row, status: "cancel_requested", call_id: "foreign-call",
     })).toBe(false);
@@ -1222,7 +1251,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-held-startup",
-        opening_mode_requested: "application_tts_v1",
+        opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
       },
       async (...args: unknown[]) => {
         let cancelled = false;
@@ -1292,7 +1322,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-completed-startup",
-        opening_mode_requested: "application_tts_v1",
+        opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
       },
       async (...args: unknown[]) => {
         (args[5] as any)?.({
@@ -1312,8 +1343,8 @@ describe("durable browser cancel_requested handshake", () => {
     finishStartup({
       sdp: "answer-completed-startup",
       call_id: "22222222-2222-4222-8222-222222222229",
-      opening_mode_applied: "application_tts_v1",
-      opening_payload: APPLICATION_OPENING_PAYLOAD,
+      opening_mode_applied: "realtime_stream_v1",
+      opening_payload: STREAM_OPENING_PAYLOAD,
     });
     await handling;
     expect(size()).toBe(0);
@@ -1339,9 +1370,10 @@ describe("durable browser cancel_requested handshake", () => {
         status: "cancel_requested",
         call_id: `call-restart-${outcome}`,
         answer_sdp: "answer-before-cancel",
-        opening_mode_requested: "application_tts_v1",
-        opening_mode_applied: "application_tts_v1",
-        opening_payload: structuredClone(APPLICATION_OPENING_PAYLOAD),
+        opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
+        opening_mode_applied: "realtime_stream_v1",
+        opening_payload: structuredClone(STREAM_OPENING_PAYLOAD),
         error: "edge_deadline_exceeded",
       };
       const call: Record<string, unknown> = {
@@ -1458,9 +1490,10 @@ describe("durable browser cancel_requested handshake", () => {
         status: "cancel_requested",
         call_id: `call-provider-usage-${suffix}`,
         answer_sdp: "answer-before-cancel",
-        opening_mode_requested: "application_tts_v1",
-        opening_mode_applied: "application_tts_v1",
-        opening_payload: structuredClone(APPLICATION_OPENING_PAYLOAD),
+        opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
+        opening_mode_applied: "realtime_stream_v1",
+        opening_payload: structuredClone(STREAM_OPENING_PAYLOAD),
         error: "edge_deadline_exceeded",
       };
       const call: Record<string, unknown> = {
@@ -1585,7 +1618,8 @@ describe("durable browser cancel_requested handshake", () => {
         status: "cancel_requested",
         call_id: `call-processing-${variant}`,
         answer_sdp: null,
-        opening_mode_requested: "application_tts_v1",
+        opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
         opening_mode_applied: null,
         opening_payload: null,
         error: "edge_cancelled_processing",
@@ -1708,7 +1742,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-cancel",
-        opening_mode_requested: "application_tts_v1",
+        opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
       },
       async (...args: unknown[]) => {
         (args[5] as any)?.({
@@ -1725,8 +1760,8 @@ describe("durable browser cancel_requested handshake", () => {
         return {
           sdp: "answer-cancel",
           call_id: "22222222-2222-4222-8222-222222222229",
-          opening_mode_applied: "application_tts_v1",
-          opening_payload: APPLICATION_OPENING_PAYLOAD,
+          opening_mode_applied: "realtime_stream_v1",
+          opening_payload: STREAM_OPENING_PAYLOAD,
         } as any;
       },
       { callIdFactory: () => "22222222-2222-4222-8222-222222222229" } as any,

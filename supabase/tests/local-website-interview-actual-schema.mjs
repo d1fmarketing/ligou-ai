@@ -14,6 +14,8 @@ import {generateWebsiteSummaryParts,buildWebsiteCandidateContext} from '../../vo
 import {ONBOARDING_FINAL_SIGNOFF_TEXT} from '../../voice-controller/src/onboarding-speech.ts';
 import {runWebsiteInterruptionActualSchemaProbe} from './website-interview-interruption-actual-schema.mjs';
 import {runWebsiteNoProviderResumeCases} from './website-interview-no-provider-resume-cases.mjs';
+import {runWebsiteStreamActualSchemaProbe,runWebsiteStreamSummaryActualSchemaProbe} from './website-interview-stream-actual-schema.mjs';
+import {runWebsiteStreamRuntimeActualSchemaProbe} from './website-interview-stream-runtime-actual-schema.mjs';
 
 const q=value=>`'${String(value).replaceAll("'","''")}'`;
 const jq=value=>`${q(JSON.stringify(value))}::jsonb`;
@@ -49,7 +51,7 @@ export async function runWebsiteInterviewActualSchemaSuite(input) {
       const literal=value===null?'null':typeof value==='object'?jq(value):typeof value==='number'?String(value):q(value);
       return `${key} => ${literal}`;
     });
-    return JSON.parse(await service(`select public.${name}(${entries.join(',')});`));
+    return JSON.parse(await service(`select coalesce(pg_catalog.to_jsonb(public.${name}(${entries.join(',')})),'null'::jsonb);`));
   };
   const client={rpc:async(name,args)=>{try{return {data:await rpc(name,args),error:null};}catch(e){return {data:null,error:{message:e.message}};}}};
   try {
@@ -93,13 +95,13 @@ export async function runWebsiteInterviewActualSchemaSuite(input) {
     const discoveryBefore=await runSql(`select jsonb_build_object('job',(select to_jsonb(j) from public.worker_jobs j where id=${q(draft.source_job_id)}),'result',(select to_jsonb(r) from public.worker_results r where id=${q(draft.source_result_id)}),'draft',(select to_jsonb(d) from public.company_discovery_onboarding_drafts d where id=${q(d.draft_id)}));`);
     const store=createOnboardingAgendaStore(client),evidence=createInterviewEvidenceStore(client);
     const setup=async()=>JSON.parse(await authenticated(owner,'select public.company_discovery_setup_status();'));
-    assert.equal((await setup()).state,'ready_for_onboarding');assert.equal((await setup()).voice_protocol_version,2);
+    assert.equal((await setup()).state,'ready_for_onboarding');assert.equal((await setup()).voice_protocol_version,4);
     const prepInput={preparationId:preparation,ownerId:owner,expectedTenantId:tenant,expectedGeneration:2,priorCallId:prior,draftId:d.draft_id,draftHash:d.draft_hash,sourceResultId:draft.source_result_id,sourceResultHash:draft.source_result_hash};
     await assert.rejects(()=>store.prepareFreshWebsiteInterview({...prepInput,ownerId:other}),/owner_or_generation/);
     await assert.rejects(()=>store.prepareFreshWebsiteInterview({...prepInput,expectedGeneration:3}),/owner_or_generation/);
     await assert.rejects(()=>store.prepareFreshWebsiteInterview({...prepInput,draftHash:'f'.repeat(64)}),/draft_changed/);
     await store.prepareFreshWebsiteInterview(prepInput);
-    assert.equal((await setup()).voice_protocol_version,3);
+    assert.equal((await setup()).voice_protocol_version,4);
     await runSql(`insert into public.calls(id,tenant_id,channel,session_type,status,provider_usage_state) values(${q(call)},${q(tenant)},'browser','onboarding','active','resolved');
       insert into public.browser_session_requests(id,tenant_id,user_id,session_type,offer_sdp,status,call_id,opening_mode_requested,onboarding_protocol_version)
         values(${q(request)},${q(tenant)},${q(owner)},'onboarding','fixture-current-offer','processing',${q(call)},'application_tts_v1',3);`);
@@ -115,6 +117,7 @@ export async function runWebsiteInterviewActualSchemaSuite(input) {
     await assert.rejects(()=>store.readWebsiteInterview({...scope,ownerId:other}),/not_owner_bound/);
     tests.push('actual-source-and-capability-initialize');
     tests.push(...(await runWebsiteNoProviderResumeCases({runSql,owner,other,tenant,call,request})).scenarios);
+    tests.push(...(await runWebsiteStreamActualSchemaProbe({runSql,owner,other,tenant,call,request})).scenarios);
 
     const opening=buildWebsiteOpeningAction(stored,'Foghorn Air, Inc.');
     const audioPayload=action=>({schema:'onboarding.speech.v1',...action,text_sha256:sha(action.text),audio_base64:'SUQzBA==',audio_sha256:createHash('sha256').update(Buffer.from('SUQzBA==','base64')).digest('hex'),mime:'audio/mpeg',voice:'ash',tts_model:'tts-1-hd',cost_usd:Number(([...action.text].length*30/1e6).toFixed(8))});
@@ -186,6 +189,7 @@ export async function runWebsiteInterviewActualSchemaSuite(input) {
     const parts=generateWebsiteSummaryParts({stored,projection}),summaryId=localId(20);
     assert.ok(parts.join('').includes(candidateTurn.text));
     const summary=await evidence.prepareSummary({...scope,summaryId,expectedRevision:stored.revision,expectedStoreVersion:stored.storeVersion,expectedDigest:stored.digest,expectedReceiptId:stored.receiptId,parts});
+    tests.push(...(await runWebsiteStreamSummaryActualSchemaProbe({runSql,owner,tenant,call,request,parts})).scenarios);
     const interruption=await runWebsiteInterruptionActualSchemaProbe({runSql,owner,call,request,summaryId,parts,revision:stored.revision,digest:stored.digest});
     tests.push(...interruption.scenarios);
     const makeAction=(kind,text,key)=>({actionId:sha([stored.agenda.binding,stored.revision,kind,key,text]),interviewId:call,callId:call,revision:stored.revision,kind,text,sourceDigest:stored.digest});
@@ -213,6 +217,8 @@ export async function runWebsiteInterviewActualSchemaSuite(input) {
     assert.deepEqual(JSON.parse(await runSql(`select transcript from public.calls where id=${q(prior)};`)),fixture.recorded_transcript);
     const discoveryAfter=await runSql(`select jsonb_build_object('job',(select to_jsonb(j) from public.worker_jobs j where id=${q(draft.source_job_id)}),'result',(select to_jsonb(r) from public.worker_results r where id=${q(draft.source_result_id)}),'draft',(select to_jsonb(d) from public.company_discovery_onboarding_drafts d where id=${q(d.draft_id)}));`);
     assert.deepEqual(JSON.parse(discoveryAfter),JSON.parse(discoveryBefore));tests.push('no-authority-no-discovery-mutation-legacy-preserved');
-    return {tests:tests.length,scenarios:tests,agendaItems:114,candidateFacts:21,originalQuestions:16,coverageRefs:136,guidanceParityCases:58,approvalGrammarCases:50,summaryParts:parts.length,sourceResultBody:'explicit synthetic marker; original raw result unavailable',providerCalls:0};
+    const streamedRuntime=await runWebsiteStreamRuntimeActualSchemaProbe({runSql,rpc,owner,other,tenant,priorCall:call,source,initialAgenda:initial,projection});
+    tests.push(...streamedRuntime.scenarios);
+    return {tests:tests.length,scenarios:tests,agendaItems:114,candidateFacts:21,originalQuestions:16,coverageRefs:136,guidanceParityCases:58,approvalGrammarCases:50,summaryParts:parts.length,streamedRuntime,sourceResultBody:'explicit synthetic marker; original raw result unavailable',providerCalls:0};
   } finally {await rm(home,{recursive:true,force:true});}
 }

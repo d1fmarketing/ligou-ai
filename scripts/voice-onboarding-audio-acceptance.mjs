@@ -27,12 +27,12 @@ export function parseArgs(args) {
   const options = { command: 'prepare', output: DEFAULT_OUTPUT, scenario: 'normal', condition: 'warm', count: 1, synthesize: true };
   for (let index = 0; index < args.length; index++) {
     const key = args[index];
-    if (['prepare', 'run', 'report', 'self-test'].includes(key)) options.command = key;
+    if (['prepare', 'run', 'report', 'self-test', 'export-in-app'].includes(key)) options.command = key;
     else if (key === '--execute') options.execute = true;
     else if (key === '--browser-smoke') options.browserSmoke = true;
     else if (key === '--no-synthesis') options.synthesize = false;
     else if (key === '--help') options.help = true;
-    else if (['--output', '--config', '--scenario', '--condition', '--count', '--mode', '--result'].includes(key)) {
+    else if (['--output', '--config', '--scenario', '--condition', '--count', '--mode', '--result', '--origin'].includes(key)) {
       if (!args[index + 1] || args[index + 1].startsWith('--')) fail('missing_option_value');
       options[key.slice(2)] = args[++index];
       if (key === '--result') (options.results ??= []).push(options.result);
@@ -227,25 +227,42 @@ async function synthesizeClips(plan, output) {
 
 // Runs in the actual dashboard document. Only media input, observation and
 // test controls are added; all production session/state logic stays in place.
-export function installBrowserHarness(settings) {
-  if (location.origin !== settings.origin) return;
+export async function validateOwnerAudioFile(file, clip) {
+  if (!file || typeof file.arrayBuffer !== 'function' || file.name !== clip?.basename
+    || !/^[A-Za-z0-9_-]{1,160}$/.test(clip?.id ?? '') || !/^[a-f0-9]{64}$/.test(clip?.audio?.sha256 ?? '')
+    || !Number.isFinite(file.size) || file.size < 44 || file.size > 25_000_000) throw new Error('owner_audio_file_invalid');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.byteLength !== file.size || String.fromCharCode(...bytes.subarray(0, 4)) !== 'RIFF'
+    || String.fromCharCode(...bytes.subarray(8, 12)) !== 'WAVE') throw new Error('owner_audio_file_not_wav');
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  const actual = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  if (actual !== clip.audio.sha256) throw new Error('owner_audio_file_hash_mismatch');
+  return bytes;
+}
+
+export function installBrowserHarness(settings, verifyOwnerAudioFile) {
+  if (location.origin !== settings.origin || window.__voiceAcceptance) return;
   const state = { events: [], recordings: [], speech: null, stage: null, callId: null, clickAt: null,
     peers: [], inputs: [], sources: new Set(), observers: new Set(), outputSequence: 0, answered: 0,
-    faultArmed: false, faultInjected: false, closed: false, context: null };
+    faultArmed: false, faultInjected: false, closed: false, context: null, outputElements: new Set(), responseCaptures: new Map(),
+    ownerFiles: new Map(), recordingFiles: new Map(), recordingLinks: new Map() };
   const now = () => performance.now();
   const stamp = (event, details = {}) => state.events.push({ event, browserMs: now(),
     elapsedMs: state.clickAt === null ? null : now() - state.clickAt, ...details });
   const context = () => state.context ??= new AudioContext({ sampleRate: 48000 });
   const cleanId = value => typeof value === 'string' && /^[a-zA-Z0-9:_-]{1,160}$/.test(value) ? value : null;
   const speech = value => {
-    if (!value || value.schema !== 'onboarding.speech.v1' || !/^[a-f0-9]{64}$/.test(value.actionId ?? '')) return;
-    state.speech = { actionId: value.actionId, revision: value.revision, kind: value.kind, text: String(value.text).slice(0, 8192) };
+    if (!value || value.schema !== 'onboarding.stream.v1' || !/^[a-f0-9]{64}$/.test(value.action?.actionId ?? '')
+      || !cleanId(value.dispatchId)) return;
+    const action = value.action;
+    state.speech = { actionId: action.actionId, revision: action.revision, kind: action.kind,
+      text: String(action.text).slice(0, 8192), dispatchId: value.dispatchId, callId: cleanId(action.callId), sourceDigest: action.sourceDigest };
     stamp('selected_speech', state.speech);
   };
   const nativeFetch = window.fetch.bind(window);
   window.fetch = async (...args) => {
     const pathname = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href).pathname;
-    const isSpeechRead = pathname.endsWith('/rpc/read_website_interview_speech');
+    const isSpeechRead = pathname.endsWith('/rpc/read_website_interview_stream');
     const isBootstrap = /\/(?:session|voice-session|browser-session)$/.test(pathname);
     if (isSpeechRead && state.faultArmed && !state.faultInjected) {
       state.faultInjected = true; stamp('isolated_fault_injected', { kind: 'one_browser_speech_read_network_failure' });
@@ -274,9 +291,9 @@ export function installBrowserHarness(settings) {
           state.bootstrap = { callId: state.callId, roundTripMs: now() - began, status: response.status, maxMinutes: data.max_minutes,
             responseHeadersMs: headersMs, edgeServerTiming,
             model: data.model, protocolVersion: data.onboarding_protocol_version, openingVersion: data.opening_payload?.version,
-            speechCallId: cleanId(data.opening_payload?.speech?.callId) };
+            speechCallId: cleanId(data.opening_payload?.stream?.action?.callId), openingMode: data.opening_mode_applied };
           stamp('bootstrap_observed', state.bootstrap);
-          speech(data.opening_payload?.speech);
+          speech(data.opening_payload?.stream);
         }
       }).catch(() => stamp('observed_payload_unavailable', { status: response.status }));
     }
@@ -293,11 +310,13 @@ export function installBrowserHarness(settings) {
       channel.addEventListener('message', message => {
         try {
           const event = JSON.parse(message.data);
+          observeStreamEvent(event);
           if (['input_audio_buffer.speech_started', 'input_audio_buffer.speech_stopped',
             'conversation.item.input_audio_transcription.completed', 'conversation.item.input_audio_transcription.failed',
-            'response.created', 'response.done', 'error'].includes(event.type)) {
+            'response.created', 'response.done', 'response.output_audio_transcript.done',
+            'output_audio_buffer.started', 'output_audio_buffer.stopped', 'output_audio_buffer.cleared', 'error'].includes(event.type)) {
             const details = { type: event.type, itemId: cleanId(event.item_id), code: cleanId(event.error?.code),
-              responseId: cleanId(event.response?.id), status: cleanId(event.response?.status) };
+              responseId: cleanId(event.response?.id ?? event.response_id), eventId: cleanId(event.event_id), status: cleanId(event.response?.status) };
             if (event.type === 'response.done' && Array.isArray(event.response?.output)) {
               const shape = { count: event.response.output.length, functionCalls: 0, messages: 0, reasoning: 0, other: 0,
                 matchingFunction: 0, completedFunction: 0, missingFunctionStatus: 0, otherFunctionStatus: 0 };
@@ -361,58 +380,121 @@ export function installBrowserHarness(settings) {
       return capture.stream.clone();
     };
   }
+  function startOutputCapture(audio, selected, responseId = null) {
+    const index = ++state.outputSequence, startedBrowserMs = now();
+    const startedElapsedMs = state.clickAt === null ? null : startedBrowserMs - state.clickAt;
+    stamp(responseId ? 'output_capture_started' : 'output_playing', { outputIndex: index, actionId: selected?.actionId,
+      dispatchId: selected?.dispatchId, responseId, kind: selected?.kind, volume: audio.volume, muted: audio.muted });
+    let stream, source, recorder, frame, gate, destination, stopped = false, nonzero = false;
+    const chunks = [], capture = { responseId, selected, finish: null, providerStatus: null, providerTranscript: null };
+    const syncGate = () => {
+      if (gate) gate.gain.value = !audio.muted && !audio.paused && audio.volume > 0 ? audio.volume : 0;
+    };
+    const cleanup = (reason = 'transport_closed') => {
+      if (stopped) return; stopped = true; cancelAnimationFrame(frame);
+      capture.stopReason = reason; capture.stoppedBrowserMs = now();
+      audio.removeEventListener('volumechange', syncGate); audio.removeEventListener('pause', syncGate); audio.removeEventListener('playing', syncGate);
+      try { if (recorder?.state !== 'inactive') recorder?.stop(); source?.disconnect(); gate?.disconnect(); } catch {}
+      for (const track of stream?.getTracks?.() ?? []) track.stop();
+      for (const track of destination?.stream?.getTracks?.() ?? []) track.stop();
+      state.observers.delete(cleanup);
+    };
+    capture.finish = cleanup; state.observers.add(cleanup);
+    try {
+      stream = responseId && audio.srcObject?.clone ? audio.srcObject.clone() : audio.captureStream();
+      if (!stream.getAudioTracks().length) throw new Error('capture_track_missing');
+      const ctx = context(), analyser = ctx.createAnalyser(); analyser.fftSize = 512;
+      source = ctx.createMediaStreamSource(stream); gate = ctx.createGain();
+      source.connect(gate); gate.connect(analyser); syncGate();
+      // This observation branch has no connection to the speakers. Its gain
+      // follows the real element so muted/cancelled output cannot be aligned as audible.
+      audio.addEventListener('volumechange', syncGate); audio.addEventListener('pause', syncGate); audio.addEventListener('playing', syncGate);
+      const samples = new Float32Array(analyser.fftSize);
+      const inspect = () => {
+        if (stopped) return; syncGate();
+        if (ctx.state === 'running' && !audio.muted && !audio.paused && audio.volume > 0) {
+          analyser.getFloatTimeDomainData(samples);
+          if (!nonzero && samples.some(sample => Math.abs(sample) > 0.0001)) {
+            nonzero = true; stamp('output_first_nonzero_sample', { outputIndex: index, actionId: selected?.actionId,
+              dispatchId: selected?.dispatchId, responseId, evidence: responseId ? 'remote_webrtc_media' : 'media_element_capture' });
+          }
+        }
+        frame = requestAnimationFrame(inspect);
+      };
+      inspect();
+      if (settings.recordTestAudio) {
+        destination = ctx.createMediaStreamDestination(); gate.connect(destination);
+        const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+        recorder = new MediaRecorder(destination.stream, { mimeType: mime });
+        recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+        recorder.onstop = async () => {
+          const bytes = new Uint8Array(await new Blob(chunks, { type: mime }).arrayBuffer());
+          let binary = ''; for (let offset = 0; offset < bytes.length; offset += 16384) binary += String.fromCharCode(...bytes.subarray(offset, offset + 16384));
+          const recording = { filename: 'output-' + String(index).padStart(4, '0') + '.webm', base64: btoa(binary),
+            outputIndex: index, actionId: selected?.actionId, dispatchId: selected?.dispatchId, responseId,
+            kind: selected?.kind, revision: selected?.revision, expectedText: selected?.text,
+            startedBrowserMs, startedElapsedMs, stoppedBrowserMs: capture.stoppedBrowserMs,
+            stopReason: capture.stopReason, providerStatus: capture.providerStatus, providerTranscript: capture.providerTranscript,
+            bytes: bytes.length, captureEvidence: responseId ? 'actual_remote_stream_with_observed_output_gate' : 'actual_html_media_capture', nonzeroObserved: nonzero };
+          const hash = await crypto.subtle.digest('SHA-256', bytes);
+          recording.sha256 = [...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+          state.recordingFiles.set(recording.filename, { blob: new Blob(chunks, { type: mime }), recording });
+          state.recordings.push(recording);
+        };
+        recorder.start(250);
+      }
+    } catch { stamp('output_capture_unavailable', { outputIndex: index, responseId }); }
+    if (!responseId) audio.addEventListener('ended', () => {
+      stamp('output_ended', { outputIndex: index, actionId: selected?.actionId }); cleanup('html_media_ended');
+    }, { once: true });
+    if (responseId) audio.addEventListener('pause', () => cleanup('media_paused'), { once: true });
+    audio.addEventListener('emptied', () => cleanup('media_emptied'), { once: true });
+    audio.addEventListener('error', () => cleanup('media_error'), { once: true });
+    return capture;
+  }
+  function observeStreamEvent(event) {
+    if (['conversation.item.created','conversation.item.done'].includes(event?.type)
+      && event.item?.role === 'system' && event.item.content?.[0]?.text?.startsWith('ligou.website_stream:')) {
+      try { speech(JSON.parse(event.item.content[0].text.slice('ligou.website_stream:'.length))); } catch { /* Observation only. */ }
+    }
+    const responseId = cleanId(event?.response?.id ?? event?.response_id);
+    if (event?.type === 'response.created' && event.response?.metadata?.ligou_transport === 'realtime_stream_v1') {
+      const binding = event.response.metadata, selected = state.speech;
+      if (!responseId || !selected || state.responseCaptures.has(responseId)
+        || binding.ligou_call_id !== state.callId || binding.ligou_dispatch_id !== selected.dispatchId
+        || binding.ligou_action_id !== selected.actionId || binding.ligou_source_digest !== selected.sourceDigest) {
+        stamp('unmatched_stream_response', { responseId }); return;
+      }
+      const audio = [...state.outputElements].find(element => element.srcObject?.getAudioTracks?.().length);
+      if (!audio) { stamp('stream_output_element_unavailable', { responseId }); return; }
+      state.responseCaptures.set(responseId, startOutputCapture(audio, selected, responseId));
+    }
+    const capture = state.responseCaptures.get(responseId);
+    if (capture) {
+      if (event.type === 'response.done') {
+        capture.providerStatus = cleanId(event.response.status);
+        const content = event.response.output?.find(item => item.type === 'message')?.content;
+        capture.providerTranscript = settings.recordTestAudio ? content?.filter(part => ['audio','output_audio'].includes(part.type))
+          .map(part => String(part.transcript ?? '')).join(' ').slice(0, 8192) : null;
+        if (event.response.status !== 'completed') capture.finish('generation_' + (capture.providerStatus ?? 'unknown'));
+      }
+      if (event.type === 'output_audio_buffer.started') stamp('output_playing', { responseId,
+        actionId: capture.selected.actionId, dispatchId: capture.selected.dispatchId, evidence: 'provider_output_buffer_started' });
+      if (['output_audio_buffer.stopped','output_audio_buffer.cleared'].includes(event.type)) {
+        stamp(event.type.endsWith('.stopped') ? 'output_buffer_stopped' : 'output_cleared', { responseId,
+          actionId: capture.selected.actionId, dispatchId: capture.selected.dispatchId, eventId: cleanId(event.event_id), evidence: event.type });
+        if (event.type.endsWith('.cleared')) capture.finish(event.type);
+      }
+    }
+    if (event?.type === 'input_audio_buffer.speech_started') for (const current of state.responseCaptures.values()) current.finish('owner_barge_in');
+  }
   function observeOutput(audio) {
+    state.outputElements.add(audio);
     if (audio.__ligouAcceptanceObserved) return;
     audio.__ligouAcceptanceObserved = true;
     audio.addEventListener('playing', () => {
-      if (audio.muted || audio.volume === 0 || state.closed) return;
-      const index = ++state.outputSequence, selected = state.speech;
-      const startedBrowserMs = now(), startedElapsedMs = state.clickAt === null ? null : startedBrowserMs - state.clickAt;
-      stamp('output_playing', { outputIndex: index, actionId: selected?.actionId, kind: selected?.kind, volume: audio.volume, muted: audio.muted });
-      let stream, source, recorder, frame, stopped = false, nonzero = false;
-      const chunks = [];
-      const cleanup = () => {
-        if (stopped) return; stopped = true; cancelAnimationFrame(frame);
-        try { if (recorder?.state !== 'inactive') recorder?.stop(); source?.disconnect(); } catch {}
-        for (const track of stream?.getTracks?.() ?? []) track.stop();
-        state.observers.delete(cleanup);
-      };
-      state.observers.add(cleanup);
-      try {
-        if (typeof audio.captureStream !== 'function') throw new Error('capture_not_supported');
-        stream = audio.captureStream();
-        if (!stream.getAudioTracks().length) throw new Error('capture_track_missing');
-        const ctx = context(), analyser = ctx.createAnalyser(); analyser.fftSize = 512;
-        source = ctx.createMediaStreamSource(stream); source.connect(analyser);
-        const samples = new Float32Array(analyser.fftSize);
-        const inspect = () => {
-          if (stopped) return;
-          if (ctx.state === 'running') {
-            analyser.getFloatTimeDomainData(samples);
-            if (!nonzero && samples.some(sample => Math.abs(sample) > 0.0001)) {
-              nonzero = true; stamp('output_first_nonzero_sample', { outputIndex: index, actionId: selected?.actionId, evidence: 'media_element_capture' });
-            }
-          }
-          frame = requestAnimationFrame(inspect);
-        };
-        inspect();
-        if (settings.recordTestAudio) {
-          const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-          recorder = new MediaRecorder(stream, { mimeType: mime });
-          recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
-          recorder.onstop = async () => {
-            const bytes = new Uint8Array(await new Blob(chunks, { type: mime }).arrayBuffer());
-            let binary = ''; for (let offset = 0; offset < bytes.length; offset += 16384) binary += String.fromCharCode(...bytes.subarray(offset, offset + 16384));
-            state.recordings.push({ filename: 'output-' + String(index).padStart(4, '0') + '.webm', base64: btoa(binary),
-              outputIndex: index, actionId: selected?.actionId, kind: selected?.kind, revision: selected?.revision, expectedText: selected?.text,
-              startedBrowserMs, startedElapsedMs, bytes: bytes.length, captureEvidence: 'actual_html_media_capture', nonzeroObserved: nonzero });
-          };
-          recorder.start(250);
-        }
-      } catch { stamp('output_capture_unavailable', { outputIndex: index }); }
-      audio.addEventListener('ended', () => { stamp('output_ended', { outputIndex: index, actionId: selected?.actionId }); cleanup(); }, { once: true });
-      audio.addEventListener('emptied', cleanup, { once: true });
-      audio.addEventListener('error', cleanup, { once: true });
+      if (audio.srcObject || audio.muted || audio.volume === 0 || state.closed) return;
+      startOutputCapture(audio, state.speech);
     });
   }
   const nativeCreate = document.createElement.bind(document);
@@ -429,19 +511,26 @@ export function installBrowserHarness(settings) {
     }
   }, true);
   window.addEventListener('ligou:voice-timing', ({ detail }) => {
-    const allowed = ['event', 'attemptId', 'elapsedMs', 'callId', 'audioRole', 'actionKind', 'evidence', 'reason', 'mediaDurationMs'];
+    const allowed = ['event', 'attemptId', 'elapsedMs', 'callId', 'audioRole', 'actionKind', 'actionId', 'dispatchId', 'responseId', 'evidence', 'reason', 'mediaDurationMs'];
     stamp('application_timing', Object.fromEntries(allowed.filter(key => Object.hasOwn(detail ?? {}, key)).map(key => [key === 'event' ? 'timingEvent' : key === 'elapsedMs' ? 'sourceElapsedMs' : key, detail[key]])));
     if (detail?.callId) state.callId = cleanId(detail.callId);
+    if (detail?.event === 'speech_ended' && detail.evidence === 'webrtc_buffer_stop_and_local_media_drained') {
+      const capture = state.responseCaptures.get(detail.responseId);
+      if (capture && capture.selected.actionId === detail.actionId && capture.selected.dispatchId === detail.dispatchId) {
+        stamp('output_ended', { responseId: detail.responseId, actionId: detail.actionId, dispatchId: detail.dispatchId, evidence: detail.evidence });
+        capture.finish('browser_stream_drained');
+      }
+    }
   });
-  window.__voiceAcceptance = {
-    async playWav(base64, clip, allowBargeIn = false) {
+  async function playWavBytes(bytes, clip, allowBargeIn = false) {
       const input = state.input;
       if (!input || input.track.readyState !== 'live' || !input.track.enabled) throw new Error('input_gate_closed');
       const stage = document.querySelector('[data-voice-stage]')?.dataset.voiceStage;
       if (!allowBargeIn && stage !== 'ready') throw new Error('owner_turn_not_ready');
       const ctx = context(); await ctx.resume();
-      const bytes = Uint8Array.from(atob(base64), char => char.charCodeAt(0));
       const decoded = await ctx.decodeAudioData(bytes.buffer);
+      if (!Number.isFinite(clip?.audio?.durationMs) || Math.abs(decoded.duration * 1000 - clip.audio.durationMs) > 2)
+        throw new Error('caller_audio_duration_changed');
       if (state.input !== input || !input.track.enabled || input.track.readyState !== 'live') throw new Error('input_gate_changed');
       const source = ctx.createBufferSource(); source.buffer = decoded; source.connect(input.destination); state.sources.add(source);
       const began = now();
@@ -450,12 +539,67 @@ export function installBrowserHarness(settings) {
       await new Promise(resolve => { source.onended = resolve; source.start(); });
       stamp('caller_audio_ended', { clipId: clip.id }); source.disconnect(); state.sources.delete(source);
       state.answered++;
+  }
+  window.__voiceAcceptance = {
+    prepareOwnerFileInput() {
+      const id = 'ligou-owner-audio-files';
+      let input = document.getElementById(id);
+      if (!input) {
+        input = document.createElement('input'); input.id = id; input.type = 'file'; input.multiple = true;
+        input.accept = '.wav,.json,audio/wav,application/json'; input.hidden = true;
+        document.body.append(input);
+      }
+      return { selector: '#' + id, selectedFiles: input.files?.length ?? 0 };
+    },
+    async loadOwnerAudioFiles() {
+      if (typeof verifyOwnerAudioFile !== 'function') throw new Error('owner_audio_verifier_unavailable');
+      const files = [...(document.getElementById('ligou-owner-audio-files')?.files ?? [])];
+      const file = files.find(value => value.name === 'owner-audio-manifest.json');
+      if (!file || file.size > 2_000_000) throw new Error('owner_audio_manifest_missing');
+      const manifest = JSON.parse(await file.text());
+      if (manifest?.schema !== 'ligou.in_app_owner_audio.v1' || manifest.isolatedTestOnly !== true
+        || manifest.provenance?.itemCount !== 114 || manifest.provenance?.candidateCount !== 21
+        || manifest.items?.length !== 114 || !Array.isArray(manifest.clips) || manifest.clips.length > 180)
+        throw new Error('owner_audio_manifest_invalid');
+      const loaded = new Map();
+      for (const clip of manifest.clips) {
+        if (loaded.has(clip.id)) throw new Error('owner_audio_clip_duplicate');
+        const selected = files.filter(value => value.name === clip.basename);
+        if (selected.length !== 1) throw new Error('owner_audio_file_missing_or_duplicate');
+        await verifyOwnerAudioFile(selected[0], clip);
+        loaded.set(clip.id, { file: selected[0], clip });
+      }
+      state.ownerFiles = loaded;
+      return { loaded: loaded.size, itemCount: manifest.items.length, fixtureHash: manifest.provenance.fixtureHash };
+    },
+    async playWavFile(clipId, allowBargeIn = false) {
+      const selected = state.ownerFiles.get(clipId);
+      if (!selected) throw new Error('owner_audio_clip_not_loaded');
+      return playWavBytes(await verifyOwnerAudioFile(selected.file, selected.clip), selected.clip, allowBargeIn);
+    },
+    async playWav(base64, clip, allowBargeIn = false) {
+      return playWavBytes(Uint8Array.from(atob(base64), char => char.charCodeAt(0)), clip, allowBargeIn);
+    },
+    recordingLink(filename) {
+      const value = state.recordingFiles.get(filename);
+      if (!value) throw new Error('recording_not_available');
+      let link = state.recordingLinks.get(filename);
+      if (!link) {
+        link = document.createElement('a'); link.id = 'ligou-recording-' + value.recording.outputIndex;
+        link.download = filename; link.href = URL.createObjectURL(value.blob); link.textContent = 'Download ' + filename;
+        document.body.append(link); state.recordingLinks.set(filename, link);
+      }
+      return { selector: '#' + link.id, filename, bytes: value.recording.bytes, sha256: value.recording.sha256 };
     },
     armFault() { state.faultArmed = true; stamp('isolated_fault_armed'); },
-    drain() {
+    drain({ includeRecordingBytes = false } = {}) {
       const stage = document.querySelector('[data-voice-stage]')?.dataset.voiceStage ?? null;
       if (stage !== state.stage) { state.stage = stage; stamp('ui_stage', { stage }); }
-      return { stage, callId: state.callId, bootstrap: state.bootstrap ?? null, speech: state.speech, events: state.events.splice(0), recordings: state.recordings.splice(0),
+      const recordings = state.recordings.splice(0).map(recording => {
+        if (includeRecordingBytes) return recording;
+        const { base64, ...metadata } = recording; return metadata;
+      });
+      return { stage, callId: state.callId, bootstrap: state.bootstrap ?? null, speech: state.speech, events: state.events.splice(0), recordings,
         inputEnabled: state.input?.track.enabled === true && state.input?.track.readyState === 'live', faultInjected: state.faultInjected,
         uiText: document.querySelector('.voice-live')?.innerText?.slice(0, 20000) ?? null };
     },
@@ -471,74 +615,54 @@ export function installBrowserHarness(settings) {
   };
 }
 
-async function findBrowser() {
-  const candidates = [process.env.LIGOU_TEST_BROWSER_PATH,
-    '/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta',
-    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium'].filter(Boolean);
-  for (const candidate of candidates) try { await access(candidate, constants.X_OK); return candidate; } catch {}
-  fail('supported_browser_unavailable');
+// RJ requires browser work in Codex's own in-app surface. Keep this former
+// entrypoint as an explicit failure so old CLI invocations cannot launch or
+// close Edge, Chrome, Safari, or another native browser accidentally.
+export async function openRealBrowser() {
+  fail('native_browser_execution_disabled_use_codex_in_app');
 }
 
-async function openRealBrowser(config, session) {
-  const profile = await mkdtemp(path.join(tmpdir(), 'ligou-voice-audio-acceptance-'));
-  await chmod(profile, 0o700);
-  const executable = await findBrowser();
-  const browser = spawn(executable, ['--disable-background-networking', '--disable-component-update', '--disable-extensions',
-    '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'],
-  { stdio: ['ignore', 'ignore', 'pipe'] });
-  let socket;
-  const close = async () => {
-    socket?.close();
-    if (browser.exitCode === null) { const ended = new Promise(resolve => browser.once('exit', resolve)); browser.kill('SIGTERM'); await Promise.race([ended, sleep(2000)]); if (browser.exitCode === null) browser.kill('SIGKILL'); }
-    await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-  };
-  try {
-    const debug = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('browser_debug_timeout')), 10000);
-      browser.stderr.on('data', data => { const match = String(data).match(/DevTools listening on (ws:\/\/[^\s]+)/); if (match) { clearTimeout(timer); resolve(match[1]); } });
-      browser.once('exit', () => { clearTimeout(timer); reject(new Error('browser_exited')); });
-      browser.once('error', () => { clearTimeout(timer); reject(new Error('browser_unavailable')); });
-    });
-    const base = debug.replace(/^ws:/, 'http:').replace(/\/devtools\/browser\/.+$/, '');
-    const pages = await (await fetch(`${base}/json/list`)).json();
-    socket = new WebSocket(pages.find(page => page.type === 'page').webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = () => reject(new Error('browser_socket_error')); });
-    const pending = new Map(); let nextId = 0;
-    socket.onmessage = ({ data }) => { const reply = JSON.parse(data); pending.get(reply.id)?.(reply); pending.delete(reply.id); };
-    const send = (method, params = {}, timeoutMs = 30000) => new Promise((resolve, reject) => {
-      const id = ++nextId;
-      const timer = setTimeout(() => { pending.delete(id); reject(new Error('browser_operation_timeout')); }, timeoutMs);
-      pending.set(id, reply => { clearTimeout(timer); reply.error ? reject(new Error('browser_operation_rejected')) : resolve(reply.result); });
-      socket.send(JSON.stringify({ id, method, params }));
-    });
-    const evaluate = async (expression, timeoutMs) => {
-      const result = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, timeoutMs);
-      if (result.exceptionDetails) {
-        const description = result.exceptionDetails.exception?.description ?? '';
-        const code = ['input_gate_closed', 'owner_turn_not_ready', 'input_gate_changed'].find(item => description.includes(item));
-        fail(code ?? 'browser_evaluation_failed');
-      }
-      return result.result?.value;
-    };
-    const settings = { origin: new URL(config.targetUrl).origin, recordTestAudio: config.recordSyntheticTestAudio === true };
-    // Session material exists only in the private browser profile and the in-memory
-    // DevTools message. It is never added to URLs, traces, screenshots or artifacts.
-    const authKey = `sb-${new URL(config.supabaseUrl).hostname.split('.')[0]}-auth-token`;
-    const source = `if(location.origin===${JSON.stringify(settings.origin)}){localStorage.setItem(${JSON.stringify(authKey)},${JSON.stringify(JSON.stringify(session))});}\n(${installBrowserHarness.toString()})(${JSON.stringify(settings)});`;
-    await send('Page.enable');
-    await send('Runtime.enable');
-    await send('Page.addScriptToEvaluateOnNewDocument', { source });
-    await send('Page.navigate', { url: config.targetUrl });
-    const click = async selector => {
-      const target = await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e||e.disabled)return null;e.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});const r=e.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;if(r.width<=0||r.height<=0||x<0||y<0||x>=innerWidth||y>=innerHeight||!e.contains(document.elementFromPoint(x,y)))return null;return {x,y};})()`);
-      if (!target) fail('rendered_control_unavailable');
-      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...target });
-      await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...target });
-      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...target });
-    };
-    return { evaluate, click, close, executable, send };
-  } catch (error) { await close(); throw error; }
+export function buildBrowserHarnessSource(settings) {
+  if (settings?.isolatedTestOnly !== true || settings.recordTestAudio !== true) fail('isolated_audio_test_required');
+  let target;
+  try { target = new URL(settings.origin); } catch { fail('in_app_origin_invalid'); }
+  if (target.origin !== settings.origin || target.username || target.password
+    || !(target.protocol === 'https:' || (target.protocol === 'http:' && ['127.0.0.1','localhost'].includes(target.hostname)))) fail('in_app_origin_invalid');
+  return `(${installBrowserHarness.toString()})(${JSON.stringify({ origin: target.origin, recordTestAudio: true })},(${validateOwnerAudioFile.toString()}));`;
+}
+
+export function buildOwnerFileManifest(plan, output) {
+  if (plan?.schema !== 'ligou.browser_audio_answer_plan.v1' || plan.provenance?.itemCount !== 114
+    || plan.provenance?.candidateCount !== 21 || plan.items?.length !== 114 || plan.unhandledItems?.length !== 0
+    || !Array.isArray(plan.clips) || !path.isAbsolute(output)) fail('faithful_fixture_incomplete');
+  const seen = new Set();
+  const clips = plan.clips.map(clip => {
+    if (typeof clip.id !== 'string' || !/^[A-Za-z0-9_-]{1,160}$/.test(clip.id) || seen.has(clip.id)
+      || typeof clip.filename !== 'string' || path.isAbsolute(clip.filename) || clip.filename.split(/[\\/]/).includes('..')
+      || !clip.filename.endsWith('.wav') || !HASH.test(clip.audio?.sha256 ?? '')
+      || !Number.isFinite(clip.audio?.durationMs) || clip.audio.durationMs <= 0) fail('owner_audio_file_invalid');
+    seen.add(clip.id);
+    return { id: clip.id, filename: clip.filename, basename: path.basename(clip.filename),
+      absolutePath: path.resolve(output, clip.filename), audio: { ...clip.audio } };
+  });
+  if (new Set(clips.map(clip => clip.basename)).size !== clips.length) fail('owner_audio_file_name_collision');
+  return { schema: 'ligou.in_app_owner_audio.v1', isolatedTestOnly: true, provenance: { ...plan.provenance },
+    policyNotice: plan.policyNotice, items: plan.items, candidateRecap: plan.candidateRecap, specials: plan.specials,
+    clips, browserAudioVerified: false, browserSurface: 'codex_in_app_only' };
+}
+
+export async function writeInAppHarnessArtifacts({ origin, output = DEFAULT_OUTPUT }) {
+  const source = buildBrowserHarnessSource({ origin, isolatedTestOnly: true, recordTestAudio: true });
+  const plan = JSON.parse(await readFile(path.join(output, 'answer-plan.json'), 'utf8'));
+  const manifest = buildOwnerFileManifest(plan, output);
+  const directory = path.join(output, 'in-app');
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const observerPath = path.join(directory, 'observer.js'), manifestPath = path.join(directory, 'owner-audio-manifest.json');
+  await writeFile(observerPath, source, { mode: 0o600 });
+  await writeFile(manifestPath, json(manifest), { mode: 0o600 });
+  return { schema: 'ligou.in_app_harness_artifacts.v1', observerPath, observerSha256: sha(source), manifestPath,
+    manifestSha256: sha(json(manifest)), clips: manifest.clips.length, items: manifest.items.length,
+    browserExecution: 'NOT_RUN', nativeBrowserExecution: 'DISABLED', providerCalls: 0 };
 }
 
 export function validateExecution(config, options, plan, session) {
@@ -642,7 +766,7 @@ async function checkIsolation(config, session, read = authenticatedRead) {
 }
 
 async function verifyBootstrap(config, session, bootstrap) {
-  if (bootstrap.protocolVersion !== 3 || bootstrap.openingVersion !== 3 || bootstrap.speechCallId !== bootstrap.callId
+  if (bootstrap.protocolVersion !== 4 || bootstrap.openingVersion !== 4 || bootstrap.openingMode !== 'realtime_stream_v1' || bootstrap.speechCallId !== bootstrap.callId
     || !UUID.test(bootstrap.callId ?? '') || !Number.isFinite(bootstrap.maxMinutes) || bootstrap.maxMinutes < 1
     || bootstrap.maxMinutes > config.sessionMaxMinutes || !config.allowedModels?.includes(bootstrap.model)) fail('bootstrap_contract_mismatch');
   const reservations = await authenticatedRead(config, session,
@@ -688,7 +812,7 @@ export function matchQuestion(plan, speech) {
 }
 
 async function saveDrain(browser, result, directory) {
-  const current = await browser.evaluate('window.__voiceAcceptance?.drain()');
+  const current = await browser.evaluate('window.__voiceAcceptance?.drain({includeRecordingBytes:true})');
   if (!current) return null;
   result.events.push(...current.events);
   for (const recording of current.recordings) {
@@ -783,16 +907,17 @@ async function attempt(browser, config, session, options, plan, output, label) {
         corrected = true; result.exercised.push('recap_interruption_and_candidate_correction');
         await sleep(250); continue;
       }
-      if (current.stage !== 'ready' || !selected || !verifiedCalls.has(current.callId) || handled.has(selected.actionId)) { await sleep(100); continue; }
+      if (current.stage !== 'ready' || !selected || !verifiedCalls.has(current.callId) || handled.has(`${current.callId}:${selected.dispatchId ?? selected.actionId}`)) { await sleep(100); continue; }
       if (result.callerClips.length >= config.maxTurns) fail('turn_budget_exhausted');
-      handled.add(selected.actionId);
+      handled.add(`${current.callId}:${selected.dispatchId ?? selected.actionId}`);
       if (selected.kind === 'REQUEST_FINAL_APPROVAL') {
         if (options.scenario === 'variation' && (!offScope || !corrected)) fail('variation_required_path_not_exercised');
         if (options.scenario === 'recovery' && !resumed) fail('recovery_path_not_exercised');
         result.beforeApproval = await authenticatedRead(config, session, '/rest/v1/rpc/get_website_interview_status', { p_call: result.callId });
         if (result.beforeApproval.revision !== selected.revision || !Array.isArray(result.beforeApproval.summaryParts)
           || !result.beforeApproval.summaryParts.length || result.beforeApproval.approvalReceiptId) fail('current_unapproved_recap_receipt_unavailable');
-        const summaries = result.recordings.filter(recording => recording.kind === 'GENERATE_FINAL_SUMMARY' && recording.revision === selected.revision);
+        const summaries = result.recordings.filter(recording => recording.kind === 'GENERATE_FINAL_SUMMARY' && recording.revision === selected.revision
+          && recording.stopReason === 'browser_stream_drained' && recording.providerStatus === 'completed');
         if (!summaries.length || summaries.some(recording => !recording.nonzeroObserved)) fail('summary_playback_not_observed');
         if (!result.beforeApproval.summaryParts.every(part => summaries.some(recording => normalize(recording.expectedText) === normalize(part)))) fail('all_current_summary_parts_not_observed');
         if (options.scenario === 'variation' && !summaries.some(recording => /noventa e nove|\b99\b/i.test(recording.expectedText ?? ''))) fail('corrected_price_missing_from_recap');
@@ -965,7 +1090,7 @@ export function summarizeAttempt(result) {
   const question = alignedRecordings.find(row => row.startedBrowserMs >= startMs && row.startedBrowserMs < nextStartMs && row.alignment.actionableQuestion);
   const harnessSample = result.events.find(event => afterStart(event) && event.event === 'output_first_nonzero_sample');
   const appSample = result.events.find(event => afterStart(event) && event.event === 'application_timing'
-    && event.timingEvent === 'speech_first_nonzero_sample' && event.evidence === 'media_element_capture');
+    && event.timingEvent === 'speech_first_nonzero_sample' && ['media_element_capture','remote_webrtc_media'].includes(event.evidence));
   const firstSample = harnessSample ?? appSample;
   const difference = (end, start) => Number.isFinite(end) && Number.isFinite(start) ? end - start : null;
   const turns = result.events.filter(event => event.event === 'caller_audio_start').map((caller, index, all) => {
@@ -1220,6 +1345,112 @@ async function browserSmoke(options, assert) {
   process.stdout.write(json({ offlineBrowserSmoke: evidence.verdict, browser: 'Edge Beta preferred', providerCalls: 0, backendCalls: 0, artifacts: directory }));
 }
 
+async function browserStreamSmoke(options, assert) {
+  const directory = path.join(options.output, 'offline-stream-browser-smoke');
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const plan = JSON.parse(await readFile(path.join(options.output, 'answer-plan.json'), 'utf8'));
+  const clip = plan.clips.find(item => item.id === plan.specials.acknowledgment);
+  const bytes = await readFile(path.join(options.output, clip.filename));
+  const playerSource = await readFile(path.join(ROOT, 'dashboard/src/voice/website-stream.js'), 'utf8');
+  const callId = '11111111-1111-4111-8111-111111111111';
+  const descriptors = [0, 1].map(index => ({schema:'onboarding.stream.v1', action:{callId,interviewId:callId,
+    actionId:sha('local-stream-smoke-' + index),sourceDigest:'b'.repeat(64),revision:index,kind:'ASK_NEXT_GAP',text:clip.text},
+    dispatchId:index ? '55555555-5555-4555-8555-555555555555' : '22222222-2222-4222-8222-222222222222',
+    receiptId:'33333333-3333-4333-8333-333333333333'}));
+  const bootstrap={call_id:callId,model:'local-loopback-no-provider',max_minutes:1,onboarding_protocol_version:4,
+    opening_mode_applied:'realtime_stream_v1',opening_payload:{version:4,stream:descriptors[0]}};
+  const server = createServer((request, response) => {
+    if (request.url === '/caller.wav') { response.setHeader('Content-Type','audio/wav'); response.end(bytes); return; }
+    if (request.url === '/website-stream.js') { response.setHeader('Content-Type','application/javascript'); response.end(playerSource); return; }
+    if (request.url === '/browser-session') { response.setHeader('Content-Type','application/json'); response.end(JSON.stringify(bootstrap)); return; }
+    response.setHeader('Content-Type','text/html');
+    response.end(`<!doctype html><html lang="pt-BR"><body><main class="voice-live" data-voice-stage="idle">
+      <h1>Local streaming transport regression</h1><p>Two local WebRTC peers. Test owner audio only. No provider.</p>
+      <button class="voice-live-button">Start</button><button class="voice-live-hangup">Stop</button></main>
+      <script type="module">
+      import {createWebsiteStreamPlayer,observeRemoteStreamMedia} from '/website-stream.js';
+      const descriptors=${JSON.stringify(descriptors)},callId=${JSON.stringify(callId)};
+      const state=window.__streamSmoke={played:[],captions:[],endedEvents:0,playingEvents:0,failures:[]};
+      const stage=value=>document.querySelector('.voice-live').dataset.voiceStage=value;
+      let audio,player,receiver,sender,ctx;
+      const gather=pc=>pc.iceGatheringState==='complete'?Promise.resolve():new Promise(resolve=>pc.addEventListener('icegatheringstatechange',()=>{if(pc.iceGatheringState==='complete')resolve();}));
+      document.querySelector('.voice-live-button').onclick=async()=>{try{
+        await navigator.mediaDevices.getUserMedia({audio:true});
+        const opening=await(await fetch('/browser-session')).json();
+        ctx=new AudioContext();await ctx.resume();const output=ctx.createMediaStreamDestination();
+        const silence=ctx.createOscillator(),silentGain=ctx.createGain();silentGain.gain.value=0;silence.connect(silentGain).connect(output);silence.start();
+        const wav=await ctx.decodeAudioData(await(await fetch('/caller.wav')).arrayBuffer());
+        audio=document.createElement('audio');audio.muted=true;audio.autoplay=true;
+        audio.addEventListener('ended',()=>state.endedEvents++);audio.addEventListener('playing',()=>state.playingEvents++);
+        receiver=new RTCPeerConnection({iceServers:[]});sender=new RTCPeerConnection({iceServers:[]});receiver.addTransceiver('audio',{direction:'recvonly'});
+        let trackReady;const track=new Promise(resolve=>trackReady=resolve);
+        receiver.ontrack=event=>{audio.srcObject=event.streams[0];trackReady();};
+        for(const entry of output.stream.getTracks())sender.addTrack(entry,output.stream);
+        const channel=receiver.createDataChannel('stream-smoke');let opened;const ready=new Promise(resolve=>opened=resolve);
+        channel.addEventListener('open',opened);channel.onmessage=event=>player.handleEvent(JSON.parse(event.data));
+        player=createWebsiteStreamPlayer({callId,interviewId:callId,readStream:async(action,dispatch)=>descriptors.find(value=>value.dispatchId===dispatch),
+          prepareOutput:async()=>{await track;await audio.play();},observeMedia:(sample,unavailable)=>observeRemoteStreamMedia(audio,sample,unavailable),
+          outputIsActive:()=>!audio.muted&&!audio.paused&&audio.volume>0,setOutput:active=>audio.muted=!active,setMicrophone:()=>{},
+          send:event=>channel.send(JSON.stringify(event)),onCaption:event=>state.captions.push(event),
+          onTiming:(event,details)=>window.dispatchEvent(new CustomEvent('ligou:voice-timing',{detail:{event,...details}})),
+          onPhase:value=>stage(value),onFailure:error=>{state.failures.push(error.message);stage('failed');}});
+        sender.ondatachannel=event=>{const remote=event.channel;const emit=value=>remote.send(JSON.stringify(value));
+          const activate=()=>emit({type:'session.updated',session:{output_modalities:['text'],tools:[],audio:{input:{turn_detection:{type:'semantic_vad',eagerness:'low',create_response:false,interrupt_response:false}}}}});
+          if(remote.readyState==='open')activate();else remote.addEventListener('open',activate,{once:true});
+          remote.onmessage=async message=>{const control=JSON.parse(message.data).item?.content?.[0]?.text??'';
+            if(control.startsWith('ligou.website_stream_ready:')){
+              const value=JSON.parse(control.slice('ligou.website_stream_ready:'.length));const index=descriptors.findIndex(d=>d.dispatchId===value.dispatchId),d=descriptors[index],responseId='local_response_'+index;
+              const metadata={ligou_transport:'realtime_stream_v1',ligou_call_id:callId,ligou_action_id:d.action.actionId,ligou_source_digest:d.action.sourceDigest,ligou_dispatch_id:d.dispatchId};
+              emit({type:'response.created',response:{id:responseId,status:'in_progress',metadata}});
+              emit({type:'output_audio_buffer.started',response_id:responseId,event_id:'local_start_'+index});
+              await new Promise(resolve=>setTimeout(resolve,80));const source=ctx.createBufferSource();source.buffer=wav;source.connect(output);
+              await new Promise(resolve=>{source.onended=resolve;source.start();});source.disconnect();
+              await new Promise(resolve=>setTimeout(resolve,250));
+              emit({type:'response.done',response:{id:responseId,status:'completed',metadata,output:[{id:'local_item_'+index,type:'message',role:'assistant',status:'completed',content:[{type:'audio',transcript:d.action.text}]}]}});
+              emit({type:'output_audio_buffer.stopped',response_id:responseId,event_id:'local_stop_'+index});
+            }else if(control.startsWith('ligou.website_stream_played:')){
+              state.played.push(JSON.parse(control.slice('ligou.website_stream_played:'.length)));
+              if(state.played.length===1){const d=descriptors[1];emit({type:'conversation.item.created',item:{id:'lsn-'+d.dispatchId.replaceAll('-','').slice(0,28),type:'message',role:'system',status:'completed',content:[{type:'input_text',text:'ligou.website_stream:'+JSON.stringify(d)}]}});}
+              else{state.complete=true;stage('complete');}
+            }
+          };
+        };
+        const offer=await receiver.createOffer();await receiver.setLocalDescription(offer);await gather(receiver);
+        await sender.setRemoteDescription(receiver.localDescription);await sender.setLocalDescription(await sender.createAnswer());await gather(sender);
+        await receiver.setRemoteDescription(sender.localDescription);await player.start(opening.opening_payload.stream,ready);
+      }catch(error){state.failures.push(error.message);stage('failed');}};
+      document.querySelector('.voice-live-hangup').onclick=()=>{player?.stop();receiver?.close();sender?.close();audio?.pause();void ctx?.close();stage('ended');};
+      </script></body></html>`);
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const evidence={mode:'offline_two_peer_webrtc_streaming_regression',providerCalls:0,events:[],recordings:[],callerClips:[],artifactDirectory:directory};
+  let browser;
+  try {
+    browser=await openRealBrowser({targetUrl:`http://127.0.0.1:${server.address().port}/`,supabaseUrl:'https://local.invalid',recordSyntheticTestAudio:true},{});
+    await waitFor(browser,'Boolean(window.__voiceAcceptance && document.querySelector(".voice-live-button"))');
+    await browser.click('.voice-live-button');
+    await waitFor(browser,'window.__streamSmoke?.complete || window.__streamSmoke?.failures.length',20_000);
+    await sleep(300);await saveDrain(browser,evidence,directory);evidence.player=await browser.evaluate('window.__streamSmoke');
+    assert.deepEqual(evidence.player.failures,[]);
+    assert.equal(evidence.player.played.length,2,'two provider-completion/buffer/media joins must be observed');
+    assert.equal(evidence.player.endedEvents,0,'continuous WebRTC media never ended between utterances');
+    assert.equal(evidence.recordings.length,2,'one actual recording per streamed response');
+    for(const recording of evidence.recordings){
+      assert.ok(recording.bytes>100 && recording.nonzeroObserved,'each rendition contains actual unmuted samples');
+      assert.equal(recording.stopReason,'browser_stream_drained');
+      assert.equal(recording.providerStatus,'completed');
+      assert.ok(evidence.player.played.some(proof=>proof.responseId===recording.responseId && proof.dispatchId===recording.dispatchId));
+      const decoded=path.join(directory,recording.filename+'.wav');
+      await localCommand('/opt/homebrew/bin/ffmpeg',['-nostdin','-hide_banner','-loglevel','error','-y','-i',path.join(directory,recording.filename),'-ar','16000','-ac','1','-c:a','pcm_s16le',decoded]);
+      recording.decoded=wavSignal(await readFile(decoded),16000);
+      assert.ok(recording.decoded.signalLastMs>clip.audio.durationMs*.6,'the continuous output was captured beyond its onset');
+    }
+    evidence.verdict='PASS';await browser.click('.voice-live-hangup');await browser.evaluate('window.__voiceAcceptance.cleanup()');
+  }catch(error){evidence.failure=error.message;try{evidence.player=await browser.evaluate('window.__streamSmoke');}catch{}throw error;}
+  finally{await browser?.close();await new Promise(resolve=>server.close(resolve));await writeFile(path.join(directory,'smoke.json'),json(evidence),{mode:0o600});}
+  process.stdout.write(json({offlineStreamBrowserSmoke:evidence.verdict,providerCalls:0,recordings:evidence.recordings.length,artifacts:directory}));
+}
+
 async function selfTest(options) {
   const assert = (await import('node:assert/strict')).default;
   const { projection, fixtureHash } = await fixtureProjection();
@@ -1319,13 +1550,14 @@ async function selfTest(options) {
   assert.equal(unconfirmed.clean,false);assert.equal(cleanupClock,1000);
   new Function(`return (${installBrowserHarness.toString()});`)();
   process.stdout.write(json({ selfTest: 'PASS', offlineOnly: true, mappedItems: plan.items.length, clips: plan.clips.length, providerAttempts: 0 }));
-  if (options.browserSmoke) await browserSmoke(options, assert);
+  if (options.browserSmoke) process.stdout.write(json({ nativeBrowserChecks: 'SKIPPED', browserAudioVerified: false, reason: 'RJ requires Codex in-app browser; native launch and cleanup are disabled.' }));
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  if (options.help) { process.stdout.write('Usage: node scripts/voice-onboarding-audio-acceptance.mjs [prepare|self-test|run|report] [--execute --config FILE --mode interview|start-sample --scenario normal|variation|recovery --condition warm|cold --count N]\nDefault: offline preparation only.\n'); return; }
-  if (options.command === 'prepare') await prepare(options);
+  if (options.help) { process.stdout.write('Usage: node scripts/voice-onboarding-audio-acceptance.mjs [prepare|self-test|export-in-app|report] [--execute --config FILE --mode interview|start-sample --scenario normal|variation|recovery --condition warm|cold --count N]\nDefault: offline preparation only.\n'); return; }
+  if (options.command === 'export-in-app') process.stdout.write(json(await writeInAppHarnessArtifacts(options)));
+  else if (options.command === 'prepare') await prepare(options);
   else if (options.command === 'run') await run(options);
   else if (options.command === 'report') await report(options);
   else await selfTest(options);

@@ -55,6 +55,8 @@ export const unitTestFiles = [
   "test/onboarding-speech.test.ts",
   "test/onboarding-website-bootstrap.test.ts",
   "test/onboarding-website-runtime.test.ts",
+  "test/onboarding-stream.test.ts",
+  "test/onboarding-website-stream-runtime.test.ts",
   "test/onboarding-website-facts.test.ts",
   "test/onboarding-website-applicability.test.ts",
   "test/onboarding-website-guidance.test.ts",

@@ -257,21 +257,19 @@ export function websiteTerritoryConfirmation(agenda: OnboardingAgenda): string {
     ["answered", "corrected"].includes(item.status) && item.answerRevision > 0 &&
     item.evidence.at(-1)?.turnId === latest.turnId && item.evidence.at(-1)?.text === latest.text)) return fallback;
   if ([...latest.text].length > 700 || /["“”<>\x00-\x1f\x7f]/.test(latest.text)) return fallback;
-  const text = latest.text.trim().replace(/^(?:(?:uhum|aham|ah|entendi)[.!?, ]+)*/i, "").replace(/^olha[, ]+/i, "");
+  const text = latest.text.trim().replace(/^(?:(?:uhum|aham|hum|ah|entendi|olha)[.!?, ]+|1, *olha[, ]+)*/i, "");
   const normalize = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   const parts = text.split(/(?<=[.!?]) +/);
-  if (!/^(?:(?:atendemos|atende) (?:so|somente|apenas|exclusivamente) |(?:a )?nossa area (?:fica|esta|e) restrita a )/.test(normalize(parts[0] ?? ""))) return fallback;
-  const outside = parts.some(part => {
-    const value = normalize(part);
-    return /^(?:se .* fora\b|para sair dessas cidades\b|fora (?:da area|dessas cidades|da cobertura)\b)/.test(value) &&
-      /\b(?:aprovacao|autorizacao)\b/.test(value) && /\b(?:dono|proprietario|minha|comigo)\b/.test(value);
-  });
-  if (!outside) return fallback;
+  // The committed area evidence authorizes attribution, regardless of filler,
+  // verb inflection or whether the owner supplied an exception rule. This
+  // narrow wording check only proves a historical aside redundant; it never
+  // decides whether the answer can be read back.
+  const exclusiveCoverage = /^(?:(?:atendemos|atende) (?:so|somente|apenas|exclusivamente) |(?:a )?nossa area (?:fica|esta|e) restrita a )/.test(normalize(parts[0] ?? ""));
   // Omit only a historical outside-city request aside whose entire current
   // restriction repeats the retained exclusive coverage. All other sentences,
   // including additional conditions and prohibitions, remain verbatim.
   const aside = /^ja (?:teve|tivemos|recebemos) pedidos? de (?:gente|pessoas|clientes) de outras cidades, mas nao e (?:pra|para) atender[.!]?$/;
-  const excerpt = parts.filter(part => !aside.test(normalize(part)))
+  const excerpt = parts.filter(part => !exclusiveCoverage || !aside.test(normalize(part)))
     .map(part => part.replace(/, *combinado[?!.]*$/i, "")).join(" ").replace(/[.!?]+$/, "").trim();
   if (!excerpt || [...excerpt].length > 480) return fallback; // No truncation of conditions.
   return `Registrado. Você informou: “${excerpt}”. `;

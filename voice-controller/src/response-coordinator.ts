@@ -11,6 +11,8 @@
 //   4. recap_push      — bounded legacy lifecycle push while a recap is owed.
 // The provider's semantic VAD owns ordinary user turns; nothing else may speak.
 
+import {streamAuthorizationIsValid,streamResponseMetadata,type StreamAuthorization} from './onboarding-stream.ts';
+
 export interface CoordinatedLedger {
   callId: string;
   status: string;
@@ -37,6 +39,7 @@ export interface ApplicationResponseIntent {
   instructions?: string;
   snapshotDigest?: string;
   approvalReceiptId?: string;
+  websiteStream?:StreamAuthorization;
 }
 export type ResponseIntent = LegacyResponseIntent | ApplicationResponseIntent;
 
@@ -63,6 +66,8 @@ export function requestResponse(ledger: CoordinatedLedger, ws: WsLike, intent: R
   const applicationIntent = typeof intent === "object" ? intent : undefined;
   const intentName = applicationIntent?.purpose ?? intent;
   const intentKey = applicationIntent?.intentKey;
+  if(applicationIntent?.websiteStream&&(!streamAuthorizationIsValid(applicationIntent.websiteStream)
+    ||applicationIntent.websiteStream.action.callId!==ledger.callId||intentKey!==applicationIntent.websiteStream.dispatchId))return false;
   if (intentKey && ledger.requestedResponseIntentKeys?.includes(intentKey)) return false;
   // No live intent, no noise: a consumed/absent idempotency key is a silent no-op.
   if (!applicationIntent && intent === "greeting" && ledger.greetingRequested) return false;
@@ -84,12 +89,14 @@ export function requestResponse(ledger: CoordinatedLedger, ws: WsLike, intent: R
         response: {
           tool_choice: "none",
           output_modalities: ["audio"],
+          ...(applicationIntent.websiteStream?{conversation:'none',tools:[],input:[{type:'message',role:'user',content:[{type:'input_text',text:applicationIntent.websiteStream.action.text}]}]}:{}),
           ...(applicationIntent.instructions
             ? { instructions: applicationIntent.instructions }
             : {}),
           metadata: {
             intent_key: applicationIntent.intentKey,
             purpose: applicationIntent.purpose,
+            ...(applicationIntent.websiteStream?streamResponseMetadata(applicationIntent.websiteStream):{}),
             ...(applicationIntent.snapshotDigest
               ? { snapshot_digest: applicationIntent.snapshotDigest }
               : {}),

@@ -14,7 +14,7 @@ import type {
   OnboardingOpeningPayload,
 } from "./onboarding-greeting.ts";
 import { createVoiceStartupTrace, type WebsiteOpeningEnvelope } from "./server.ts";
-import { isApplicationOpeningPayload } from "../../supabase/functions/browser-session/core.ts";
+import { isApplicationOpeningPayload, isStreamOpeningPayload } from "../../supabase/functions/browser-session/core.ts";
 
 type StartSession = (
   userId: string,
@@ -31,7 +31,7 @@ type StartSession = (
     browserRequestId?: string;
     openingModeRequested?: OnboardingOpeningMode;
     requestedCallId?: string;
-    onboardingProtocolVersion?: 2 | 3;
+    onboardingProtocolVersion?: 2 | 3 | 4;
   },
 ) => Promise<{
   sdp: string;
@@ -46,7 +46,7 @@ interface BrowserLiveControl {
   userId: string;
   tenantId: string;
   sessionType: "onboarding";
-  openingModeRequested: "application_tts_v1";
+  openingModeRequested: "application_tts_v1" | "realtime_stream_v1";
   onboardingProtocolVersion: number | null;
   cancel(reason: string): Promise<void>;
   startupComplete(): boolean;
@@ -97,13 +97,14 @@ function registerBrowserLiveControl(
     userId: string;
     tenantId: string;
     sessionType: "onboarding";
-    openingModeRequested: "application_tts_v1";
+    openingModeRequested: "application_tts_v1" | "realtime_stream_v1";
     onboardingProtocolVersion: number | null;
   },
 ): boolean {
   if (!requestId.trim() || !cleanup.callId?.trim() || !binding.userId.trim() ||
     !binding.tenantId.trim() ||
-    ![null, 2, 3].includes(binding.onboardingProtocolVersion)) return false;
+    !(binding.openingModeRequested==="realtime_stream_v1" ? binding.onboardingProtocolVersion===4
+      : [null, 2, 3].includes(binding.onboardingProtocolVersion))) return false;
   pruneTerminalBrowserControls();
   const existing = browserLiveControls.get(requestId);
   if (existing)
@@ -139,7 +140,40 @@ interface PendingPollDependencies {
 
 interface BrowserRequestHandleDependencies {
   callIdFactory?: () => string;
+  dispatchSource?: "realtime" | "poll";
+  queueObserver?: ReturnType<typeof createBrowserQueueObserver>;
 }
+
+/** Readiness and dispatch evidence only. Callback payloads may contain private
+ * transport details; copy only fixed states and validated request identities. */
+export function createBrowserQueueObserver(
+  write:(event:Record<string,unknown>)=>void=event=>console.log(JSON.stringify(event)),
+  monotonic:()=>number=()=>performance.now(),
+) {
+  const now=()=>{try{const value=monotonic();return Number.isFinite(value)?value:null;}catch{return null;}};
+  const began=now();let lastSubscription:string|undefined;
+  const emit=(event:Record<string,unknown>)=>{
+    const at=now();
+    try{write({...event,...(at!==null&&began!==null?{elapsedMs:Math.max(0,at-began)}:{})});}catch{ /* Logging cannot affect queue ownership. */ }
+  };
+  return {
+    subscription(state:unknown){
+      if(typeof state!=="string" || !["SUBSCRIBED","CHANNEL_ERROR","TIMED_OUT","CLOSED"].includes(state) || state===lastSubscription)return;
+      lastSubscription=state;emit({event:"browser.queue.subscription",state});
+    },
+    replication(payload:{extension?:unknown;status?:unknown}){
+      if(payload?.extension!=="postgres_changes" || !["ok","error"].includes(String(payload?.status)))return;
+      emit({event:"browser.queue.replication",state:payload.status});
+    },
+    claimed(requestId:unknown,source:unknown,claimMs:number){
+      if(typeof requestId!=="string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)
+        || !["realtime","poll","unspecified"].includes(String(source)))return;
+      emit({event:"browser.queue.claimed",requestId,source,
+        ...(Number.isFinite(claimMs)?{claimMs:Math.max(0,claimMs)}:{})});
+    },
+  };
+}
+const browserQueueObserver=createBrowserQueueObserver();
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -193,7 +227,7 @@ async function pollPendingBrowserRequests(
   } catch {
     return 0;
   }
-  const handleRow = dependencies.handleRow ?? handle;
+  const handleRow = dependencies.handleRow ?? ((row,start)=>handle(row,start,{dispatchSource:"poll"}));
   // The durable pending -> processing claim still arbitrates Realtime/poll
   // duplicates. A slow provider must not hold unrelated owners behind it.
   const outcomes = await Promise.allSettled(
@@ -206,8 +240,9 @@ export function startBrowserRequestListener(startSession: StartSession) {
   if (!config.openaiKey) return;
   const rt = createClient(config.supabaseUrl, config.supabaseSecretKey, { auth: { persistSession: false } });
   rt.channel("browser-session-requests")
+    .on("system", {}, (payload) => {browserQueueObserver.replication(payload);})
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "browser_session_requests" }, (payload) => {
-      void handle(payload.new as any, startSession).catch((e) => console.error("browser request failed", e));
+      void handle(payload.new as any, startSession,{dispatchSource:"realtime"}).catch((e) => console.error("browser request failed", e));
     })
     .on("postgres_changes", { event: "UPDATE", schema: "public", table: "browser_session_requests" }, (payload) => {
       if ((payload.new as any)?.status === "cancel_requested")
@@ -215,7 +250,7 @@ export function startBrowserRequestListener(startSession: StartSession) {
           console.error("browser cancellation failed", e)
         );
     })
-    .subscribe();
+    .subscribe((status)=>{browserQueueObserver.subscription(status);});
   // Cancellation recovery is immediate and independent from potentially slow
   // provider startup work. The shared promise makes 1s ticks non-overlapping.
   void pollBrowserCancellations();
@@ -230,7 +265,7 @@ export function startBrowserRequestListener(startSession: StartSession) {
   };
   pollPending();
   setInterval(pollPending, 1_000);
-  console.log("browser session listener active (realtime + poll)");
+  console.log("browser session listeners registered; subscription readiness is logged separately");
 }
 
 function exactOpeningPayloadMatches(
@@ -283,9 +318,9 @@ async function bindProcessingRequestCall(
     candidate?.status === "processing" && candidate?.call_id === callId &&
     candidate?.tenant_id === row.tenant_id &&
     candidate?.session_type === "onboarding" &&
-    candidate?.opening_mode_requested === "application_tts_v1";
+    candidate?.opening_mode_requested === "realtime_stream_v1" && candidate?.onboarding_protocol_version===4;
   const fields =
-    "id,status,call_id,tenant_id,session_type,opening_mode_requested";
+    "id,status,call_id,tenant_id,session_type,opening_mode_requested,onboarding_protocol_version";
   try {
     const { data, error } = await supa()
       .from("browser_session_requests")
@@ -327,17 +362,18 @@ async function loadDurableCancellationRequest(
 type CancellationRequestKind = "processing" | "ready";
 
 function cancellationRequestKind(row: any): CancellationRequestKind | null {
+  const stream=row?.opening_mode_requested==="realtime_stream_v1" && row?.onboarding_protocol_version===4;
+  const legacy=row?.opening_mode_requested==="application_tts_v1" && [null,undefined,2,3].includes(row?.onboarding_protocol_version);
   if (row?.session_type !== "onboarding" ||
-    row?.opening_mode_requested !== "application_tts_v1" ||
-    ![null, undefined, 2, 3].includes(row?.onboarding_protocol_version) ||
+    (!stream && !legacy) ||
     typeof row?.call_id !== "string" || !row.call_id.trim()) return null;
   if (row.answer_sdp == null && row.opening_mode_applied == null &&
     row.opening_payload == null) return "processing";
   const payload = row.opening_payload;
   if (typeof row.answer_sdp === "string" && row.answer_sdp.trim() &&
-    row.opening_mode_applied === "application_tts_v1" && payload &&
+    row.opening_mode_applied === row.opening_mode_requested && payload &&
     typeof payload === "object" && !Array.isArray(payload) &&
-    ([2, 3].includes(row.onboarding_protocol_version)
+    ([2, 3, 4].includes(row.onboarding_protocol_version)
       ? payload.version === row.onboarding_protocol_version
       : payload.version === 1 || payload.version === 2)) return "ready";
   return null;
@@ -641,10 +677,12 @@ async function handle(
 ) {
   const traceScope = { requestId: String(row.id), callId: undefined as string | undefined, traceScope: "request" as const };
   const trace = createVoiceStartupTrace(traceScope);
+  const claimBegan=performance.now();
   const { data: claimed } = await trace.measure("request_claim", () => supa().from("browser_session_requests")
     .update({ status: "processing", handled_at: new Date().toISOString() })
     .eq("id", row.id).eq("status", "pending").select("id"));
   if (!claimed?.length) return; // another controller instance won the race
+  try{(dependencies.queueObserver??browserQueueObserver).claimed(row.id,dependencies.dispatchSource??"unspecified",performance.now()-claimBegan);}catch{ /* Diagnostic observers never own the claim. */ }
 
   let sessionCleanup: {
     callId: string;
@@ -659,14 +697,14 @@ async function handle(
         OnboardingOpeningMode;
     if (
       (row.session_type ?? "owner_browser") === "onboarding" &&
-      requestedOpeningMode !== "application_tts_v1"
+      (requestedOpeningMode !== "realtime_stream_v1" || row.onboarding_protocol_version!==4)
     ) throw Object.assign(
       new Error("client_upgrade_required"),
       { status: 409 },
     );
     const needsDurableCancelControl =
       (row.session_type ?? "owner_browser") === "onboarding" &&
-      requestedOpeningMode === "application_tts_v1";
+      requestedOpeningMode === "realtime_stream_v1";
     if (needsDurableCancelControl) {
       requestedCallId = (dependencies.callIdFactory ?? randomUUID)();
       traceScope.callId = requestedCallId;
@@ -689,7 +727,7 @@ async function handle(
             userId: String(row.user_id ?? ""),
             tenantId: String(row.tenant_id ?? ""),
             sessionType: "onboarding",
-            openingModeRequested: "application_tts_v1",
+            openingModeRequested: "realtime_stream_v1",
             onboardingProtocolVersion:
               typeof row.onboarding_protocol_version === "number"
                 ? row.onboarding_protocol_version
@@ -703,7 +741,7 @@ async function handle(
           (row.opening_mode_requested ?? "provider_model_v1") as
             OnboardingOpeningMode,
         ...(requestedCallId ? { requestedCallId } : {}),
-        ...([2, 3].includes(row.onboarding_protocol_version) ? { onboardingProtocolVersion: row.onboarding_protocol_version } : {}),
+        ...([2, 3, 4].includes(row.onboarding_protocol_version) ? { onboardingProtocolVersion: row.onboarding_protocol_version } : {}),
       },
     ));
     if (needsDurableCancelControl &&
@@ -714,7 +752,7 @@ async function handle(
     if (out.opening_mode_applied !== requestedOpeningMode)
       throw new Error("browser_request_opening_mode_mismatch");
     if (
-      requestedOpeningMode === "application_tts_v1" &&
+      requestedOpeningMode === "realtime_stream_v1" &&
       !out.opening_payload
     ) throw new Error("browser_request_opening_payload_missing");
     if (
@@ -722,6 +760,9 @@ async function handle(
       out.opening_payload != null
     ) throw new Error("browser_request_provider_opening_payload_forbidden");
     const expectedOpeningPayload = out.opening_payload ?? null;
+    if(row.onboarding_protocol_version===4 && (!isStreamOpeningPayload(expectedOpeningPayload)
+      || ((expectedOpeningPayload.stream as Record<string,unknown>).action as Record<string,unknown>).callId!==out.call_id))
+      throw new Error("browser_request_stream_opening_invalid");
     if (row.onboarding_protocol_version === 3 && (!isApplicationOpeningPayload(expectedOpeningPayload) ||
       expectedOpeningPayload.version !== 3 || (expectedOpeningPayload.speech as Record<string, unknown>).callId !== out.call_id))
       throw new Error("browser_request_website_opening_invalid");

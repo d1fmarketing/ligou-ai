@@ -368,7 +368,7 @@ async function discoverCanonicalColimaSocket(sourceEnv, repoRoot) {
 
 async function inspectDisposableStack(daemonEnv, allowedWorkdirs, { allowMissing = false, forwardListeners, forwardPid } = {}) {
   const format = "{{json .Name}}@@{{json .Config.Image}}@@{{json .Config.Labels}}@@{{json .State}}@@{{json .HostConfig.PortBindings}}@@{{json .NetworkSettings.Ports}}@@{{json .Mounts}}";
-  const result = await run("docker", ["inspect", "--format", format, `supabase_db_${LOCAL_PROJECT_ID}`], { env: daemonEnv });
+  const result = await run("docker", ["inspect", "--type", "container", "--format", format, `supabase_db_${LOCAL_PROJECT_ID}`], { env: daemonEnv });
   if (result.code !== 0 && allowMissing && /No such (object|container)/i.test(result.stderr)) return null;
   const output = successful(result, "Disposable database container inspection");
   const fields = output.split("@@");

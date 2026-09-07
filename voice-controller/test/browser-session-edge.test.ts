@@ -81,6 +81,12 @@ const WEBSITE_PAYLOAD = {
   resume_context: WEBSITE_CONTEXT,
 };
 
+const STREAM_OPENING={version:4,stream:{schema:"onboarding.stream.v1",dispatchId:"77777777-7777-4777-8777-777777777777",receiptId:"88888888-8888-4888-8888-888888888888",
+  action:{actionId:"a".repeat(64),interviewId:"33333333-3333-4333-8333-333333333333",callId:"33333333-3333-4333-8333-333333333333",revision:0,kind:"ASK_NEXT_GAP",sourceDigest:"b".repeat(64),text:PAYLOAD.text}}};
+const streamForCall=(callId:string)=>({...STREAM_OPENING,stream:{...STREAM_OPENING.stream,action:{...STREAM_OPENING.stream.action,callId}}});
+const RESUMED_STREAM={version:4,stream:{...STREAM_OPENING.stream,action:{...STREAM_OPENING.stream.action,text:RESUMED_PAYLOAD.text}}};
+const WEBSITE_STREAM={version:4,stream:{...STREAM_OPENING.stream,action:{...STREAM_OPENING.stream.action,text:WEBSITE_TEXT}}};
+
 let handler: BrowserHandler | undefined;
 let currentClient: ReturnType<typeof edgeClient>;
 const edgeModule = await import("../../supabase/functions/browser-session/core.ts").catch(() => ({}));
@@ -102,9 +108,9 @@ function edgeClient(options: {
     answer_sdp: "answer-sdp",
     call_id: "33333333-3333-4333-8333-333333333333",
     error: null,
-    opening_mode_applied: "application_tts_v1",
-    opening_payload: PAYLOAD,
-    onboarding_protocol_version: 2,
+    opening_mode_applied: "realtime_stream_v1",
+    opening_payload: STREAM_OPENING,
+    onboarding_protocol_version: 4,
   };
   const readyRows = [...(options.readyRows ?? [])];
   const updateResults = [...(options.updateResults ?? [])];
@@ -189,7 +195,7 @@ function request(body: Record<string, unknown>, signal?: AbortSignal) {
   return new Request("https://example.supabase.co/functions/v1/browser-session", {
     method: "POST",
     headers: { authorization: "Bearer owner-token", "content-type": "application/json" },
-    body: JSON.stringify({ sdp: "offer-sdp", ...(body.session_type === "onboarding" ? { speech_contract_version: 2 } : {}), ...body }),
+    body: JSON.stringify({ sdp: "offer-sdp", ...(body.session_type === "onboarding" ? { speech_contract_version: 3 } : {}), ...body }),
     signal,
   });
 }
@@ -213,10 +219,10 @@ function invalidApplicationReady(overrides: Record<string, unknown> = {}) {
     call_id: "33333333-3333-4333-8333-333333333333",
     answer_sdp: "invalid-ready-answer-sdp",
     error: null,
-    opening_mode_requested: "application_tts_v1",
-    opening_mode_applied: "application_tts_v1",
-    opening_payload: { ...PAYLOAD, text: `${PAYLOAD.text} extra` },
-    onboarding_protocol_version: 2,
+    opening_mode_requested: "realtime_stream_v1",
+    opening_mode_applied: "realtime_stream_v1",
+    opening_payload: {...STREAM_OPENING,stream:{...STREAM_OPENING.stream,receiptId:"invalid"}},
+    onboarding_protocol_version: 4,
     ...overrides,
   };
 }
@@ -225,7 +231,7 @@ function invalidReadyAckScenario(ready: Record<string, unknown>) {
   const cancelRequested = {
     ...ready,
     status: "cancel_requested",
-    error: "invalid_application_opening_contract",
+    error: "invalid_stream_opening_contract",
   };
   const expired = {
     ...cancelRequested,
@@ -250,19 +256,19 @@ beforeEach(() => {
 });
 
 describe("browser-session opening contract", () => {
-  test("protocol3 returns exact nested persisted speech and preserves protocol identity", async () => {
-    const speech = { schema: "onboarding.speech.v1", actionId: "a".repeat(64), interviewId: "33333333-3333-4333-8333-333333333333", callId: "33333333-3333-4333-8333-333333333333", revision: 0, kind: "ASK_NEXT_GAP", text: PAYLOAD.text, sourceDigest: "b".repeat(64), text_sha256: PAYLOAD.text_sha256, audio_base64: PAYLOAD.audio_base64, audio_sha256: PAYLOAD.audio_sha256, mime: "audio/mpeg", voice: "ash", tts_model: "tts-1-hd", cost_usd: PAYLOAD.cost_usd };
-    const payload = { version: 3, item_id: `lgs-${speech.actionId.slice(0, 28)}`, speech };
-    currentClient = edgeClient({ readyRow: { status: "ready", answer_sdp: "answer", call_id: speech.callId, opening_mode_applied: "application_tts_v1", opening_payload: payload, onboarding_protocol_version: 3 } });
-    const response = await handler!(request({ session_type: "onboarding", opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 3 }));
+  test("protocol4 returns exact persisted stream authorization and preserves protocol identity", async () => {
+    const speech = STREAM_OPENING.stream.action;
+    const payload = STREAM_OPENING;
+    currentClient = edgeClient({ readyRow: { status: "ready", answer_sdp: "answer", call_id: speech.callId, opening_mode_applied: "realtime_stream_v1", opening_payload: payload, onboarding_protocol_version: 4 } });
+    const response = await handler!(request({ session_type: "onboarding", opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4 }));
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.opening_payload).toEqual(payload);
-    expect(body.onboarding_protocol_version).toBe(3);
+    expect(body.onboarding_protocol_version).toBe(4);
     expect(body.max_minutes).toBe(55);
     expect(body).not.toHaveProperty("opening_text");
     expect(body).not.toHaveProperty("resume_context");
-    expect(currentClient.inserts[0].onboarding_protocol_version).toBe(3);
+    expect(currentClient.inserts[0].onboarding_protocol_version).toBe(4);
   });
 
   test("protocol3 nested contract validates actual hashes and rejects flattening and changed bindings", () => {
@@ -316,33 +322,31 @@ describe("browser-session opening contract", () => {
     }
   });
 
-  test("persists protocol 2 and returns exact resumed context, business, and text", async () => {
+  test("preserves the resumed stream action and authenticated business identity", async () => {
     currentClient = edgeClient({ readyRow: {
       status: "ready",
       answer_sdp: "resumed-answer-sdp",
       call_id: "33333333-3333-4333-8333-333333333333",
       error: null,
-      opening_mode_applied: "application_tts_v1",
-      opening_payload: RESUMED_PAYLOAD,
-      onboarding_protocol_version: 2,
+      opening_mode_applied: "realtime_stream_v1",
+      opening_payload: RESUMED_STREAM,
+      onboarding_protocol_version: 4,
     } });
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
-      onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
     }));
 
     expect(response.status).toBe(200);
     expect(currentClient.inserts[0]).toMatchObject({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
-      onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
     });
     expect(await response.json()).toMatchObject({
-      opening_payload: RESUMED_PAYLOAD,
-      onboarding_protocol_version: 2,
-      resume_context: RESUME_CONTEXT,
-      opening_text: RESUMED_PAYLOAD.text,
+      opening_payload: RESUMED_STREAM,
+      onboarding_protocol_version: 4,
       business_name: "D1F Marketing",
     });
   });
@@ -353,25 +357,24 @@ describe("browser-session opening contract", () => {
       answer_sdp: "website-answer-sdp",
       call_id: "33333333-3333-4333-8333-333333333333",
       error: null,
-      opening_mode_applied: "application_tts_v1",
-      opening_payload: WEBSITE_PAYLOAD,
-      onboarding_protocol_version: 2,
+      opening_mode_applied: "realtime_stream_v1",
+      opening_payload: WEBSITE_STREAM,
+      onboarding_protocol_version: 4,
     } });
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
-      onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
     }));
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
-      opening_text: WEBSITE_TEXT,
-      resume_context: WEBSITE_CONTEXT,
+      opening_payload: WEBSITE_STREAM,
     });
     expect(WEBSITE_TEXT).not.toContain("Vamos continuar de onde paramos");
   });
 
-  test("protocol 2 rejects a legacy v1 ready row", async () => {
+  test("protocol4 rejects a legacy v1 ready row", async () => {
     const ready = invalidApplicationReady({
       answer_sdp: "legacy-answer-sdp",
       opening_payload: LEGACY_PAYLOAD,
@@ -379,22 +382,22 @@ describe("browser-session opening contract", () => {
     currentClient = invalidReadyAckScenario(ready).client;
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
-      onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
     }));
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({
-      error: "invalid_application_opening_contract",
+      error: "invalid_stream_opening_contract",
     });
   });
 
-  test("binds an application opening to the authenticated tenant and ignores browser payload fields", async () => {
+  test("binds a stream opening to the authenticated tenant and ignores browser payload fields", async () => {
     expect(createBrowserSessionHandler).toBeFunction();
     currentClient = edgeClient();
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
-      onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
       opening_mode_applied: "provider_model_v1",
       opening_payload: { ...PAYLOAD, text: "browser spoof" },
       business_name: "Browser Spoof LLC",
@@ -408,19 +411,17 @@ describe("browser-session opening contract", () => {
       session_type: "onboarding",
       model_override: null,
       offer_sdp: "offer-sdp",
-      opening_mode_requested: "application_tts_v1",
-      onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
     }]);
     expect(await response.json()).toEqual({
       sdp: "answer-sdp",
       call_id: "33333333-3333-4333-8333-333333333333",
-      max_minutes: 30,
+      max_minutes: 55,
       model: "gpt-realtime-2.1",
-      opening_mode_applied: "application_tts_v1",
-      opening_payload: PAYLOAD,
-      onboarding_protocol_version: 2,
-      resume_context: null,
-      opening_text: PAYLOAD.text,
+      opening_mode_applied: "realtime_stream_v1",
+      opening_payload: STREAM_OPENING,
+      onboarding_protocol_version: 4,
       business_name: "D1F Marketing",
     });
   });
@@ -439,11 +440,11 @@ describe("browser-session opening contract", () => {
       currentClient = invalidReadyAckScenario(readyRow).client;
       const response = await handler!(request({
         session_type: "onboarding",
-        opening_mode_requested: "application_tts_v1",
-        onboarding_protocol_version: 2,
+        opening_mode_requested: "realtime_stream_v1",
+        onboarding_protocol_version: 4,
       }));
       expect(response.status).toBe(502);
-      expect(await response.json()).toEqual({ error: "invalid_application_opening_contract" });
+      expect(await response.json()).toEqual({ error: "invalid_stream_opening_contract" });
       expect(currentClient.updates).toHaveLength(1);
     }
   });
@@ -455,19 +456,19 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
-      onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
     }));
 
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({
-      error: "invalid_application_opening_contract",
+      error: "invalid_stream_opening_contract",
     });
     expect(currentClient.updates).toEqual([{
       table: "browser_session_requests",
       patch: {
         status: "cancel_requested",
-        error: "invalid_application_opening_contract",
+        error: "invalid_stream_opening_contract",
       },
       filters: {
         id: "request-1",
@@ -485,7 +486,7 @@ describe("browser-session opening contract", () => {
     const cancelRequested = {
       ...ready,
       status: "cancel_requested",
-      error: "invalid_application_opening_contract",
+      error: "invalid_stream_opening_contract",
     };
     currentClient = edgeClient({
       readyRows: [ready, ...Array(60).fill(cancelRequested)],
@@ -496,8 +497,8 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
-      onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1",
+      onboarding_protocol_version: 4,
     }));
 
     expect(response.status).toBe(502);
@@ -538,7 +539,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -557,7 +558,7 @@ describe("browser-session opening contract", () => {
         error: null,
         opening_mode_applied: null,
         opening_payload: null,
-        onboarding_protocol_version: 2,
+        onboarding_protocol_version: 4,
       } });
       const times = [0, 0, 20_001];
       handler = buildHandler({
@@ -567,7 +568,7 @@ describe("browser-session opening contract", () => {
 
       const response = await handler!(request({
         session_type: "onboarding",
-        opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
+        opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
       }, abort.signal));
 
       expect(response.status).toBe(499);
@@ -596,9 +597,9 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: "race-answer-sdp",
       error: null,
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
-      opening_mode_applied: "application_tts_v1",
-      opening_payload: PAYLOAD,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_applied: "realtime_stream_v1",
+      opening_payload: streamForCall(callId),
     };
     const cancelRequested = { ...ready, status: "cancel_requested", error: "request_aborted" };
     const expired = {
@@ -620,7 +621,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -678,7 +679,7 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: null,
       error: null,
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
       opening_mode_applied: null,
       opening_payload: null,
     };
@@ -695,7 +696,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -715,7 +716,7 @@ describe("browser-session opening contract", () => {
         call_id: "77777777-7777-4777-8777-777777777777",
         answer_sdp: "malformed-answer",
         error: null,
-        opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
+        opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
         opening_mode_applied: "provider_model_v1",
         opening_payload: null,
       }],
@@ -725,7 +726,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
     }, abort.signal));
 
     expect(response.status).toBe(502);
@@ -742,9 +743,9 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: "race-answer-sdp",
       error: null,
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
-      opening_mode_applied: "application_tts_v1",
-      opening_payload: PAYLOAD,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_applied: "realtime_stream_v1",
+      opening_payload: streamForCall(callId),
     };
     const cancelRequested = { ...ready, status: "cancel_requested", error: "request_aborted" };
     const expired = {
@@ -766,7 +767,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -783,9 +784,9 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: "race-answer-sdp",
       error: null,
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
-      opening_mode_applied: "application_tts_v1",
-      opening_payload: PAYLOAD,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_applied: "realtime_stream_v1",
+      opening_payload: streamForCall(callId),
     };
     const cancelRequested = { ...ready, status: "cancel_requested", error: "request_aborted" };
     currentClient = edgeClient({
@@ -803,7 +804,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
     }, abort.signal));
 
     expect(response.status).toBe(502);
@@ -825,7 +826,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
     }));
 
     expect(response.status).toBe(504);
@@ -842,7 +843,7 @@ describe("browser-session opening contract", () => {
       operation === "select" && columns.startsWith("status,answer_sdp"))).toBe(false);
   });
 
-  test("application TTS keeps its bounded startup window past the provider deadline", async () => {
+  test("stream startup keeps its bounded startup window past the provider deadline", async () => {
     currentClient = edgeClient({ readyRows: [
       {
         status: "processing",
@@ -857,9 +858,9 @@ describe("browser-session opening contract", () => {
         answer_sdp: "application-answer-sdp",
         call_id: "55555555-5555-4555-8555-555555555555",
         error: null,
-        opening_mode_applied: "application_tts_v1",
-        opening_payload: PAYLOAD,
-        onboarding_protocol_version: 2,
+        opening_mode_applied: "realtime_stream_v1",
+        opening_payload: streamForCall("55555555-5555-4555-8555-555555555555"),
+        onboarding_protocol_version: 4,
       },
     ] });
     const times = [0, 0, 20_001, 21_000, 22_000];
@@ -867,13 +868,13 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1", onboarding_protocol_version: 2,
+      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
     }));
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       sdp: "application-answer-sdp",
-      opening_mode_applied: "application_tts_v1",
+      opening_mode_applied: "realtime_stream_v1",
     });
     expect(currentClient.updates).toHaveLength(0);
   });
@@ -938,7 +939,7 @@ test("old open dashboards cannot enqueue onboarding before upgrading their speec
   }
 });
 
-test("declared speech contract admits fast V2 and V3 payloads without storing a new capability field", async () => {
+test("legacy valid MP3 payloads cannot re-enable new TTS sessions", async () => {
   const fast = {...PAYLOAD,tts_model:"tts-1",cost_usd:0.001605};
   const callId="33333333-3333-4333-8333-333333333333";
   const speech={schema:"onboarding.speech.v1",actionId:"a".repeat(64),interviewId:callId,callId,revision:0,kind:"ASK_NEXT_GAP",text:fast.text,sourceDigest:"b".repeat(64),text_sha256:fast.text_sha256,audio_base64:fast.audio_base64,audio_sha256:fast.audio_sha256,mime:"audio/mpeg",voice:"ash",tts_model:fast.tts_model,cost_usd:fast.cost_usd};
@@ -946,20 +947,20 @@ test("declared speech contract admits fast V2 and V3 payloads without storing a 
     const payload=protocol===2?fast:{version:3,item_id:`lgs-${speech.actionId.slice(0,28)}`,speech};
     currentClient=edgeClient({readyRow:{status:"ready",answer_sdp:"answer",call_id:callId,error:null,opening_mode_applied:"application_tts_v1",opening_payload:payload,onboarding_protocol_version:protocol}});
     const response=await handler!(request({session_type:"onboarding",opening_mode_requested:"application_tts_v1",onboarding_protocol_version:protocol,speech_contract_version:2}));
-    expect(response.status).toBe(200);expect((await response.json()).opening_payload).toEqual(payload);
-    expect(currentClient.inserts).toHaveLength(1);expect(currentClient.inserts[0]).not.toHaveProperty("speech_contract_version");
+    expect(response.status).toBe(409);expect(await response.json()).toEqual({error:"client_upgrade_required"});
+    expect(currentClient.inserts).toHaveLength(0);expect(currentClient.selections).toHaveLength(0);
   }
 });
 
 test("Edge startup timings distinguish nested polling from the elapsed request without private content", async () => {
   let clock=0; const timings:any[]=[];
   const ready={status:"ready",answer_sdp:"answer-sdp",call_id:"33333333-3333-4333-8333-333333333333",error:null,
-    opening_mode_applied:"application_tts_v1",opening_payload:PAYLOAD,onboarding_protocol_version:2};
+    opening_mode_applied:"realtime_stream_v1",opening_payload:STREAM_OPENING,onboarding_protocol_version:4};
   currentClient=edgeClient({readyRows:[{...ready,status:"processing",answer_sdp:null,opening_payload:null},ready]});
   const timed=buildHandler({monotonic:()=>clock,now:()=>clock,
     fetch:async()=>{clock+=25;return Response.json({id:"owner-a"});},
     sleep:async(ms:number)=>{clock+=ms;},onTiming:(event:any)=>timings.push(event)});
-  const response=await timed!(request({session_type:"onboarding",opening_mode_requested:"application_tts_v1",onboarding_protocol_version:2}));
+  const response=await timed!(request({session_type:"onboarding",opening_mode_requested:"realtime_stream_v1",onboarding_protocol_version:4}));
   expect(response.status).toBe(200);
   expect(response.headers.get("Access-Control-Expose-Headers")).toContain("Server-Timing");
   const header=response.headers.get("Server-Timing");
@@ -972,7 +973,7 @@ test("Edge startup timings distinguish nested polling from the elapsed request w
   expect(timings[0].durations.edge_total).toBe(625);
   for(const secret of ["owner-token","test-secret","offer-sdp","answer-sdp","D1F Marketing",PAYLOAD.audio_base64])
     expect(JSON.stringify(timings)).not.toContain(secret);
-  expect((await response.json()).opening_payload).toEqual(PAYLOAD);
+  expect((await response.json()).opening_payload).toEqual(STREAM_OPENING);
 });
 
 test("failed timing observers cannot change owner authentication or successful startup", async () => {
@@ -981,8 +982,37 @@ test("failed timing observers cannot change owner authentication or successful s
     const timed=buildHandler({monotonic:()=>{throw new Error("broken-clock");},
       onTiming:()=>{throw new Error("broken-observer");},
       fetch:async()=>Response.json(authorized?{id:"owner-a"}:{error:"denied"},{status:authorized?200:401})});
-    const response=await timed!(request({session_type:"onboarding",opening_mode_requested:"application_tts_v1",onboarding_protocol_version:2}));
+    const response=await timed!(request({session_type:"onboarding",opening_mode_requested:"realtime_stream_v1",onboarding_protocol_version:4}));
     expect(response.status).toBe(authorized?200:401);
     expect(currentClient.inserts).toHaveLength(authorized?1:0);
   }
+});
+
+
+
+test("full streaming admission returns only an authorized action and preserves the existing call budget window",async()=>{
+  currentClient=edgeClient({readyRow:{id:"request-1",status:"ready",session_type:"onboarding",answer_sdp:"answer-sdp",call_id:STREAM_OPENING.stream.action.callId,error:null,
+    opening_mode_requested:"realtime_stream_v1",opening_mode_applied:"realtime_stream_v1",opening_payload:STREAM_OPENING,onboarding_protocol_version:4}});
+  const response=await handler!(request({session_type:"onboarding",opening_mode_requested:"realtime_stream_v1",onboarding_protocol_version:4,speech_contract_version:3}));
+  expect(response.status).toBe(200);const body=await response.json();
+  expect(body.opening_payload).toEqual(STREAM_OPENING);expect(body.max_minutes).toBe(55);expect(body.onboarding_protocol_version).toBe(4);
+  expect(JSON.stringify(body)).not.toContain("audio_base64");expect(JSON.stringify(body)).not.toContain("tts_model");
+  expect(currentClient.inserts[0]).toMatchObject({opening_mode_requested:"realtime_stream_v1",onboarding_protocol_version:4});
+});
+
+test("new onboarding requests can never select the old MP3 path or an undeclared stream capability",async()=>{
+  for(const [protocol,mode,capability] of [[2,"application_tts_v1",2],[3,"application_tts_v1",2],[4,"application_tts_v1",3],[4,"realtime_stream_v1",2],[4,"realtime_stream_v1",undefined]]){
+    currentClient=edgeClient();
+    const response=await handler!(request({session_type:"onboarding",opening_mode_requested:mode,onboarding_protocol_version:protocol,speech_contract_version:capability}));
+    expect(response.status).toBe(409);expect(currentClient.inserts).toHaveLength(0);expect(currentClient.selections).toHaveLength(0);
+  }
+});
+
+test("stream descriptors reject missing authority, mismatched identities and embedded prerecorded audio",()=>{
+  const validate=(edgeModule as any).isStreamOpeningPayload;
+  expect(validate).toBeFunction();expect(validate(STREAM_OPENING)).toBe(true);
+  for(const stream of [{...STREAM_OPENING.stream,receiptId:null},{...STREAM_OPENING.stream,dispatchId:"bad"},
+    {...STREAM_OPENING.stream,audio_base64:"SUQzBA=="},{...STREAM_OPENING.stream,action:{...STREAM_OPENING.stream.action,callId:"bad"}},
+    {...STREAM_OPENING.stream,action:{...STREAM_OPENING.stream.action,revision:-1}}])expect(validate({version:4,stream})).toBe(false);
+  expect(validate({...STREAM_OPENING,speech:PAYLOAD})).toBe(false);
 });

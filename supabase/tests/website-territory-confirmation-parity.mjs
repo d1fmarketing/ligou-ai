@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createOnboardingAgenda, applyVerifiedOwnerTurn } from '../../voice-controller/src/onboarding-agenda.ts';
+import { createOnboardingAgenda, applyVerifiedOwnerTurn, websiteTerritoryConfirmation } from '../../voice-controller/src/onboarding-agenda.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const directory = await mkdtemp(path.join(tmpdir(), 'ligou-territory-confirmation-'));
@@ -30,15 +30,24 @@ try {
   const acl = sql("select proacl::text from pg_proc where oid='public.website_interview_action(jsonb,text)'::regprocedure;");
   if (!process.argv.includes('--red')) {
     sql(await readFile(path.join(root, 'supabase/migrations/20260907062057_website_interview_territory_confirmation.sql'), 'utf8'));
+    const helperAcl = sql("select proacl::text from pg_proc where oid='public.website_territory_confirmation(jsonb)'::regprocedure;");
+    if (!process.argv.includes('--before-readback-fix'))
+      sql(await readFile(path.join(root, 'supabase/migrations/20260907161251_website_territory_readback_evidence.sql'), 'utf8'));
     assert.equal(sql("select proacl::text from pg_proc where oid='public.website_interview_action(jsonb,text)'::regprocedure;"), acl);
+    assert.equal(sql("select proacl::text from pg_proc where oid='public.website_territory_confirmation(jsonb)'::regprocedure;"), helperAcl);
     for (const role of ['anon', 'authenticated', 'service_role']) assert.equal(sql(`select has_function_privilege('${role}','public.website_territory_confirmation(jsonb)','EXECUTE');`), 'f');
     assert.equal(sql("select provolatile from pg_proc where oid='public.website_territory_confirmation(jsonb)'::regprocedure;"), 's');
+    assert.equal(sql("select prosecdef from pg_proc where oid='public.website_territory_confirmation(jsonb)'::regprocedure;"), 'f');
   }
   const binding = { callId: 'call-1', interviewId: 'interview-1', draftId: 'draft-1', draftHash: 'a'.repeat(64), sourceResultId: 'result-1', sourceResultHash: 'b'.repeat(64) };
   const initial = () => createOnboardingAgenda(binding, ['area', 'next', 'last'].map(id => ({ id, source: 'missing_website_information', subject: id,
     questionPt: id === 'next' ? 'Qual é o fuso horário?' : `Qual a política de ${id}?`, coverageRefs: [id === 'area' ? 'area.coverage' : id], relatedItemIds: [], blocking: true })));
   const cases = JSON.parse(await readFile(path.join(root, 'voice-controller/test/fixtures/website-territory-confirmation-cases.json'), 'utf8'));
-  let comparisons = 0;
+  let comparisons = 0, helperComparisons = 0;
+  const compareHelper = agenda => {
+    const actual = JSON.parse(sql(`select to_json(public.website_territory_confirmation(${quote(JSON.stringify(agenda))}::jsonb));`));
+    assert.equal(actual, websiteTerritoryConfirmation(agenda)); helperComparisons++;
+  };
   const compare = (agenda, itemId, text) => {
     const transition = applyVerifiedOwnerTurn(agenda, { type: 'verified_owner_turn', binding, turnId: `turn-${agenda.revision}`, text, proposal: { kind: 'answer', itemId } });
     const actual = JSON.parse(sql(`select public.website_interview_action(${quote(JSON.stringify(transition.agenda))}::jsonb,'answer');`));
@@ -48,8 +57,33 @@ try {
   for (const entry of cases) {
     const agenda = compare(initial(), 'area', entry.text);
     compare(agenda, 'next', 'Este novo turno não fala sobre território.');
+    compareHelper(agenda);
   }
-  console.log(JSON.stringify({ status: 'PASS', actionComparisons: comparisons, sqlTsParity: true, privateHelper: true, existingActionAclPreserved: true, remoteActions: 0 }, null, 2));
+  const territory = compare(initial(), 'area', 'Recife e Olinda. Fora delas, só com minha aprovação explícita.');
+  for (const status of ['open', 'awaiting_clarification', 'deferred_owner_review', 'not_applicable']) {
+    const agenda = structuredClone(territory); agenda.items[0].status = status; compareHelper(agenda);
+    assert.equal(websiteTerritoryConfirmation(agenda), 'Obrigado, registrei sua resposta. ');
+  }
+  for (const mutate of [
+    agenda => { agenda.items[0].answerRevision = 0; },
+    agenda => { agenda.items[0].coverageRefs = ['schedule.business_hours']; },
+    agenda => { agenda.items[0].evidence.at(-1).turnId = 'stale-turn'; },
+    agenda => { agenda.items[0].evidence.at(-1).text = 'Outro texto'; },
+    agenda => { agenda.ownerTurns = []; },
+  ]) {
+    const agenda = structuredClone(territory); mutate(agenda); compareHelper(agenda);
+    assert.equal(websiteTerritoryConfirmation(agenda), 'Obrigado, registrei sua resposta. ');
+  }
+  const corrected = applyVerifiedOwnerTurn(territory, { type: 'verified_owner_turn', binding, turnId: 'correction',
+    text: 'Corrija: atendemos Recife, mas Olinda somente com minha aprovação.',
+    proposal: { kind: 'correction', affectedItems: [{ itemId: 'area', disposition: 'corrected' }] } });
+  compareHelper(corrected.agenda);
+  for (const length of [480, 700]) {
+    const text = `Recife e Olinda. ${'Mais informação. '.repeat(Math.ceil(length / 17))}Fora delas, nunca sem minha aprovação explícita.`;
+    const agenda = compare(initial(), 'area', text); compareHelper(agenda);
+    assert.equal(websiteTerritoryConfirmation(agenda), 'Obrigado, registrei sua resposta. ');
+  }
+  console.log(JSON.stringify({ status: 'PASS', actionComparisons: comparisons, helperComparisons, sqlTsParity: true, privateHelper: true, existingActionAclPreserved: true, remoteActions: 0 }, null, 2));
 } finally {
   if (started) run('pg_ctl', ['-D', directory + '/data', '-m', 'fast', '-w', 'stop']);
   await rm(directory, { recursive: true, force: true });

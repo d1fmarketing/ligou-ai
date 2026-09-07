@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 
 export type OnboardingOpeningMode =
   | "provider_model_v1"
-  | "application_tts_v1";
+  | "application_tts_v1"
+  | "realtime_stream_v1";
 
 interface OnboardingOpeningPayloadBase {
   item_id: string;
@@ -97,7 +98,7 @@ function openingFailure(
 export function isOnboardingOpeningMode(
   value: unknown,
 ): value is OnboardingOpeningMode {
-  return value === "provider_model_v1" || value === "application_tts_v1";
+  return value === "provider_model_v1" || value === "application_tts_v1" || value === "realtime_stream_v1";
 }
 
 function exactObjectKeys(

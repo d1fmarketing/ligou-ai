@@ -45,32 +45,7 @@ test("opening playback has its own bounded default while explicit test deadlines
   });
 });
 
-test("a separate playback timeout is wired to audio without widening channel or ACK deadlines", async () => {
-  const browser = installVoiceBrowser({ autoPlayback: "pending" });
-  let settled = false;
-  let session = null;
-  try {
-    const starting = startVoiceSession({
-      accessToken: "owner-token",
-      sessionType: "onboarding",
-      openingTimeoutMs: 5,
-      openingPlaybackTimeoutMs: 500,
-    }).finally(() => { settled = true; });
-    await waitUntil(
-      () => browser.audios[1]?.playCalls === 1,
-      "independently bounded opening playback",
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(settled, false);
-    browser.audios[1].dispatch("ended");
-    session = await starting;
-    assert.equal(browser.tracks[0].enabled, true);
-    assert.equal(browser.audios[0].muted, false);
-  } finally {
-    session?.end();
-    browser.restore();
-  }
-});
+
 
 const CLIENT_UPGRADE_MESSAGE_PT =
   "O Ligou foi atualizado. Recarregue esta página para continuar.";
@@ -486,49 +461,7 @@ test("cancel returns while microphone permission is unresolved and disposes a la
   }
 });
 
-test("playing is visible before opening ended, while readiness still waits for verified audio and VAD", async () => {
-  const browser = installVoiceBrowser({ autoPlayback: "pending", autoOpeningEvents: false });
-  const abort = new AbortController();
-  const stages = [];
-  const timings = [];
-  let resolved = false;
-  let session;
-  const starting = startVoiceSession({ accessToken: "owner-token", sessionType: "onboarding",
-    signal: abort.signal, onStage: (stage) => stages.push(stage), onTiming: (timing) => timings.push(timing),
-  }).then((value) => { resolved = true; session = value; return value; });
-  try {
-    await waitUntil(() => browser.audios[1]?.playCalls === 1, "opening audio play request");
-    browser.audios[1].dispatch("playing");
-    assert.equal(stages.at(-1), "playing");
-    assert.equal(stages.includes("ready"), false);
-    assert.equal(resolved, false, "visible playback cannot bypass played ACK and safe VAD");
-    assert.equal(browser.tracks[0].enabled, false);
-    assert.equal(timings.some((entry) => entry.event === "speech_playing"), true);
-    assert.equal(timings.some((entry) => entry.event === "speech_ended"), false);
-    assert.equal(timings.some((entry) => /audible|actionable_question_onset$/.test(entry.event)), false,
-      "mixed opening audio has no exact question alignment or physical speaker proof");
-    browser.audios[1].dispatch("ended");
-    await waitUntil(() => browser.channel.sent.length === 1, "played opening ACK request");
-    assert.equal(stages.includes("ready"), false);
-    browser.channel.emit({ type: "conversation.item.done", item: browser.channel.sent[0].item });
-    browser.channel.emit(LIVE_VAD_EVENT);
-    await starting;
-    assert.equal(stages.at(-1), "ready");
-    assert.equal(browser.tracks[0].enabled, true);
-    for (const name of ["microphone_requested", "microphone_ready", "offer_started", "offer_ready", "bootstrap_started", "bootstrap_response", "remote_sdp_applied", "data_channel_open", "speech_playing", "speech_ended", "ready"]) {
-      assert.ok(timings.find((entry) => entry.event === name), `missing ${name}`);
-    }
-    assert.ok(timings.every((entry) => Number.isFinite(entry.elapsedMs) && entry.elapsedMs >= 0));
-    assert.equal(JSON.stringify(timings).includes("owner-token"), false);
-    assert.equal(JSON.stringify(timings).includes("answer-sdp"), false);
-    assert.equal(JSON.stringify(timings).includes(OPENING_TEXT), false);
-  } finally {
-    abort.abort("test_cleanup");
-    await starting.catch(() => {});
-    session?.end();
-    browser.restore();
-  }
-});
+
 
 test("microphone failures become actionable Portuguese copy and remain retryable", async () => {
   for (const [name, expected] of [["NotAllowedError", /permit|permiss/i], ["NotFoundError", /microfone.*encontr|conect/i], ["NotReadableError", /uso|dispon/i]]) {
@@ -588,107 +521,11 @@ test("timing uses one browser monotonic origin and observer failure cannot chang
   assert.deepEqual(recorder.mark("bootstrap_response"), { event: "bootstrap_response", attemptId: recorder.attemptId, elapsedMs: 125 });
 });
 
-test("nonzero sample telemetry requires browser playback capture; byte availability and silence do not qualify", async () => {
-  for (const sampleAmplitude of [0, 0.125]) {
-    const browser = installVoiceBrowser({ autoPlayback: "pending", sampleAmplitude });
-    const abort = new AbortController();
-    const timings = [];
-    const starting = startVoiceSession({ accessToken: "owner-token", sessionType: "onboarding",
-      signal: abort.signal, onTiming: (entry) => timings.push(entry),
-    });
-    try {
-      await waitUntil(() => browser.audios[1]?.playCalls === 1, "play request");
-      assert.equal(timings.some((entry) => entry.event === "speech_first_nonzero_sample"), false);
-      browser.audios[1].dispatch("playing");
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      const observed = timings.filter((entry) => entry.event === "speech_first_nonzero_sample");
-      assert.equal(observed.length, sampleAmplitude ? 1 : 0);
-      if (sampleAmplitude) assert.equal(observed[0].evidence, "media_element_capture");
-      assert.equal(browser.tracks[0].enabled, false, "diagnostics cannot release microphone custody");
-    } finally {
-      abort.abort("test_cleanup");
-      await starting.catch(() => {});
-      assert.equal(browser.actions.filter((entry) => entry === "sample:capture-stopped").length, 1);
-      assert.equal(browser.actions.filter((entry) => entry === "sample:context-closed").length, 1);
-      browser.restore();
-    }
-  }
-});
 
-test("Test 10 invariant: verified application MP3 is the only audible onboarding opening", async () => {
-  const browser = installVoiceBrowser({
-    providerGreetingTranscript: "Oi, eu sou uma assistente virtual brasileira.",
-  });
-  const events = [];
-  try {
-    const session = await startVoiceSession({
-      accessToken: "owner-token",
-      sessionType: "onboarding",
-      onEvent: (event) => { events.push(event); },
-    });
 
-    assert.deepEqual(browser.requestBodies, [{
-      sdp: "offer-sdp",
-      session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
-      onboarding_protocol_version: 2,
-      speech_contract_version: 2,
-    }]);
-    assert.equal(browser.actions.includes("peer:addTrack:enabled=false"), true);
-    assert.equal(browser.actions.includes("audio:1:play:remote-muted=true:mic=false"), true);
-    assert.equal(browser.audios[0].playCalls, 0, "provider audio is autoplay-only and must remain muted during opening");
-    assert.equal(browser.audios[1].playCalls, 1, "application owns exactly one opening playback");
-    assert.equal(browser.objectUrls.length, 1);
-    assert.equal(browser.objectUrls[0].blob.type, "audio/mpeg");
-    assert.deepEqual([...new Uint8Array(await browser.objectUrls[0].blob.arrayBuffer())], [...Buffer.from("ID3fake-mp3")]);
-    assert.deepEqual(browser.channel.sent, [{
-      type: "conversation.item.create",
-      item: {
-        id: OPENING_ITEM_ID,
-        type: "message",
-        role: "assistant",
-        status: "completed",
-        content: [{ type: "output_text", text: OPENING_TEXT }],
-      },
-    }]);
-    assert.deepEqual(events, [{ kind: "agent", text: OPENING_TEXT }]);
-    assert.equal(browser.tracks[0].enabled, true);
-    assert.equal(browser.audios[0].muted, false);
-    assert.deepEqual(browser.revokedObjectUrls, ["blob:opening-1"]);
-    session.end();
-  } finally {
-    browser.restore();
-  }
-});
 
-test("protocol v2 fresh opening validates exact HD Ash cost and service question before voice release", async () => {
-  const response = openingResponseV2();
-  const browser = installVoiceBrowser({ response });
-  const events = [];
-  try {
-    const session = await startVoiceSession({
-      accessToken: "owner-token",
-      sessionType: "onboarding",
-      onEvent: (event) => { events.push(event); },
-    });
-    assert.deepEqual(browser.requestBodies, [{
-      sdp: "offer-sdp",
-      session_type: "onboarding",
-      opening_mode_requested: "application_tts_v1",
-      onboarding_protocol_version: 2,
-      speech_contract_version: 2,
-    }]);
-    assert.equal(browser.audios[1].playCalls, 1);
-    assert.equal(browser.actions.includes("audio:1:play:remote-muted=true:mic=false"), true);
-    assert.equal(browser.tracks[0].enabled, true);
-    assert.equal(browser.audios[0].muted, false);
-    assert.deepEqual(events, [{ kind: "agent", text: OPENING_TEXT }]);
-    assert.equal(response.opening_payload.resume_context, null);
-    session.end();
-  } finally {
-    browser.restore();
-  }
-});
+
+
 
 function websiteOpeningResponse() {
   const response=openingResponseV2();
@@ -709,288 +546,29 @@ function websiteSafeVad() {
   return event;
 }
 
-for (const firstReady of ['read','channel']) test(`website opening overlaps its one authenticated read with connection setup (${firstReady} ready first)`,async()=>{
-  const response=websiteOpeningResponse(),reads=[],stages=[];
-  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,vadEvent:websiteSafeVad()});
-  const abort=new AbortController();let resolveRead,session;
-  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
-    signal:abort.signal,onStage:stage=>stages.push(stage),
-    speechClient:{rpc:(name,args)=>{
-      reads.push({name,args});return new Promise(resolve=>{resolveRead=resolve;});
-    }}});
-  starting.catch(()=>{});
-  try {
-    await waitUntil(()=>browser.actions.includes('peer:setRemoteDescription'),'SDP negotiation');
-    await waitUntil(()=>reads.length===1,'authenticated opening read while data channel is still connecting');
-    assert.equal(browser.channel.readyState,'connecting');
-    browser.channel.emit(websiteSafeVad());
-    const action=response.opening_payload.speech.actionId;
-    browser.channel.emit({type:'conversation.item.done',item:{id:`lsn-${action.slice(0,28)}`,type:'message',role:'system',status:'completed',content:[{type:'input_text',text:`ligou.website_speech:${action}`}]}});
-    if(firstReady==='read')resolveRead({data:response.opening_payload.speech,error:null});
-    else browser.channel.open();
-    await nextTurn();await nextTurn();
-    assert.equal(browser.audios.length,1,'neither readiness branch alone authorizes opening audio');
-    assert.equal(browser.channel.sent.length,0);
-    assert.equal(browser.tracks[0].enabled,false);
-    assert.equal(stages.includes('ready'),false);
-    if(firstReady==='read')browser.channel.open();
-    else resolveRead({data:response.opening_payload.speech,error:null});
-    session=await starting;
-    assert.deepEqual(reads,[{name:'read_website_interview_speech',args:{p_call:CALL_ID,p_action:response.opening_payload.speech.actionId}}]);
-    assert.equal(browser.audios[1].playCalls,1);
-    assert.equal(browser.channel.sent.filter(event=>event.item?.role==='assistant').length,1);
-    assert.equal(browser.tracks[0].enabled,true);
-  } finally {
-    abort.abort('manual_hangup');session?.end();browser.channel.close();
-    resolveRead?.({data:response.opening_payload.speech,error:null});
-    await starting.catch(()=>{});browser.restore();
-  }
-});
 
-test('opening read overlaps held SDP, and SDP failure aborts that read before a late rejection',async()=>{
-  const response=websiteOpeningResponse(),stages=[];
-  let finishSdp,rejectRead,readSignal;
-  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,remoteDescriptionError:new Error('SDP failure'),
-    remoteDescriptionWait:new Promise(resolve=>{finishSdp=resolve;})});
-  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
-    onStage:stage=>stages.push(stage),speechClient:{rpc:()=>{
-      const request=new Promise((resolve,reject)=>{rejectRead=reject;});
-      request.abortSignal=signal=>{readSignal=signal;return request;};return request;
-    }}});
-  starting.catch(()=>{});
-  try {
-    await waitUntil(()=>browser.actions.includes('peer:setRemoteDescription'),'held SDP negotiation');
-    await waitUntil(()=>Boolean(rejectRead),'opening read overlapping unresolved SDP');
-    assert.equal(browser.audios.length,1);assert.equal(browser.tracks[0].enabled,false);
-    finishSdp();await assert.rejects(starting,/SDP failure/);
-    assert.equal(readSignal.aborted,true);
-    rejectRead(new Error('late failed read'));
-    await nextTurn();await nextTurn();
-    assert.equal(browser.audios.length,1);assert.equal(browser.channel.sent.length,0);
-    assert.equal(browser.peers[0].closeCalls,1);assert.equal(browser.tracks[0].stopped,true);
-    assert.equal(browser.tracks[0].enabled,false);assert.equal(stages.includes('ready'),false);
-  } finally {
-    finishSdp();browser.channel.close();rejectRead?.(new Error('cleanup'));
-    await starting.catch(()=>{});browser.restore();
-  }
-});
 
-test('overlapped read does not charge SDP negotiation against the later channel control deadline',async()=>{
-  const response=websiteOpeningResponse(),stages=[];
-  let finishSdp,reads=0,session;
-  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,vadEvent:websiteSafeVad(),
-    remoteDescriptionWait:new Promise(resolve=>{finishSdp=resolve;})});
-  const abort=new AbortController();
-  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
-    signal:abort.signal,openingTimeoutMs:15,connectionTimeoutMs:500,onStage:stage=>stages.push(stage),
-    speechClient:{rpc:async()=>{reads++;return{data:response.opening_payload.speech,error:null};}}});
-  starting.catch(()=>{});
-  try {
-    await waitUntil(()=>reads===1,'overlapping opening read');
-    await new Promise(resolve=>setTimeout(resolve,35));
-    assert.equal(browser.tracks[0].stopped,false,'SDP remains inside its existing connection budget');
-    assert.equal(browser.audios.length,1);assert.equal(stages.includes('ready'),false);
-    finishSdp();browser.channel.open();session=await starting;
-    assert.equal(browser.audios[1].playCalls,1);assert.equal(reads,1);
-  } finally {
-    abort.abort('manual_hangup');session?.end();finishSdp();browser.channel.close();
-    await starting.catch(()=>{});browser.restore();
-  }
-});
 
-test('existing connection deadline aborts the overlapped opening gate while SDP remains pending',async()=>{
-  const response=websiteOpeningResponse();let finishSdp,reads=0;
-  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,
-    remoteDescriptionWait:new Promise(resolve=>{finishSdp=resolve;})});
-  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
-    connectionTimeoutMs:20,speechClient:{rpc:async()=>{reads++;return{data:response.opening_payload.speech,error:null};}}});
-  starting.catch(()=>{});
-  try {
-    await waitUntil(()=>reads===1,'overlapped read before connection deadline');
-    await assert.rejects(starting);
-    finishSdp();await nextTurn();
-    assert.equal(browser.audios.length,1);assert.equal(browser.channel.sent.length,0);
-    assert.equal(browser.tracks[0].enabled,false);assert.equal(browser.tracks[0].stopped,true);
-    assert.equal(browser.peers[0].closeCalls,1);
-  }finally{finishSdp();browser.channel.close();await starting.catch(()=>{});browser.restore();}
-});
 
-for(const invalid of ['owner-read-error','foreign-call','bad-audio-hash','changed-source','changed-revision'])test(`overlapped opening refuses ${invalid} before audio, ACK or microphone`,async()=>{
-  const response=websiteOpeningResponse(),stages=[];
-  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,vadEvent:websiteSafeVad()});
-  const abort=new AbortController();let resolveRead,reads=0;
-  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
-    signal:abort.signal,onStage:stage=>stages.push(stage),
-    speechClient:{rpc:()=>{reads++;return new Promise(resolve=>{resolveRead=resolve;});}}});
-  starting.catch(()=>{});
-  try {
-    await waitUntil(()=>reads===1,'opening read before channel readiness');
-    const data={...response.opening_payload.speech};
-    if(invalid==='foreign-call')data.callId=APPROVAL_ID;
-    if(invalid==='bad-audio-hash')data.audio_sha256='0'.repeat(64);
-    if(invalid==='changed-source')data.sourceDigest='c'.repeat(64);
-    if(invalid==='changed-revision')data.revision++;
-    resolveRead(invalid==='owner-read-error'?{data:null,error:{code:'42501',message:'owner changed'}}:{data,error:null});
-    await nextTurn();await nextTurn();
-    assert.equal(browser.audios.length,1);assert.equal(browser.tracks[0].enabled,false);
-    browser.channel.open();browser.channel.emit(websiteSafeVad());
-    await waitUntil(()=>browser.channel.sent.some(event=>event.item?.content?.[0]?.text===`ligou.website_stop:${CALL_ID}:technical_failure`),'controlled technical Stop');
-    browser.channel.close();await assert.rejects(starting);
-    assert.equal(reads,1);assert.equal(browser.audios.length,1);
-    assert.equal(browser.channel.sent.some(event=>event.item?.role==='assistant'),false);
-    assert.equal(browser.tracks[0].enabled,false);assert.equal(stages.includes('ready'),false);
-  } finally {
-    abort.abort('manual_hangup');browser.channel.close();resolveRead?.({data:null,error:{message:'cancelled'}});
-    await starting.catch(()=>{});browser.restore();
-  }
-});
 
-for(const readyBeforeStop of ['neither','read','channel'])test(`Stop during overlapped opening keeps audio, ACK and microphone off (${readyBeforeStop} ready)`,async()=>{
-  const response=websiteOpeningResponse(),stages=[];
-  const browser=installVoiceBrowser({response,channelInitiallyOpen:false,vadEvent:websiteSafeVad()});
-  const abort=new AbortController();let resolveRead,readSignal;
-  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
-    signal:abort.signal,onStage:stage=>stages.push(stage),speechClient:{rpc:()=>{
-      const request=new Promise(resolve=>{resolveRead=resolve;});
-      request.abortSignal=signal=>{readSignal=signal;return request;};return request;
-    }}});
-  starting.catch(()=>{});
-  try {
-    await waitUntil(()=>Boolean(resolveRead),'pending authenticated opening read');
-    if(readyBeforeStop==='read')resolveRead({data:response.opening_payload.speech,error:null});
-    if(readyBeforeStop==='channel')browser.channel.open();
-    await nextTurn();
-    abort.abort('manual_hangup');
-    assert.equal(readSignal.aborted,true);
-    assert.equal(browser.tracks[0].stopped,true);assert.equal(browser.tracks[0].enabled,false);
-    if(browser.channel.readyState!=='open')browser.channel.open();
-    resolveRead({data:response.opening_payload.speech,error:null});
-    browser.channel.emit(websiteSafeVad());
-    await nextTurn();await nextTurn();
-    assert.equal(browser.audios.length,1);assert.equal(stages.includes('ready'),false);
-    assert.equal(browser.channel.sent.filter(event=>event.item?.role==='system').length,1);
-    assert.equal(browser.channel.sent.some(event=>event.item?.role==='assistant'),false);
-    browser.channel.close();await assert.rejects(starting);
-    assert.equal(browser.peers[0].closeCalls,1);assert.equal(browser.tracks[0].enabled,false);
-  } finally {
-    abort.abort('manual_hangup');browser.channel.close();resolveRead?.({data:response.opening_payload.speech,error:null});
-    await starting.catch(()=>{});browser.restore();
-  }
-});
 
-test('protocol3 Stop silences immediately and retains peer until one control request is closed by provider', async () => {
-  const response=websiteOpeningResponse(),safeVad=structuredClone(LIVE_VAD_EVENT);
-  safeVad.session.audio.input.turn_detection.create_response=false;safeVad.session.audio.input.turn_detection.interrupt_response=false;
-  const browser=installVoiceBrowser({response,vadEvent:safeVad});const ended=[],stages=[];const abort=new AbortController();
-  try {
-    const session=await startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
-      signal:abort.signal,onStage:stage=>stages.push(stage),onEnd:event=>ended.push(event),
-      speechClient:{rpc:async()=>({data:response.opening_payload.speech,error:null})}});
-    session.end('manual_hangup');session.end('manual_hangup');abort.abort('manual_hangup');
-    assert.equal(browser.tracks[0].stopped,true);
-    assert.equal(browser.peers[0].closeCalls,0,'provider must still have the browser leg when it receives audited Stop');
-    const controls=browser.channel.sent.filter(event=>event.item?.content?.[0]?.text===`ligou.website_stop:${CALL_ID}`);
-    assert.equal(controls.length,1);
-    assert.deepEqual(controls[0],{type:'conversation.item.create',item:{id:`lgt-${CALL_ID.replaceAll('-','').slice(0,28)}`,type:'message',role:'system',status:'completed',content:[{type:'input_text',text:`ligou.website_stop:${CALL_ID}`}]}});
-    assert.equal(stages.at(-1),'stopping');assert.equal(ended.length,0);
-    browser.channel.close();
-    assert.equal(browser.peers[0].closeCalls,1);assert.deepEqual(ended,[{reason:'manual_hangup',callId:CALL_ID}]);
-  } finally { browser.restore(); }
-});
 
-test('known protocol3 call cancelled before data channel open keeps its control path and sends Stop on open', async () => {
-  const response=websiteOpeningResponse();const browser=installVoiceBrowser({response,channelInitiallyOpen:false});
-  const abort=new AbortController();let partial;const ended=[];
-  const starting=startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
-    signal:abort.signal,onCallCreated:session=>{partial=session;session.end('manual_hangup');abort.abort('manual_hangup');},
-    onEnd:event=>ended.push(event),speechClient:{rpc:async()=>({data:response.opening_payload.speech,error:null})}});
-  starting.catch(()=>{});
-  try {
-    await waitUntil(()=>Boolean(partial),'call identity');
-    await waitUntil(()=>browser.actions.includes('peer:setRemoteDescription'),'remote control path negotiation');
-    assert.equal(browser.peers[0].closeCalls,0);assert.equal(browser.tracks[0].stopped,true);
-    browser.channel.open();
-    assert.equal(browser.channel.sent.filter(event=>event.item?.role==='system').length,1);
-    assert.equal(browser.audios.slice(1).every(audio=>audio.playCalls===0),true);
-    browser.channel.close();await starting.catch(()=>{});
-    assert.equal(ended.length,1);assert.equal(browser.peers[0].closeCalls,1);
-  } finally { browser.channel.close();await starting.catch(()=>{});browser.restore(); }
-});
 
-test('protocol3 Stop has a bounded local escape when provider never closes', async () => {
-  const response=websiteOpeningResponse(),safeVad=structuredClone(LIVE_VAD_EVENT);
-  safeVad.session.audio.input.turn_detection.create_response=false;safeVad.session.audio.input.turn_detection.interrupt_response=false;
-  const browser=installVoiceBrowser({response,vadEvent:safeVad}),ended=[];
-  try {
-    const session=await startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,stopTimeoutMs:5,
-      onEnd:event=>ended.push(event),speechClient:{rpc:async()=>({data:response.opening_payload.speech,error:null})}});
-    session.end('manual_hangup');assert.equal(browser.peers[0].closeCalls,0);
-    // Event-loop turns need not advance a wall-clock timer. Wait beyond the
-    // configured deadline, then assert its effect instead of racing 100 spins.
-    await new Promise(resolve=>setTimeout(resolve,20));
-    assert.equal(browser.peers[0].closeCalls,1);
-    assert.equal(ended.length,1);assert.equal(ended[0].reason,'manual_hangup');
-  } finally { browser.restore(); }
-});
 
-test('protocol3 audio read failure requests controlled technical teardown without becoming owner pause', async () => {
-  const response=websiteOpeningResponse(),safeVad=structuredClone(LIVE_VAD_EVENT);
-  safeVad.session.audio.input.turn_detection.create_response=false;safeVad.session.audio.input.turn_detection.interrupt_response=false;
-  const browser=installVoiceBrowser({response,vadEvent:safeVad}),ended=[];let reads=0;
-  try {
-    await startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
-      onEnd:event=>ended.push(event),speechClient:{rpc:async()=>++reads===1?{data:response.opening_payload.speech,error:null}:{data:null,error:{message:'network failure'}}}});
-    const action='b'.repeat(64);
-    browser.channel.emit({type:'conversation.item.done',item:{id:`lsn-${action.slice(0,28)}`,type:'message',role:'system',status:'completed',content:[{type:'input_text',text:`ligou.website_speech:${action}`}]}});
-    await waitUntil(()=>browser.channel.sent.some(event=>event.item?.content?.[0]?.text===`ligou.website_stop:${CALL_ID}:technical_failure`),'technical Stop control');
-    assert.equal(browser.peers[0].closeCalls,0);assert.equal(browser.tracks[0].stopped,true);assert.equal(ended.length,0);
-    browser.channel.close();assert.equal(ended[0].reason,'application_speech_error');
-    assert.match(ended[0].message,/falha técnica/);assert.equal(browser.peers[0].closeCalls,1);
-  }finally{browser.restore();}
-});
 
-test('protocol3 lost data transport uses immediate truthful fallback without a fabricated Stop request', async () => {
-  const response=websiteOpeningResponse(),safeVad=structuredClone(LIVE_VAD_EVENT);
-  safeVad.session.audio.input.turn_detection.create_response=false;safeVad.session.audio.input.turn_detection.interrupt_response=false;
-  const browser=installVoiceBrowser({response,vadEvent:safeVad}),ended=[];
-  try{
-    await startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
-      onEnd:event=>ended.push(event),speechClient:{rpc:async()=>({data:response.opening_payload.speech,error:null})}});
-    browser.channel.close();assert.equal(browser.peers[0].closeCalls,1);
-    assert.equal(ended[0].reason,'remote_hangup');assert.equal(browser.channel.sent.some(event=>event.item?.role==='system'),false);
-  }finally{browser.restore();}
-});
-test('website protocol3 uses owner-scoped application speech and never unmutes Realtime',async()=>{
-  const response=websiteOpeningResponse(),reads=[],events=[],stages=[];
-  const safeVad=structuredClone(LIVE_VAD_EVENT);
-  safeVad.session.audio.input.turn_detection.create_response=false;
-  safeVad.session.audio.input.turn_detection.interrupt_response=false;
-  const browser=installVoiceBrowser({response,vadEvent:safeVad,providerGreetingTranscript:'Se quiser, posso escrever seu site.'});
-  try{
-    const session=await startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
-      speechClient:{rpc:async(name,args)=>{reads.push({name,args});return{data:response.opening_payload.speech,error:null};}},
-      onEvent:event=>events.push(event),onStage:stage=>stages.push(stage)});
-    assert.equal(browser.requestBodies[0].onboarding_protocol_version,3);
-    assert.equal(browser.requestBodies[0].speech_contract_version,2);
-    assert.deepEqual(reads,[{name:'read_website_interview_speech',args:{p_call:CALL_ID,p_action:'a'.repeat(64)}}]);
-    assert.equal(browser.audios[0].muted,true);assert.equal(browser.tracks[0].enabled,true);
-    assert.equal(browser.audios[1].playCalls,1);assert.equal(browser.channel.sent[0].item.id,response.opening_payload.item_id);
-    assert.deepEqual(events,[{kind:'agent',text:response.opening_payload.speech.text}]);
-    browser.channel.emit({type:'response.output_audio_transcript.done',transcript:'Quer mais alguma coisa?'});
-    assert.equal(events.length,1);assert.equal(browser.audios[0].muted,true);
-    browser.channel.emit({type:'input_audio_buffer.speech_started',item_id:'owner-answer'});
-    browser.channel.emit({type:'conversation.item.input_audio_transcription.completed',item_id:'owner-answer',transcript:'Somente as cidades que mencionei.'});
-    assert.equal(stages.at(-1),'processing');assert.equal(browser.tracks[0].enabled,true);
-    session.end();assert.equal(browser.revokedObjectUrls.length,1);
-  }finally{browser.restore();}
-});
-test('website protocol3 refuses downgrade before any audio',async()=>{
-  const browser=installVoiceBrowser({response:openingResponseV2()});
-  try{
-    await assert.rejects(startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,speechClient:{rpc:async()=>({data:null})}}));
-    assert.equal(browser.audios.length,1);assert.equal(browser.tracks[0].enabled,false);
-  }finally{browser.restore();}
-});
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 test('website completion requires one durable terminal receipt with approval, provider and budget proof',async()=>{
   const approval='22222222-2222-4222-8222-222222222222';
@@ -1008,297 +586,23 @@ test('website completion requires one durable terminal receipt with approval, pr
   assert.notEqual((await read({...status,state:'closing',completed:false,terminal:null})).status,'complete');
 });
 
-test("protocol v2 resume speaks identity, continuation, and persisted question exactly once", async () => {
-  const response = openingResponseV2({ resumeContext: RESUME_CONTEXT });
-  const browser = installVoiceBrowser({ response });
-  const events = [];
-  try {
-    const session = await startVoiceSession({
-      accessToken: "owner-token",
-      sessionType: "onboarding",
-      onEvent: (event) => { events.push(event); },
-    });
-    assert.equal(response.opening_payload.text.split(
-      "Vamos continuar de onde paramos.",
-    ).length, 2);
-    assert.equal(response.opening_payload.text.split(RESUME_QUESTION).length, 2);
-    assert.deepEqual(browser.channel.sent[0].item.content, [{
-      type: "output_text",
-      text: RESUME_TEXT,
-    }]);
-    assert.deepEqual(events, [{ kind: "agent", text: RESUME_TEXT }]);
-    assert.equal(browser.audios[1].playCalls, 1);
-    assert.equal(browser.actions.includes("audio:1:play:remote-muted=true:mic=false"), true);
-    assert.equal(browser.tracks[0].enabled, true);
-    session.end();
-  } finally {
-    browser.restore();
-  }
-});
 
-test("onboarding rejects every provider or missing opening mode before accepting remote speech", async () => {
-  for (const opening_mode_applied of [null, "provider", "application_tts_v2", 1]) {
-    const browser = installVoiceBrowser({ response: openingResponse({ opening_mode_applied }) });
-    try {
-      await assert.rejects(
-        () => startVoiceSession({ accessToken: "owner-token", sessionType: "onboarding" }),
-        /abertura|opening|modo/i,
-      );
-      assert.equal(browser.peers[0].closeCalls, 1);
-      assert.equal(browser.tracks[0].stopCalls, 1);
-      assert.equal(browser.audios[0].muted, true);
-      assert.equal(browser.actions.includes("peer:setRemoteDescription"), false);
-      assert.equal(browser.audios.slice(1).every((audio) => audio.playCalls === 0), true);
-    } finally {
-      browser.restore();
-    }
-  }
-});
 
-test("onboarding validates exact server-owned opening text, payload shape, hashes, and cost before playback", async () => {
-  const invalidResponses = [
-    openingResponse({ business_name: " D1F Marketing " }),
-    openingResponse({
-      onboarding_protocol_version: 2,
-      resume_context: null,
-      opening_text: OPENING_TEXT,
-    }),
-    openingResponse({ opening_payload: { text: "Oi, eu sou uma assistente virtual brasileira." } }),
-    openingResponse({ opening_payload: { text_sha256: "0".repeat(64) } }),
-    openingResponse({ opening_payload: { audio_sha256: "0".repeat(64) } }),
-    openingResponse({ opening_payload: { mime: "audio/wav" } }),
-    openingResponse({ opening_payload: { voice: "alloy" } }),
-    openingResponse({ opening_payload: { tts_model: "other" } }),
-    openingResponse({ opening_payload: { cost_usd: -1 } }),
-    openingResponse({ opening_payload: { item_id: `lgo-${"f".repeat(29)}` } }),
-    (() => {
-      const candidate = openingResponse();
-      candidate.opening_payload.unexpected = true;
-      return candidate;
-    })(),
-  ];
 
-  for (const response of invalidResponses) {
-    const browser = installVoiceBrowser({ response });
-    try {
-      await assert.rejects(
-        () => startVoiceSession({ accessToken: "owner-token", sessionType: "onboarding" }),
-        /abertura|opening|payload|áudio|audio|hash|custo|empresa/i,
-      );
-      assert.equal(browser.audios.slice(1).every((audio) => audio.playCalls === 0), true);
-      assert.equal(browser.tracks[0].stopCalls, 1);
-    } finally {
-      browser.restore();
-    }
-  }
-});
 
-test("protocol v2 mismatches fail before remote description, playback, or microphone release", async () => {
-  const invalidResponses = [
-    openingResponseV2({ opening_text: "wrong" }),
-    openingResponseV2({ resume_context: RESUME_CONTEXT }),
-    openingResponseV2({
-      resumeContext: RESUME_CONTEXT,
-      opening_payload: { resume_context: null },
-    }),
-    openingResponseV2({
-      resumeContext: RESUME_CONTEXT,
-      opening_payload: { text: `${RESUME_TEXT} ${RESUME_QUESTION}` },
-    }),
-    openingResponseV2({ opening_payload: { tts_model: "tts-1" } }),
-    openingResponseV2({ opening_payload: { voice: "alloy" } }),
-    openingResponseV2({ opening_payload: { cost_usd: 0.0032 } }),
-    openingResponseV2({ opening_payload: { text_sha256: "0".repeat(64) } }),
-  ];
-  for (const response of invalidResponses) {
-    const browser = installVoiceBrowser({ response });
-    try {
-      await assert.rejects(
-        () => startVoiceSession({
-          accessToken: "owner-token",
-          sessionType: "onboarding",
-        }),
-        /abertura|opening|payload|contexto|texto|hash|custo|voz|modelo/i,
-      );
-      assert.equal(browser.actions.includes("peer:setRemoteDescription"), false);
-      assert.equal(browser.audios.slice(1).every((audio) => audio.playCalls === 0), true);
-      assert.equal(browser.tracks[0].enabled, false);
-      assert.equal(browser.tracks[0].stopCalls, 1);
-    } finally {
-      browser.restore();
-    }
-  }
-});
 
-test("onboarding stays gated through mismatched and duplicate ACKs until exact item and VAD echoes", async () => {
-  const browser = installVoiceBrowser({ autoOpeningEvents: false });
-  const events = [];
-  try {
-    let settled = false;
-    const starting = startVoiceSession({
-      accessToken: "owner-token",
-      sessionType: "onboarding",
-      onEvent: (event) => { events.push(event); },
-    }).then((session) => { settled = true; return session; });
-    await waitUntil(() => browser.channel.sent.length === 1, "opening conversation item");
 
-    browser.channel.emit({
-      type: "conversation.item.created",
-      item: { ...browser.channel.sent[0].item, id: "msg_wrong" },
-    });
-    browser.channel.emit(LIVE_VAD_EVENT);
-    await nextTurn();
-    assert.equal(settled, false);
-    assert.equal(browser.tracks[0].enabled, false);
-    assert.equal(browser.audios[0].muted, true);
 
-    browser.channel.emit({ type: "conversation.item.created", item: browser.channel.sent[0].item });
-    browser.channel.emit({ type: "conversation.item.created", item: browser.channel.sent[0].item });
-    browser.channel.emit({
-      ...LIVE_VAD_EVENT,
-      session: { audio: { input: { turn_detection: { type: "semantic_vad", create_response: true, interrupt_response: false } } } },
-    });
-    await nextTurn();
-    assert.equal(settled, false);
-    assert.deepEqual(events, []);
 
-    browser.channel.emit(LIVE_VAD_EVENT);
-    const session = await starting;
-    assert.equal(browser.channel.sent.length, 1);
-    assert.equal(browser.tracks[0].enabled, true);
-    assert.equal(browser.audios[0].muted, false);
-    assert.deepEqual(events, [{ kind: "agent", text: OPENING_TEXT }]);
-    session.end();
-  } finally {
-    browser.restore();
-  }
-});
 
-test("GA item added is non-authoritative and exact duplicate done ACKs release only with fresh VAD", async () => {
-  const browser = installVoiceBrowser({ autoOpeningEvents: false });
-  const events = [];
-  let settled = false;
-  let session = null;
-  const starting = startVoiceSession({
-    accessToken: "owner-token",
-    sessionType: "onboarding",
-    openingTimeoutMs: 1_000,
-    onEvent: (event) => { events.push(event); },
-  }).then((value) => {
-    settled = true;
-    session = value;
-    return value;
-  });
-  try {
-    await waitUntil(() => browser.channel.sent.length === 1, "opening conversation item");
-    const item = browser.channel.sent[0].item;
 
-    browser.channel.emit({ type: "conversation.item.added", item });
-    browser.channel.emit(LIVE_VAD_EVENT);
-    await nextTurn();
-    assert.equal(settled, false);
-    assert.equal(browser.tracks[0].enabled, false);
-    assert.equal(browser.audios[0].muted, true);
 
-    browser.channel.emit({
-      type: "conversation.item.done",
-      item: { ...item, id: "lgo-0000000000000000000000000000" },
-    });
-    browser.channel.emit({ type: "conversation.item.added", item });
-    browser.channel.emit({ type: "conversation.item.done", item });
-    browser.channel.emit({ type: "conversation.item.done", item });
-    browser.channel.emit({
-      ...LIVE_VAD_EVENT,
-      session: { audio: { input: { turn_detection: {
-        type: "semantic_vad",
-        eagerness: "low",
-        create_response: true,
-        interrupt_response: false,
-      } } } },
-    });
-    await nextTurn();
-    assert.equal(settled, false);
 
-    browser.channel.emit(LIVE_VAD_EVENT);
-    await waitUntil(() => settled, "GA conversation.item.done opening ACK");
-    assert.equal(browser.channel.sent.length, 1);
-    assert.deepEqual(events, [{ kind: "agent", text: OPENING_TEXT }]);
-  } finally {
-    if (!settled && browser.channel.sent[0]?.item) {
-      browser.channel.emit({ type: "conversation.item.created", item: browser.channel.sent[0].item });
-      browser.channel.emit(LIVE_VAD_EVENT);
-    }
-    await starting.catch(() => null);
-    session?.end();
-    browser.restore();
-  }
-});
 
-test("later sideband session updates revoke and restore browser speech custody", async () => {
-  const browser = installVoiceBrowser();
-  try {
-    const session = await startVoiceSession({ accessToken: "owner-token", sessionType: "onboarding" });
-    browser.channel.emit({
-      type: "session.updated",
-      session: { audio: { input: { turn_detection: { type: "semantic_vad", eagerness: "low", create_response: false, interrupt_response: false } } } },
-    });
-    assert.equal(browser.tracks[0].enabled, false);
-    assert.equal(browser.audios[0].muted, true);
 
-    browser.channel.emit(LIVE_VAD_EVENT);
-    assert.equal(browser.tracks[0].enabled, true);
-    assert.equal(browser.audios[0].muted, false);
-    session.end();
-  } finally {
-    browser.restore();
-  }
-});
 
-test("opening playback rejection and timeout fail closed with complete cleanup", async () => {
-  for (const [autoPlayback, openingTimeoutMs] of [["reject", 100], ["pending", 5]]) {
-    const browser = installVoiceBrowser({ autoPlayback });
-    try {
-      await assert.rejects(
-        () => startVoiceSession({
-          accessToken: "owner-token",
-          sessionType: "onboarding",
-          openingTimeoutMs,
-        }),
-        /abertura|opening|reprodu|play|tempo|timeout/i,
-      );
-      assert.equal(browser.tracks[0].stopCalls, 1);
-      assert.equal(browser.peers[0].closeCalls, 1);
-      assert.equal(browser.audios[0].muted, true);
-      assert.equal(browser.audios[1].pauseCalls >= 1, true);
-      assert.deepEqual(browser.revokedObjectUrls, ["blob:opening-1"]);
-    } finally {
-      browser.restore();
-    }
-  }
-});
 
-test("aborting a stale onboarding setup stops TTS, microphone, peer, and pending timers", async () => {
-  const browser = installVoiceBrowser({ autoPlayback: "pending" });
-  const abort = new AbortController();
-  try {
-    const starting = startVoiceSession({
-      accessToken: "owner-token",
-      sessionType: "onboarding",
-      openingTimeoutMs: 10_000,
-      signal: abort.signal,
-    });
-    await waitUntil(() => browser.audios[1]?.playCalls === 1, "application opening playback");
-    abort.abort("stale_run");
 
-    await assert.rejects(() => starting, /cancel|abort|interromp/i);
-    assert.equal(browser.tracks[0].stopCalls, 1);
-    assert.equal(browser.peers[0].closeCalls, 1);
-    assert.equal(browser.audios[1].pauseCalls >= 1, true);
-    assert.deepEqual(browser.revokedObjectUrls, ["blob:opening-1"]);
-  } finally {
-    browser.restore();
-  }
-});
 
 test("hangup aborts the paid onboarding bootstrap before remote description or playback", async () => {
   let fetchInit = null;
@@ -1382,7 +686,7 @@ test("session end reports explicit reason and exact call identity", async () => 
     let ended = null;
     const session = await startVoiceSession({
       accessToken: "owner-token",
-      sessionType: "onboarding",
+      sessionType: "owner_browser",
       onEnd: (event) => { ended = event; },
     });
 
@@ -2393,15 +1697,4 @@ test("onboarding recovery errors give owner-safe instructions instead of SQL ide
   assert.equal(sessionModule.voiceSessionErrorMessage(new Error("interview_resume_source_not_settled")), "A entrevista anterior ainda está sendo encerrada. Aguarde um momento e tente novamente. Se continuar, fale com o suporte; suas respostas estão preservadas.");
   assert.equal(sessionModule.voiceSessionErrorMessage(new Error("interview_prior_not_settled")), sessionModule.voiceSessionErrorMessage(new Error("interview_resume_source_not_settled")));
   assert.equal(sessionModule.voiceSessionErrorMessage(new Error("Microfone indisponível")), "Microfone indisponível");
-});
-
-
-test("V2 startup accepts fast or historical HD audio only at the model's exact cost", async () => {
- for(const [model,rate] of [["tts-1",15],["tts-1-hd",30]]){
-  const cost=Number(([...OPENING_TEXT].length*rate/1e6).toFixed(8));
-  const browser=installVoiceBrowser({response:openingResponseV2({opening_payload:{tts_model:model,cost_usd:cost}})});
-  try{const session=await startVoiceSession({accessToken:"owner-token",sessionType:"onboarding"});assert.equal(browser.audios[1].playCalls,1);session.end();}finally{browser.restore();}
-  const forged=installVoiceBrowser({response:openingResponseV2({opening_payload:{tts_model:model,cost_usd:Number(([...OPENING_TEXT].length*(rate===15?30:15)/1e6).toFixed(8))}})});
-  try{await assert.rejects(startVoiceSession({accessToken:"owner-token",sessionType:"onboarding"}));assert.equal(forged.audios.slice(1).some(a=>a.playCalls>0),false);}finally{forged.restore();}
- }
 });

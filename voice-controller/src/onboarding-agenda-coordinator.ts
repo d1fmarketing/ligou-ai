@@ -12,6 +12,7 @@ import {
 import type { OnboardingAnswerArgs } from "./onboarding-store.ts";
 import { validateWebsiteAnswerApplicability } from "./onboarding-website-applicability.ts";
 import { websiteQuestionGuidance, websiteApprovalClarification } from "./onboarding-website-guidance.ts";
+import {streamAuthorizationIsValid,STREAM_UUID,type StreamAuthorization,type StreamProof} from './onboarding-stream.ts';
 
 /** A pure mode helper for the existing serialized onboarding adapter. No socket,
  * timer, provider, database or policy-authority effect is executed here. */
@@ -46,9 +47,12 @@ export interface WebsiteAgendaState {
   fieldGuidance: Record<string, string>;
   openingAction: OnboardingSpeechAction;
   openingDeadlineAtMs: number;
+  transport?:'realtime_stream_v1';
+  openingStream?:StreamAuthorization;
   turns: OwnerTurn[];
   pending?: PendingEffect;
   speech?: { action: OnboardingSpeechAction; textSha256?: string; audioSha256?: string;
+    stream?:StreamAuthorization;
     deadlineAtMs: number; after: "owner" | "summary_part" | "approval" | "signoff" | "error" | "amendment" };
   summary?: WebsiteSummaryReceipt & { partIndex: number };
   correctionRequired: boolean;
@@ -60,7 +64,7 @@ export interface WebsiteAgendaState {
   amendmentReceiptId?: string;
   error?: string;
   activeOwnerItemId?: string;
-  interruptedSpeech?: { action: OnboardingSpeechAction; after: NonNullable<WebsiteAgendaState["speech"]>["after"]; providerItemId: string };
+  interruptedSpeech?: { action: OnboardingSpeechAction; after: NonNullable<WebsiteAgendaState["speech"]>["after"]; providerItemId: string|null };
   deferredSpeech?: { speech: NonNullable<WebsiteAgendaState["speech"]>; command: Extract<WebsiteAgendaCommand,{type:"request_speech"}> };
   deferredAfterPlayback?: NonNullable<WebsiteAgendaState["speech"]>["after"];
 }
@@ -80,7 +84,7 @@ export type WebsiteAgendaCommand =
       summaryId: string; summaryHash: string; revision: number; digest: string; expectedStoreVersion: number }
   | { type: "request_speech"; action: OnboardingSpeechAction; summaryId?: string; partIndex?: number; clarificationTurnId?: string }
   | { type: "interrupt_speech"; requestId: string; actionId: string; providerItemId: string }
-  | { type: "resume_speech"; requestId: string; actionId: string; providerItemId: string }
+  | { type: "resume_speech"; requestId: string; actionId: string; providerItemId: string|null }
   | { type: "record_empty_input"; requestId: string; actionId: string; providerItemId: string }
   | { type: "request_amendment"; requestId: string; approvalReceiptId: string; providerItemId: string; proposal: Extract<AgendaProposal,{kind:"correction"}> }
   | { type: "terminate_session"; requestId: string; action: "TERMINATE_SESSION"; outcome: "complete" | "unfinished";
@@ -94,6 +98,11 @@ type Timed = { nowMs: number };
 export type WebsiteAgendaEvent = Timed & (
   | { type: "adapter.failed"; code: string }
   | { type: "opening.played" }
+  | { type:'stream.authorized';stream:StreamAuthorization }
+  | { type:'stream.dispatched';actionId:string;dispatchId:string }
+  | ({type:'stream.played'}&StreamProof)
+  | { type:'stream.rejected';actionId:string;dispatchId:string;generationReceiptId:string }
+  | { type:'stream.transport_failed';code:string }
   | { type: "owner.transcript"; providerItemId: string; text: string; capturedItemId?: string | null; approvalSummaryId?: string | null }
   | { type: "owner.speech_started"; providerItemId: string; afterPlaybackActionId?: string }
   | { type: "owner.speech_finished" | "owner.transcript_empty"; providerItemId: string }
@@ -125,7 +134,7 @@ export function websiteSummaryHash(value: Omit<WebsiteSummaryReceipt, "summaryHa
 export const WEBSITE_APPROVAL_QUESTION = "Está tudo correto no resumo e você confirma essas informações? Se precisar, diga o que devo corrigir.";
 const TERMINAL_ERROR = "Tive uma falha técnica e não consegui continuar esta conversa. A configuração ainda não foi concluída. Você pode tentar novamente pelo painel. Obrigado e até logo.";
 const SHA = /^[a-f0-9]{64}$/;
-function requestId(state: WebsiteAgendaState, kind: string, key: unknown): string {
+function requestId(state: Pick<WebsiteAgendaState,'stored'>, kind: string, key: unknown): string {
   const h = hash([state.stored.agenda.binding.interviewId, state.stored.agenda.binding.callId, kind, key]);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
@@ -372,7 +381,7 @@ function fail(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], code:
   const mayAlreadyBeAudible = Boolean(state.speech?.audioSha256);
   state.error = code; delete state.pending;
   if (!state.approval) delete state.summary;
-  if (mayAlreadyBeAudible || state.speech?.after === "error") {
+  if (mayAlreadyBeAudible || state.speech?.after === "error" || state.interruptedSpeech?.after === 'error') {
     terminate(state, commands, "unfinished", code, nowMs); return;
   }
   delete state.speech;
@@ -512,9 +521,22 @@ export function buildWebsiteOpeningAction(stored: StoredWebsiteInterview, tenant
   return action;
 }
 
+export function websiteSummaryPreparationId(stored:StoredWebsiteInterview):string{
+  return requestId({stored},'summary',[stored.revision,stored.digest]);
+}
+export function buildWebsiteSummaryOpening(stored:StoredWebsiteInterview,summary:WebsiteSummaryReceipt):OnboardingSpeechAction{
+  if(!validStored(stored,stored.agenda)||stored.state!=='reviewing'||!projectAgendaSummary(stored.agenda).readyForSummary
+    ||summary.revision!==stored.revision||summary.digest!==stored.digest||summary.summaryHash!==websiteSummaryHash(summary)
+    ||!summary.parts.length||summary.parts.some(part=>!nonblank(part,4096)))throw new Error('Invalid stream recap source');
+  const text=summary.parts[0]!,kind='GENERATE_FINAL_SUMMARY' as const;
+  return{actionId:hash([stored.agenda.binding,stored.revision,kind,[summary.summaryHash,0],text]),
+    interviewId:stored.agenda.binding.interviewId,callId:stored.agenda.binding.callId,revision:stored.revision,kind,text,sourceDigest:stored.digest};
+}
+
 export function createWebsiteAgendaCoordinator(
   stored: StoredWebsiteInterview,
-  options: { nowMs: number; timeoutMs?: number; fieldGuidance?: Record<string, string>; openingAction?: OnboardingSpeechAction },
+  options: { nowMs: number; timeoutMs?: number; fieldGuidance?: Record<string, string>; openingAction?: OnboardingSpeechAction;
+    openingStream?:StreamAuthorization;initialSummary?:WebsiteSummaryReceipt },
 ): WebsiteAgendaState {
   if (!validStored(stored, stored.agenda) || !Number.isFinite(options.nowMs) || options.nowMs < 0 ||
     !Number.isSafeInteger(options.timeoutMs ?? 30_000) || (options.timeoutMs ?? 30_000) < 1 || (options.timeoutMs ?? 30_000) > 30_000)
@@ -528,10 +550,16 @@ export function createWebsiteAgendaCoordinator(
   };
   if (!speechActionIsInternallyValid(openingAction) || openingAction.sourceDigest !== stored.digest ||
     openingAction.revision !== stored.revision || openingAction.interviewId !== stored.agenda.binding.interviewId ||
-    openingAction.callId !== stored.agenda.binding.callId || !openingAction.text.endsWith(stored.nextAction.spokenPt))
+    openingAction.callId !== stored.agenda.binding.callId || (options.initialSummary
+      ?JSON.stringify(openingAction)!==JSON.stringify(buildWebsiteSummaryOpening(stored,options.initialSummary))
+      :!openingAction.text.endsWith(stored.nextAction.spokenPt)))
     throw new Error("Opening action does not bind current agenda");
+  if(options.openingStream&&!streamAuthorizationIsValid(options.openingStream,openingAction))throw new Error('Invalid stream opening authorization');
   return { version: 1, phase: "opening", stored: structuredClone(stored), timeoutMs: options.timeoutMs ?? 30_000,
     fieldGuidance: options.fieldGuidance ?? {}, openingAction, openingDeadlineAtMs: options.nowMs + (options.timeoutMs ?? 30_000),
+    ...(options.openingStream?{transport:'realtime_stream_v1' as const,openingStream:options.openingStream}:{}),
+    ...(options.initialSummary?{phase:'speaking' as const,summary:{...options.initialSummary,partIndex:0},
+      speech:{action:openingAction,stream:options.openingStream,after:'summary_part' as const,deadlineAtMs:options.nowMs+(options.timeoutMs??30000)}}:{}),
     turns: stored.agenda.ownerTurns.map(turn => ({ ...turn, providerItemId: turn.turnId,
       requestId: "", recorded: true, processed: true, attempt: 0, deadlineAtMs: 0,
       capturedItemId: null, approvalSummaryId: null })), correctionRequired: false, approvalClarifications: 0 };
@@ -543,14 +571,47 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
   const commands: WebsiteAgendaCommand[] = [];
   const pending = state.pending;
   const closing = Boolean(state.termination) || state.phase==="failed" || state.speech?.after === "error" || state.speech?.after === "amendment";
-  if (closing && !["adapter.failed", "approval.persisted", "speech.ready", "speech.played", "speech.failed", "deadline", "effect.failed",
+  if (closing && !["adapter.failed", "approval.persisted", "speech.ready", "speech.played", "stream.authorized", "stream.dispatched", "stream.played", "stream.rejected", "stream.transport_failed", "speech.failed", "deadline", "effect.failed",
     "provider.termination_confirmed", "budget.settled", "completion.recorded"].includes(event.type)) return { state: current, commands: [] };
   switch (event.type) {
     case "adapter.failed":
       fail(state, commands, event.code, event.nowMs); break;
+    case 'stream.transport_failed':
+      if(state.transport==='realtime_stream_v1')terminate(state,commands,'unfinished',event.code,event.nowMs);break;
     case "opening.played":
-      if (state.phase !== "opening") break;
+      if (state.phase !== "opening"||state.transport==='realtime_stream_v1') break;
       state.phase = "awaiting_owner"; pump(state, commands, event.nowMs); break;
+    case 'stream.authorized':{
+      if(state.transport!=='realtime_stream_v1')break;
+      const action=state.phase==='opening'?state.openingAction:state.speech?.action;
+      if(!action||!streamAuthorizationIsValid(event.stream,action))break;
+      if(state.phase==='opening')state.openingStream=event.stream;else state.speech!.stream=event.stream;
+      break;
+    }
+    case 'stream.dispatched':{
+      const stream=state.phase==='opening'?state.openingStream:state.speech?.stream;
+      if(state.transport!=='realtime_stream_v1'||stream?.action.actionId!==event.actionId||stream.dispatchId!==event.dispatchId)break;
+      if(state.phase==='opening')state.openingDeadlineAtMs=event.nowMs+180000;else state.speech!.deadlineAtMs=event.nowMs+180000;
+      break;
+    }
+    case 'stream.played':{
+      const stream=state.phase==='opening'?state.openingStream:state.speech?.stream;
+      if(state.transport!=='realtime_stream_v1'||stream?.action.actionId!==event.actionId||stream.dispatchId!==event.dispatchId||event.status!=='played'
+        ||!nonblank(event.responseId)||!nonblank(event.itemId)||![event.receiptId,event.generationReceiptId,event.playoutReceiptId].every(id=>typeof id==='string'&&STREAM_UUID.test(id))
+        ||new Set([event.receiptId,event.generationReceiptId,event.playoutReceiptId]).size!==3)break;
+      if(state.phase==='opening'){state.phase='awaiting_owner';pump(state,commands,event.nowMs);}
+      else{const speech=state.speech!;delete state.speech;if(speech.after==='summary_part'&&state.summary)state.summary.partIndex++;
+        continueAfterPlayback(state,commands,speech.after,event.nowMs);}
+      break;
+    }
+    case 'stream.rejected':{
+      const stream=state.phase==='opening'?state.openingStream:state.speech?.stream;
+      if(state.transport!=='realtime_stream_v1'||stream?.action.actionId!==event.actionId||stream.dispatchId!==event.dispatchId||!STREAM_UUID.test(event.generationReceiptId))break;
+      state.interruptedSpeech={action:stream.action,after:state.phase==='opening'?'owner':state.speech!.after,providerItemId:null};
+      delete state.speech;state.phase='awaiting_owner';
+      effect(state,commands,{type:'resume_speech',requestId:requestId(state,'stream-reread',[event.dispatchId,event.generationReceiptId]),
+        actionId:event.actionId,providerItemId:null},'resume_speech',event.nowMs);break;
+    }
     case "owner.speech_started": {
       if(!nonblank(event.providerItemId,400) || state.activeOwnerItemId===event.providerItemId)break;
       state.activeOwnerItemId=event.providerItemId;
@@ -675,10 +736,12 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
       if(pending?.kind!=="resume_speech" || pending.requestId!==event.requestId || !state.interruptedSpeech)break;
       const prior=state.interruptedSpeech;
       if(!speechActionIsInternallyValid(event.action) || event.action.actionId===prior.action.actionId ||
-        ["interviewId","callId","revision","kind","text","sourceDigest"].some(key=>
+        ["interviewId","callId","revision","kind","sourceDigest"].some(key=>
           event.action[key as keyof OnboardingSpeechAction]!==prior.action[key as keyof OnboardingSpeechAction])){
         fail(state,commands,"resumed_speech_receipt_mismatch",event.nowMs);break;
       }
+      if(event.action.text!==prior.action.text&&!(state.transport==='realtime_stream_v1'&&prior.action.actionId===state.openingAction.actionId
+        &&event.action.text===state.stored.nextAction.spokenPt)){fail(state,commands,'resumed_speech_receipt_mismatch',event.nowMs);break;}
       delete state.pending;delete state.interruptedSpeech;state.correctionRequired=false;
       emitSpeech(state,commands,{action:event.action,after:prior.after,deadlineAtMs:event.nowMs+state.timeoutMs},{type:"request_speech",action:event.action,
         ...(state.summary?{summaryId:state.summary.summaryId}:{}),
@@ -727,6 +790,7 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
       speak(state, commands, "SPEAK_FINAL_SIGNOFF", ONBOARDING_FINAL_SIGNOFF_TEXT, "signoff", event.nowMs, event.approvalReceiptId); break;
     }
     case "speech.ready": {
+      if(state.transport==='realtime_stream_v1')break;
       const speech = state.speech;
       if (!speech || speech.action.actionId !== event.actionId) break;
       if (event.textSha256 !== hash(speech.action.text) || !SHA.test(event.audioSha256) ||
@@ -737,6 +801,7 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
       speech.deadlineAtMs = event.nowMs + 180_000; break;
     }
     case "speech.played": {
+      if(state.transport==='realtime_stream_v1')break;
       const speech = state.speech;
       if (!speech || speech.action.actionId !== event.actionId || !speech.audioSha256 ||
         speech.textSha256 !== event.textSha256 || speech.audioSha256 !== event.audioSha256) break;

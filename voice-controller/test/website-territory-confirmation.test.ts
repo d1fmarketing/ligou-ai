@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createOnboardingAgenda, applyVerifiedOwnerTurn, getAgendaAction, type OnboardingAgenda } from "../src/onboarding-agenda.ts";
+import { createOnboardingAgenda, applyVerifiedOwnerTurn, getAgendaAction, websiteTerritoryConfirmation, type OnboardingAgenda } from "../src/onboarding-agenda.ts";
 import { createOnboardingAgendaStore, onboardingAgendaDigest } from "../src/onboarding-agenda-store.ts";
 import { createWebsiteAgendaCoordinator, reduceWebsiteAgenda } from "../src/onboarding-agenda-coordinator.ts";
 import cases from "./fixtures/website-territory-confirmation-cases.json";
@@ -31,6 +31,38 @@ test("a later unrelated answer cannot replay an old territory confirmation", () 
   const territory = answered(initial(), "area", cases[0].text);
   const later = answered(territory.agenda, "next", "O fuso é o horário do Pacífico.");
   expect(later.action?.spokenPt).toBe("Obrigado, registrei sua resposta. Quem pode confirmar um agendamento?");
+});
+
+test('only current answered or corrected area evidence authorizes an attributed territory readback',()=>{
+  const result=answered(initial(),'area','Recife e Olinda. Fora delas, só com minha aprovação explícita.');
+  const fallback='Obrigado, registrei sua resposta. ';
+  for(const status of ['open','awaiting_clarification','deferred_owner_review','not_applicable']){
+    const agenda:any=structuredClone(result.agenda);agenda.items[0].status=status;
+    expect(websiteTerritoryConfirmation(agenda)).toBe(fallback);
+  }
+  for(const mutate of [
+    (agenda:any)=>{agenda.items[0].answerRevision=0;},
+    (agenda:any)=>{agenda.items[0].coverageRefs=['schedule.business_hours'];},
+    (agenda:any)=>{agenda.items[0].evidence.at(-1).turnId='stale-turn';},
+    (agenda:any)=>{agenda.items[0].evidence.at(-1).text='Outro texto';},
+    (agenda:any)=>{agenda.ownerTurns=[];},
+  ]){
+    const agenda=structuredClone(result.agenda);mutate(agenda);
+    expect(websiteTerritoryConfirmation(agenda)).toBe(fallback);
+  }
+  const corrected=applyVerifiedOwnerTurn(result.agenda,{type:'verified_owner_turn',binding,turnId:`${callId}:correction`,
+    text:'Corrija: atendemos Recife, mas Olinda somente com minha aprovação.',
+    proposal:{kind:'correction',affectedItems:[{itemId:'area',disposition:'corrected'}]}});
+  expect(websiteTerritoryConfirmation(corrected.agenda)).toBe('Registrado. Você informou: “Corrija: atendemos Recife, mas Olinda somente com minha aprovação”. ');
+});
+
+test('oversized territory evidence falls back without truncating a trailing restriction',()=>{
+  for(const length of [480,700]){
+    const text=`Recife e Olinda. ${'Mais informação. '.repeat(Math.ceil(length/17))}Fora delas, nunca sem minha aprovação explícita.`;
+    const result=answered(initial(),'area',text);
+    expect(result.action?.spokenPt).toBe('Obrigado, registrei sua resposta. '+nextQuestion);
+    expect(result.agenda.items[0].evidence.at(-1)?.text).toBe(text);
+  }
 });
 
 test("store readback accepts only the exact committed extract and authoritative next question", async () => {

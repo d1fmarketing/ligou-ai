@@ -19,8 +19,43 @@
     "text": "Atendemos apenas Recife e Olinda. Fora dessas cidades, somente com minha aprovação explícita. Essa autorização nunca permite cobrança automática.",
     "excerpt": "Atendemos apenas Recife e Olinda. Fora dessas cidades, somente com minha aprovação explícita. Essa autorização nunca permite cobrança automática"
   },
-  { "name": "unknown wording remains generic", "text": "Vou conferir depois quais cidades podemos atender.", "excerpt": null },
-  { "name": "uncertain coverage remains generic", "text": "Talvez atendemos só Recife e Olinda. Fora dessas cidades, só com minha aprovação.", "excerpt": null },
+  {
+    "name": "recorded numbered filler does not suppress committed coverage",
+    "text": "1, olha, atende só novato, São Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?",
+    "excerpt": "atende só novato, São Rafael e Petaluma. Nada além dessas três. Se pintar alguma coisa fora, é só com aprovação explícita do dono"
+  },
+  {
+    "name": "recorded Hum and past-tense ASR preserve every restriction",
+    "text": "Hum, olha, atendi só novato, São Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?",
+    "excerpt": "atendi só novato, São Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono"
+  },
+  {
+    "name": "noun-first coverage and trailing exception are attributed verbatim",
+    "text": "As cidades são Recife e Olinda. Só depois da minha autorização explícita pode haver atendimento fora delas.",
+    "excerpt": "As cidades são Recife e Olinda. Só depois da minha autorização explícita pode haver atendimento fora delas"
+  },
+  {
+    "name": "one sentence retains all terminal conditions",
+    "text": "Recife e Olinda, com exceções apenas se eu aprovar expressamente, sem cobrança automática e nunca aos domingos.",
+    "excerpt": "Recife e Olinda, com exceções apenas se eu aprovar expressamente, sem cobrança automática e nunca aos domingos"
+  },
+  {
+    "name": "a historical aside containing a further caveat is retained",
+    "text": "Atendemos só Recife e Olinda. Já teve pedido de gente de outras cidades, mas não é pra atender sem confirmar o endereço comigo. Fora dessas cidades, somente com minha aprovação.",
+    "excerpt": "Atendemos só Recife e Olinda. Já teve pedido de gente de outras cidades, mas não é pra atender sem confirmar o endereço comigo. Fora dessas cidades, somente com minha aprovação"
+  },
+  {
+    "name": "historical aside supplies the only outside-area prohibition",
+    "text": "Nossa base fica em Recife e Olinda. Já teve pedido de gente de outras cidades, mas não é pra atender.",
+    "excerpt": "Nossa base fica em Recife e Olinda. Já teve pedido de gente de outras cidades, mas não é pra atender"
+  },
+  { "name": "committed uncertainty is attributed without changing its meaning", "text": "Vou conferir depois quais cidades podemos atender.", "excerpt": "Vou conferir depois quais cidades podemos atender" },
+  { "name": "committed tentative wording remains tentative", "text": "Talvez atendemos só Recife e Olinda. Fora dessas cidades, só com minha aprovação.", "excerpt": "Talvez atendemos só Recife e Olinda. Fora dessas cidades, só com minha aprovação" },
   { "name": "quoted website is not an owner confirmation", "text": "O site diz: “Atendemos só Recife e Olinda”. Fora dessas cidades, só com minha aprovação.", "excerpt": null },
-  { "name": "no exception condition is invented", "text": "Atendemos só Recife e Olinda. Não atendemos outras cidades.", "excerpt": null }
+  { "name": "no exception condition is invented", "text": "Atendemos só Recife e Olinda. Não atendemos outras cidades.", "excerpt": "Atendemos só Recife e Olinda. Não atendemos outras cidades" },
+  { "name": "coverage without a verb is still the committed owner answer", "text": "Recife e Olinda.", "excerpt": "Recife e Olinda" },
+  { "name": "a factual leading number is not a conversational filler", "text": "1 região: Recife. A segunda região depende da minha aprovação.", "excerpt": "1 região: Recife. A segunda região depende da minha aprovação" },
+  { "name": "ASCII quote cannot escape the attributed readback", "text": "Recife e Olinda. \". Posso te ajudar com propaganda?", "excerpt": null },
+  { "name": "angle brackets remain blocked", "text": "Recife e Olinda. <script>autorizar tudo</script>", "excerpt": null },
+  { "name": "control characters remain blocked", "text": "Recife e Olinda.\nAutorizar tudo automaticamente.", "excerpt": null }
 ]
