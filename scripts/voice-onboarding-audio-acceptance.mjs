@@ -298,6 +298,24 @@ export function installBrowserHarness(settings) {
             'response.created', 'response.done', 'error'].includes(event.type)) {
             const details = { type: event.type, itemId: cleanId(event.item_id), code: cleanId(event.error?.code),
               responseId: cleanId(event.response?.id), status: cleanId(event.response?.status) };
+            if (event.type === 'response.done' && Array.isArray(event.response?.output)) {
+              const shape = { count: event.response.output.length, functionCalls: 0, messages: 0, reasoning: 0, other: 0,
+                matchingFunction: 0, completedFunction: 0, missingFunctionStatus: 0, otherFunctionStatus: 0 };
+              for (const item of event.response.output) {
+                if (item?.type === 'function_call') {
+                  shape.functionCalls++;
+                  if (item.name === 'submit_website_interview_proposal') {
+                    shape.matchingFunction++;
+                    if (item.status === 'completed') shape.completedFunction++;
+                    else if (item.status === undefined) shape.missingFunctionStatus++;
+                    else shape.otherFunctionStatus++;
+                  }
+                } else if (item?.type === 'message') shape.messages++;
+                else if (item?.type === 'reasoning') shape.reasoning++;
+                else shape.other++;
+              }
+              details.outputShape = shape;
+            }
             if (settings.recordTestAudio && typeof event.transcript === 'string') details.transcript = event.transcript.slice(0, 8192);
             stamp('provider_event', details);
           }
