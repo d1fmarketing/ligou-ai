@@ -13,6 +13,7 @@ import {createWebsiteInterviewRuntime} from '../../voice-controller/src/onboardi
 import {generateWebsiteSummaryParts,buildWebsiteCandidateContext} from '../../voice-controller/src/onboarding-website-summary.ts';
 import {ONBOARDING_FINAL_SIGNOFF_TEXT} from '../../voice-controller/src/onboarding-speech.ts';
 import {runWebsiteInterruptionActualSchemaProbe} from './website-interview-interruption-actual-schema.mjs';
+import {runWebsiteNoProviderResumeCases} from './website-interview-no-provider-resume-cases.mjs';
 
 const q=value=>`'${String(value).replaceAll("'","''")}'`;
 const jq=value=>`${q(JSON.stringify(value))}::jsonb`;
@@ -113,6 +114,7 @@ export async function runWebsiteInterviewActualSchemaSuite(input) {
     assert.equal(starts.filter(r=>r.replayed).length,1);let stored=starts.find(r=>!r.replayed);
     await assert.rejects(()=>store.readWebsiteInterview({...scope,ownerId:other}),/not_owner_bound/);
     tests.push('actual-source-and-capability-initialize');
+    tests.push(...(await runWebsiteNoProviderResumeCases({runSql,owner,other,tenant,call,request})).scenarios);
 
     const opening=buildWebsiteOpeningAction(stored,'Foghorn Air, Inc.');
     const audioPayload=action=>({schema:'onboarding.speech.v1',...action,text_sha256:sha(action.text),audio_base64:'SUQzBA==',audio_sha256:createHash('sha256').update(Buffer.from('SUQzBA==','base64')).digest('hex'),mime:'audio/mpeg',voice:'ash',tts_model:'tts-1-hd',cost_usd:Number(([...action.text].length*30/1e6).toFixed(8))});
