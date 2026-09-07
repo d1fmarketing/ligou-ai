@@ -6,6 +6,7 @@ Ligou is an AI operational employee for service businesses: a public voice demon
 
 The approved original website and current dashboard are deployed at **https://client-nine-taupe-24.vercel.app**. The September 6, 2026 release consolidates the website, responsive fixes, sales runtime source, and first-phone preparation on `main`.
 
+- [Latest onboarding resume recovery](docs/release/ONBOARDING-RESUME-RECOVERY-2026-09-06.md)
 - [Production release receipt and verification](docs/release/VERCEL-2026-09-06.md)
 - [Build, deploy and rollback](docs/DEPLOY-DASHBOARD.md)
 - [Repository map](docs/REPOSITORY-MAP.md)
