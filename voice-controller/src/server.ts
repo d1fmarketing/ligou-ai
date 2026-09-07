@@ -13,6 +13,7 @@ import {
 import { attachSideband, liveSessions } from "./sideband.ts";
 import { requireTenantOwner } from "../../supabase/functions/_shared/tenant-ownership.ts";
 import { finalizeTerminalBudget, reserveCallBudget } from "./budget.ts";
+import { terminateProviderCall, type ProviderTerminationResult } from "./provider-termination.ts";
 import { randomUUID } from "node:crypto";
 import {
   isOnboardingOpeningMode,
@@ -157,6 +158,44 @@ export interface StartSessionOptions {
   onboardingProtocolVersion?: 2 | 3;
 }
 
+type VoiceStartupStage = "tenant_context" | "call_insert" | "budget_reservation" |
+  "website_context" | "resume_context" | "tts_marker" | "opening_audio" |
+  "opening_cost_floor" | "provider_marker" | "provider_create" |
+  "provider_identity" | "sideband_open" | "request_claim" | "request_bind" |
+  "session_start" | "request_ready";
+
+/** Process-local offsets expose overlapping work without subtracting clocks
+ * across browser, Edge and controller hosts. Payloads and exceptions stay out. */
+export function createVoiceStartupTrace(
+  scope: { requestId?: string; callId?: string; traceScope?: "request" | "session" },
+  dependencies: { now?: () => number; write?: (event: Record<string, unknown>) => void } = {},
+) {
+  const now = dependencies.now ?? (() => performance.now());
+  const origin = now();
+  const safeId = (value: string | undefined) => value && /^[a-zA-Z0-9_-]{1,128}$/.test(value) ? value : undefined;
+  const write = dependencies.write ?? ((event) => console.log("voice_startup", JSON.stringify(event)));
+  return {
+    async measure<T>(stage: VoiceStartupStage, work: () => T | PromiseLike<T>): Promise<T> {
+      const started = now();
+      let outcome = "ok";
+      try { return await work(); }
+      catch (error) { outcome = "error"; throw error; }
+      finally {
+        const finished = now();
+        try { write({
+          evt: "voice.startup.stage", timing_version: 1,
+          trace_scope: scope.traceScope ?? "session",
+          request_id: safeId(scope.requestId), call_id: safeId(scope.callId),
+          stage, outcome,
+          stage_start_ms: Math.round((started - origin) * 100) / 100,
+          duration_ms: Math.round((finished - started) * 100) / 100,
+          elapsed_ms: Math.round((finished - origin) * 100) / 100,
+        }); } catch { /* Timing must not change startup or cleanup behavior. */ }
+      }
+    },
+  };
+}
+
 export function resolvedOnboardingTtsFailureCost(error: unknown): number | null {
   if (!error || typeof error !== "object") return null;
   const failure = error as { usageResolved?: unknown; costUsd?: unknown };
@@ -200,41 +239,57 @@ export function assertPublicDirectSessionAllowed(
     throw Object.assign(new Error("onboarding_edge_required"), { status: 409 });
 }
 
+function abortableStartupReceipt<T>(request: PromiseLike<T> & { abortSignal?(signal: AbortSignal): PromiseLike<T> }, signal?: AbortSignal): Promise<T> {
+  if (!signal) return Promise.resolve(request);
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const aborted = () => reject(new Error("startup_receipt_cancelled"));
+    signal.addEventListener("abort", aborted, { once: true });
+    Promise.resolve(request.abortSignal ? request.abortSignal(signal) : request).then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", aborted));
+  });
+}
+
+async function boundedCleanupReceipt<T>(work: (signal: AbortSignal) => PromiseLike<T>, timeoutMs = 250): Promise<T | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try { return await abortableStartupReceipt(work(controller.signal), controller.signal); }
+  catch { return null; }
+  finally { clearTimeout(timer); }
+}
+
 async function persistOnboardingTtsCostFloor(args: {
   callId: string;
   tenantId: string;
   costUsd: number;
+  signal?: AbortSignal;
 }): Promise<boolean> {
   const exact = (row: any) => row?.id === args.callId &&
     row?.tenant_id === args.tenantId &&
     row?.status === "active" &&
-    Number(row?.cost_estimate_usd) === args.costUsd &&
-    row?.provider_termination_state === "not_required" &&
-    row?.provider_termination_reason === "tts_resolved" &&
-    row?.provider_usage_state === "resolved";
+    row?.cost_estimate_usd != null &&
+    Number(row?.cost_estimate_usd) === args.costUsd;
   try {
-    const { data, error } = await supa()
+    const { data, error } = await abortableStartupReceipt(supa()
       .from("calls")
       .update({
         cost_estimate_usd: args.costUsd,
-        provider_termination_state: "not_required",
-        provider_termination_reason: "tts_resolved",
-        provider_usage_state: "resolved",
       })
       .eq("id", args.callId)
       .eq("tenant_id", args.tenantId)
       .eq("status", "active")
       .select("id,tenant_id,status,cost_estimate_usd,provider_termination_state,provider_termination_reason,provider_usage_state")
-      .maybeSingle();
+      .maybeSingle(), args.signal);
     if (!error && exact(data)) return true;
   } catch {}
+  if (args.signal?.aborted) return false;
   try {
-    const { data, error } = await supa()
+    const { data, error } = await abortableStartupReceipt(supa()
       .from("calls")
       .select("id,tenant_id,status,cost_estimate_usd,provider_termination_state,provider_termination_reason,provider_usage_state")
       .eq("id", args.callId)
       .eq("tenant_id", args.tenantId)
-      .maybeSingle();
+      .maybeSingle(), args.signal);
     return !error && exact(data);
   } catch {
     return false;
@@ -244,6 +299,7 @@ async function persistOnboardingTtsCostFloor(args: {
 async function persistTtsInflight(args: {
   callId: string;
   tenantId: string;
+  signal?: AbortSignal;
 }): Promise<boolean> {
   const exact = (row: any) => row?.id === args.callId &&
     row?.tenant_id === args.tenantId && row?.status === "active" &&
@@ -253,7 +309,7 @@ async function persistTtsInflight(args: {
   const fields =
     "id,tenant_id,status,provider_termination_state,provider_termination_reason,provider_usage_state";
   try {
-    const { data, error } = await supa()
+    const { data, error } = await abortableStartupReceipt(supa()
       .from("calls")
       .update({
         provider_termination_state: "not_required",
@@ -264,16 +320,17 @@ async function persistTtsInflight(args: {
       .eq("tenant_id", args.tenantId)
       .eq("status", "active")
       .select(fields)
-      .maybeSingle();
+      .maybeSingle(), args.signal);
     if (!error && exact(data)) return true;
   } catch {}
+  if (args.signal?.aborted) return false;
   try {
-    const { data, error } = await supa()
+    const { data, error } = await abortableStartupReceipt(supa()
       .from("calls")
       .select(fields)
       .eq("id", args.callId)
       .eq("tenant_id", args.tenantId)
-      .maybeSingle();
+      .maybeSingle(), args.signal);
     return !error && exact(data);
   } catch {
     return false;
@@ -285,6 +342,7 @@ async function persistRealtimeProviderIdentity(args: {
   tenantId: string;
   openaiCallId: string;
   model: string;
+  signal?: AbortSignal;
 }): Promise<boolean> {
   const exact = (row: any) => row?.id === args.callId &&
     row?.tenant_id === args.tenantId &&
@@ -296,7 +354,7 @@ async function persistRealtimeProviderIdentity(args: {
   const fields =
     "id,tenant_id,status,openai_call_id,model,provider_termination_state,provider_termination_mode,provider_usage_state";
   try {
-    const { data, error } = await supa()
+    const { data, error } = await abortableStartupReceipt(supa()
       .from("calls")
       .update({
         openai_call_id: args.openaiCallId,
@@ -309,17 +367,19 @@ async function persistRealtimeProviderIdentity(args: {
       .eq("tenant_id", args.tenantId)
       .eq("status", "active")
       .eq("provider_termination_state", "unknown")
+      .is("provider_termination_attempt_id", null)
       .select(fields)
-      .maybeSingle();
+      .maybeSingle(), args.signal);
     if (!error && exact(data)) return true;
   } catch {}
+  if (args.signal?.aborted) return false;
   try {
-    const { data, error } = await supa()
+    const { data, error } = await abortableStartupReceipt(supa()
       .from("calls")
       .select(fields)
       .eq("id", args.callId)
       .eq("tenant_id", args.tenantId)
-      .maybeSingle();
+      .maybeSingle(), args.signal);
     return !error && exact(data);
   } catch {
     return false;
@@ -329,6 +389,7 @@ async function persistRealtimeProviderIdentity(args: {
 async function persistProviderCreateInflight(args: {
   callId: string;
   tenantId: string;
+  signal?: AbortSignal;
 }): Promise<boolean> {
   const exact = (row: any) => row?.id === args.callId &&
     row?.tenant_id === args.tenantId &&
@@ -341,7 +402,7 @@ async function persistProviderCreateInflight(args: {
   const fields =
     "id,tenant_id,status,openai_call_id,provider_termination_state,provider_termination_mode,provider_termination_reason,provider_usage_state";
   try {
-    const { data, error } = await supa()
+    const { data, error } = await abortableStartupReceipt(supa()
       .from("calls")
       .update({
         provider_termination_state: "unknown",
@@ -353,16 +414,17 @@ async function persistProviderCreateInflight(args: {
       .eq("tenant_id", args.tenantId)
       .eq("status", "active")
       .select(fields)
-      .maybeSingle();
+      .maybeSingle(), args.signal);
     if (!error && exact(data)) return true;
   } catch {}
+  if (args.signal?.aborted) return false;
   try {
-    const { data, error } = await supa()
+    const { data, error } = await abortableStartupReceipt(supa()
       .from("calls")
       .select(fields)
       .eq("id", args.callId)
       .eq("tenant_id", args.tenantId)
-      .maybeSingle();
+      .maybeSingle(), args.signal);
     return !error && exact(data);
   } catch {
     return false;
@@ -518,7 +580,9 @@ export async function startSession(
   registerCleanup?: (cleanup: DirectSessionCleanup) => void,
   options: StartSessionOptions = {},
 ) {
-  const { tenant, rules } = await resolveSessionTenant(userId, tenantId);
+  const traceScope = { requestId: options.browserRequestId, callId: options.requestedCallId };
+  const trace = createVoiceStartupTrace(traceScope);
+  const { tenant, rules } = await trace.measure("tenant_context", () => resolveSessionTenant(userId, tenantId));
 
   if (
     sessionType === "onboarding" &&
@@ -543,7 +607,7 @@ export async function startSession(
   const budgetEnvelope = sessionBudgetEnvelope(sessionType);
 
   // call row first (budget RPC references it)
-  const { data: call, error: ce } = await supa()
+  const { data: call, error: ce } = await trace.measure("call_insert", () => supa()
     .from("calls")
     .insert({
       ...(sessionType === "onboarding"
@@ -558,52 +622,64 @@ export async function startSession(
       provider_usage_state: "not_applicable",
     })
     .select("id")
-    .single();
+    .single());
   if (ce || !call) throw new Error(`call_insert_failed: ${ce?.message}`);
+  traceScope.callId = call.id;
 
+  let acceptedModel = primary;
+  const terminateStartupProvider = async (
+    provider: { openaiCallId: string | null; mode: "hangup" | "reject" }, reason: string,
+  ): Promise<ProviderTerminationResult> => {
+    const terminate = () => boundedCleanupReceipt(() => terminateProviderCall({
+      callId: call.id, ...provider, reason,
+    }), 5_500);
+    const first = await terminate();
+    if (first?.confirmed || !provider.openaiCallId) return first ?? { confirmed: false, error: "provider_termination_receipt_pending" };
+    // A Location may arrive before the identity write completes (or its body
+    // fails). Bind only that known identity, guarded against a spent termination
+    // attempt, then let the existing RPC arbitrate the single permitted hangup.
+    const identity = await boundedCleanupReceipt(signal => persistRealtimeProviderIdentity({
+      callId: call.id, tenantId: tenant.id, openaiCallId: provider.openaiCallId!, model: acceptedModel, signal,
+    }));
+    if (!identity) return first ?? { confirmed: false, error: "provider_identity_receipt_pending" };
+    return await terminate() ?? { confirmed: false, error: "provider_termination_receipt_pending" };
+  };
   const settleStartupFailure = async (
     reason: string,
     usageState: "not_applicable" | "unknown" | "resolved",
     provider?: { openaiCallId: string | null; mode: "hangup" | "reject" },
     actualCostUsd = 0,
+    terminationWork?: Promise<ProviderTerminationResult>,
   ) => {
     const usageResolved = usageState === "not_applicable" || usageState === "resolved";
     const knownCostFloor = Number(actualCostUsd.toFixed(8));
-    const resolvedCost = knownCostFloor;
-    const terminalWrite = await supa().from("calls").update({
+    const termination = provider ? await (terminationWork ?? terminateStartupProvider(provider, reason)) : null;
+    const terminalWrite = await boundedCleanupReceipt(signal => abortableStartupReceipt(supa().from("calls").update({
       status: "error",
       ended_at: new Date().toISOString(),
       duration_seconds: 0,
-      cost_estimate_usd: usageResolved || knownCostFloor > 0
-        ? usageResolved ? resolvedCost : knownCostFloor
-        : null,
-      provider_termination_state: provider ? (provider.openaiCallId ? "active" : "unknown") : "not_required",
-      provider_termination_mode: provider?.mode ?? null,
+      cost_estimate_usd: usageResolved || knownCostFloor > 0 ? knownCostFloor : null,
+      // Accepted/unknown provider state belongs to the termination RPC. A late
+      // status-write response must never reset its pending/confirmed evidence.
+      ...(!provider ? { provider_termination_state: "not_required", provider_termination_mode: null } : {}),
       provider_termination_reason: reason,
       provider_usage_state: usageState,
-    }).eq("id", call.id);
-    if (terminalWrite.error) return false;
-    return await finalizeTerminalBudget({
-      tenantId: tenant.id,
-      callId: call.id,
-      actualCostUsd: usageResolved ? resolvedCost : knownCostFloor,
-      minutes: 0,
-      outcome: "startup_error",
-      detail: { reason },
-      provider: provider ? { ...provider, reason } : undefined,
-      usageResolved,
-    });
+    }).eq("id", call.id).eq("tenant_id", tenant.id).eq("status", "active"), signal));
+    const terminalWriteProven = terminalWrite !== null && !terminalWrite.error;
+    const settled = await boundedCleanupReceipt(() => finalizeTerminalBudget({
+      tenantId: tenant.id, callId: call.id, actualCostUsd: knownCostFloor,
+      minutes: 0, outcome: "startup_error", detail: { reason },
+      // Termination is already under separate custody. Unproven receipts or
+      // accepted-provider usage keep the existing reservation in reconciliation.
+      usageResolved: usageResolved && terminalWriteProven && (!provider || termination?.confirmed === true),
+    }));
+    return settled === true;
   };
 
-  type StartupPhase =
-    | "before_tts"
-    | "tts_inflight"
-    | "tts_resolved"
-    | "provider_marking"
-    | "provider_inflight"
-    | "provider_accepted"
-    | "sideband";
-  let startupPhase: StartupPhase = "before_tts";
+  // Audio synthesis and Realtime creation can overlap. Neither outcome can be
+  // inferred from the other: preserve both before cancelling or settling.
+  let ttsUsageState: "not_applicable" | "unknown" | "resolved" = "not_applicable";
+  let providerLifecycle: "not_started" | "marking" | "inflight" | "rejected" | "accepted" = "not_started";
   let startupCancelled = false;
   let openingPayload: OnboardingOpeningPayload | null = null;
   let websiteInterview: Awaited<ReturnType<typeof synthesizeClaimedWebsiteOpening>> | undefined;
@@ -611,8 +687,26 @@ export async function startSession(
   let externalCostUsd = 0;
   let openaiCallId = "";
   let ttsAbortController: AbortController | null = null;
-  let ttsFinished: Promise<void> | null = null;
-  let resolveTtsFinished: (() => void) | null = null;
+  let ttsFinished: Promise<unknown> | null = null;
+  let providerFinished: Promise<unknown> | null = null;
+  let ttsProviderFinished: Promise<void> | null = null;
+  let providerNetworkFinished: Promise<void> | null = null;
+  const startupReceipts = new AbortController();
+  const trackTtsProvider = async <T extends { cost_usd: number }>(operation: () => Promise<T>): Promise<T> => {
+    if (startupCancelled) throw Object.assign(new Error("browser_request_cancelled"), { usageResolved: true, costUsd: externalCostUsd });
+    let finished!: () => void;
+    ttsProviderFinished = new Promise<void>(resolve => { finished = resolve; });
+    try {
+      const payload = await operation();
+      externalCostUsd = payload.cost_usd;
+      ttsUsageState = "resolved";
+      return payload;
+    } catch (error) {
+      const cost = resolvedOnboardingTtsFailureCost(error);
+      if (cost !== null) { externalCostUsd = cost; ttsUsageState = "resolved"; }
+      throw error;
+    } finally { finished(); }
+  };
   let providerCreateController: AbortController | null = null;
   let sidebandControl: ReturnType<typeof attachSideband> | null = null;
   let cleanupPromise: Promise<void> | null = null;
@@ -628,30 +722,26 @@ export async function startSession(
         startupCancelled = true;
         ttsAbortController?.abort();
         providerCreateController?.abort();
+        startupReceipts.abort();
         sidebandControl?.cancel(reason);
         cleanupPromise = (async () => {
           await reservationFinished;
-          if (startupPhase === "tts_inflight" && ttsFinished)
-            await ttsFinished;
-          const provider = startupPhase === "provider_inflight"
-            ? { openaiCallId: null, mode: "hangup" as const }
-            : (startupPhase === "provider_accepted" ||
-                startupPhase === "sideband") && openaiCallId
-              ? { openaiCallId, mode: "hangup" as const }
-              : undefined;
-          const usageState = startupPhase === "before_tts"
-            ? "not_applicable" as const
-            : (startupPhase === "tts_resolved" ||
-                startupPhase === "provider_marking")
-              ? "resolved" as const
-              : "unknown" as const;
+          // Wait only for the bounded provider request, never for its database
+          // response body. An accepted call can be stopped while TTS accounting
+          // is still resolving independently.
+          await providerNetworkFinished;
+          const provider = ["inflight", "accepted"].includes(providerLifecycle)
+            ? { openaiCallId: openaiCallId || null, mode: "hangup" as const }
+            : undefined;
+          const termination = provider ? terminateStartupProvider(provider, reason) : undefined;
+          await ttsProviderFinished;
+          const usageState = provider ? "unknown" as const : ttsUsageState;
           await settleStartupFailure(
             reason,
             usageState,
             provider,
-            startupPhase === "before_tts" || startupPhase === "tts_inflight"
-              ? 0
-              : externalCostUsd,
+            externalCostUsd,
+            termination,
           );
         })();
       }
@@ -672,11 +762,11 @@ export async function startSession(
   // Atomic budget reservation remains a hard gate, but the app-opening cleanup
   // control is already registered and waits for this outcome before settlement.
   try {
-    await reserveCallBudget(
+    await trace.measure("budget_reservation", () => reserveCallBudget(
       tenant.id,
       call.id,
       budgetEnvelope.reservationUsd,
-    );
+    ));
   } catch (error: any) {
     resolveReservationFinished();
     if (startupCancelled) await stopIfCancelled();
@@ -707,14 +797,14 @@ export async function startSession(
   if (websiteProtocol) {
     try {
       if (!options.browserRequestId || !UUID_PATTERN.test(options.browserRequestId)) throw new Error("website_interview_request_identity_required");
-      preparedWebsite = await prepareRequiredWebsiteInterview({ ownerId: userId, tenantId: tenant.id, callId: call.id, requestId: options.browserRequestId }, supa());
+      preparedWebsite = await trace.measure("website_context", () => prepareRequiredWebsiteInterview({ ownerId: userId, tenantId: tenant.id, callId: call.id, requestId: options.browserRequestId! }, supa()));
     } catch (error: any) {
       await settleStartupFailure(String(error?.message ?? "website_interview_prepare_failed"), "not_applicable");
       throw Object.assign(error, { status: 503 });
     }
     await stopIfCancelled();
   } else if (sessionType === "onboarding") {
-    const resumeResult = await initializeOnboardingResume(cap);
+    const resumeResult = await trace.measure("resume_context", () => initializeOnboardingResume(cap));
     await stopIfCancelled();
     if (!resumeResult.ok) {
       const reason = `onboarding_resume_${resumeResult.code}`;
@@ -727,238 +817,156 @@ export async function startSession(
 
   if (openingMode === "application_tts_v1") {
     if (!options.browserRequestId?.trim()) {
-      await settleStartupFailure(
-        "onboarding_opening_request_identity_missing",
-        "not_applicable",
-      );
-      throw Object.assign(
-        new Error("onboarding_opening_request_identity_missing"),
-        { status: 503 },
-      );
+      await settleStartupFailure("onboarding_opening_request_identity_missing", "not_applicable");
+      throw Object.assign(new Error("onboarding_opening_request_identity_missing"), { status: 503 });
     }
-    const ttsInflightProven = await persistTtsInflight({
-      callId: call.id,
-      tenantId: tenant.id,
-    });
+    const ttsInflightProven = await trace.measure("tts_marker", () => persistTtsInflight({ callId: call.id, tenantId: tenant.id, signal: startupReceipts.signal }));
     await stopIfCancelled();
     if (!ttsInflightProven) {
-      await settleStartupFailure(
-        "onboarding_tts_inflight_unproven",
-        "not_applicable",
-      );
-      throw Object.assign(
-        new Error("onboarding_tts_inflight_unproven"),
-        { status: 503 },
-      );
+      await settleStartupFailure("onboarding_tts_inflight_unproven", "not_applicable");
+      throw Object.assign(new Error("onboarding_tts_inflight_unproven"), { status: 503 });
     }
-    startupPhase = "tts_inflight";
+  }
+
+  // The persisted context and reservation are hard gates above. Once they pass,
+  // audio and SDP creation are independent; publish only after both succeed.
+  ttsFinished = abortableStartupReceipt(trace.measure("opening_audio", async () => {
+    if (openingMode !== "application_tts_v1" || startupCancelled) return;
+    ttsUsageState = "unknown";
     ttsAbortController = new AbortController();
-    ttsFinished = new Promise<void>((resolve) => {
-      resolveTtsFinished = resolve;
-    });
     try {
       if (preparedWebsite) {
         websiteInterview = await synthesizeClaimedWebsiteOpening(preparedWebsite, tenant.name, {
           evidence: createInterviewEvidenceStore(supa()),
-          synthesize: (action) => synthesizeOnboardingSpeech(action, { openaiKey: config.openaiKey, signal: ttsAbortController!.signal }),
+          synthesize: (action) => trackTtsProvider(() => synthesizeOnboardingSpeech(action, {
+            openaiKey: config.openaiKey, signal: ttsAbortController!.signal,
+          })),
         });
         externalCostUsd = websiteInterview.openingPayload.cost_usd;
       } else {
-        openingPayload = await synthesizeOnboardingOpening(
-        {
+        openingPayload = await trackTtsProvider(() => synthesizeOnboardingOpening({
           tenantName: tenant.name,
-          browserRequestId: options.browserRequestId,
+          browserRequestId: options.browserRequestId!,
           callId: call.id,
           resumeContext,
-        },
-        {
-          openaiKey: config.openaiKey,
-          signal: ttsAbortController.signal,
-        },
-      );
-      externalCostUsd = openingPayload.cost_usd;
+        }, { openaiKey: config.openaiKey, signal: ttsAbortController!.signal }));
+        externalCostUsd = openingPayload.cost_usd;
       }
-      startupPhase = "tts_resolved";
-      resolveTtsFinished?.();
-      await stopIfCancelled();
-      if (!await persistOnboardingTtsCostFloor({
-        callId: call.id,
-        tenantId: tenant.id,
-        costUsd: externalCostUsd,
-      })) {
-        await settleStartupFailure(
-          "onboarding_tts_cost_floor_unproven",
-          "resolved",
-          undefined,
-          externalCostUsd,
-        );
-        throw Object.assign(
-          new Error("onboarding_tts_cost_floor_unproven"),
-          { status: 503, costFloorHandled: true },
-        );
-      }
-      await stopIfCancelled();
+      ttsUsageState = "resolved";
+      // A cost-only write cannot overwrite the concurrent provider's unknown or
+      // accepted lifecycle marker. Terminal settlement joins their usage later.
+      if (!await trace.measure("opening_cost_floor", () => persistOnboardingTtsCostFloor({
+        callId: call.id, tenantId: tenant.id, costUsd: externalCostUsd, signal: startupReceipts.signal,
+      }))) throw Object.assign(new Error("onboarding_tts_cost_floor_unproven"), { status: 503 });
     } catch (error: any) {
       const resolvedCost = resolvedOnboardingTtsFailureCost(error);
-      const usageResolved = resolvedCost !== null;
-      const actualCost = resolvedCost ?? 0;
-      if (usageResolved) {
-        externalCostUsd = actualCost;
-        startupPhase = "tts_resolved";
+      if (resolvedCost !== null) {
+        externalCostUsd = resolvedCost;
+        ttsUsageState = "resolved";
       }
-      resolveTtsFinished?.();
-      if (startupCancelled) await stopIfCancelled();
-      if (error?.costFloorHandled === true) throw error;
-      await settleStartupFailure(
-        String(error?.message ?? "onboarding_tts_outcome_unknown"),
-        usageResolved ? "resolved" : "unknown",
-        undefined,
-        actualCost,
-      );
-      throw Object.assign(
-        new Error(String(error?.message ?? "onboarding_tts_outcome_unknown")),
-        { status: usageResolved ? 502 : 503 },
-      );
+      throw Object.assign(new Error(String(error?.message ?? "onboarding_tts_outcome_unknown")), {
+        status: error?.status ?? (ttsUsageState === "resolved" ? 502 : 503),
+      });
     } finally {
-      resolveTtsFinished?.();
-      resolveTtsFinished = null;
       ttsAbortController = null;
     }
-  }
+  }), startupReceipts.signal);
 
-  startupPhase = "provider_marking";
-  const providerInflightProven = await persistProviderCreateInflight({
-    callId: call.id,
-    tenantId: tenant.id,
-  });
-  await stopIfCancelled();
-  if (!providerInflightProven) {
-    await settleStartupFailure(
-      "provider_create_inflight_unproven",
-      "not_applicable",
-      undefined,
-      externalCostUsd,
-    );
-    throw Object.assign(
-      new Error("provider_create_inflight_unproven"),
-      { status: 503 },
-    );
-  }
-  startupPhase = "provider_inflight";
+  let answerSdp = "", usedModel = "";
+  providerFinished = abortableStartupReceipt((async () => {
+    providerLifecycle = "marking";
+    const providerInflightProven = await trace.measure("provider_marker", () => persistProviderCreateInflight({ callId: call.id, tenantId: tenant.id, signal: startupReceipts.signal }));
+    if (startupCancelled) return;
+    if (!providerInflightProven)
+      throw Object.assign(new Error("provider_create_inflight_unproven"), { status: 503 });
 
-  // Unified interface (official server flow): ONE multipart POST with the STANDARD key. No ephemeral ek_ —
-  // we proxy the SDP ourselves, and calls created under an ek_ are invisible to the standard-key sideband
-  // (404 call_id_not_found), which killed tools mid-call on 2026-08-19. Fall back through the model chain.
-  let answerSdp = "", usedModel = "", lastErr = "";
-  let ambiguousProvider: { detail: string; openaiCallId: string | null } | null = null;
-  providerCreateController = new AbortController();
-  const providerCreateDeadline = setTimeout(
-    () => providerCreateController.abort(),
-    config.realtimeCreateTimeoutMs,
-  );
-  try {
-    for (const model of chain) {
-      let attemptCallId: string | null = null;
-      try {
-      const form = new FormData();
-      form.set("sdp", sdpOffer);
-      // One explicit turn-control mode (voice-orchestration contract): semantic VAD with
-      // low eagerness owns ordinary user turns — server-created responses, native
-      // barge-in. The application never creates a response for a normal user turn.
-      form.set("session", JSON.stringify(buildRealtimeSessionConfig({
-        model,
-        instructions,
-        tools: toolSchemasForSessionType(sessionType),
-        voice: sessionType === "onboarding" ? "ash" : config.voice,
-        openingMode,
-        ...(websiteProtocol ? { onboardingProtocolVersion: 3 as const } : {}),
-      })));
-      const callRes = await fetch("https://api.openai.com/v1/realtime/calls", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${config.openaiKey}` },
-        body: form,
-        signal: providerCreateController.signal,
-      });
-      const candidateCallId = (callRes.headers.get("Location") ?? "").split("/").pop() ?? "";
-      attemptCallId = candidateCallId || null;
-      if (candidateCallId) {
-        openaiCallId = candidateCallId;
-        startupPhase = "provider_accepted";
-      }
-      if (!callRes.ok) {
-        const responseText = await callRes.text();
-        const detail = `sdp ${model}: ${callRes.status} ${responseText}`;
-        if (callRes.status >= 400 && callRes.status < 500 && !candidateCallId) {
-          lastErr = detail;
-          continue; // explicit non-acceptance: this model did not create a call
+    // ONE multipart POST with the standard key. Explicit non-acceptance alone
+    // permits model fallback; unknown outcomes never create a second session.
+    let lastErr = "";
+    providerCreateController = new AbortController();
+    const controller = providerCreateController;
+    const providerCreateDeadline = setTimeout(() => controller.abort(), config.realtimeCreateTimeoutMs);
+    let finishNetwork!: () => void;
+    providerNetworkFinished = new Promise<void>(resolve => { finishNetwork = resolve; });
+    try {
+      await trace.measure("provider_create", async () => {
+        for (const model of chain) {
+          if (startupCancelled) return;
+          let attemptCallId: string | null = null;
+          try {
+            const form = new FormData();
+            form.set("sdp", sdpOffer);
+            form.set("session", JSON.stringify(buildRealtimeSessionConfig({
+              model,
+              instructions,
+              tools: toolSchemasForSessionType(sessionType),
+              voice: sessionType === "onboarding" ? "ash" : config.voice,
+              openingMode,
+              ...(websiteProtocol ? { onboardingProtocolVersion: 3 as const } : {}),
+            })));
+            providerLifecycle = "inflight";
+            const callRes = await fetch("https://api.openai.com/v1/realtime/calls", {
+              method: "POST",
+              headers: { Authorization: `Bearer ${config.openaiKey}` },
+              body: form,
+              signal: controller.signal,
+            });
+            const candidateCallId = (callRes.headers.get("Location") ?? "").split("/").pop() ?? "";
+            attemptCallId = candidateCallId || null;
+            if (candidateCallId) {
+              openaiCallId = candidateCallId;
+              providerLifecycle = "accepted";
+              acceptedModel = model;
+            }
+            if (!callRes.ok) {
+              const responseText = await callRes.text();
+              const detail = `sdp ${model}: ${callRes.status} ${responseText}`;
+              if (callRes.status >= 400 && callRes.status < 500 && !candidateCallId) {
+                providerLifecycle = "rejected";
+                lastErr = detail;
+                continue;
+              }
+              throw Object.assign(new Error("provider_outcome_unknown"), { detail });
+            }
+            if (!candidateCallId)
+              throw Object.assign(new Error("provider_outcome_unknown"), { detail: `no_call_id ${model}` });
+            const candidateAnswerSdp = await callRes.text();
+            if (!candidateAnswerSdp.trim())
+              throw Object.assign(new Error("provider_outcome_unknown"), { detail: `empty_sdp ${model}` });
+            answerSdp = candidateAnswerSdp;
+            usedModel = model;
+            break;
+          } catch (error: any) {
+            // Keep any late Location even when cancellation won before its body.
+            if (attemptCallId) openaiCallId = attemptCallId;
+            throw Object.assign(new Error("provider_outcome_unknown"), {
+              status: 502, detail: error?.detail ?? `${model}: ${error?.message}`,
+            });
+          }
         }
-        ambiguousProvider = { detail, openaiCallId: candidateCallId || null };
-        break;
-      }
-      if (!candidateCallId) {
-        ambiguousProvider = { detail: `no_call_id ${model}`, openaiCallId: null };
-        break;
-      }
-      const candidateAnswerSdp = await callRes.text();
-      if (!candidateAnswerSdp.trim()) {
-        ambiguousProvider = { detail: `empty_sdp ${model}`, openaiCallId: candidateCallId };
-        break;
-      }
-      answerSdp = candidateAnswerSdp;
-      openaiCallId = candidateCallId;
-      usedModel = model;
-      break;
-      } catch (e: any) {
-        ambiguousProvider = {
-          detail: `${model}: ${e?.message}`,
-          openaiCallId: attemptCallId,
-        };
-        break;
-      }
+        if (!startupCancelled && !usedModel)
+          throw Object.assign(new Error("realtime_unavailable"), { status: 502, detail: lastErr });
+      });
+    } finally {
+      clearTimeout(providerCreateDeadline);
+      providerCreateController = null;
+      finishNetwork();
     }
-  } finally {
-    clearTimeout(providerCreateDeadline);
-    providerCreateController = null;
-  }
-  await stopIfCancelled();
-  if (ambiguousProvider) {
-    await settleStartupFailure("provider_outcome_unknown", "unknown", {
-      openaiCallId: ambiguousProvider.openaiCallId,
-      mode: "hangup",
-    }, externalCostUsd);
-    throw Object.assign(new Error("provider_outcome_unknown"), {
-      status: 502,
-      detail: ambiguousProvider.detail,
-    });
-  }
-  if (!usedModel) {
-    await settleStartupFailure(
-      "realtime_unavailable",
-      "not_applicable",
-      undefined,
-      externalCostUsd,
-    );
-    throw Object.assign(new Error("realtime_unavailable"), { status: 502, detail: lastErr });
-  }
+    if (startupCancelled) return;
+    const providerIdentityProven = await trace.measure("provider_identity", () => persistRealtimeProviderIdentity({
+      callId: call.id, tenantId: tenant.id, openaiCallId, model: usedModel, signal: startupReceipts.signal,
+    }));
+    if (!providerIdentityProven)
+      throw Object.assign(new Error("provider_identity_unproven"), { status: 503 });
+  })(), startupReceipts.signal);
 
-  const providerIdentityProven = await persistRealtimeProviderIdentity({
-    callId: call.id,
-    tenantId: tenant.id,
-    openaiCallId,
-    model: usedModel,
-  });
+  const startupOutcomes = await Promise.allSettled([ttsFinished, providerFinished]);
   await stopIfCancelled();
-  if (!providerIdentityProven) {
-    await settleStartupFailure(
-      "provider_identity_unproven",
-      "unknown",
-      { openaiCallId, mode: "hangup" },
-      externalCostUsd,
-    );
-    throw Object.assign(
-      new Error("provider_identity_unproven"),
-      { status: 503 },
-    );
+  const failed = startupOutcomes.find((outcome) => outcome.status === "rejected");
+  if (failed?.status === "rejected") {
+    const failure = failed.reason;
+    await cleanupControl.cancel(String(failure?.message ?? "startup_failed"));
+    throw failure;
   }
   try {
     sidebandControl = attachSideband(
@@ -981,20 +989,14 @@ export async function startSession(
     cleanupControl.startupComplete = true;
   } catch (error) {
     if (startupCancelled) await stopIfCancelled();
-    await settleStartupFailure(
-      "sideband_attach_failed",
-      "unknown",
-      { openaiCallId, mode: "hangup" },
-      externalCostUsd,
-    );
+    await cleanupControl.cancel("sideband_attach_failed");
     throw error;
   }
-  startupPhase = "sideband";
   if (openingMode !== "application_tts_v1") registerCleanup?.(cleanupControl);
   let openTimer: ReturnType<typeof setTimeout> | null = null;
   if (openingMode === "application_tts_v1")
     try {
-      await Promise.race([
+      await trace.measure("sideband_open", () => Promise.race([
         sidebandControl!.opened,
         new Promise<never>((_resolve, reject) => {
           openTimer = setTimeout(
@@ -1002,7 +1004,7 @@ export async function startSession(
             config.sidebandOpenTimeoutMs,
           );
         }),
-      ]);
+      ]));
     } catch (error) {
       const reason = error instanceof Error &&
           error.message === "sideband_open_timeout"

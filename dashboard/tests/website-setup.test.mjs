@@ -138,6 +138,22 @@ test("maps every durable website setup state without inventing readiness", () =>
   assert.equal(legacyReady.startOnboardingEnabled, true);
 });
 
+test('pending amendment preserves approval and permits only a proven settled resume',async()=>{
+ const value=status('onboarding_amendment_pending',{voice_protocol_version:3,amendment_pending:true,
+  amendment_can_resume:false,amendment_request_receipt_id:UUID,voice_approval_receipt_id:UUID});
+ const pending=mapWebsiteSetupStatus(value);
+ assert.equal(pending.approvalReceiptId,UUID);assert.equal(pending.startOnboardingEnabled,false);
+ const html=await renderSetup({setup:pending});assert.match(html,/versão aprovada/i);assert.match(html,/disabled/);
+ const ready=mapWebsiteSetupStatus({...value,amendment_can_resume:true});assert.equal(ready.startOnboardingEnabled,true);
+ assert.throws(()=>mapWebsiteSetupStatus({...value,voice_approval_receipt_id:null}),/amendment proof/i);
+});
+test('an active or approved-closing interview cannot start a competing attempt from the setup page',async()=>{
+ for(const proof of [{},{voice_approval_receipt_id:UUID}]){
+  const setup=mapWebsiteSetupStatus(status('onboarding_in_progress',{voice_protocol_version:3,...proof}));
+  const html=await renderSetup({setup});assert.match(html,/disabled/);
+ }
+});
+
 test("validates one public HTTPS website URL", () => {
   assert.equal(validateWebsiteUrl("https://foghorn-air.vercel.app"), "https://foghorn-air.vercel.app/");
   for (const candidate of [

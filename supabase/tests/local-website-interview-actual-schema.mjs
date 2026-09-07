@@ -8,9 +8,11 @@ import {createOnboardingAgenda,applyVerifiedOwnerTurn,getAgendaAction} from '../
 import {buildWebsiteAgendaSeeds} from '../../voice-controller/src/onboarding-agenda-seed.ts';
 import {createOnboardingAgendaStore} from '../../voice-controller/src/onboarding-agenda-store.ts';
 import {createInterviewEvidenceStore} from '../../voice-controller/src/onboarding-interview-evidence-store.ts';
-import {buildWebsiteOpeningAction,createWebsiteAgendaCoordinator,reduceWebsiteAgenda,WEBSITE_APPROVAL_QUESTION} from '../../voice-controller/src/onboarding-agenda-coordinator.ts';
+import {buildWebsiteOpeningAction,WEBSITE_APPROVAL_QUESTION} from '../../voice-controller/src/onboarding-agenda-coordinator.ts';
+import {createWebsiteInterviewRuntime} from '../../voice-controller/src/onboarding-website-runtime.ts';
 import {generateWebsiteSummaryParts,buildWebsiteCandidateContext} from '../../voice-controller/src/onboarding-website-summary.ts';
 import {ONBOARDING_FINAL_SIGNOFF_TEXT} from '../../voice-controller/src/onboarding-speech.ts';
+import {runWebsiteInterruptionActualSchemaProbe} from './website-interview-interruption-actual-schema.mjs';
 
 const q=value=>`'${String(value).replaceAll("'","''")}'`;
 const jq=value=>`${q(JSON.stringify(value))}::jsonb`;
@@ -129,24 +131,33 @@ export async function runWebsiteInterviewActualSchemaSuite(input) {
     await assert.rejects(()=>authenticated(other,`select public.read_website_interview_speech(${q(call)},${q(opening.actionId)});`),/not_owner_bound/);
     tests.push('actual-browser-v3-owned-opening-and-played-proof');
 
-    // Exercise SQL JSONB output through the real coordinator, not only parsing.
-    let coordinator=createWebsiteAgendaCoordinator(stored,{nowMs:0,openingAction:opening});
-    const step=event=>{const r=reduceWebsiteAgenda(coordinator,event);coordinator=r.state;return r.commands;};
-    step({type:'opening.played',nowMs:1});
-    const text='Atendemos Novato, San Rafael e Petaluma; qualquer exceção exige minha aprovação.';
-    let commands=step({type:'owner.transcript',providerItemId:'actual-territory',text,nowMs:2});
-    const record=commands.find(c=>c.type==='record_owner_turn');assert.ok(record);
-    const turn=await store.recordOwnerTranscript({...scope,providerItemId:record.providerItemId,text});
-    commands=step({type:'owner_turn.recorded',requestId:record.requestId,providerItemId:record.providerItemId,turnId:turn.turnId,text,nowMs:3});
-    const interpret=commands.find(c=>c.type==='interpret_owner_turn');assert.ok(interpret);
-    step({type:'interpretation.created',requestId:interpret.requestId,responseId:'local-fixture-response',nowMs:4});
-    commands=step({type:'interpretation.completed',requestId:interpret.requestId,responseId:'local-fixture-response',turnId:turn.turnId,itemId:interpret.itemId,digest:interpret.digest,result:{proposal:{kind:'answer',itemId:interpret.itemId},facts:[]},nowMs:5});
-    const persist=commands.find(c=>c.type==='persist_agenda');assert.ok(persist);
-    const {requestId:effectRequestId,type:_effectType,...persistInput}=persist;
-    stored=await store.commitOwnerTurn({...scope,...persistInput});
-    const after=step({type:'agenda.persisted',requestId:persist.requestId,stored,nowMs:6});
-    assert.equal(coordinator.phase,'speaking');assert.ok(after.some(c=>c.type==='request_speech'));
-    tests.push('real-jsonb-store-to-coordinator-transition');
+    // Real runtime -> real store -> actual SQL. Removing an internal requestId
+    // here used to hide the production authorization collision (September 6).
+    // Only provider events/audio are simulated in this integration lane.
+    const events=[],diagnostics=[];
+    const runtime=createWebsiteInterviewRuntime({prepared:{scope,stored,projection},openingAction:opening,openingPayload},{
+      agendaStore:store,evidenceStore:evidence,synthesize:async action=>audioPayload(action),
+      send:event=>events.push(event),enqueue:async task=>task(),onTranscript:()=>{},onCost:()=>{},onUsage:()=>{},onUsageUnknown:()=>{},
+      onTerminate:()=>{},onState:()=>{},onDiagnostic:event=>diagnostics.push(event),
+    });
+    const acknowledge=action=>runtime.handleEvent({type:'conversation.item.created',item:{id:`lgs-${action.actionId.slice(0,28)}`,
+      type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:action.text}]}});
+    try{
+      await runtime.attach();await acknowledge(opening);
+      const text='Olha, atende só Novato, San Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?';
+      await runtime.handleEvent({type:'input_audio_buffer.speech_started',item_id:'actual-territory'});
+      await runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:'actual-territory',transcript:text});
+      const interpretation=events.find(event=>event.type==='response.create');assert.ok(interpretation);
+      await runtime.handleEvent({type:'response.done',response:{id:'local-fixture-response',status:'completed',metadata:interpretation.response.metadata,
+        output:[{type:'function_call',name:'submit_website_interview_proposal',call_id:'local-proposal',status:'completed',arguments:JSON.stringify({proposal:{kind:'answer',itemId:stored.nextAction.itemId},facts:[]})}]}});
+      assert.equal(runtime.state.stored.revision,1,JSON.stringify(diagnostics));
+      assert.equal(runtime.state.speech?.action.kind,'CONFIRM_AND_ASK_NEXT');
+      assert.equal(runtime.state.stored.agenda.items[0].evidence[0].text,text);
+      assert.equal(runtime.state.approval,undefined);
+      stored=runtime.state.stored;await acknowledge(runtime.state.speech.action);
+      assert.equal(await runSql(`select count(*) from public.website_interview_fact_batches where call_id=${q(call)};`),'1');
+    }finally{runtime.stop();}
+    tests.push('real-runtime-store-sql-september-6-territory-progression');
 
     // All remaining obligations stay present. Synthetic owner review deferrals
     // exercise a long queue without inventing operational answers or powers.
@@ -173,6 +184,8 @@ export async function runWebsiteInterviewActualSchemaSuite(input) {
     const parts=generateWebsiteSummaryParts({stored,projection}),summaryId=localId(20);
     assert.ok(parts.join('').includes(candidateTurn.text));
     const summary=await evidence.prepareSummary({...scope,summaryId,expectedRevision:stored.revision,expectedStoreVersion:stored.storeVersion,expectedDigest:stored.digest,expectedReceiptId:stored.receiptId,parts});
+    const interruption=await runWebsiteInterruptionActualSchemaProbe({runSql,owner,call,request,summaryId,parts,revision:stored.revision,digest:stored.digest});
+    tests.push(...interruption.scenarios);
     const makeAction=(kind,text,key)=>({actionId:sha([stored.agenda.binding,stored.revision,kind,key,text]),interviewId:call,callId:call,revision:stored.revision,kind,text,sourceDigest:stored.digest});
     assert.notEqual((await setup()).state,'onboarding_complete');
     for(let index=0;index<parts.length;index++)await played(makeAction('GENERATE_FINAL_SUMMARY',parts[index],[summary.summaryHash,index]),{summaryId,partIndex:index});

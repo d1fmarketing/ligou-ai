@@ -1,11 +1,12 @@
 import { createWebsiteAgendaCoordinator, reduceWebsiteAgenda, type WebsiteAgendaCommand, type WebsiteAgendaEvent, type WebsiteAgendaState } from "./onboarding-agenda-coordinator.ts";
-import { createOnboardingAgendaStore } from "./onboarding-agenda-store.ts";
+import { createOnboardingAgendaStore, onboardingAgendaDigest } from "./onboarding-agenda-store.ts";
 import { createInterviewEvidenceStore } from "./onboarding-interview-evidence-store.ts";
 import { synthesizeOnboardingSpeech, speechPayloadIsInternallyValid, type OnboardingSpeechAction, type OnboardingSpeechPayload } from "./onboarding-speech.ts";
 import type { PreparedWebsiteInterview } from "./onboarding-website-bootstrap.ts";
 import { generateWebsiteSummaryParts } from "./onboarding-website-summary.ts";
 import { validateWebsiteInterpretationFacts } from "./onboarding-website-facts.ts";
-import { getAgendaItems } from "./onboarding-agenda.ts";
+import { getAgendaItems, getAgendaAction } from "./onboarding-agenda.ts";
+import { randomUUID } from "node:crypto";
 
 type Interpret = Extract<WebsiteAgendaCommand,{type:"interpret_owner_turn"}>;
 export interface WebsiteInterviewRuntimeConfig {
@@ -26,6 +27,7 @@ export interface WebsiteInterviewRuntimeDependencies {
   onUsageUnknown():void;
   onTerminate(command:Extract<WebsiteAgendaCommand,{type:"terminate_session"}>):void;
   onState(state:WebsiteAgendaState):void;
+  onDiagnostic?(event:{callId:string;requestId:string;stage:string;elapsedMs:number;code?:string;attempt?:number;durationMs?:number;effectId?:string}):void;
   now?:()=>number;
 }
 
@@ -52,7 +54,7 @@ export function websiteInterpretationRequest(command: Interpret) {
 
 export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfig,deps:WebsiteInterviewRuntimeDependencies) {
   if(!speechPayloadIsInternallyValid(input.openingPayload,input.openingAction))throw new Error('website_runtime_opening_invalid');
-  const now=deps.now??Date.now,scope=input.prepared.scope,abort=new AbortController();
+  const now=deps.now??(()=>performance.now()),scope=input.prepared.scope,abort=new AbortController(),startedAt=now();
   let state=createWebsiteAgendaCoordinator(input.prepared.stored,{nowMs:now(),openingAction:input.openingAction});
   let payload:OnboardingSpeechPayload|null=input.openingPayload,stopped=false,deadline:ReturnType<typeof setTimeout>|undefined;
   let noticeTimer:ReturnType<typeof setTimeout>|undefined,noticeAttempts=0;
@@ -61,30 +63,115 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
   const terminalResponses=new Set<string>(),callerItems=new Set<string>(),ownerTranscripts=new Map<string,string>();
   const retiredInterpretations=new Set<string>();
   let interpreter:Interpret|undefined,activeResponseId:string|undefined,ttsInFlight=false;
-  function clearTimers(){if(deadline)clearTimeout(deadline);if(noticeTimer)clearTimeout(noticeTimer);deadline=undefined;noticeTimer=undefined;}
+  let speechAbort:AbortController|undefined;
+  const observedCommands:WebsiteAgendaCommand[]=[];
+  const retiredSpeech=new Set<string>();
+  const ownerContexts=new Map<string,{capturedItemId:string|null;approvalSummaryId:string|null}>();
+  const resumedClaims=new Map<string,Awaited<ReturnType<WebsiteInterviewRuntimeDependencies['evidenceStore']['resumeSpeech']>>>();
+  let recordingPlaybackActionId:string|undefined;
+  let lastHeardQuestionItemId=getAgendaAction(input.prepared.stored.agenda).itemId??null;
+  const asrWaiting=new Map<string,{retry:ReturnType<typeof setTimeout>;deadline:ReturnType<typeof setTimeout>;eventId?:string}>();
+  const asrProbes=new Map<string,{itemId:string;generation:number}>(),expiredOwnerInputs=new Set<string>();
+  const transientCodes=new Set(['08000','08001','08003','08006','40001','53300','57P01','57014','ETIMEDOUT','ECONNRESET','EAI_AGAIN','408','429','500','502','503','504']);
+  function errorCode(error:unknown):string{
+    const e=error as {code?:unknown;message?:unknown;status?:unknown};
+    if(typeof e?.code==='string' && (transientCodes.has(e.code) || ['42501','23505','PGRST301','PGRST302','PGRST303','WEBSITE_SOURCE_CHANGED'].includes(e.code)))return e.code;
+    if(e?.status===401 || e?.status===403)return '42501';
+    if(typeof e?.status==='number' && transientCodes.has(String(e.status)))return String(e.status);
+    if(typeof e?.message==='string' && /fetch failed|network request failed|failed to fetch|connection reset|timed out/i.test(e.message))return 'ETIMEDOUT';
+    return 'unclassified_effect_error';
+  }
+  function diagnostic(stage:string,detail:{code?:string;attempt?:number;durationMs?:number;effectId?:string}={}){
+    deps.onDiagnostic?.({callId:scope.callId,requestId:scope.requestId,stage,elapsedMs:Math.max(0,now()-startedAt),...detail});
+  }
+  function clearAsrWait(itemId:string){const wait=asrWaiting.get(itemId);if(wait){clearTimeout(wait.retry);clearTimeout(wait.deadline);asrWaiting.delete(itemId);}}
+  function clearTimers(){if(deadline)clearTimeout(deadline);if(noticeTimer)clearTimeout(noticeTimer);deadline=undefined;noticeTimer=undefined;for(const itemId of asrWaiting.keys())clearAsrWait(itemId);}
   function stop(){if(ttsInFlight)deps.onUsageUnknown();stopped=true;speechRetrieve=undefined;clearTimers();abort.abort();}
   function requireLive(){if(stopped || abort.signal.aborted)throw new Error('website_runtime_stopped');}
   function currentSpeechActionId(){return state.phase==='opening'?state.openingAction.actionId:state.speech?.action.actionId;}
   function publish(){
     if(speechRetrieve && (payload?.actionId!==speechRetrieve.actionId || currentSpeechActionId()!==speechRetrieve.actionId))speechRetrieve=undefined;
+    if(state.termination || ['error','amendment'].includes(state.speech?.after??'')){
+      for(const itemId of asrWaiting.keys()){expiredOwnerInputs.add(itemId);callerItems.delete(itemId);clearAsrWait(itemId);}
+    }
     deps.onState(state);scheduleDeadline();
+  }
+  function waitForFinalTranscript(itemId:string){
+    if(asrWaiting.has(itemId) || ownerTranscripts.has(itemId) || expiredOwnerInputs.has(itemId) || !callerItems.has(itemId) || state.termination || ['error','amendment'].includes(state.speech?.after??''))return;
+    const wait={retry:undefined as unknown as ReturnType<typeof setTimeout>,deadline:undefined as unknown as ReturnType<typeof setTimeout>,eventId:undefined as string|undefined};
+    wait.retry=setTimeout(()=>{
+      if(stopped || asrWaiting.get(itemId)!==wait)return;
+      const id=randomUUID();wait.eventId=`website-asr-retrieve-${id}`;
+      asrProbes.set(wait.eventId,{itemId,generation:attachGeneration});
+      diagnostic('owner.asr_retrieve',{effectId:id});
+      try{
+        deps.send({type:'conversation.item.retrieve',event_id:wait.eventId,item_id:itemId});
+        deps.send({type:'conversation.item.create',item:{id:`lsp-${id.slice(0,28)}`,type:'message',role:'system',status:'completed',
+          content:[{type:'input_text',text:`ligou.website_progress:${JSON.stringify({requestId:id,stage:'retrying'})}`}]}});
+      }catch{diagnostic('owner.asr_retrieve_unavailable');}
+    },5000);
+    wait.deadline=setTimeout(()=>{
+      if(stopped || asrWaiting.get(itemId)!==wait)return;
+      clearAsrWait(itemId);expiredOwnerInputs.add(itemId);callerItems.delete(itemId);
+      diagnostic('owner.asr_deadline');
+      // Fence the late event immediately, even if serialized IO is still busy.
+      let reduced=reduceWebsiteAgenda(state,{type:'owner.speech_finished',providerItemId:itemId,nowMs:now()});
+      state=reduced.state;
+      reduced=reduceWebsiteAgenda(state,{type:'adapter.failed',code:'website_asr_deadline_exceeded',nowMs:now()});
+      state=reduced.state;publish();
+      void deps.enqueue(async()=>{for(const command of reduced.commands)await execute(command);}).catch(()=>{});
+    },10000);
+    asrWaiting.set(itemId,wait);
+  }
+  /** Observe speech immediately, before the serialized queue finishes remote
+   * work. Only final provider transcripts may subsequently change the draft. */
+  function observeEvent(event:any):void{
+    if(stopped)return;
+    if(typeof event?.item_id==='string'){
+      if(event.type==='conversation.item.input_audio_transcription.failed' ||
+        (event.type==='conversation.item.input_audio_transcription.completed' && typeof event.transcript==='string'))clearAsrWait(event.item_id);
+      if(event.type==='input_audio_buffer.speech_stopped'){waitForFinalTranscript(event.item_id);return;}
+    }
+    if(stopped || event?.type!=='input_audio_buffer.speech_started' || typeof event.item_id!=='string' ||
+      callerItems.has(event.item_id) || ownerTranscripts.has(event.item_id) || expiredOwnerInputs.has(event.item_id) || state.termination || ['failed','complete'].includes(state.phase))return;
+    if(state.speech?.after==='error' || state.speech?.after==='amendment')return;
+    const previousAction=currentSpeechActionId();
+    const afterPlayedAck=Boolean(previousAction && recordingPlaybackActionId===previousAction);
+    // The next question can be answered while its published audio is playing.
+    // Until that audio exists, a continuation still belongs to the heard question.
+    const currentQuestionPublished=state.speech?.after==='owner' && payload?.actionId===previousAction;
+    ownerContexts.set(event.item_id,{capturedItemId:state.summary || currentQuestionPublished?getAgendaAction(state.stored.agenda).itemId??null:lastHeardQuestionItemId,
+      approvalSummaryId:asrWaiting.size===0 && (state.phase==='awaiting_approval' || (afterPlayedAck && state.speech?.after==='approval'))?state.summary?.summaryId??null:null});
+    callerItems.add(event.item_id);
+    const reduced=reduceWebsiteAgenda(state,{type:'owner.speech_started',providerItemId:event.item_id,
+      ...(afterPlayedAck?{afterPlaybackActionId:previousAction}:{}),nowMs:now()});
+    state=reduced.state;observedCommands.push(...reduced.commands);
+    if(previousAction && reduced.commands.some(command=>command.type==='interrupt_speech')){
+      retiredSpeech.add(previousAction);speechAbort?.abort();payload=null;speechRetrieve=undefined;
+      if(noticeTimer)clearTimeout(noticeTimer);noticeTimer=undefined;
+      diagnostic('speech.interrupted');
+    }
+    diagnostic('owner.speech_started');publish();
   }
   /** Only this exact live retrieve request may explain a missing item while
    * browser playback is still pending. It never proves playback or advances. */
   function ownsSpeechRetrieveMiss(event:any):boolean{
-    const itemId=payload?`lgs-${payload.actionId.slice(0,28)}`:'';
     const error=event?.error;
-    return !stopped && !!payload && !!speechRetrieve
+    const asr=asrProbes.get(error?.event_id);
+    const ownsSpeech=!!payload && !!speechRetrieve
       && speechRetrieve.generation===attachGeneration
       && speechRetrieve.actionId===payload.actionId
       && speechRetrieve.actionId===currentSpeechActionId()
-      && event?.type==='error'
-      && error?.event_id===speechRetrieve.eventId
+      && error?.event_id===speechRetrieve.eventId;
+    const itemId=asr?.itemId??(ownsSpeech?`lgs-${payload!.actionId.slice(0,28)}`:'');
+    const escaped=itemId.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    // Known old read misses are ignored, never promoted to successful evidence.
+    return !stopped && (Boolean(asr) || ownsSpeech) && event?.type==='error'
       && (error?.code==='item_not_found' ||
         (error?.type==='invalid_request_error' && error?.param==='item_id'
           && (error.code===undefined || error.code===null || error.code==='invalid_request_error')
           && typeof error.message==='string'
-          && new RegExp(`(?:^|[^A-Za-z0-9_-])${itemId}(?:$|[^A-Za-z0-9_-])`).test(error.message)
+          && new RegExp(`(?:^|[^A-Za-z0-9_-])${escaped}(?:$|[^A-Za-z0-9_-])`).test(error.message)
           && /\b(?:not found|does not exist)\b/i.test(error.message)));
   }
   function scheduleDeadline(){
@@ -98,10 +185,50 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
       :state.termination?{id:state.termination.requestId,at:state.termination.deadlineAtMs}:null;
     if(due)deadline=setTimeout(()=>{void deps.enqueue(()=>dispatch({type:'deadline',requestId:due.id,nowMs:now()})).catch(()=>{});},Math.max(1,due.at-now()));
   }
-  async function bounded<T>(operation:()=>Promise<T>):Promise<T>{
+  async function bounded<T>(operation:(signal:AbortSignal)=>Promise<T>,timeoutMs=15_000):Promise<T>{
     let timer:ReturnType<typeof setTimeout>|undefined;
-    try{requireLive();const result=await Promise.race([operation(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('website_effect_timeout')),15_000);})]);requireLive();return result;}
-    finally{if(timer)clearTimeout(timer);}
+    const operationAbort=new AbortController();
+    const cancel=()=>operationAbort.abort();abort.signal.addEventListener('abort',cancel,{once:true});
+    try{requireLive();const result=await Promise.race([operation(operationAbort.signal),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{
+      operationAbort.abort();reject(Object.assign(new Error('website_effect_timeout'),{code:'ETIMEDOUT'}));
+    },timeoutMs);})]);requireLive();return result;}
+    finally{if(timer)clearTimeout(timer);abort.signal.removeEventListener('abort',cancel);}
+  }
+  async function commitWithRecovery(command:Extract<WebsiteAgendaCommand,{type:'persist_agenda'}>,facts:ReturnType<typeof validateWebsiteInterpretationFacts>){
+    const start=now(),deadlineAt=start+10_000;
+    const expectedDigest=onboardingAgendaDigest(command.agenda);
+    let lastError:unknown;
+    for(let attempt=0;attempt<3 && now()<deadlineAt;attempt++){
+      requireLive();
+      try{
+        // The effect requestId deduplicates work; the browser requestId authorizes it.
+        const result=await bounded(signal=>deps.agendaStore.commitOwnerTurn({...command,...scope,signal,facts}),Math.min(2500,deadlineAt-now()));
+        diagnostic('answer.commit',{attempt,durationMs:now()-start,effectId:command.requestId});return result;
+      }catch(error){
+        requireLive();lastError=error;const code=errorCode(error);
+        diagnostic('answer.commit_failed',{code,attempt,durationMs:now()-start,effectId:command.requestId});
+        if(!transientCodes.has(code))throw error;
+        // A timeout is not proof of rollback. Read the authoritative receipt
+        // before replaying this exact idempotent owner operation.
+        try{
+          const stored=await bounded(signal=>deps.agendaStore.readWebsiteInterview({...scope,signal}),Math.min(2500,Math.max(1,deadlineAt-now())));
+          if(stored.digest===expectedDigest && stored.revision===command.agenda.revision && stored.storeVersion===command.expectedStoreVersion+1){
+            diagnostic('answer.reconciled',{attempt,durationMs:now()-start,effectId:command.requestId});return stored;
+          }
+          if(stored.digest!==command.expectedDigest || stored.storeVersion!==command.expectedStoreVersion)
+            throw Object.assign(new Error('website_answer_source_changed'),{code:'WEBSITE_SOURCE_CHANGED'});
+        }catch(readError){
+          requireLive();if(!transientCodes.has(errorCode(readError)))throw readError;
+          diagnostic('answer.reconcile_unavailable',{code:errorCode(readError),attempt,effectId:command.requestId});
+        }
+        if(attempt<2 && now()<deadlineAt){
+          if(attempt===0)deps.send({type:'conversation.item.create',item:{id:`lsp-${command.requestId.slice(0,28)}`,type:'message',role:'system',status:'completed',
+            content:[{type:'input_text',text:`ligou.website_progress:${JSON.stringify({requestId:command.requestId,stage:'retrying'})}`}]}});
+          await new Promise<void>(resolve=>setTimeout(resolve,Math.min(100*(attempt+1),Math.max(1,deadlineAt-now()))));
+        }
+      }
+    }
+    throw lastError??Object.assign(new Error('website_recovery_exhausted'),{code:'ETIMEDOUT'});
   }
   function notice(){
     if(stopped || !payload)return;
@@ -124,8 +251,28 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
     if(stopped)return;
     try{
       switch(command.type){
+        case 'record_empty_input':{
+          const receipt=await bounded(()=>deps.evidenceStore.recordEmptyInput({...scope,actionId:command.actionId,providerItemId:command.providerItemId}));
+          await dispatch({type:'empty_input.recorded',requestId:command.requestId,...receipt,nowMs:now()});break;
+        }
+        case 'interrupt_speech':{
+          const receipt=await bounded(()=>deps.evidenceStore.interruptSpeech({...scope,actionId:command.actionId,providerItemId:command.providerItemId}));
+          if(!receipt?.receiptId || receipt.actionId!==command.actionId || receipt.providerItemId!==command.providerItemId)
+            throw new Error('website_interruption_receipt_mismatch');
+          break;
+        }
+        case 'resume_speech':{
+          const receipt=await bounded(()=>deps.evidenceStore.resumeSpeech({...scope,actionId:command.actionId,providerItemId:command.providerItemId}));
+          resumedClaims.set(receipt.action.actionId,receipt);
+          await dispatch({type:'speech.resumed',requestId:command.requestId,action:receipt.action,nowMs:now()});break;
+        }
+        case 'request_amendment':{
+          const receipt=await bounded(()=>deps.evidenceStore.requestAmendment({...scope,approvalReceiptId:command.approvalReceiptId,
+            providerItemId:command.providerItemId,proposal:command.proposal}));
+          await dispatch({type:'amendment.requested',requestId:command.requestId,...receipt,nowMs:now()});break;
+        }
         case 'record_owner_turn':{
-          const result=await bounded(()=>deps.agendaStore.recordOwnerTranscript({...scope,providerItemId:command.providerItemId,text:command.text}));
+          const result=await bounded(signal=>deps.agendaStore.recordOwnerTranscript({...scope,signal,providerItemId:command.providerItemId,text:command.text}));
           await dispatch({type:'owner_turn.recorded',...result,requestId:command.requestId,nowMs:now()});break;
         }
         case 'interpret_owner_turn':
@@ -140,7 +287,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
           if(!ownerTranscript)throw new Error('website_owner_transcript_missing');
           const facts=validateWebsiteInterpretationFacts({facts:command.facts,proposal:command.proposal,
             currentItemId:command.currentItemId,agenda:state.stored.agenda,ownerTranscript});
-          const stored=await bounded(()=>deps.agendaStore.commitOwnerTurn({...scope,...command,facts}));
+          const stored=await commitWithRecovery(command,facts);
           await dispatch({type:'agenda.persisted',requestId:command.requestId,stored,nowMs:now()});break;
         }
         case 'prepare_summary':{
@@ -160,18 +307,23 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
           await dispatch({type:'approval.persisted',requestId:command.requestId,...receipt,nowMs:now()});break;
         }
         case 'request_speech':{
+          if(retiredSpeech.has(command.action.actionId))return;
+          const renditionAbort=new AbortController();speechAbort=renditionAbort;
           const summary=state.summary;
           const latestTurn=state.turns.at(-1);
           const association=summary && ['GENERATE_FINAL_SUMMARY','REQUEST_FINAL_APPROVAL'].includes(command.action.kind)
             ?{summaryId:summary.summaryId,...(command.action.kind==='GENERATE_FINAL_SUMMARY'?{partIndex:summary.partIndex}:{}),
               ...(command.action.kind==='REQUEST_FINAL_APPROVAL' && state.approvalClarifications>0 && latestTurn?{clarificationTurnId:latestTurn.turnId}:{})}:{};
-          const claim=await bounded(()=>deps.evidenceStore.claimSpeech({...scope,action:command.action,...association}));
+          const claim=resumedClaims.get(command.action.actionId)??await bounded(()=>deps.evidenceStore.claimSpeech({...scope,action:command.action,...association}));
+          resumedClaims.delete(command.action.actionId);
+          if(retiredSpeech.has(command.action.actionId))return;
           let ready=claim.payload;
           if(claim.status==='preparing' && claim.claimed){
             try{
               ttsInFlight=true;
-              ready=await deps.synthesize(command.action,abort.signal);requireLive();ttsInFlight=false;
+              ready=await deps.synthesize(command.action,AbortSignal.any([abort.signal,renditionAbort.signal]));requireLive();ttsInFlight=false;
               deps.onCost(ready.cost_usd);
+              if(retiredSpeech.has(command.action.actionId))return;
               const completed=await bounded(()=>deps.evidenceStore.completeSpeech({...scope,actionId:command.action.actionId,payload:ready!}));
               ready=completed.payload;
             }catch(error){
@@ -180,6 +332,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
               const failure=error as {usageResolved?:boolean;costUsd?:number};
               if(!ready && failure.usageResolved && typeof failure.costUsd==='number')deps.onCost(failure.costUsd);
               if(!ready && failure.usageResolved!==true)deps.onUsageUnknown();
+              if(retiredSpeech.has(command.action.actionId))return;
               await bounded(()=>deps.evidenceStore.failSpeech({...scope,actionId:command.action.actionId,reason:'tts_or_persistence_failed'})).catch(()=>{});
               throw error;
             }
@@ -188,6 +341,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
             throw new Error('website_speech_not_publishable');
           }
           if(!ready || !speechPayloadIsInternallyValid(ready,command.action))throw new Error('website_speech_readback_invalid');
+          if(retiredSpeech.has(command.action.actionId))return;
           payload=ready;noticeAttempts=0;
           await dispatch({type:'speech.ready',actionId:ready.actionId,textSha256:ready.text_sha256,audioSha256:ready.audio_sha256,nowMs:now()});
           notice();break;
@@ -200,36 +354,66 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
         case 'telemetry':break;
       }
     }catch(error){
-      if(command.type==='request_speech')await dispatch({type:'speech.failed',actionId:command.action.actionId,code:'speech_effect_failed',nowMs:now()});
+      diagnostic('effect.failed',{code:errorCode(error),...('requestId'in command?{effectId:command.requestId}:{})});
+      if(command.type==='interrupt_speech')await dispatch({type:'adapter.failed',code:'interruption_persistence_failed',nowMs:now()});
+      else if(command.type==='request_speech')await dispatch({type:'speech.failed',actionId:command.action.actionId,code:'speech_effect_failed',nowMs:now()});
       else if('requestId'in command)await dispatch({type:'effect.failed',requestId:command.requestId,code:'website_effect_failed',nowMs:now()});
     }
   }
   async function handleEvent(event:any):Promise<void>{
     if(stopped)return;
+    observeEvent(event);
+    for(const command of observedCommands.splice(0))await execute(command);
     if(event?.type==='input_audio_buffer.speech_started'){
-      if(['awaiting_owner','awaiting_approval'].includes(state.phase) && typeof event.item_id==='string')callerItems.add(event.item_id);
       return;
     }
+    if(event?.type==='input_audio_buffer.speech_stopped'){diagnostic('owner.speech_stopped');return;}
     if(event?.type==='conversation.item.input_audio_transcription.completed'){
+      if(expiredOwnerInputs.has(event.item_id))return;
       const previous=ownerTranscripts.get(event.item_id);
-      if(previous!==undefined){if(previous!==event.transcript)await dispatch({type:'adapter.failed',code:'conflicting_owner_transcript',nowMs:now()});return;}
-      if(!callerItems.delete(event.item_id) || typeof event.transcript!=='string' || !event.transcript.trim())return;
+      if(previous!==undefined){
+        if(previous!==event.transcript && (previous.trim() || String(event.transcript??'').trim()))
+          await dispatch({type:'adapter.failed',code:'conflicting_owner_transcript',nowMs:now()});
+        return;
+      }
+      if(typeof event.item_id!=='string' || typeof event.transcript!=='string')return;
+      callerItems.delete(event.item_id);
+      if(!event.transcript.trim()){
+        ownerTranscripts.set(event.item_id,event.transcript);
+        diagnostic('owner.transcript_empty');
+        await dispatch({type:'owner.transcript_empty',providerItemId:event.item_id,nowMs:now()});return;
+      }
+      const captured=ownerContexts.get(event.item_id)??{capturedItemId:getAgendaAction(state.stored.agenda).itemId??null,approvalSummaryId:null};
       ownerTranscripts.set(event.item_id,event.transcript);
-      deps.onTranscript({role:'caller',text:event.transcript,at:new Date(now()).toISOString()});
-      await dispatch({type:'owner.transcript',providerItemId:event.item_id,text:event.transcript,nowMs:now()});return;
+      diagnostic('owner.transcript_final');
+      deps.onTranscript({role:'caller',text:event.transcript,at:new Date().toISOString()});
+      await dispatch({type:'owner.transcript',providerItemId:event.item_id,text:event.transcript,...captured,nowMs:now()});return;
     }
     if(['conversation.item.created','conversation.item.done','conversation.item.retrieved'].includes(event?.type)){
       const item=event.item,p=payload;
+      if(event.type==='conversation.item.retrieved' && asrWaiting.has(item?.id) &&
+        [...asrProbes.values()].some(probe=>probe.itemId===item.id && probe.generation===attachGeneration)){
+        // The API documents this as an attached transcript, not final ASR.
+        // Only the completed transcription event can become an owner answer.
+        diagnostic('owner.asr_retrieved',{code:item?.role==='user' && item.content?.some((c:any)=>c.type==='input_audio' && typeof c.transcript==='string')
+          ?'attached_transcript_unverified':'attached_transcript_absent'});return;
+      }
       if(!p || item?.id!==`lgs-${p.actionId.slice(0,28)}`)return;
       if(item.type!=='message' || item.role!=='assistant' || item.status!=='completed'
         || item.content?.length!==1 || item.content[0]?.type!=='output_text' || item.content[0]?.text!==p.text){
         await dispatch({type:'adapter.failed',code:'website_speech_ack_mismatch',nowMs:now()});return;
       }
-      const receipt=await bounded(()=>deps.evidenceStore.recordSpeechPlayed({...scope,actionId:p.actionId,
-        assistantItemId:item.id,assistantText:p.text,textSha256:p.text_sha256,audioSha256:p.audio_sha256}));
+      recordingPlaybackActionId=p.actionId;
+      let receipt;
+      try{receipt=await bounded(()=>deps.evidenceStore.recordSpeechPlayed({...scope,actionId:p.actionId,
+        assistantItemId:item.id,assistantText:p.text,textSha256:p.text_sha256,audioSha256:p.audio_sha256}));}
+      finally{if(recordingPlaybackActionId===p.actionId)recordingPlaybackActionId=undefined;}
       if(!receipt?.receiptId)throw new Error('website_playback_receipt_missing');
+      if(['ASK_NEXT_GAP','CLARIFY_CURRENT_GAP','CONFIRM_AND_ASK_NEXT','DEFER_OFF_SCOPE_AND_CONTINUE','HANDLE_OWNER_CORRECTION'].includes(p.kind))
+        lastHeardQuestionItemId=getAgendaAction(state.stored.agenda).itemId??null;
       payload=null;speechRetrieve=undefined;if(noticeTimer)clearTimeout(noticeTimer);noticeTimer=undefined;
-      deps.onTranscript({role:'agent',text:p.text,at:new Date(now()).toISOString()});
+      diagnostic('speech.played');
+      deps.onTranscript({role:'agent',text:p.text,at:new Date().toISOString()});
       await dispatch(state.phase==='opening'?{type:'opening.played',nowMs:now()}:
         {type:'speech.played',actionId:p.actionId,textSha256:p.text_sha256,audioSha256:p.audio_sha256,nowMs:now()});return;
     }
@@ -277,8 +461,13 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
         || d?.create_response!==false || d?.interrupt_response!==false)
         await dispatch({type:'adapter.failed',code:'website_session_mode_drift',nowMs:now()});
     }
-    if(event?.type==='conversation.item.input_audio_transcription.failed')
+    if(event?.type==='conversation.item.input_audio_transcription.failed'){
+      if(typeof event.item_id==='string'){
+        callerItems.delete(event.item_id);
+        await dispatch({type:'owner.speech_finished',providerItemId:event.item_id,nowMs:now()});
+      }
       await dispatch({type:'adapter.failed',code:'website_transcription_failed',nowMs:now()});
+    }
   }
   async function attach(){
     requireLive();attachGeneration+=1;
@@ -298,5 +487,5 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
     await dispatch({type:'provider.termination_confirmed',requestId,receiptId:proof.providerReceiptId,nowMs:now()});
     await dispatch({type:'budget.settled',requestId,receiptId:proof.budgetReceiptId,nowMs:now()});
   }
-  return {handleEvent,attach,stop,finalized,ownsSpeechRetrieveMiss,get state(){return state;}};
+  return {observeEvent,handleEvent,attach,stop,finalized,ownsSpeechRetrieveMiss,get state(){return state;}};
 }

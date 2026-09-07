@@ -102,6 +102,7 @@ select extensions.ok(
   ) = array(
     select signature from (values
       ('prepare_fresh_website_interview(uuid,uuid,uuid,bigint,uuid,uuid,text,uuid,text)'),
+      ('prepare_initial_website_interview(uuid,uuid,uuid,bigint,uuid,text,uuid,text)'),
       ('resolve_prepared_website_source(uuid,uuid,uuid)'),
       ('initialize_website_interview(uuid,uuid,uuid,uuid,jsonb)'),
       ('read_website_interview(uuid,uuid,uuid)'),
@@ -112,6 +113,10 @@ select extensions.ok(
       ('claim_website_interview_speech(uuid,uuid,uuid,jsonb,uuid,integer,text)'),
       ('complete_website_interview_speech(uuid,uuid,uuid,text,jsonb)'),
       ('fail_website_interview_speech(uuid,uuid,uuid,text,text)'),
+      ('interrupt_website_interview_speech(uuid,uuid,uuid,text,text)'),
+      ('record_website_interview_empty_input(uuid,uuid,uuid,text,text)'),
+      ('resume_website_interview_speech(uuid,uuid,uuid,text,text)'),
+      ('request_website_interview_amendment(uuid,uuid,uuid,uuid,text,jsonb)'),
       ('record_website_interview_speech_played(uuid,uuid,uuid,text,text,text,text,text)'),
       ('approve_website_interview_summary(uuid,uuid,uuid,uuid,text,text,bigint,bigint,text)'),
       ('record_website_interview_completion(uuid,uuid,uuid,text,uuid)'),

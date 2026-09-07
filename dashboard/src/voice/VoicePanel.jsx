@@ -4,6 +4,8 @@ import { Dialog } from "../components/Dialog.jsx";
 import { supabase } from "../lib/supabase.js";
 import {
   applyCurrentSessionRun,
+  authenticateVoiceSession,
+  createVoiceSessionTiming,
   endedVoiceSessionCopy,
   handleClientUpgradeRequired,
   markVoiceSessionAccepted,
@@ -22,8 +24,9 @@ export function VoicePanel({
   initialSessionType = "owner_browser",
   lockedOnboarding = false,
   onboardingProtocolVersion = 2,
+  onTiming,
 }) {
-  const [status, setStatus] = useState("idle"); // idle | connecting | live | ended | error
+  const [status, setStatus] = useState("idle");
   const [error, setError] = useState(null);
   const [lines, setLines] = useState([]);
   const [liveCases, setLiveCases] = useState([]);
@@ -34,7 +37,10 @@ export function VoicePanel({
   );
   const [onboardingOutcome, setOnboardingOutcome] = useState(null);
   const [endedSessionType, setEndedSessionType] = useState(null);
+  const [endedCallId,setEndedCallId]=useState(null);
   const sessionRef = useRef(null);
+  const endedCallRef=useRef(null),outcomeRef=useRef(null);
+  const resumable=outcome=>outcome?.status==="resumable" || (outcome?.status==="amendment_pending" && outcome.canResume===true);
 
   useEffect(() => {
     if (!supabase) return undefined;
@@ -64,6 +70,15 @@ export function VoicePanel({
   const sessionRunRef = useRef(0);
   const outcomeAbortRef = useRef(null);
   const startAbortRef = useRef(null);
+  const startTimingRef = useRef(null);
+
+  useEffect(() => {
+    const timing = startTimingRef.current;
+    if (timing && !timing.visible && !["idle", "ended", "failed"].includes(status)) {
+      timing.visible = true;
+      timing.mark("visible_response");
+    }
+  }, [status]);
 
   useEffect(() => () => {
     outcomeAbortRef.current?.abort();
@@ -81,7 +96,9 @@ export function VoicePanel({
     endedRef.current = true;
     sessionRef.current = null;
     setStatus("ended");
+    setError(typeof end.message === "string" ? end.message : null);
     setEndedSessionType(endedSessionType);
+    endedCallRef.current=end.callId??null;outcomeRef.current=null;setEndedCallId(end.callId??null);
     setOnboardingOutcome(null);
     outcomeAbortRef.current?.abort();
     outcomeAbortRef.current = null;
@@ -98,34 +115,41 @@ export function VoicePanel({
       onOutcome: (outcome) => applyCurrentSessionRun({
         runId,
         currentRunId: sessionRunRef.current,
-        onCurrent: () => { if (endedRef.current) setOnboardingOutcome(outcome); },
+        onCurrent: () => { if (endedRef.current) { outcomeRef.current=outcome;setOnboardingOutcome(outcome); } },
       }),
     });
   }
 
   async function begin() {
+    // React may batch two click handlers before repainting. Claim custody in a
+    // ref before the first await so one click cannot supersede another start.
+    if (startAbortRef.current || sessionRef.current) return;
+    if(endedRef.current && sessionType==="onboarding" && onboardingProtocolVersion===3 && endedCallRef.current && !resumable(outcomeRef.current))return;
     outcomeAbortRef.current?.abort();
     outcomeAbortRef.current = null;
-    startAbortRef.current?.abort("superseded_run");
     const startAbort = new AbortController();
     startAbortRef.current = startAbort;
+    const timing = createVoiceSessionTiming({ onTiming });
+    startTimingRef.current = timing;
+    timing.mark("start");
     const runId = sessionRunRef.current + 1;
     sessionRunRef.current = runId;
     const startedSessionType = sessionType;
     cancelledRef.current = false;
     endedRef.current = false;
-    setStatus("connecting");
+    setStatus(status === "failed" ? "retrying" : "authenticating");
     setError(null);
     setOnboardingOutcome(null);
     setEndedSessionType(null);
+    endedCallRef.current=null;outcomeRef.current=null;setEndedCallId(null);
     setLines([]);
     setLiveCases([]);
     setLiveSuggestions([]);
     try {
-      const { data } = await supabase.auth.getSession();
-      if (sessionRunRef.current !== runId) return;
-      const token = data?.session?.access_token;
-      if (!token) throw new Error("Sessão expirada — entre novamente.");
+      timing.mark("auth_started");
+      const token = await authenticateVoiceSession({ client: supabase, signal: startAbort.signal });
+      if (sessionRunRef.current !== runId || startAbort.signal.aborted) return;
+      timing.mark("auth_completed");
       const session = await startVoiceSession({
         accessToken: token,
         model,
@@ -133,6 +157,18 @@ export function VoicePanel({
         onboardingProtocolVersion,
         speechClient: supabase,
         signal: startAbort.signal,
+        startedAt: timing.startedAt,
+        attemptId: timing.attemptId,
+        onTiming,
+        onCallCreated: (partialSession) => settleStartedSession({
+          session:partialSession,runId,currentRunId:sessionRunRef.current,cancelled:cancelledRef.current,ended:endedRef.current,
+          onAccepted:owned=>{sessionRef.current=owned;},
+        }),
+        onStage: (stage) => applyCurrentSessionRun({
+          runId,
+          currentRunId: sessionRunRef.current,
+          onCurrent: () => { if (!cancelledRef.current && !endedRef.current) setStatus(stage); },
+        }),
         onEvent: (ev) => applyCurrentSessionRun({
           runId,
           currentRunId: sessionRunRef.current,
@@ -153,7 +189,6 @@ export function VoicePanel({
         onAccepted: (acceptedSession) => {
           markVoiceSessionAccepted();
           sessionRef.current = acceptedSession;
-          setStatus("live");
         },
       });
     } catch (e) {
@@ -161,7 +196,8 @@ export function VoicePanel({
       const upgrade = handleClientUpgradeRequired(e);
       if (upgrade.reloaded) return;
       setError(upgrade.handled ? upgrade.message : voiceSessionErrorMessage(e));
-      setStatus("error");
+      timing.mark("panel_failed");
+      setStatus("failed");
     } finally {
       if (startAbortRef.current === startAbort) startAbortRef.current = null;
     }
@@ -170,27 +206,42 @@ export function VoicePanel({
   function hangup() {
     const runId = sessionRunRef.current;
     cancelledRef.current = true;
-    startAbortRef.current?.abort("manual_hangup");
-    startAbortRef.current = null;
+    startTimingRef.current?.mark("stop_requested");
     const session = sessionRef.current;
     sessionRef.current = null;
     if (session?.end) session.end("manual_hangup");
     else handleEnd({ reason: "manual_hangup", callId: null }, sessionType, runId);
+    startAbortRef.current?.abort("manual_hangup");
+    startAbortRef.current = null;
   }
 
   const interviewing = sessionType === "onboarding";
+  const starting = ["authenticating", "permission-required", "connecting", "retrying"].includes(status);
+  const progress = {
+    authenticating: ["Verificando sua sessão…", "Preparando uma conexão segura para a conversa."],
+    "permission-required": ["Aguardando o microfone…", "Permita o uso do microfone no navegador. Você pode cancelar enquanto aguarda."],
+    connecting: ["Conectando o áudio…", "Preparando a conversa. Você pode cancelar a qualquer momento."],
+    playing: ["Ligou está falando", "Você pode interromper para responder ou corrigir."],
+    closing: ["Encerrando a conversa…", "Concluindo a despedida. O painel confirma quando você pode retomar."],
+    "verifying-playback": ["Confirmando a fala…", "Concluindo a confirmação do áudio."],
+    processing: ["Preparando a próxima resposta…", "O Ligou está processando sua resposta."],
+    retrying: ["Tentando novamente…", "Houve uma falha técnica. O Ligou está tentando continuar."],
+    ready: [interviewing ? "Sua vez — pode falar" : statusLineFor(sessionType), "Pode falar — o Ligou está ouvindo."],
+  }[status];
 
   return (
     <Dialog
       open
       title={interviewing ? "Entrevista de onboarding" : "Falar com o Ligou"}
       description={interviewing
-        ? "O Ligou te entrevista em português e registra cada regra como sugestão. Você aprova o lote na aba Memória."
+        ? onboardingProtocolVersion === 3
+          ? "O Ligou conversa com você em português para confirmar as informações da sua empresa. Ao final, você revisa e aprova a configuração."
+          : "O Ligou te entrevista em português e registra cada regra como sugestão. Você aprova o lote na aba Memória."
         : "Converse por voz como se fosse um cliente. Casos abertos durante a chamada aparecem aqui ao vivo."}
       onClose={() => { hangup(); onClose(); }}
     >
-      <div className="voice-live">
-        {status === "idle" || status === "error" || status === "ended" ? (
+      <div className="voice-live" data-voice-stage={status}>
+        {status === "idle" || status === "failed" || status === "ended" ? (
           <div className="voice-live-start">
             {!lockedOnboarding ? (
               <>
@@ -211,28 +262,30 @@ export function VoicePanel({
                 </label>
               </>
             ) : null}
-            <button type="button" className="voice-live-button" onClick={begin}>
+            <button type="button" className="voice-live-button" onClick={begin}
+              disabled={status==="ended" && endedSessionType==="onboarding" && onboardingProtocolVersion===3 && Boolean(endedCallId) && !resumable(onboardingOutcome)}>
               <IconMicrophone2 aria-hidden="true" /> {status === "ended"
                 ? voiceSessionRestartLabel({ endedSessionType, onboardingOutcome })
-                : (interviewing ? "Começar entrevista" : "Iniciar chamada")}
+                : status === "failed" ? "Tentar novamente"
+                  : (interviewing ? "Começar entrevista" : "Iniciar chamada")}
             </button>
             {status === "ended" ? (
               <p className="voice-live-note">
                 {endedVoiceSessionCopy({ endedSessionType, onboardingOutcome })}
               </p>
             ) : null}
-            {error ? <p className="voice-live-error">{error}</p> : null}
+            {error ? <p className="voice-live-error" role="alert">{error}</p> : null}
           </div>
         ) : (
           <div className="voice-live-active">
-            <p className={`voice-live-status ${status === "connecting" ? "is-connecting" : "is-live"}`}>
+            <p className={`voice-live-status ${status === "ready" || status === "playing" ? "is-live" : "is-connecting"}`} role="status" aria-live="polite">
               <span className="voice-live-dot" aria-hidden="true" />
-              {status === "connecting" ? "Conectando…" : statusLineFor(sessionType)}
+              {progress?.[0]}
             </p>
             <div className="voice-live-transcript" aria-live="polite">
-              {lines.length === 0 ? (
+              {lines.length === 0 || status === "retrying" ? (
                 <p className="voice-live-hint">
-                  {status === "connecting" ? "Preparando o áudio…" : "Pode falar — o Ligou está ouvindo."}
+                  {progress?.[1]}
                 </p>
               ) : null}
               {lines.map((l, i) => (
@@ -242,7 +295,7 @@ export function VoicePanel({
               ))}
             </div>
             <button type="button" className="voice-live-hangup" onClick={hangup}>
-              <IconPhoneOff aria-hidden="true" /> Encerrar
+              <IconPhoneOff aria-hidden="true" /> {starting ? "Cancelar" : "Encerrar"}
             </button>
           </div>
         )}

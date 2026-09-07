@@ -10,12 +10,14 @@ import {
 export const ONBOARDING_SPEECH_SCHEMA = "onboarding.speech.v1" as const;
 export const ONBOARDING_FINAL_SIGNOFF_TEXT =
   "Perfeito. Seu onboarding foi concluído e suas informações foram salvas. Até logo.";
+export const ONBOARDING_AMENDMENT_SIGNOFF_TEXT =
+  "Registrei seu pedido de correção. A versão aprovada continua guardada. Para revisar a alteração, inicie uma nova conversa pelo painel. Obrigado e até logo.";
 
 const SPEECH_KINDS = [
   "ASK_NEXT_GAP", "CLARIFY_CURRENT_GAP", "CONFIRM_AND_ASK_NEXT",
   "DEFER_OFF_SCOPE_AND_CONTINUE", "GENERATE_FINAL_SUMMARY",
   "REQUEST_FINAL_APPROVAL", "HANDLE_OWNER_CORRECTION", "SPEAK_FINAL_SIGNOFF",
-  "SPEAK_TERMINAL_ERROR",
+  "SPEAK_TERMINAL_ERROR", "SPEAK_AMENDMENT_SIGNOFF",
 ] as const;
 export type OnboardingSpeechKind = typeof SPEECH_KINDS[number];
 export interface OnboardingSpeechAction {
@@ -54,8 +56,13 @@ function failure(message: string, usageResolved = true, costUsd: number | null =
 
 /** Defense in depth, not scope authority: only the caller's persisted action
  * establishes what may be spoken. No model-proposed text belongs here. */
-function offersOpenEndedHelp(text: string): boolean {
-  const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ");
+function offersOpenEndedHelp(text: string, kind: string): boolean {
+  // Only this application-produced attribution is exempt. Its complete text
+  // must still equal persisted next_action.spokenPt in the SQL speech claim.
+  const agentWords = kind === 'CONFIRM_AND_ASK_NEXT'
+    ? text.replace(/^Registrado\. Você informou: “[^“”"<>\x00-\x1f\x7f]{1,480}”\. /u, 'Registrado. ')
+    : text;
+  const normalized = agentWords.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ");
   return /\bposso (?:te )?ajudar\b|\btem mais alguma coisa\b|\bo que mais voce gostaria\b|\be so me chamar\b/.test(normalized);
 }
 
@@ -70,7 +77,9 @@ export function speechActionIsInternallyValid(value: unknown): value is Onboardi
     typeof value.text === "string" && Boolean(value.text.trim()) &&
     [...value.text].length <= MAX_TEXT_CHARACTERS &&
     !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.text) &&
-    !offersOpenEndedHelp(value.text) &&
+    // Recap text is separately bound to a persisted summary by the SQL claim;
+    // its literal owner quotations must not be reclassified as agent offers.
+    (value.kind === "GENERATE_FINAL_SUMMARY" || !offersOpenEndedHelp(value.text,value.kind)) &&
     (value.kind !== "SPEAK_FINAL_SIGNOFF" || value.text === ONBOARDING_FINAL_SIGNOFF_TEXT);
 }
 

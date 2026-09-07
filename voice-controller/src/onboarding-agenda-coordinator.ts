@@ -6,7 +6,7 @@ import {
 } from "./onboarding-agenda.ts";
 import { onboardingAgendaDigest, type StoredWebsiteInterview } from "./onboarding-agenda-store.ts";
 import {
-  ONBOARDING_FINAL_SIGNOFF_TEXT, speechActionIsInternallyValid,
+  ONBOARDING_FINAL_SIGNOFF_TEXT, ONBOARDING_AMENDMENT_SIGNOFF_TEXT, speechActionIsInternallyValid,
   type OnboardingSpeechAction, type OnboardingSpeechKind,
 } from "./onboarding-speech.ts";
 import type { OnboardingAnswerArgs } from "./onboarding-store.ts";
@@ -34,7 +34,7 @@ interface OwnerTurn {
 }
 interface PendingEffect {
   requestId: string; deadlineAtMs: number; attempt: number;
-  kind: "interpret" | "persist_agenda" | "prepare_summary" | "persist_approval" | "record_completion";
+  kind: "interpret" | "persist_agenda" | "prepare_summary" | "persist_approval" | "record_completion" | "resume_speech" | "request_amendment" | "empty_input";
   turnId?: string; itemId?: string | null; responseId?: string;
   command: WebsiteAgendaCommand;
 }
@@ -49,7 +49,7 @@ export interface WebsiteAgendaState {
   turns: OwnerTurn[];
   pending?: PendingEffect;
   speech?: { action: OnboardingSpeechAction; textSha256?: string; audioSha256?: string;
-    deadlineAtMs: number; after: "owner" | "summary_part" | "approval" | "signoff" | "error" };
+    deadlineAtMs: number; after: "owner" | "summary_part" | "approval" | "signoff" | "error" | "amendment" };
   summary?: WebsiteSummaryReceipt & { partIndex: number };
   correctionRequired: boolean;
   approvalClarifications: number;
@@ -57,7 +57,12 @@ export interface WebsiteAgendaState {
   termination?: { requestId: string; outcome: "complete" | "unfinished"; reason: string;
     deadlineAtMs: number; providerReceiptId?: string; budgetReceiptId?: string };
   completionReceiptId?: string;
+  amendmentReceiptId?: string;
   error?: string;
+  activeOwnerItemId?: string;
+  interruptedSpeech?: { action: OnboardingSpeechAction; after: NonNullable<WebsiteAgendaState["speech"]>["after"]; providerItemId: string };
+  deferredSpeech?: { speech: NonNullable<WebsiteAgendaState["speech"]>; command: Extract<WebsiteAgendaCommand,{type:"request_speech"}> };
+  deferredAfterPlayback?: NonNullable<WebsiteAgendaState["speech"]>["after"];
 }
 
 export type WebsiteAgendaCommand =
@@ -74,6 +79,10 @@ export type WebsiteAgendaCommand =
   | { type: "persist_approval"; requestId: string; turnId: string; providerItemId: string; transcript: string;
       summaryId: string; summaryHash: string; revision: number; digest: string; expectedStoreVersion: number }
   | { type: "request_speech"; action: OnboardingSpeechAction; summaryId?: string; partIndex?: number; clarificationTurnId?: string }
+  | { type: "interrupt_speech"; requestId: string; actionId: string; providerItemId: string }
+  | { type: "resume_speech"; requestId: string; actionId: string; providerItemId: string }
+  | { type: "record_empty_input"; requestId: string; actionId: string; providerItemId: string }
+  | { type: "request_amendment"; requestId: string; approvalReceiptId: string; providerItemId: string; proposal: Extract<AgendaProposal,{kind:"correction"}> }
   | { type: "terminate_session"; requestId: string; action: "TERMINATE_SESSION"; outcome: "complete" | "unfinished";
       reason: string; approvalReceiptId?: string }
   | { type: "record_completion"; requestId: string; interviewId: string; callId: string;
@@ -84,7 +93,12 @@ type Timed = { nowMs: number };
 export type WebsiteAgendaEvent = Timed & (
   | { type: "adapter.failed"; code: string }
   | { type: "opening.played" }
-  | { type: "owner.transcript"; providerItemId: string; text: string }
+  | { type: "owner.transcript"; providerItemId: string; text: string; capturedItemId?: string | null; approvalSummaryId?: string | null }
+  | { type: "owner.speech_started"; providerItemId: string; afterPlaybackActionId?: string }
+  | { type: "owner.speech_finished" | "owner.transcript_empty"; providerItemId: string }
+  | { type: "empty_input.recorded"; requestId: string; actionId: string; providerItemId: string; receiptId: string }
+  | { type: "speech.resumed"; requestId: string; action: OnboardingSpeechAction }
+  | { type: "amendment.requested"; requestId: string; approvalReceiptId: string; providerItemId: string; receiptId: string }
   | { type: "owner_turn.recorded"; requestId: string; providerItemId: string; turnId: string; text: string }
   | { type: "interpretation.created"; requestId: string; responseId: string }
   | { type: "interpretation.completed"; requestId: string; responseId: string; turnId: string;
@@ -108,7 +122,7 @@ export function websiteSummaryHash(value: Omit<WebsiteSummaryReceipt, "summaryHa
   return hash([value.summaryId, value.revision, value.digest, value.parts]);
 }
 export const WEBSITE_APPROVAL_QUESTION = "Está tudo correto no resumo e você confirma essas informações? Se precisar, diga o que devo corrigir.";
-const TERMINAL_ERROR = "Não consegui concluir esta configuração com segurança. As informações já salvas continuam guardadas, mas a configuração ainda não está concluída. Vou encerrar esta sessão.";
+const TERMINAL_ERROR = "Tive uma falha técnica e não consegui continuar esta conversa. A configuração ainda não foi concluída. Você pode tentar novamente pelo painel. Obrigado e até logo.";
 const SHA = /^[a-f0-9]{64}$/;
 function requestId(state: WebsiteAgendaState, kind: string, key: unknown): string {
   const h = hash([state.stored.agenda.binding.interviewId, state.stored.agenda.binding.callId, kind, key]);
@@ -136,13 +150,25 @@ function normalize(text: string): string {
 }
 function replyKind(text: string): "approval" | "correction" | "ambiguous" {
   const t = normalize(text);
+  // Match the WHOLE affirmative construction before inspecting isolated
+  // correction words. "Correções que confirmei" refers to completed changes;
+  // it is not "corrija" or a condition on an approval that has not happened.
+  // The SQL helper carries the same grammar. This is linguistic classification
+  // only; the coordinator and RPC still bind the played/current owner recap.
+  if (!/[^a-z\s.,!;:\-–—]/.test(t)) {
+    const words = t.replace(/[.,!;:\-–—]+/g, " ").trim().replace(/\s+/g, " ");
+    const legacy = "sim|(?:eu )?(?:aprovo|confirmo)|aprovado|aprovada|esta correto|esta correta|esta tudo correto|esta tudo correta|tudo certo|tudo correto|correto|correta|pode salvar|pode confirmar";
+    const summary = "(?:este|esse|o) resumo(?: atual| apresentado)?";
+    const configuration = "(?:esta|essa|a) configuracao(?: atual| apresentada)?";
+    const completedCorrections = "(?: com as correcoes que (?:eu )?(?:ja )?confirmei)?";
+    const direct = `(?:eu )?(?:aprovo|confirmo)(?: explicitamente)? (?:${summary}|a versao atual do resumo|${configuration})${completedCorrections}`;
+    const correctness = `(?:eu )?confirmo(?: explicitamente)? que (?:${summary} esta correto|${configuration} esta correta)`;
+    const reviewed = `(?:(?:eu )?(?:revisei|conferi|li) ${summary} (?:e )?)?`;
+    const clause = `(?:${legacy}|${reviewed}(?:${direct}|${correctness}))`;
+    if (new RegExp(`^${clause}(?: (?:e )?${clause})*$`).test(words)) return "approval";
+  }
   if (/\b(?:nao|nunca|jamais|nem|tampouco|nenhum|nenhuma|negativo|negativa|discordo|recuso|rejeito|corrigir|corrija|correcao|correcoes|mude|mudar|altere|alterar|ajuste|ajustar|troque|retifique|mas|porem|contudo|errado|errada|incorreto|incorreta)\b|de (?:forma|maneira) alguma|em hipotese alguma|de (?:modo|jeito) algum/.test(t)) return "correction";
-  // One anchored grammar shared with the durable SQL approval gate. Questions,
-  // qualifiers, numbers, quoted narratives and all extra words remain non-assent.
-  if (/[^a-z\s.,!;:\-–—]/.test(t)) return "ambiguous";
-  const words = t.replace(/[.,!;:\-–—]+/g, " ").trim().replace(/\s+/g, " ");
-  const clause = "sim|aprovo|aprovado|aprovada|confirmo|esta correto|esta correta|esta tudo correto|esta tudo correta|tudo certo|tudo correto|correto|correta|pode salvar|pode confirmar";
-  return new RegExp(`^(?:${clause})(?: (?:e )?(?:${clause}))*$`).test(words) ? "approval" : "ambiguous";
+  return "ambiguous";
 }
 export const classifyWebsiteApprovalTranscript = replyKind;
 function copyRequest(text: string): boolean {
@@ -154,6 +180,16 @@ function explanationRequest(text: string): boolean {
 function explicitlyUnknown(text:string):boolean {
   return /^(?:eu )?(?:ainda )?(?:nao sei|nao tenho certeza|nao tenho essa informacao|nao esta definido)(?:[.!]\s*(?:preciso|vou) (?:verificar|confirmar)(?: essa informacao)?)?[.!]*$/.test(normalize(text));
 }
+function acknowledgment(text:string):boolean {
+  return /^(?:(?:ah|hum)[, .]*)?(?:entendi|uhum|aham|ta bom|ok|beleza|certo)[.!]*$/.test(normalize(text));
+}
+function ownerPauseRequest(text:string):boolean {
+  const t=normalize(text);
+  if(/\b(?:nao|nunca|se|mas|porem)\b|["“”]/.test(t))return false;
+  const words=t.replace(/[.,!?]/g,' ').trim().replace(/\s+/g,' ');
+  return /^(?:(?:eu )?(?:quero|preciso)|vamos|pode(?:mos)?) (?:pausar|parar|encerrar)(?: (?:(?:a|esta|essa) (?:conversa|sessao|entrevista|configuracao)|(?:o|este|esse) onboarding))?(?: (?:agora|por agora|por hoje|por favor|sim))*$/.test(words);
+}
+const closingCourtesy=(text:string)=>/^(?:obrigad[oa](?:,? (?:tchau|ate logo))?|tchau|ate logo|certo|ta bom)[.!]*$/.test(normalize(text));
 
 /** Validate only the proposal boundary here. Existing policy parsing must still
  * validate every fact before persistence; this mode never approves a rule. */
@@ -236,17 +272,52 @@ function speak(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], kind
   if (!speechActionIsInternallyValid(action)) {
     terminate(state, commands, "unfinished", "invalid_application_speech", nowMs); return;
   }
-  state.phase = "speaking";
-  state.speech = { action, after, deadlineAtMs: nowMs + state.timeoutMs };
-  commands.push({ type: "request_speech", action,
+  emitSpeech(state,commands,{action,after,deadlineAtMs:nowMs+state.timeoutMs},{ type: "request_speech", action,
     ...(state.summary ? { summaryId: state.summary.summaryId } : {}),
     ...(after === "summary_part" ? { partIndex: state.summary!.partIndex } : {}),
     ...(after === "approval" && Array.isArray(key) ? { clarificationTurnId: String(key[1]) } : {}),
   });
 }
+function ownerWorkPending(state:WebsiteAgendaState):boolean{
+  return Boolean(state.activeOwnerItemId) || state.turns.some(turn=>!turn.processed);
+}
+function emitSpeech(state:WebsiteAgendaState,commands:WebsiteAgendaCommand[],speech:NonNullable<WebsiteAgendaState["speech"]>,command:Extract<WebsiteAgendaCommand,{type:"request_speech"}>):void{
+  if(speech.after!=="error" && ownerWorkPending(state)){
+    state.deferredSpeech={speech,command};state.phase="awaiting_owner";
+    if(state.summary)state.correctionRequired=true;
+    return;
+  }
+  delete state.deferredSpeech;state.phase="speaking";state.speech=speech;commands.push(command);
+}
+function continueAfterPlayback(state:WebsiteAgendaState,commands:WebsiteAgendaCommand[],after:NonNullable<WebsiteAgendaState["speech"]>["after"],nowMs:number):void{
+  if(after==="error"){terminate(state,commands,"unfinished",state.error??"incomplete",nowMs);return;}
+  if(after==="amendment"){terminate(state,commands,"unfinished","owner_requested_amendment",nowMs);return;}
+  if(ownerWorkPending(state)){
+    state.deferredAfterPlayback=after;state.phase=after==="approval"?"awaiting_approval":"awaiting_owner";
+    if(state.summary && after!=="approval")state.correctionRequired=true;
+    pump(state,commands,nowMs);return;
+  }
+  delete state.deferredAfterPlayback;
+  if(after==="signoff"){terminate(state,commands,"complete","approved_signoff_played",nowMs);return;}
+  if(after==="summary_part" && state.summary){
+    const index=state.summary.partIndex;
+    if(index<state.summary.parts.length)speak(state,commands,"GENERATE_FINAL_SUMMARY",state.summary.parts[index]!,"summary_part",nowMs,[state.summary.summaryHash,index]);
+    else speak(state,commands,"REQUEST_FINAL_APPROVAL",WEBSITE_APPROVAL_QUESTION,"approval",nowMs,state.summary.summaryHash);
+  }else{state.phase=after==="approval"?"awaiting_approval":"awaiting_owner";pump(state,commands,nowMs);}
+}
+function continueDeferredSpeech(state:WebsiteAgendaState,commands:WebsiteAgendaCommand[],nowMs:number):void{
+  if(ownerWorkPending(state) || state.pending)return;
+  if(state.deferredAfterPlayback){continueAfterPlayback(state,commands,state.deferredAfterPlayback,nowMs);return;}
+  const deferred=state.deferredSpeech;
+  if(deferred){
+    delete state.deferredSpeech;
+    if(deferred.speech.action.sourceDigest!==state.stored.digest || deferred.speech.action.revision!==state.stored.revision){pump(state,commands,nowMs);return;}
+    emitSpeech(state,commands,{...deferred.speech,deadlineAtMs:nowMs+state.timeoutMs},deferred.command);
+  }
+}
 function terminate(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], outcome: "complete" | "unfinished", reason: string, nowMs: number): void {
   if (state.termination) return;
-  delete state.speech; delete state.pending;
+  delete state.speech; delete state.pending;delete state.deferredSpeech;delete state.deferredAfterPlayback;
   state.phase = "terminating";
   const id = requestId(state, "terminate", [outcome, state.approval?.receiptId ?? reason]);
   state.termination = { requestId: id, outcome, reason, deadlineAtMs: nowMs + state.timeoutMs };
@@ -256,12 +327,16 @@ function terminate(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], 
 function fail(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], code: string, nowMs: number): void {
   if (state.termination) return;
   const mayAlreadyBeAudible = Boolean(state.speech?.audioSha256);
-  state.error = code; delete state.pending; delete state.summary; delete state.approval;
+  state.error = code; delete state.pending;
+  if (!state.approval) delete state.summary;
   if (mayAlreadyBeAudible || state.speech?.after === "error") {
     terminate(state, commands, "unfinished", code, nowMs); return;
   }
   delete state.speech;
-  speak(state, commands, "SPEAK_TERMINAL_ERROR", TERMINAL_ERROR, "error", nowMs, code);
+  const explanation = state.approval
+    ? "Sua configuração foi aprovada e continua salva. Tive uma falha técnica ao encerrar a conversa. Obrigado e até logo."
+    : TERMINAL_ERROR;
+  speak(state, commands, "SPEAK_TERMINAL_ERROR", explanation, "error", nowMs, code);
 }
 function prepareSummary(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], nowMs: number): void {
   if (!projectAgendaSummary(state.stored.agenda).readyForSummary || state.pending || state.speech ||
@@ -326,14 +401,38 @@ function repeatApproval(state: WebsiteAgendaState, commands: WebsiteAgendaComman
   speak(state, commands, "REQUEST_FINAL_APPROVAL", `${websiteApprovalClarification(turn.text)} ${WEBSITE_APPROVAL_QUESTION}`,
     "approval", nowMs, [state.summary.summaryHash, turn.turnId]);
 }
+function resumeInterruptedSpeech(state:WebsiteAgendaState,commands:WebsiteAgendaCommand[],providerItemId:string,nowMs:number,turn?:OwnerTurn):void{
+  const interrupted=state.interruptedSpeech;
+  if(!interrupted){fail(state,commands,"interrupted_speech_missing",nowMs);return;}
+  if(turn)turn.processed=true;delete state.pending;
+  effect(state,commands,{type:"resume_speech",requestId:requestId(state,"resume-speech",[interrupted.action.actionId,providerItemId]),
+    actionId:interrupted.action.actionId,providerItemId},"resume_speech",nowMs,turn);
+}
 function pump(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], nowMs: number): void {
-  if (state.pending || state.speech || !["awaiting_owner", "awaiting_approval"].includes(state.phase)) return;
+  if (state.pending || state.speech || state.activeOwnerItemId || !["awaiting_owner", "awaiting_approval"].includes(state.phase)) return;
   const turn = state.turns.find(turn => !turn.processed);
   if (!turn) { if (state.phase === "awaiting_owner") prepareSummary(state, commands, nowMs); return; }
   if (!turn.recorded) return;
+  if(!state.approval && ownerPauseRequest(turn.text)){
+    turn.processed=true;state.error="owner_requested_pause";delete state.summary;delete state.interruptedSpeech;
+    speak(state,commands,"SPEAK_TERMINAL_ERROR","Tudo bem. A configuração continua incompleta e você pode retomar pelo painel. Obrigado e até logo.","error",nowMs,turn.turnId);return;
+  }
+  if(state.approval){
+    if(acknowledgment(turn.text) || closingCourtesy(turn.text) || replyKind(turn.text)==="approval"){
+      if(state.deferredAfterPlayback || state.deferredSpeech){turn.processed=true;continueDeferredSpeech(state,commands,nowMs);}
+      else if(state.interruptedSpeech)resumeInterruptedSpeech(state,commands,turn.providerItemId,nowMs,turn);
+      else{turn.processed=true;speak(state,commands,"SPEAK_FINAL_SIGNOFF",ONBOARDING_FINAL_SIGNOFF_TEXT,"signoff",nowMs,state.approval.receiptId);}
+      return;
+    }
+    state.correctionRequired=true;
+  }
+  if(turn.capturedItemId && turn.capturedItemId!==getAgendaAction(state.stored.agenda).itemId &&
+    getAgendaItems(state.stored.agenda).some(item=>item.id===turn.capturedItemId && ["answered","corrected","not_applicable"].includes(item.status)))
+    state.correctionRequired=true;
   if (state.phase === "awaiting_approval" && state.summary) {
     const kind = replyKind(turn.text);
     if (kind === "approval" && turn.approvalSummaryId === state.summary.summaryId) {
+      delete state.deferredAfterPlayback;delete state.deferredSpeech;
       state.phase = "persisting_approval";
       effect(state, commands, { type: "persist_approval", requestId: requestId(state, "approval", [turn.turnId, state.summary.summaryHash]),
         turnId: turn.turnId, providerItemId: turn.providerItemId, transcript: turn.text,
@@ -398,7 +497,7 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
   const state = structuredClone(current);
   const commands: WebsiteAgendaCommand[] = [];
   const pending = state.pending;
-  const closing = Boolean(state.termination) || ["persisting_approval", "failed"].includes(state.phase) || state.speech?.after === "signoff" || state.speech?.after === "error";
+  const closing = Boolean(state.termination) || state.phase==="failed" || state.speech?.after === "error" || state.speech?.after === "amendment";
   if (closing && !["adapter.failed", "approval.persisted", "speech.ready", "speech.played", "speech.failed", "deadline", "effect.failed",
     "provider.termination_confirmed", "budget.settled", "completion.recorded"].includes(event.type)) return { state: current, commands: [] };
   switch (event.type) {
@@ -407,8 +506,40 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
     case "opening.played":
       if (state.phase !== "opening") break;
       state.phase = "awaiting_owner"; pump(state, commands, event.nowMs); break;
+    case "owner.speech_started": {
+      if(!nonblank(event.providerItemId,400) || state.activeOwnerItemId===event.providerItemId)break;
+      state.activeOwnerItemId=event.providerItemId;
+      const speech=state.phase==="opening"?{action:state.openingAction,after:"owner" as const}:state.speech;
+      if(speech && speech.action.actionId!==event.afterPlaybackActionId){
+        state.interruptedSpeech={action:speech.action,after:speech.after,providerItemId:event.providerItemId};
+        delete state.speech;state.phase="awaiting_owner";
+        state.correctionRequired=Boolean(state.summary);
+        commands.push({type:"interrupt_speech",requestId:requestId(state,"interrupt-speech",[speech.action.actionId,event.providerItemId]),
+          actionId:speech.action.actionId,providerItemId:event.providerItemId});
+      }
+      break;
+    }
+    case "owner.speech_finished":
+      if(state.activeOwnerItemId===event.providerItemId)delete state.activeOwnerItemId;
+      break;
+    case "owner.transcript_empty": {
+      if(state.activeOwnerItemId===event.providerItemId)delete state.activeOwnerItemId;
+      if(state.interruptedSpeech?.providerItemId===event.providerItemId && !state.pending){
+        const actionId=state.interruptedSpeech.action.actionId;
+        effect(state,commands,{type:"record_empty_input",requestId:requestId(state,"empty-input",[actionId,event.providerItemId]),
+          actionId,providerItemId:event.providerItemId},"empty_input",event.nowMs);
+      }else{continueDeferredSpeech(state,commands,event.nowMs);pump(state,commands,event.nowMs);}
+      break;
+    }
+    case "empty_input.recorded":
+      if(pending?.kind!=="empty_input" || pending.requestId!==event.requestId || pending.command.type!=="record_empty_input")break;
+      if(!nonblank(event.receiptId) || event.actionId!==pending.command.actionId || event.providerItemId!==pending.command.providerItemId){
+        fail(state,commands,"empty_input_receipt_mismatch",event.nowMs);break;
+      }
+      resumeInterruptedSpeech(state,commands,event.providerItemId,event.nowMs);break;
     case "owner.transcript": {
       if (!nonblank(event.providerItemId, 400) || !nonblank(event.text, 32768)) { fail(state, commands, "invalid_owner_transcript", event.nowMs); break; }
+      if(state.activeOwnerItemId===event.providerItemId)delete state.activeOwnerItemId;
       const turnId = `${state.stored.agenda.binding.callId}:${event.providerItemId}`;
       const previous = state.turns.find(turn => turn.turnId === turnId);
       if (previous) { if (previous.text !== event.text) fail(state, commands, "conflicting_owner_transcript", event.nowMs); break; }
@@ -416,8 +547,8 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
       const id = requestId(state, "owner-turn", turnId);
       state.turns.push({ providerItemId: event.providerItemId, turnId, text: event.text, requestId: id,
         recorded: false, processed: false, attempt: 0, deadlineAtMs: event.nowMs + state.timeoutMs,
-        capturedItemId: getAgendaAction(state.stored.agenda).itemId ?? null,
-        approvalSummaryId: state.phase === "awaiting_approval" ? state.summary?.summaryId ?? null : null });
+        capturedItemId: event.capturedItemId===undefined ? getAgendaAction(state.stored.agenda).itemId ?? null : event.capturedItemId,
+        approvalSummaryId: event.approvalSummaryId===undefined ? (state.phase === "awaiting_approval" ? state.summary?.summaryId ?? null : null) : event.approvalSummaryId });
       commands.push({ type: "record_owner_turn", requestId: id, turnId, providerItemId: event.providerItemId, text: event.text, attempt: 0 });
       break;
     }
@@ -438,12 +569,26 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
         pending.turnId !== event.turnId || pending.itemId !== event.itemId || state.stored.digest !== event.digest) break;
       const turn = state.turns.find(turn => turn.turnId === pending.turnId && turn.recorded)!;
       let result = parseWebsiteInterpretation(event.result);
+      if(state.approval && result?.proposal.kind==="correction"){
+        const proposal=result.proposal;
+        if((proposal.affectedItems??[]).some(target=>!state.stored.agenda.items.some(item=>item.id===target.itemId)) ||
+          (proposal.affectedCandidates??[]).some(target=>!state.stored.agenda.candidateContext.some(item=>item.id===target.candidateId))){
+          interpretationFailure(state,commands,event.nowMs);break;
+        }
+        const reopen:Extract<AgendaProposal,{kind:"correction"}>={kind:"correction",
+          ...(proposal.affectedItems?{affectedItems:proposal.affectedItems.map(target=>({...target,disposition:"reopen" as const}))}:{}),
+          ...(proposal.affectedCandidates?{affectedCandidates:proposal.affectedCandidates.map(target=>({...target,disposition:"reopen" as const}))}:{})};
+        effect(state,commands,{type:"request_amendment",requestId:requestId(state,"amendment",[state.approval.receiptId,turn.turnId]),
+          approvalReceiptId:state.approval.receiptId,providerItemId:turn.providerItemId,proposal:reopen},"request_amendment",event.nowMs,turn);break;
+      }
       if(state.correctionRequired && result && (result.facts?.length ?? 0)===0 &&
         (result.proposal.kind==="off_scope" || (result.proposal.kind==="clarification" && result.proposal.itemId===null))){
-        repeatApproval(state,commands,turn,event.nowMs);break;
+        if(state.deferredAfterPlayback || state.deferredSpeech){turn.processed=true;delete state.pending;state.correctionRequired=false;continueDeferredSpeech(state,commands,event.nowMs);}
+        else if(state.interruptedSpeech)resumeInterruptedSpeech(state,commands,turn.providerItemId,event.nowMs,turn);
+        else repeatApproval(state,commands,turn,event.nowMs);break;
       }
       if (copyRequest(turn.text) && !state.correctionRequired) result = { proposal: { kind: "off_scope" }, facts: [] };
-      else if ((explanationRequest(turn.text) || explicitlyUnknown(turn.text)) && !state.correctionRequired && turn.capturedItemId)
+      else if ((explanationRequest(turn.text) || explicitlyUnknown(turn.text) || acknowledgment(turn.text)) && !state.correctionRequired && turn.capturedItemId)
         result = { proposal: { kind: "clarification", itemId: turn.capturedItemId }, facts: [] };
       if (!result || (state.correctionRequired && result.proposal.kind !== "correction") ||
         (!state.correctionRequired && result.proposal.kind === "correction" && replyKind(turn.text) !== "correction") ||
@@ -466,11 +611,38 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
       }
       state.stored = structuredClone(event.stored);
       delete state.summary;
+      delete state.interruptedSpeech;
+      delete state.deferredSpeech;delete state.deferredAfterPlayback;
       state.approvalClarifications = 0;
       state.turns.find(turn => turn.turnId === pending.turnId)!.processed = true;
       state.correctionRequired = false;
       delete state.pending;
-      agendaSpeech(state, commands, event.stored.nextAction, event.nowMs); break;
+      if(state.activeOwnerItemId || state.turns.some(turn=>!turn.processed)){
+        state.phase="awaiting_owner";pump(state,commands,event.nowMs);
+      }else agendaSpeech(state, commands, event.stored.nextAction, event.nowMs); break;
+    }
+    case "speech.resumed": {
+      if(pending?.kind!=="resume_speech" || pending.requestId!==event.requestId || !state.interruptedSpeech)break;
+      const prior=state.interruptedSpeech;
+      if(!speechActionIsInternallyValid(event.action) || event.action.actionId===prior.action.actionId ||
+        ["interviewId","callId","revision","kind","text","sourceDigest"].some(key=>
+          event.action[key as keyof OnboardingSpeechAction]!==prior.action[key as keyof OnboardingSpeechAction])){
+        fail(state,commands,"resumed_speech_receipt_mismatch",event.nowMs);break;
+      }
+      delete state.pending;delete state.interruptedSpeech;state.correctionRequired=false;
+      emitSpeech(state,commands,{action:event.action,after:prior.after,deadlineAtMs:event.nowMs+state.timeoutMs},{type:"request_speech",action:event.action,
+        ...(state.summary?{summaryId:state.summary.summaryId}:{}),
+        ...(prior.after==="summary_part"?{partIndex:state.summary!.partIndex}:{})});
+      break;
+    }
+    case "amendment.requested": {
+      if(pending?.kind!=="request_amendment" || pending.requestId!==event.requestId || pending.command.type!=="request_amendment")break;
+      if(!nonblank(event.receiptId) || event.approvalReceiptId!==state.approval?.receiptId || event.providerItemId!==pending.command.providerItemId){
+        fail(state,commands,"amendment_receipt_mismatch",event.nowMs);break;
+      }
+      state.amendmentReceiptId=event.receiptId;state.turns.find(turn=>turn.turnId===pending.turnId)!.processed=true;
+      delete state.pending;delete state.interruptedSpeech;delete state.deferredAfterPlayback;
+      speak(state,commands,"SPEAK_AMENDMENT_SIGNOFF",ONBOARDING_AMENDMENT_SIGNOFF_TEXT,"amendment",event.nowMs,event.receiptId);break;
     }
     case "summary.ready": {
       if (pending?.kind !== "prepare_summary" || pending.requestId !== event.requestId) break;
@@ -493,12 +665,15 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
       if (!nonblank(event.approvalReceiptId) || event.turnId !== expected.turnId || event.summaryId !== expected.summaryId ||
         event.summaryHash !== expected.summaryHash || event.revision !== expected.revision || event.digest !== expected.digest ||
         event.storeVersion !== expected.expectedStoreVersion + 1 || !state.summary ||
-        state.summary.summaryHash !== expected.summaryHash || state.turns.some(turn => !turn.processed && turn.turnId !== event.turnId)) {
+        state.summary.summaryHash !== expected.summaryHash) {
         fail(state, commands, "approval_receipt_mismatch", event.nowMs); break;
       }
       state.approval = { receiptId: event.approvalReceiptId, turnId: event.turnId, summaryId: event.summaryId, summaryHash: event.summaryHash };
       state.turns.find(turn => turn.turnId === event.turnId)!.processed = true;
       state.stored.storeVersion = event.storeVersion; state.stored.state = "closing"; delete state.pending;
+      if(state.activeOwnerItemId || state.turns.some(turn=>!turn.processed)){
+        state.phase="awaiting_owner";pump(state,commands,event.nowMs);break;
+      }
       speak(state, commands, "SPEAK_FINAL_SIGNOFF", ONBOARDING_FINAL_SIGNOFF_TEXT, "signoff", event.nowMs, event.approvalReceiptId); break;
     }
     case "speech.ready": {
@@ -516,13 +691,8 @@ export function reduceWebsiteAgenda(current: WebsiteAgendaState, event: WebsiteA
       if (!speech || speech.action.actionId !== event.actionId || !speech.audioSha256 ||
         speech.textSha256 !== event.textSha256 || speech.audioSha256 !== event.audioSha256) break;
       delete state.speech;
-      if (speech.after === "signoff") { terminate(state, commands, "complete", "approved_signoff_played", event.nowMs); break; }
-      if (speech.after === "error") { terminate(state, commands, "unfinished", state.error ?? "incomplete", event.nowMs); break; }
-      if (speech.after === "summary_part" && state.summary) {
-        const index = ++state.summary.partIndex;
-        if (index < state.summary.parts.length) speak(state, commands, "GENERATE_FINAL_SUMMARY", state.summary.parts[index]!, "summary_part", event.nowMs, [state.summary.summaryHash, index]);
-        else speak(state, commands, "REQUEST_FINAL_APPROVAL", WEBSITE_APPROVAL_QUESTION, "approval", event.nowMs, state.summary.summaryHash);
-      } else { state.phase = speech.after === "approval" ? "awaiting_approval" : "awaiting_owner"; pump(state, commands, event.nowMs); }
+      if(speech.after==="summary_part" && state.summary)state.summary.partIndex++;
+      continueAfterPlayback(state,commands,speech.after,event.nowMs);
       break;
     }
     case "speech.failed":

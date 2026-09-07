@@ -247,11 +247,41 @@ export function parseOnboardingAgenda(value: unknown, expectedBinding: AgendaBin
   return freezeAgenda({ version: ONBOARDING_AGENDA_VERSION, binding: bound, revision: raw.revision, items,
     candidateContext: seedAgenda.candidateContext, candidateOverrides, ownerTurns });
 }
+/** Presentation only: quote the latest resolved territory evidence without
+ * inventing locality normalization, operational permission, or a next topic.
+ * Mirrored by private SQL website_territory_confirmation. */
+export function websiteTerritoryConfirmation(agenda: OnboardingAgenda): string {
+  const fallback = "Obrigado, registrei sua resposta. ";
+  const latest = agenda.ownerTurns.at(-1);
+  if (!latest || !agenda.items.some(item => item.coverageRefs.includes("area.coverage") &&
+    ["answered", "corrected"].includes(item.status) && item.answerRevision > 0 &&
+    item.evidence.at(-1)?.turnId === latest.turnId && item.evidence.at(-1)?.text === latest.text)) return fallback;
+  if ([...latest.text].length > 700 || /["“”<>\x00-\x1f\x7f]/.test(latest.text)) return fallback;
+  const text = latest.text.trim().replace(/^(?:(?:uhum|aham|ah|entendi)[.!?, ]+)*/i, "").replace(/^olha[, ]+/i, "");
+  const normalize = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const parts = text.split(/(?<=[.!?]) +/);
+  if (!/^(?:(?:atendemos|atende) (?:so|somente|apenas|exclusivamente) |(?:a )?nossa area (?:fica|esta|e) restrita a )/.test(normalize(parts[0] ?? ""))) return fallback;
+  const outside = parts.some(part => {
+    const value = normalize(part);
+    return /^(?:se .* fora\b|para sair dessas cidades\b|fora (?:da area|dessas cidades|da cobertura)\b)/.test(value) &&
+      /\b(?:aprovacao|autorizacao)\b/.test(value) && /\b(?:dono|proprietario|minha|comigo)\b/.test(value);
+  });
+  if (!outside) return fallback;
+  // Omit only a historical outside-city request aside whose entire current
+  // restriction repeats the retained exclusive coverage. All other sentences,
+  // including additional conditions and prohibitions, remain verbatim.
+  const aside = /^ja (?:teve|tivemos|recebemos) pedidos? de (?:gente|pessoas|clientes) de outras cidades, mas nao e (?:pra|para) atender[.!]?$/;
+  const excerpt = parts.filter(part => !aside.test(normalize(part)))
+    .map(part => part.replace(/, *combinado[?!.]*$/i, "")).join(" ").replace(/[.!?]+$/, "").trim();
+  if (!excerpt || [...excerpt].length > 480) return fallback; // No truncation of conditions.
+  return `Registrado. Você informou: “${excerpt}”. `;
+}
+
 function actionFor(agenda: OnboardingAgenda, requested: AgendaActionType): AgendaAction {
   const item = getAgendaItems(agenda).find(unresolved);
   const type = !item && requested !== "HANDLE_OWNER_CORRECTION" && requested !== "DEFER_OFF_SCOPE_AND_CONTINUE" ? "GENERATE_FINAL_SUMMARY" : requested;
   const prefix: Record<AgendaActionType, string> = {
-    ASK_NEXT_GAP: "", CLARIFY_CURRENT_GAP: "Para esclarecer: ", CONFIRM_AND_ASK_NEXT: "Obrigado, registrei sua resposta. ",
+    ASK_NEXT_GAP: "", CLARIFY_CURRENT_GAP: "Para esclarecer: ", CONFIRM_AND_ASK_NEXT: websiteTerritoryConfirmation(agenda),
     DEFER_OFF_SCOPE_AND_CONTINUE: "Podemos tratar disso depois; agora vamos concluir sua configuração. ",
     GENERATE_FINAL_SUMMARY: "Vou preparar o resumo para sua revisão.", HANDLE_OWNER_CORRECTION: "Registrei sua correção. ",
   };

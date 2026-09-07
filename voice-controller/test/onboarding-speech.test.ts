@@ -13,6 +13,25 @@ const response = () => new Response(audio, { headers: { "content-type": "audio/m
 const deps = { openaiKey: "synthetic-only", timeoutMs: 30, fetchImpl: async () => response() };
 
 describe("application-owned onboarding speech", () => {
+  test('an attributed territory quotation is distinct from an agent offer; its next question stays guarded',async()=>{
+    const text='Registrado. Você informou: “Atendemos só Recife e Olinda. Fora dessas cidades, é só me chamar para obter minha aprovação explícita”. Qual o horário de sábado?';
+    const confirmation={...action,kind:'CONFIRM_AND_ASK_NEXT' as const,text};
+    expect(speech.speechActionIsInternallyValid(confirmation)).toBe(true);
+    expect((await speech.synthesizeOnboardingSpeech(confirmation,deps)).text).toBe(text);
+    for(const changed of [
+      {...confirmation,kind:'ASK_NEXT_GAP'},
+      {...confirmation,text:text+' Posso te ajudar com o website?'},
+      {...confirmation,text:text.replace('Você informou:','Você disse:')},
+      {...confirmation,text:text.replace('”. Qual',' Qual')},
+      {...confirmation,text:'É só me chamar. Qual o horário de sábado?'},
+    ])expect(speech.speechActionIsInternallyValid(changed)).toBe(false);
+  });
+  test('source-bound recap can quote owner policy without treating that quote as an agent offer',async()=>{
+    const summary={...action,kind:'GENERATE_FINAL_SUMMARY' as const,text:'Resposta literal do dono: “Se o cliente pedir desconto, é só me chamar para eu decidir.”'};
+    const payload=await speech.synthesizeOnboardingSpeech(summary,deps);
+    expect(speech.speechPayloadIsInternallyValid(payload,summary)).toBe(true);
+    expect(speech.speechActionIsInternallyValid({...summary,kind:'ASK_NEXT_GAP'})).toBe(false);
+  });
   test("sends exact persisted action text to the single bounded TTS endpoint and binds payload", async () => {
     const requests: { url: string; init: RequestInit }[] = [];
     const payload = await speech.synthesizeOnboardingSpeech(action, { ...deps, fetchImpl: async (url, init) => {

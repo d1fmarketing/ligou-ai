@@ -29,6 +29,16 @@ function checked(agenda: OnboardingAgenda, text: string, proposal: AgendaProposa
 }
 
 describe("verified owner answer applicability", () => {
+  test('the September 6 territory answer can resolve related territory gaps despite its polite combinado tag',()=>{
+    const item=byRef('area.coverage'),agenda=at(item.id);
+    const text='Olha, atende só Novato, San Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?';
+    const proposal=checked(agenda,text,answer(item.id,[...item.relatedItemIds]));
+    const result=applyVerifiedOwnerTurn(agenda,{type:'verified_owner_turn',binding,turnId:'september6-territory',text,proposal});
+    expect(result.agenda.items.filter(item=>item.evidence.at(-1)?.turnId==='september6-territory')).toHaveLength(2);
+    expect(result.action?.itemId).toBe('ff9fa80b-12d5-4afa-85e2-a17a937aceca');
+    for(const uncertain of ['Talvez atendamos somente Novato, combinado?','Você acha que devemos atender somente essas cidades? Combinado?','O site diz: “Atendemos somente Novato”, combinado?'])
+      expect(()=>checked(agenda,uncertain,answer(item.id,[...item.relatedItemIds]))).toThrow();
+  });
   test("exact Foghorn obligations unchanged; explicit universal warranty answers eleven with identical evidence", () => {
     expect(projection.seeds).toHaveLength(114);
     expect(projection.coverageObligations.filter(item => item.disposition === "ask")).toHaveLength(115);

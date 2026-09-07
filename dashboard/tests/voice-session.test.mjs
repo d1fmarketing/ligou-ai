@@ -266,6 +266,8 @@ function installVoiceBrowser({
   autoOpeningEvents = true,
   providerGreetingTranscript,
   vadEvent = LIVE_VAD_EVENT,
+  getUserMediaImpl,
+  sampleAmplitude,
 } = {}) {
   const originals = {
     navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
@@ -274,6 +276,9 @@ function installVoiceBrowser({
     fetch: Object.getOwnPropertyDescriptor(globalThis, "fetch"),
     createObjectURL: Object.getOwnPropertyDescriptor(globalThis.URL, "createObjectURL"),
     revokeObjectURL: Object.getOwnPropertyDescriptor(globalThis.URL, "revokeObjectURL"),
+    AudioContext: Object.getOwnPropertyDescriptor(globalThis, "AudioContext"),
+    requestAnimationFrame: Object.getOwnPropertyDescriptor(globalThis, "requestAnimationFrame"),
+    cancelAnimationFrame: Object.getOwnPropertyDescriptor(globalThis, "cancelAnimationFrame"),
   };
   const actions = [];
   const tracks = [{
@@ -357,10 +362,14 @@ function installVoiceBrowser({
       this.playCalls += 1;
       actions.push(`audio:${this.index}:play:remote-muted=${audios[0]?.muted}:mic=${tracks[0].enabled}`);
       if (autoPlayback === "reject") throw new Error("play_rejected");
-      if (autoPlayback === "ended") queueMicrotask(() => this.dispatch("ended"));
+      if (autoPlayback === "ended") queueMicrotask(() => { this.dispatch("playing"); this.dispatch("ended"); });
       if (autoPlayback === "error") queueMicrotask(() => this.dispatch("error", new Error("audio_error")));
     }
     pause() { this.pauseCalls += 1; actions.push(`audio:${this.index}:pause`); }
+    captureStream() {
+      const captured = { stop: () => actions.push("sample:capture-stopped") };
+      return { getAudioTracks: () => [captured], getTracks: () => [captured] };
+    }
   }
 
   class Peer {
@@ -376,15 +385,28 @@ function installVoiceBrowser({
     async setRemoteDescription() {
       actions.push("peer:setRemoteDescription");
       if (remoteDescriptionError) throw remoteDescriptionError;
+      if (!audios[0].muted) {
+        this.ontrack?.({ streams: [{ getAudioTracks: () => [{}] }] });
+      }
     }
     close() { this.closeCalls += 1; this.connectionState = "closed"; }
   }
 
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
-    value: { mediaDevices: { getUserMedia: async () => ({ getTracks: () => tracks }) } },
+    value: { mediaDevices: { getUserMedia: getUserMediaImpl ?? (async () => ({ getTracks: () => tracks })) } },
   });
   Object.defineProperty(globalThis, "RTCPeerConnection", { configurable: true, value: Peer });
+  if (typeof sampleAmplitude === "number") {
+    Object.defineProperty(globalThis, "AudioContext", { configurable: true, value: class {
+      state = "running";
+      createAnalyser() { return { fftSize: 256, getFloatTimeDomainData: (array) => array.fill(sampleAmplitude) }; }
+      createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+      close() { actions.push("sample:context-closed"); return Promise.resolve(); }
+    } });
+    Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, value: (fn) => setTimeout(fn, 1) });
+    Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, value: clearTimeout });
+  }
   Object.defineProperty(globalThis, "document", {
     configurable: true,
     value: { createElement: () => new FakeAudio() },
@@ -435,6 +457,161 @@ function installVoiceBrowser({
     },
   };
 }
+
+test("cancel returns while microphone permission is unresolved and disposes a late granted stream", async () => {
+  let grant;
+  const browser = installVoiceBrowser({ getUserMediaImpl: () => new Promise((resolve) => { grant = resolve; }) });
+  const abort = new AbortController();
+  let ended = false;
+  let result = "pending";
+  const starting = startVoiceSession({ accessToken: "owner-token", signal: abort.signal,
+    onEnd: () => { ended = true; },
+  }).then(() => { result = "started"; }, () => { result = "cancelled"; });
+  try {
+    await waitUntil(() => Boolean(grant), "permission request");
+    abort.abort("manual_hangup");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(result, "cancelled", "cancellation must not wait for the permission dialog");
+    assert.equal(browser.peers.length, 0);
+    assert.equal(browser.requestBodies.length, 0);
+    assert.equal(ended, false, "the panel owns cancellation before a call exists");
+  } finally {
+    grant({ getTracks: () => browser.tracks });
+    await starting;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(browser.tracks[0].stopCalls, 1, "a late stream must never retain microphone custody");
+    browser.restore();
+  }
+});
+
+test("playing is visible before opening ended, while readiness still waits for verified audio and VAD", async () => {
+  const browser = installVoiceBrowser({ autoPlayback: "pending", autoOpeningEvents: false });
+  const abort = new AbortController();
+  const stages = [];
+  const timings = [];
+  let resolved = false;
+  let session;
+  const starting = startVoiceSession({ accessToken: "owner-token", sessionType: "onboarding",
+    signal: abort.signal, onStage: (stage) => stages.push(stage), onTiming: (timing) => timings.push(timing),
+  }).then((value) => { resolved = true; session = value; return value; });
+  try {
+    await waitUntil(() => browser.audios[1]?.playCalls === 1, "opening audio play request");
+    browser.audios[1].dispatch("playing");
+    assert.equal(stages.at(-1), "playing");
+    assert.equal(stages.includes("ready"), false);
+    assert.equal(resolved, false, "visible playback cannot bypass played ACK and safe VAD");
+    assert.equal(browser.tracks[0].enabled, false);
+    assert.equal(timings.some((entry) => entry.event === "speech_playing"), true);
+    assert.equal(timings.some((entry) => entry.event === "speech_ended"), false);
+    assert.equal(timings.some((entry) => /audible|actionable_question_onset$/.test(entry.event)), false,
+      "mixed opening audio has no exact question alignment or physical speaker proof");
+    browser.audios[1].dispatch("ended");
+    await waitUntil(() => browser.channel.sent.length === 1, "played opening ACK request");
+    assert.equal(stages.includes("ready"), false);
+    browser.channel.emit({ type: "conversation.item.done", item: browser.channel.sent[0].item });
+    browser.channel.emit(LIVE_VAD_EVENT);
+    await starting;
+    assert.equal(stages.at(-1), "ready");
+    assert.equal(browser.tracks[0].enabled, true);
+    for (const name of ["microphone_requested", "microphone_ready", "offer_started", "offer_ready", "bootstrap_started", "bootstrap_response", "remote_sdp_applied", "data_channel_open", "speech_playing", "speech_ended", "ready"]) {
+      assert.ok(timings.find((entry) => entry.event === name), `missing ${name}`);
+    }
+    assert.ok(timings.every((entry) => Number.isFinite(entry.elapsedMs) && entry.elapsedMs >= 0));
+    assert.equal(JSON.stringify(timings).includes("owner-token"), false);
+    assert.equal(JSON.stringify(timings).includes("answer-sdp"), false);
+    assert.equal(JSON.stringify(timings).includes(OPENING_TEXT), false);
+  } finally {
+    abort.abort("test_cleanup");
+    await starting.catch(() => {});
+    session?.end();
+    browser.restore();
+  }
+});
+
+test("microphone failures become actionable Portuguese copy and remain retryable", async () => {
+  for (const [name, expected] of [["NotAllowedError", /permit|permiss/i], ["NotFoundError", /microfone.*encontr|conect/i], ["NotReadableError", /uso|dispon/i]]) {
+    const browser = installVoiceBrowser({ getUserMediaImpl: async () => { throw Object.assign(new Error("private device detail"), { name }); } });
+    const stages = [];
+    try {
+      await assert.rejects(startVoiceSession({ accessToken: "owner-token", onStage: (stage) => stages.push(stage) }), (error) => {
+        const message = sessionModule.voiceSessionErrorMessage(error);
+        assert.match(message, expected);
+        assert.doesNotMatch(message, /private device/);
+        return true;
+      });
+      assert.equal(stages.at(-1), "failed");
+      assert.equal(browser.requestBodies.length, 0);
+    } finally { browser.restore(); }
+  }
+});
+
+test("authentication and abandoned permission prompts have bounded cancellation and timeout paths", async () => {
+  const authAbort = new AbortController();
+  const auth = sessionModule.authenticateVoiceSession({ client: { auth: { getSession: () => new Promise(() => {}) } }, signal: authAbort.signal });
+  authAbort.abort("manual_hangup");
+  await assert.rejects(auth, (error) => error.code === "voice_start_cancelled");
+  await assert.rejects(sessionModule.authenticateVoiceSession({ client: { auth: { getSession: () => new Promise(() => {}) } }, timeoutMs: 5 }),
+    (error) => error.code === "voice_auth_timeout");
+  let grant;
+  const browser = installVoiceBrowser({ getUserMediaImpl: () => new Promise((resolve) => { grant = resolve; }) });
+  try {
+    await assert.rejects(startVoiceSession({ accessToken: "owner-token", permissionTimeoutMs: 5 }),
+      (error) => error.code === "microphone_permission_timeout");
+    grant({ getTracks: () => browser.tracks });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(browser.tracks[0].stopCalls, 1);
+    assert.equal(browser.peers.length, 0);
+  } finally { browser.restore(); }
+});
+
+test("hung bootstrap fails within its connection budget and releases microphone and peer", async () => {
+  const stages = [];
+  const browser = installVoiceBrowser({ fetchImpl: () => new Promise(() => {}) });
+  try {
+    await assert.rejects(startVoiceSession({ accessToken: "owner-token", connectionTimeoutMs: 5, onStage: (stage) => stages.push(stage) }),
+      (error) => error.code === "voice_connection_timeout");
+    assert.equal(stages.at(-1), "failed");
+    assert.equal(browser.tracks[0].stopCalls, 1);
+    assert.equal(browser.peers[0].closeCalls, 1);
+  } finally { browser.restore(); }
+});
+
+test("timing uses one browser monotonic origin and observer failure cannot change session work", () => {
+  let clock = 500;
+  const recorder = sessionModule.createVoiceSessionTiming({ startedAt: 450, now: () => clock,
+    onTiming: () => { throw new Error("diagnostic_sink_unavailable"); },
+  });
+  assert.deepEqual(recorder.mark("auth_completed"), { event: "auth_completed", attemptId: recorder.attemptId, elapsedMs: 50 });
+  clock = 575;
+  assert.deepEqual(recorder.mark("bootstrap_response"), { event: "bootstrap_response", attemptId: recorder.attemptId, elapsedMs: 125 });
+});
+
+test("nonzero sample telemetry requires browser playback capture; byte availability and silence do not qualify", async () => {
+  for (const sampleAmplitude of [0, 0.125]) {
+    const browser = installVoiceBrowser({ autoPlayback: "pending", sampleAmplitude });
+    const abort = new AbortController();
+    const timings = [];
+    const starting = startVoiceSession({ accessToken: "owner-token", sessionType: "onboarding",
+      signal: abort.signal, onTiming: (entry) => timings.push(entry),
+    });
+    try {
+      await waitUntil(() => browser.audios[1]?.playCalls === 1, "play request");
+      assert.equal(timings.some((entry) => entry.event === "speech_first_nonzero_sample"), false);
+      browser.audios[1].dispatch("playing");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const observed = timings.filter((entry) => entry.event === "speech_first_nonzero_sample");
+      assert.equal(observed.length, sampleAmplitude ? 1 : 0);
+      if (sampleAmplitude) assert.equal(observed[0].evidence, "media_element_capture");
+      assert.equal(browser.tracks[0].enabled, false, "diagnostics cannot release microphone custody");
+    } finally {
+      abort.abort("test_cleanup");
+      await starting.catch(() => {});
+      assert.equal(browser.actions.filter((entry) => entry === "sample:capture-stopped").length, 1);
+      assert.equal(browser.actions.filter((entry) => entry === "sample:context-closed").length, 1);
+      browser.restore();
+    }
+  }
+});
 
 test("Test 10 invariant: verified application MP3 is the only audible onboarding opening", async () => {
   const browser = installVoiceBrowser({
@@ -521,7 +698,7 @@ function websiteOpeningResponse() {
   return {...response,onboarding_protocol_version:3,opening_payload:{version:3,item_id:`lgs-${speech.actionId.slice(0,28)}`,speech}};
 }
 test('website protocol3 uses owner-scoped application speech and never unmutes Realtime',async()=>{
-  const response=websiteOpeningResponse(),reads=[],events=[];
+  const response=websiteOpeningResponse(),reads=[],events=[],stages=[];
   const safeVad=structuredClone(LIVE_VAD_EVENT);
   safeVad.session.audio.input.turn_detection.create_response=false;
   safeVad.session.audio.input.turn_detection.interrupt_response=false;
@@ -529,7 +706,7 @@ test('website protocol3 uses owner-scoped application speech and never unmutes R
   try{
     const session=await startVoiceSession({accessToken:'owner-token',sessionType:'onboarding',onboardingProtocolVersion:3,
       speechClient:{rpc:async(name,args)=>{reads.push({name,args});return{data:response.opening_payload.speech,error:null};}},
-      onEvent:event=>events.push(event)});
+      onEvent:event=>events.push(event),onStage:stage=>stages.push(stage)});
     assert.equal(browser.requestBodies[0].onboarding_protocol_version,3);
     assert.deepEqual(reads,[{name:'read_website_interview_speech',args:{p_call:CALL_ID,p_action:'a'.repeat(64)}}]);
     assert.equal(browser.audios[0].muted,true);assert.equal(browser.tracks[0].enabled,true);
@@ -537,6 +714,9 @@ test('website protocol3 uses owner-scoped application speech and never unmutes R
     assert.deepEqual(events,[{kind:'agent',text:response.opening_payload.speech.text}]);
     browser.channel.emit({type:'response.output_audio_transcript.done',transcript:'Quer mais alguma coisa?'});
     assert.equal(events.length,1);assert.equal(browser.audios[0].muted,true);
+    browser.channel.emit({type:'input_audio_buffer.speech_started',item_id:'owner-answer'});
+    browser.channel.emit({type:'conversation.item.input_audio_transcription.completed',item_id:'owner-answer',transcript:'Somente as cidades que mencionei.'});
+    assert.equal(stages.at(-1),'processing');assert.equal(browser.tracks[0].enabled,true);
     session.end();assert.equal(browser.revokedObjectUrls.length,1);
   }finally{browser.restore();}
 });
@@ -918,6 +1098,18 @@ test("owner browser sessions keep the existing request and immediate duplex medi
   } finally {
     browser.restore();
   }
+});
+
+test("owner browser autoplay denial fails explicitly instead of claiming a ready audio path", async () => {
+  const browser = installVoiceBrowser({ autoPlayback: "reject" });
+  const stages = [];
+  try {
+    await assert.rejects(startVoiceSession({ accessToken: "owner-token", onStage: (stage) => stages.push(stage) }),
+      (error) => /navegador bloqueou o áudio/.test(sessionModule.voiceSessionErrorMessage(error)));
+    assert.equal(stages.includes("ready"), false);
+    assert.equal(stages.at(-1), "failed");
+    assert.equal(browser.tracks[0].stopCalls, 1);
+  } finally { browser.restore(); }
 });
 
 test("session end reports explicit reason and exact call identity", async () => {
@@ -1556,6 +1748,7 @@ test("deadline aborts both real query builders through their captured child sign
 });
 
 test("watcher never overlaps a new probe with the prior aborted receipt and call reads", async () => {
+  let clock=0;
   let active = 0;
   let maxActive = 0;
   let queryStarts = 0;
@@ -1564,6 +1757,7 @@ test("watcher never overlaps a new probe with the prior aborted receipt and call
     active += 1;
     maxActive = Math.max(maxActive, active);
     query.abortSignal.addEventListener("abort", () => {
+      clock+=5;
       active -= 1;
       resolve({ data: null, error: { message: "aborted" } });
     }, { once: true });
@@ -1575,6 +1769,7 @@ test("watcher never overlaps a new probe with the prior aborted receipt and call
     reason: "remote_hangup",
     callId: CALL_ID,
     knownRevision: 8,
+    now:()=>clock,
     timeoutMs: 5,
     pollIntervalMs: 1,
     retryDelayMs: 250,
@@ -1867,6 +2062,17 @@ test("terminal error cannot be relabeled as a completed interview", async () => 
   const outcome = await resolveOnboardingOutcome({ client, reason: "remote_hangup", callId: CALL_ID });
 
   assert.deepEqual(outcome, { status: "interrupted", revision: 8 });
+});
+
+test('protocol3 manual teardown retains durable approval instead of requiring a new interview',async()=>{
+ const data={callId:CALL_ID,currentCallId:CALL_ID,interviewId:CALL_ID,revision:4,state:'closing',completed:false,
+  approvalReceiptId:CALL_ID,providerTerminationState:'confirmed',budgetStatus:'settled',callStatus:'ended',terminal:{outcome:'unfinished'}};
+ const outcome=await resolveOnboardingOutcome({client:{rpc:async()=>({data,error:null})},reason:'manual_hangup',callId:CALL_ID,onboardingProtocolVersion:3});
+ assert.equal(outcome.status,'approved');assert.equal(outcome.approvalReceiptId,CALL_ID);
+ assert.match(onboardingOutcomeCopy(outcome),/aprovada/i);assert.doesNotMatch(onboardingOutcomeCopy(outcome),/concluída/);
+ const amendment=await resolveOnboardingOutcome({client:{rpc:async()=>({data:{...data,amendmentPending:true,amendmentCanResume:true,amendmentRequestReceiptId:CALL_ID},error:null})},
+  reason:'remote_hangup',callId:CALL_ID,onboardingProtocolVersion:3});
+ assert.equal(amendment.status,'amendment_pending');assert.equal(amendment.canResume,true);
 });
 
 test("onboarding result copy distinguishes interrupted, finalizing, and durable completion", () => {

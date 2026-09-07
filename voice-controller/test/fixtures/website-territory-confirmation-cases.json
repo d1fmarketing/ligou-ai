@@ -1,0 +1,26 @@
+[
+  {
+    "name": "exact multi-sentence answer",
+    "text": "Uhum. Olha, atende só Novato, San Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?",
+    "excerpt": "atende só Novato, San Rafael e Petaluma. Nada além dessas três. Se pintar alguma coisa fora, é só com aprovação explícita do dono"
+  },
+  {
+    "name": "recorded ASR spelling is retained",
+    "text": "Olha, atende só novatos São Rafael e Petaluma, nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?",
+    "excerpt": "atende só novatos São Rafael e Petaluma, nada além dessas três. Se pintar alguma coisa fora, é só com aprovação explícita do dono"
+  },
+  {
+    "name": "natural paraphrase",
+    "text": "Nossa área fica restrita a Novato, San Rafael e Petaluma. Para sair dessas cidades precisa falar comigo e ter minha autorização.",
+    "excerpt": "Nossa área fica restrita a Novato, San Rafael e Petaluma. Para sair dessas cidades precisa falar comigo e ter minha autorização"
+  },
+  {
+    "name": "different cities and additional restriction",
+    "text": "Atendemos apenas Recife e Olinda. Fora dessas cidades, somente com minha aprovação explícita. Essa autorização nunca permite cobrança automática.",
+    "excerpt": "Atendemos apenas Recife e Olinda. Fora dessas cidades, somente com minha aprovação explícita. Essa autorização nunca permite cobrança automática"
+  },
+  { "name": "unknown wording remains generic", "text": "Vou conferir depois quais cidades podemos atender.", "excerpt": null },
+  { "name": "uncertain coverage remains generic", "text": "Talvez atendemos só Recife e Olinda. Fora dessas cidades, só com minha aprovação.", "excerpt": null },
+  { "name": "quoted website is not an owner confirmation", "text": "O site diz: “Atendemos só Recife e Olinda”. Fora dessas cidades, só com minha aprovação.", "excerpt": null },
+  { "name": "no exception condition is invented", "text": "Atendemos só Recife e Olinda. Não atendemos outras cidades.", "excerpt": null }
+]

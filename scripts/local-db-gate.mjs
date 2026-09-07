@@ -238,15 +238,20 @@ function sanitize(value, secrets = []) {
   return sanitized.replace(/postgres(?:ql)?:\/\/\S+/gi, "[redacted-db-url]");
 }
 
-function run(command, args, { cwd, env, input } = {}) {
+export function run(command, args, { cwd, env, input } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let inputError;
     child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
     child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
     child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout: stdout.trim(), stderr: stderr.trim() }));
+    // A rejected SQL process can exit before a large input finishes writing.
+    // Keep its real stderr and let the caller report the failed gate.
+    child.stdin.on("error", (error) => { inputError = error; });
+    child.on("close", (code) => resolve({ code: code===0 && inputError ? 1 : code, stdout: stdout.trim(),
+      stderr: [stderr.trim(),inputError && code===0 ? "child_input_closed_early" : ""].filter(Boolean).join("\n") }));
     child.stdin.end(input ?? "");
   });
 }

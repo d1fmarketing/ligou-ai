@@ -1799,6 +1799,7 @@ function enqueueOnboardingRawEvent(
   const adapter = ensureOnboardingAdapter(context.ledger);
   if (!context.isCurrent()) return Promise.resolve();
   if (context.ledger.websiteInterviewRuntime) {
+    context.ledger.websiteInterviewRuntime.observeEvent(msg);
     const task = adapter.queue.then(async () => {
       if (!context.isCurrent()) return;
       const ledger = context.ledger;
@@ -3523,8 +3524,9 @@ export function attachSideband(
         enforceWebsiteHardBudget();
       },
       onUsageUnknown: () => { ledger.providerUsageEvidence.continuous = false; },
-      onTerminate: (command) => { ledger.agentEnded = true; if (ledger.status === "active") ledger.status = command.outcome === "complete" ? "ended" : "error"; },
+      onTerminate: (command) => { ledger.agentEnded = true; if (ledger.status === "active") ledger.status = command.outcome === "complete" || ["owner_requested_pause","owner_requested_amendment"].includes(command.reason) ? "ended" : "error"; },
       onState: (state) => { ledger.phase = state.phase; },
+      onDiagnostic: (event) => { console.info(JSON.stringify({ event: "website_interview", ...event })); },
     });
   }
 

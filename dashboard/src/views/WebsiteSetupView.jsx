@@ -84,16 +84,28 @@ export function WebsiteSetupView({
     );
   }
   if (state === "onboarding_complete") return null;
+  if (state === "onboarding_amendment_pending") {
+    return <main className="website-setup-shell" id="main-content"><section className="website-setup-card">
+      <span className="website-setup-kicker">Correção solicitada</span>
+      <h1>Vamos revisar os pontos que você pediu</h1>
+      <p>A versão aprovada continua guardada. A próxima conversa retoma os pontos da correção, preservando as outras respostas.</p>
+      <SetupReadWarning message={loadError} />
+      {!setup.startOnboardingEnabled ? <p role="status">Confirmando o encerramento da última conversa…</p> : null}
+      <button className="button button--primary" type="button" disabled={busy || !setup.startOnboardingEnabled} onClick={onStartOnboarding}>
+        Revisar correção
+      </button>
+    </section></main>;
+  }
   if (state === "onboarding_in_progress") {
     return (
       <main className="website-setup-shell" id="main-content">
         <section className="website-setup-card">
           <span className="website-setup-kicker">Onboarding</span>
-          <h1>Seu onboarding está em andamento</h1>
+          <h1>{setup.approvalReceiptId ? "Sua configuração está aprovada" : "Sua conversa ainda está em andamento"}</h1>
           <SetupReadWarning message={loadError} />
-          <p>Continue de onde parou para concluir as regras da sua empresa.</p>
-          <button className="button button--primary" type="button" onClick={onStartOnboarding}>
-            Continuar onboarding
+          <p>{setup.approvalReceiptId ? "A aprovação está salva. Confirmando o encerramento da conversa…" : "Volte à aba em que iniciou a conversa ou aguarde o encerramento para retomar."}</p>
+          <button className="button button--primary" type="button" disabled onClick={onStartOnboarding}>
+            Aguardando encerramento
           </button>
         </section>
       </main>

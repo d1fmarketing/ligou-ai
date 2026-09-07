@@ -8,6 +8,7 @@ const STATES = new Set([
   "ready_for_onboarding",
   "onboarding_in_progress",
   "onboarding_complete",
+  "onboarding_amendment_pending",
 ]);
 
 const FAILURE_COPY = Object.freeze({
@@ -108,10 +109,14 @@ export function mapWebsiteSetupStatus(value) {
         !["ready_for_onboarding", "reviewed"].includes(job.processingStage))) {
     throw new Error("ready proof ausente ou inválido");
   }
-  if (status.state !== "ready_for_onboarding" &&
+  if (!["ready_for_onboarding","onboarding_amendment_pending"].includes(status.state) &&
       (summary !== null || readyProof !== null)) {
     throw new Error("ready proof fora do estado pronto");
   }
+  const amendment=status.state==="onboarding_amendment_pending";
+  if(amendment && (status.voice_protocol_version!==3 || status.amendment_pending!==true ||
+    typeof status.amendment_can_resume!=="boolean" || !UUID.test(status.amendment_request_receipt_id??"") || !UUID.test(status.voice_approval_receipt_id??"")))
+    throw new Error("amendment proof ausente ou inválido");
   return Object.freeze({
     state: status.state,
     entitlementSource: status.entitlement_source,
@@ -120,7 +125,10 @@ export function mapWebsiteSetupStatus(value) {
     job,
     summary,
     readyProof,
-    startOnboardingEnabled: status.state === "ready_for_onboarding" && readyProof !== null,
+    startOnboardingEnabled: (status.state === "ready_for_onboarding" && readyProof !== null) || (amendment && status.amendment_can_resume),
+    approvalReceiptId: UUID.test(status.voice_approval_receipt_id??"")?status.voice_approval_receipt_id:null,
+    priorApprovalReceiptId: UUID.test(status.prior_voice_approval_receipt_id??"")?status.prior_voice_approval_receipt_id:null,
+    amendmentRequestReceiptId: amendment?status.amendment_request_receipt_id:null,
     voiceProtocolVersion: status.voice_protocol_version ?? 2,
     failureMessage: status.state === "learning_failed"
       ? FAILURE_COPY[job?.failureCode] ?? "Não conseguimos concluir a análise. Confira o endereço e tente novamente."

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { parseOnboardingAgenda, getAgendaAction, type OnboardingAgenda, type AgendaAction, type AgendaProposal } from "./onboarding-agenda.ts";
+import { parseOnboardingAgenda, getAgendaAction, websiteTerritoryConfirmation, type OnboardingAgenda, type AgendaAction, type AgendaProposal } from "./onboarding-agenda.ts";
 
-export interface InterviewScope { ownerId: string; callId: string; requestId: string }
+export interface InterviewScope { ownerId: string; callId: string; requestId: string; signal?: AbortSignal }
 export interface FreshWebsiteInterviewPreparation {
   preparationId: string; ownerId: string; expectedTenantId: string; expectedGeneration: number;
   priorCallId: string; draftId: string; draftHash: string; sourceResultId: string; sourceResultHash: string;
@@ -10,7 +10,8 @@ export interface StoredWebsiteInterview {
   agenda: OnboardingAgenda; revision: number; storeVersion: number; digest: string; receiptId: string;
   nextAction: AgendaAction; state: "unfinished" | "reviewing" | "closing" | "complete"; replayed: boolean;
 }
-type RpcClient = { rpc(name: string, args: Record<string, unknown>): PromiseLike<{ data: unknown; error: { message?: string } | null }> };
+type RpcResult = { data: unknown; error: { message?: string; code?: string } | null; status?: number };
+type RpcClient = { rpc(name: string, args: Record<string, unknown>): PromiseLike<RpcResult> & { abortSignal?(signal: AbortSignal): PromiseLike<RpcResult> } };
 const MAX_BYTES = 2 * 1024 * 1024;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function canonical(value: unknown): string {
@@ -37,7 +38,7 @@ function readback(value: unknown, callId: string): StoredWebsiteInterview {
   if (!["unfinished", "reviewing", "closing", "complete"].includes(raw.state)) throw new Error("Invalid interview state");
   const current = getAgendaAction(agenda);
   const prefixes: Record<AgendaAction["type"], string> = {
-    ASK_NEXT_GAP: "", CLARIFY_CURRENT_GAP: "Para esclarecer: ", CONFIRM_AND_ASK_NEXT: "Obrigado, registrei sua resposta. ",
+    ASK_NEXT_GAP: "", CLARIFY_CURRENT_GAP: "Para esclarecer: ", CONFIRM_AND_ASK_NEXT: websiteTerritoryConfirmation(agenda),
     DEFER_OFF_SCOPE_AND_CONTINUE: "Podemos tratar disso depois; agora vamos concluir sua configuração. ",
     GENERATE_FINAL_SUMMARY: "Vou preparar o resumo para sua revisão.", HANDLE_OWNER_CORRECTION: "Registrei sua correção. ",
   };
@@ -46,14 +47,20 @@ function readback(value: unknown, callId: string): StoredWebsiteInterview {
   const b = agenda.binding;
   const actionId = createHash("sha256").update(JSON.stringify([1,b.interviewId,b.callId,b.draftId,b.draftHash,b.sourceResultId,b.sourceResultHash,agenda.revision,current.itemId ?? null,type])).digest("hex");
   const spokenPt = prefixes[type] + (current.questionPt ?? (type === "GENERATE_FINAL_SUMMARY" ? "" : "Vou preparar o resumo para sua revisão."));
-  if (raw.nextAction.actionId !== actionId || raw.nextAction.spokenPt !== spokenPt) throw new Error("Interview action proof mismatch");
+  // Existing persisted actions retain their original generic acknowledgment;
+  // accepting that exact historical form does not rewrite its receipt or words.
+  const legacySpokenPt = "Obrigado, registrei sua resposta. " + (current.questionPt ?? "Vou preparar o resumo para sua revisão.");
+  const legacy = type === "CONFIRM_AND_ASK_NEXT" && raw.nextAction.spokenPt === legacySpokenPt;
+  if (raw.nextAction.actionId !== actionId || (raw.nextAction.spokenPt !== spokenPt && !legacy)) throw new Error("Interview action proof mismatch");
   const nextAction: AgendaAction = Object.freeze({ ...raw.nextAction });
   return { agenda, revision: agenda.revision, storeVersion: raw.storeVersion, digest: raw.digest, receiptId: raw.receiptId, nextAction, state: raw.state, replayed: raw.replayed === true };
 }
 export function createOnboardingAgendaStore(client: RpcClient) {
-  async function rpc(name: string, args: Record<string, unknown>) {
-    const result = await client.rpc(name, args);
-    if (result.error) throw new Error(result.error.message ?? "Interview persistence failed");
+  async function rpc(name: string, args: Record<string, unknown>, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    const request = client.rpc(name, args);
+    const result = await (signal && request.abortSignal ? request.abortSignal(signal) : request);
+    if (result.error) throw Object.assign(new Error(result.error.message ?? "Interview persistence failed"), { code: result.error.code, status: result.status });
     if (!result.data) throw new Error("Interview persistence returned no proof");
     return result.data;
   }
@@ -73,21 +80,21 @@ export function createOnboardingAgendaStore(client: RpcClient) {
       return result as { prepared: true; preparationId: string; draftId: string; draftHash: string; sourceResultId: string; sourceResultHash: string; draft_readback: unknown; resume?: { interviewId: string; priorCallId: string } | null };
     },
     async readWebsiteInterview(input: InterviewScope) {
-      return readback(await rpc("read_website_interview", scoped(input)), input.callId);
+      return readback(await rpc("read_website_interview", scoped(input), input.signal), input.callId);
     },
     async attachWebsiteInterview(input: InterviewScope & { interviewId: string; priorCallId: string }) {
       return readback(await rpc("attach_website_interview", { ...scoped(input), p_interview: input.interviewId, p_prior_call: input.priorCallId }), input.callId);
     },
     async recordOwnerTranscript(input: InterviewScope & { providerItemId: string; text: string }) {
       if (!input.providerItemId?.trim() || input.providerItemId.length > 400 || !input.text?.trim() || input.text.length > 32768) throw new Error("Invalid owner transcript");
-      const result = await rpc("record_website_interview_owner_turn", { ...scoped(input), p_item: input.providerItemId, p_text: input.text }) as Record<string, unknown>;
+      const result = await rpc("record_website_interview_owner_turn", { ...scoped(input), p_item: input.providerItemId, p_text: input.text }, input.signal) as Record<string, unknown>;
       if (result.callId !== input.callId || result.providerItemId !== input.providerItemId || result.turnId !== `${input.callId}:${input.providerItemId}` || result.text !== input.text) throw new Error("Owner transcript proof mismatch");
       return result as { callId: string; providerItemId: string; turnId: string; text: string; replayed: boolean };
     },
     async commitOwnerTurn(input: InterviewScope & { expectedRevision: number; expectedStoreVersion: number; expectedDigest: string; providerItemId: string; proposal: AgendaProposal; agenda: OnboardingAgenda; facts?: readonly Record<string, unknown>[] }) {
       const agenda = checkedAgenda(input.agenda);
       if (!Number.isSafeInteger(input.expectedStoreVersion) || input.expectedStoreVersion < 0) throw new Error("Invalid interview store version");
-      return readback(await rpc("commit_website_interview_turn", { ...scoped(input), p_revision: input.expectedRevision, p_store_version: input.expectedStoreVersion, p_digest: input.expectedDigest, p_item: input.providerItemId, p_agenda: agenda, p_proposal_kind: input.proposal.kind, p_facts: input.facts ?? [] }), input.callId);
+      return readback(await rpc("commit_website_interview_turn", { ...scoped(input), p_revision: input.expectedRevision, p_store_version: input.expectedStoreVersion, p_digest: input.expectedDigest, p_item: input.providerItemId, p_agenda: agenda, p_proposal_kind: input.proposal.kind, p_facts: input.facts ?? [] }, input.signal), input.callId);
     },
   };
 }

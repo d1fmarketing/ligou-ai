@@ -157,7 +157,9 @@ export function validateWebsiteAnswerApplicability(input: {
   if (!related.length) return proposal;
   const current = agenda.items.find(item => item.id === currentItemId);
   if (!current) throw new Error("website_applicability_current_graph_missing");
-  const text = normalized(ownerTranscript);
+  // A trailing agreement tag does not turn an otherwise explicit policy into
+  // a question. Other question marks, quotations and uncertain scope remain.
+  const text = normalized(ownerTranscript).replace(/[,\s]*\bcombinado\s*\?[.!]*\s*$/, '.');
   if (unsafeScope(text)) throw new Error("website_applicability_scope_unsupported");
   for (const id of related) {
     const target = agenda.items.find(item => item.id === id);

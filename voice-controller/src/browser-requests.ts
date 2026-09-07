@@ -13,7 +13,7 @@ import type {
   OnboardingOpeningMode,
   OnboardingOpeningPayload,
 } from "./onboarding-greeting.ts";
-import type { WebsiteOpeningEnvelope } from "./server.ts";
+import { createVoiceStartupTrace, type WebsiteOpeningEnvelope } from "./server.ts";
 import { isApplicationOpeningPayload } from "../../supabase/functions/browser-session/core.ts";
 
 type StartSession = (
@@ -189,20 +189,17 @@ async function pollPendingBrowserRequests(
         .from("browser_session_requests")
         .select("*")
         .eq("status", "pending")
-        .lt("created_at", new Date(Date.now() - 2_000).toISOString())
         .limit(3)).data ?? []);
   } catch {
     return 0;
   }
   const handleRow = dependencies.handleRow ?? handle;
-  let handled = 0;
-  for (const row of rows.slice(0, 3)) {
-    try {
-      await handleRow(row, startSession);
-      handled += 1;
-    } catch {}
-  }
-  return handled;
+  // The durable pending -> processing claim still arbitrates Realtime/poll
+  // duplicates. A slow provider must not hold unrelated owners behind it.
+  const outcomes = await Promise.allSettled(
+    rows.slice(0, 3).map((row) => handleRow(row, startSession)),
+  );
+  return outcomes.filter((outcome) => outcome.status === "fulfilled").length;
 }
 
 export function startBrowserRequestListener(startSession: StartSession) {
@@ -224,13 +221,15 @@ export function startBrowserRequestListener(startSession: StartSession) {
   void pollBrowserCancellations();
   setInterval(() => { void pollBrowserCancellations(); }, 1_000);
   let pendingPollInFlight = false;
-  setInterval(() => {
+  const pollPending = () => {
     if (pendingPollInFlight) return;
     pendingPollInFlight = true;
     void pollPendingBrowserRequests(startSession).finally(() => {
       pendingPollInFlight = false;
     });
-  }, 4_000);
+  };
+  pollPending();
+  setInterval(pollPending, 1_000);
   console.log("browser session listener active (realtime + poll)");
 }
 
@@ -640,9 +639,11 @@ async function handle(
   startSession: StartSession,
   dependencies: BrowserRequestHandleDependencies = {},
 ) {
-  const { data: claimed } = await supa().from("browser_session_requests")
+  const traceScope = { requestId: String(row.id), callId: undefined as string | undefined, traceScope: "request" as const };
+  const trace = createVoiceStartupTrace(traceScope);
+  const { data: claimed } = await trace.measure("request_claim", () => supa().from("browser_session_requests")
     .update({ status: "processing", handled_at: new Date().toISOString() })
-    .eq("id", row.id).eq("status", "pending").select("id");
+    .eq("id", row.id).eq("status", "pending").select("id"));
   if (!claimed?.length) return; // another controller instance won the race
 
   let sessionCleanup: {
@@ -668,13 +669,14 @@ async function handle(
       requestedOpeningMode === "application_tts_v1";
     if (needsDurableCancelControl) {
       requestedCallId = (dependencies.callIdFactory ?? randomUUID)();
+      traceScope.callId = requestedCallId;
       if (!UUID_PATTERN.test(requestedCallId) ||
-        !await bindProcessingRequestCall(row, requestedCallId))
+        !await trace.measure("request_bind", () => bindProcessingRequestCall(row, requestedCallId!)))
         throw new Error("browser_request_call_bind_failed");
     }
     // The row's tenant_id is what the Edge Function resolved for the AUTHENTICATED
     // owner; startSession re-verifies ownership against a fresh read.
-    const out = await startSession(
+    const out = await trace.measure("session_start", () => startSession(
       row.user_id,
       (row.session_type ?? "owner_browser") as SessionType,
       row.offer_sdp,
@@ -703,7 +705,7 @@ async function handle(
         ...(requestedCallId ? { requestedCallId } : {}),
         ...([2, 3].includes(row.onboarding_protocol_version) ? { onboardingProtocolVersion: row.onboarding_protocol_version } : {}),
       },
-    );
+    ));
     if (needsDurableCancelControl &&
       (controlRegistrationFailed || !sessionCleanup))
       throw new Error("browser_request_cleanup_control_missing");
@@ -725,46 +727,48 @@ async function handle(
       throw new Error("browser_request_website_opening_invalid");
     if (row.onboarding_protocol_version === 2 && expectedOpeningPayload?.version !== 2)
       throw new Error("browser_request_opening_protocol_mismatch");
-    let ready: Array<{ id: string }> | null = null;
-    let readyError: unknown = null;
-    try {
-      const result = await supa()
-        .from("browser_session_requests")
-        .update({
-          status: "ready",
-          answer_sdp: out.sdp,
-          call_id: out.call_id,
-          opening_mode_applied: requestedOpeningMode,
-          opening_payload: expectedOpeningPayload,
-        })
-        .eq("id", row.id)
-        .eq("status", "processing")
-        .select("id");
-      ready = result.data as Array<{ id: string }> | null;
-      readyError = result.error;
-    } catch (error) {
-      readyError = error;
-    }
-    if (readyError || ready?.length !== 1) {
-      let durableReady = false;
+    await trace.measure("request_ready", async () => {
+      let ready: Array<{ id: string }> | null = null;
+      let readyError: unknown = null;
       try {
-        const { data: receipt, error: receiptError } = await supa()
+        const result = await supa()
           .from("browser_session_requests")
-          .select(
-            "id,status,answer_sdp,call_id,opening_mode_applied,opening_payload",
-          )
+          .update({
+            status: "ready",
+            answer_sdp: out.sdp,
+            call_id: out.call_id,
+            opening_mode_applied: requestedOpeningMode,
+            opening_payload: expectedOpeningPayload,
+          })
           .eq("id", row.id)
-          .maybeSingle();
-        durableReady = !receiptError && exactReadyReceiptMatches(receipt, {
-          requestId: String(row.id),
-          answerSdp: out.sdp,
-          callId: out.call_id,
-          openingMode: requestedOpeningMode,
-          openingPayload: expectedOpeningPayload,
-        });
-      } catch {}
-      if (!durableReady) throw new Error("browser_request_ready_failed");
-    }
+          .eq("status", "processing")
+          .select("id");
+        ready = result.data as Array<{ id: string }> | null;
+        readyError = result.error;
+      } catch (error) {
+        readyError = error;
+      }
+      if (readyError || ready?.length !== 1) {
+        let durableReady = false;
+        try {
+          const { data: receipt, error: receiptError } = await supa()
+            .from("browser_session_requests")
+            .select(
+              "id,status,answer_sdp,call_id,opening_mode_applied,opening_payload",
+            )
+            .eq("id", row.id)
+            .maybeSingle();
+          durableReady = !receiptError && exactReadyReceiptMatches(receipt, {
+            requestId: String(row.id),
+            answerSdp: out.sdp,
+            callId: out.call_id,
+            openingMode: requestedOpeningMode,
+            openingPayload: expectedOpeningPayload,
+          });
+        } catch {}
+        if (!durableReady) throw new Error("browser_request_ready_failed");
+      }
+    });
   } catch (e: any) {
     if (sessionCleanup) {
       const registeredControl = browserLiveControls.get(String(row.id));

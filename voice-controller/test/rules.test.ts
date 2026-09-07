@@ -73,6 +73,63 @@ beforeEach(() => {
 afterAll(() => _setClient(null));
 
 describe("effective rule loading", () => {
+  test("starts the three independent projection reads together after the fresh tenant row", async () => {
+    const started: string[] = [];
+    let releaseTenant!: () => void;
+    let releaseRules!: () => void;
+    const tenantGate = new Promise<void>((resolve) => { releaseTenant = resolve; });
+    const rulesGate = new Promise<void>((resolve) => { releaseRules = resolve; });
+    _setClient({
+      from(table: string) {
+        const api: any = {
+          select() { return api; }, eq() { return api; },
+          single: async () => {
+            await tenantGate;
+            return { data: BASE_TENANT, error: null };
+          },
+          then(resolve: (value: unknown) => unknown) {
+            started.push(table);
+            return (async () => {
+              if (table === "effective_rules") await rulesGate;
+              return { data: table === "effective_rules" ? effectiveRules : [], error: null };
+            })().then(resolve);
+          },
+        };
+        return api;
+      },
+    } as any);
+    const pending = loadTenant(BASE_TENANT.slug);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(started).toEqual([]);
+    releaseTenant();
+    await new Promise((resolve) => setImmediate(resolve));
+    const beforeRulesFinished = [...started];
+    releaseRules();
+    await pending;
+    expect(beforeRulesFinished.sort()).toEqual([
+      "effective_rules", "onboarding_locality_aliases", "onboarding_locality_registry",
+    ]);
+  });
+
+  test("never reuses a projection when a slug resolves to another tenant id with equal epochs", async () => {
+    await loadTenant(BASE_TENANT.slug);
+    const replacement = rulesClient();
+    const originalFrom = replacement.from;
+    replacement.from = (table: string) => {
+      const query = originalFrom(table);
+      if (table === "tenants") query.single = async () => ({
+        data: { ...BASE_TENANT, id: "replacement-tenant" }, error: null,
+      });
+      return query;
+    };
+    effectiveRules = [];
+    _setClient(replacement);
+    const loaded = await loadTenant(BASE_TENANT.slug);
+    expect(loaded.tenant.id).toBe("replacement-tenant");
+    expect(loaded.rules).toEqual([]);
+    expect(effectiveRuleReads).toBe(2);
+  });
+
   test("reads the latest-version projection instead of every approved history row", async () => {
     const loaded = await loadTenant("rocha-plumbing");
 

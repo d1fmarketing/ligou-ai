@@ -1,8 +1,14 @@
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as configModule from "../src/config.ts";
 import { _setClient, invalidateTenant } from "../src/rules.ts";
-import { startSession } from "../src/server.ts";
+import { createVoiceStartupTrace, startSession } from "../src/server.ts";
 import { liveSessions } from "../src/sideband.ts";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createUnitTestEnvironment } from "../scripts/run-unit-tests.mjs";
 
 const TENANT = {
   id: "11111111-1111-4111-8111-111111111111", slug: "rocha-plumbing", name: "Rocha Plumbing", vertical: "plumbing",
@@ -35,6 +41,11 @@ let durableProviderIdentity: Record<string, unknown> | null = null;
 let reserveGate: Promise<void> | null = null;
 let providerMarkerGate: Promise<void> | null = null;
 let resumeGate: Promise<void> | null = null;
+let terminalWriteError = false;
+let costFloorResponseGate: Promise<void> | null = null;
+let identityResponseGate: Promise<void> | null = null;
+let terminalResponseGate: Promise<void> | null = null;
+let heldResponseReached = false;
 let resumeRpcResult: { data: unknown; error: { code?: string; message: string } | null } = {
   data: null,
   error: { code: "P0002", message: "onboarding_resume_source_missing" },
@@ -123,7 +134,7 @@ function client() {
     from(table: string) {
       let updatedRow: any = null;
       const api: any = {
-        select() { return api; }, eq() { return api; },
+        select() { return api; }, eq() { return api; }, is() { return api; },
         insert(row: Record<string, unknown>) {
           if (table === "calls") {
             callInserts += 1;
@@ -179,12 +190,14 @@ function client() {
               status: "active",
               ...structuredClone(updatedRow),
             };
+            if (identityResponseGate) { heldResponseReached = true; await identityResponseGate; }
             return { data: structuredClone(durableProviderIdentity), error: null };
           }
           if (updatedRow && typeof updatedRow.cost_estimate_usd === "number") {
             if (floorWriteMode === "unproven")
               return { data: null, error: { message: "floor write unknown" } };
             durableFloor = updatedRow.cost_estimate_usd;
+            if (costFloorResponseGate) { heldResponseReached = true; await costFloorResponseGate; }
             if (floorWriteMode === "throw_exact")
               throw new TypeError("floor write transport lost after commit");
             return {
@@ -209,6 +222,12 @@ function client() {
               };
         },
         then(resolve: (value: unknown) => unknown) {
+          if (table === "calls" && updatedRow?.status === "error" && terminalResponseGate) {
+            heldResponseReached = true;
+            return terminalResponseGate.then(() => ({ data: null, error: null })).then(resolve);
+          }
+          if (table === "calls" && updatedRow?.status === "error" && terminalWriteError)
+            return Promise.resolve({ data: null, error: { message: "synthetic terminal write failure" } }).then(resolve);
           return Promise.resolve({ data: table === "effective_rules" ? [] : null, error: null }).then(resolve);
         },
       };
@@ -270,6 +289,9 @@ beforeEach(() => {
   reserveGate = null;
   providerMarkerGate = null;
   resumeGate = null;
+  terminalWriteError = false;
+  costFloorResponseGate = identityResponseGate = terminalResponseGate = null;
+  heldResponseReached = false;
   resumeRpcResult = {
     data: null,
     error: { code: "P0002", message: "onboarding_resume_source_missing" },
@@ -291,6 +313,233 @@ afterEach(() => {
 afterAll(() => _setClient(null));
 
 describe("session budget lifecycle", () => {
+  test("late identity and terminal writes cannot overwrite confirmed termination or an already terminal call", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    const fallbackClient = client();
+    const row: Record<string, any> = { provider_termination_attempt_id: null, openai_call_id: null, cost_estimate_usd: null };
+    let releaseIdentity!: () => void, releaseTerminal!: () => void;
+    const identityGate = new Promise<void>(resolve => { releaseIdentity = resolve; });
+    const terminalGate = new Promise<void>(resolve => { releaseTerminal = resolve; });
+    let identityStarted = false, identityWrites = 0, staleWritesRejected = 0;
+    _setClient({
+      from(table: string) {
+        if (table !== "calls") return fallbackClient.from(table);
+        let patch: Record<string, unknown> | null = null;
+        const filters: Record<string, unknown> = {};
+        const execute = async () => {
+          if (patch?.openai_call_id && ++identityWrites === 1) { identityStarted = true; await identityGate; }
+          if (patch?.status === "error") await terminalGate;
+          const matches = Object.entries(filters).every(([key,value]) => row[key] === value);
+          if (patch && matches) Object.assign(row,patch);
+          else if (patch && !matches) staleWritesRejected++;
+          return { data: !patch || matches ? structuredClone(row) : null, error: null };
+        };
+        const api: any = {
+          select() { return api; },
+          eq(key: string,value: unknown) { filters[key]=value;return api; },
+          is(key: string,value: unknown) { filters[key]=value;return api; },
+          insert(value: Record<string,unknown>) { Object.assign(row,value);return api; },
+          update(value: Record<string,unknown>) { patch=value;return api; },
+          single:execute, maybeSingle:execute,
+          then(resolve: (value:unknown)=>unknown,reject:(reason:unknown)=>unknown) { return execute().then(resolve,reject); },
+        };
+        return api;
+      },
+      async rpc(name: string,args: Record<string,unknown>) {
+        if(name==="begin_provider_termination_attempt") {
+          rpcCalls.push({name,args});
+          if(row.provider_termination_attempt_id || row.provider_termination_state==="unknown")return {data:{should_attempt:false},error:null};
+          Object.assign(row,{openai_call_id:args.p_openai_call_id,provider_termination_state:"pending",provider_termination_attempt_id:"attempt-once"});
+          return {data:{should_attempt:true,attempt_id:"attempt-once",request_id:"request-once",openai_call_id:args.p_openai_call_id,provider_termination_mode:"hangup"},error:null};
+        }
+        if(name==="complete_provider_termination_attempt") {
+          rpcCalls.push({name,args});row.provider_termination_state="confirmed";return {data:true,error:null};
+        }
+        return fallbackClient.rpc(name,args);
+      },
+    } as any);
+    globalThis.fetch=async input=>{
+      const url=String(input);fetchUrls.push(url);
+      if(url.endsWith("/hangup"))return new Response(null,{status:200});
+      if(url.endsWith("/v1/audio/speech"))return new Response(new Uint8Array([0x49,0x44,0x33,0xff]),{status:200,headers:{"content-type":"audio/mpeg"}});
+      return new Response("answer-sdp",{status:200,headers:{Location:"/v1/realtime/calls/rtc-late-guard"}});
+    };
+    let cleanup: {cancel(reason:string):Promise<void>} | null=null;
+    const pending=startSession(TENANT.owner_user_id,"onboarding","test-sdp",undefined,TENANT.id,control=>{cleanup=control;},
+      {browserRequestId:"request-late-guard",openingModeRequested:"application_tts_v1",requestedCallId:"11111111-1111-4111-8111-111111111119"});
+    const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
+    while(!identityStarted)await new Promise(resolve=>setImmediate(resolve));
+    await cleanup!.cancel("late_guard_cancel");
+    expect(row.provider_termination_state).toBe("confirmed");
+    expect(fetchUrls.filter(url=>url.endsWith("/hangup"))).toHaveLength(1);
+    // Model a faster terminal writer while both earlier responses are delayed.
+    row.status="ended";releaseIdentity();releaseTerminal();
+    for(let turn=0;turn<10;turn++)await new Promise(resolve=>setImmediate(resolve));
+    expect(await outcome).toBe("browser_request_cancelled");
+    expect(staleWritesRejected).toBe(2);
+    expect(row.status).toBe("ended");expect(row.provider_termination_state).toBe("confirmed");
+    expect(row.cost_estimate_usd).toBe(0.00324);
+    expect(rpcCalls.filter(call=>call.name==="settle_call_budget")).toHaveLength(0);
+  });
+
+  for (const held of ["audio cost", "provider identity", "terminal state"] as const) {
+    test(`cancellation hangs up a known provider while the ${held} response remains held`, async () => {
+      config.openaiKey = "synthetic-openai-key";
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      if (held === "audio cost") costFloorResponseGate = gate;
+      if (held === "provider identity") identityResponseGate = gate;
+      if (held === "terminal state") terminalResponseGate = gate;
+      let releaseTts!: (response: Response) => void;
+      const heldTts = new Promise<Response>((resolve) => { releaseTts = resolve; });
+      globalThis.fetch = async (input) => {
+        const url = String(input); fetchUrls.push(url);
+        if (url.endsWith("/hangup")) return new Response(null, { status: 200 });
+        if (url.endsWith("/v1/audio/speech")) return held === "terminal state" ? await heldTts : new Response(new Uint8Array([0x49,0x44,0x33,0xff]), {status:200,headers:{"content-type":"audio/mpeg"}});
+        return new Response("answer-sdp", {status:200,headers:{Location:"/v1/realtime/calls/rtc-held-receipt"}});
+      };
+      let cleanup: {cancel(reason:string):Promise<void>} | null = null;
+      const pending = startSession(TENANT.owner_user_id,"onboarding","test-sdp",undefined,TENANT.id,
+        control=>{cleanup=control;},{browserRequestId:"request-held-receipt",openingModeRequested:"application_tts_v1",requestedCallId:"11111111-1111-4111-8111-111111111119"});
+      const outcome = pending.then(()=>"ready", (error:Error)=>error.message);
+      if (held === "terminal state") {
+        while (!durableProviderIdentity) await new Promise(resolve=>setImmediate(resolve));
+        releaseTts(new Response("rejected",{status:400}));
+      }
+      while (!heldResponseReached) await new Promise(resolve=>setImmediate(resolve));
+      const cancelled=cleanup!.cancel("held_response_cancel");
+      for(let turn=0;turn<10;turn++)await new Promise(resolve=>setImmediate(resolve));
+      const earlyHangups=fetchUrls.filter(url=>url.endsWith("/hangup")).length;
+      const completedWhileHeld=await Promise.race([cancelled.then(()=>true),new Promise<boolean>(resolve=>setTimeout(()=>resolve(false),750))]);
+      release();await cancelled;const result=await outcome;
+      expect(earlyHangups).toBe(1);
+      expect(completedWhileHeld).toBe(true);
+      expect(result).not.toBe("ready");
+      expect(fetchUrls.filter(url=>url.endsWith("/hangup"))).toHaveLength(1);
+      expect(rpcCalls.filter(call=>call.name==="settle_call_budget")).toHaveLength(0);
+      expect(callUpdates.filter(row=>row.status==="error").every(row=>!Object.hasOwn(row,"provider_termination_state"))).toBe(true);
+    });
+  }
+
+  test("the executable controller reaches its HTTP surface without an asynchronous import cycle", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ligou-startup-main-"));
+    const preload = join(dir, "network-free-preload.ts");
+    writeFileSync(preload, `
+      globalThis.setInterval = (() => 0) as any;
+      globalThis.fetch = (async () => { throw new Error("network forbidden in bootstrap test"); }) as any;
+      Bun.serve = (() => { console.log("CONTROLLER_HTTP_READY"); process.exit(0); }) as any;
+    `);
+    try {
+      const output = execFileSync(process.execPath, ["--preload", preload,
+        fileURLToPath(new URL("../src/server.ts", import.meta.url))], {
+        cwd: dir, env: { ...createUnitTestEnvironment(), OPENAI_API_KEY: "" },
+        encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "pipe"],
+      });
+      expect(output).toContain("CONTROLLER_HTTP_READY");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("startup timings retain overlapping monotonic offsets without payload or exception contents", async () => {
+    let now = 100;
+    const events: Record<string, unknown>[] = [];
+    const scope = { requestId: "request-timing", callId: "call-timing" };
+    const trace = createVoiceStartupTrace(scope, { now: () => now, write: (event) => { events.push(event); } });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const audio = trace.measure("opening_audio", () => held);
+    now = 102;
+    await trace.measure("provider_create", () => { now = 105; });
+    now = 110;
+    release();
+    await audio;
+    expect(events).toEqual([
+      { evt: "voice.startup.stage", timing_version: 1, trace_scope: "session", request_id: scope.requestId, call_id: scope.callId,
+        stage: "provider_create", outcome: "ok", stage_start_ms: 2, duration_ms: 3, elapsed_ms: 5 },
+      { evt: "voice.startup.stage", timing_version: 1, trace_scope: "session", request_id: scope.requestId, call_id: scope.callId,
+        stage: "opening_audio", outcome: "ok", stage_start_ms: 0, duration_ms: 10, elapsed_ms: 10 },
+    ]);
+    await expect(trace.measure("provider_identity", () => {
+      throw new Error("synthetic-secret private transcript SDP");
+    })).rejects.toThrow("synthetic-secret");
+    expect(events.at(-1)?.outcome).toBe("error");
+    expect(JSON.stringify(events)).not.toContain("synthetic-secret");
+    const brokenLogger = createVoiceStartupTrace(scope, { write: () => { throw new Error("logger unavailable"); } });
+    expect(await brokenLogger.measure("provider_identity", () => "preserved")).toBe("preserved");
+  });
+
+  test("Realtime creation overlaps held opening audio without publishing ready before both succeed", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    globalThis.WebSocket = AutoOpenWebSocket as any;
+    let finishTts!: (response: Response) => void;
+    const tts = new Promise<Response>((resolve) => { finishTts = resolve; });
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      fetchUrls.push(url);
+      if (url.endsWith("/v1/audio/speech")) return await tts;
+      if (url.endsWith("/hangup")) return new Response(null, { status: 200 });
+      return new Response("answer-sdp", {
+        status: 200, headers: { Location: "/v1/realtime/calls/rtc-concurrent-opening" },
+      });
+    };
+    let cleanup: { cancel(reason: string): Promise<void> } | null = null;
+    let ready = false;
+    const pending = startSession(
+      TENANT.owner_user_id, "onboarding", "test-sdp", undefined, TENANT.id,
+      (control) => { cleanup = control; },
+      {
+        browserRequestId: "request-concurrent-opening",
+        openingModeRequested: "application_tts_v1",
+        requestedCallId: "11111111-1111-4111-8111-111111111119",
+      },
+    ).then((result) => { ready = true; return result; });
+    for (let turn = 0; turn < 10; turn += 1)
+      await new Promise((resolve) => setImmediate(resolve));
+    const providerStartedBeforeAudio = providerCreationRequests().length;
+    const publishedBeforeAudio = ready;
+    finishTts(new Response(new Uint8Array([0x49, 0x44, 0x33, 0xff]), {
+      status: 200, headers: { "content-type": "audio/mpeg" },
+    }));
+    const result = await pending;
+    await cleanup!.cancel("test_cleanup");
+    expect(result.sdp).toBe("answer-sdp");
+    expect(publishedBeforeAudio).toBe(false);
+    expect(providerStartedBeforeAudio).toBe(1);
+    expect(durableFloor).toBe(0.00324);
+    expect(callUpdates.filter((row) => row.cost_estimate_usd === 0.00324 && row.status === undefined))
+      .toContainEqual({ cost_estimate_usd: 0.00324 });
+  });
+
+  test("a failed terminal write still terminates an accepted provider and defers budget settlement", async () => {
+    config.openaiKey = "synthetic-openai-key";
+    terminalWriteError = true;
+    let releaseTts!: (response: Response) => void;
+    const heldTts = new Promise<Response>((resolve) => { releaseTts = resolve; });
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      fetchUrls.push(url);
+      if (url.endsWith("/v1/audio/speech")) return await heldTts;
+      if (url.endsWith("/hangup")) return new Response(null, { status: 200 });
+      return new Response("answer-sdp", {
+        status: 200, headers: { Location: "/v1/realtime/calls/rtc-terminal-write-failed" },
+      });
+    };
+    const pending = startSession(TENANT.owner_user_id, "onboarding", "test-sdp", undefined, TENANT.id,
+      undefined, {
+        browserRequestId: "request-terminal-write-failed", openingModeRequested: "application_tts_v1",
+        requestedCallId: "11111111-1111-4111-8111-111111111119",
+      });
+    for (let turn = 0; turn < 10; turn += 1)
+      await new Promise((resolve) => setImmediate(resolve));
+    expect(durableProviderIdentity?.openai_call_id).toBe("rtc-terminal-write-failed");
+    releaseTts(new Response("rejected", { status: 400 }));
+    await expect(pending).rejects.toMatchObject({ message: "onboarding_tts_rejected" });
+    expect(fetchUrls.filter((url) => url.endsWith("/hangup"))).toEqual([
+      "https://api.openai.com/v1/realtime/calls/rtc-terminal-write-failed/hangup",
+    ]);
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
+    expect(budgetUpdates).toContainEqual(expect.objectContaining({ reconcile_last_error: "provider_usage_unresolved" }));
+  });
+
   test("onboarding rejects missing or provider opening mode before call, budget, TTS, or Realtime", async () => {
     config.openaiKey = "synthetic-openai-key";
     globalThis.fetch = async (input) => {
@@ -433,7 +682,7 @@ describe("session budget lifecycle", () => {
 
   const providerCreationRequests = () => fetchUrls.filter((url) => url.endsWith("/v1/realtime/calls"));
 
-  test("application opening spends TTS only after reservation and before Realtime, then settles its known cost on definitive provider rejection", async () => {
+  test("application opening reserves before both providers and settles its known cost after definitive Realtime rejection", async () => {
     config.openaiKey = "synthetic-openai-key";
     floorWriteMode = "throw_exact";
     const audio = new Uint8Array([0x49, 0x44, 0x33, 0xff]);
@@ -457,12 +706,6 @@ describe("session budget lifecycle", () => {
         });
       }
       expect(fetchUrls[0]).toBe("https://api.openai.com/v1/audio/speech");
-      expect(callUpdates).toContainEqual(expect.objectContaining({
-        cost_estimate_usd: 0.00324,
-        provider_termination_reason: "tts_resolved",
-        provider_usage_state: "resolved",
-      }));
-      expect(durableFloor).toBe(0.00324);
       expect(callUpdates).toContainEqual(expect.objectContaining({
         provider_termination_state: "unknown",
         provider_termination_mode: "hangup",
@@ -499,8 +742,9 @@ describe("session budget lifecycle", () => {
     });
     expect(rpcCalls.find((call) => call.name === "settle_call_budget")?.args)
       .toMatchObject({ p_actual_cost: 0.00324, p_outcome: "startup_error" });
+    expect(durableFloor).toBe(0.00324);
     expect(callUpdates).toContainEqual(expect.objectContaining({
-      provider_usage_state: "not_applicable",
+      provider_usage_state: "resolved",
       cost_estimate_usd: 0.00324,
     }));
   });
@@ -817,18 +1061,26 @@ describe("session budget lifecycle", () => {
     expect(callUpdates.filter((row) => row.status === "error")).toHaveLength(1);
   });
 
-  test("TTS success racing cancellation preserves the exact floor and never starts Realtime", async () => {
+  test("cancellation joins a late accepted provider and successful TTS, then hangs up exactly once", async () => {
     config.openaiKey = "synthetic-openai-key";
     let resolveTts!: (response: Response) => void;
+    let resolveProvider!: (response: Response) => void;
     let ttsSignal: AbortSignal | null = null;
+    let providerSignal: AbortSignal | null = null;
     globalThis.fetch = async (input, init) => {
-      fetchUrls.push(String(input));
-      ttsSignal = init?.signal as AbortSignal;
-      return await new Promise<Response>((resolve) => { resolveTts = resolve; });
+      const url = String(input);
+      fetchUrls.push(url);
+      if (url.endsWith("/hangup")) return new Response(null, { status: 200 });
+      if (url.endsWith("/v1/audio/speech")) {
+        ttsSignal = init?.signal as AbortSignal;
+        return await new Promise<Response>((resolve) => { resolveTts = resolve; });
+      }
+      providerSignal = init?.signal as AbortSignal;
+      return await new Promise<Response>((resolve) => { resolveProvider = resolve; });
     };
     let cleanup: { cancel(reason: string): Promise<void> } | null = null;
     const pending = startSession(
-      "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
+      TENANT.owner_user_id, "onboarding", "test-sdp", undefined, TENANT.id,
       (control) => { cleanup = control; },
       {
         browserRequestId: "request-held-tts",
@@ -836,28 +1088,38 @@ describe("session budget lifecycle", () => {
         requestedCallId: "11111111-1111-4111-8111-111111111119",
       },
     );
-    while (!resolveTts) await new Promise((resolve) => setImmediate(resolve));
-    const cancelled = cleanup!.cancel("edge_cancel_held_tts");
+    while (!resolveTts || !resolveProvider)
+      await new Promise((resolve) => setImmediate(resolve));
+    let cleanupFinished = false;
+    const cancelled = cleanup!.cancel("edge_cancel_held_tts").then(() => { cleanupFinished = true; });
     resolveTts(new Response(new Uint8Array([0x49, 0x44, 0x33, 0xff]), {
-      status: 200,
-      headers: { "content-type": "audio/mpeg" },
+      status: 200, headers: { "content-type": "audio/mpeg" },
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(cleanupFinished).toBe(false);
+    resolveProvider(new Response("late-answer-sdp", {
+      status: 200, headers: { Location: "/v1/realtime/calls/rtc-late-accept" },
     }));
     await cancelled;
-    await expect(pending).rejects.toMatchObject({
-      message: "browser_request_cancelled",
-    });
+    await expect(pending).rejects.toMatchObject({ message: "browser_request_cancelled" });
+    await cleanup!.cancel("duplicate_cancel");
     expect(ttsSignal?.aborted).toBe(true);
-    expect(fetchUrls).toEqual(["https://api.openai.com/v1/audio/speech"]);
+    expect(providerSignal?.aborted).toBe(true);
+    expect(providerCreationRequests()).toHaveLength(1);
+    expect(fetchUrls.filter((url) => url.endsWith("/hangup"))).toEqual([
+      "https://api.openai.com/v1/realtime/calls/rtc-late-accept/hangup",
+    ]);
     expect(callUpdates).toContainEqual(expect.objectContaining({
-      status: "error",
-      cost_estimate_usd: 0.00324,
-      provider_usage_state: "resolved",
-      provider_termination_state: "not_required",
+      status: "error", cost_estimate_usd: 0.00324,
+      provider_usage_state: "unknown",
     }));
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
   });
 
   test("HTTP 200 TTS body abort preserves known cost as resolved before cancellation settlement", async () => {
     config.openaiKey = "synthetic-openai-key";
+    let releaseMarker!: () => void;
+    providerMarkerGate = new Promise<void>((resolve) => { releaseMarker = resolve; });
     let bodyStarted = false;
     globalThis.fetch = async (input, init) => {
       fetchUrls.push(String(input));
@@ -885,7 +1147,9 @@ describe("session budget lifecycle", () => {
       },
     );
     while (!bodyStarted) await new Promise((resolve) => setImmediate(resolve));
-    await cleanup!.cancel("edge_cancel_tts_body");
+    const cancelled = cleanup!.cancel("edge_cancel_tts_body");
+    releaseMarker();
+    await cancelled;
     await expect(pending).rejects.toMatchObject({
       message: "browser_request_cancelled",
     });
@@ -977,16 +1241,20 @@ describe("session budget lifecycle", () => {
       status: "error",
       cost_estimate_usd: 0.00324,
       provider_usage_state: "unknown",
-      provider_termination_state: "unknown",
     }));
   });
 
-  test("an unprovable TTS cost floor never opens Realtime and settles or defers the known charge", async () => {
+  test("an unprovable TTS cost floor terminates the concurrent accepted Realtime call and preserves its known charge", async () => {
     config.openaiKey = "synthetic-openai-key";
     floorWriteMode = "unproven";
     const audio = new Uint8Array([0x49, 0x44, 0x33, 0xff]);
     globalThis.fetch = async (input) => {
-      fetchUrls.push(String(input));
+      const url = String(input);
+      fetchUrls.push(url);
+      if (url.endsWith("/hangup")) return new Response(null, { status: 200 });
+      if (url.endsWith("/v1/realtime/calls")) return new Response("answer-sdp", {
+        status: 200, headers: { Location: "/v1/realtime/calls/rtc-unproven-floor" },
+      });
       return new Response(audio, {
         status: 200,
         headers: { "content-type": "audio/mpeg" },
@@ -1009,13 +1277,17 @@ describe("session budget lifecycle", () => {
       message: "onboarding_tts_cost_floor_unproven",
       status: 503,
     });
-    expect(fetchUrls).toEqual(["https://api.openai.com/v1/audio/speech"]);
-    expect(providerCreationRequests()).toHaveLength(0);
-    expect(rpcCalls.find((call) => call.name === "settle_call_budget")?.args)
-      .toMatchObject({ p_actual_cost: 0.00324, p_outcome: "startup_error" });
+    expect(providerCreationRequests()).toHaveLength(1);
+    expect(fetchUrls.filter((url) => url.endsWith("/hangup"))).toEqual([
+      "https://api.openai.com/v1/realtime/calls/rtc-unproven-floor/hangup",
+    ]);
+    expect(callUpdates).toContainEqual(expect.objectContaining({
+      status: "error", cost_estimate_usd: 0.00324, provider_usage_state: "unknown",
+    }));
+    expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
   });
 
-  test("definitive TTS rejection settles zero without opening Realtime", async () => {
+  test("definitive rejection from both concurrent providers settles zero", async () => {
     config.openaiKey = "synthetic-openai-key";
     globalThis.fetch = async (input) => {
       fetchUrls.push(String(input));
@@ -1039,13 +1311,12 @@ describe("session budget lifecycle", () => {
       status: 502,
     });
 
-    expect(fetchUrls).toEqual(["https://api.openai.com/v1/audio/speech"]);
-    expect(providerCreationRequests()).toHaveLength(0);
+    expect(providerCreationRequests()).toHaveLength(2);
     expect(rpcCalls.find((call) => call.name === "settle_call_budget")?.args)
       .toMatchObject({ p_actual_cost: 0, p_outcome: "startup_error" });
   });
 
-  test("indeterminate TTS transport defers the reservation and never opens Realtime", async () => {
+  test("indeterminate concurrent provider outcomes defer the reservation without a duplicate creation", async () => {
     config.openaiKey = "synthetic-openai-key";
     globalThis.fetch = async (input) => {
       fetchUrls.push(String(input));
@@ -1069,8 +1340,7 @@ describe("session budget lifecycle", () => {
       status: 503,
     });
 
-    expect(fetchUrls).toEqual(["https://api.openai.com/v1/audio/speech"]);
-    expect(providerCreationRequests()).toHaveLength(0);
+    expect(providerCreationRequests()).toHaveLength(1);
     assertUnknownProviderRemainsDiscoverable();
   });
 

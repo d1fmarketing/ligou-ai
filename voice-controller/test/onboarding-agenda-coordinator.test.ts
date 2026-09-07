@@ -207,6 +207,43 @@ test("approval grammar matches the shared exact TS/SQL matrix without substring 
     expect(coordinator.classifyWebsiteApprovalTranscript(text)).toBe(kind as "approval" | "correction" | "ambiguous");
 });
 
+test.each(approvalCases.filter(entry => entry.kind === "approval" && "basis" in entry).map(({ text }) => text))(
+  "natural present approval binds the played current recap without interpretation: %s", (text) => {
+    const h = harness(stored([])); h.event({ type: "opening.played" }); h.summary();
+    const summary = h.state.summary!;
+    h.owner("natural-current-approval", text);
+    const approval = h.last("persist_approval");
+    expect(approval).toMatchObject({ transcript: text, providerItemId: "natural-current-approval",
+      summaryId: summary.summaryId, summaryHash: summary.summaryHash,
+      revision: h.state.stored.revision, digest: h.state.stored.digest });
+    expect(h.commands.some(command => command.type === "interpret_owner_turn")).toBe(false);
+    h.event({ type: "owner.transcript", providerItemId: "natural-current-approval", text });
+    expect(h.all.filter(command => command.type === "persist_approval")).toHaveLength(1);
+  },
+);
+
+test("natural approval captured before recap playback cannot approve a later summary", () => {
+  const h = harness(stored([])); h.event({ type: "opening.played" });
+  const prepare = h.last("prepare_summary");
+  const text = "Eu revisei o resumo e aprovo explicitamente esta configuração, com as correções que confirmei.";
+  h.owner("before-playback", text);
+  const summary = { summaryId: "current-summary", revision: h.state.stored.revision,
+    digest: h.state.stored.digest, parts: ["O resumo atual ainda precisa ser ouvido."] };
+  h.event({ type: "summary.ready", requestId: prepare.requestId, ...summary, summaryHash: websiteSummaryHash(summary) });
+  h.play();
+  expect(h.state.turns.find(turn => turn.providerItemId === "before-playback")?.approvalSummaryId).toBeNull();
+  expect(h.all.some(command => command.type === "persist_approval")).toBe(false);
+});
+
+test("natural approval with a stale summary correlation stays non-authoritative", () => {
+  const h = harness(stored([])); h.event({ type: "opening.played" }); h.summary();
+  const text = "Eu aprovo esta configuração.";
+  h.event({ type: "owner.transcript", providerItemId: "stale-natural", text, approvalSummaryId: "older-summary" });
+  const write = h.last("record_owner_turn");
+  h.event({ type: "owner_turn.recorded", requestId: write.requestId, providerItemId: write.providerItemId, turnId: write.turnId, text });
+  expect(h.all.some(command => command.type === "persist_approval")).toBe(false);
+});
+
 test("bare sim after the fully played approval question requests one durable approval and no interpretation", () => {
   const h = harness(stored([])); h.event({ type: "opening.played" }); h.summary();
   h.owner("plain-sim", "Sim.");
@@ -215,6 +252,128 @@ test("bare sim after the fully played approval question requests one durable app
   h.event({ type: "owner.transcript", providerItemId: "plain-sim", text: "Sim." });
   expect(h.commands).toEqual([]);
   expect(h.all.filter(command => command.type === "persist_approval")).toHaveLength(1);
+});
+
+test.each(['Ah, entendi.','Uhum.','Tá bom.'])("acknowledgment cannot resolve the territory question: %s",text=>{
+ const h=harness();h.event({type:'opening.played'});
+ const request=h.owner('acknowledgment',text);
+ const commit=h.interpret(request,answer('territory'));
+ h.persist(commit);
+ expect(h.state.stored.agenda.items[0].status).toBe('awaiting_clarification');
+ expect(h.state.stored.agenda.items[0].answerRevision).toBe(0);
+ expect(h.state.speech?.action.kind).toBe('CLARIFY_CURRENT_GAP');
+ expect(h.all.some(command=>command.type==='persist_approval')).toBe(false);
+});
+
+test('a failed signoff preserves the already durable configuration approval',()=>{
+ const h=harness(stored([]));h.event({type:'opening.played'});h.summary();h.owner('approved','Sim. Confirmo.');
+ const command=h.last('persist_approval');
+ h.event({type:'approval.persisted',requestId:command.requestId,approvalReceiptId:'durable-approval',turnId:command.turnId,
+  summaryId:command.summaryId,summaryHash:command.summaryHash,revision:command.revision,digest:command.digest,storeVersion:command.expectedStoreVersion+1});
+ const approved=h.state.approval,action=h.state.speech.action;
+ h.event({type:'speech.failed',actionId:action.actionId,code:'transport_unavailable'});
+ expect(h.state.approval).toEqual(approved);
+ expect(h.state.stored.state).toBe('closing');
+ expect(h.state.phase).not.toBe('complete');
+});
+
+test('barge-in retires unplayed recap and binds the correction to the same durable revision',()=>{
+ const h=harness(stored([seeds[0]]));h.event({type:'opening.played'});
+ h.persist(h.interpret(h.owner('first','Somente Novato.'),answer('territory')));
+ const prepare=h.last('prepare_summary');
+ const parts=['A área confirmada é Novato.'],summaryId='interrupted-summary';
+ const summaryHash=websiteSummaryHash({summaryId,revision:1,digest:h.state.stored.digest,parts});
+ h.event({type:'summary.ready',requestId:prepare.requestId,summaryId,summaryHash,revision:1,digest:h.state.stored.digest,parts});
+ const interrupted=h.state.speech.action;
+ h.event({type:'owner.speech_started',providerItemId:'correction'});
+ expect(h.last('interrupt_speech')).toMatchObject({actionId:interrupted.actionId,providerItemId:'correction'});
+ expect(h.state.speech).toBeUndefined();expect(h.state.phase).toBe('awaiting_owner');
+ const request=h.owner('correction','Corrija: também atendemos San Rafael.');
+ expect(request.mode).toBe('correction');
+ h.persist(h.interpret(request,{kind:'correction',affectedItems:[{itemId:'territory',disposition:'corrected'}]}));
+ expect(h.state.stored.revision).toBe(2);expect(h.state.summary).toBeUndefined();
+ h.event({type:'speech.played',actionId:interrupted.actionId,textSha256:hash(interrupted.text),audioSha256:hash('old')});
+ expect(h.state.approval).toBeUndefined();expect(h.all.some(command=>command.type==='persist_approval')).toBe(false);
+});
+
+test('acknowledgment during recap resumes it instead of requesting premature approval',()=>{
+ const h=harness(stored([]));h.event({type:'opening.played'});
+ const prepare=h.last('prepare_summary'),parts=['Resumo completo, ainda não reproduzido.'],summaryId='summary-pause';
+ const summaryHash=websiteSummaryHash({summaryId,revision:0,digest:h.state.stored.digest,parts});
+ h.event({type:'summary.ready',requestId:prepare.requestId,summaryId,summaryHash,revision:0,digest:h.state.stored.digest,parts});
+ const action=h.state.speech.action;
+ h.event({type:'owner.speech_started',providerItemId:'ack'});
+ const request=h.owner('ack','Ah, entendi.');
+ expect(request).toBeDefined();
+ h.interpret(request,{kind:'clarification',itemId:null});
+ expect(h.last('resume_speech')).toMatchObject({actionId:action.actionId,providerItemId:'ack'});
+ expect(h.all.some(command=>command.type==='request_speech' && command.action.kind==='REQUEST_FINAL_APPROVAL')).toBe(false);
+ expect(h.state.approval).toBeUndefined();
+});
+
+test('summary IO completing during owner speech defers audio and lets a correction invalidate it',()=>{
+ const h=harness(stored([seeds[0]]));h.event({type:'opening.played'});
+ h.persist(h.interpret(h.owner('first','Somente Novato.'),answer('territory')));
+ const prepare=h.last('prepare_summary'),parts=['A área é Novato.'],summaryId='summary-during-owner';
+ h.event({type:'owner.speech_started',providerItemId:'correction-during-io'});
+ h.event({type:'summary.ready',requestId:prepare.requestId,summaryId,revision:1,digest:h.state.stored.digest,parts,
+  summaryHash:websiteSummaryHash({summaryId,revision:1,digest:h.state.stored.digest,parts})});
+ expect(h.commands.some(command=>command.type==='request_speech')).toBe(false);expect(h.state.speech).toBeUndefined();
+ const request=h.owner('correction-during-io','Corrija: também atendemos San Rafael.');expect(request?.mode).toBe('correction');
+ h.persist(h.interpret(request,{kind:'correction',affectedItems:[{itemId:'territory',disposition:'corrected'}]}));
+ expect(h.state.stored.revision).toBe(2);expect(h.state.summary).toBeUndefined();expect(h.last('prepare_summary')).toBeDefined();
+});
+
+test('a reply during approval playback persistence is admitted only after that exact question is proven played',()=>{
+ const h=harness(stored([]));h.event({type:'opening.played'});
+ const prepare=h.last('prepare_summary'),parts=['Resumo confirmado.'],summaryId='quick-approval';
+ const summaryHash=websiteSummaryHash({summaryId,revision:0,digest:h.state.stored.digest,parts});
+ h.event({type:'summary.ready',requestId:prepare.requestId,summaryId,summaryHash,revision:0,digest:h.state.stored.digest,parts});h.play();
+ const question=h.state.speech.action;
+ h.event({type:'owner.speech_started',providerItemId:'quick-yes',afterPlaybackActionId:question.actionId});
+ expect(h.last('interrupt_speech')).toBeUndefined();expect(h.last('persist_approval')).toBeUndefined();
+ h.play();h.owner('quick-yes','Sim. Confirmo.');
+ const approval=h.last('persist_approval');expect(approval).toBeDefined();
+ h.event({type:'approval.persisted',requestId:approval.requestId,approvalReceiptId:'durable-approval',turnId:approval.turnId,
+  summaryId:approval.summaryId,summaryHash:approval.summaryHash,revision:approval.revision,digest:approval.digest,storeVersion:approval.expectedStoreVersion+1});
+ const signoff=h.state.speech.action;
+ h.event({type:'owner.speech_started',providerItemId:'thanks',afterPlaybackActionId:signoff.actionId});h.play();
+ expect(h.last('terminate_session')).toBeUndefined();h.owner('thanks','Obrigada, tchau.');
+ expect(h.last('terminate_session')?.outcome).toBe('complete');
+ expect(h.all.filter(c=>c.type==='request_speech' && c.action.kind==='SPEAK_FINAL_SIGNOFF')).toHaveLength(1);
+});
+
+test('correction during closing requests a new amendment without mutating the approved snapshot',()=>{
+ const h=harness(stored([seeds[0]]));h.event({type:'opening.played'});
+ h.persist(h.interpret(h.owner('first','Somente Novato.'),answer('territory')));h.summary();h.owner('approved','Sim. Confirmo.');
+ const command=h.last('persist_approval');
+ h.event({type:'approval.persisted',requestId:command.requestId,approvalReceiptId:'durable-approval',turnId:command.turnId,
+  summaryId:command.summaryId,summaryHash:command.summaryHash,revision:command.revision,digest:command.digest,storeVersion:command.expectedStoreVersion+1});
+ const approved=structuredClone(h.state.stored),approval=structuredClone(h.state.approval);
+ h.event({type:'owner.speech_started',providerItemId:'late-correction'});
+ expect(h.last('interrupt_speech')).toBeDefined();
+ const request=h.owner('late-correction','Espera, corrija: também atendemos San Rafael.');expect(request).toBeDefined();
+ h.interpret(request,{kind:'correction',affectedItems:[{itemId:'territory',disposition:'corrected'}]});
+ expect(h.last('request_amendment')).toMatchObject({approvalReceiptId:'durable-approval',providerItemId:'late-correction',
+  proposal:{kind:'correction',affectedItems:[{itemId:'territory',disposition:'reopen'}]}});
+ expect(h.state.stored).toEqual(approved);expect(h.state.approval).toEqual(approval);
+ expect(h.commands.some(c=>c.type==='persist_agenda')).toBe(false);
+});
+
+test('an explicit owner pause has its own incomplete terminal reason and never grants approval',()=>{
+ const h=harness();h.event({type:'opening.played'});h.owner('pause','Quero pausar a configuração por agora.');
+ expect(h.state.speech?.action.kind).toBe('SPEAK_TERMINAL_ERROR');
+ h.play();expect(h.last('terminate_session')).toMatchObject({outcome:'unfinished',reason:'owner_requested_pause'});
+ expect(h.state.approval).toBeUndefined();
+});
+test.each([
+ 'Quero parar de atender em São Francisco e ficar só em Novato, San Rafael e Petaluma.',
+ 'Preciso encerrar os descontos automáticos para todos os serviços.',
+ 'Vamos parar de trabalhar aos domingos.',
+])('stopping a business practice is an owner answer, not an interview pause: %s',text=>{
+ const h=harness();h.event({type:'opening.played'});
+ expect(h.owner('business-change',text)).toBeDefined();
+ expect(h.state.speech).toBeUndefined();expect(h.state.error).toBeUndefined();
 });
 
 test("durable revision mismatch fails truthfully and nonempty queue cannot synthesize final authority", () => {

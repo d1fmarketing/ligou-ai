@@ -46,7 +46,7 @@ export function supa(): SupabaseClient {
 // test seam
 export function _setClient(c: SupabaseClient | null) { client = c; }
 
-const tenantCache = new Map<string, { authEpoch: number; policyEpoch: number; rules: Rule[] }>();
+const tenantCache = new Map<string, { tenantId: string; authEpoch: number; policyEpoch: number; rules: Rule[] }>();
 
 async function loadTenantRow(column: "slug" | "id", value: string): Promise<{ tenant: Tenant; rules: Rule[] }> {
   const s = supa();
@@ -58,21 +58,25 @@ async function loadTenantRow(column: "slug" | "id", value: string): Promise<{ te
   }
 
   const hit = tenantCache.get(typedTenant.slug);
-  if (hit && hit.authEpoch === typedTenant.auth_epoch && hit.policyEpoch === typedTenant.policy_epoch) {
+  if (hit && hit.tenantId === typedTenant.id && hit.authEpoch === typedTenant.auth_epoch && hit.policyEpoch === typedTenant.policy_epoch) {
     return { tenant: typedTenant, rules: hit.rules };
   }
 
-  const { data: rules, error: re } = await s
-    .from("effective_rules")
-    .select("id,rule_group_id,version,category,escopo,text,structured")
-    .eq("tenant_id", typedTenant.id);
+  // These projections are independent after the fresh tenant/epoch read.
+  // Cache neither ownership nor a projection from a different tenant id.
+  const [ruleResult, localityResult, aliasResult] = await Promise.all([
+    s.from("effective_rules")
+      .select("id,rule_group_id,version,category,escopo,text,structured")
+      .eq("tenant_id", typedTenant.id),
+    s.from("onboarding_locality_registry")
+      .select("locality_id,display_name,country_code,region_code"),
+    s.from("onboarding_locality_aliases")
+      .select("alias_normalized,locality_id"),
+  ]);
+  const { data: rules, error: re } = ruleResult;
   if (re) throw new Error(`rules_load_failed: ${re.message}`);
-  const { data: localityRows, error: localityError } = await s
-    .from("onboarding_locality_registry")
-    .select("locality_id,display_name,country_code,region_code");
-  const { data: aliasRows, error: aliasError } = await s
-    .from("onboarding_locality_aliases")
-    .select("alias_normalized,locality_id");
+  const { data: localityRows, error: localityError } = localityResult;
+  const { data: aliasRows, error: aliasError } = aliasResult;
   if (localityError || aliasError)
     throw new Error("locality_registry_load_failed");
   const aliasesByLocality = new Map<string, string[]>();
@@ -94,6 +98,7 @@ async function loadTenantRow(column: "slug" | "id", value: string): Promise<{ te
     registry,
   );
   tenantCache.set(typedTenant.slug, {
+    tenantId: typedTenant.id,
     authEpoch: typedTenant.auth_epoch,
     policyEpoch: typedTenant.policy_epoch,
     rules: effectiveRules,

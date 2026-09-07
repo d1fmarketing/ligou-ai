@@ -294,9 +294,11 @@ function AppInner({ user = null, tenant = null, onLogout = () => {} } = {}) {
   }, [tenant, websiteSetup]);
 
   useEffect(() => {
-    if (websiteSetup.state !== "learning") return undefined;
+    if (!["learning","onboarding_in_progress","onboarding_amendment_pending"].includes(websiteSetup.state)) return undefined;
+    let reading=false;
     const timer = window.setInterval(() => {
-      void refreshWebsiteSetup();
+      if(reading)return;
+      reading=true;void refreshWebsiteSetup().finally(()=>{reading=false;});
     }, 2_000);
     return () => window.clearInterval(timer);
   }, [refreshWebsiteSetup, websiteSetup.state]);

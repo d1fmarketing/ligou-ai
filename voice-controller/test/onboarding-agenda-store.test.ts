@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createOnboardingAgenda, getAgendaAction } from "../src/onboarding-agenda.ts";
+import { createClient } from "@supabase/supabase-js";
 
 const binding = { interviewId: "11111111-1111-4111-8111-111111111111", callId: "11111111-1111-4111-8111-111111111111", draftId: "22222222-2222-4222-8222-222222222222", draftHash: "a".repeat(64), sourceResultId: "33333333-3333-4333-8333-333333333333", sourceResultHash: "b".repeat(64) };
 const agenda = createOnboardingAgenda(binding, [{ id: "gap", subject: "territory", questionPt: "Onde atende?", source: "ambiguity", coverageRefs: ["area"], relatedItemIds: [], blocking: true }]);
@@ -29,4 +30,11 @@ test("trusted transcript rejects blank/oversized evidence before RPC", async () 
   const store = createOnboardingAgendaStore({ rpc: async () => { throw new Error("must not reach RPC"); } });
   await expect(store.recordOwnerTranscript({ ...scope, providerItemId: "turn1", text: " " })).rejects.toThrow("transcript");
   await expect(store.recordOwnerTranscript({ ...scope, providerItemId: "turn1", text: "x".repeat(32769) })).rejects.toThrow("transcript");
+});
+
+test('actual Supabase gateway response retains HTTP status for bounded recovery',async()=>{
+ const {createOnboardingAgendaStore}=await import('../src/onboarding-agenda-store.ts');
+ const client=createClient('https://fixture.supabase.co','synthetic-key',{auth:{persistSession:false,autoRefreshToken:false},
+  global:{fetch:async()=>new Response('Service Unavailable',{status:503,headers:{'Content-Type':'text/plain'}})}});
+ await expect(createOnboardingAgendaStore(client).readWebsiteInterview(scope)).rejects.toMatchObject({status:503});
 });

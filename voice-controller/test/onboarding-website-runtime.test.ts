@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createWebsiteInterviewRuntime, websiteInterpretationRequest } from "../src/onboarding-website-runtime.ts";
 import { createWebsiteAgendaCoordinator, buildWebsiteOpeningAction, reduceWebsiteAgenda } from "../src/onboarding-agenda-coordinator.ts";
-import { createOnboardingAgenda, getAgendaAction } from "../src/onboarding-agenda.ts";
-import { onboardingAgendaDigest } from "../src/onboarding-agenda-store.ts";
+import { createOnboardingAgenda, getAgendaAction, applyVerifiedOwnerTurn } from "../src/onboarding-agenda.ts";
+import { onboardingAgendaDigest, createOnboardingAgendaStore } from "../src/onboarding-agenda-store.ts";
 import { createHash } from "node:crypto";
 const callId="11111111-1111-4111-8111-111111111111",requestId="22222222-2222-4222-8222-222222222222";
 const hash=(v:string|Uint8Array)=>createHash('sha256').update(v).digest('hex');
@@ -18,6 +18,50 @@ function base(){
  return{stored,openingAction,openingPayload:payload(openingAction),payload};
 }
 describe('website interview serialized transport adapter',()=>{
+ test.each([
+  'Olha, atende só Novato, San Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?',
+  'Olha, atende só novatos São Rafael e Petaluma, nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?',
+  'Nossa área fica restrita a Novato, San Rafael e Petaluma. Para sair dessas cidades precisa falar comigo e ter minha autorização.',
+ ])('owner answer reaches the real store under the authenticated browser request: %s',async text=>{
+  const b=base(),sent:any[]=[],requests:any[]=[],spoken:any[]=[];
+  const scope={ownerId:requestId,callId,requestId};
+  const client={rpc:async(name:string,args:any)=>{
+   requests.push({name,args});
+   // This is the real SQL scope invariant; the transport itself stays real.
+   if(args.p_owner!==scope.ownerId || args.p_call!==callId || args.p_request!==requestId)
+    return{data:null,error:{code:'42501',message:'interview_call_not_owner_bound'}};
+   if(name==='record_website_interview_owner_turn')return{data:{callId,providerItemId:args.p_item,turnId:`${callId}:${args.p_item}`,text:args.p_text,replayed:false},error:null};
+   if(name==='commit_website_interview_turn'){
+    const transition=applyVerifiedOwnerTurn(b.stored.agenda,{type:'verified_owner_turn',binding:b.stored.agenda.binding,
+     turnId:`${callId}:${args.p_item}`,text,proposal:{kind:'answer',itemId:'cities'}});
+    return{data:{...b.stored,agenda:args.p_agenda,revision:1,storeVersion:1,digest:onboardingAgendaDigest(args.p_agenda),nextAction:transition.action},error:null};
+   }
+   throw new Error(`Unexpected RPC ${name}`);
+  }};
+  const runtime=createWebsiteInterviewRuntime({prepared:{scope,stored:b.stored,projection:{} as any},openingAction:b.openingAction,openingPayload:b.openingPayload as any},{
+   agendaStore:createOnboardingAgendaStore(client),
+   evidenceStore:{recordSpeechPlayed:async()=>({receiptId:requestId}),claimSpeech:async({action}:any)=>({status:'preparing',claimed:true,action}),
+    completeSpeech:async({payload}:any)=>({status:'ready',payload}),failSpeech:async()=>({})} as any,
+   synthesize:async action=>{spoken.push(action);return b.payload(action) as any;},send:event=>sent.push(event),enqueue:async f=>f(),
+   onTranscript:()=>{},onCost:()=>{},onUsage:()=>{},onUsageUnknown:()=>{},onTerminate:()=>{},onState:()=>{},
+  });
+  try{
+   await runtime.attach();
+   await runtime.handleEvent({type:'conversation.item.created',item:{id:`lgs-${b.openingAction.actionId.slice(0,28)}`,type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:b.openingAction.text}]}});
+   await runtime.handleEvent({type:'input_audio_buffer.speech_started',item_id:'territory'});
+   await runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:'territory',transcript:text});
+   const request=sent.find(e=>e.type==='response.create');
+   await runtime.handleEvent({type:'response.done',response:{id:'resp-territory',status:'completed',metadata:request.response.metadata,
+    output:[{type:'function_call',name:'submit_website_interview_proposal',status:'completed',call_id:'tool-territory',arguments:JSON.stringify({proposal:{kind:'answer',itemId:'cities'},facts:[]})}]}});
+   expect(runtime.state.stored.revision).toBe(1);
+   expect(runtime.state.stored.agenda.items[0].evidence[0].text).toBe(text);
+   expect(runtime.state.stored.nextAction.itemId).toBe('hours');
+   expect(runtime.state.speech?.action.kind).toBe('CONFIRM_AND_ASK_NEXT');
+   expect(runtime.state.approval).toBeUndefined();
+   expect(requests.filter(r=>r.name==='commit_website_interview_turn').map(r=>r.args.p_request)).toEqual([requestId]);
+   expect(spoken.some(action=>action.kind==='SPEAK_TERMINAL_ERROR')).toBe(false);
+  }finally{runtime.stop();}
+ });
  test('interpretation is silent out-of-band one tool with only current relevant context',()=>{
   const b=base();let state=createWebsiteAgendaCoordinator(b.stored,{nowMs:0,openingAction:b.openingAction});
   state=reduceWebsiteAgenda(state,{type:'opening.played',nowMs:1}).state;
@@ -81,8 +125,11 @@ describe('website interview serialized transport adapter',()=>{
  });
 });
 
-function recoveryHarness(){
+function recoveryHarness(options:{commitFailure?:'transient'|'after_commit'|'auth'|'exhausted'|'http_unavailable';holdPlaybackReceipt?:boolean;holdNextQuestion?:boolean}={}){
  const b=base(),sent:any[]=[],spoken:any[]=[],receipts:any[]=[],transcripts:any[]=[],terminations:any[]=[],completions:any[]=[];
+ const diagnostics:any[]=[],commitRequests:any[]=[],interruptions:any[]=[],emptyInputs:any[]=[],resumptions:any[]=[];let reads=0;
+ let releasePlayback=()=>{};
+ let releaseQuestion=()=>{};
  let stored:any=b.stored,clock=Date.now(),sequence=0;
  const canonical=(value:any):any=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([k,v])=>[k,canonical(v)])):value;
  const body={version:1,provenance:{...b.stored.agenda.binding,authority:{}},candidateRecap:[],seeds:b.stored.agenda.items.map(({id,source,subject,questionPt,coverageRefs,relatedItemIds,blocking})=>({id,source,subject,questionPt,coverageRefs,relatedItemIds,blocking}))};
@@ -91,15 +138,28 @@ function recoveryHarness(){
  const providerItems=new Map<string,any>(),plays:string[]=[];
  const runtime=createWebsiteInterviewRuntime({prepared:{scope:{ownerId:requestId,callId,requestId},stored,projection:projection as any},openingAction:b.openingAction,openingPayload:b.openingPayload as any},{
   agendaStore:{recordOwnerTranscript:async(x:any)=>({...x,turnId:`${callId}:${x.providerItemId}`}),
-   commitOwnerTurn:async(x:any)=>{stored={...stored,agenda:x.agenda,revision:x.agenda.revision,storeVersion:stored.storeVersion+1,digest:onboardingAgendaDigest(x.agenda),nextAction:x.nextAction,state:x.nextAction.type==='GENERATE_FINAL_SUMMARY'?'reviewing':'unfinished'};return stored;},
-   readWebsiteInterview:async()=>stored} as any,
-  evidenceStore:{recordSpeechPlayed:async(x:any)=>{receipts.push(x);return{receiptId:requestId};},
+   commitOwnerTurn:async(x:any)=>{
+    commitRequests.push(x);
+    const failure=options.commitFailure;
+    if(failure==='http_unavailable' && commitRequests.length===1)throw Object.assign(new Error('Service Unavailable'),{status:503});
+    if(failure==='auth' || failure==='exhausted' || (failure==='transient' && commitRequests.length===1))
+     throw Object.assign(new Error('private diagnostic text must not be logged'),{code:failure==='auth'?'42501':'08006'});
+    stored={...stored,agenda:x.agenda,revision:x.agenda.revision,storeVersion:stored.storeVersion+1,digest:onboardingAgendaDigest(x.agenda),nextAction:x.nextAction,state:x.nextAction.type==='GENERATE_FINAL_SUMMARY'?'reviewing':'unfinished'};
+    if(failure==='after_commit' && commitRequests.length===1)throw Object.assign(new Error('response timed out after COMMIT'),{code:'ETIMEDOUT'});
+    return stored;},
+   readWebsiteInterview:async()=>{reads++;return stored;}} as any,
+  evidenceStore:{recordSpeechPlayed:async(x:any)=>{receipts.push(x);if(options.holdPlaybackReceipt && receipts.length===1)await new Promise<void>(resolve=>{releasePlayback=resolve;});return{receiptId:requestId};},
+   interruptSpeech:async(x:any)=>{interruptions.push(x);if(receipts.some(r=>r.actionId===x.actionId))throw new Error('interview_speech_not_interruptible');return{receiptId:requestId,actionId:x.actionId,providerItemId:x.providerItemId};},
+   recordEmptyInput:async(x:any)=>{emptyInputs.push(x);return{receiptId:requestId,actionId:x.actionId,providerItemId:x.providerItemId};},
+   resumeSpeech:async(x:any)=>{resumptions.push(x);const old=payloads.get(x.actionId),action={actionId:hash([x.actionId,x.providerItemId].join(':')),
+    interviewId:old.interviewId,callId:old.callId,revision:old.revision,kind:old.kind,text:old.text,sourceDigest:old.sourceDigest};
+    const p=b.payload(action);payloads.set(action.actionId,p);return{action,payload:p,status:'ready',claimed:false};},
    claimSpeech:async({action}:any)=>({status:'preparing',claimed:true,action}),completeSpeech:async({payload}:any)=>({status:'ready',payload}),failSpeech:async()=>({}),
    prepareSummary:async(x:any)=>({summaryId:x.summaryId,revision:x.expectedRevision,digest:x.expectedDigest,parts:x.parts,summaryHash:hash(JSON.stringify([x.summaryId,x.expectedRevision,x.expectedDigest,x.parts])),receiptId:requestId}),
    approveSummary:async(x:any)=>({approvalReceiptId:requestId,turnId:`${callId}:${x.providerItemId}`,summaryId:x.summaryId,summaryHash:x.summaryHash,revision:x.expectedRevision,digest:x.expectedDigest,storeVersion:x.expectedStoreVersion+1}),
    recordCompletion:async(x:any)=>{completions.push(x);return{receiptId:requestId,interviewId:callId,callId,outcome:x.outcome,approvalReceiptId:x.approvalReceiptId};}} as any,
-  synthesize:async(a:any)=>{spoken.push(a);const p=b.payload(a);payloads.set(a.actionId,p);return p as any;},
-  send:e=>sent.push(e),enqueue:async f=>f(),onTranscript:t=>transcripts.push(t),onCost:()=>{},onUsage:()=>{},onUsageUnknown:()=>{},onTerminate:t=>terminations.push(t),onState:()=>{},now:()=>clock,
+  synthesize:async(a:any)=>{spoken.push(a);if(options.holdNextQuestion && a.kind==='CONFIRM_AND_ASK_NEXT')await new Promise<void>(resolve=>{releaseQuestion=resolve;});const p=b.payload(a);payloads.set(a.actionId,p);return p as any;},
+  send:e=>sent.push(e),enqueue:async f=>f(),onTranscript:t=>transcripts.push(t),onCost:()=>{},onUsage:()=>{},onUsageUnknown:()=>{},onTerminate:t=>terminations.push(t),onState:()=>{},onDiagnostic:d=>diagnostics.push(d),now:()=>clock,
  });
  const current=()=>runtime.state.phase==='opening'?b.openingPayload:payloads.get(runtime.state.speech!.action.actionId);
  async function play(deliver=true){const p=current(),id=`lgs-${p.actionId.slice(0,28)}`;if(providerItems.has(id))throw new Error('browser must never replay');
@@ -108,11 +168,151 @@ function recoveryHarness(){
  async function answer(itemId:string){const id=`owner-${++sequence}`;await runtime.handleEvent({type:'input_audio_buffer.speech_started',item_id:id});
   await runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:id,transcript:`Minha resposta sobre ${itemId}.`});
   const request=sent.filter(e=>e.type==='response.create').at(-1);
+  if(!request)return;
   await runtime.handleEvent({type:'response.done',response:{id:`response-${sequence}`,status:'completed',metadata:request.response.metadata,output:[{type:'function_call',name:'submit_website_interview_proposal',status:'completed',call_id:`tool-${sequence}`,arguments:JSON.stringify({proposal:{kind:'answer',itemId},facts:[]})}]}});}
  async function recover(){const frame=sent.filter(e=>e.type==='conversation.item.retrieve' && e.item_id?.startsWith('lgs-')).at(-1);expect(frame).toBeDefined();
   const item=providerItems.get(frame.item_id);expect(item).toBeDefined();await runtime.handleEvent({type:'conversation.item.retrieved',event_id:'provider-generated-event',item});return {frame,item};}
- return{runtime,sent,spoken,receipts,transcripts,terminations,completions,plays,current,play,answer,recover,advance:(ms:number)=>{clock+=ms;}};
+ return{runtime,sent,spoken,receipts,transcripts,terminations,completions,plays,current,play,answer,recover,diagnostics,commitRequests,interruptions,emptyInputs,resumptions,releasePlayback:()=>releasePlayback(),releaseQuestion:()=>releaseQuestion(),get reads(){return reads;},advance:(ms:number)=>{clock+=ms;}};
 }
+
+test('barge-in answer to the published next question binds to that question before its played ACK',async()=>{
+ const h=recoveryHarness();try{
+  await h.runtime.attach();await h.play();await h.answer('cities');
+  expect(h.runtime.state.speech?.action.text).toContain('Qual o horário de sábado?');
+  await h.answer('hours');
+  expect(h.runtime.state.turns.at(-1)?.capturedItemId).toBe('hours');
+  expect(h.runtime.state.stored.revision).toBe(2);expect(h.runtime.state.error).toBeUndefined();
+  expect(h.runtime.state.speech?.action.kind).toBe('GENERATE_FINAL_SUMMARY');
+ }finally{h.runtime.stop();}
+});
+
+test('owner continuation before next-question audio is ready retains the preceding question context',async()=>{
+ const h=recoveryHarness({holdNextQuestion:true});try{
+  await h.runtime.attach();await h.play();const pending=h.answer('cities');
+  for(let n=0;n<100&&!h.spoken.length;n++)await Promise.resolve();
+  expect(h.spoken[0]?.kind).toBe('CONFIRM_AND_ASK_NEXT');
+  h.runtime.observeEvent({type:'input_audio_buffer.speech_started',item_id:'city-continuation'});
+  h.releaseQuestion();await pending;
+  await h.runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:'city-continuation',transcript:'E fora dessas cidades, só com minha aprovação explícita.'});
+  expect(h.runtime.state.turns.at(-1)?.capturedItemId).toBe('cities');
+  expect(h.sent.filter(e=>e.type==='response.create').at(-1)?.response.input[0].content[0].text).toContain('"mode":"correction"');
+  expect(h.runtime.state.stored.revision).toBe(1);expect(h.runtime.state.error).toBeUndefined();
+ }finally{h.releaseQuestion();h.runtime.stop();}
+});
+
+test('empty final ASR resumes interrupted audio once without inventing owner words or approval',async()=>{
+ const h=recoveryHarness();try{
+  await h.runtime.attach();await h.runtime.handleEvent({type:'input_audio_buffer.speech_started',item_id:'noise'});
+  await h.runtime.handleEvent({type:'input_audio_buffer.speech_stopped',item_id:'noise'});
+  await h.runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:'noise',transcript:''});
+  expect(h.emptyInputs).toHaveLength(1);expect(h.resumptions).toHaveLength(1);expect(h.runtime.state.activeOwnerItemId).toBeUndefined();
+  expect(h.runtime.state.speech?.action.kind).toBe('ASK_NEXT_GAP');expect(h.runtime.state.stored.revision).toBe(0);
+  expect(h.runtime.state.turns).toHaveLength(0);expect(h.transcripts.filter(t=>t.role==='caller')).toHaveLength(0);
+  expect(h.spoken).toHaveLength(0);expect(h.runtime.state.approval).toBeUndefined();
+  await h.runtime.handleEvent({type:'input_audio_buffer.speech_started',item_id:'noise'});
+  await h.runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:'noise',transcript:''});
+  expect(h.interruptions).toHaveLength(1);expect(h.emptyInputs).toHaveLength(1);
+  await h.play();expect(h.runtime.state.phase).toBe('awaiting_owner');
+ }finally{h.runtime.stop();}
+});
+
+test('a missing final ASR gets one bounded probe; retrieved text never invents a final owner answer',async()=>{
+ const originalSet=globalThis.setTimeout,originalClear=globalThis.clearTimeout;
+ const timers=new Map<any,{callback:()=>void;ms:number}>();
+ globalThis.setTimeout=((callback:()=>void,ms:number)=>{const id={};timers.set(id,{callback,ms});return id;}) as any;
+ globalThis.clearTimeout=((id:any)=>{timers.delete(id);}) as any;
+ const h=recoveryHarness();try{
+  await h.runtime.attach();await h.runtime.handleEvent({type:'input_audio_buffer.speech_started',item_id:'missing-final'});
+  await h.runtime.handleEvent({type:'input_audio_buffer.speech_stopped',item_id:'missing-final'});
+  const retry=[...timers.values()].find(t=>t.ms===5000);expect(retry).toBeDefined();
+  const deadline=[...timers.values()].find(t=>t.ms===10000);expect(deadline).toBeDefined();
+  h.advance(5000);retry!.callback();
+  const probe=h.sent.filter(e=>e.type==='conversation.item.retrieve' && e.item_id==='missing-final');expect(probe).toHaveLength(1);
+  expect(h.runtime.ownsSpeechRetrieveMiss({type:'error',error:{event_id:probe[0].event_id,code:'item_not_found'}})).toBe(true);
+  await h.runtime.handleEvent({type:'conversation.item.retrieved',item:{id:'missing-final',type:'message',role:'user',status:'completed',content:[{type:'input_audio',transcript:'Sim. Confirmo.'}]}});
+  expect(h.runtime.state.stored.revision).toBe(0);expect(h.runtime.state.turns).toHaveLength(0);
+  h.advance(5000);deadline!.callback();for(let n=0;n<60;n++)await Promise.resolve();
+  expect(h.runtime.state.error).toBe('website_asr_deadline_exceeded');expect(h.runtime.state.activeOwnerItemId).toBeUndefined();
+  expect(h.emptyInputs).toHaveLength(0);expect(h.runtime.state.approval).toBeUndefined();
+  await h.runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:'missing-final',transcript:'Sim. Confirmo.'});
+  expect(h.runtime.state.turns).toHaveLength(0);
+ }finally{h.runtime.stop();globalThis.setTimeout=originalSet;globalThis.clearTimeout=originalClear;}
+});
+
+test('a retired ASR deadline cannot cut off an already selected failure signoff',async()=>{
+ const originalSet=globalThis.setTimeout,originalClear=globalThis.clearTimeout;
+ const timers=new Map<any,{callback:()=>void;ms:number}>();
+ globalThis.setTimeout=((callback:()=>void,ms:number)=>{const id={};timers.set(id,{callback,ms});return id;}) as any;
+ globalThis.clearTimeout=((id:any)=>timers.delete(id)) as any;
+ const h=recoveryHarness();try{
+  await h.runtime.attach();await h.runtime.handleEvent({type:'input_audio_buffer.speech_started',item_id:'pending-asr'});
+  await h.runtime.handleEvent({type:'input_audio_buffer.speech_stopped',item_id:'pending-asr'});
+  const deadline=[...timers.values()].find(t=>t.ms===10000)!;
+  await h.runtime.handleEvent({type:'session.updated',session:{output_modalities:['audio'],audio:{input:{turn_detection:{create_response:true,interrupt_response:true}}}}});
+  expect(h.runtime.state.speech?.action.kind).toBe('SPEAK_TERMINAL_ERROR');
+  h.advance(10000);deadline.callback();for(let n=0;n<50;n++)await Promise.resolve();
+  expect(h.terminations).toHaveLength(0);await h.play();expect(h.terminations).toHaveLength(1);
+ }finally{h.runtime.stop();globalThis.setTimeout=originalSet;globalThis.clearTimeout=originalClear;}
+});
+
+test('owner speech after the browser played ACK waits for its durable receipt without interrupting played audio',async()=>{
+ const h=recoveryHarness({holdPlaybackReceipt:true});try{
+  await h.runtime.attach();const played=h.play();
+  for(let n=0;n<20 && h.receipts.length===0;n++)await Promise.resolve();
+  expect(h.receipts).toHaveLength(1);
+  h.runtime.observeEvent({type:'input_audio_buffer.speech_started',item_id:'owner-1'});
+  h.releasePlayback();await played;await h.answer('cities');
+  expect(h.interruptions).toHaveLength(0);expect(h.runtime.state.error).toBeUndefined();
+  expect(h.runtime.state.stored.revision).toBe(1);expect(h.runtime.state.stored.nextAction.itemId).toBe('hours');
+ }finally{h.releasePlayback();h.runtime.stop();}
+});
+
+test('owner audio during the opening is retained without falsely acknowledging the interrupted audio',async()=>{
+ const h=recoveryHarness();try{
+  await h.runtime.attach();await h.answer('cities');
+  expect(h.interruptions).toHaveLength(1);expect(h.receipts).toHaveLength(0);
+  expect(h.runtime.state.stored.revision).toBe(1);expect(h.runtime.state.stored.nextAction.itemId).toBe('hours');
+  expect(h.transcripts.some(t=>t.role==='caller')).toBe(true);expect(h.terminations).toHaveLength(0);
+ }finally{h.runtime.stop();}
+});
+
+test('transient persistence failure reconciles then retries the same operation and continues',async()=>{
+ const h=recoveryHarness({commitFailure:'transient'});try{
+  await h.runtime.attach();await h.play();await h.answer('cities');
+  expect(h.runtime.state.stored.revision).toBe(1);expect(h.runtime.state.speech?.action.kind).toBe('CONFIRM_AND_ASK_NEXT');
+  expect(h.commitRequests).toHaveLength(2);expect(h.commitRequests[1]).toEqual(h.commitRequests[0]);expect(h.reads).toBe(1);
+  expect(h.sent.some(e=>e.item?.content?.[0]?.text?.startsWith('ligou.website_progress:'))).toBe(true);
+  expect(JSON.stringify(h.diagnostics)).not.toContain('private diagnostic text');
+  expect(h.diagnostics.some(d=>d.code==='08006')).toBe(true);
+ }finally{h.runtime.stop();}
+});
+
+test('timeout after commit uses durable readback and never applies an answer twice',async()=>{
+ const h=recoveryHarness({commitFailure:'after_commit'});try{
+  await h.runtime.attach();await h.play();await h.answer('cities');
+  expect(h.runtime.state.stored.revision).toBe(1);expect(h.runtime.state.stored.agenda.ownerTurns).toHaveLength(1);
+  expect(h.runtime.state.speech?.action.kind).toBe('CONFIRM_AND_ASK_NEXT');
+  expect(h.commitRequests).toHaveLength(1);expect(h.reads).toBe(1);expect(h.terminations).toHaveLength(0);
+ }finally{h.runtime.stop();}
+});
+
+test('HTTP gateway failure without a database code recovers through durable readback',async()=>{
+ const h=recoveryHarness({commitFailure:'http_unavailable'});try{
+  await h.runtime.attach();await h.play();await h.answer('cities');
+  expect(h.runtime.state.stored.revision).toBe(1);expect(h.commitRequests).toHaveLength(2);expect(h.reads).toBe(1);
+ }finally{h.runtime.stop();}
+});
+
+test('authorization failure is blocked without retry or approval, while transient exhaustion is bounded',async()=>{
+ for(const commitFailure of ['auth','exhausted'] as const){
+  const h=recoveryHarness({commitFailure});try{
+   await h.runtime.attach();await h.play();await h.answer('cities');
+   expect(h.commitRequests.length).toBe(commitFailure==='auth'?1:3);
+   expect(h.runtime.state.stored.revision).toBe(0);expect(h.runtime.state.approval).toBeUndefined();
+   expect(h.runtime.state.speech?.action.kind).toBe('SPEAK_TERMINAL_ERROR');
+  }finally{h.runtime.stop();}
+ }
+});
 
 test('lost opening ACK is recovered by exact lgs retrieval without replay or deadline extension',async()=>{
  const h=recoveryHarness();try{

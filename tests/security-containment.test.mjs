@@ -9,13 +9,13 @@ const binaryExtensions = new Set([
   ".avif", ".gif", ".ico", ".jpeg", ".jpg", ".mp4", ".png", ".ttf", ".webp", ".woff", ".woff2",
 ]);
 
-async function readTextAssets(directory, relative = "") {
+async function readTextAssets(directory, relative = "", excludedDirectories = new Set()) {
   const entries = await readdir(path.join(directory, relative), { withFileTypes: true });
   const assets = [];
   for (const entry of entries) {
     const entryRelative = path.join(relative, entry.name);
     if (entry.isDirectory()) {
-      assets.push(...await readTextAssets(directory, entryRelative));
+      if (!excludedDirectories.has(entry.name)) assets.push(...await readTextAssets(directory, entryRelative, excludedDirectories));
       continue;
     }
     if (!entry.isFile() || binaryExtensions.has(path.extname(entry.name).toLowerCase())) continue;
@@ -38,9 +38,16 @@ test("production site ships Google-only login: no password, magic-link, code, or
   assert.ok(assets.some((asset) => asset.path === "index.html"));
   assert.ok(assets.some((asset) => asset.path.endsWith(".js")));
   assert.doesNotMatch(productionOutput, /VITE_TEST_AUTOLOGIN/);
-  assert.doesNotMatch(productionOutput, /signInWithPassword/);
-  assert.doesNotMatch(productionOutput, /signInWithOtp/);
-  assert.doesNotMatch(productionOutput, /verifyOtp/);
+  // The commercial bundle includes the Supabase SDK's unused auth method
+  // declarations. Check app-owned auth paths and actual bundled invocations;
+  // method names in a vendor class do not create a password or OTP login UI.
+  const ownedSources = (await Promise.all(["dashboard/src", "src/commercial", "src/sales-demo"].map(async directory =>
+    (await readTextAssets(path.resolve(new URL("../", import.meta.url).pathname, directory), "", new Set(["node_modules","dist",".git"])))
+      .map(asset => ({ ...asset, path: `${directory}/${asset.path}` })) ))).flat();
+  for (const asset of ownedSources) assert.equal(/signInWithPassword|signInWithOtp|verifyOtp/.test(asset.text), false,
+    `alternate auth path in application source: ${asset.path}`);
+  for (const asset of assets) assert.equal(/(?:\.\s*(?:signInWithPassword|signInWithOtp|verifyOtp)|\[\s*["'](?:signInWithPassword|signInWithOtp|verifyOtp)["']\s*\])\s*\(/.test(asset.text), false,
+    `alternate auth invocation in production: ${asset.path}`);
   assert.doesNotMatch(productionOutput, /ligou\.test\.k/);
   assert.doesNotMatch(productionOutput, /#k=/);
   assert.match(productionOutput, /signInWithOAuth/);

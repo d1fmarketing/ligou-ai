@@ -14,6 +14,96 @@ const MANUAL_END_REASONS = new Set(["user", "manual_hangup", "dialog_close"]);
 const TERMINAL_FAILURE_STATUSES = new Set(["error", "killed_budget", "killed_deadline"]);
 const RECONCILABLE_PROVIDER_STATES = new Set(["active", "pending", "unknown"]);
 
+function notifyVoiceObserver(observer, value) {
+  try { observer?.(value); } catch { /* Measurement cannot alter session custody. */ }
+}
+
+export function createVoiceSessionTiming({ onTiming, startedAt, attemptId, now = () => performance.now() } = {}) {
+  const origin = Number.isFinite(startedAt) ? startedAt : now();
+  const browserAttemptId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(attemptId ?? "")
+    ? attemptId : globalThis.crypto?.randomUUID?.() ?? `local-${origin.toFixed(3)}`;
+  return {
+    startedAt: origin,
+    attemptId: browserAttemptId,
+    mark(event, details = {}) {
+      const entry = { event, attemptId: browserAttemptId, elapsedMs: Math.max(0, now() - origin), ...details };
+      notifyVoiceObserver(onTiming, entry);
+      // A local acceptance harness may subscribe without collecting credentials,
+      // SDP, business text, owner transcripts, or wall clocks from another host.
+      try {
+        globalThis.dispatchEvent?.(new CustomEvent("ligou:voice-timing", { detail: entry }));
+      } catch { /* Optional browser-only diagnostics. */ }
+      return entry;
+    },
+  };
+}
+
+function voiceAbortError(signal) {
+  return Object.assign(new Error(signal?.reason === "connection_timeout"
+    ? "A conexão demorou mais que o esperado. Tente iniciar novamente."
+    : "Início da chamada cancelado."), {
+    name: "AbortError", code: signal?.reason === "connection_timeout" ? "voice_connection_timeout" : "voice_start_cancelled",
+  });
+}
+
+function abortableVoiceOperation(operation, signal) {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(voiceAbortError(signal));
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(operation).then(resolve, reject).finally(() => signal?.removeEventListener("abort", onAbort));
+  });
+}
+
+async function requestVoiceMicrophone(signal, timeoutMs) {
+  let abandoned = false;
+  let timer;
+  let onAbort;
+  try {
+    if (signal?.aborted) throw voiceAbortError(signal);
+    if (!navigator.mediaDevices?.getUserMedia) throw Object.assign(
+      new Error("Microfone indisponível neste navegador. Abra o painel em um navegador compatível."),
+      { code: "microphone_unavailable" },
+    );
+    const request = Promise.resolve(navigator.mediaDevices.getUserMedia({ audio: true })).then((media) => {
+      if (abandoned || signal?.aborted) {
+        for (const track of media.getTracks()) track.stop();
+        throw voiceAbortError(signal);
+      }
+      return media;
+    });
+    return await Promise.race([
+      request,
+      new Promise((_, reject) => {
+        onAbort = () => { abandoned = true; reject(voiceAbortError(signal)); };
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+        timer = setTimeout(() => {
+          abandoned = true;
+          reject(Object.assign(new Error("Permita o uso do microfone no navegador e tente novamente."), { code: "microphone_permission_timeout" }));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+export async function authenticateVoiceSession({ client, signal, timeoutMs = 10_000 }) {
+  const read = await boundedRead(() => client?.auth?.getSession(), timeoutMs, signal);
+  if (signal?.aborted) throw voiceAbortError(signal);
+  if (!read.ok) throw Object.assign(
+    new Error("Não consegui verificar sua sessão. Tente novamente."), { code: "voice_auth_timeout" },
+  );
+  if (read.value?.error) throw Object.assign(
+    new Error("Não consegui verificar sua sessão. Tente novamente."), { code: "voice_auth_failed" },
+  );
+  const token = read.value?.data?.session?.access_token;
+  if (!token) throw Object.assign(new Error("Sessão expirada — entre novamente."), { code: "voice_auth_required" });
+  return token;
+}
+
 function isObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -317,9 +407,10 @@ export async function resolveOnboardingOutcome({
 }
 
 async function resolveWebsiteInterviewOutcome({client,reason,callId,timeoutMs,pollIntervalMs,isCancelled,signal,now,sleep,knownRevision}) {
-  if(MANUAL_END_REASONS.has(reason) || !client?.rpc || typeof callId !== "string")return {status:"interrupted"};
+  if(!client?.rpc || typeof callId !== "string")return {status:"interrupted"};
   const deadline=now()+(Number.isFinite(timeoutMs)&&timeoutMs>0?timeoutMs:ONBOARDING_OUTCOME_WINDOW_MS);
   let revision=Number.isSafeInteger(knownRevision)?knownRevision:null;
+  let approvedReceiptId=null;
   while(!cancellationRequested(isCancelled,signal)){
     const remaining=deadline-now();if(remaining<=0)break;
     const read=await boundedRead(readSignal=>{
@@ -337,6 +428,13 @@ async function resolveWebsiteInterviewOutcome({client,reason,callId,timeoutMs,po
         && uuid(t.receiptId) && uuid(data.approvalReceiptId) && t.approvalReceiptId===data.approvalReceiptId
         && t.providerConfirmed===true && t.budgetSettled===true && uuid(t.budgetReservationId))
         return {status:"complete",revision,protocolVersion:3};
+      if(uuid(data.approvalReceiptId)){
+        approvedReceiptId=data.approvalReceiptId;
+        if(data.amendmentPending===true && uuid(data.amendmentRequestReceiptId))
+          return {status:"amendment_pending",revision,protocolVersion:3,approvalReceiptId:approvedReceiptId,canResume:data.amendmentCanResume===true};
+        if(t?.outcome==="unfinished" && data.budgetStatus==="settled" && data.providerTerminationState==="confirmed")
+          return {status:"approved",revision,protocolVersion:3,approvalReceiptId:approvedReceiptId};
+      }
       if(data.resumeEligible===true && data.state==="unfinished")return {status:"resumable",revision,snapshotDigest:data.digest,protocolVersion:3};
       if(t?.outcome==="unfinished" || (data.budgetStatus==="settled" && ["ended","error","killed_budget","killed_deadline"].includes(data.callStatus)
         && data.state!=="closing" && data.state!=="complete"))return {status:"interrupted",revision,protocolVersion:3};
@@ -344,7 +442,7 @@ async function resolveWebsiteInterviewOutcome({client,reason,callId,timeoutMs,po
     const delay=Math.min(Math.max(1,pollIntervalMs??250),Math.max(0,deadline-now()));
     if(delay && !await pause(delay,{signal,sleep}))return {status:"interrupted"};
   }
-  return {status:"finalizing",...(revision!==null?{revision}:{}),protocolVersion:3};
+  return {status:"finalizing",...(revision!==null?{revision}:{}),...(approvedReceiptId?{approvalReceiptId:approvedReceiptId}:{}),protocolVersion:3};
 }
 
 export async function watchOnboardingOutcome({
@@ -363,7 +461,7 @@ export async function watchOnboardingOutcome({
     const outcome = await resolve({ ...resolution, knownRevision, signal, isCancelled, sleep });
     if (cancellationRequested(isCancelled, signal)) return { status: "interrupted" };
     onOutcome?.(outcome);
-    if (outcome.status !== "finalizing") return outcome;
+    if (outcome.status !== "finalizing" && !(outcome.status==="amendment_pending" && !outcome.canResume)) return outcome;
     if (Number.isSafeInteger(outcome.revision) && outcome.revision > 0) knownRevision = outcome.revision;
     const boundedRetry = Number.isFinite(retryDelayMs) && retryDelayMs >= 250
       ? retryDelayMs
@@ -375,17 +473,23 @@ export async function watchOnboardingOutcome({
 
 export function onboardingOutcomeCopy(outcome) {
   if (!outcome) return "Verificando conclusão…";
+  if(outcome.status==="amendment_pending")return outcome.canResume
+    ? "Pedido de correção salvo. A versão anterior continua aprovada. Continue para revisar os pontos alterados."
+    : "Pedido de correção salvo. A versão anterior continua aprovada. Confirmando o encerramento antes de retomar.";
+  if(outcome.status==="approved")return "Sua configuração foi aprovada e está salva. A conversa terminou antes da confirmação final de encerramento.";
   if (outcome?.status === "complete") {
     if(outcome.protocolVersion===3)return `Entrevista concluída e salva · revisão ${outcome.revision}. Os pontos pendentes continuam sujeitos à revisão; nenhum poder foi concedido automaticamente.`;
     return `Entrevista concluída. Cobertura confirmada por voz · revisão ${outcome.revision}. Regras ainda aguardando aprovação na Memória.`;
   }
   if (outcome?.status === "finalizing") {
+    if(outcome.approvalReceiptId)return "Configuração aprovada e salva. Confirmando o encerramento da conversa…";
     const revision = Number.isSafeInteger(outcome.revision) && outcome.revision > 0
       ? ` · revisão ${outcome.revision}`
       : "";
     return `Finalizando… A pausa e a possibilidade de continuar ainda estão sendo confirmadas${revision}.`;
   }
   if (outcome?.status === "resumable") {
+    if(outcome.protocolVersion===3)return "A configuração continua incompleta. Você pode retomar da pergunta salva.";
     return `Entrevista pausada com segurança · revisão ${outcome.revision}. Você pode continuar da pergunta salva.`;
   }
   return "Entrevista interrompida. A conclusão não foi confirmada. Revise na Memória as sugestões que já foram registradas.";
@@ -395,6 +499,7 @@ export function voiceSessionRestartLabel({
   endedSessionType,
   onboardingOutcome,
 }) {
+  if(endedSessionType==="onboarding" && onboardingOutcome?.status==="amendment_pending")return "Revisar correção";
   return endedSessionType === "onboarding"
       && onboardingOutcome?.status === "resumable"
     ? "Continuar entrevista"
@@ -655,7 +760,62 @@ function waitForDataChannelOpen(channel, timeoutMs, signal) {
   });
 }
 
-function playApplicationOpening(audioBytes, timeoutMs, signal, onOwnedResource) {
+function observePlaybackSamples(audio, onSample, onUnavailable) {
+  // captureStream observes the media element's output without replacing its
+  // speaker route. Nonzero captured samples are browser evidence, not proof
+  // of sound reaching a physical speaker or a listener understanding it.
+  let context;
+  let source;
+  let stream;
+  let frame;
+  let stopped = false;
+  const cleanup = () => {
+    if (stopped) return;
+    stopped = true;
+    if (frame !== undefined) globalThis.cancelAnimationFrame?.(frame);
+    try { source?.disconnect(); } catch { /* noop */ }
+    for (const track of stream?.getTracks?.() ?? []) track.stop();
+    try { context?.close()?.catch?.(() => {}); } catch { /* noop */ }
+  };
+  try {
+    const AudioContext = globalThis.AudioContext || globalThis.webkitAudioContext;
+    if (!AudioContext || typeof audio.captureStream !== "function" || !globalThis.requestAnimationFrame) {
+      onUnavailable("capture_not_supported");
+      return cleanup;
+    }
+    stream = audio.captureStream();
+    if (!stream.getAudioTracks().length) throw new Error("no_capture_track");
+    context = new AudioContext();
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 256;
+    source = context.createMediaStreamSource(stream);
+    source.connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    const inspect = () => {
+      if (stopped) return;
+      if (context.state === "running") {
+        analyser.getFloatTimeDomainData(samples);
+        if (samples.some((sample) => Math.abs(sample) > 0.0001)) {
+          onSample();
+          cleanup();
+          return;
+        }
+      }
+      frame = globalThis.requestAnimationFrame(inspect);
+    };
+    // A suspended analyser must never stall or reroute the application audio.
+    if (context.state === "suspended") {
+      onUnavailable("capture_context_suspended");
+      cleanup();
+    } else inspect();
+  } catch {
+    onUnavailable("capture_unavailable");
+    cleanup();
+  }
+  return cleanup;
+}
+
+function playApplicationOpening(audioBytes, timeoutMs, signal, onOwnedResource, playback = {}) {
   const blob = new Blob([audioBytes], { type: "audio/mpeg" });
   const objectUrl = URL.createObjectURL(blob);
   const audio = document.createElement("audio");
@@ -664,23 +824,41 @@ function playApplicationOpening(audioBytes, timeoutMs, signal, onOwnedResource) 
   onOwnedResource(audio, objectUrl);
   return new Promise((resolve, reject) => {
     let settled = false;
+    let playing = false;
+    let stopSamples;
     const finish = (error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      audio.removeEventListener("playing", onPlaying);
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("error", onError);
       signal?.removeEventListener("abort", onAbort);
+      stopSamples?.();
       if (error) reject(error);
       else resolve();
     };
-    const onEnded = () => finish();
+    const onPlaying = () => {
+      if (playing || settled || signal?.aborted) return;
+      playing = true;
+      playback.onPlaying?.();
+      stopSamples = observePlaybackSamples(audio,
+        () => playback.onSample?.(),
+        (reason) => playback.onSampleUnavailable?.(reason));
+    };
+    const onEnded = () => {
+      playback.onEnded?.({ mediaDurationMs: Number.isFinite(audio.duration) ? audio.duration * 1_000 : null });
+      finish();
+    };
     const onError = () => finish(safeOpeningError("reprodução da abertura falhou"));
     const onAbort = () => finish(safeOpeningError("abertura cancelada"));
     const timer = setTimeout(() => finish(safeOpeningError("tempo da reprodução excedido")), timeoutMs);
+    audio.addEventListener("playing", onPlaying, { once: true });
     audio.addEventListener("ended", onEnded, { once: true });
     audio.addEventListener("error", onError, { once: true });
     signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
+    playback.onRequested?.();
     Promise.resolve(audio.play()).catch(() => finish(safeOpeningError("reprodução da abertura bloqueada")));
   });
 }
@@ -691,20 +869,47 @@ export async function startVoiceSession({
   model,
   onEvent,
   onEnd,
+  onCallCreated,
+  onStage,
+  onTiming,
+  startedAt,
+  attemptId,
   signal,
+  permissionTimeoutMs = 60_000,
+  connectionTimeoutMs = 30_000,
   openingTimeoutMs,
   openingPlaybackTimeoutMs,
   onboardingProtocolVersion = ONBOARDING_PROTOCOL_VERSION,
   speechClient,
 }) {
-  if (signal?.aborted) throw safeOpeningError("abertura cancelada");
-  const media = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const timing = createVoiceSessionTiming({ onTiming, startedAt, attemptId });
+  if (!Number.isFinite(startedAt)) timing.mark("start");
+  let currentStage;
+  const stage = (value) => {
+    if (currentStage === value || signal?.aborted) return;
+    currentStage = value;
+    notifyVoiceObserver(onStage, value);
+  };
+  if (signal?.aborted) throw voiceAbortError(signal);
   const onboarding = sessionType === "onboarding";
   const websiteInterview = onboarding && onboardingProtocolVersion === 3;
   if (onboarding && ![2, 3].includes(onboardingProtocolVersion)) {
-    for (const track of media.getTracks()) track.stop();
+    stage("failed");
     throw safeOpeningError("protocolo desconhecido");
   }
+  stage("permission-required");
+  timing.mark("microphone_requested");
+  let media;
+  try {
+    media = await requestVoiceMicrophone(signal,
+      Number.isFinite(permissionTimeoutMs) && permissionTimeoutMs > 0 ? permissionTimeoutMs : 60_000);
+    timing.mark("microphone_ready");
+  } catch (error) {
+    timing.mark(signal?.aborted ? "start_cancelled" : "microphone_failed");
+    if (!signal?.aborted) stage("failed");
+    throw error;
+  }
+  stage("connecting");
   const {
     controlMs: boundedOpeningTimeout,
     playbackMs: boundedOpeningPlaybackTimeout,
@@ -717,6 +922,7 @@ export async function startVoiceSession({
   let externalAbort = null;
   const setupAbort = new AbortController();
   let disconnectGrace = null;
+  let connectionDeadline = null;
   let deadline = null;
   let endedOnce = false;
   let stopped = false;
@@ -729,8 +935,39 @@ export async function startVoiceSession({
   let openingGateReject = null;
   let openingGateTimer = null;
   let websitePlayer = null;
+  let websitePhase = "idle";
   let earlyWebsiteVad = null;
   let earlyWebsiteNotice = null;
+
+  const clearConnectionDeadline = () => {
+    clearTimeout(connectionDeadline);
+    connectionDeadline = null;
+  };
+  const ready = () => {
+    if (stopped || signal?.aborted) return;
+    clearConnectionDeadline();
+    stage("ready");
+    timing.mark("ready");
+  };
+  const playbackCallbacks = (payload, opening = false) => {
+    const details = { audioRole: opening ? "opening" : "interview_turn" };
+    if (payload?.kind) details.actionKind = payload.kind;
+    return {
+      onRequested: () => timing.mark("speech_play_requested", details),
+      onPlaying: () => {
+        clearConnectionDeadline();
+        stage(["SPEAK_TERMINAL_ERROR","SPEAK_AMENDMENT_SIGNOFF"].includes(payload?.kind)?"closing":"playing");
+        timing.mark("speech_playing", { ...details, evidence: "html_media_playing" });
+        if (opening) timing.mark("actionable_question_alignment_unavailable", { reason: "mixed_opening_audio" });
+      },
+      onSample: () => timing.mark("speech_first_nonzero_sample", { ...details, evidence: "media_element_capture" }),
+      onSampleUnavailable: (reason) => timing.mark("speech_sample_measurement_unavailable", { ...details, reason }),
+      onEnded: (detailsEnded) => {
+        timing.mark("speech_ended", { ...details, ...detailsEnded, evidence: "html_media_ended" });
+        stage("verifying-playback");
+      },
+    };
+  };
 
   function setSpeechCustody(active) {
     if (!onboarding) return;
@@ -759,6 +996,7 @@ export async function startVoiceSession({
     stopped = true;
     websitePlayer?.stop();
     setupAbort.abort("voice_session_stopped");
+    clearConnectionDeadline();
     if (externalAbort) signal?.removeEventListener("abort", externalAbort);
     externalAbort = null;
     if (deadline) clearTimeout(deadline);
@@ -770,7 +1008,14 @@ export async function startVoiceSession({
     rejectOpeningGate(safeOpeningError("abertura cancelada"));
     if (channel) channel.onclose = null;
     if (channel) channel.onmessage = null;
+    if (channel) channel.onopen = null;
     if (pc) pc.onconnectionstatechange = null;
+    if (pc) pc.ontrack = null;
+    if (remoteAudio) remoteAudio.onplaying = null;
+    if (remoteAudio) {
+      try { remoteAudio.pause(); } catch { /* noop */ }
+      remoteAudio.srcObject = null;
+    }
     setSpeechCustody(false);
     if (openingAudio) {
       try { openingAudio.pause(); } catch { /* noop */ }
@@ -781,11 +1026,12 @@ export async function startVoiceSession({
     for (const track of media.getTracks()) track.stop();
     try { pc?.close(); } catch { /* noop */ }
   }
-  function end(reason = "user") {
+  function end(reason = "user", message) {
     if (endedOnce) return;
     endedOnce = true;
+    timing.mark("session_ended", { reason });
     stop();
-    onEnd?.({ reason, callId });
+    onEnd?.({ reason, callId, ...(message ? { message } : {}) });
   }
 
   try {
@@ -794,11 +1040,30 @@ export async function startVoiceSession({
       signal.addEventListener("abort", externalAbort, { once: true });
       if (signal.aborted) throw safeOpeningError("abertura cancelada");
     }
+    connectionDeadline = setTimeout(() => setupAbort.abort("connection_timeout"),
+      Number.isFinite(connectionTimeoutMs) && connectionTimeoutMs > 0 ? connectionTimeoutMs : 30_000);
     pc = new RTCPeerConnection();
     remoteAudio = document.createElement("audio");
     remoteAudio.autoplay = true;
     remoteAudio.muted = onboarding;
-    pc.ontrack = (event) => { remoteAudio.srcObject = event.streams[0]; };
+    let remotePlaybackResolve;
+    let remotePlaybackReject;
+    const remotePlayback = new Promise((resolve, reject) => { remotePlaybackResolve = resolve; remotePlaybackReject = reject; });
+    remotePlayback.catch(() => {});
+    remoteAudio.onplaying = () => {
+      if (stopped || onboarding || remoteAudio.muted || !remoteAudio.srcObject) return;
+      timing.mark("speech_playing", { audioRole: "provider", evidence: "html_media_playing" });
+      remotePlaybackResolve();
+    };
+    pc.ontrack = (event) => {
+      if (stopped) return;
+      remoteAudio.srcObject = event.streams[0];
+      timing.mark("remote_audio_track");
+      if (!onboarding) {
+        Promise.resolve().then(() => { if (!stopped) return remoteAudio.play(); })
+          .catch(() => remotePlaybackReject(safeOpeningError("reprodução da abertura bloqueada")));
+      }
+    };
     for (const track of media.getTracks()) {
       if (onboarding) track.enabled = false;
       pc.addTrack(track, media);
@@ -806,9 +1071,20 @@ export async function startVoiceSession({
 
     // data channel: local visibility only (captions); nothing authoritative happens here
     channel = pc.createDataChannel("oai-events");
+    let channelOpenReported = false;
+    const channelOpened = () => {
+      if (channelOpenReported || stopped) return;
+      channelOpenReported = true;
+      timing.mark("data_channel_open");
+    };
+    channel.onopen = channelOpened;
+    if (channel.readyState === "open") channelOpened();
     channel.onmessage = (msg) => {
       try {
         const ev = JSON.parse(msg.data);
+        if (ev.type === "input_audio_buffer.speech_started") timing.mark("transport_owner_speech_started");
+        if (ev.type === "input_audio_buffer.speech_stopped") timing.mark("transport_owner_speech_ended");
+        if (ev.type === "conversation.item.input_audio_transcription.completed") timing.mark("transport_owner_transcript_final");
         if (websiteInterview) {
           if (websitePlayer) websitePlayer.handleEvent(ev);
           else if (ev.type === "session.updated") earlyWebsiteVad = ev;
@@ -863,26 +1139,32 @@ export async function startVoiceSession({
       }
     };
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    timing.mark("offer_started");
+    const offer = await abortableVoiceOperation(pc.createOffer(), setupAbort.signal);
+    await abortableVoiceOperation(pc.setLocalDescription(offer), setupAbort.signal);
+    timing.mark("offer_ready");
     const requestBody = { sdp: offer.sdp, session_type: sessionType, model };
     if (onboarding) {
       requestBody.opening_mode_requested = APPLICATION_OPENING_MODE;
       requestBody.onboarding_protocol_version = onboardingProtocolVersion;
     }
-    const res = await fetch(SESSION_URL, {
+    timing.mark("bootstrap_started");
+    const res = await abortableVoiceOperation(fetch(SESSION_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
       body: JSON.stringify(requestBody),
       signal: setupAbort.signal,
-    });
+    }), setupAbort.signal);
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw voiceSessionStartError(body, res.status);
     }
-    const response = await res.json();
+    const response = await abortableVoiceOperation(res.json(), setupAbort.signal);
     const { sdp, call_id, max_minutes } = response;
     callId = call_id;
+    timing.mark("bootstrap_response", /^[0-9a-f-]{36}$/i.test(callId ?? "") ? { callId } : {});
+    if(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(callId??""))
+      notifyVoiceObserver(onCallCreated,{callId,end,maxMinutes:max_minutes});
     let opening = null;
     if (websiteInterview) {
       const envelope = response.opening_payload;
@@ -899,25 +1181,40 @@ export async function startVoiceSession({
         readSpeech:async(actionId,abortSignal)=>{
           const request=speechClient.rpc("read_website_interview_speech",{p_call:callId,p_action:actionId});
           const result=await (typeof request.abortSignal === "function" ? request.abortSignal(abortSignal) : request);
-          if(result.error || !result.data)throw safeOpeningError("fala atual indisponível");
+          if(result.error)throw safeOpeningError("fala atual indisponível");
           return result.data;
         },
-        play:async(bytes,abortSignal)=>{
+        play:async(bytes,abortSignal,payload)=>{
           try {
-            await playApplicationOpening(bytes,180_000,abortSignal,(audio,url)=>{openingAudio=audio;openingObjectUrl=url;});
+            await playApplicationOpening(bytes,180_000,abortSignal,(audio,url)=>{openingAudio=audio;openingObjectUrl=url;},
+              playbackCallbacks(payload, payload?.actionId === envelope.speech.actionId));
           } finally {
             if(openingAudio){try{openingAudio.pause();}catch{}openingAudio.removeAttribute?.("src");try{openingAudio.load?.();}catch{}openingAudio=null;}
             releaseOpeningObjectUrl();
           }
         },
         send:event=>{if(stopped)throw safeOpeningError("sessão encerrada");channel.send(JSON.stringify(event));},
-        setMicrophone:setSpeechCustody,onCaption:onEvent,onFailure:()=>end("application_speech_error"),
+        setMicrophone:(active)=>{
+          setSpeechCustody(active);
+          if(active && websitePhase === "idle")ready();
+          else if(!active && !stopped && currentStage === "ready")stage("processing");
+        },
+        onPhase:(phase)=>{
+          websitePhase = phase;
+          if(phase === "loading")stage(openingActivated ? "processing" : "connecting");
+          else if(phase === "ack_pending")stage("verifying-playback");
+          else if(phase === "processing")stage("processing");
+          else if(phase === "owner-speaking")stage("ready");
+        },
+        onProgress:()=>{stage("retrying");timing.mark("backend_retrying");},
+        onCaption:onEvent,onFailure:(error)=>{stage("failed");end("application_speech_error",voiceSessionErrorMessage(error));},
       });
       if(earlyWebsiteVad)websitePlayer.handleEvent(earlyWebsiteVad);
       opening=envelope;
     } else if (onboarding) opening = await validateApplicationOpening(response);
     if (stopped || signal?.aborted) throw safeOpeningError("abertura cancelada");
-    await pc.setRemoteDescription({ type: "answer", sdp });
+    await abortableVoiceOperation(pc.setRemoteDescription({ type: "answer", sdp }), setupAbort.signal);
+    timing.mark("remote_sdp_applied");
     if (websiteInterview) {
       await waitForDataChannelOpen(channel,boundedOpeningTimeout,setupAbort.signal);
       const played=websitePlayer.start(opening.speech);
@@ -936,6 +1233,7 @@ export async function startVoiceSession({
           openingAudio = audio;
           openingObjectUrl = objectUrl;
         },
+        playbackCallbacks(opening.payload, true),
       );
       releaseOpeningObjectUrl();
       if (stopped || signal?.aborted) throw safeOpeningError("abertura cancelada");
@@ -961,17 +1259,42 @@ export async function startVoiceSession({
       if (stopped || signal?.aborted || !openingVadActive) throw safeOpeningError("custódia de voz não confirmada");
       openingActivated = true;
       setSpeechCustody(true);
+      ready();
       onEvent?.({ kind: "agent", text: openingPayload.text });
+    } else {
+      await waitForDataChannelOpen(channel, boundedOpeningTimeout, setupAbort.signal);
+      await abortableVoiceOperation(remotePlayback, setupAbort.signal);
+      ready();
     }
     if (!endedOnce) deadline = setTimeout(() => end("deadline"), max_minutes * 60_000);
     return { end, callId, maxMinutes: max_minutes };
   } catch (error) {
+    timing.mark(signal?.aborted ? "start_cancelled" : "start_failed");
+    if (!signal?.aborted && !endedOnce) stage("failed");
+    if(!endedOnce && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(callId??""))
+      end(signal?.aborted?"manual_hangup":"startup_failed",voiceSessionErrorMessage(error));
     stop();
     throw error;
   }
 }
 
 export function voiceSessionErrorMessage(error) {
+  if (["NotAllowedError", "PermissionDeniedError", "SecurityError"].includes(error?.name)) {
+    return "Permita o uso do microfone nas configurações deste site e tente novamente.";
+  }
+  if (["NotFoundError", "DevicesNotFoundError"].includes(error?.name)) {
+    return "Não encontrei um microfone. Conecte um dispositivo de áudio e tente novamente.";
+  }
+  if (["NotReadableError", "TrackStartError"].includes(error?.name)) {
+    return "O microfone está em uso ou indisponível. Feche o outro aplicativo de áudio e tente novamente.";
+  }
+  if (error?.name === "OverconstrainedError") return "Este microfone não está disponível. Escolha outro dispositivo e tente novamente.";
+  if (/reprodução da abertura bloqueada/.test(error?.message ?? "")) {
+    return "O navegador bloqueou o áudio. Permita a reprodução de som neste site e tente novamente.";
+  }
+  if (/^(Abertura segura indisponível|Fala segura do onboarding):?/.test(error?.message ?? "")) {
+    return "Houve uma falha técnica no áudio. Tente iniciar novamente.";
+  }
   const message = typeof error?.message === "string" ? error.message : "Não foi possível iniciar a chamada. Tente novamente.";
   if (["interview_resume_source_not_settled", "interview_prior_not_settled"].includes(message)) {
     return "A entrevista anterior ainda está sendo encerrada. Aguarde um momento e tente novamente. Se continuar, fale com o suporte; suas respostas estão preservadas.";

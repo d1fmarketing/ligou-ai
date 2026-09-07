@@ -1767,6 +1767,27 @@ describe("durable browser cancel_requested handshake", () => {
     expect(cancellations).toBe(1);
   });
 
+  test("one slow pending startup does not serialize the other two bounded queue claims", async () => {
+    const started: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const pending = (browserRequestsModule as any)._pollPendingBrowserRequests(
+      async () => ({ sdp: "", call_id: "" }),
+      {
+        loadRows: async () => [{ id: "slow" }, { id: "second" }, { id: "third" }, { id: "over-limit" }],
+        handleRow: async (row: { id: string }) => {
+          started.push(row.id);
+          if (row.id === "slow") await held;
+        },
+      },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const beforeFirstFinished = [...started];
+    release();
+    expect(await pending).toBe(3);
+    expect(beforeFirstFinished).toEqual(["slow", "second", "third"]);
+  });
+
   test("overlapping cancellation ticks share one bounded poll", async () => {
     const pollCancellations = (browserRequestsModule as any)
       ._pollBrowserCancellations;

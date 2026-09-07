@@ -65,17 +65,22 @@ test("website sideband boot bypasses legacy opening activation and owns every au
 
 test("website timeout finalizes without waiting for a subsequent provider message",async()=>{
   const h=harness();const originalSet=globalThis.setTimeout,originalClear=globalThis.clearTimeout,originalNow=Date.now;
-  let now=originalNow();const timers=new Map<any,{callback:Function,ms:number}>();
+  const originalMonotonic=Object.getOwnPropertyDescriptor(performance,'now');
+  let now=0;const timers=new Map<any,{callback:Function,ms:number}>();
   globalThis.setTimeout=((callback:Function,ms:number)=>{const id={};timers.set(id,{callback,ms});return id;}) as any;
-  globalThis.clearTimeout=((id:any)=>timers.delete(id)) as any;Date.now=()=>now;
+  globalThis.clearTimeout=((id:any)=>timers.delete(id)) as any;
+  Object.defineProperty(performance,'now',{value:()=>now,configurable:true});
   try{
     const control=h.attach();Socket.instances[0]!.emit("open");await control.opened;
     const deadline=[...timers.values()].find(x=>x.ms<=30_000)!;expect(deadline).toBeDefined();
+    Date.now=()=>originalNow()+3_600_000;deadline.callback();await flush();
+    expect(liveSessions.has(callId)).toBe(true);
     now+=40_000;deadline.callback();await flush();
     expect(h.updates.some(x=>x.table==="calls" && x.status==="error")).toBe(true);
     expect(liveSessions.has(callId)).toBe(false);
     expect(timers.size).toBe(0);
-  }finally{h.restore();Date.now=originalNow;globalThis.setTimeout=originalSet;globalThis.clearTimeout=originalClear;}
+  }finally{h.restore();Date.now=originalNow;globalThis.setTimeout=originalSet;globalThis.clearTimeout=originalClear;
+    if(originalMonotonic)Object.defineProperty(performance,'now',originalMonotonic);else delete (performance as any).now;}
 });
 
 test("silent interpretation usage is counted once without inventing terminal usage",async()=>{

@@ -16,7 +16,13 @@ import {
   orderMigrationFiles,
   parseLocalRuntimeStatus,
   parseLocalStatus,
+  run,
 } from "../scripts/local-db-gate.mjs";
+
+test('local gate preserves the child rejection when its input pipe closes early',async()=>{
+  const result=await run(process.execPath,['-e',"require('node:fs').closeSync(0);process.stderr.write('intentional child rejection');process.exit(7)"],{input:'x'.repeat(2*1024*1024)});
+  assert.equal(result.code,7);assert.match(result.stderr,/intentional child rejection/);
+});
 
 const rlsModule = await import("../supabase/tests/local-db-rls.mjs").catch(() => ({}));
 
