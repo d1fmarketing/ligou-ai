@@ -240,7 +240,21 @@ export async function validateOwnerAudioFile(file, clip) {
   return bytes;
 }
 
-export function installBrowserHarness(settings, verifyOwnerAudioFile) {
+export function safeProviderSessionConfig(session) {
+  const allowed = (value, values) => values.includes(value) ? value : null;
+  const boolean = value => typeof value === 'boolean' ? value : null;
+  const transcription = session?.audio?.input?.transcription, vad = session?.audio?.input?.turn_detection;
+  const languages = transcription?.languages;
+  return { model: allowed(session?.model, ['gpt-realtime', 'gpt-realtime-2.1', 'gpt-realtime-2.1-mini']),
+    reasoningEffort: allowed(session?.reasoning?.effort, ['minimal', 'low', 'medium', 'high', 'xhigh']),
+    transcriptionModel: allowed(transcription?.model, ['gpt-live-transcribe', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1']),
+    languages: Array.isArray(languages) && languages.length <= 8
+      && languages.every(value => typeof value === 'string' && /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$/.test(value)) ? [...languages] : null,
+    vadType: allowed(vad?.type, ['semantic_vad', 'server_vad']), vadEagerness: allowed(vad?.eagerness, ['auto', 'low', 'medium', 'high']),
+    createResponse: boolean(vad?.create_response), interruptResponse: boolean(vad?.interrupt_response) };
+}
+
+export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessionConfig) {
   if (location.origin !== settings.origin || window.__voiceAcceptance) return;
   const state = { events: [], recordings: [], speech: null, stage: null, callId: null, clickAt: null,
     peers: [], inputs: [], sources: new Set(), observers: new Set(), outputSequence: 0, answered: 0,
@@ -311,6 +325,11 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile) {
         try {
           const event = JSON.parse(message.data);
           observeStreamEvent(event);
+          if (event.type === 'session.updated') {
+            // Select fixed configuration fields only; a session can contain secrets.
+            stamp('provider_event', { type: event.type, sessionConfig: readSessionConfig(event.session) });
+            return;
+          }
           if (['input_audio_buffer.speech_started', 'input_audio_buffer.speech_stopped',
             'conversation.item.input_audio_transcription.completed', 'conversation.item.input_audio_transcription.failed',
             'response.created', 'response.done', 'response.output_audio_transcript.done',
@@ -628,7 +647,7 @@ export function buildBrowserHarnessSource(settings) {
   try { target = new URL(settings.origin); } catch { fail('in_app_origin_invalid'); }
   if (target.origin !== settings.origin || target.username || target.password
     || !(target.protocol === 'https:' || (target.protocol === 'http:' && ['127.0.0.1','localhost'].includes(target.hostname)))) fail('in_app_origin_invalid');
-  return `(${installBrowserHarness.toString()})(${JSON.stringify({ origin: target.origin, recordTestAudio: true })},(${validateOwnerAudioFile.toString()}));`;
+  return `(${installBrowserHarness.toString()})(${JSON.stringify({ origin: target.origin, recordTestAudio: true })},(${validateOwnerAudioFile.toString()}),(${safeProviderSessionConfig.toString()}));`;
 }
 
 export function buildOwnerFileManifest(plan, output) {

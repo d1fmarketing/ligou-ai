@@ -77,17 +77,47 @@ export async function runWebsiteStreamRuntimeActualSchemaProbe({runSql,rpc,owner
         mediaEvidence:{schema:'onboarding.stream.media.v1',nonzeroSamples:100,observedMs:500,firstSampleAtMs:100,lastSampleAtMs:600,unmuted:true,playbackStarted:true}}));
       assert.equal(runtime.state.error,undefined,JSON.stringify(diagnostics));
     }
-    async function answer(providerItemId,text,relatedItemIds=[]){
+    async function answer(providerItemId,text,relatedItemIds=[],{directAcknowledgment=false}={}){
+      const before=runtime.state.stored,sentBefore=sent.length,invocationsBefore=invocations.length;
       await runtime.handleEvent({type:'input_audio_buffer.speech_started',item_id:providerItemId});
       await runtime.handleEvent({type:'conversation.item.input_audio_transcription.completed',item_id:providerItemId,transcript:text});
-      const frame=sent.filter(event=>event.type==='response.create'&&event.response.output_modalities[0]==='text').at(-1);assert.ok(frame);
+      const textRequests=sent.slice(sentBefore).filter(event=>event.type==='response.create'&&event.response.output_modalities[0]==='text');
+      assert.equal(textRequests.length,directAcknowledgment?0:1,JSON.stringify(diagnostics));
+      if(directAcknowledgment){
+        const durableAck=await store.readWebsiteInterview(scope),itemId=getAgendaAction(before.agenda).itemId;
+        assert.deepEqual(durableAck.agenda,runtime.state.stored.agenda);assert.equal(durableAck.revision,before.revision+1);
+        assert.equal(durableAck.receiptId,runtime.state.stored.receiptId);
+        const item=durableAck.agenda.items.find(item=>item.id===itemId);
+        assert.equal(item.status,'awaiting_clarification');assert.equal(item.answerRevision,0);
+        assert.equal(durableAck.nextAction.itemId,itemId);assert.equal(runtime.state.speech.action.kind,'CLARIFY_CURRENT_GAP');
+        const ownerTurn=JSON.parse(await runSql(`select jsonb_build_object('callId',call_id,'providerItemId',provider_item_id,'text',owner_text)
+          from public.website_interview_owner_turns where call_id=${q(call)} and provider_item_id=${q(providerItemId)} and tenant_id=${q(tenant)};`));
+        assert.deepEqual(ownerTurn,{callId:call,providerItemId,text});
+        assert.deepEqual(item.evidence.at(-1),{turnId:call+':'+providerItemId,text});
+        const receipt=JSON.parse(await runSql(`select jsonb_build_object('id',id,'payloadHash',payload_hash,'readback',readback,'detail',detail)
+          from public.receipts where id=${q(durableAck.receiptId)} and tenant_id=${q(tenant)} and call_id=${q(call)} and kind='website_interview'
+          and outcome='accepted' and external_id=${q('website-interview:'+call+':turn:'+providerItemId)};`));
+        assert.equal(receipt.payloadHash,durableAck.digest);assert.deepEqual(receipt.readback.agenda,durableAck.agenda);
+        assert.equal(receipt.detail.proposalKind,'clarification');assert.equal(receipt.detail.expectedDigest,before.digest);
+        const work=invocations.slice(invocationsBefore),recordIndex=work.findIndex(({name,args})=>name==='record_website_interview_owner_turn'&&args.p_item===providerItemId);
+        const commitIndex=work.findIndex(({name,args})=>name==='commit_website_interview_turn'&&args.p_item===providerItemId);
+        const speechIndex=work.findIndex(({name})=>name==='claim_website_interview_stream');
+        assert.ok(recordIndex>=0&&commitIndex>recordIndex&&speechIndex>commitIndex,'owner and agenda receipts precede subsequent speech claim');
+        assert.equal(work[commitIndex].args.p_proposal_kind,'clarification');assert.deepEqual(work[commitIndex].args.p_facts,[]);
+        assert.equal(sent.slice(sentBefore).some(event=>event.type==='response.create'),false,'no model or audio request before the durable ACK receipts are checked');
+        assert.equal(runtime.state.error,undefined,JSON.stringify(diagnostics));
+        return {interpreterRequests:0,ownerTurnId:call+':'+providerItemId,agendaReceiptId:durableAck.receiptId};
+      }
+      const frame=textRequests[0];
       const itemId=JSON.parse(frame.response.input[0].content[0].text).current_item_id;
       await runtime.handleEvent({type:'response.done',response:{id:'interpret-'+providerItemId,status:'completed',metadata:frame.response.metadata,
         output:[{type:'function_call',name:'submit_website_interview_proposal',status:'completed',arguments:JSON.stringify({proposal:{kind:'answer',itemId,relatedItemIds},facts:[]})}]}});
       assert.equal(runtime.state.error,undefined,JSON.stringify(diagnostics));
+      return {interpreterRequests:textRequests.length};
     }
     await speech(input.openingStream);assert.equal(runtime.state.phase,'awaiting_owner');
-    await answer('stream-ack','Ah, entendi.');assert.equal(runtime.state.stored.agenda.items[0].status,'awaiting_clarification');
+    const acknowledgment=await answer('stream-ack','Ah, entendi.',[],{directAcknowledgment:true});
+    assert.equal(runtime.state.stored.agenda.items[0].status,'awaiting_clarification');
     await speech(runtime.state.speech.stream);
     const text='Hum, olha, atendi só novato, San Rafael e Petaluma, nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?';
     const beforeTerritory=runtime.state.stored;
@@ -95,7 +125,7 @@ export async function runWebsiteStreamRuntimeActualSchemaProbe({runSql,rpc,owner
     assert.equal(getAgendaAction(beforeTerritory.agenda).itemId,territory.id);
     const related=territory.relatedItemIds.map(id=>beforeTerritory.agenda.items.find(item=>item.id===id));
     assert.equal(related.length,1);assert.ok(related[0]?.coverageRefs.some(ref=>ref.startsWith('discovery.owner_question.')));
-    await answer('stream-territory',text,related.map(item=>item.id));
+    const territoryInterpretation=await answer('stream-territory',text,related.map(item=>item.id));
     const durable=await store.readWebsiteInterview(scope);
     assert.deepEqual(durable.agenda,runtime.state.stored.agenda);assert.equal(durable.digest,runtime.state.stored.digest);
     assert.equal(durable.receiptId,runtime.state.stored.receiptId);assert.equal(durable.revision,2);
@@ -134,9 +164,10 @@ export async function runWebsiteStreamRuntimeActualSchemaProbe({runSql,rpc,owner
     assert.equal(speechReceipts.length,3);
     for(const receipt of speechReceipts){assert.equal(receipt.acceptedReceipts,4);assert.equal(new Set([receipt.authorization,receipt.generation,receipt.playout,receipt.played]).size,4);}
     assert.equal(invocations.some(({name})=>name==='approve_website_interview_summary'),false);
+    assert.equal(sent.filter(event=>event.type==='response.create'&&event.response.output_modalities[0]==='text').length,1);
     assert.deepEqual(JSON.parse(await preservedState()),JSON.parse(sourceBefore));
     return {tests:4,scenarios:['actual-runtime-store-sql-stream-opening-with-zero-tts','actual-stream-playout-commit-response-loss-reconciled','actual-stream-ack-and-related-territory-durable-next-timezone','actual-stream-source-and-approval-boundaries-preserved'],providerCalls:0,browserMedia:'explicit synthetic attestation',agendaItems:114,callId:call,
-      answeredItemIds:answeredIds,nextItemId:next.itemId,nextQuestionPt:next.questionPt,agendaReceiptId:durable.receiptId,speechReceipts};
+      acknowledgment,territoryInterpretation,answeredItemIds:answeredIds,nextItemId:next.itemId,nextQuestionPt:next.questionPt,agendaReceiptId:durable.receiptId,speechReceipts};
   }finally{
     runtime?.stop();
     if(callCreated)await runSql(`update public.calls set status='error',ended_at=clock_timestamp(),provider_termination_state='confirmed',provider_termination_reason='isolated_stream_probe_finished',provider_usage_state='resolved',cost_estimate_usd=0.025 where id=${q(call)};`);

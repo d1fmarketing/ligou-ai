@@ -20,6 +20,35 @@ test('in-app observer source is scoped, repeat-safe JavaScript without carrying 
  const wrongPage={get fetch(){reads++;throw new Error('wrong origin touched');}};
  assert.doesNotThrow(()=>install({origin:'https://unrelated.example'},wrongPage));assert.equal(reads,0);
 });
+test('data-channel session readback records only bounded allowlisted configuration',()=>{
+ const origin='https://client-nine-taupe-24.vercel.app';
+ class Peer extends EventTarget {createDataChannel(){return new EventTarget();}}
+ class Media {play(){throw new Error('media must remain untouched');}}
+ const window={RTCPeerConnection:Peer,fetch(){throw new Error('network must remain untouched');},addEventListener(){}};
+ const document={createElement(){throw new Error('DOM must remain untouched');},addEventListener(){},querySelector(){return null;}};
+ new Function('location','window','navigator','document','HTMLMediaElement','HTMLAudioElement','performance',
+  harness.buildBrowserHarnessSource({origin,isolatedTestOnly:true,recordTestAudio:true}))(
+    {origin},window,{mediaDevices:{}},document,Media,Media,{now:()=>100});
+ const channel=new window.RTCPeerConnection().createDataChannel('test-only');
+ const observe=session=>{
+  channel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'session.updated',session,
+    transcript:'secret must not become a transcript',client_secret:'event secret',sdp:'event SDP'})}));
+  return window.__voiceAcceptance.drain().events.filter(event=>event.event==='provider_event');
+ };
+ const session={model:'gpt-realtime-2.1',reasoning:{effort:'medium',private:'secret'},client_secret:{value:'session secret'},sdp:'session SDP',instructions:'private prompt',
+  audio:{input:{transcription:{model:'gpt-live-transcribe',languages:['pt','en-US'],prompt:'private ASR prompt'},
+    turn_detection:{type:'semantic_vad',eagerness:'low',create_response:false,interrupt_response:false,private:'secret'}}}};
+ assert.deepEqual(observe(session),[{event:'provider_event',browserMs:100,elapsedMs:null,type:'session.updated',sessionConfig:{
+  model:'gpt-realtime-2.1',reasoningEffort:'medium',transcriptionModel:'gpt-live-transcribe',languages:['pt','en-US'],
+  vadType:'semantic_vad',vadEagerness:'low',createResponse:false,interruptResponse:false}}]);
+ const unknown={model:'secret-unrecognized-model',reasoning:{effort:'secret'},audio:{input:{transcription:{model:'secret',languages:['pt','not a language secret']},
+  turn_detection:{type:'secret',eagerness:'secret',create_response:'false',interrupt_response:1}}}};
+ const empty={model:null,reasoningEffort:null,transcriptionModel:null,languages:null,vadType:null,vadEagerness:null,createResponse:null,interruptResponse:null};
+ assert.deepEqual(observe(unknown)[0].sessionConfig,empty);
+ assert.deepEqual(observe({})[0].sessionConfig,empty,'missing provider defaults must stay unknown');
+ const excessive=structuredClone(session);excessive.audio.input.transcription.languages=Array(9).fill('pt');
+ assert.equal(observe(excessive)[0].sessionConfig.languages,null,'an over-bound list is not truncated into apparent provider truth');
+});
 test('local file manifest retains all114 questions and verifies selected owner WAV metadata',async()=>{
  assert.equal(typeof harness.buildOwnerFileManifest,'function');
  const plan={schema:'ligou.browser_audio_answer_plan.v1',provenance:{itemCount:114,candidateCount:21},

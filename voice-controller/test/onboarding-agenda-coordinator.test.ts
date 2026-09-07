@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createOnboardingAgenda, getAgendaAction, type AgendaSeed } from "../src/onboarding-agenda.ts";
+import * as agendaTransitions from "../src/onboarding-agenda.ts";
 import { onboardingAgendaDigest, type StoredWebsiteInterview } from "../src/onboarding-agenda-store.ts";
 import { ONBOARDING_FINAL_SIGNOFF_TEXT } from "../src/onboarding-speech.ts";
 import * as coordinator from "../src/onboarding-agenda-coordinator.ts";
@@ -220,7 +221,8 @@ test("each advertised proposal variant permits only the fields accepted by the p
 
 test("two unusable outputs after an acknowledgment never defer the owner's valid territory answer", () => {
   const h = harness(); h.event({ type: "opening.played" });
-  h.persist(h.interpret(h.owner("ack", "Ah, entendi."), { kind: "clarification", itemId: "territory" }));
+  expect(h.owner("ack", "Ah, entendi.")).toBeUndefined();
+  h.persist(h.last("persist_agenda"));
   h.play();
   const before = structuredClone(h.state.stored);
   const text = "Hum, olha, atendi só novato, San Rafael e Petaluma, nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?";
@@ -323,15 +325,103 @@ test("bare sim after the fully played approval question requests one durable app
   expect(h.all.filter(command => command.type === "persist_approval")).toHaveLength(1);
 });
 
-test.each(['Ah, entendi.','Uhum.','Tá bom.'])("acknowledgment cannot resolve the territory question: %s",text=>{
+test.each(['Ah, entendi.','Uhum.','Tá bom.','Aham.','OK!','Beleza.','Certo.'])("a durable acknowledgment skips interpretation and cannot resolve the territory question: %s",text=>{
  const h=harness();h.event({type:'opening.played'});
  const request=h.owner('acknowledgment',text);
- const commit=h.interpret(request,answer('territory'));
+ expect(request).toBeUndefined();
+ const commit=h.last('persist_agenda');
+ expect(commit).toMatchObject({proposal:{kind:'clarification',itemId:'territory'},facts:[],ownerTranscript:text});
+ expect(h.state.stored.revision).toBe(0);
+ expect(h.commands.some(command=>command.type==='request_speech'||command.type==='telemetry')).toBe(false);
  h.persist(commit);
  expect(h.state.stored.agenda.items[0].status).toBe('awaiting_clarification');
  expect(h.state.stored.agenda.items[0].answerRevision).toBe(0);
  expect(h.state.speech?.action.kind).toBe('CLARIFY_CURRENT_GAP');
  expect(h.all.some(command=>command.type==='persist_approval')).toBe(false);
+});
+
+test('ACK needs its exact final owner receipt and one commit before speech; duplicate receipts do not repeat either',()=>{
+ const h=harness();h.event({type:'opening.played'});
+ h.event({type:'owner.transcript',providerItemId:'ack-final',text:'Ah, entendi.'});
+ const record=h.last('record_owner_turn');
+ expect(h.commands.map(command=>command.type)).toEqual(['record_owner_turn']);
+ const receipt={type:'owner_turn.recorded',requestId:record.requestId,providerItemId:record.providerItemId,turnId:record.turnId,text:record.text};
+ h.event(receipt);
+ const commit=h.last('persist_agenda');
+ expect(h.commands.map(command=>command.type)).toEqual(['persist_agenda']);
+ expect(h.state.stored.agenda.ownerTurns).toEqual([]);
+ h.event(receipt);expect(h.commands).toEqual([]);
+ h.event({type:'owner.transcript',providerItemId:record.providerItemId,text:record.text});expect(h.commands).toEqual([]);
+ h.persist(commit);expect(h.state.speech?.action.kind).toBe('CLARIFY_CURRENT_GAP');
+ h.event(receipt);expect(h.commands).toEqual([]);
+ h.persist(commit);expect(h.commands).toEqual([]);
+ expect(h.all.filter(command=>command.type==='persist_agenda')).toHaveLength(1);
+ expect(h.all.filter(command=>command.type==='request_speech')).toHaveLength(1);
+ expect(h.all.some(command=>command.type==='interpret_owner_turn')).toBe(false);
+});
+
+test('substantive speech queued behind an ACK commit is processed before clarification audio',()=>{
+ const h=harness();h.event({type:'opening.played'});
+ h.owner('ack','Ah, entendi.');const ackCommit=h.last('persist_agenda');
+ h.event({type:'owner.speech_started',providerItemId:'full-answer'});
+ h.persist(ackCommit);
+ expect(h.commands).toEqual([]);expect(h.state.speech).toBeUndefined();
+ const request=h.owner('full-answer','A política de território é esta.');
+ expect(request).toMatchObject({itemId:'territory',mode:'answer'});
+ expect(h.all.some(command=>command.type==='request_speech')).toBe(false);
+ h.persist(h.interpret(request,answer('territory')));
+ expect(h.state.stored.agenda.items[0].status).toBe('answered');
+ expect(h.state.speech?.action.text).toContain(seeds[1].questionPt);
+ expect(h.all.filter(command=>command.type==='persist_agenda')).toHaveLength(2);
+});
+
+test.each(['Ah, entendi. Atendemos apenas essas cidades.','Tá bom, mas corrija os horários.','Não entendi.'])(
+ 'an ACK prefix never skips substantive interpretation: %s',text=>{
+  const h=harness();h.event({type:'opening.played'});
+  expect(h.owner('substantive',text)).toBeDefined();
+  expect(h.last('persist_agenda')).toBeUndefined();
+ });
+
+test.each([null,'schedule'])('ACK captured for another or no unresolved item retains interpretation: %s',capturedItemId=>{
+ const h=harness();h.event({type:'opening.played'});
+ h.event({type:'owner.transcript',providerItemId:'other-item',text:'Ah, entendi.',capturedItemId});
+ const record=h.last('record_owner_turn');
+ h.event({type:'owner_turn.recorded',requestId:record.requestId,providerItemId:record.providerItemId,turnId:record.turnId,text:record.text});
+ expect(h.last('interpret_owner_turn')).toMatchObject({itemId:capturedItemId});
+ expect(h.last('persist_agenda')).toBeUndefined();
+});
+
+test('an ACK behind an older unrecorded answer cannot bypass ordering or become an answer to the next question',()=>{
+ const h=harness();h.event({type:'opening.played'});
+ h.event({type:'owner.transcript',providerItemId:'answer-first',text:'Minha política explícita de território.'});
+ const first=h.last('record_owner_turn');
+ expect(h.owner('ack-later','Ah, entendi.')).toBeUndefined();
+ expect(h.last('persist_agenda')).toBeUndefined();
+ h.event({type:'owner_turn.recorded',requestId:first.requestId,providerItemId:first.providerItemId,turnId:first.turnId,text:first.text});
+ const request=h.last('interpret_owner_turn');
+ h.persist(h.interpret(request,answer('territory')));
+ expect(h.last('interpret_owner_turn')).toMatchObject({itemId:'territory',mode:'correction',transcript:'Ah, entendi.'});
+ expect(h.last('persist_agenda')).toBeUndefined();
+ expect(h.state.stored.agenda.items[1].status).toBe('open');
+});
+
+test('a declined direct ACK transition retains the existing interpreter fallback',()=>{
+ const h=harness();h.event({type:'opening.played'});
+ const transition=spyOn(agendaTransitions,'applyVerifiedOwnerTurn').mockImplementationOnce(()=>({agenda:h.state.stored.agenda,
+  action:getAgendaAction(h.state.stored.agenda),accepted:false,replayed:false,rejection:'answer_must_bind_current_item'}));
+ try{
+  expect(h.owner('ack-fallback','Ah, entendi.')).toMatchObject({mode:'answer',transcript:'Ah, entendi.'});
+  expect(transition).toHaveBeenCalledTimes(1);
+  expect(h.last('persist_agenda')).toBeUndefined();
+  expect(h.state.stored.revision).toBe(0);
+ }finally{transition.mockRestore();}
+});
+
+test('ACK after technical failure cannot become a clarification or approval',()=>{
+ const h=harness();h.event({type:'opening.played'});h.event({type:'adapter.failed',code:'technical_failure'});
+ const before=structuredClone(h.state);
+ h.event({type:'owner.transcript',providerItemId:'error-ack',text:'Tá bom.'});
+ expect(h.commands).toEqual([]);expect(h.state).toEqual(before);
 });
 
 test('a failed signoff preserves the already durable configuration approval',()=>{

@@ -41,9 +41,10 @@ function harness(){
   failSpeech:async({actionId}:any)=>({status:'failed',action:streams.get(actionId)!.action}),
   requestAmendment:async(x:any)=>({approvalReceiptId:x.approvalReceiptId,providerItemId:x.providerItemId,receiptId:id(85)}),
  };
+ const agendaStore:any={recordOwnerTranscript:async(x:any)=>({...x,turnId:`${scope.callId}:${x.providerItemId}`}),readWebsiteInterview:async()=>stored,
+  commitOwnerTurn:async(x:any)=>{commits.push(x);stored={...stored,agenda:x.agenda,revision:x.agenda.revision,digest:onboardingAgendaDigest(x.agenda),storeVersion:stored.storeVersion+1,nextAction:x.nextAction,state:x.nextAction.type==='GENERATE_FINAL_SUMMARY'?'reviewing':'unfinished'};return stored;}};
  const runtime=createWebsiteInterviewRuntime({prepared,openingAction,openingStream} as any,{
-  evidenceStore:evidence,agendaStore:{recordOwnerTranscript:async(x:any)=>({...x,turnId:`${scope.callId}:${x.providerItemId}`}),readWebsiteInterview:async()=>stored,
-   commitOwnerTurn:async(x:any)=>{commits.push(x);stored={...stored,agenda:x.agenda,revision:x.agenda.revision,digest:onboardingAgendaDigest(x.agenda),storeVersion:stored.storeVersion+1,nextAction:x.nextAction,state:x.nextAction.type==='GENERATE_FINAL_SUMMARY'?'reviewing':'unfinished'};return stored;}} as any,
+  evidenceStore:evidence,agendaStore,
   synthesize:async()=>{throw new Error('TTS forbidden');},enqueue:async f=>f(),send:e=>sent.push(e),onTranscript:e=>transcripts.push(e),onCost:()=>{throw new Error('TTS charge forbidden');},
   onUsage:r=>usages.push(r),onUsageUnknown:()=>{},onTerminate:c=>terminations.push(c),onState:()=>{},onDiagnostic:d=>diagnostics.push(d),
  });
@@ -67,11 +68,12 @@ function harness(){
   if(proposal){const frame=sent.filter(e=>e.type==='response.create'&&e.response.output_modalities[0]==='text').at(-1);
    await runtime.handleEvent({type:'response.done',response:{id:'interpret-'+item,metadata:frame.response.metadata,status:'completed',output:[{type:'function_call',name:'submit_website_interview_proposal',status:'completed',arguments:JSON.stringify({proposal,facts:[]})}]}});}
  }
- return{runtime,prepared,openingAction,openingStream,streams,sent,calls,transcripts,commits,terminations,diagnostics,usages,ready,generation,played,evidence,current,say,owner,control};
+ return{runtime,prepared,openingAction,openingStream,streams,sent,calls,transcripts,commits,terminations,diagnostics,usages,ready,generation,played,evidence,agendaStore,current,say,owner,control};
 }
 test('stream opening waits for browser readiness, dispatches once with no TTS, and joins generation with client playout',async()=>{
  const h=harness();try{
   await h.runtime.attach();expect(h.sent.some(e=>e.type==='response.create')).toBe(false);
+  expect(h.sent.find(e=>e.type==='session.update')?.session.audio.input.transcription).toEqual({model:'gpt-live-transcribe',languages:['pt']});
   const frame=await h.ready();await h.ready();
   expect(frame.response).toMatchObject({conversation:'none',output_modalities:['audio'],tools:[],tool_choice:'none'});
   expect(h.calls.filter(x=>x==='authorizeStream')).toHaveLength(1);
@@ -166,7 +168,8 @@ test('barge-in cancels and clears old audio before a new question-only rendition
 test('streamed acknowledgment, full answer, recap, approval and signoff preserve the application lifecycle',async()=>{
  const h=harness();try{
   await h.runtime.attach();await h.say();
-  await h.owner('Ah, entendi.',{kind:'answer',itemId:'cities'});expect(h.runtime.state.stored.agenda.items[0].status).toBe('awaiting_clarification');await h.say();
+  await h.owner('Ah, entendi.');expect(h.runtime.state.stored.agenda.items[0].status).toBe('awaiting_clarification');
+  expect(h.sent.filter(e=>e.type==='response.create'&&e.response.output_modalities[0]==='text')).toHaveLength(0);await h.say();
   const text='Atendemos só Novato, San Rafael e Petaluma. Fora dessas três cidades, somente com aprovação explícita do dono, combinado?';
   await h.owner(text,{kind:'answer',itemId:'cities'});expect(h.runtime.state.stored.agenda.items[0].evidence.at(-1)?.text).toBe(text);await h.say();
   await h.owner('Sábado das 8 às 17 horas.',{kind:'answer',itemId:'hours'});
@@ -179,6 +182,43 @@ test('streamed acknowledgment, full answer, recap, approval and signoff preserve
   await h.runtime.finalized({providerReceiptId:id(86),budgetReceiptId:id(87)});expect(h.runtime.state.phase).toBe('complete');
   expect(h.commits).toHaveLength(3);expect(h.calls.some(x=>/tts|Speech/.test(x))).toBe(false);
  }finally{h.runtime.stop();}
+});
+
+test('streaming ACK skips text generation but waits for both owner and agenda receipts before new audio',async()=>{
+ const h=harness();let releaseRecord=()=>{},releaseCommit=()=>{},recording=false,committing=false;
+ let pending:Promise<void>|undefined;
+ const record=h.agendaStore.recordOwnerTranscript,commit=h.agendaStore.commitOwnerTurn;
+ h.agendaStore.recordOwnerTranscript=async(x:any)=>{recording=true;await new Promise<void>(resolve=>{releaseRecord=resolve;});return record(x);};
+ h.agendaStore.commitOwnerTurn=async(x:any)=>{committing=true;await new Promise<void>(resolve=>{releaseCommit=resolve;});return commit(x);};
+ try{
+  await h.runtime.attach();await h.say();pending=h.owner('Ah, entendi.');
+  for(let n=0;n<80&&!recording;n++)await Promise.resolve();expect(recording).toBe(true);
+  expect(h.runtime.state.turns.at(-1)?.recorded).toBe(false);expect(h.commits).toHaveLength(0);
+  expect(h.sent.filter(e=>e.type==='response.create')).toHaveLength(1);
+  releaseRecord();for(let n=0;n<80&&!committing;n++)await Promise.resolve();expect(committing).toBe(true);
+  expect(h.runtime.state.turns.at(-1)?.recorded).toBe(true);expect(h.runtime.state.stored.revision).toBe(0);
+  expect(h.runtime.state.phase).toBe('persisting_agenda');expect(h.calls).not.toContain('claimStream');
+  expect(h.sent.filter(e=>e.type==='response.create')).toHaveLength(1);
+  releaseCommit();await pending;
+  expect(h.commits).toHaveLength(1);expect(h.commits[0]).toMatchObject({ownerTranscript:'Ah, entendi.',facts:[],proposal:{kind:'clarification',itemId:'cities'}});
+  expect(h.runtime.state.stored.revision).toBe(1);expect(h.current().action.kind).toBe('CLARIFY_CURRENT_GAP');
+  expect(h.sent.filter(e=>e.type==='response.create'&&e.response.output_modalities[0]==='text')).toHaveLength(0);
+  await h.say();expect(h.runtime.state.phase).toBe('awaiting_owner');expect(h.terminations).toHaveLength(0);
+ }finally{h.runtime.stop();releaseRecord();releaseCommit();await pending;}
+});
+
+test('Stop while the ACK owner receipt is pending prevents a late agenda write or speech',async()=>{
+ const h=harness();let release=()=>{},recording=false,pending:Promise<void>|undefined;
+ const record=h.agendaStore.recordOwnerTranscript;
+ h.agendaStore.recordOwnerTranscript=async(x:any)=>{recording=true;await new Promise<void>(resolve=>{release=resolve;});return record(x);};
+ try{
+  await h.runtime.attach();await h.say();pending=h.owner('Ah, entendi.');
+  for(let n=0;n<80&&!recording;n++)await Promise.resolve();expect(recording).toBe(true);
+  h.runtime.stop();release();await pending;
+  expect(h.commits).toHaveLength(0);expect(h.calls).not.toContain('claimStream');
+  expect(h.sent.filter(e=>e.type==='response.create')).toHaveLength(1);
+  expect(h.runtime.state.stored.revision).toBe(0);expect(h.runtime.state.approval).toBeUndefined();
+ }finally{h.runtime.stop();release();await pending;}
 });
 
 test('a mismatched generated transcript stays unplayed and requests a new bounded rendition without owner progress',async()=>{

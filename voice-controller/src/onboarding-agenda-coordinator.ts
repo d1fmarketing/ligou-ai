@@ -505,6 +505,14 @@ function pump(state: WebsiteAgendaState, commands: WebsiteAgendaCommand[], nowMs
     // while this interpretation/persistence is pending.
     state.correctionRequired = true;
   }
+  // The exact ACK grammar already selects this clarification after model
+  // interpretation. Once its final owner receipt and the pump gates pass, the
+  // same validated transition can be persisted without a provider round trip.
+  if (state.phase === "awaiting_owner" && !state.correctionRequired && !state.summary && !state.approval &&
+    !turn.approvalSummaryId && acknowledgment(turn.text) && turn.capturedItemId &&
+    turn.capturedItemId === getAgendaAction(state.stored.agenda).itemId &&
+    getAgendaItems(state.stored.agenda).some(item => item.id === turn.capturedItemId && ["open", "awaiting_clarification"].includes(item.status)) &&
+    persistProposal(state, commands, turn, { proposal: { kind: "clarification", itemId: turn.capturedItemId }, facts: [] }, nowMs)) return;
   interpret(state, commands, turn, nowMs);
 }
 

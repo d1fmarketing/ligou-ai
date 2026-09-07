@@ -774,7 +774,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
   async function attach(){
     requireLive();attachGeneration+=1;
     deps.send({type:'session.update',session:{type:'realtime',output_modalities:['text'],tools:[],tool_choice:'none',
-      audio:{input:{transcription:{model:'gpt-live-transcribe'},turn_detection:{type:'semantic_vad',eagerness:'low',create_response:false,interrupt_response:false}}}}});
+      audio:{input:{transcription:{model:'gpt-live-transcribe',languages:['pt']},turn_detection:{type:'semantic_vad',eagerness:'low',create_response:false,interrupt_response:false}}}}});
     publish();
     if(streaming){if(currentStream)announceStream(currentStream);return;}
     if(attachGeneration>1 && payload && currentSpeechActionId()===payload.actionId){
