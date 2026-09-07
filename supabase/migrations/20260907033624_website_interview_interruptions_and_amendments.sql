@@ -1,4 +1,10 @@
 begin;
+set local lock_timeout='5s';
+
+-- Status readers acquire the parent before speech. Take the final-strength
+-- locks in that order before DDL can hold speech and later upgrade the parent.
+lock table public.website_interviews in access exclusive mode;
+lock table public.website_interview_speech in access exclusive mode;
 
 -- An interrupted rendition remains auditable and can never prove playback.
 alter table public.website_interview_speech

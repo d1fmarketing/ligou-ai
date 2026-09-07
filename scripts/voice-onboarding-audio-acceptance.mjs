@@ -591,19 +591,19 @@ async function verifyBootstrap(config, session, bootstrap) {
   return { ...bootstrap, reservation };
 }
 
-async function terminalRead(config, session, callId, timeoutMs = 20_000) {
+async function terminalRead(config, session, callId, { timeoutMs = 180_000, read = authenticatedRead, now = () => performance.now(), wait = sleep } = {}) {
   if (!UUID.test(callId ?? '')) return { clean: false, reason: 'call_identity_unavailable' };
-  const deadline = performance.now() + timeoutMs;
+  const deadline = now() + timeoutMs;
   let last = null;
-  while (performance.now() < deadline) {
+  while (now() < deadline) {
     try {
-      last = await authenticatedRead(config, session, '/rest/v1/rpc/get_website_interview_status', { p_call: callId });
+      last = await read(config, session, '/rest/v1/rpc/get_website_interview_status', { p_call: callId });
       if (last.callId !== callId) fail('terminal_call_mismatch');
       const terminalCall = ['ended', 'error', 'killed_budget', 'killed_deadline'].includes(last.callStatus);
       const providerConfirmed = last.providerTerminationState === 'confirmed' || last.terminal?.providerConfirmed === true;
       if (terminalCall && providerConfirmed && last.budgetStatus === 'settled') return { clean: true, status: last };
     } catch { /* Bounded reconciliation; never infer teardown from a closed tab. */ }
-    await sleep(500);
+    await wait(500);
   }
   return { clean: false, reason: 'terminal_or_budget_not_confirmed', status: last };
 }
@@ -681,7 +681,7 @@ async function attempt(browser, config, session, options, plan, output, label) {
       await waitFor(browser, `Boolean(document.querySelector(${JSON.stringify(config.openPanelSelector ?? '.website-setup-start')}))`);
       await browser.click(config.openPanelSelector ?? '.website-setup-start');
     }
-    await waitFor(browser, 'Boolean(document.querySelector(".voice-live-button"))');
+    await waitFor(browser, 'Boolean(document.querySelector(".voice-live-button") && !document.querySelector(".voice-live-button").disabled)');
     await browser.click('.voice-live-button');
     const started = performance.now();
     result.sessionDeadlineHostMs = started + config.maxSessionSeconds * 1000;
@@ -703,6 +703,7 @@ async function attempt(browser, config, session, options, plan, output, label) {
           result.cleanupBeforeResume = await terminalRead(config, session, result.callId);
           if (!result.cleanupBeforeResume.clean || result.cleanupBeforeResume.status?.resumeEligible !== true) fail('recovery_resume_not_durably_available');
           result.exercised.push('confirmed_failure_and_resume'); resumed = true; returned = false;
+          await waitFor(browser, 'Boolean(document.querySelector(".voice-live-button") && !document.querySelector(".voice-live-button").disabled)');
           await browser.click('.voice-live-button'); continue;
         }
         returned = true; break;
@@ -1139,6 +1140,14 @@ async function selfTest(options) {
   await assert.rejects(()=>checkIsolation(isolationConfig,{},sourceRead),/live_website_source_mismatch/);
   sourceRows.result.tenant_id=tenantId;sourceRows.job.selected_attempt_id=ownerId;
   await assert.rejects(()=>checkIsolation(isolationConfig,{},sourceRead),/live_website_source_mismatch/);
+  let cleanupClock=0;
+  const cleanupRead=async()=>({callId:attemptId,callStatus:'ended',providerTerminationState:'confirmed',budgetStatus:cleanupClock>=100_000?'settled':'active'});
+  const cleanup=await terminalRead({}, {}, attemptId,{now:()=>cleanupClock,wait:async ms=>{cleanupClock+=ms;},read:cleanupRead});
+  assert.equal(cleanup.clean,true,'a real reconciliation delay must not become a premature cleanup failure');
+  assert.equal(cleanupClock,100_000);
+  cleanupClock=0;
+  const unconfirmed=await terminalRead({}, {}, attemptId,{timeoutMs:1000,now:()=>cleanupClock,wait:async ms=>{cleanupClock+=ms;},read:cleanupRead});
+  assert.equal(unconfirmed.clean,false);assert.equal(cleanupClock,1000);
   new Function(`return (${installBrowserHarness.toString()});`)();
   process.stdout.write(json({ selfTest: 'PASS', offlineOnly: true, mappedItems: plan.items.length, clips: plan.clips.length, providerAttempts: 0 }));
   if (options.browserSmoke) await browserSmoke(options, assert);
