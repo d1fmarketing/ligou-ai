@@ -531,7 +531,13 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
   }, true);
   window.addEventListener('ligou:voice-timing', ({ detail }) => {
     const allowed = ['event', 'attemptId', 'elapsedMs', 'callId', 'audioRole', 'actionKind', 'actionId', 'dispatchId', 'responseId', 'evidence', 'reason', 'mediaDurationMs'];
-    stamp('application_timing', Object.fromEntries(allowed.filter(key => Object.hasOwn(detail ?? {}, key)).map(key => [key === 'event' ? 'timingEvent' : key === 'elapsedMs' ? 'sourceElapsedMs' : key, detail[key]])));
+    const timing = Object.fromEntries(allowed.filter(key => Object.hasOwn(detail ?? {}, key)).map(key => [key === 'event' ? 'timingEvent' : key === 'elapsedMs' ? 'sourceElapsedMs' : key, detail[key]]));
+    if(['speech_read_failed','speech_read_retry'].includes(detail?.event)){
+      if([1,2].includes(detail.attempt))timing.attempt=detail.attempt;
+      if(detail.status===null||detail.status===0||(Number.isInteger(detail.status)&&detail.status>=100&&detail.status<=599))timing.status=detail.status;
+      if(['network','transient_http','authorization','non_transient'].includes(detail.code))timing.code=detail.code;
+    }
+    stamp('application_timing', timing);
     if (detail?.callId) state.callId = cleanId(detail.callId);
     if (detail?.event === 'speech_ended' && detail.evidence === 'webrtc_buffer_stop_and_local_media_drained') {
       const capture = state.responseCaptures.get(detail.responseId);

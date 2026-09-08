@@ -162,6 +162,9 @@ function supportedTarget(current: AgendaSeed, target: AgendaSeed, text: string):
 
 /** Always runs before queue mutation, including the facts:[] evidence-only path.
  * Eligibility is not approval. This answered-only gate creates no policy/power. */
+function ineligibleTarget(reason:"missing_target"|"current_target"|"outside_related_graph"|"resolved_target") {
+  return Object.assign(new Error("website_applicability_target_not_eligible"),{eligibilityRejectReason:reason});
+}
 export function validateWebsiteAnswerApplicability(input: {
   agenda: OnboardingAgenda; currentItemId: string | null; ownerTranscript: string; proposal: AgendaProposal;
 }): AgendaProposal {
@@ -182,7 +185,10 @@ export function validateWebsiteAnswerApplicability(input: {
   if (unsafeScope(text)) throw new Error("website_applicability_scope_unsupported");
   for (const id of related) {
     const target = agenda.items.find(item => item.id === id);
-    if (!target || id === currentItemId || !current.relatedItemIds.includes(id) || ["answered", "corrected", "not_applicable"].includes(target.status)) throw new Error("website_applicability_target_not_eligible");
+    if(!target)throw ineligibleTarget("missing_target");
+    if(id===currentItemId)throw ineligibleTarget("current_target");
+    if(!current.relatedItemIds.includes(id))throw ineligibleTarget("outside_related_graph");
+    if(["answered","corrected","not_applicable"].includes(target.status))throw ineligibleTarget("resolved_target");
     if (!supportedTarget(current, target, text)) throw new Error(`website_applicability_owner_evidence_missing:${id}`);
   }
   return proposal;

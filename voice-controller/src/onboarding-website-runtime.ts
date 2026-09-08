@@ -5,7 +5,7 @@ import { synthesizeOnboardingSpeech, speechPayloadIsInternallyValid, type Onboar
 import type { PreparedWebsiteInterview } from "./onboarding-website-bootstrap.ts";
 import { generateWebsiteSummaryParts } from "./onboarding-website-summary.ts";
 import { validateWebsiteInterpretationFacts } from "./onboarding-website-facts.ts";
-import { retainSupportedWebsiteAnswerTargets } from "./onboarding-website-applicability.ts";
+import { retainSupportedWebsiteAnswerTargets, validateWebsiteAnswerApplicability } from "./onboarding-website-applicability.ts";
 import { getAgendaItems, getAgendaAction, type AgendaProposal } from "./onboarding-agenda.ts";
 import { randomUUID } from "node:crypto";
 import {streamAuthorizationIsValid,streamControlId,streamResponseMatches,streamMediaEvidenceIsValid,normalizeWebsiteStreamTranscript,type StreamAuthorization,type StreamMediaEvidence,type StreamProof} from './onboarding-stream.ts';
@@ -14,7 +14,7 @@ import {requestResponse,type CoordinatedLedger} from './response-coordinator.ts'
 type Interpret = Extract<WebsiteAgendaCommand,{type:"interpret_owner_turn"}>;
 type DiagnosticDetail = {code?:string;attempt?:number;durationMs?:number;effectId?:string;
   proposalKind?:AgendaProposal['kind'];factCount?:number;targetCount?:number;outputCount?:number;
-  toolCallCount?:number;discardedTextMessageCount?:number;parserRejectReason?:string};
+  toolCallCount?:number;discardedTextMessageCount?:number;parserRejectReason?:string;eligibilityRejectReason?:string};
 interface WebsiteInterviewRuntimeBase {
   prepared: PreparedWebsiteInterview;
   openingAction: OnboardingSpeechAction;
@@ -45,19 +45,47 @@ export function websiteInterpretationRequest(command: Interpret) {
   const allItems=getAgendaItems(command.agenda);
   const current=allItems.find(item=>item.id===command.itemId);
   const related=new Set(current?.relatedItemIds??[]);
+  const normalAnswer=command.mode==='answer';
+  const structurallyEligibleIds=normalAnswer && current && current.id===getAgendaAction(command.agenda).itemId
+    && command.agenda.items.some(item=>item.id===current.id)
+    ? [...related].filter(id=>id!==current.id && command.agenda.items.some(item=>item.id===id
+      && ['open','awaiting_clarification','deferred_owner_review'].includes(item.status))) : [];
+  const eligibleRelatedIds=structurallyEligibleIds.filter(id=>{
+    if(!current)return false;
+    try{
+      validateWebsiteAnswerApplicability({agenda:command.agenda,currentItemId:command.itemId,ownerTranscript:command.transcript,
+        proposal:{kind:'answer',itemId:current.id,relatedItemIds:[id]}});
+      return true;
+    }catch{return false;} // A declined invitation remains read-only; final validation still owns persistence.
+  });
+  const eligibleRelated=new Set(eligibleRelatedIds);
   const items=command.mode==='correction' ? allItems : allItems.filter(item=>item.id===command.itemId || related.has(item.id));
+  const describe=(item:typeof allItems[number],relatedItemIds?:readonly string[])=>({id:item.id,source:item.source,subject:item.subject,question:item.questionPt,
+    status:item.status,coverageRefs:item.coverageRefs,...(relatedItemIds!==undefined?{relatedItemIds}:{}),latest_evidence:item.evidence.at(-1)??null});
   const context={current_item_id:command.itemId,mode:command.mode,owner_transcript:command.transcript,
-    items:items.map(item=>({id:item.id,source:item.source,subject:item.subject,question:item.questionPt,
-      status:item.status,coverageRefs:item.coverageRefs,relatedItemIds:item.relatedItemIds,
-      latest_evidence:item.evidence.at(-1)??null})),
-    ...(command.mode==='correction'?{candidate_context:command.agenda.candidateContext}:{})};
+    items:normalAnswer ? items.filter(item=>item.id===command.itemId || eligibleRelated.has(item.id))
+      .map(item=>describe(item,item.id===command.itemId?eligibleRelatedIds:[])) : items.map(item=>describe(item,item.relatedItemIds)),
+    ...(normalAnswer?{eligible_related_item_ids:eligibleRelatedIds,
+      read_only_history:items.filter(item=>item.id!==command.itemId && !eligibleRelated.has(item.id)).map(item=>({...describe(item),answer_writable:false}))}
+      :{candidate_context:command.agenda.candidateContext})};
   const input=JSON.stringify(context);
   if(Buffer.byteLength(input)>2_097_152)throw new Error('website_interpretation_context_too_large');
+  const toolSchema=structuredClone(command.toolSchema);
+  if(normalAnswer){
+    type Variant={properties?:{kind?:{const?:string};relatedItemIds?:{maxItems?:number;items?:Record<string,unknown>}}};
+    const variants=(toolSchema.properties as {proposal?:{anyOf?:Variant[]}}|undefined)?.proposal?.anyOf;
+    const targets=variants?.find(variant=>variant.properties?.kind?.const==='answer')?.properties?.relatedItemIds;
+    if(!targets?.items)throw new Error('website_interpretation_answer_schema_missing');
+    targets.maxItems=eligibleRelatedIds.length;
+    if(eligibleRelatedIds.length)targets.items.enum=eligibleRelatedIds;
+    else delete targets.items.enum;
+  }
+  const targetInstructions=normalAnswer?' For answer proposals, relatedItemIds may contain only eligible_related_item_ids, and only when the owner transcript explicitly supports each target. Otherwise omit optional targets. read_only_history is not writable in this turn\'s answer proposal, even when its status is open; retain it as context for explicit corrections.':'';
   return {type:'response.create',event_id:command.requestId,response:{conversation:'none',output_modalities:['text'],
     metadata:{website_request_id:command.requestId,website_turn_id:command.turnId,website_digest:command.digest,
       website_item_id:command.itemId??'',website_mode:'finite_onboarding_v1'},
-    instructions:`${command.instructions} Typed facts are optional. Use facts:[] unless the existing field's exact value schema is known; the full literal owner answer is preserved independently. Never guess a typed value shape.`,tools:[{type:'function',name:command.toolName,
-      description:'Return only the interpretation of the exact stored owner turn. This is not an approval or an executable action.',parameters:command.toolSchema}],
+    instructions:`${command.instructions}${targetInstructions} Typed facts are optional. Use facts:[] unless the existing field's exact value schema is known; the full literal owner answer is preserved independently. Never guess a typed value shape.`,tools:[{type:'function',name:command.toolName,
+      description:'Return only the interpretation of the exact stored owner turn. This is not an approval or an executable action.',parameters:toolSchema}],
     tool_choice:{type:'function',name:command.toolName},max_output_tokens:4096,
     input:[{type:'message',role:'user',content:[{type:'input_text',text:input}]}]}};
 }
@@ -732,6 +760,7 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
       const selectedOutput=websiteProposalOutput(output,command.toolName);
       let raw:unknown,result:ReturnType<typeof parseWebsiteInterpretation>=null;
       let rejectionCode='interpretation_tool_output_invalid';
+      let eligibilityRejectReason:string|undefined;
       if(['failed','cancelled','incomplete'].includes(response.status))rejectionCode=`interpretation_provider_${response.status}`;
       else if(response.status==='completed' && selectedOutput.arguments!==undefined){
         try{raw=JSON.parse(selectedOutput.arguments);}catch{rejectionCode='interpretation_json_invalid';}
@@ -754,15 +783,22 @@ export function createWebsiteInterviewRuntime(input:WebsiteInterviewRuntimeConfi
           // typed shape gets the same single bounded interpreter repair.
           validateWebsiteInterpretationFacts({facts:result.facts??[],proposal:result.proposal,currentItemId:command.itemId,
             agenda:state.stored.agenda,ownerTranscript:command.transcript});
-        }catch(error){rejectionCode=websiteInterpretationFailureCode(error);result=null;}
+        }catch(error){
+          rejectionCode=websiteInterpretationFailureCode(error);result=null;
+          const reason=(error as {eligibilityRejectReason?:unknown})?.eligibilityRejectReason;
+          if(typeof reason==='string'&&['missing_target','current_target','outside_related_graph','resolved_target'].includes(reason))eligibilityRejectReason=reason;
+        }
       }
-      const shape=raw as {proposal?:{kind?:unknown};facts?:unknown}|null;
+      const shape=raw as {proposal?:{kind?:unknown;relatedItemIds?:unknown};facts?:unknown}|null;
       const kind=shape?.proposal?.kind;
       diagnostic('interpretation.done',{attempt:command.attempt,effectId:command.requestId,
         ...(timing?{durationMs:Math.max(0,now()-timing.requestedAtMs)}:{}),
         ...(Array.isArray(output)?{outputCount:output.length}:{}),
         ...(selectedOutput.toolCallCount!==undefined?{toolCallCount:selectedOutput.toolCallCount,discardedTextMessageCount:selectedOutput.discardedTextMessageCount}:{}),
         ...(selectedOutput.parserRejectReason?{parserRejectReason:selectedOutput.parserRejectReason}:{}),
+        ...(eligibilityRejectReason?{eligibilityRejectReason}:{}),
+        ...(kind==='answer'&&(shape?.proposal?.relatedItemIds===undefined||Array.isArray(shape.proposal.relatedItemIds))
+          ?{targetCount:1+(Array.isArray(shape?.proposal?.relatedItemIds)?shape.proposal.relatedItemIds.length:0)}:{}),
         ...(typeof kind==='string' && ['answer','clarification','defer','not_applicable','off_scope','correction'].includes(kind)?{proposalKind:kind as AgendaProposal['kind']}:{}),
         ...(Array.isArray(shape?.facts)?{factCount:shape.facts.length}:{})});
       if(!result)await dispatch({type:'interpretation.failed',requestId:command.requestId,code:rejectionCode,nowMs:now()});

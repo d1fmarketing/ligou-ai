@@ -32,6 +32,20 @@ function checked(agenda: OnboardingAgenda, text: string, proposal: AgendaProposa
 }
 
 describe("verified owner answer applicability", () => {
+  test.each(['missing_target','current_target','outside_related_graph','resolved_target'])(
+    'target rejection reports only its fixed eligibility reason: %s',reason=>{
+      const item=byRef('area.coverage'),agenda=structuredClone(at(item.id));
+      let targetId=item.relatedItemIds[0];
+      if(reason==='missing_target')targetId='missing-item';
+      if(reason==='current_target')targetId=item.id;
+      if(reason==='outside_related_graph')targetId=byRef('authority.out_of_area').id;
+      if(reason==='resolved_target')agenda.items.find(i=>i.id===targetId)!.status='answered';
+      try{checked(agenda,recordedStreamingTerritory,answer(item.id,[targetId]));throw new Error('expected rejection');}
+      catch(error){expect((error as Error).message).toBe('website_applicability_target_not_eligible');
+        expect((error as {eligibilityRejectReason:string}).eligibilityRejectReason).toBe(reason);
+        expect(Object.keys(error as object)).toEqual(['eligibilityRejectReason']);}
+    });
+
   test('optional target admission keeps unsupported coverage open without changing the durable validator',()=>{
     const item=byRef('area.coverage'),agenda=at(item.id),proposal=answer(item.id,[...item.relatedItemIds]);
     const ownerTranscript='Hã, atendi só Recife e Olinda. Fora dessas cidades, não é para atender.';

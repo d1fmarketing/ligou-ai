@@ -49,6 +49,23 @@ test('data-channel session readback records only bounded allowlisted configurati
  const excessive=structuredClone(session);excessive.audio.input.transcription.languages=Array(9).fill('pt');
  assert.equal(observe(excessive)[0].sessionConfig.languages,null,'an over-bound list is not truncated into apparent provider truth');
 });
+
+test('browser speech-read diagnostics retain bounded failure codes without arbitrary error data',()=>{
+ const origin='https://client-nine-taupe-24.vercel.app',listeners=new Map();
+ class Peer extends EventTarget {createDataChannel(){return new EventTarget();}}
+ class Media {play(){throw new Error('media must remain untouched');}}
+ const window={RTCPeerConnection:Peer,fetch(){throw new Error('network must remain untouched');},addEventListener(name,fn){listeners.set(name,fn);}};
+ const document={createElement(){throw new Error('DOM must remain untouched');},addEventListener(){},querySelector(){return null;}};
+ new Function('location','window','navigator','document','HTMLMediaElement','HTMLAudioElement','performance',
+  harness.buildBrowserHarnessSource({origin,isolatedTestOnly:true,recordTestAudio:true}))({origin},window,{mediaDevices:{}},document,Media,Media,{now:()=>100});
+ const observe=detail=>{listeners.get('ligou:voice-timing')({detail});return window.__voiceAcceptance.drain().events.find(e=>e.event==='application_timing');};
+ assert.deepEqual(observe({event:'speech_read_failed',attempt:1,status:0,code:'network',message:'private error',authorization:'secret'}),
+  {event:'application_timing',browserMs:100,elapsedMs:null,timingEvent:'speech_read_failed',attempt:1,status:0,code:'network'});
+ const invalid=observe({event:'speech_read_retry',attempt:99,status:'401 private',code:'private-secret-value',message:'secret'});
+ for(const key of ['attempt','status','code','message','authorization'])assert.equal(Object.hasOwn(invalid,key),false);
+ const unrelated=observe({event:'ready',attempt:1,status:200,code:'network'});
+ for(const key of ['attempt','status','code'])assert.equal(Object.hasOwn(unrelated,key),false);
+});
 test('local file manifest retains all114 questions and verifies selected owner WAV metadata',async()=>{
  assert.equal(typeof harness.buildOwnerFileManifest,'function');
  const plan={schema:'ligou.browser_audio_answer_plan.v1',provenance:{itemCount:114,candidateCount:21},

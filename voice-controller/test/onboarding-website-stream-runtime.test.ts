@@ -125,6 +125,7 @@ test('optional narrowing does not conceal a later illegal target or discard none
    await h.runtime.attach();await h.say();await h.owner('Hã, atendi só Recife e Olinda. Fora dessas cidades, não é para atender.',
     {kind:'answer',itemId:'cities',relatedItemIds:[...relatedItemIds]},[...facts]);
    expect(h.commits).toHaveLength(0);expect(h.diagnostics.some(d=>d.stage==='interpretation.related_targets_narrowed')).toBe(false);
+   if(relatedItemIds.length===2)expect(h.diagnostics.find(d=>d.stage==='interpretation.done')).toMatchObject({eligibilityRejectReason:'outside_related_graph',targetCount:3});
    expect(h.sent.filter(e=>e.type==='response.create'&&e.response.output_modalities[0]==='text')).toHaveLength(2);
   }finally{h.runtime.stop();}
  }

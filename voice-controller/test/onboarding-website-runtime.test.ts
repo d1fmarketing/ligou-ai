@@ -18,6 +18,105 @@ function base(){
  const payload=(a:any)=>({...a,schema:'onboarding.speech.v1',text_sha256:hash(a.text),audio_base64:bytes.toString('base64'),audio_sha256:hash(bytes),mime:'audio/mpeg',voice:'ash',tts_model:'tts-1-hd',cost_usd:Number(([...a.text].length*30/1e6).toFixed(8))});
  return{stored,openingAction,openingPayload:payload(openingAction),payload};
 }
+function interpretationBuilderCommand(){
+ const b=base();let state=createWebsiteAgendaCoordinator(b.stored,{nowMs:0,openingAction:b.openingAction});
+ state=reduceWebsiteAgenda(state,{type:'opening.played',nowMs:1}).state;
+ let reduced=reduceWebsiteAgenda(state,{type:'owner.transcript',providerItemId:'builder-owner',text:'Atendemos somente Novato e Petaluma.',nowMs:2});
+ const record=reduced.commands.find(c=>c.type==='record_owner_turn')!;
+ reduced=reduceWebsiteAgenda(reduced.state,{type:'owner_turn.recorded',requestId:record.requestId,providerItemId:record.providerItemId,
+  turnId:record.turnId,text:record.text,nowMs:3});
+ return reduced.commands.find(c=>c.type==='interpret_owner_turn')!;
+}
+function interpretationBuilderGraph(){
+ const command=interpretationBuilderCommand(),current=command.agenda.items[0];
+ const targets=[['open-related','open'],['clarifying-related','awaiting_clarification'],['deferred-related','deferred_owner_review'],
+  ['answered-related','answered'],['corrected-related','corrected'],['na-related','not_applicable'],['beyond-current-graph','open']] as const;
+ const items=targets.map(([id,status])=>({...current,id,status,questionPt:`Pergunta ${id}?`,lastQuestionPt:`Pergunta ${id}?`,
+  relatedItemIds:id==='open-related'?['beyond-current-graph']:[],
+  answerRevision:['answered','corrected','not_applicable'].includes(status)?1:0,clarificationCount:status==='awaiting_clarification'?1:0,
+  evidence:[{turnId:`${callId}:${id}`,text:`Histórico literal ${id}.`}]}));
+ return{...command,agenda:{...command.agenda,items:[{...current,
+  relatedItemIds:['open-related','clarifying-related','deferred-related','answered-related','corrected-related','na-related',current.id,'missing-related','open-related']},...items]}};
+}
+const builderContext=(request:ReturnType<typeof websiteInterpretationRequest>)=>JSON.parse(request.response.input[0].content[0].text);
+const builderRelatedSchema=(request:ReturnType<typeof websiteInterpretationRequest>)=>(request.response.tools[0].parameters as any)
+ .properties.proposal.anyOf.find((variant:any)=>variant.properties.kind.const==='answer').properties.relatedItemIds;
+describe('interpretation builder writable target invitation',()=>{
+ test('normal answers advertise only current explicit writable targets and retain resolved evidence as read-only history',()=>{
+  const command=interpretationBuilderGraph(),before=JSON.stringify(command.agenda),request=websiteInterpretationRequest(command);
+  const context=builderContext(request),eligible=['open-related','clarifying-related','deferred-related'];
+  expect(context.eligible_related_item_ids).toEqual(eligible);
+  expect(context.items.map((item:any)=>item.id)).toEqual(['cities',...eligible]);
+  expect(context.items[0].relatedItemIds).toEqual(eligible);
+  expect(context.items.slice(1).every((item:any)=>item.relatedItemIds.length===0)).toBe(true);
+  expect(context.read_only_history.map((item:any)=>item.id)).toEqual(['answered-related','corrected-related','na-related']);
+  expect(context.read_only_history[0].latest_evidence).toEqual(command.agenda.items.find(item=>item.id==='answered-related')!.evidence.at(-1));
+  expect(context.read_only_history.every((item:any)=>!Object.hasOwn(item,'relatedItemIds'))).toBe(true);
+  expect(JSON.stringify(context)).not.toContain('beyond-current-graph');expect(JSON.stringify(context)).not.toContain('missing-related');
+  expect(builderRelatedSchema(request)).toMatchObject({maxItems:3,items:{type:'string',enum:eligible}});
+  expect(request.response.instructions).toContain('eligible_related_item_ids');expect(request.response.instructions).toContain('read_only_history');
+  expect(context.owner_transcript).toBe(command.transcript);expect(JSON.stringify(command.agenda)).toBe(before);
+ });
+ test.each(['ordinary','private'])('a structurally related but unsupported %s target stays read-only for this exact turn',kind=>{
+  const source=interpretationBuilderGraph(),command={...source,agenda:{...source.agenda,items:source.agenda.items.map(item=>item.id!=='open-related'?item:
+   {...item,source:kind==='private'?'owner_private_requirement' as const:'ambiguity' as const,
+    coverageRefs:[kind==='private'?'authority.book':'policy.warranty_materials']})}};
+  const before=JSON.stringify(command.agenda),request=websiteInterpretationRequest(command),context=builderContext(request);
+  expect(context.eligible_related_item_ids).toEqual(['clarifying-related','deferred-related']);
+  expect(builderRelatedSchema(request)).toMatchObject({maxItems:2,items:{enum:['clarifying-related','deferred-related']}});
+  expect(context.items.map((item:any)=>item.id)).toEqual(['cities','clarifying-related','deferred-related']);
+  const history=context.read_only_history.find((item:any)=>item.id==='open-related');
+  expect(history).toMatchObject({status:'open',answer_writable:false,latest_evidence:command.agenda.items.find(item=>item.id==='open-related')!.evidence.at(-1)});
+  expect(history).not.toHaveProperty('relatedItemIds');expect(JSON.stringify(command.agenda)).toBe(before);
+ });
+ test.each(['Talvez atendemos somente Novato e Petaluma.','Não tenho certeza se atendemos somente Novato e Petaluma.',
+  'O site diz: “Atendemos somente Novato e Petaluma.”'])(
+  'unsafe or ambiguous owner text offers zero extras without changing the current item: %s',transcript=>{
+   const command={...interpretationBuilderGraph(),transcript},request=websiteInterpretationRequest(command),context=builderContext(request);
+   expect(context.eligible_related_item_ids).toEqual([]);expect(context.items.map((item:any)=>item.id)).toEqual(['cities']);
+   expect(context.read_only_history).toHaveLength(6);expect(context.read_only_history.every((item:any)=>item.answer_writable===false)).toBe(true);
+   expect(context.read_only_history.find((item:any)=>item.id==='deferred-related')?.status).toBe('deferred_owner_review');
+   expect(context.owner_transcript).toBe(transcript);expect(context.current_item_id).toBe(command.itemId);
+   const schema=builderRelatedSchema(request);expect(schema.maxItems).toBe(0);expect(schema.items).not.toHaveProperty('enum');
+  });
+ test.each([false,true])('empty or fully resolved related graphs use maxItems zero without enum empty: %s',resolved=>{
+  const command=resolved?interpretationBuilderGraph():interpretationBuilderCommand();
+  if(resolved)command.agenda={...command.agenda,items:command.agenda.items.map(item=>item.id==='cities'?item:{...item,status:'answered' as const})};
+  const request=websiteInterpretationRequest(command),schema=builderRelatedSchema(request);
+  expect(builderContext(request).eligible_related_item_ids).toEqual([]);
+  expect(schema.maxItems).toBe(0);expect(schema.items).not.toHaveProperty('enum');
+  expect(JSON.stringify(request.response.tools[0].parameters)).not.toContain('"enum":[]');
+ });
+ test('each request clones the shared proposal schema and recalculates current eligibility',()=>{
+  const command=interpretationBuilderGraph(),schemaBefore=JSON.stringify(command.toolSchema);
+  const first=websiteInterpretationRequest(command);
+  expect(first.response.tools[0].parameters).not.toBe(command.toolSchema);
+  builderRelatedSchema(first).items.enum.push('returned-request-only');
+  builderRelatedSchema(first).maxItems=99;
+  const changed={...command,agenda:{...command.agenda,items:command.agenda.items.map(item=>item.id==='open-related'?{...item,status:'answered' as const}:item)}};
+  const second=websiteInterpretationRequest(changed);
+  expect(builderRelatedSchema(second)).toMatchObject({maxItems:2,items:{enum:['clarifying-related','deferred-related']}});
+  expect(JSON.stringify(command.toolSchema)).toBe(schemaBefore);
+  expect(builderRelatedSchema(first).items.enum).toContain('returned-request-only');
+ });
+ test.each(['cities',null])('correction mode keeps all prior context, raw graphs, candidate context and proposal semantics: %s',itemId=>{
+  const source=interpretationBuilderGraph(),command={...source,itemId,mode:'correction' as const,transcript:'Talvez seja preciso corrigir a política anterior.',
+   agenda:{...source.agenda,candidateContext:[{id:'candidate:policy',subject:'policy',questionPt:'Confirme esta política do site.',coverageRefs:['policy.warranty_materials']}]}};
+  const request=websiteInterpretationRequest(command),context=builderContext(request);
+  expect(context.items.map((item:any)=>item.id)).toEqual(command.agenda.items.map(item=>item.id));
+  for(const item of command.agenda.items){
+   const projected=context.items.find((entry:any)=>entry.id===item.id);
+   expect(projected.relatedItemIds).toEqual(item.relatedItemIds);expect(projected.latest_evidence).toEqual(item.evidence.at(-1)??null);
+  }
+  expect(context.candidate_context).toEqual(command.agenda.candidateContext);
+  expect(context).not.toHaveProperty('eligible_related_item_ids');expect(context).not.toHaveProperty('read_only_history');
+  expect(request.response.tools[0].parameters).toEqual(command.toolSchema);expect(request.response.tools[0].parameters).not.toBe(command.toolSchema);
+  expect(request.response.instructions).not.toContain('eligible_related_item_ids');
+  const normal=websiteInterpretationRequest(source);
+  const variant=(request:any)=>request.response.tools[0].parameters.properties.proposal.anyOf.find((entry:any)=>entry.properties.kind.const==='correction');
+  expect(variant(normal)).toEqual(variant(request));
+ });
+});
 describe('website interview serialized transport adapter',()=>{
  test.each([
   'Olha, atende só Novato, San Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?',
