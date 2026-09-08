@@ -90,7 +90,16 @@ function explicitTerritoryCoverage(text: string): boolean {
   });
 }
 function negotiationRestricted(text: string): boolean {
-  return /\bnao (?:negociamos|negociar|ha negociacao|damos descontos|concedemos descontos)\b|\bsem (?:negociacao|descontos?)\b|\bnao negociave(?:l|is)\b/.test(text) ||
+  // The direct first clause is unqualified. Later clauses may only retain
+  // its universal scope, deny a released private floor or require owner approval.
+  const [first,...later]=text.trim().split(/[.,;\n]/).map(clause=>clause.trim().replace(/\s+/g,' ')).filter(Boolean);
+  // Articles/quantifiers can occur before desconto (the recorded ASR used
+  // "meia"). Never accept an arbitrary word: it could be a new permission verb.
+  const directDenial=/^(?:eu )?nao autorizo (?:a )?negociacao(?: (?:ou|nem) (?:(?:um|nenhum|qualquer|meio|meia) )?descontos?(?: automaticos?)?)?(?: (?:em|para) nenhum servicos?)?$/.test(first??'')
+    && later.every(clause=>/^nao (?:ha|existe) (?:um )?minimo privado liberado(?: para (?:o )?[a-z0-9_-]+)?$/.test(clause)
+      || /^(?:essa|esta) regra vale para todos os(?: nossos)? servicos$/.test(clause)
+      || /^qualquer excecao de preco precisa da minha aprovacao(?: explicita)?(?: antes de ser apresentada ao cliente)?$/.test(clause));
+  return directDenial || /\bnao (?:negociamos|negociar|ha negociacao|damos descontos|concedemos descontos)\b|\bsem (?:negociacao|descontos?)\b|\bnao negociave(?:l|is)\b/.test(text) ||
     clauses(text).some(clause => namedActions["authority.negotiate_floor"].test(clause) && ownerRequired(clause));
 }
 function privateRestriction(field: string, text: string): boolean {

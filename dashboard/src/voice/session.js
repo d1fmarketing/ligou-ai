@@ -435,7 +435,9 @@ async function resolveWebsiteInterviewOutcome({client,reason,callId,timeoutMs,po
         if(t?.outcome==="unfinished" && data.budgetStatus==="settled" && data.providerTerminationState==="confirmed")
           return {status:"approved",revision,protocolVersion,approvalReceiptId:approvedReceiptId};
       }
-      if(data.resumeEligible===true && data.state==="unfinished")return {status:"resumable",revision,snapshotDigest:data.digest,protocolVersion};
+      if(data.resumeEligible===true && !approvedReceiptId && data.completed!==true && ["unfinished","reviewing"].includes(data.state))
+        return {status:"resumable",revision,snapshotDigest:data.digest,protocolVersion,
+          ...(data.state==="reviewing"?{resumeState:"reviewing"}:{})};
       if(t?.outcome==="unfinished" || (data.budgetStatus==="settled" && ["ended","error","killed_budget","killed_deadline"].includes(data.callStatus)
         && data.state!=="closing" && data.state!=="complete"))return {status:"interrupted",revision,protocolVersion};
     }
@@ -489,6 +491,8 @@ export function onboardingOutcomeCopy(outcome) {
     return `Finalizando… A pausa e a possibilidade de continuar ainda estão sendo confirmadas${revision}.`;
   }
   if (outcome?.status === "resumable") {
+    if([3,4].includes(outcome.protocolVersion) && outcome.resumeState==="reviewing")
+      return "A configuração continua incompleta. Você pode retomar a revisão do resumo.";
     if([3,4].includes(outcome.protocolVersion))return "A configuração continua incompleta. Você pode retomar da pergunta salva.";
     return `Entrevista pausada com segurança · revisão ${outcome.revision}. Você pode continuar da pergunta salva.`;
   }
@@ -500,6 +504,7 @@ export function voiceSessionRestartLabel({
   onboardingOutcome,
 }) {
   if(endedSessionType==="onboarding" && onboardingOutcome?.status==="amendment_pending")return "Revisar correção";
+  if(endedSessionType==="onboarding" && onboardingOutcome?.status==="resumable" && onboardingOutcome.resumeState==="reviewing")return "Revisar resumo";
   return endedSessionType === "onboarding"
       && onboardingOutcome?.status === "resumable"
     ? "Continuar entrevista"

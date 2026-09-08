@@ -1643,6 +1643,62 @@ test('protocol3 manual teardown retains durable approval instead of requiring a 
  assert.equal(amendment.status,'amendment_pending');assert.equal(amendment.canResume,true);
 });
 
+const REVIEW_CALL_ID='3e377f51-5cd7-4f67-bc46-141a77fe9f34';
+const REVIEW_INTERVIEW_ID='7db1432c-3a5a-43cc-80fb-b2d0f04707a5';
+const reviewingWebsiteStatus=()=>({callId:REVIEW_CALL_ID,currentCallId:REVIEW_CALL_ID,interviewId:REVIEW_INTERVIEW_ID,
+ revision:95,state:'reviewing',completed:false,digest:'a'.repeat(64),approvalReceiptId:null,resumeEligible:true,
+ callStatus:'ended',providerTerminationState:'confirmed',budgetStatus:'settled',terminal:{outcome:'unfinished'}});
+async function websiteStatusOutcome(data,extra={}){
+ let clock=0;
+ return resolveOnboardingOutcome({client:{rpc:async(name,args)=>{
+  assert.equal(name,'get_website_interview_status');assert.deepEqual(args,{p_call:REVIEW_CALL_ID});
+  return {status:200,data,error:null};
+ }},callId:REVIEW_CALL_ID,reason:'remote_hangup',onboardingProtocolVersion:4,
+  timeoutMs:5,pollIntervalMs:1,now:()=>clock,sleep:async ms=>{clock+=ms;},...extra});
+}
+
+test('actual ended/settled reviewing status resumes the saved recap with honest copy',async()=>{
+ const data=reviewingWebsiteStatus(),outcome=await websiteStatusOutcome(data);
+ assert.deepEqual(outcome,{status:'resumable',revision:95,snapshotDigest:data.digest,protocolVersion:4,resumeState:'reviewing'});
+ assert.equal(onboardingOutcomeCopy(outcome),'A configuração continua incompleta. Você pode retomar a revisão do resumo.');
+ assert.doesNotMatch(onboardingOutcomeCopy(outcome),/pergunta salva/);
+ assert.equal(voiceSessionRestartLabel({endedSessionType:'onboarding',onboardingOutcome:outcome}),'Revisar resumo');
+ assert.equal(endedVoiceSessionCopy({endedSessionType:'onboarding',onboardingOutcome:outcome}),onboardingOutcomeCopy(outcome));
+});
+
+test('eligible unfinished website interviews still resume the saved question',async()=>{
+ const data={...reviewingWebsiteStatus(),state:'unfinished'},outcome=await websiteStatusOutcome(data);
+ assert.deepEqual(outcome,{status:'resumable',revision:95,snapshotDigest:data.digest,protocolVersion:4});
+ assert.match(onboardingOutcomeCopy(outcome),/pergunta salva/);
+ assert.equal(voiceSessionRestartLabel({endedSessionType:'onboarding',onboardingOutcome:outcome}),'Continuar entrevista');
+});
+
+for(const resumeEligible of [false,null,undefined,'true'])test(`reviewing resume requires confirmed boolean eligibility: ${resumeEligible}`,async()=>{
+ const outcome=await websiteStatusOutcome({...reviewingWebsiteStatus(),resumeEligible});
+ assert.notEqual(outcome.status,'resumable');assert.doesNotMatch(onboardingOutcomeCopy(outcome),/retomar a revisão do resumo/);
+});
+for(const state of ['closing','complete','unknown'])test(`eligibility cannot turn ${state} into a recap resume`,async()=>{
+ assert.notEqual((await websiteStatusOutcome({...reviewingWebsiteStatus(),state})).status,'resumable');
+});
+for(const field of ['callId','currentCallId'])test(`reviewing resume keeps the exact ${field} binding`,async()=>{
+ const outcome=await websiteStatusOutcome({...reviewingWebsiteStatus(),[field]:CALL_ID});
+ assert.notEqual(outcome.status,'resumable');
+});
+
+test('completion, approval and amendment outcomes retain precedence over reviewing resume',async()=>{
+ const approved={...reviewingWebsiteStatus(),approvalReceiptId:CALL_ID};
+ assert.equal((await websiteStatusOutcome(approved)).status,'approved');
+ const amendment=await websiteStatusOutcome({...approved,amendmentPending:true,amendmentCanResume:true,amendmentRequestReceiptId:CALL_ID});
+ assert.equal(amendment.status,'amendment_pending');assert.equal(amendment.canResume,true);
+ const completed=await websiteStatusOutcome({...approved,state:'complete',completed:true,terminal:{outcome:'complete',
+  callId:REVIEW_CALL_ID,interviewId:REVIEW_INTERVIEW_ID,callStatus:'ended',receiptId:CALL_ID,approvalReceiptId:CALL_ID,
+  providerConfirmed:true,budgetSettled:true,budgetReservationId:CALL_ID}});
+ assert.deepEqual(completed,{status:'complete',revision:95,protocolVersion:4});
+ const pending=await websiteStatusOutcome({...approved,terminal:null,budgetStatus:'active',providerTerminationState:'pending'});
+ assert.equal(pending.status,'finalizing');assert.equal(pending.approvalReceiptId,CALL_ID);
+ assert.notEqual((await websiteStatusOutcome({...reviewingWebsiteStatus(),completed:true})).status,'resumable');
+});
+
 test("onboarding result copy distinguishes interrupted, finalizing, and durable completion", () => {
   assert.equal(onboardingOutcomeCopy(null), "Verificando conclusão…");
   assert.equal(

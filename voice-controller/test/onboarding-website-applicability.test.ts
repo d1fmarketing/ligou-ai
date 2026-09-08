@@ -7,6 +7,7 @@ import { buildWebsiteOpeningAction, createWebsiteAgendaCoordinator, parseWebsite
 import { onboardingAgendaDigest, type StoredWebsiteInterview } from "../src/onboarding-agenda-store.ts";
 import type { CoverageSnapshot } from "../src/onboarding-coverage.ts";
 import type { StreamAuthorization } from "../src/onboarding-stream.ts";
+import { websiteInterpretationRequest } from "../src/onboarding-website-runtime.ts";
 
 const { tenant_id: _tenant, ...draftReadback } = fixture.draft_row;
 const projection = buildWebsiteAgendaSeeds({ draftReadback, initialCoverage: fixture.initial_coverage.snapshot as CoverageSnapshot });
@@ -27,6 +28,7 @@ function at(id: string): OnboardingAgenda {
 const answer = (itemId: string, relatedItemIds: string[] = []): AgendaProposal => ({ kind: "answer", itemId, relatedItemIds });
 const recordedStreamingTerritory = "Hum, olha, atendi só novato, San Rafael e Petaluma, nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?";
 const recordedNumberedTerritory = "1, olha, atendi só novato, San Rafael e Petaluma. Nada além dessas três. Já teve pedido de gente de outras cidades, mas não é pra atender. Se pintar alguma coisa fora, é só com aprovação explícita do dono, combinado?";
+const recordedNegotiationDenial = "Não autorizo negociação ou meia desconto automático em nenhum serviço, não há mínimo privado liberado para o Uligol. Qualquer exceção de preço precisa da minha aprovação explícita antes de ser apresentada ao cliente.";
 function checked(agenda: OnboardingAgenda, text: string, proposal: AgendaProposal) {
   return validateWebsiteAnswerApplicability({ agenda, currentItemId: getAgendaAction(agenda).itemId!, ownerTranscript: text, proposal });
 }
@@ -273,6 +275,70 @@ describe("verified owner answer applicability", () => {
     const targets = familyIds("service.negotiation");
     expect(checked(agenda, "Não negociamos preços nem damos descontos. Essa regra vale para todos os serviços.", answer(current, targets))).toEqual(answer(current, targets));
     expect(() => checked(agenda, "Não pode informar preços automaticamente para todos os serviços.", answer(current, targets))).toThrow();
+  });
+
+  test.each([
+    recordedNegotiationDenial,
+    "Não autorizo negociação ou desconto automático em nenhum serviço.",
+    "Eu não autorizo a negociação em nenhum serviço.",
+    "Não autorizo negociação. Essa regra vale para todos os serviços.",
+  ])("direct owner negotiation denial retains literal evidence for the ten related services: %s", text => {
+    const current=byRef('authority.negotiate_floor').id,agenda=at(current),targets=familyIds('service.negotiation');
+    expect(targets).toHaveLength(10);
+    const proposal=checked(agenda,text,answer(current,targets));
+    const transition=applyVerifiedOwnerTurn(agenda,{type:'verified_owner_turn',binding,turnId:'recorded-negotiation-denial',text,proposal});
+    expect(transition.accepted).toBe(true);expect(transition.agenda.revision).toBe(agenda.revision+1);
+    expect(transition.agenda.items.filter(item=>item.status==='answered')).toHaveLength(11);
+    for(const id of [current,...targets])expect(transition.agenda.items.find(item=>item.id===id)?.evidence.at(-1)).toEqual({turnId:'recorded-negotiation-denial',text});
+    for(const field of ['authority.book','authority.charge_fee','authority.read_calendar']){
+      const id=byRef(field).id;
+      expect(transition.agenda.items.find(item=>item.id===id)).toEqual(agenda.items.find(item=>item.id===id));
+    }
+  });
+
+  test('the pure builder offers all ten negotiation services for the recorded universal denial',()=>{
+    const current=byRef('authority.negotiate_floor').id,agenda=at(current),targets=familyIds('service.negotiation');
+    const stored:StoredWebsiteInterview={agenda,revision:agenda.revision,storeVersion:0,digest:onboardingAgendaDigest(agenda),receiptId:'receipt',nextAction:getAgendaAction(agenda),state:'unfinished',replayed:false};
+    let state=createWebsiteAgendaCoordinator(stored,{nowMs:0});state=reduceWebsiteAgenda(state,{type:'opening.played',nowMs:1}).state;
+    let reduced=reduceWebsiteAgenda(state,{type:'owner.transcript',providerItemId:'negotiation-denial',text:recordedNegotiationDenial,nowMs:2});
+    const record=reduced.commands.find(command=>command.type==='record_owner_turn')!;
+    reduced=reduceWebsiteAgenda(reduced.state,{type:'owner_turn.recorded',requestId:record.requestId,providerItemId:record.providerItemId,turnId:record.turnId,text:record.text,nowMs:3});
+    const command=reduced.commands.find(command=>command.type==='interpret_owner_turn')!,request=websiteInterpretationRequest(command);
+    const context=JSON.parse(request.response.input[0].content[0].text),offered=context.eligible_related_item_ids.filter((id:string)=>targets.includes(id));
+    console.info(JSON.stringify({scenario:'recorded-negotiation-builder',offeredNegotiationServices:offered.length,allOfferedRelatedItems:context.eligible_related_item_ids.length}));
+    expect(offered.toSorted()).toEqual(targets.toSorted());expect(context.owner_transcript).toBe(recordedNegotiationDenial);
+    expect(context.read_only_history.some((item:{id:string})=>targets.includes(item.id))).toBe(false);
+    expect(command.agenda).toEqual(agenda);
+  });
+
+  test.each([
+    "O dono disse: não autorizo negociação em nenhum serviço.",
+    "Eu disse que não autorizo negociação em nenhum serviço.",
+    "Não estou dizendo que não autorizo negociação em nenhum serviço.",
+    "Não é verdade que não autorizo negociação em nenhum serviço.",
+    "Talvez eu não autorize negociação em nenhum serviço.",
+    "O site diz: “Não autorizo negociação em nenhum serviço.”",
+    "Não autorizo negociação em nenhum serviço?",
+    "Não autorizo negociação automática em nenhum serviço.",
+    "Não autorizo negociação acima de dez por cento em nenhum serviço.",
+    "Não autorizo negociação em nenhum serviço se o pagamento atrasar.",
+    "Não autorizo negociação em nenhum serviço hoje.",
+    "Não autorizo negociação em nenhum serviço, mas descontos automáticos estão permitidos.",
+    "Não autorizo negociação em nenhum serviço, foi o que o dono disse.",
+    "Não autorizo negociação para todos os serviços.",
+    "Não autorizo negociação em nenhum serviço. Isso era antes; agora autorizo descontos.",
+    "Não autorizo negociação ou permito desconto automático em nenhum serviço.",
+    "Não autorizo negociação ou permitimos descontos automáticos. Essa regra vale para todos os serviços.",
+    "Não autorizo negociação ou autorizamos descontos automáticos. Essa regra vale para todos os serviços.",
+    "Não autorizo negociação ou concedo descontos automáticos. Essa regra vale para todos os serviços.",
+    "Não autorizo negociação ou aplicamos descontos automáticos. Essa regra vale para todos os serviços.",
+    "Não autorizo negociação em nenhum serviço. Descontos automáticos estão liberados.",
+    "Não autorizo negociação em nenhum serviço, não há restrições para descontos automáticos.",
+    "Não autorizo negociação em nenhum serviço. Não há restrições para descontos automáticos.",
+  ])('qualified or reported direct denial cannot become a universal negotiation restriction: %s',text=>{
+    const current=byRef('authority.negotiate_floor').id,agenda=at(current);
+    expect(()=>checked(agenda,text,answer(current,familyIds('service.negotiation')))).toThrow();
+    expect(agenda.items.find(item=>item.id===current)?.status).toBe('open');
   });
 
   test("exact cities do not silently resolve exception policy; explicit outside-area exception does", () => {
