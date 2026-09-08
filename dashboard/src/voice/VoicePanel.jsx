@@ -31,7 +31,7 @@ export function VoicePanel({
   const [lines, setLines] = useState([]);
   const [liveCases, setLiveCases] = useState([]);
   const [liveSuggestions, setLiveSuggestions] = useState([]);
-  const [model, setModel] = useState("gpt-realtime-2.1");
+  const [model, setModel] = useState("gpt-realtime-2.1-mini");
   const [sessionType, setSessionType] = useState(
     lockedOnboarding ? "onboarding" : initialSessionType,
   );
@@ -257,8 +257,8 @@ export function VoicePanel({
                 <label>
                   Modelo
                   <select value={model} onChange={(e) => setModel(e.target.value)}>
-                    <option value="gpt-realtime-2.1">gpt-realtime-2.1 (padrão; cai pro mini se falhar)</option>
-                    <option value="gpt-realtime-2.1-mini">gpt-realtime-2.1-mini (fallback/econômico)</option>
+                    <option value="gpt-realtime-2.1">gpt-realtime-2.1 (validação final de qualidade)</option>
+                    <option value="gpt-realtime-2.1-mini">gpt-realtime-2.1-mini (padrão dos testes)</option>
                     <option value="gpt-realtime">gpt-realtime (GA)</option>
                   </select>
                 </label>
