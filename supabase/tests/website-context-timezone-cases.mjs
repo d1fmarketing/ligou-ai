@@ -93,7 +93,8 @@ export async function runWebsiteTimezoneContextActualSchemaProbe({runSql,rpc,own
   assert.ok(projection.contextTimezone);
   const draft=JSON.parse(await runSql(`select draft from company_discovery_onboarding_drafts where id=${q(source.draftId)};`));
   const parity=await runTimezoneContextParityCases({runSql,draft,itemId:projection.contextTimezone.itemId});
-  await store.prepareFreshWebsiteInterview({preparationId:preparation,ownerId:owner,expectedTenantId:tenant,expectedGeneration:2,priorCallId:priorCall,...source});
+  await store.prepareFreshWebsiteInterview({preparationId:preparation,ownerId:owner,expectedTenantId:tenant,expectedGeneration:2,priorCallId:priorCall,
+   draftId:source.draftId,draftHash:source.draftHash,sourceResultId:source.sourceResultId,sourceResultHash:source.sourceResultHash});
   await runSql(`insert into calls(id,tenant_id,channel,session_type,status,model,provider_usage_state,cost_estimate_usd) values(${q(call)},${q(tenant)},'browser','onboarding','active','gpt-realtime-2.1','not_applicable',0);
    insert into browser_session_requests(id,tenant_id,user_id,session_type,offer_sdp,status,call_id,opening_mode_requested,onboarding_protocol_version) values(${q(request)},${q(tenant)},${q(owner)},'onboarding','timezone-probe-offer','processing',${q(call)},'realtime_native_v1',5);`);created=true;
   await rpc('reserve_call_budget',{p_tenant:tenant,p_call:call,p_est_cost:7.5,p_reserved_minutes:55});reserved=true;

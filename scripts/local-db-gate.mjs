@@ -765,6 +765,13 @@ export async function runLocalDatabaseGate() {
     ], "database pgTAP assertions", [databaseSecret]);
     const pgTapCount = Number(/Tests=(\d+)/.exec(pgTapOutput)?.[1]);
     assert.equal(pgTapCount, 29);
+    // CLI mounts the supabase/tests tree; the file's \ir ../ include stays
+    // relative to supabase/tests/database and uses the same guarded database.
+    const budgetOverrunPgTapOutput = await runSupabase([
+      "test", "db", "--local", path.join(repoRoot, "supabase/tests/database/01_observed_budget_overrun.sql"),
+    ], "observed budget overrun pgTAP assertions", [databaseSecret]);
+    const budgetOverrunSqlAssertions = Number(/Tests=(\d+)/.exec(budgetOverrunPgTapOutput)?.[1]);
+    assert.equal(budgetOverrunSqlAssertions, 1);
 
     const testEnvironment = {
       PATH: process.env.PATH ?? "/usr/bin:/bin",
@@ -805,6 +812,10 @@ export async function runLocalDatabaseGate() {
       "test", "db", "--local", path.join(repoRoot, "supabase/tests/database/00_schema_security.sql"),
     ], "post-upgrade pgTAP assertions", [databaseSecret]);
     assert.equal(Number(/Tests=(\d+)/.exec(finalPgTapOutput)?.[1]), pgTapCount);
+    const finalBudgetOverrunPgTapOutput = await runSupabase([
+      "test", "db", "--local", path.join(repoRoot, "supabase/tests/database/01_observed_budget_overrun.sql"),
+    ], "post-upgrade observed budget overrun pgTAP assertions", [databaseSecret]);
+    assert.equal(Number(/Tests=(\d+)/.exec(finalBudgetOverrunPgTapOutput)?.[1]), budgetOverrunSqlAssertions);
 
     const finalHistoryOutput = successful(await runPsql(connection, psqlBin, isolatedHome, `
       select version from supabase_migrations.schema_migrations order by version;
@@ -913,6 +924,7 @@ export async function runLocalDatabaseGate() {
       missing0008: migrationEvidence.missing0008,
       extensionStatementsWithoutVersionClauses: extensionStatements,
       sqlAssertions: pgTapCount,
+      budgetOverrunSqlAssertions,
       concurrencyTests: concurrency.tests,
       websiteInterview,
       salesPersistence,
