@@ -45,11 +45,9 @@ import {
   type OnboardingOpeningPayload,
   type OnboardingOpeningResumeContext,
 } from "./onboarding-greeting.ts";
-import { createWebsiteInterviewRuntime, type WebsiteInterviewRuntimeConfig } from "./onboarding-website-runtime.ts";
-import {streamAuthorizationIsValid} from './onboarding-stream.ts';
+import { createNativeWebsiteInterviewRuntime, nativeWebsiteBinding, type NativeWebsiteRuntimeConfig } from "./onboarding-native-runtime.ts";
 import { createOnboardingAgendaStore } from "./onboarding-agenda-store.ts";
 import { createInterviewEvidenceStore } from "./onboarding-interview-evidence-store.ts";
-import { speechPayloadIsInternallyValid, synthesizeOnboardingSpeech } from "./onboarding-speech.ts";
 
 type RequestResponseCommand = Extract<
   OnboardingCommand,
@@ -242,7 +240,7 @@ export interface SessionLedger {
   /** Onboarding-only reducer/transport state. It survives sideband socket reattachment. */
   onboarding?: OnboardingAdapterState;
   /** V3 mode uses the same adapter queue, not the legacy response lifecycle. */
-  websiteInterviewRuntime?: ReturnType<typeof createWebsiteInterviewRuntime>;
+  websiteInterviewRuntime?: ReturnType<typeof createNativeWebsiteInterviewRuntime>;
 }
 
 /** Plan v4 §8: reserving quota only gates FUTURE sessions — a live session that runs up the bill must be cut.
@@ -274,7 +272,7 @@ export interface SidebandOptions {
     resume?: OnboardingResumeSuccess;
     reactivationTimeoutMs?: number;
     transportAckTimeoutMs?: number;
-    websiteInterview?: WebsiteInterviewRuntimeConfig;
+    websiteInterview?: NativeWebsiteRuntimeConfig;
   };
   externalCostUsd?: number;
   fetchImpl?: FetchLike;
@@ -1843,11 +1841,8 @@ function enqueueOnboardingRawEvent(
       }
       await ledger.websiteInterviewRuntime!.handleEvent(msg);
       if (msg?.type === "error") {
-        const actionId = ledger.websiteInterviewRuntime!.state.speech?.action.actionId ?? ledger.websiteInterviewRuntime!.state.openingAction.actionId;
-        const noticeEvent = typeof msg.error?.event_id === "string" &&
-          msg.error.event_id === `website-notice-${actionId.slice(0,24)}`;
         const expectedSpeechRetrieveMiss = ledger.websiteInterviewRuntime!.ownsSpeechRetrieveMiss(msg);
-        if (!expectedSpeechRetrieveMiss && !ledger.websiteInterviewRuntime!.ownsControlError(msg) && !(noticeEvent && msg.error?.code === "conversation_item_already_exists")) {
+        if (!expectedSpeechRetrieveMiss && !ledger.websiteInterviewRuntime!.ownsControlError(msg)) {
           ledger.providerUsageEvidence.continuous = false; ledger.agentEnded = true; ledger.status = "error";
         }
       }
@@ -3305,14 +3300,16 @@ export function attachSideband(
     : "provider_model_v1";
   const openingPayload = options.onboarding?.openingPayload;
   const websiteInterview = options.onboarding?.websiteInterview;
-  const websiteStreaming=Boolean(websiteInterview?.openingStream);
-  if(openingMode==='realtime_stream_v1'&&!websiteStreaming)throw new Error('website_sideband_scope_invalid');
-  if (websiteInterview && (cap.sessionType !== "onboarding" || openingMode !== (websiteStreaming?'realtime_stream_v1':"application_tts_v1") ||
+  if(openingMode==='realtime_native_v1'&&!websiteInterview)throw new Error('website_sideband_scope_invalid');
+  if(openingMode==='realtime_stream_v1')throw new Error('website_sideband_scope_invalid');
+  if (websiteInterview && (cap.sessionType !== "onboarding" ||
     openingPayload || options.onboarding?.resume || websiteInterview.prepared.scope.callId !== cap.callId ||
-    websiteInterview.prepared.scope.ownerId !== cap.ownerUserId ||
-    websiteInterview.openingAction.callId !== cap.callId ||
-    (websiteStreaming?!streamAuthorizationIsValid(websiteInterview.openingStream,websiteInterview.openingAction):!speechPayloadIsInternallyValid(websiteInterview.openingPayload, websiteInterview.openingAction))))
+    websiteInterview.prepared.scope.ownerId !== cap.ownerUserId))
     throw new Error("website_sideband_scope_invalid");
+  if(websiteInterview){
+    nativeWebsiteBinding(websiteInterview);
+    if(openingMode!=='realtime_native_v1'||websiteInterview.businessName!==expectedOnboardingBusinessName)throw new Error('website_sideband_scope_invalid');
+  }
   const applicationReactivationTimeoutMs =
     options.onboarding?.reactivationTimeoutMs ?? 5_000;
   if (
@@ -3336,7 +3333,7 @@ export function attachSideband(
   if (!Number.isFinite(externalCostUsd) || externalCostUsd < 0)
     throw new Error("external_cost_invalid");
   if (websiteInterview) {
-    if (externalCostUsd !== (websiteStreaming?0:websiteInterview.openingPayload!.cost_usd)) throw new Error("website_opening_cost_mismatch");
+    if (externalCostUsd !== 0) throw new Error("website_opening_cost_mismatch");
   } else if (openingMode === "application_tts_v1") {
     const expectedText = onboardingOpeningText(
       expectedOnboardingBusinessName!,
@@ -3553,11 +3550,10 @@ export function attachSideband(
         throw new Error("website_hard_budget_reached");
       }
     };
-    ledger.websiteInterviewRuntime = createWebsiteInterviewRuntime(websiteInterview, {
+    const runtimeDependencies = {
       model: ledger.model,
       agendaStore: createOnboardingAgendaStore(supa()),
       evidenceStore: createInterviewEvidenceStore(supa()),
-      synthesize: (action, signal) => synthesizeOnboardingSpeech(action, { openaiKey: config.openaiKey, signal, fetchImpl: options.fetchImpl }),
       enqueue: (task) => {
         const adapter = ensureOnboardingAdapter(ledger);
         const queued = adapter.queue.then(async () => {
@@ -3572,13 +3568,12 @@ export function attachSideband(
         });
         return adapter.queue;
       },
-      send: (event) => { if (!ws || !ownsLiveLedger()) throw new Error("website_sideband_unavailable"); ws.send(JSON.stringify(event)); },
-      onTranscript: (entry) => ledger.transcript.push(entry),
-      onCost: (cost) => {
-        if (!Number.isFinite(cost) || cost < 0) throw new Error("website_tts_cost_invalid");
-        ledger.externalCostUsd = Number(((ledger.externalCostUsd ?? 0) + cost).toFixed(8));
-        enforceWebsiteHardBudget();
+      send: (event) => {
+        if (!ws || !ownsLiveLedger() || ledger.providerTerminalEvidence?.observed)
+          throw new Error("website_sideband_unavailable");
+        ws.send(JSON.stringify(event));
       },
+      onTranscript: (entry) => ledger.transcript.push(entry),
       onUsage: (response: any) => {
         const usage = validatedProviderUsage(response?.usage);
         if (!usage) { ledger.providerUsageEvidence.continuous = false; return; }
@@ -3590,9 +3585,10 @@ export function attachSideband(
       },
       onUsageUnknown: () => { ledger.providerUsageEvidence.continuous = false; },
       onTerminate: (command) => { ledger.agentEnded = true; if (ledger.status === "active") ledger.status = command.outcome === "complete" || ["owner_requested_pause","owner_requested_amendment"].includes(command.reason) ? "ended" : "error"; },
-      onState: (state) => { ledger.phase = state.phase; },
+      onState: (state: {phase:any}) => { ledger.phase = state.phase; },
       onDiagnostic: (event) => { console.info(JSON.stringify({ event: "website_interview", ...event })); },
-    });
+    };
+    ledger.websiteInterviewRuntime=createNativeWebsiteInterviewRuntime(websiteInterview,runtimeDependencies);
   }
 
   const startHeartbeat = () => {
@@ -3727,6 +3723,14 @@ export function attachSideband(
         // Evidence remains observable while finalization fences application work.
         // Capturing here also prevents a queued terminal event being lost to close.
         observeWebsiteTerminalEvidence(ledger, msg);
+        if (msg?.type === "session.ended") {
+          // Stop immediately: an admitted write may still be awaiting its receipt.
+          // Finalization retains this socket's terminal and usage evidence custody.
+          ledger.websiteInterviewRuntime.stop();
+          if (ledger.status === "active") ledger.status = "ended";
+          void finalize("terminal_event");
+          return;
+        }
         const stopReason = websiteStopControlReason(msg, cap.callId);
         if (stopReason) {
           if (!terminal && !finalizing && !ledger.websiteStopReason) {

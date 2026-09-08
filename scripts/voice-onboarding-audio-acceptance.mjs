@@ -259,12 +259,29 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
   const state = { events: [], recordings: [], speech: null, stage: null, callId: null, clickAt: null,
     peers: [], inputs: [], sources: new Set(), observers: new Set(), outputSequence: 0, answered: 0,
     faultArmed: false, faultInjected: false, closed: false, context: null, outputElements: new Set(), responseCaptures: new Map(),
-    ownerFiles: new Map(), recordingFiles: new Map(), recordingLinks: new Map() };
+    ownerFiles: new Map(), recordingFiles: new Map(), recordingLinks: new Map(), nativeContext: null,
+    nativeNotices: new Set(), toolOutputs: new Set() };
   const now = () => performance.now();
   const stamp = (event, details = {}) => state.events.push({ event, browserMs: now(),
     elapsedMs: state.clickAt === null ? null : now() - state.clickAt, ...details });
   const context = () => state.context ??= new AudioContext({ sampleRate: 48000 });
   const cleanId = value => typeof value === 'string' && /^[a-zA-Z0-9:_-]{1,160}$/.test(value) ? value : null;
+  const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+  const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  const revision = value => Number.isSafeInteger(value) && value >= 0;
+  function nativeContext(value, initial = false) {
+    const prior = state.nativeContext;
+    if (!value || !uuid(value.callId) || !uuid(value.interviewId) || value.callId !== state.callId
+      || !revision(value.revision) || !digest(value.sourceDigest) || (prior && (value.interviewId !== prior.interviewId
+        || value.revision < prior.revision || (value.revision === prior.revision && value.sourceDigest !== prior.sourceDigest)))) return false;
+    const question = value.currentQuestion;
+    if (!initial && (value.mode !== 'conversation' || (question !== null && (!question
+      || !/^[A-Za-z0-9_.:-]{1,256}$/.test(question.itemId ?? '') || typeof question.questionPt !== 'string'
+      || !question.questionPt.trim() || question.questionPt.length > 4096)))) return false;
+    state.nativeContext = { callId: value.callId, interviewId: value.interviewId, revision: value.revision, sourceDigest: value.sourceDigest,
+      currentQuestion: initial ? null : question === null ? null : { itemId: question.itemId, questionPt: question.questionPt } };
+    return true;
+  }
   const speech = value => {
     if (!value || value.schema !== 'onboarding.stream.v1' || !/^[a-f0-9]{64}$/.test(value.action?.actionId ?? '')
       || !cleanId(value.dispatchId)) return;
@@ -305,8 +322,10 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
           state.bootstrap = { callId: state.callId, roundTripMs: now() - began, status: response.status, maxMinutes: data.max_minutes,
             responseHeadersMs: headersMs, edgeServerTiming,
             model: data.model, protocolVersion: data.onboarding_protocol_version, openingVersion: data.opening_payload?.version,
-            speechCallId: cleanId(data.opening_payload?.stream?.action?.callId), openingMode: data.opening_mode_applied };
+            speechCallId: cleanId(data.opening_payload?.native?.callId ?? data.opening_payload?.stream?.action?.callId), openingMode: data.opening_mode_applied };
           stamp('bootstrap_observed', state.bootstrap);
+          if (data.onboarding_protocol_version === 5 && data.opening_payload?.version === 5 && data.opening_mode_applied === 'realtime_native_v1')
+            nativeContext(data.opening_payload.native, true);
           speech(data.opening_payload?.stream);
         }
       }).catch(() => stamp('observed_payload_unavailable', { status: response.status }));
@@ -353,13 +372,16 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
                 else shape.other++;
               }
               details.outputShape = shape;
+              const capture = state.responseCaptures.get(details.responseId);
+              if (settings.recordTestAudio && capture?.selected?.transport === 'realtime_native_v1' && capture.providerTranscript)
+                details.transcript = capture.providerTranscript;
             }
             if (settings.recordTestAudio && typeof event.transcript === 'string') details.transcript = event.transcript.slice(0, 8192);
             stamp('provider_event', details);
           }
         } catch { /* Non-JSON or unselected provider messages are not logged. */ }
       });
-      channel.addEventListener('close', () => stamp('data_channel_closed'));
+      channel.addEventListener('close', () => { for (const capture of state.responseCaptures.values()) capture.finish('transport_closed'); stamp('data_channel_closed'); });
       return channel;
     }
   };
@@ -400,17 +422,19 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
     };
   }
   function startOutputCapture(audio, selected, responseId = null) {
+    const native = selected?.transport === 'realtime_native_v1';
     const index = ++state.outputSequence, startedBrowserMs = now();
     const startedElapsedMs = state.clickAt === null ? null : startedBrowserMs - state.clickAt;
     stamp(responseId ? 'output_capture_started' : 'output_playing', { outputIndex: index, actionId: selected?.actionId,
       dispatchId: selected?.dispatchId, responseId, kind: selected?.kind, volume: audio.volume, muted: audio.muted });
     let stream, source, recorder, frame, gate, destination, stopped = false, nonzero = false;
-    const chunks = [], capture = { responseId, selected, finish: null, providerStatus: null, providerTranscript: null };
+    const chunks = [], capture = { responseId, selected, finish: null, providerStatus: null, providerTranscript: null,
+      lastNonzero: null, bufferStoppedAt: null, drainTimer: null };
     const syncGate = () => {
       if (gate) gate.gain.value = !audio.muted && !audio.paused && audio.volume > 0 ? audio.volume : 0;
     };
     const cleanup = (reason = 'transport_closed') => {
-      if (stopped) return; stopped = true; cancelAnimationFrame(frame);
+      if (stopped) return; stopped = true; cancelAnimationFrame(frame); clearTimeout(capture.drainTimer);
       capture.stopReason = reason; capture.stoppedBrowserMs = now();
       audio.removeEventListener('volumechange', syncGate); audio.removeEventListener('pause', syncGate); audio.removeEventListener('playing', syncGate);
       try { if (recorder?.state !== 'inactive') recorder?.stop(); source?.disconnect(); gate?.disconnect(); } catch {}
@@ -418,6 +442,19 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
       for (const track of destination?.stream?.getTracks?.() ?? []) track.stop();
       state.observers.delete(cleanup);
     };
+    const drain = () => {
+      if (stopped || !native || capture.bufferStoppedAt === null) return;
+      if (audio.muted || audio.paused || audio.volume <= 0) { cleanup('native_output_inactive'); return; }
+      const remaining = 2000 - (now() - capture.bufferStoppedAt);
+      if (remaining <= 0) { cleanup('native_drain_timeout'); return; }
+      const quietFor = nonzero ? now() - Math.max(capture.bufferStoppedAt, capture.lastNonzero) : 0;
+      if (nonzero && quietFor >= 120) {
+        stamp('output_ended', { responseId, callId: selected.callId, interviewId: selected.interviewId, evidence: 'native_capture_local_drain' });
+        cleanup('native_browser_drained'); return;
+      }
+      clearTimeout(capture.drainTimer); capture.drainTimer = setTimeout(drain, Math.max(1, Math.min(remaining, nonzero ? 120 - quietFor : 25)));
+    };
+    capture.bufferStopped = () => { if (!native || stopped || capture.bufferStoppedAt !== null) return; capture.bufferStoppedAt = now(); drain(); };
     capture.finish = cleanup; state.observers.add(cleanup);
     try {
       stream = responseId && audio.srcObject?.clone ? audio.srcObject.clone() : audio.captureStream();
@@ -433,9 +470,11 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
         if (stopped) return; syncGate();
         if (ctx.state === 'running' && !audio.muted && !audio.paused && audio.volume > 0) {
           analyser.getFloatTimeDomainData(samples);
-          if (!nonzero && samples.some(sample => Math.abs(sample) > 0.0001)) {
-            nonzero = true; stamp('output_first_nonzero_sample', { outputIndex: index, actionId: selected?.actionId,
-              dispatchId: selected?.dispatchId, responseId, evidence: responseId ? 'remote_webrtc_media' : 'media_element_capture' });
+          if (samples.some(sample => Math.abs(sample) > 0.0001)) {
+            capture.lastNonzero = now();
+            if (!nonzero) { nonzero = true; stamp('output_first_nonzero_sample', { outputIndex: index, actionId: selected?.actionId,
+              dispatchId: selected?.dispatchId, responseId, ...(native ? { callId: selected.callId, interviewId: selected.interviewId } : {}),
+              evidence: responseId ? 'remote_webrtc_media' : 'media_element_capture' }); }
           }
         }
         frame = requestAnimationFrame(inspect);
@@ -450,11 +489,14 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
           const bytes = new Uint8Array(await new Blob(chunks, { type: mime }).arrayBuffer());
           let binary = ''; for (let offset = 0; offset < bytes.length; offset += 16384) binary += String.fromCharCode(...bytes.subarray(offset, offset + 16384));
           const recording = { filename: 'output-' + String(index).padStart(4, '0') + '.webm', base64: btoa(binary),
-            outputIndex: index, actionId: selected?.actionId, dispatchId: selected?.dispatchId, responseId,
-            kind: selected?.kind, revision: selected?.revision, expectedText: selected?.text,
+            outputIndex: index, responseId,
+            ...(native ? { transport: 'realtime_native_v1', callId: selected.callId, interviewId: selected.interviewId,
+              revision: selected.revision, sourceDigest: selected.sourceDigest, currentQuestion: selected.currentQuestion,
+              checkpoint: selected.checkpoint ?? null, partial: capture.stopReason !== 'native_browser_drained' }
+              : { actionId: selected?.actionId, dispatchId: selected?.dispatchId, kind: selected?.kind, revision: selected?.revision, expectedText: selected?.text }),
             startedBrowserMs, startedElapsedMs, stoppedBrowserMs: capture.stoppedBrowserMs,
             stopReason: capture.stopReason, providerStatus: capture.providerStatus, providerTranscript: capture.providerTranscript,
-            bytes: bytes.length, captureEvidence: responseId ? 'actual_remote_stream_with_observed_output_gate' : 'actual_html_media_capture', nonzeroObserved: nonzero };
+            bytes: bytes.length, captureEvidence: native ? 'actual_native_remote_stream' : responseId ? 'actual_remote_stream_with_observed_output_gate' : 'actual_html_media_capture', nonzeroObserved: nonzero };
           const hash = await crypto.subtle.digest('SHA-256', bytes);
           recording.sha256 = [...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, '0')).join('');
           state.recordingFiles.set(recording.filename, { blob: new Blob(chunks, { type: mime }), recording });
@@ -472,11 +514,39 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
     return capture;
   }
   function observeStreamEvent(event) {
+    if (state.nativeContext && ['conversation.item.created','conversation.item.done'].includes(event?.type)) {
+      const item = event.item, text = item?.content?.[0]?.text;
+      if (item?.type === 'message' && item.role === 'system' && item.status === 'completed' && item.content?.length === 1
+        && item.content[0].type === 'input_text' && typeof text === 'string' && text.length <= 32768
+        && /^lnc-[a-f0-9]{28}$/.test(item.id ?? '') && !state.nativeNotices.has(item.id) && text.startsWith('ligou.website_native:')) {
+        try { if (nativeContext(JSON.parse(text.slice('ligou.website_native:'.length)))) { state.nativeNotices.add(item.id); stamp('native_context', state.nativeContext); } } catch {}
+      }
+      if (item?.type === 'function_call_output' && cleanId(item.call_id) && typeof item.output === 'string'
+        && item.output.length <= 262144 && !state.toolOutputs.has(item.call_id)) {
+        try {
+          const value = JSON.parse(item.output), details = { callId: state.callId, interviewId: state.nativeContext.interviewId, toolCallId: item.call_id };
+          for (const key of ['saved','replayed','approved','amendmentRequested','approvalPreserved']) if (typeof value?.[key] === 'boolean') details[key] = value[key];
+          for (const key of ['revision','savedRevision']) if (revision(value?.[key])) details[key] = value[key];
+          for (const key of ['savedReceiptId','approvalReceiptId']) if (uuid(value?.[key])) details[key] = value[key];
+          if (digest(value?.digest)) details.digest = value.digest;
+          if (value?.provenance === 'model_interpretation') details.provenance = value.provenance;
+          if (typeof details.saved === 'boolean') { state.toolOutputs.add(item.call_id); stamp('native_tool_output', details); }
+        } catch {}
+      }
+    }
     if (['conversation.item.created','conversation.item.done'].includes(event?.type)
       && event.item?.role === 'system' && event.item.content?.[0]?.text?.startsWith('ligou.website_stream:')) {
       try { speech(JSON.parse(event.item.content[0].text.slice('ligou.website_stream:'.length))); } catch { /* Observation only. */ }
     }
     const responseId = cleanId(event?.response?.id ?? event?.response_id);
+    if (state.nativeContext && event?.type === 'response.created' && responseId && !state.responseCaptures.has(responseId)
+      && !event.response?.output_modalities?.includes('text')) {
+      for (const prior of state.responseCaptures.values()) prior.finish('response_replaced');
+      const audio = [...state.outputElements].find(element => element.srcObject?.getAudioTracks?.().length);
+      if (audio) state.responseCaptures.set(responseId, startOutputCapture(audio, { ...state.nativeContext, transport: 'realtime_native_v1',
+        checkpoint: ['review','signoff'].includes(event.response.metadata?.native_checkpoint) ? event.response.metadata.native_checkpoint : null }, responseId));
+      else stamp('native_output_element_unavailable', { responseId });
+    }
     if (event?.type === 'response.created' && event.response?.metadata?.ligou_transport === 'realtime_stream_v1') {
       const binding = event.response.metadata, selected = state.speech;
       if (!responseId || !selected || state.responseCaptures.has(responseId)
@@ -490,12 +560,14 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
     }
     const capture = state.responseCaptures.get(responseId);
     if (capture) {
+      if (event.type === 'response.output_audio_transcript.done' && settings.recordTestAudio && typeof event.transcript === 'string') capture.providerTranscript = event.transcript.slice(0, 8192);
       if (event.type === 'response.done') {
         capture.providerStatus = cleanId(event.response.status);
         const content = event.response.output?.find(item => item.type === 'message')?.content;
         capture.providerTranscript = settings.recordTestAudio ? content?.filter(part => ['audio','output_audio'].includes(part.type))
-          .map(part => String(part.transcript ?? '')).join(' ').slice(0, 8192) : null;
+          .map(part => String(part.transcript ?? '')).join(' ').slice(0, 8192) || capture.providerTranscript : null;
         if (event.response.status !== 'completed') capture.finish('generation_' + (capture.providerStatus ?? 'unknown'));
+        else if (capture.selected?.transport === 'realtime_native_v1' && !content?.some(part => ['audio','output_audio'].includes(part.type))) capture.finish('generation_without_audio');
       }
       if (event.type === 'output_audio_buffer.started') stamp('output_playing', { responseId,
         actionId: capture.selected.actionId, dispatchId: capture.selected.dispatchId, evidence: 'provider_output_buffer_started' });
@@ -503,6 +575,7 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
         stamp(event.type.endsWith('.stopped') ? 'output_buffer_stopped' : 'output_cleared', { responseId,
           actionId: capture.selected.actionId, dispatchId: capture.selected.dispatchId, eventId: cleanId(event.event_id), evidence: event.type });
         if (event.type.endsWith('.cleared')) capture.finish(event.type);
+        else capture.bufferStopped();
       }
     }
     if (event?.type === 'input_audio_buffer.speech_started') for (const current of state.responseCaptures.values()) current.finish('owner_barge_in');
@@ -524,6 +597,8 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
     if (event.target.closest?.('.voice-live-button')) {
       const observedBrowserMs = now();
       state.clickAt = Number.isFinite(event.timeStamp) && event.timeStamp >= 0 && event.timeStamp <= observedBrowserMs ? event.timeStamp : observedBrowserMs;
+      for (const capture of state.responseCaptures.values()) capture.finish('new_attempt');
+      state.responseCaptures.clear(); state.nativeContext = null; state.nativeNotices.clear(); state.toolOutputs.clear();
       state.speech = null; state.callId = null; state.bootstrap = null;
       stamp('start_clicked', { browserMs: state.clickAt, observedBrowserMs, trusted: event.isTrusted });
       void context().resume();
@@ -537,8 +612,18 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
       if(detail.status===null||detail.status===0||(Number.isInteger(detail.status)&&detail.status>=100&&detail.status<=599))timing.status=detail.status;
       if(['network','transient_http','authorization','non_transient'].includes(detail.code))timing.code=detail.code;
     }
+    if (detail?.transport === 'realtime_native_v1') {
+      timing.transport = detail.transport;
+      if (uuid(detail.interviewId)) timing.interviewId = detail.interviewId;
+      if (revision(detail.revision)) timing.revision = detail.revision;
+      if (digest(detail.sourceDigest)) timing.sourceDigest = detail.sourceDigest;
+      if (['review','signoff'].includes(detail.checkpoint)) timing.checkpoint = detail.checkpoint;
+      if (uuid(detail.nativeRequestId)) timing.nativeRequestId = detail.nativeRequestId;
+      if (detail.currentQuestionItemId === null || /^[A-Za-z0-9_.:-]{1,256}$/.test(detail.currentQuestionItemId ?? '')) timing.currentQuestionItemId = detail.currentQuestionItemId;
+    }
     stamp('application_timing', timing);
     if (detail?.callId) state.callId = cleanId(detail.callId);
+    if (['session_ended','start_cancelled','start_failed'].includes(detail?.event)) for (const capture of state.responseCaptures.values()) capture.finish(detail.event);
     if (detail?.event === 'speech_ended' && detail.evidence === 'webrtc_buffer_stop_and_local_media_drained') {
       const capture = state.responseCaptures.get(detail.responseId);
       if (capture && capture.selected.actionId === detail.actionId && capture.selected.dispatchId === detail.dispatchId) {
@@ -624,7 +709,7 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
         if (includeRecordingBytes) return recording;
         const { base64, ...metadata } = recording; return metadata;
       });
-      return { stage, callId: state.callId, bootstrap: state.bootstrap ?? null, speech: state.speech, events: state.events.splice(0), recordings,
+      return { stage, callId: state.callId, bootstrap: state.bootstrap ?? null, speech: state.speech, nativeContext: state.nativeContext, events: state.events.splice(0), recordings,
         inputEnabled: state.input?.track.enabled === true && state.input?.track.readyState === 'live', faultInjected: state.faultInjected,
         uiText: document.querySelector('.voice-live')?.innerText?.slice(0, 20000) ?? null };
     },
@@ -1037,20 +1122,24 @@ function firstVerifiedPhrase(words, expectedText) {
 }
 
 function recordingSample(recording, events) {
+  const native = recording.captureEvidence === 'actual_native_remote_stream';
   if (!(recording.bytes > 0) || recording.nonzeroObserved !== true || !Number.isSafeInteger(recording.outputIndex)
-    || !recording.actionId || !Number.isFinite(recording.startedBrowserMs) || !Number.isFinite(recording.stoppedBrowserMs)) return null;
-  const streamed = recording.captureEvidence === 'actual_remote_stream_with_observed_output_gate';
-  if (streamed ? !recording.responseId || !recording.dispatchId : recording.captureEvidence !== 'actual_html_media_capture') return null;
+    || (!native && !recording.actionId) || !Number.isFinite(recording.startedBrowserMs) || !Number.isFinite(recording.stoppedBrowserMs)) return null;
+  const streamed = native || recording.captureEvidence === 'actual_remote_stream_with_observed_output_gate';
+  if (native && (!UUID.test(recording.callId ?? '') || !UUID.test(recording.interviewId ?? ''))) return null;
+  if (streamed ? !recording.responseId || (!native && !recording.dispatchId) : recording.captureEvidence !== 'actual_html_media_capture') return null;
   return (events ?? []).filter(event => event.event === 'output_first_nonzero_sample'
     && event.evidence === (streamed ? 'remote_webrtc_media' : 'media_element_capture')
-    && event.outputIndex === recording.outputIndex && event.actionId === recording.actionId
+    && event.outputIndex === recording.outputIndex && (native ? event.callId === recording.callId && event.interviewId === recording.interviewId : event.actionId === recording.actionId)
     && (event.responseId ?? null) === (recording.responseId ?? null) && (event.dispatchId ?? null) === (recording.dispatchId ?? null)
     && Number.isFinite(event.browserMs) && event.browserMs >= recording.startedBrowserMs && event.browserMs <= recording.stoppedBrowserMs)
     .toSorted((left, right) => left.browserMs - right.browserMs)[0] ?? null;
 }
 
 export function alignCapturedWords(recording, events, waveform, words, questionPt) {
-  const firstPhrase = firstVerifiedPhrase(words, recording.expectedText);
+  const native = recording.captureEvidence === 'actual_native_remote_stream';
+  const firstPhrase = firstVerifiedPhrase(words, native ? recording.providerTranscript : recording.expectedText);
+  if (native && firstPhrase) firstPhrase.evidence = 'local_asr_matches_provider_transcript';
   const question = alignedQuestion(words, questionPhrase(questionPt));
   const alignment = { firstAsrTokenOffsetMs: words.length ? words[0].start * 1000 : null, firstVerifiedPhrase: firstPhrase,
     browserClock: { available: false, reason: 'matching_capture_sample_or_waveform_missing' },
@@ -1135,7 +1224,11 @@ export async function alignRecordings(result, plan) {
     const words = (transcript.segments ?? []).flatMap(segment => segment.words ?? [])
       .filter(word => normalize(word.word) && Number.isFinite(word.start) && Number.isFinite(word.end) && word.start >= 0 && word.end >= word.start);
     if (!words.length) { recording.alignment = { available: false, reason: 'no_aligned_words' }; continue; }
-    const item = matchQuestion(plan, { text: recording.expectedText });
+    const native = recording.captureEvidence === 'actual_native_remote_stream';
+    if (native && !recording.providerTranscript) recording.providerTranscript = result.events.find(event => event.event === 'provider_event'
+      && event.responseId === recording.responseId && ['response.done','response.output_audio_transcript.done'].includes(event.type)
+      && typeof event.transcript === 'string')?.transcript ?? null;
+    const item = native ? recording.currentQuestion : matchQuestion(plan, { text: recording.expectedText });
     const captured = alignCapturedWords(recording, result.events, waveform, words, item?.questionPt);
     recording.alignment = { available: captured.browserClock.available, sourceRecordingSha256: recordingHash, transcript: transcript.text, ...captured,
       limitation: 'Conservative estimate of recognizable speech in captured browser media, bounded by waveform onset and its matching browser sample observation. Recorder, codec, polling and ASR timing are not a calibrated physical speaker clock; audibility and comprehension require live acceptance.' };
@@ -1153,6 +1246,8 @@ export function summarizeAttempt(result) {
   const afterStart = event => Number.isFinite(startMs) && event.browserMs >= startMs && event.browserMs < nextStartMs;
   const app = name => result.events.find(event => afterStart(event) && event.event === 'application_timing' && event.timingEvent === name);
   const alignedRecordings = result.recordings.filter(row => {
+    if (row.partial === true || (row.captureEvidence === 'actual_native_remote_stream'
+      && (row.stopReason !== 'native_browser_drained' || row.providerStatus !== 'completed'))) return false;
     const clock = row.alignment?.browserClock, sample = recordingSample(row, result.events);
     return row.alignment?.available === true && row.alignment.sourceRecordingSha256 === row.sha256 && sample
       && clock?.available === true && clock.method === 'conservative_captured_media_alignment'

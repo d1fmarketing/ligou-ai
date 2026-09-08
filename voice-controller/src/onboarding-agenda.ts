@@ -29,7 +29,9 @@ export interface AgendaCandidateContext {
   readonly questionPt: string;
   readonly coverageRefs: readonly string[];
 }
-export interface OwnerTurnEvidence { readonly turnId: string; readonly text: string }
+/** Missing provenance is the historical provider-transcription contract. Only
+ * the native server adapter can assign model_interpretation to new evidence. */
+export interface OwnerTurnEvidence { readonly turnId: string; readonly text: string; readonly provenance?: "model_interpretation" }
 export interface AgendaItem extends AgendaSeed {
   readonly status: AgendaStatus;
   readonly answerRevision: number;
@@ -54,8 +56,8 @@ export type AgendaProposal =
   | { readonly kind: "correction";
       readonly affectedItems?: readonly { readonly itemId: string; readonly disposition: "corrected" | "reopen" }[];
       readonly affectedCandidates?: readonly { readonly candidateId: string; readonly disposition: "corrected" | "reopen" }[] };
-/** Only the transcript-verifying adapter may construct this domain event. The
- * discriminator is not cryptographic proof; no model-asserted approval is read. */
+/** Only a server adapter bound to the actual input item constructs this event.
+ * It explicitly labels native interpretation; no model-asserted approval is read. */
 export interface VerifiedOwnerTurnEvent extends OwnerTurnEvidence {
   readonly type: "verified_owner_turn";
   readonly binding: AgendaBinding;
@@ -171,10 +173,12 @@ function counter(value: unknown, label: string, max = Number.MAX_SAFE_INTEGER): 
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > max) throw new Error(`Invalid ${label} counter`);
 }
 function parseEvidence(value: unknown): OwnerTurnEvidence {
-  const row = exactRecord(value, ["turnId", "text"], "owner evidence");
+  const interpreted=Boolean(value&&typeof value==='object'&&Object.hasOwn(value,'provenance'));
+  const row = exactRecord(value, interpreted?["turnId", "text", "provenance"]:["turnId", "text"], "owner evidence");
   nonblank(row.turnId, "turnId");
   nonblank(row.text, "owner evidence", 32768);
-  return { turnId: row.turnId, text: row.text };
+  if(interpreted&&row.provenance!=='model_interpretation')throw Error('Invalid evidence provenance');
+  return { turnId: row.turnId, text: row.text,...(interpreted?{provenance:'model_interpretation' as const}:{}) };
 }
 /** Validate JSONB before use; this checks integrity, not transcript authenticity.
  * The store must separately bind persisted state to its trusted source/receipt. */
@@ -218,7 +222,8 @@ export function parseOnboardingAgenda(value: unknown, expectedBinding: AgendaBin
     let previousIndex = -1;
     for (const turn of evidence) {
       const turnIndex = turnIndexes.get(turn.turnId);
-      if (turnIndex === undefined || turnIndex <= previousIndex || ownerTurns[turnIndex].text !== turn.text) throw new Error("Invalid item evidence linkage or order");
+      if (turnIndex === undefined || turnIndex <= previousIndex || ownerTurns[turnIndex].text !== turn.text
+        ||ownerTurns[turnIndex].provenance!==turn.provenance) throw new Error("Invalid item evidence linkage or order");
       previousIndex = turnIndex;
     }
     if (row.answerRevision + row.clarificationCount > evidence.length) throw new Error("Item counters lack evidence");
@@ -253,6 +258,7 @@ export function parseOnboardingAgenda(value: unknown, expectedBinding: AgendaBin
 export function websiteTerritoryConfirmation(agenda: OnboardingAgenda): string {
   const fallback = "Obrigado, registrei sua resposta. ";
   const latest = agenda.ownerTurns.at(-1);
+  if(latest?.provenance==='model_interpretation')return fallback;
   if (!latest || !agenda.items.some(item => item.coverageRefs.includes("area.coverage") &&
     ["answered", "corrected"].includes(item.status) && item.answerRevision > 0 &&
     item.evidence.at(-1)?.turnId === latest.turnId && item.evidence.at(-1)?.text === latest.text)) return fallback;
@@ -295,9 +301,10 @@ export function applyVerifiedOwnerTurn(agenda: OnboardingAgenda, event: Verified
   if (event.type !== "verified_owner_turn" || bindingKeys.some(k => agenda.binding[k] !== event.binding[k])) throw new Error("Owner turn binding mismatch");
   nonblank(event.turnId, "turnId");
   nonblank(event.text, "owner evidence", 32768);
+  if(event.provenance!==undefined&&event.provenance!=='model_interpretation')throw Error('Invalid evidence provenance');
   const previous = agenda.ownerTurns.find(t => t.turnId === event.turnId);
   if (previous) {
-    if (previous.text !== event.text) throw new Error("Conflicting owner turn evidence");
+    if (previous.text !== event.text||previous.provenance!==event.provenance) throw new Error("Conflicting owner turn evidence");
     return { agenda, action: null, accepted: true, replayed: true };
   }
   const proposal = event.proposal;
@@ -355,7 +362,8 @@ export function applyVerifiedOwnerTurn(agenda: OnboardingAgenda, event: Verified
     else if (proposal.kind === "not_applicable") updates.set(current.id, { status: "not_applicable", answerRevision: current.answerRevision + 1 });
     else return reject("unsupported_proposal");
   }
-  const evidence = { turnId: event.turnId, text: event.text };
+  const evidence:OwnerTurnEvidence = { turnId: event.turnId, text: event.text,
+    ...(event.provenance?{provenance:event.provenance}:{}) };
   const updatedItem = (item: AgendaItem): AgendaItem => updates.has(item.id) ? { ...item, ...updates.get(item.id), evidence: [...item.evidence, evidence] } : item;
   const next = freezeAgenda({ ...agenda, revision: agenda.revision + 1, ownerTurns: [...agenda.ownerTurns, evidence],
     items: agenda.items.map(updatedItem), candidateOverrides: agenda.candidateContext.filter(context => overrides.has(context.id)).map(context => updatedItem(overrides.get(context.id)!)) });

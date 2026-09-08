@@ -170,7 +170,11 @@ export function generateWebsiteSummaryParts(input: {
     if (!selected.length) continue;
     paragraphs.push(`${section.title}. As palavras abaixo são evidência do que foi informado; a materialização de regras ainda exige validação e aprovação próprias.`);
     for (const group of selected) {
-      paragraphs.push(`Perguntas abrangidas por este mesmo depoimento:\n${questionList(group.items)}\nResposta literal do dono: “${group.evidence.text}”`);
+      const statement=group.evidence.provenance==='model_interpretation'
+        ?`Interpretação do modelo a partir do áudio: ${group.evidence.text}`
+        :`Resposta literal do dono: “${group.evidence.text}”`;
+      const heading=group.evidence.provenance==='model_interpretation'?'Perguntas abrangidas por este registro:':'Perguntas abrangidas por este mesmo depoimento:';
+      paragraphs.push(`${heading}\n${questionList(group.items)}\n${statement}`);
       quoted.add(group.evidence.turnId);
     }
   }
@@ -183,7 +187,9 @@ export function generateWebsiteSummaryParts(input: {
     for (const group of historical) {
       paragraphs.push(`Perguntas com registro anterior substituído:\n${questionList(group.items)}\n${quoted.has(group.evidence.turnId)
         ? "Depoimento já citado para outras perguntas; foi substituído somente para as perguntas acima."
-        : `Registro literal anterior, apenas histórico: “${group.evidence.text}”`}`);
+        : group.evidence.provenance==='model_interpretation'
+          ? `Interpretação anterior do modelo, apenas histórica: ${group.evidence.text}`
+          : `Registro literal anterior, apenas histórico: “${group.evidence.text}”`}`);
       quoted.add(group.evidence.turnId);
     }
   }

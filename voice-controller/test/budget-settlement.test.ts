@@ -22,12 +22,12 @@ const TENANT = {
 };
 
 const { config } = configModule;
-const STREAM_CALL='11111111-1111-4111-8111-111111111119';
-const streamOptions=(callId=STREAM_CALL)=>({browserRequestId:callId.replace(/^11111111/,'44444444'),requestedCallId:callId,openingModeRequested:'realtime_stream_v1' as const,onboardingProtocolVersion:4 as const});
+const NATIVE_CALL='11111111-1111-4111-8111-111111111119';
+const nativeOptions=(callId=NATIVE_CALL)=>({browserRequestId:callId.replace(/^11111111/,'44444444'),requestedCallId:callId,openingModeRequested:'realtime_native_v1' as const,onboardingProtocolVersion:5 as const});
 const {tenant_id:_fixtureTenant,...draftReadback}=websiteFixture.draft_row;
-let sourceError:{message:string;code?:string}|null=null,claimError:{message:string;code?:string}|null=null;
-let sourceGate:Promise<void>|null=null,claimGate:Promise<void>|null=null,resumeSource:StoredWebsiteInterview|null=null,lastPrepared:StoredWebsiteInterview|null=null;
-let claimReached=false;
+let sourceError:{message:string;code?:string}|null=null,preparationError:{message:string;code?:string}|null=null;
+let sourceGate:Promise<void>|null=null,preparationGate:Promise<void>|null=null,resumeSource:StoredWebsiteInterview|null=null,lastPrepared:StoredWebsiteInterview|null=null;
+let preparationReached=false;
 const cleanupControls=new Set<{cancel(reason:string):Promise<void>}>(),pendingStarts=new Set<Promise<unknown>>(),releases=new Set<()=>void>();
 function startSession(...args:Parameters<typeof startSessionImplementation>){
   const registered=args[5];args[5]=control=>{cleanupControls.add(control);registered?.(control);};
@@ -157,7 +157,7 @@ function client() {
       if (name === "settle_call_budget") {
         return Promise.resolve({ data: "reservation-1", error: null });
       }
-      if(['resolve_prepared_website_source','initialize_website_interview','attach_website_interview','claim_website_interview_stream'].includes(name)){
+      if(['resolve_prepared_website_source','initialize_website_interview','attach_website_interview'].includes(name)){
         if(args.p_owner!==TENANT.owner_user_id||typeof args.p_call!=='string'||typeof args.p_request!=='string')return{data:null,error:{code:'42501',message:'interview_call_not_owner_bound'}};
         if(name==='resolve_prepared_website_source'){
           if(sourceGate)await sourceGate;if(sourceError)return{data:null,error:sourceError};
@@ -165,15 +165,16 @@ function client() {
             sourceResultId:draftReadback.draft.source_result_id,sourceResultHash:draftReadback.draft.source_result_hash,draft_readback:draftReadback,
             resume:resumeSource?{interviewId:resumeSource.agenda.binding.interviewId,priorCallId:resumeSource.agenda.binding.callId}:null},error:null};
         }
-        if(name==='initialize_website_interview'){lastPrepared=storedAgenda(args.p_agenda);return{data:lastPrepared,error:null};}
+        if(preparationError)return{data:null,error:preparationError};
+        if(name==='initialize_website_interview'){
+          lastPrepared=storedAgenda(args.p_agenda);preparationReached=true;if(preparationGate)await preparationGate;
+          return{data:lastPrepared,error:null};
+        }
         if(name==='attach_website_interview'){
           if(!resumeSource||args.p_interview!==resumeSource.agenda.binding.interviewId||args.p_prior_call!==resumeSource.agenda.binding.callId)return{data:null,error:{message:'interview_resume_source_changed'}};
-          const agenda=structuredClone(resumeSource.agenda);agenda.binding.callId=String(args.p_call);lastPrepared=storedAgenda(agenda,resumeSource.storeVersion+1);return{data:lastPrepared,error:null};
+          const agenda=structuredClone(resumeSource.agenda);agenda.binding.callId=String(args.p_call);lastPrepared=storedAgenda(agenda,resumeSource.storeVersion+1);
+          preparationReached=true;if(preparationGate)await preparationGate;return{data:lastPrepared,error:null};
         }
-        claimReached=true;if(claimGate)await claimGate;if(claimError)return{data:null,error:claimError};
-        const action=args.p_action as any;
-        if(action.callId!==args.p_call||action.sourceDigest!==lastPrepared?.digest)return{data:null,error:{message:'interview_speech_binding_invalid'}};
-        return{data:{schema:'onboarding.stream.v1',action,dispatchId:'77777777-7777-4777-8777-777777777777',receiptId:'88888888-8888-4888-8888-888888888888'},error:null};
       }
       if (name === "begin_provider_termination_attempt") {
         const callId = String(args.p_call_id);
@@ -218,7 +219,7 @@ beforeEach(() => {
   terminalWriteError = false;
   identityResponseGate = terminalResponseGate = null;
   heldResponseReached = false;
-  sourceError=claimError=null;sourceGate=claimGate=null;resumeSource=lastPrepared=null;claimReached=false;
+  sourceError=preparationError=null;sourceGate=preparationGate=null;resumeSource=lastPrepared=null;preparationReached=false;
   cleanupControls.clear();pendingStarts.clear();releases.clear();
   invalidateTenant("rocha-plumbing");
   _setClient(client());
@@ -230,6 +231,7 @@ afterEach(async () => {
   for(const control of cleanupControls)await control.cancel('isolated_budget_fixture_cleanup');
   await Promise.allSettled([...pendingStarts]);
   expect(fetchUrls.some(url=>url.includes('/audio/speech'))).toBe(false);
+  expect(rpcCalls.some(call=>['claim_website_interview_speech','claim_website_interview_stream','complete_website_interview_speech','prepare_website_interview_summary'].includes(call.name))).toBe(false);
   config.openaiKey = originalOpenAiKey;
   config.sessionCostCeilingUsd = originalCeiling;
   (config as any).realtimeCreateTimeoutMs = originalProviderCreateTimeoutMs;
@@ -296,7 +298,7 @@ describe("session budget lifecycle", () => {
     };
     let cleanup: {cancel(reason:string):Promise<void>} | null=null;
     const pending=startSession(TENANT.owner_user_id,"onboarding","test-sdp",undefined,TENANT.id,control=>{cleanup=control;},
-      streamOptions());
+      nativeOptions());
     const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
     await until(()=>identityStarted,"provider identity write");
     await cleanup!.cancel("late_guard_cancel");
@@ -313,7 +315,7 @@ describe("session budget lifecycle", () => {
   });
 
   for (const held of ["provider identity", "terminal state"] as const) {
-    test(`stream cancellation hangs up a known provider while the ${held} response remains held`, async () => {
+    test(`native cancellation hangs up a known provider while the ${held} response remains held`, async () => {
       config.openaiKey = "synthetic-openai-key";
       const gate=heldGate();
       if(held==='provider identity')identityResponseGate=gate.promise;
@@ -323,7 +325,7 @@ describe("session budget lifecycle", () => {
         if(!url.endsWith('/v1/realtime/calls'))throw new Error('TTS forbidden');
         return new Response('answer-sdp',{status:200,headers:{Location:'/v1/realtime/calls/rtc-held-receipt'}});};
       let cleanup:{cancel(reason:string):Promise<void>}|null=null;
-      const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},streamOptions());
+      const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},nativeOptions());
       const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
       try{
         await until(()=>heldResponseReached,'held cleanup receipt');
@@ -365,17 +367,17 @@ describe("session budget lifecycle", () => {
     const trace = createVoiceStartupTrace(scope, { now: () => now, write: (event) => { events.push(event); } });
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
-    const audio = trace.measure("opening_audio", () => held);
+    const preparation = trace.measure("website_context", () => held);
     now = 102;
     await trace.measure("provider_create", () => { now = 105; });
     now = 110;
     release();
-    await audio;
+    await preparation;
     expect(events).toEqual([
       { evt: "voice.startup.stage", timing_version: 1, trace_scope: "session", request_id: scope.requestId, call_id: scope.callId,
         stage: "provider_create", outcome: "ok", stage_start_ms: 2, duration_ms: 3, elapsed_ms: 5 },
       { evt: "voice.startup.stage", timing_version: 1, trace_scope: "session", request_id: scope.requestId, call_id: scope.callId,
-        stage: "opening_audio", outcome: "ok", stage_start_ms: 0, duration_ms: 10, elapsed_ms: 10 },
+        stage: "website_context", outcome: "ok", stage_start_ms: 0, duration_ms: 10, elapsed_ms: 10 },
     ]);
     await expect(trace.measure("provider_identity", () => {
       throw new Error("synthetic-secret private transcript SDP");
@@ -386,42 +388,43 @@ describe("session budget lifecycle", () => {
     expect(await brokenLogger.measure("provider_identity", () => "preserved")).toBe("preserved");
   });
 
-  test("stream authorization finishes before provider creation and never generates an MP3", async () => {
+  test("persisted preparation finishes before provider creation and never generates an MP3", async () => {
     config.openaiKey='synthetic-openai-key';globalThis.WebSocket=AutoOpenWebSocket as any;
-    const gate=heldGate();claimGate=gate.promise;let published=false;
+    const gate=heldGate();preparationGate=gate.promise;let published=false;
     globalThis.fetch=async input=>{const url=String(input);fetchUrls.push(url);if(url.endsWith('/hangup'))return new Response(null,{status:200});
       if(!url.endsWith('/v1/realtime/calls'))throw new Error('TTS forbidden');
       return new Response('answer-sdp',{status:200,headers:{Location:'/v1/realtime/calls/rtc-stream-opening'}});};
-    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,streamOptions()).then(result=>{published=true;return result;});
+    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,nativeOptions()).then(result=>{published=true;return result;});
     pending.catch(()=>{});
     try{
-      await until(()=>claimReached,'stream claim');
-      if(process.env.LIGOU_BUDGET_FORCE_CLAIM_FAILURE==='1')throw new Error('intentional held-claim teardown probe');
+      await until(()=>preparationReached,'persisted preparation');
+      if(process.env.LIGOU_BUDGET_FORCE_PREPARATION_FAILURE==='1')throw new Error('intentional held-preparation teardown probe');
       expect(providerCreationRequests()).toHaveLength(0);expect(published).toBe(false);
       gate.release();const result=await pending;
-      expect(result.sdp).toBe('answer-sdp');expect(result.opening_payload).toMatchObject({version:4,stream:{schema:'onboarding.stream.v1'}});
+      expect(result.sdp).toBe('answer-sdp');expect(result.opening_payload).toEqual({version:5,native:{callId:NATIVE_CALL,interviewId:NATIVE_CALL,revision:0,sourceDigest:lastPrepared!.digest}});
+      expect(rpcCalls.some(call=>call.name==='claim_website_interview_stream'||call.name==='claim_website_interview_speech')).toBe(false);
       expect(providerCreationRequests()).toHaveLength(1);expect(fetchUrls.some(url=>url.includes('/audio/speech'))).toBe(false);
-      expect(liveSessions.get(STREAM_CALL)?.externalCostUsd).toBe(0);
+      expect(liveSessions.get(NATIVE_CALL)?.externalCostUsd).toBe(0);
     }finally{gate.release();}
   });
 
-  test('a failed assertion during a held stream claim tears down its isolated process',()=>{
+  test('a failed assertion during a held persisted preparation tears down its isolated process',()=>{
     const file=fileURLToPath(import.meta.url);
     let failure:any;
-    try{execFileSync(process.execPath,['test',file,'--test-name-pattern','stream authorization finishes before provider creation'],{
-      env:{...createUnitTestEnvironment(),LIGOU_BUDGET_FORCE_CLAIM_FAILURE:'1'},cwd:tmpdir(),encoding:'utf8',timeout:2000,stdio:['ignore','pipe','pipe'],
+    try{execFileSync(process.execPath,['test',file,'--test-name-pattern','persisted preparation finishes before provider creation'],{
+      env:{...createUnitTestEnvironment(),LIGOU_BUDGET_FORCE_PREPARATION_FAILURE:'1'},cwd:tmpdir(),encoding:'utf8',timeout:2000,stdio:['ignore','pipe','pipe'],
     });}catch(error){failure=error;}
     expect(failure?.status).toBe(1);expect(failure?.signal).toBeNull();
-    expect(String(failure?.stderr)).toContain('intentional held-claim teardown probe');
+    expect(String(failure?.stderr)).toContain('intentional held-preparation teardown probe');
   });
 
-  test("a failed terminal write still terminates an accepted stream provider and defers budget settlement", async () => {
+  test("a failed terminal write still terminates an accepted native provider and defers budget settlement", async () => {
     config.openaiKey='synthetic-openai-key';terminalWriteError=true;(config as any).sidebandOpenTimeoutMs=20;
     globalThis.WebSocket=class {addEventListener(){}send(){}close(){}} as any;
     globalThis.fetch=async input=>{const url=String(input);fetchUrls.push(url);if(url.endsWith('/hangup'))return new Response(null,{status:200});
       if(!url.endsWith('/v1/realtime/calls'))throw new Error('TTS forbidden');
       return new Response('answer-sdp',{status:200,headers:{Location:'/v1/realtime/calls/rtc-terminal-write-failed'}});};
-    await expect(startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,streamOptions())).rejects.toMatchObject({message:'sideband_open_timeout'});
+    await expect(startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,nativeOptions())).rejects.toMatchObject({message:'sideband_open_timeout'});
     expect(fetchUrls.filter(url=>url.endsWith('/hangup'))).toEqual(['https://api.openai.com/v1/realtime/calls/rtc-terminal-write-failed/hangup']);
     expect(rpcCalls.filter(call=>call.name==='settle_call_budget')).toHaveLength(0);
     expect(budgetUpdates).toContainEqual(expect.objectContaining({reconcile_last_error:'provider_usage_unresolved'}));
@@ -439,7 +442,8 @@ describe("session budget lifecycle", () => {
         browserRequestId: "stale-provider-request",
         openingModeRequested: "provider_model_v1" as const,
       },
-      {...streamOptions(),openingModeRequested:'application_tts_v1' as const,onboardingProtocolVersion:3 as const},
+      {...nativeOptions(),openingModeRequested:'application_tts_v1' as const,onboardingProtocolVersion:3 as const},
+      {...nativeOptions(),openingModeRequested:'realtime_stream_v1' as const,onboardingProtocolVersion:4 as const},
     ]) {
       invalidateTenant("rocha-plumbing");
       await expect(startSession(
@@ -502,7 +506,7 @@ describe("session budget lifecycle", () => {
       undefined,
       TENANT.id,
       undefined,
-      streamOptions(),
+      nativeOptions(),
     )).rejects.toMatchObject({ message: "budget_exceeded", status: 402 });
 
     expect(rpcCalls.find((call) => call.name === "reserve_call_budget")?.args)
@@ -566,33 +570,36 @@ describe("session budget lifecycle", () => {
 
   const providerCreationRequests = () => fetchUrls.filter((url) => url.endsWith("/v1/realtime/calls"));
 
-  test("stream start reserves and claims current website context before Realtime; definitive rejection settles zero", async () => {
+  test("native start reserves and prepares current website context before Realtime; definitive rejection settles zero", async () => {
     config.openaiKey='synthetic-openai-key';
     globalThis.fetch=async(input,init)=>{const url=String(input);fetchUrls.push(url);
       if(!url.endsWith('/v1/realtime/calls'))throw new Error('No TTS or other provider');
-      expect(rpcCalls.map(call=>call.name).slice(0,4)).toEqual(['reserve_call_budget','resolve_prepared_website_source','initialize_website_interview','claim_website_interview_stream']);
+      expect(rpcCalls.map(call=>call.name)).toEqual(['reserve_call_budget','resolve_prepared_website_source','initialize_website_interview']);
       const session=JSON.parse(String((init?.body as FormData).get('session')));
-      expect(session.output_modalities).toEqual(['text']);expect(session.tools).toEqual([]);expect(session.audio.input.turn_detection.create_response).toBe(false);
+      expect(session.output_modalities).toEqual(['audio']);expect(session.tool_choice).toBe('auto');
+      expect(session.tools.map((tool:any)=>tool.name)).toContain('submit_website_interview_proposal');
+      expect(session.audio.input.turn_detection.create_response).toBe(true);
+      expect(session.instructions).toContain(lastPrepared!.nextAction.questionPt);
       return new Response('model rejected',{status:400});};
-    await expect(startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,streamOptions())).rejects.toMatchObject({message:'realtime_unavailable',status:502});
+    await expect(startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,nativeOptions())).rejects.toMatchObject({message:'realtime_unavailable',status:502});
     expect(providerCreationRequests()).toHaveLength(2);expect(fetchUrls.some(url=>url.includes('/audio/speech'))).toBe(false);
     expect(rpcCalls.find(call=>call.name==='settle_call_budget')?.args).toMatchObject({p_actual_cost:0,p_minutes:0,p_outcome:'startup_error'});
     expect(callUpdates).toContainEqual(expect.objectContaining({provider_usage_state:'not_applicable',cost_estimate_usd:0}));
     expect(lastPrepared?.agenda.items).toHaveLength(114);
   });
 
-  for(const boundary of ['source','claim'] as const)test(`failed website ${boundary} settles before every provider and cannot fall through`,async()=>{
+  for(const boundary of ['source','preparation'] as const)test(`failed website ${boundary} settles before every provider and cannot fall through`,async()=>{
     config.openaiKey='synthetic-openai-key';
     if(boundary==='source')sourceError={code:'55000',message:'interview_resume_source_not_settled'};
-    else claimError={code:'42501',message:'interview_stream_claim_unproven'};
+    else preparationError={code:'42501',message:'interview_preparation_unproven'};
     globalThis.fetch=async input=>{fetchUrls.push(String(input));throw new Error('Provider forbidden');};
-    await expect(startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,streamOptions())).rejects.toMatchObject({status:503});
+    await expect(startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,nativeOptions())).rejects.toMatchObject({status:503});
     expect(fetchUrls).toEqual([]);expect(rpcCalls.some(call=>call.name==='initialize_onboarding_resume')).toBe(false);
     expect(rpcCalls.filter(call=>call.name==='settle_call_budget')).toHaveLength(1);
     expect(rpcCalls.find(call=>call.name==='settle_call_budget')?.args.p_actual_cost).toBe(0);
   });
 
-  test("successful stream resume binds the persisted next question and raw answers to sideband custody",async()=>{
+  test("successful native resume binds the persisted next question and raw answers to sideband custody",async()=>{
     config.openaiKey='synthetic-openai-key';(config as any).voice='cedar';globalThis.WebSocket=AutoOpenWebSocket as any;
     resumeSource=savedWebsiteSource('33333333-3333-4333-8333-333333333333',true);const original=structuredClone(resumeSource);
     let realtimeSession:any;
@@ -600,43 +607,45 @@ describe("session budget lifecycle", () => {
       if(!url.endsWith('/v1/realtime/calls'))throw new Error('TTS forbidden');
       realtimeSession=JSON.parse(String((init?.body as FormData).get('session')));
       return new Response('answer-sdp',{status:200,headers:{Location:'/v1/realtime/calls/rtc-resumed-stream'}});};
-    const result=await startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,streamOptions());
-    expect(result.opening_payload).toMatchObject({version:4,stream:{schema:'onboarding.stream.v1',action:{callId:STREAM_CALL,revision:1}}});
-    expect((result.opening_payload as any).stream.action.text).toEndWith(lastPrepared!.nextAction.spokenPt);
-    expect(realtimeSession.audio.output.voice).toBe('ash');expect(realtimeSession.tools).toEqual([]);
-    expect(liveSessions.get(STREAM_CALL)?.websiteInterviewRuntime?.state.stored.agenda.ownerTurns).toEqual(original.agenda.ownerTurns);
-    expect(liveSessions.get(STREAM_CALL)?.externalCostUsd).toBe(0);expect(resumeSource).toEqual(original);
+    const result=await startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,nativeOptions());
+    expect(result.opening_payload).toEqual({version:5,native:{callId:NATIVE_CALL,interviewId:original.agenda.binding.interviewId,revision:1,sourceDigest:lastPrepared!.digest}});
+    expect(realtimeSession.instructions).toContain(lastPrepared!.nextAction.questionPt);
+    expect(realtimeSession.instructions).toContain(original.agenda.ownerTurns[0].text);
+    expect(realtimeSession.audio.output.voice).toBe('ash');expect(realtimeSession.output_modalities).toEqual(['audio']);
+    expect(realtimeSession.tools.map((tool:any)=>tool.name)).toContain('submit_website_interview_proposal');
+    expect(liveSessions.get(NATIVE_CALL)?.websiteInterviewRuntime?.state.stored.agenda.ownerTurns).toEqual(original.agenda.ownerTurns);
+    expect(liveSessions.get(NATIVE_CALL)?.externalCostUsd).toBe(0);expect(resumeSource).toEqual(original);
     expect(rpcCalls.filter(call=>call.name==='attach_website_interview')).toHaveLength(1);
     expect(rpcCalls.some(call=>call.name==='initialize_website_interview'||call.name==='initialize_onboarding_resume')).toBe(false);
     expect(fetchUrls.some(url=>url.includes('/audio/speech'))).toBe(false);
   });
 
-  for(const boundary of ['source','claim'] as const)test(`cancellation while website ${boundary} is held creates no provider session or TTS charge`,async()=>{
-    config.openaiKey='synthetic-openai-key';const gate=heldGate();if(boundary==='source')sourceGate=gate.promise;else claimGate=gate.promise;
+  for(const boundary of ['source','preparation'] as const)test(`cancellation while website ${boundary} is held creates no provider session or TTS charge`,async()=>{
+    config.openaiKey='synthetic-openai-key';const gate=heldGate();if(boundary==='source')sourceGate=gate.promise;else preparationGate=gate.promise;
     let cleanup:{cancel(reason:string):Promise<void>}|null=null;
     globalThis.fetch=async input=>{fetchUrls.push(String(input));throw new Error('Provider forbidden');};
-    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},streamOptions());
+    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},nativeOptions());
     const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
     try{
-      await until(()=>boundary==='source'?rpcCalls.some(call=>call.name==='resolve_prepared_website_source'):claimReached,'held website boundary');
+      await until(()=>boundary==='source'?rpcCalls.some(call=>call.name==='resolve_prepared_website_source'):preparationReached,'held website boundary');
       await cleanup!.cancel('cancel_held_website');gate.release();
       expect(await outcome).toBe('browser_request_cancelled');expect(fetchUrls).toEqual([]);
       expect(rpcCalls.find(call=>call.name==='settle_call_budget')?.args).toMatchObject({p_actual_cost:0,p_minutes:0});
     }finally{gate.release();await outcome;}
   });
 
-  test("abandoned stream preparation resumes the same finite question in a new call without resetting its source",async()=>{
-    config.openaiKey='synthetic-openai-key';const gate=heldGate();claimGate=gate.promise;
+  test("abandoned native preparation resumes the same finite question in a new call without resetting its source",async()=>{
+    config.openaiKey='synthetic-openai-key';const gate=heldGate();preparationGate=gate.promise;
     const abandonedCall='11111111-1111-4111-8111-111111111118',recoveredCall='11111111-1111-4111-8111-111111111117';
     let cleanup:{cancel(reason:string):Promise<void>}|null=null;
     globalThis.fetch=async input=>{fetchUrls.push(String(input));return new Response('rejected',{status:400});};
-    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},streamOptions(abandonedCall));
+    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},nativeOptions(abandonedCall));
     const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
     try{
-      await until(()=>claimReached,'abandoned stream claim');const before=structuredClone(lastPrepared!);
+      await until(()=>preparationReached,'abandoned persisted preparation');const before=structuredClone(lastPrepared!);
       await cleanup!.cancel('cancel_prepared_stream');gate.release();expect(await outcome).toBe('browser_request_cancelled');
-      resumeSource=before;claimGate=null;claimReached=false;durableProviderIdentity=null;
-      await expect(startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,streamOptions(recoveredCall))).rejects.toMatchObject({message:'realtime_unavailable'});
+      resumeSource=before;preparationGate=null;preparationReached=false;durableProviderIdentity=null;
+      await expect(startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,nativeOptions(recoveredCall))).rejects.toMatchObject({message:'realtime_unavailable'});
       expect(lastPrepared!.agenda.binding).toMatchObject({interviewId:abandonedCall,callId:recoveredCall,draftId:before.agenda.binding.draftId});
       expect(lastPrepared!.nextAction.questionPt).toBe(before.nextAction.questionPt);expect(lastPrepared!.agenda.items).toEqual(before.agenda.items);
       expect(rpcCalls.filter(call=>call.name==='initialize_website_interview')).toHaveLength(1);expect(rpcCalls.filter(call=>call.name==='attach_website_interview')).toHaveLength(1);
@@ -644,9 +653,9 @@ describe("session budget lifecycle", () => {
     }finally{gate.release();await outcome;}
   });
 
-  test("cancellation during held budget reservation prevents source, stream and provider work",async()=>{
+  test("cancellation during held budget reservation prevents source, preparation and provider work",async()=>{
     config.openaiKey='synthetic-openai-key';const gate=heldGate();reserveGate=gate.promise;let cleanup:{cancel(reason:string):Promise<void>}|null=null;
-    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},streamOptions());
+    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},nativeOptions());
     const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
     try{
       await until(()=>cleanup&&rpcCalls.some(call=>call.name==='reserve_call_budget'),'reservation');const cancelled=cleanup!.cancel('cancel_held_reserve');
@@ -656,13 +665,13 @@ describe("session budget lifecycle", () => {
     }finally{gate.release();await outcome;}
   });
 
-  test("stream cancellation joins a late accepted Realtime call and hangs up exactly once with no invented TTS cost",async()=>{
+  test("native cancellation joins a late accepted Realtime call and hangs up exactly once with no invented TTS cost",async()=>{
     config.openaiKey='synthetic-openai-key';let releaseProvider!:(response:Response)=>void,providerSignal:AbortSignal|null=null;
     globalThis.fetch=async(input,init)=>{const url=String(input);fetchUrls.push(url);if(url.endsWith('/hangup'))return new Response(null,{status:200});
       if(!url.endsWith('/v1/realtime/calls'))throw new Error('TTS forbidden');providerSignal=init?.signal as AbortSignal;
       return new Promise<Response>(resolve=>{releaseProvider=resolve;releases.add(()=>resolve(new Response('late cleanup rejection',{status:400})));});};
     let cleanup:{cancel(reason:string):Promise<void>}|null=null;
-    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},streamOptions());const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
+    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},nativeOptions());const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
     await until(()=>releaseProvider,'provider POST');let finished=false;const cancelled=cleanup!.cancel('cancel_late_provider').then(()=>{finished=true;});
     await new Promise(resolve=>setImmediate(resolve));expect(finished).toBe(false);
     releaseProvider(new Response('late-answer',{status:200,headers:{Location:'/v1/realtime/calls/rtc-late-stream'}}));await cancelled;
@@ -678,7 +687,7 @@ describe("session budget lifecycle", () => {
       const body=new ReadableStream<Uint8Array>({start(controller){bodyStarted=true;init?.signal?.addEventListener('abort',()=>{aborted=true;controller.error(new DOMException('aborted','AbortError'));});}});
       return new Response(body,{status:200,headers:{Location:'/v1/realtime/calls/rtc-body-cancel'}});};
     let cleanup:{cancel(reason:string):Promise<void>}|null=null;
-    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},streamOptions());const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
+    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},nativeOptions());const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
     await until(()=>bodyStarted,'SDP body');await cleanup!.cancel('cancel_sdp_body');expect(await outcome).toBe('browser_request_cancelled');
     expect(aborted).toBe(true);expect(providerCreationRequests()).toHaveLength(1);expect(fetchUrls.filter(url=>url.endsWith('/hangup'))).toHaveLength(1);
     assertUnknownProviderRemainsDiscoverable();
@@ -686,7 +695,7 @@ describe("session budget lifecycle", () => {
 
   test("cancellation while the provider marker is held settles zero without a provider POST",async()=>{
     config.openaiKey='synthetic-openai-key';const gate=heldGate();providerMarkerGate=gate.promise;let cleanup:{cancel(reason:string):Promise<void>}|null=null;
-    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},streamOptions());const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
+    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},nativeOptions());const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
     try{
       await until(()=>callUpdates.some(row=>row.provider_termination_reason==='provider_create_inflight'),'provider marker');
       await cleanup!.cancel('cancel_provider_marker');gate.release();expect(await outcome).toBe('browser_request_cancelled');expect(fetchUrls).toEqual([]);
@@ -699,25 +708,25 @@ describe("session budget lifecycle", () => {
     globalThis.fetch=async(input,init)=>{const url=String(input);fetchUrls.push(url);if(!url.endsWith('/v1/realtime/calls'))throw new Error('unexpected provider operation');
       providerSignal=init?.signal as AbortSignal;return new Promise<Response>((_resolve,reject)=>{providerSignal!.addEventListener('abort',()=>reject(new DOMException('aborted','AbortError')));});};
     let cleanup:{cancel(reason:string):Promise<void>}|null=null;
-    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},streamOptions());const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
+    const pending=startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},nativeOptions());const outcome=pending.then(()=>"ready",(error:Error)=>error.message);
     await until(()=>providerSignal,'abortable provider POST');await cleanup!.cancel('cancel_provider_post');
     expect(await outcome).toBe('browser_request_cancelled');expect(providerSignal?.aborted).toBe(true);expect(providerCreationRequests()).toHaveLength(1);
     assertUnknownProviderRemainsDiscoverable();
   });
 
-  test("unknown stream provider outcome remains discoverable with no TTS charge or duplicate creation",async()=>{
+  test("unknown native provider outcome remains discoverable with no TTS charge or duplicate creation",async()=>{
     config.openaiKey='synthetic-openai-key';globalThis.fetch=async input=>{fetchUrls.push(String(input));throw new TypeError('synthetic Realtime transport loss');};
-    await expect(startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,streamOptions())).rejects.toMatchObject({message:'provider_outcome_unknown'});
+    await expect(startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,undefined,nativeOptions())).rejects.toMatchObject({message:'provider_outcome_unknown'});
     expect(providerCreationRequests()).toHaveLength(1);expect(fetchUrls.some(url=>url.includes('/audio/speech'))).toBe(false);assertUnknownProviderRemainsDiscoverable();
   });
 
-  test("post-start stream cleanup preserves unknown Realtime usage with zero external TTS cost",async()=>{
+  test("post-start native cleanup preserves unknown Realtime usage with zero external TTS cost",async()=>{
     config.openaiKey='synthetic-openai-key';globalThis.WebSocket=AutoOpenWebSocket as any;
     globalThis.fetch=async input=>{const url=String(input);fetchUrls.push(url);if(url.endsWith('/hangup'))return new Response(null,{status:200});
       if(!url.endsWith('/v1/realtime/calls'))throw new Error('TTS forbidden');return new Response('answer-sdp',{status:200,headers:{Location:'/v1/realtime/calls/rtc-stream-cleanup'}});};
     let cleanup:{cancel(reason:string):Promise<void>}|null=null;
-    await startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},streamOptions());
-    expect(liveSessions.get(STREAM_CALL)?.externalCostUsd).toBe(0);await cleanup!.cancel('ready_publication_unknown');
+    await startSession(TENANT.owner_user_id,'onboarding','test-sdp',undefined,TENANT.id,c=>{cleanup=c;},nativeOptions());
+    expect(liveSessions.get(NATIVE_CALL)?.externalCostUsd).toBe(0);await cleanup!.cancel('ready_publication_unknown');
     expect(fetchUrls.some(url=>url.includes('/audio/speech'))).toBe(false);assertUnknownProviderRemainsDiscoverable();
   });
 
@@ -1001,7 +1010,7 @@ describe("session budget lifecycle", () => {
     const pending = startSession(
       "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
       (control) => { cleanup = control; },
-      streamOptions(),
+      nativeOptions(),
     ).then((result) => { settled = true; return result; });
     pending.catch(()=>{});releases.add(()=>DelayedOpenSocket.instance?.emit("open"));
     await until(()=>DelayedOpenSocket.instance,"sideband socket construction");
@@ -1058,7 +1067,7 @@ describe("session budget lifecycle", () => {
     await expect(startSession(
       "22222222-2222-4222-8222-222222222222", "onboarding", "test-sdp", undefined, TENANT.id,
       undefined,
-      streamOptions(),
+      nativeOptions(),
     )).rejects.toMatchObject({
       message: "sideband_open_timeout",
       status: 502,

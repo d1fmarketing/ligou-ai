@@ -93,7 +93,7 @@ function rawReadyProof(value) {
 
 export function mapWebsiteSetupStatus(value) {
   const status = object(value, "website setup");
-  if(status.voice_protocol_version !== undefined && ![2,3,4].includes(status.voice_protocol_version))
+  if(status.voice_protocol_version !== undefined && ![2,3,4,5].includes(status.voice_protocol_version))
     throw new Error("website voice protocol inválido");
   if (status.schema_version !== "company_discovery.setup_status.v1" ||
       !STATES.has(status.state) ||
@@ -114,7 +114,7 @@ export function mapWebsiteSetupStatus(value) {
     throw new Error("ready proof fora do estado pronto");
   }
   const amendment=status.state==="onboarding_amendment_pending";
-  if(amendment && (![3,4].includes(status.voice_protocol_version) || status.amendment_pending!==true ||
+  if(amendment && (![3,4,5].includes(status.voice_protocol_version) || status.amendment_pending!==true ||
     typeof status.amendment_can_resume!=="boolean" || !UUID.test(status.amendment_request_receipt_id??"") || !UUID.test(status.voice_approval_receipt_id??"")))
     throw new Error("amendment proof ausente ou inválido");
   return Object.freeze({

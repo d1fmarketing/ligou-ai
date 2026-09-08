@@ -10,6 +10,8 @@ export interface StoredWebsiteInterview {
   agenda: OnboardingAgenda; revision: number; storeVersion: number; digest: string; receiptId: string;
   nextAction: AgendaAction; state: "unfinished" | "reviewing" | "closing" | "complete"; replayed: boolean;
 }
+export interface StoredNativeOwnerTurn extends StoredWebsiteInterview { operationReceiptId: string; operationRevision: number }
+export interface NativeOwnerTurnInput extends InterviewScope { providerItemId: string; proposal: AgendaProposal; interpretation: string; facts?: readonly Record<string, unknown>[] }
 type RpcResult = { data: unknown; error: { message?: string; code?: string } | null; status?: number };
 type RpcClient = { rpc(name: string, args: Record<string, unknown>): PromiseLike<RpcResult> & { abortSignal?(signal: AbortSignal): PromiseLike<RpcResult> } };
 const MAX_BYTES = 2 * 1024 * 1024;
@@ -56,15 +58,43 @@ function readback(value: unknown, callId: string): StoredWebsiteInterview {
   return { agenda, revision: agenda.revision, storeVersion: raw.storeVersion, digest: raw.digest, receiptId: raw.receiptId, nextAction, state: raw.state, replayed: raw.replayed === true };
 }
 export function createOnboardingAgendaStore(client: RpcClient) {
-  async function rpc(name: string, args: Record<string, unknown>, signal?: AbortSignal) {
+  async function rpc(name: string, args: Record<string, unknown>, signal?: AbortSignal, allowMissing=false) {
     signal?.throwIfAborted();
     const request = client.rpc(name, args);
     const result = await (signal && request.abortSignal ? request.abortSignal(signal) : request);
     if (result.error) throw Object.assign(new Error(result.error.message ?? "Interview persistence failed"), { code: result.error.code, status: result.status });
+    if(allowMissing && result.data===null)return null;
     if (!result.data) throw new Error("Interview persistence returned no proof");
     return result.data;
   }
+  function nativeArgs(input:NativeOwnerTurnInput) {
+    if(!input.providerItemId?.trim() || input.providerItemId.length>400 || typeof input.interpretation!=='string'
+      || !input.interpretation.trim() || input.interpretation.length>32768)throw new Error('Invalid native interpretation');
+    return{...scoped(input),p_item:input.providerItemId,p_interpretation:input.interpretation,p_proposal:input.proposal,p_facts:input.facts??[]};
+  }
+  function nativeReadback(value:unknown,input:NativeOwnerTurnInput):StoredNativeOwnerTurn {
+    const stored=readback(value,input.callId),raw=value as Record<string,unknown>;
+    const index=stored.agenda.ownerTurns.findIndex(t=>t.turnId===`${input.callId}:${input.providerItemId}`);
+    const turn=stored.agenda.ownerTurns[index];
+    if(!turn || turn.text!==input.interpretation || turn.provenance!=='model_interpretation'
+      || typeof raw.operationReceiptId!=='string' || !uuid.test(raw.operationReceiptId) || raw.operationRevision!==index+1)
+      throw new Error('Native operation proof mismatch');
+    return{...stored,operationReceiptId:raw.operationReceiptId,operationRevision:index+1};
+  }
   return {
+    async commitNativeOwnerTurn(input:NativeOwnerTurnInput&{expectedRevision:number;expectedStoreVersion:number;expectedDigest:string;agenda:OnboardingAgenda}):Promise<StoredNativeOwnerTurn> {
+      const args=nativeArgs(input),agenda=checkedAgenda(input.agenda);
+      const turn=agenda.ownerTurns.at(-1);
+      if(!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision<0 || !Number.isSafeInteger(input.expectedStoreVersion) || input.expectedStoreVersion<0
+        || !/^[a-f0-9]{64}$/.test(input.expectedDigest) || agenda.revision!==input.expectedRevision+1
+        || turn?.turnId!==`${input.callId}:${input.providerItemId}` || turn.text!==input.interpretation || turn.provenance!=='model_interpretation')
+        throw new Error('Native interpretation binding mismatch');
+      return nativeReadback(await rpc('commit_website_interview_native_turn',{...args,p_revision:input.expectedRevision,p_store_version:input.expectedStoreVersion,p_digest:input.expectedDigest,p_agenda:agenda},input.signal),input);
+    },
+    async replayNativeOwnerTurn(input:NativeOwnerTurnInput):Promise<StoredNativeOwnerTurn|null> {
+      const result=await rpc('replay_website_interview_native_turn',nativeArgs(input),input.signal,true);
+      return result===null?null:nativeReadback(result,input);
+    },
     async prepareFreshWebsiteInterview(input: FreshWebsiteInterviewPreparation) {
       if (![input.preparationId, input.ownerId, input.expectedTenantId, input.priorCallId, input.draftId, input.sourceResultId].every(id => uuid.test(id)) || !Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration < 0) throw new Error("Invalid interview preparation");
       return rpc("prepare_fresh_website_interview", { p_preparation: input.preparationId, p_owner: input.ownerId, p_expected_tenant: input.expectedTenantId, p_generation: input.expectedGeneration, p_prior_call: input.priorCallId, p_draft: input.draftId, p_draft_hash: input.draftHash, p_result: input.sourceResultId, p_result_hash: input.sourceResultHash });

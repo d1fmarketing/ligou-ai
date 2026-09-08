@@ -176,3 +176,114 @@ test('summary rechecks sample identity and rejects a changed early aligned times
  assert.equal(metrics.startToFirstActionableQuestionMs,null);
  assert.equal(metrics.audioTimingEvidence,null);
 });
+
+const NATIVE_CALL='11111111-1111-4111-8111-111111111111',NATIVE_INTERVIEW='22222222-2222-4222-8222-222222222222';
+async function nativeObserverSimulation(){
+ const origin='https://client-nine-taupe-24.vercel.app',listeners=new Map(),frames=new Map();let frame=0,amplitude=.2;
+ const track=()=>({readyState:'live',stop(){this.readyState='ended';}});
+ const stream=()=>({getTracks:()=>[track()],getAudioTracks:()=>[track()],clone:()=>stream()});
+ class Media extends EventTarget {muted=false;paused=false;volume=1;srcObject=stream();play(){return Promise.resolve();}}
+ class Peer extends EventTarget {connectionState='new';createDataChannel(){return new EventTarget();}close(){this.connectionState='closed';}}
+ class Context {state='running';resume(){return Promise.resolve();}close(){this.state='closed';return Promise.resolve();}
+  createAnalyser(){return{fftSize:512,getFloatTimeDomainData(a){a.fill(amplitude);}};}
+  createMediaStreamSource(){return{connect(node){return node;},disconnect(){}};}
+  createGain(){return{gain:{value:1},connect(node){return node;},disconnect(){}};}
+  createMediaStreamDestination(){return{stream:stream()};}}
+ class Recorder {static isTypeSupported(){return true;}state='inactive';start(){this.state='recording';}stop(){if(this.state==='inactive')return;this.state='inactive';this.ondataavailable?.({data:new Blob([new Uint8Array([1,2,3,4])])});void this.onstop?.();}}
+ const window={RTCPeerConnection:Peer,fetch:async()=>Response.json({call_id:NATIVE_CALL,model:'gpt-realtime-2.1',max_minutes:55,
+  onboarding_protocol_version:5,opening_mode_applied:'realtime_native_v1',opening_payload:{version:5,native:{callId:NATIVE_CALL,interviewId:NATIVE_INTERVIEW,revision:0,sourceDigest:'b'.repeat(64)}}}),addEventListener(name,fn){listeners.set(name,fn);}};
+ const document={createElement(){return new Media();},addEventListener(){},querySelector(){return null;}};
+ const raf=fn=>{const id=++frame;frames.set(id,setTimeout(()=>{frames.delete(id);fn();},8));return id;};
+ new Function('location','window','navigator','document','HTMLMediaElement','HTMLAudioElement','AudioContext','MediaRecorder','requestAnimationFrame','cancelAnimationFrame',
+  harness.buildBrowserHarnessSource({origin,isolatedTestOnly:true,recordTestAudio:true}))(
+    {origin,href:origin+'/dashboard/setup/website'},window,{mediaDevices:{}},document,Media,Media,Context,Recorder,raf,id=>{clearTimeout(frames.get(id));frames.delete(id);});
+ const audio=document.createElement('audio'),channel=new window.RTCPeerConnection().createDataChannel('test');
+ await window.fetch(origin+'/browser-session');await new Promise(r=>setTimeout(r,5));
+ const emit=event=>channel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(event)}));
+ const created=(responseId)=>emit({type:'response.created',response:{id:responseId,status:'in_progress',output_modalities:['audio']}});
+ const finished=(responseId,text='Oi, aqui é o Ligou. Quais cidades você atende?')=>{
+  emit({type:'response.done',response:{id:responseId,status:'completed',output:[{id:'item_'+responseId,type:'message',role:'assistant',status:'completed',content:[{type:'audio',transcript:text}]}]}});
+  emit({type:'output_audio_buffer.stopped',response_id:responseId,event_id:'stop_'+responseId});
+ };
+ return{window,audio,emit,created,finished,listeners,setAmplitude:v=>{amplitude=v;},cleanup:async()=>{await window.__voiceAcceptance.cleanup();for(const timer of frames.values())clearTimeout(timer);}};
+}
+
+test('native observer captures direct audio without selected speech and closes on actual local drain',async()=>{
+ const h=await nativeObserverSimulation();try{
+  h.created('native_1');h.emit({type:'output_audio_buffer.started',response_id:'native_1',event_id:'start_native_1'});
+  await new Promise(r=>setTimeout(r,20));h.setAmplitude(0);h.finished('native_1');
+  await new Promise(r=>setTimeout(r,165));const result=h.window.__voiceAcceptance.drain({includeRecordingBytes:true});
+  assert.equal(result.recordings.length,1);const recording=result.recordings[0];
+  assert.equal(recording.responseId,'native_1');assert.equal(recording.callId,NATIVE_CALL);assert.equal(recording.interviewId,NATIVE_INTERVIEW);
+  assert.equal(recording.captureEvidence,'actual_native_remote_stream');assert.equal(recording.nonzeroObserved,true);
+  assert.equal(recording.stopReason,'native_browser_drained');assert.equal(recording.providerTranscript,'Oi, aqui é o Ligou. Quais cidades você atende?');
+  assert.equal(Object.hasOwn(recording,'expectedText'),false);assert.equal(Object.hasOwn(recording,'actionId'),false);
+  assert.equal(recording.sha256,createHash('sha256').update(Buffer.from(recording.base64,'base64')).digest('hex'));
+  assert.equal(result.events.some(e=>e.event==='selected_speech'),false);assert.equal(h.audio.muted,false);
+ }finally{await h.cleanup();}
+});
+
+test('native observer preserves barge-in and cleared audio as partial recordings',async()=>{
+ const h=await nativeObserverSimulation();try{
+  h.created('partial_1');await new Promise(r=>setTimeout(r,15));h.emit({type:'input_audio_buffer.speech_started',item_id:'owner_1'});
+  await new Promise(r=>setTimeout(r,15));h.created('partial_2');await new Promise(r=>setTimeout(r,15));
+  h.emit({type:'output_audio_buffer.cleared',response_id:'partial_2',event_id:'clear_2'});await new Promise(r=>setTimeout(r,15));
+  const result=h.window.__voiceAcceptance.drain();assert.deepEqual(result.recordings.map(r=>r.stopReason),['owner_barge_in','output_audio_buffer.cleared']);
+  assert.equal(result.recordings.every(r=>r.partial===true),true);assert.equal(h.audio.muted,false);
+ }finally{await h.cleanup();}
+});
+
+test('native context and saved tool receipt are bounded without copying interpretation, arguments or secrets',async()=>{
+ const h=await nativeObserverSimulation();try{
+  const notice={callId:NATIVE_CALL,interviewId:NATIVE_INTERVIEW,revision:1,sourceDigest:'c'.repeat(64),mode:'conversation',currentQuestion:{itemId:'schedule.timezone',questionPt:'Qual é o fuso horário?'}};
+  const contextEvent={type:'conversation.item.done',item:{id:'lnc-'+'a'.repeat(28),type:'message',role:'system',status:'completed',content:[{type:'input_text',text:'ligou.website_native:'+JSON.stringify(notice)}]}};
+  h.emit(contextEvent);h.emit(contextEvent);
+  h.emit({...contextEvent,item:{...contextEvent.item,id:'lnc-'+'d'.repeat(28),content:[{type:'input_text',text:'ligou.website_native:'+JSON.stringify({...notice,callId:NATIVE_INTERVIEW})}]}});
+  const output={saved:true,replayed:false,savedRevision:1,revision:1,savedReceiptId:'33333333-3333-4333-8333-333333333333',digest:'c'.repeat(64),
+   interpretation:'private interpretation',context:{instructions:'secret'},authorization:'secret',args:{key:'secret'},provenance:'model_interpretation'};
+  const toolEvent={type:'conversation.item.done',item:{type:'function_call_output',id:'tool_item',call_id:'tool_1',output:JSON.stringify(output)}};
+  h.emit(toolEvent);h.emit(toolEvent);
+  h.emit({type:'conversation.item.input_audio_transcription.completed',item_id:'owner_1',transcript:'late ASR'});
+  const result=h.window.__voiceAcceptance.drain(),contexts=result.events.filter(e=>e.event==='native_context'),tools=result.events.filter(e=>e.event==='native_tool_output');
+  assert.equal(contexts.length,1);assert.deepEqual(contexts[0].currentQuestion,notice.currentQuestion);assert.equal(result.nativeContext.revision,1);
+  assert.equal(tools.length,1);assert.equal(tools[0].saved,true);assert.equal(tools[0].savedRevision,1);assert.equal(tools[0].savedReceiptId,output.savedReceiptId);
+  assert.equal(JSON.stringify(tools).includes('private interpretation'),false);assert.equal(JSON.stringify(tools).includes('secret'),false);
+  assert.ok(result.events.indexOf(tools[0])<result.events.findIndex(e=>e.type==='conversation.item.input_audio_transcription.completed'));
+ }finally{await h.cleanup();}
+});
+
+test('native alignment uses actual provider transcript and response identity without an expected phrase',()=>{
+ const {recording,events,waveform,words}=capturedOpening();
+ Object.assign(recording,{captureEvidence:'actual_native_remote_stream',callId:NATIVE_CALL,interviewId:NATIVE_INTERVIEW,revision:0,sourceDigest:'b'.repeat(64),providerTranscript:'Oi, aqui é o Ligou.',providerStatus:'completed',stopReason:'native_browser_drained',partial:false});
+ delete recording.actionId;delete recording.dispatchId;delete recording.expectedText;
+ Object.assign(events[1],{callId:NATIVE_CALL,interviewId:NATIVE_INTERVIEW});delete events[1].actionId;delete events[1].dispatchId;
+ const aligned=harness.alignCapturedWords(recording,events,waveform,words,'Quais cidades exatas sua empresa atende?');
+ assert.equal(aligned.browserClock.available,true);assert.equal(aligned.firstIntelligibleBrowserMs,123204.55);
+ assert.equal(aligned.firstVerifiedPhrase.evidence,'local_asr_matches_provider_transcript');
+ recording.alignment={...aligned,available:true,sourceRecordingSha256:recording.sha256};
+ assert.equal(harness.summarizeAttempt({recordings:[recording],events}).startToFirstIntelligibleAudioMs,7564.449999999997);
+ recording.providerStatus=null;
+ assert.equal(harness.summarizeAttempt({recordings:[recording],events}).startToFirstIntelligibleAudioMs,null,'local drain alone cannot prove a completed response');
+ recording.providerStatus='completed';
+ recording.partial=true;recording.stopReason='owner_barge_in';
+ assert.equal(harness.summarizeAttempt({recordings:[recording],events}).startToFirstIntelligibleAudioMs,null,'a rejected partial cannot count as a completed useful response');
+});
+
+test('native capture waits through a late audible tail but closes an unproven stream within its capture-only bound',async()=>{
+ const h=await nativeObserverSimulation();try{
+  h.created('tail_1');await new Promise(r=>setTimeout(r,20));h.finished('tail_1');
+  await new Promise(r=>setTimeout(r,150));assert.equal(h.window.__voiceAcceptance.drain().recordings.length,0,'ongoing local samples extend capture');
+  h.setAmplitude(0);await new Promise(r=>setTimeout(r,150));assert.equal(h.window.__voiceAcceptance.drain().recordings[0].stopReason,'native_browser_drained');
+  h.created('silent_1');h.finished('silent_1');await new Promise(r=>setTimeout(r,2050));
+  const silent=h.window.__voiceAcceptance.drain().recordings[0];assert.equal(silent.stopReason,'native_drain_timeout');assert.equal(silent.partial,true);
+  assert.equal(silent.nonzeroObserved,false);assert.equal(h.audio.muted,false,'capture timeout never changes application audio');
+ }finally{await h.cleanup();}
+});
+
+test('muting a native tail cannot turn earlier nonzero samples into a complete capture',async()=>{
+ const h=await nativeObserverSimulation();try{
+  h.created('muted_tail');await new Promise(r=>setTimeout(r,20));h.audio.muted=true;h.finished('muted_tail');
+  await new Promise(r=>setTimeout(r,160));const recording=h.window.__voiceAcceptance.drain().recordings[0];
+  assert.equal(recording.stopReason,'native_output_inactive');assert.equal(recording.partial,true);
+ }finally{await h.cleanup();}
+});

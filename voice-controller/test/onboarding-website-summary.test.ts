@@ -36,6 +36,16 @@ function generate(agenda: OnboardingAgenda, source: WebsiteAgendaSeedProjection 
   return generateWebsiteSummaryParts({ stored: stored(agenda), projection: source });
 }
 
+test('persisted model interpretation is never presented as a literal owner quote in compatibility summaries',()=>{
+  const text='Área interpretada: Novato, San Rafael e Petaluma; exceções somente com aprovação do dono.';
+  let agenda=fresh();
+  agenda=applyVerifiedOwnerTurn(agenda,{type:'verified_owner_turn',binding,turnId:'interpreted-territory',text,
+    provenance:'model_interpretation',proposal:{kind:'answer',itemId:agenda.items[0].id}}).agenda;
+  const parts=generate(finish(agenda)).join('');
+  expect(parts).toContain(`Interpretação do modelo a partir do áudio: ${text}`);
+  expect(parts).not.toContain(`Resposta literal do dono: “${text}”`);
+});
+
 test("exact Foghorn summary retains all 21 website candidates, conditional prices, 114 dispositions and private boundaries", () => {
   const agenda = finish();
   const parts = generate(agenda);

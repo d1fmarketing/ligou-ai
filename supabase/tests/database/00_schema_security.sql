@@ -87,7 +87,8 @@ select extensions.ok(
       ('start_company_discovery_setup(text)'),
       ('submit_company_discovery(text,text)'),
       ('website_browser_opening_v3_valid(jsonb,uuid)'),
-      ('website_browser_opening_v4_valid(jsonb,uuid)')
+      ('website_browser_opening_v4_valid(jsonb,uuid)'),
+      ('website_browser_opening_v5_valid(jsonb,uuid)')
     ) expected(signature)
     order by signature
   ),
@@ -111,6 +112,10 @@ select extensions.ok(
       ('attach_website_interview(uuid,uuid,uuid,uuid,uuid)'),
       ('record_website_interview_owner_turn(uuid,uuid,uuid,text,text)'),
       ('commit_website_interview_turn(uuid,uuid,uuid,bigint,bigint,text,text,jsonb,text,jsonb)'),
+      ('commit_website_interview_native_turn(uuid,uuid,uuid,bigint,bigint,text,text,text,jsonb,jsonb,jsonb)'),
+      ('replay_website_interview_native_turn(uuid,uuid,uuid,text,text,jsonb,jsonb)'),
+      ('request_website_interview_native_amendment(uuid,uuid,uuid,uuid,text,jsonb,text)'),
+      ('record_website_interview_native_checkpoint(uuid,uuid,uuid,uuid,text,bigint,bigint,text,uuid,text,text,text,text,jsonb,uuid)'),
       ('prepare_website_interview_summary(uuid,uuid,uuid,uuid,bigint,bigint,text,uuid,jsonb)'),
       ('claim_website_interview_speech(uuid,uuid,uuid,jsonb,uuid,integer,text)'),
       ('claim_website_interview_stream(uuid,uuid,uuid,jsonb,uuid,integer,text)'),
@@ -130,6 +135,7 @@ select extensions.ok(
       ('list_website_interview_terminal_candidates(integer)'),
       ('website_browser_opening_v3_valid(jsonb,uuid)'),
       ('website_browser_opening_v4_valid(jsonb,uuid)'),
+      ('website_browser_opening_v5_valid(jsonb,uuid)'),
       ('authorize_booking_intent(uuid,uuid,uuid,uuid,uuid,numeric,integer,integer,jsonb,text)'),
       ('begin_calendar_test_attempt(uuid,text,text,text,text,text)'),
       ('begin_provider_write(uuid,uuid)'),

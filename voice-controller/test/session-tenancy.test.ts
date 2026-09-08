@@ -61,11 +61,10 @@ const APPLICATION_OPENING_PAYLOAD_V2 = {
   },
 };
 
-function streamOpening(callId = "22222222-2222-4222-8222-222222222229") {
-  return {version:4,stream:{schema:"onboarding.stream.v1",dispatchId:"77777777-7777-4777-8777-777777777777",receiptId:"88888888-8888-4888-8888-888888888888",
-    action:{actionId:"a".repeat(64),interviewId:callId,callId,revision:0,kind:"ASK_NEXT_GAP",text:APPLICATION_OPENING_PAYLOAD.text,sourceDigest:"b".repeat(64)}}};
+function nativeOpening(callId = "22222222-2222-4222-8222-222222222229") {
+  return {version:5,native:{interviewId:callId,callId,revision:0,sourceDigest:"b".repeat(64)}};
 }
-const STREAM_OPENING_PAYLOAD=streamOpening();
+const NATIVE_OPENING_PAYLOAD=nativeOpening();
 
 function tenantClient() {
   return {
@@ -426,7 +425,7 @@ describe("browser request handling", () => {
     ]);
   });
 
-  test("stream opening mode reaches startSession and is committed atomically with the ready SDP", async () => {
+  test("native opening mode reaches startSession and is committed atomically with the ready SDP", async () => {
     const updates: Array<Record<string, unknown>> = [];
     const durableRow: Record<string, unknown> = {
       id: "request-test-10",
@@ -434,8 +433,8 @@ describe("browser request handling", () => {
       call_id: null,
       tenant_id: V02_TENANT.id,
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
     };
     const rowClient = {
       from(table: string) {
@@ -461,7 +460,7 @@ describe("browser request handling", () => {
     };
     _setClient(rowClient as any);
     const starts: unknown[][] = [];
-    const openingPayload = streamOpening("11111111-1111-4111-8111-111111111119");
+    const openingPayload = nativeOpening("11111111-1111-4111-8111-111111111119");
 
     await _handleBrowserRequest(
       {
@@ -471,8 +470,8 @@ describe("browser request handling", () => {
         session_type: "onboarding",
         offer_sdp: "offer-test-10",
         model_override: null,
-        opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+        opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
       },
       async (...args: unknown[]) => {
         starts.push(args);
@@ -483,7 +482,7 @@ describe("browser request handling", () => {
         return {
           sdp: "answer-test-10",
           call_id: "11111111-1111-4111-8111-111111111119",
-          opening_mode_applied: "realtime_stream_v1",
+          opening_mode_applied: "realtime_native_v1",
           opening_payload: openingPayload,
         } as any;
       },
@@ -502,22 +501,22 @@ describe("browser request handling", () => {
     expect(typeof starts[0]?.[5]).toBe("function");
     expect(starts[0]?.[6]).toEqual({
       browserRequestId: "request-test-10",
-      openingModeRequested: "realtime_stream_v1",
-      onboardingProtocolVersion: 4,
+      openingModeRequested: "realtime_native_v1",
+      onboardingProtocolVersion: 5,
       requestedCallId: "11111111-1111-4111-8111-111111111119",
     });
     expect(updates).toContainEqual({
       table: "browser_session_requests",
       patch: { call_id: "11111111-1111-4111-8111-111111111119" },
     });
-    expect(openingPayload.stream.dispatchId).toHaveLength(36);
+    expect(openingPayload.native.callId).toBe("11111111-1111-4111-8111-111111111119");
     expect(updates.at(-1)).toEqual({
       table: "browser_session_requests",
       patch: {
         status: "ready",
         answer_sdp: "answer-test-10",
         call_id: "11111111-1111-4111-8111-111111111119",
-        opening_mode_applied: "realtime_stream_v1",
+        opening_mode_applied: "realtime_native_v1",
         opening_payload: openingPayload,
       },
     });
@@ -867,19 +866,19 @@ describe("browser request handling", () => {
 });
 
 describe("durable browser cancel_requested handshake", () => {
-  test("protocol4 forwards durable identity and preserves ready cancellation custody", async () => {
-    const b = boundary({ protocolVersion: 4 });
-    b.row.opening_mode_requested="realtime_stream_v1";
+  test("protocol5 forwards durable identity and preserves ready cancellation custody", async () => {
+    const b = boundary({ protocolVersion: 5 });
+    b.row.opening_mode_requested="realtime_native_v1";
     _setClient(b.client as any);
     const reasons: string[] = [];
-    const payload = STREAM_OPENING_PAYLOAD;
+    const payload = NATIVE_OPENING_PAYLOAD;
     await _handleBrowserRequest(structuredClone(b.row), async (...args: any[]) => {
-      expect(args[6].onboardingProtocolVersion).toBe(4);
+      expect(args[6].onboardingProtocolVersion).toBe(5);
       expect(args[6].browserRequestId).toBe("request-cancel-1");
       args[5]({ callId: "22222222-2222-4222-8222-222222222229", startupComplete: true, cancel: async (reason: string) => {
         reasons.push(reason); Object.assign(b.call, { status: "error", provider_termination_state: "confirmed" });
       } });
-      return { sdp: "answer", call_id: "22222222-2222-4222-8222-222222222229", opening_mode_applied: "realtime_stream_v1", opening_payload: payload } as any;
+      return { sdp: "answer", call_id: "22222222-2222-4222-8222-222222222229", opening_mode_applied: "realtime_native_v1", opening_payload: payload } as any;
     });
     expect(b.row.error).toBeUndefined();
     expect(b.row.status).toBe("ready");
@@ -952,8 +951,8 @@ describe("durable browser cancel_requested handshake", () => {
       answer_sdp: null,
       session_type: "onboarding",
       tenant_id: V02_TENANT.id,
-      opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: options.protocolVersion ?? 4,
+      opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: options.protocolVersion ?? 5,
       opening_mode_applied: null,
       opening_payload: null,
     };
@@ -1039,16 +1038,16 @@ describe("durable browser cancel_requested handshake", () => {
     };
   }
 
-  test("malformed stream descriptor cancellation reaches controller cleanup and expires exactly once", async () => {
+  test("malformed native descriptor cancellation reaches controller cleanup and expires exactly once", async () => {
     const poll = (browserRequestsModule as any)._pollBrowserCancellations;
     const reset = (browserRequestsModule as any)
       ._resetBrowserLiveControlsForTests;
     const size = (browserRequestsModule as any)._browserLiveControlCount;
     reset();
-    const b = boundary({ protocolVersion: 4 });
+    const b = boundary({ protocolVersion: 5 });
     _setClient(b.client as any);
     const reasons: string[] = [];
-    const opening = STREAM_OPENING_PAYLOAD;
+    const opening = NATIVE_OPENING_PAYLOAD;
     await _handleBrowserRequest(
       {
         id: "request-cancel-1",
@@ -1056,8 +1055,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-wrong-cost-v2",
-        opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+        opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
       },
       async (...args: unknown[]) => {
         (args[5] as any)?.({
@@ -1073,7 +1072,7 @@ describe("durable browser cancel_requested handshake", () => {
         return {
           sdp: "answer-wrong-cost-v2",
           call_id: "22222222-2222-4222-8222-222222222229",
-          opening_mode_applied: "realtime_stream_v1",
+          opening_mode_applied: "realtime_native_v1",
           opening_payload: opening,
         } as any;
       },
@@ -1081,14 +1080,14 @@ describe("durable browser cancel_requested handshake", () => {
     expect(size()).toBe(1);
     Object.assign(b.row, {
       status: "cancel_requested",
-      opening_payload: {...opening,stream:{...opening.stream,receiptId:"invalid"}},
-      error: "invalid_stream_opening_contract",
+      opening_payload: {...opening,native:{...opening.native,sourceDigest:"invalid"}},
+      error: "invalid_native_opening_contract",
     });
 
     expect(await poll({
       loadRows: async () => [structuredClone(b.row)],
     })).toBe(1);
-    expect(reasons).toEqual(["invalid_stream_opening_contract"]);
+    expect(reasons).toEqual(["invalid_native_opening_contract"]);
     expect(b.expiredTransitions).toBe(1);
     expect(b.row).toMatchObject({
       status: "expired",
@@ -1096,7 +1095,7 @@ describe("durable browser cancel_requested handshake", () => {
       answer_sdp: null,
       opening_mode_applied: null,
       opening_payload: null,
-      onboarding_protocol_version: 4,
+      onboarding_protocol_version: 5,
     });
     expect(size()).toBe(0);
     reset();
@@ -1119,8 +1118,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-cancel",
-        opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+        opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
       },
       async (...args: unknown[]) => {
         (args[5] as any)?.({
@@ -1136,8 +1135,8 @@ describe("durable browser cancel_requested handshake", () => {
         return {
           sdp: "answer-cancel",
           call_id: "22222222-2222-4222-8222-222222222229",
-          opening_mode_applied: "realtime_stream_v1",
-          opening_payload: STREAM_OPENING_PAYLOAD,
+          opening_mode_applied: "realtime_native_v1",
+          opening_payload: NATIVE_OPENING_PAYLOAD,
         } as any;
       },
     );
@@ -1178,8 +1177,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-cancel",
-        opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+        opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
       },
       async (...args: unknown[]) => {
         (args[5] as any)?.({
@@ -1189,8 +1188,8 @@ describe("durable browser cancel_requested handshake", () => {
         return {
           sdp: "answer-cancel",
           call_id: "22222222-2222-4222-8222-222222222229",
-          opening_mode_applied: "realtime_stream_v1",
-          opening_payload: STREAM_OPENING_PAYLOAD,
+          opening_mode_applied: "realtime_native_v1",
+          opening_payload: NATIVE_OPENING_PAYLOAD,
         } as any;
       },
     );
@@ -1203,7 +1202,7 @@ describe("durable browser cancel_requested handshake", () => {
     b.row.user_id = "owner-a";
     b.row.onboarding_protocol_version = 2;
     expect(await cancel(structuredClone(b.row))).toBe(false);
-    b.row.onboarding_protocol_version = 4;
+    b.row.onboarding_protocol_version = 5;
     expect(await cancel({
       ...b.row, status: "cancel_requested", call_id: "foreign-call",
     })).toBe(false);
@@ -1251,8 +1250,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-held-startup",
-        opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+        opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
       },
       async (...args: unknown[]) => {
         let cancelled = false;
@@ -1322,8 +1321,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-completed-startup",
-        opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+        opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
       },
       async (...args: unknown[]) => {
         (args[5] as any)?.({
@@ -1343,8 +1342,8 @@ describe("durable browser cancel_requested handshake", () => {
     finishStartup({
       sdp: "answer-completed-startup",
       call_id: "22222222-2222-4222-8222-222222222229",
-      opening_mode_applied: "realtime_stream_v1",
-      opening_payload: STREAM_OPENING_PAYLOAD,
+      opening_mode_applied: "realtime_native_v1",
+      opening_payload: NATIVE_OPENING_PAYLOAD,
     });
     await handling;
     expect(size()).toBe(0);
@@ -1370,10 +1369,10 @@ describe("durable browser cancel_requested handshake", () => {
         status: "cancel_requested",
         call_id: `call-restart-${outcome}`,
         answer_sdp: "answer-before-cancel",
-        opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
-        opening_mode_applied: "realtime_stream_v1",
-        opening_payload: structuredClone(STREAM_OPENING_PAYLOAD),
+        opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
+        opening_mode_applied: "realtime_native_v1",
+        opening_payload: structuredClone(NATIVE_OPENING_PAYLOAD),
         error: "edge_deadline_exceeded",
       };
       const call: Record<string, unknown> = {
@@ -1490,10 +1489,10 @@ describe("durable browser cancel_requested handshake", () => {
         status: "cancel_requested",
         call_id: `call-provider-usage-${suffix}`,
         answer_sdp: "answer-before-cancel",
-        opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
-        opening_mode_applied: "realtime_stream_v1",
-        opening_payload: structuredClone(STREAM_OPENING_PAYLOAD),
+        opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
+        opening_mode_applied: "realtime_native_v1",
+        opening_payload: structuredClone(NATIVE_OPENING_PAYLOAD),
         error: "edge_deadline_exceeded",
       };
       const call: Record<string, unknown> = {
@@ -1618,8 +1617,8 @@ describe("durable browser cancel_requested handshake", () => {
         status: "cancel_requested",
         call_id: `call-processing-${variant}`,
         answer_sdp: null,
-        opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+        opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
         opening_mode_applied: null,
         opening_payload: null,
         error: "edge_cancelled_processing",
@@ -1742,8 +1741,8 @@ describe("durable browser cancel_requested handshake", () => {
         tenant_id: V02_TENANT.id,
         session_type: "onboarding",
         offer_sdp: "offer-cancel",
-        opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+        opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
       },
       async (...args: unknown[]) => {
         (args[5] as any)?.({
@@ -1760,8 +1759,8 @@ describe("durable browser cancel_requested handshake", () => {
         return {
           sdp: "answer-cancel",
           call_id: "22222222-2222-4222-8222-222222222229",
-          opening_mode_applied: "realtime_stream_v1",
-          opening_payload: STREAM_OPENING_PAYLOAD,
+          opening_mode_applied: "realtime_native_v1",
+          opening_payload: NATIVE_OPENING_PAYLOAD,
         } as any;
       },
       { callIdFactory: () => "22222222-2222-4222-8222-222222222229" } as any,

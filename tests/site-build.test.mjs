@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildSite, composeSite } from "../scripts/build-site.mjs";
 import { publicSiteConfig } from "../scripts/public-site-config.mjs";
+import * as productionEnv from "../scripts/production-env.mjs";
 import { handleSalesSession } from "../src/server/vercel-sales-session.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -14,6 +15,36 @@ const publicUrl = "https://fixture-project.supabase.co";
 const publicKey = "sb_publishable_local_fixture_only";
 const buildEnv = { PATH: process.env.PATH || "/usr/bin:/bin", NODE_ENV: "production" };
 const jwt = role => ["header", Buffer.from(JSON.stringify({ role })).toString("base64url"), "signature"].join(".");
+const publicationEnv = { LIGOU_PUBLIC_SUPABASE_URL: publicUrl, LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY: publicKey,
+  LIGOU_PUBLIC_SUPABASE_FUNCTIONS_URL: `${publicUrl}/functions/v1`, LIGOU_PUBLIC_SESSION_URL: `${publicUrl}/functions/v1/browser-session` };
+
+test('publication requires the four public inputs while ordinary offline build environments remain usable', () => {
+  assert.equal(typeof productionEnv.validateProductionPublicationEnv, 'function');
+  assert.doesNotThrow(() => productionEnv.validateProductionPublicationEnv(publicationEnv));
+  for (const key of Object.keys(publicationEnv)) for (const value of [undefined, '', '   ']) {
+    assert.throws(() => productionEnv.validateProductionPublicationEnv({ ...publicationEnv, [key]: value }), /production_public_env_required/);
+  }
+  assert.equal(productionEnv.productionBuildEnv({}).VITE_SESSION_URL, undefined);
+  assert.equal(productionEnv.productionBuildEnv({ LIGOU_PUBLIC_SESSION_URL: 'http://127.0.0.1:8790/session' }).VITE_SESSION_URL, 'http://127.0.0.1:8790/session');
+});
+
+test('publication endpoint validation rejects loopback, wrong project/path and secret-bearing URLs', () => {
+  for (const endpoint of ['http://localhost:8790/session', 'https://127.0.0.1/session', 'https://[::1]/session',
+    'https://other-project.supabase.co/functions/v1/browser-session', `${publicUrl}/functions/v1/accept-call`,
+    `${publicUrl}/functions/v1/browser-session?token=must-not-print`, `${publicUrl}/functions/v1/browser-session#fragment`]) {
+    assert.throws(() => productionEnv.validateProductionPublicationEnv({ ...publicationEnv, LIGOU_PUBLIC_SESSION_URL: endpoint }),
+      reason => /production_voice_endpoint_invalid/.test(reason.message) && !reason.message.includes('must-not-print'));
+  }
+  assert.throws(() => productionEnv.validateProductionPublicationEnv({ ...publicationEnv, LIGOU_PUBLIC_SUPABASE_FUNCTIONS_URL: 'https://other-project.supabase.co/functions/v1' }), /production_functions_endpoint_invalid/);
+  assert.throws(() => productionEnv.validateProductionPublicationEnv({ ...publicationEnv, LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY: jwt('service_role') }), /public_supabase_key_invalid/);
+});
+
+test('explicit publication build rejects incomplete configuration before invoking any bundler', () => {
+  assert.throws(() => buildSite({ ...publicationEnv, PATH: '/nonexistent', LIGOU_PUBLIC_SESSION_URL: '' }, { publication: true }), /production_public_env_required/);
+  const run = () => execFileSync(process.execPath, [path.join(root, 'scripts/build-site.mjs'), '--production'],
+    { cwd: os.tmpdir(), env: { PATH: '/nonexistent' }, encoding: 'utf8', stdio: 'pipe' });
+  assert.throws(run, reason => String(reason.stderr).includes('production_public_env_required') && !String(reason.stderr).includes('spawnSync npm'));
+});
 
 test("public config admits only public keys and rejects invalid input before a build can start", () => {
   assert.deepEqual(publicSiteConfig(), {});

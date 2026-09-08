@@ -11,6 +11,7 @@ export const BROWSER_SESSION_CORS = {
 
 const APPLICATION_MODE = "application_tts_v1";
 const STREAM_MODE = "realtime_stream_v1";
+const NATIVE_MODE = "realtime_native_v1";
 const PROVIDER_MODE = "provider_model_v1";
 const APPLICATION_STARTUP_DEADLINE_MS = 35_000;
 const PROVIDER_STARTUP_DEADLINE_MS = 20_000;
@@ -58,8 +59,10 @@ function validWebsiteOpening(payload: Record<string, unknown>): boolean {
     createHash("sha256").update(audio).digest("hex") === speech.audio_sha256;
 }
 
-type OpeningMode = typeof APPLICATION_MODE | typeof STREAM_MODE | typeof PROVIDER_MODE;
-const controlledOpening=(mode:unknown)=>mode===APPLICATION_MODE || mode===STREAM_MODE;
+type OpeningMode = typeof APPLICATION_MODE | typeof STREAM_MODE | typeof NATIVE_MODE | typeof PROVIDER_MODE;
+const controlledOpening=(mode:unknown)=>mode===APPLICATION_MODE || mode===STREAM_MODE || mode===NATIVE_MODE;
+const protocolOpeningMode=(version:number)=>version===5?NATIVE_MODE:version===4?STREAM_MODE:APPLICATION_MODE;
+const invalidOpeningContract=(mode:OpeningMode)=>mode===NATIVE_MODE?"invalid_native_opening_contract":mode===STREAM_MODE?"invalid_stream_opening_contract":"invalid_application_opening_contract";
 
 export function isStreamOpeningPayload(value:unknown):value is Record<string,unknown> {
   if(!value || typeof value!=="object" || Array.isArray(value) || !exactKeys(value as Record<string,unknown>,["version","stream"]))return false;
@@ -77,6 +80,19 @@ export function isStreamOpeningPayload(value:unknown):value is Record<string,unk
     && typeof action.kind==="string" && ["ASK_NEXT_GAP","CLARIFY_CURRENT_GAP","CONFIRM_AND_ASK_NEXT","DEFER_OFF_SCOPE_AND_CONTINUE","GENERATE_FINAL_SUMMARY","REQUEST_FINAL_APPROVAL","HANDLE_OWNER_CORRECTION","SPEAK_FINAL_SIGNOFF","SPEAK_TERMINAL_ERROR","SPEAK_AMENDMENT_SIGNOFF"].includes(action.kind)
     && typeof action.text==="string" && Boolean(action.text.trim()) && [...action.text].length<=4096
     && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(action.text));
+}
+
+export function isNativeOpeningPayload(value:unknown):value is Record<string,unknown> {
+  if(!value || typeof value!=="object" || Array.isArray(value))return false;
+  const payload=value as Record<string,unknown>;
+  if(!exactKeys(payload,["version","native"]) || payload.version!==5 || !payload.native || typeof payload.native!=="object" || Array.isArray(payload.native))return false;
+  const native=payload.native as Record<string,unknown>;
+  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  return exactKeys(native,["callId","interviewId","revision","sourceDigest"])
+    && typeof native.callId==="string" && uuid.test(native.callId)
+    && typeof native.interviewId==="string" && uuid.test(native.interviewId)
+    && Number.isSafeInteger(native.revision) && Number(native.revision)>=0
+    && typeof native.sourceDigest==="string" && /^[0-9a-f]{64}$/.test(native.sourceDigest);
 }
 
 interface BrowserSessionDependencies {
@@ -259,6 +275,11 @@ function validReadyOpening(
       || !isStreamOpeningPayload(row.opening_payload))return false;
     return ((row.opening_payload.stream as Record<string,unknown>).action as Record<string,unknown>).callId===row.call_id;
   }
+  if(requested===NATIVE_MODE){
+    if(protocolVersion!==5 || row.onboarding_protocol_version!==5 || row.opening_mode_applied!==NATIVE_MODE
+      || !isNativeOpeningPayload(row.opening_payload))return false;
+    return (row.opening_payload.native as Record<string,unknown>).callId===row.call_id;
+  }
   if (row.onboarding_protocol_version !== protocolVersion ||
     row.opening_mode_applied !== APPLICATION_MODE ||
     !isApplicationOpeningPayload(row.opening_payload) ||
@@ -358,7 +379,7 @@ function exactInvalidApplicationReadyCleanupIdentity(
   return row.id === requestId
     && row.status === status
     && row.session_type === "onboarding"
-    && row.opening_mode_requested === (protocolVersion===4?STREAM_MODE:APPLICATION_MODE)
+    && row.opening_mode_requested === protocolOpeningMode(protocolVersion)
     && row.onboarding_protocol_version === protocolVersion
     && row.call_id === expectedCallId
     && boundedString(row.answer_sdp, 1, 1_000_000);
@@ -492,7 +513,7 @@ async function cancelInvalidApplicationReady(
   requestId: string,
   protocolVersion: number,
 ): Promise<boolean> {
-  const requested=protocolVersion===4?STREAM_MODE:APPLICATION_MODE;
+  const requested=protocolOpeningMode(protocolVersion);
   const expectedCallId = typeof observedRow.call_id === "string"
     ? observedRow.call_id
     : "";
@@ -505,7 +526,7 @@ async function cancelInvalidApplicationReady(
     expectedCallId,
   )) return false;
 
-  const reason = protocolVersion===4?"invalid_stream_opening_contract":"invalid_application_opening_contract";
+  const reason = invalidOpeningContract(requested);
   const { data: cancelRows, error: cancelError } = await client
     .from("browser_session_requests")
     .update({ status: "cancel_requested", error: reason })
@@ -585,19 +606,18 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
     if (!["customer", "owner_browser", "onboarding"].includes(sessionType)) {
       return json({ error: "invalid_session_type" }, 400);
     }
-    const openingModeRequested: OpeningMode = sessionType === "onboarding" ? STREAM_MODE : PROVIDER_MODE;
-    if (sessionType === "onboarding" && body.opening_mode_requested !== STREAM_MODE) {
-      return json({ error: "client_upgrade_required" }, 409);
-    }
     const protocolVersion = sessionType === "onboarding"
       ? body.onboarding_protocol_version
       : null;
-    if (sessionType === "onboarding" &&
-      protocolVersion !== 4) {
+    const openingModeRequested: OpeningMode = sessionType === "onboarding"
+      ? NATIVE_MODE
+      : PROVIDER_MODE;
+    if (sessionType === "onboarding" && (protocolVersion !== 5
+      || body.opening_mode_requested !== openingModeRequested)) {
       return json({ error: "client_upgrade_required" }, 409);
     }
-    // New onboarding is exclusively live streaming. Reject older MP3 clients
-    // before tenant reads, enqueue or provider work; never silently fall back.
+    // New calls use native audio and retain client playback evidence capability.
+    // Historical payload validation must never re-enable an older speech path.
     if (sessionType === "onboarding" && body.speech_contract_version !== 3) {
       return json({ error: "client_upgrade_required" }, 409);
     }
@@ -676,7 +696,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
           businessName,
         )) {
           const error = controlledOpening(openingModeRequested)
-            ? openingModeRequested===STREAM_MODE?"invalid_stream_opening_contract":"invalid_application_opening_contract"
+            ? invalidOpeningContract(openingModeRequested)
             : "invalid_provider_opening_contract";
           if (controlledOpening(openingModeRequested)) {
             timing.enter("edge_cleanup");

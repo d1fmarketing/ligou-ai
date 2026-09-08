@@ -10,8 +10,17 @@ export function validateWebsiteInterpretationFacts(input: {
   facts: unknown; proposal: AgendaProposal; currentItemId: string | null;
   agenda: OnboardingAgenda; ownerTranscript: string;
 }): OnboardingAnswerArgs[] {
-  const { facts, proposal, currentItemId, agenda, ownerTranscript } = input;
+  const { proposal, currentItemId, agenda, ownerTranscript } = input;
   validateWebsiteAnswerApplicability({agenda,currentItemId,ownerTranscript,proposal});
+  return validateWebsiteTypedFacts(input);
+}
+
+/** Concrete field/value validation after the caller's proposal scope admission. */
+export function validateWebsiteTypedFacts(input: {
+  facts: unknown; proposal: AgendaProposal; currentItemId: string | null;
+  agenda: OnboardingAgenda; ownerTranscript: string;
+}): OnboardingAnswerArgs[] {
+  const { facts, proposal, currentItemId, agenda, ownerTranscript } = input;
   if (!Array.isArray(facts) || facts.length > 16 || Buffer.byteLength(JSON.stringify(facts)) > 65_536)
     throw new Error("website_facts_invalid_batch");
   if (typeof ownerTranscript !== "string" || !ownerTranscript.trim() || ownerTranscript.length > 32768)

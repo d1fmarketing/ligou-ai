@@ -26,6 +26,36 @@ const make = () => createOnboardingAgenda(binding, [
 const apply = (agenda: OnboardingAgenda, turnId: string, text: string, proposal: AgendaProposal) =>
   applyVerifiedOwnerTurn(agenda, { type: "verified_owner_turn", binding, turnId, text, proposal });
 
+test('native interpretation provenance survives persistence without changing historical literal evidence',()=>{
+  const first=apply(make(),'literal-1',territoryText,{kind:'answer',itemId:territory}).agenda;
+  const before=JSON.stringify(first.ownerTurns[0]);
+  const next=applyVerifiedOwnerTurn(first,{type:'verified_owner_turn',binding,turnId:'native-2',
+    text:'Fora da área somente com aprovação explícita do dono.',provenance:'model_interpretation',
+    proposal:{kind:'answer',itemId:'area.out_of_area_policy'}}).agenda;
+  expect(next.ownerTurns.at(-1)?.provenance).toBe('model_interpretation');
+  expect(next.items.find(x=>x.id==='area.out_of_area_policy')?.evidence.at(-1)?.provenance).toBe('model_interpretation');
+  expect(parseOnboardingAgenda(JSON.parse(JSON.stringify(next)),binding)).toEqual(next);
+  expect(JSON.stringify(next.ownerTurns[0])).toBe(before);
+});
+
+test('changing evidence provenance on replay or on one linked item is rejected',()=>{
+  const event={type:'verified_owner_turn' as const,binding,turnId:'native-1',text:territoryText,
+    provenance:'model_interpretation' as const,proposal:{kind:'answer' as const,itemId:territory}};
+  const next=applyVerifiedOwnerTurn(make(),event).agenda;
+  expect(()=>applyVerifiedOwnerTurn(next,{...event,provenance:undefined})).toThrow('Conflicting owner turn evidence');
+  const bad=JSON.parse(JSON.stringify(next));delete bad.items[0].evidence[0].provenance;
+  expect(()=>parseOnboardingAgenda(bad,binding)).toThrow();
+  const unknown=JSON.parse(JSON.stringify(next));unknown.ownerTurns[0].provenance='provider_asserted_by_model';
+  expect(()=>parseOnboardingAgenda(unknown,binding)).toThrow();
+});
+
+test('interpreted territory is not rendered as a literal owner quotation',()=>{
+  const initial=createOnboardingAgenda(binding,[seed('area.coverage'),seed('next')]);
+  const next=applyVerifiedOwnerTurn(initial,{type:'verified_owner_turn',binding,turnId:'native-area',text:'Atendemos somente Novato.',
+    provenance:'model_interpretation',proposal:{kind:'answer',itemId:'area.coverage'}});
+  expect(next.action?.spokenPt).not.toContain('Você informou:');
+});
+
 const candidatePhone = {
   id: "candidate:950d347b-63cb-4ea9-a0ef-9dfca0a9d97f", subject: "public_phone",
   questionPt: "O telefone publicado está incorreto. Qual é o telefone correto?",

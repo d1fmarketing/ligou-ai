@@ -22,12 +22,10 @@ async function browserExecutable() { return null; }
 function moduleSource() {
   const callId = "11111111-1111-4111-8111-111111111111";
   const text = "Oi! Aqui é o Ligou, agente de inteligência artificial da Empresa de teste. Eu já analisei seu website. Quais cidades sua empresa atende?";
-  const stream = { schema: "onboarding.stream.v1", action: { actionId: "a".repeat(64), interviewId: callId, callId,
-    revision: 0, kind: "ASK_NEXT_GAP", text, sourceDigest: "b".repeat(64) },
-    dispatchId: "22222222-2222-4222-8222-222222222222", receiptId: "33333333-3333-4333-8333-333333333333" };
+  const native = { interviewId: callId, callId, revision: 0, sourceDigest: "b".repeat(64) };
   const response = { sdp: "simulated-answer", call_id: callId, max_minutes: 1, business_name: "Empresa de teste",
-    onboarding_protocol_version: 4, opening_mode_applied: "realtime_stream_v1",
-    opening_payload: { version: 4, stream } };
+    onboarding_protocol_version: 5, opening_mode_applied: "realtime_native_v1",
+    opening_payload: { version: 5, native } };
   return `
     import React from 'react';
     import { createRoot } from 'react-dom/client';
@@ -35,12 +33,11 @@ function moduleSource() {
     window.__voice = { auth: [], permission: [], tracks: [], audios: [], peers: [], timing: [], bootstrap: 0, statusReads: [] };
     const state = window.__voice;
     const response = ${JSON.stringify(response)};
-    state.stream = response.opening_payload.stream;
-    state.speech = state.stream.action;
-    const metadata = {ligou_transport:"realtime_stream_v1",ligou_call_id:response.call_id,ligou_action_id:state.speech.actionId,ligou_source_digest:state.speech.sourceDigest,ligou_dispatch_id:state.stream.dispatchId};
+    state.speech = {...response.opening_payload.native,text:${JSON.stringify(text)}};
+    const metadata = {};
     state.outcome={callId:response.call_id,currentCallId:response.call_id,interviewId:response.call_id,revision:0,state:'unfinished',
       callStatus:'active',providerTerminationState:'active',budgetStatus:'active',resumeEligible:false,digest:state.speech.sourceDigest};
-    const vad = {type:'session.updated',session:{output_modalities:['text'],audio:{input:{turn_detection:{type:'semantic_vad',eagerness:'low',create_response:false,interrupt_response:false}}}}};
+    const vad = {type:'session.updated',event_id:'native_config',session:{output_modalities:['audio'],audio:{input:{turn_detection:{type:'semantic_vad',eagerness:'medium',create_response:true,interrupt_response:true}}}}};
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: {
       getUserMedia: () => new Promise((resolve, reject) => state.permission.push({resolve, reject}))
     }});
@@ -70,7 +67,7 @@ function moduleSource() {
           if(JSON.parse(body).item?.content?.[0]?.text?.startsWith('ligou.website_stop:')) {
             setTimeout(()=>{channel.readyState='closed';channel.onclose?.();},20);return;
           }
-          if(JSON.parse(body).item?.content?.[0]?.text?.startsWith('ligou.website_stream_ready:')) {
+          if(JSON.parse(body).item?.content?.[0]?.text?.startsWith('ligou.website_native_ready:')) {
             state.amplitude=.2;
             channel.onmessage?.({data:JSON.stringify({type:'response.created',response:{id:'response_1',status:'in_progress',metadata}})});
             channel.onmessage?.({data:JSON.stringify({type:'output_audio_buffer.started',event_id:'buffer_start',response_id:'response_1'})});
@@ -94,7 +91,7 @@ function moduleSource() {
     window.fetch = async () => { state.bootstrap++; return {ok:true,json:async()=>response}; };
     const { VoicePanel } = await import('/src/voice/VoicePanel.jsx');
     createRoot(document.getElementById('root')).render(<VoicePanel onClose={()=>{}} initialSessionType="onboarding"
-      lockedOnboarding onboardingProtocolVersion={4} onTiming={entry=>state.timing.push(entry)} />);
+      lockedOnboarding onboardingProtocolVersion={5} onTiming={entry=>state.timing.push(entry)} />);
   `;
 }
 

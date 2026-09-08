@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createOnboardingAgenda, type AgendaProposal } from "../src/onboarding-agenda.ts";
 import { validateWebsiteInterpretationFacts } from "../src/onboarding-website-facts.ts";
+import * as websiteFacts from "../src/onboarding-website-facts.ts";
 
 const binding = { interviewId: "interview-1", callId: "call-1", draftId: "draft-1", draftHash: "a".repeat(64), sourceResultId: "result-1", sourceResultHash: "b".repeat(64) };
 const agenda = createOnboardingAgenda(binding, [
@@ -65,4 +66,23 @@ test("an explicitly undecided private answer cannot be staged as a decided autho
   expect(check([], { kind: "answer", itemId: "private" }, "private", "Não sei. Preciso revisar essa autorização.")).toEqual([]);
   expect(check([{ ...fact, structured: { value: "Só pode agendar depois de minha aprovação explícita." } }],
     { kind: "answer", itemId: "private" }, "private", "Só pode agendar depois de minha aprovação explícita.")).toHaveLength(1);
+});
+
+test('native typed validation accepts structurally scoped empty facts without the legacy language applicability gate',()=>{
+  const input={agenda,currentItemId:'current',ownerTranscript:'The nearby service visits have no travel charge.',
+    proposal:{kind:'answer',itemId:'current',relatedItemIds:['related']} as AgendaProposal,facts:[]};
+  expect(()=>validateWebsiteInterpretationFacts(input)).toThrow();
+  expect(websiteFacts.validateWebsiteTypedFacts(input)).toEqual([]);
+});
+test('native typed validation preserves shape, reference, owner evidence and explicit-unknown protections',()=>{
+  const validate=websiteFacts.validateWebsiteTypedFacts;
+  const input={agenda,currentItemId:'current',ownerTranscript:text,proposal:{kind:'answer',itemId:'current'} as AgendaProposal,facts:[raw]};
+  expect(validate(input)[0].owner_words).toBe(text);
+  for(const facts of [[{...raw,powers_granted:true}],[{...raw,field:'area.travel_fee'}],[raw,raw],
+    [{...raw,structured:{value:123}}]])expect(()=>validate({...input,facts})).toThrow();
+  expect(()=>validate({...input,ownerTranscript:'',facts:[]})).toThrow();
+  const privateInput={...input,currentItemId:'private',ownerTranscript:'Não sei. Preciso revisar essa autorização.',
+    proposal:{kind:'answer',itemId:'private'} as AgendaProposal,
+    facts:[{...raw,topic:'outro',field:'authority.book',structured:{value:'Pode agendar sem consultar o dono.'}}]};
+  expect(()=>validate(privateInput)).toThrow();
 });

@@ -1,6 +1,7 @@
 // Browser side of a voice session: microphone + WebRTC only.
 // All authority (tools, budget, deadline, transcript of record) lives in the voice-controller.
-import { createWebsiteStreamPlayer, validateWebsiteStream, observeRemoteStreamMedia } from "./website-stream.js";
+import { observeRemoteStreamMedia } from "./website-stream.js";
+import { createWebsiteNativePlayer, validateWebsiteNative } from "./website-native.js";
 const CONTROLLER_URL = import.meta.env.VITE_CONTROLLER_URL || "http://127.0.0.1:8790";
 // Remote mode (production): a public Supabase Edge Function bootstraps the session and the EC2 controller
 // (zero inbound ports) services it via Realtime. Set VITE_SESSION_URL to the function URL to enable.
@@ -301,7 +302,7 @@ export async function resolveOnboardingOutcome({
   knownRevision,
   onboardingProtocolVersion = 2,
 }) {
-  if ([3, 4].includes(onboardingProtocolVersion)) return resolveWebsiteInterviewOutcome({
+  if ([3, 4, 5].includes(onboardingProtocolVersion)) return resolveWebsiteInterviewOutcome({
     client,reason,callId,timeoutMs,pollIntervalMs,isCancelled,signal,now,sleep,knownRevision,protocolVersion:onboardingProtocolVersion,
   });
   if (MANUAL_END_REASONS.has(reason)
@@ -517,8 +518,8 @@ export function endedVoiceSessionCopy({ endedSessionType, onboardingOutcome }) {
     : "Chamada encerrada. Resumo e custo aparecem no histórico.";
 }
 
-const STREAM_OPENING_MODE = "realtime_stream_v1";
-const ONBOARDING_PROTOCOL_VERSION = 4;
+const NATIVE_OPENING_MODE = "realtime_native_v1";
+const ONBOARDING_PROTOCOL_VERSION = 5;
 const DEFAULT_OPENING_TIMEOUT_MS = 15_000;
 function safeOpeningError(detail) {
   return new Error(`Abertura segura indisponível — sessão encerrada (${detail}).`);
@@ -600,7 +601,6 @@ export async function startVoiceSession({
   openingTimeoutMs,
   openingPlaybackTimeoutMs,
   onboardingProtocolVersion = ONBOARDING_PROTOCOL_VERSION,
-  speechClient,
 }) {
   const timing = createVoiceSessionTiming({ onTiming, startedAt, attemptId });
   if (!Number.isFinite(startedAt)) timing.mark("start");
@@ -613,7 +613,7 @@ export async function startVoiceSession({
   };
   if (signal?.aborted) throw voiceAbortError(signal);
   const onboarding = sessionType === "onboarding";
-  const websiteInterview = onboarding && onboardingProtocolVersion === 4;
+  const websiteInterview = onboarding && onboardingProtocolVersion === 5;
   if (onboarding && !websiteInterview) {
     stage("failed");
     throw Object.assign(new Error(CLIENT_UPGRADE_MESSAGE_PT), { code: CLIENT_UPGRADE_REQUIRED });
@@ -661,6 +661,7 @@ export async function startVoiceSession({
   let websiteOpeningPlayback = null;
   let releaseWebsiteOpening = null;
   let websitePhase = "idle";
+  let firstWebsiteMedia = false;
   let earlyWebsiteVad = null;
   const earlyWebsiteEvents = [];
   let remoteTrackResolve;
@@ -860,7 +861,7 @@ export async function startVoiceSession({
     timing.mark("offer_ready");
     const requestBody = { sdp: offer.sdp, session_type: sessionType, model };
     if (onboarding) {
-      requestBody.opening_mode_requested = STREAM_OPENING_MODE;
+      requestBody.opening_mode_requested = NATIVE_OPENING_MODE;
       requestBody.onboarding_protocol_version = onboardingProtocolVersion;
       requestBody.speech_contract_version = 3;
     }
@@ -892,20 +893,14 @@ export async function startVoiceSession({
     }
     if (websiteInterview) {
       const envelope = response.opening_payload;
-      if (response.onboarding_protocol_version !== 4 || response.opening_mode_applied !== STREAM_OPENING_MODE
-        || !exactKeys(envelope, ["version", "stream"]) || envelope.version !== 4
+      if (response.onboarding_protocol_version !== ONBOARDING_PROTOCOL_VERSION || response.opening_mode_applied !== NATIVE_OPENING_MODE
+        || !exactKeys(envelope, ["version", "native"]) || envelope.version !== ONBOARDING_PROTOCOL_VERSION
         || response.opening_text !== undefined || response.resume_context !== undefined
         || typeof response.business_name !== "string" || !response.business_name.trim()
-        || response.business_name.length > 256 || !speechClient?.rpc) throw safeOpeningError("contrato da entrevista divergente");
-      const authorization = validateWebsiteStream(envelope.stream, { callId, interviewId: envelope.stream?.action?.interviewId });
-      if (authorization.action.kind === "ASK_NEXT_GAP"
-        && !authorization.action.text.startsWith(`Oi! Aqui é o Ligou, agente de inteligência artificial da ${response.business_name}. Eu já analisei seu website. `))
-        throw safeOpeningError("identidade da entrevista divergente");
-      websitePlayer = createWebsiteStreamPlayer({ callId, interviewId: authorization.action.interviewId,
+        || response.business_name.length > 256) throw safeOpeningError("contrato da entrevista divergente");
+      const nativeBinding = validateWebsiteNative(envelope.native, { callId, interviewId: envelope.native?.interviewId });
+      websitePlayer = createWebsiteNativePlayer({ callId, interviewId: nativeBinding.interviewId,
         signal: setupAbort.signal, controlTimeoutMs: boundedOpeningTimeout,
-        readStream: (actionId, dispatchId, signal) => readWebsiteInterviewStream({client:speechClient,callId,actionId,dispatchId,signal,
-          onAttemptFailure:detail=>timing.mark('speech_read_failed',detail),
-          onRetry:detail=>{stage('retrying');timing.mark('speech_read_retry',detail);}}),
         prepareOutput: async () => {
           await abortableVoiceOperation(remoteTrackReady, setupAbort.signal);
           if (stopped || stopRequested || !remoteAudio.srcObject) throw safeOpeningError("áudio remoto indisponível");
@@ -920,28 +915,27 @@ export async function startVoiceSession({
         },
         setMicrophone: active => {
           setSpeechCustody(active);
-          if (active && websitePhase === "idle") ready();
+          if (active && websitePhase === "idle" && firstWebsiteMedia) ready();
           else if (!active && !stopped && currentStage === "ready") stage("processing");
         },
         onPhase: phase => {
           websitePhase = phase;
           if (["loading", "waiting-response"].includes(phase)) stage(openingActivated ? "processing" : "connecting");
-          else if (phase === "ack_pending") stage("verifying-playback");
           else if (phase === "processing") stage("processing");
-          else if (phase === "owner-speaking") stage("ready");
+          else if (phase === "owner-speaking" && firstWebsiteMedia) stage("ready");
+          else if (phase === "idle" && firstWebsiteMedia) ready();
         },
         onTiming: (event, details) => {
           if (event === "speech_first_nonzero_sample") {
-            clearConnectionDeadline(); stage(["SPEAK_TERMINAL_ERROR","SPEAK_AMENDMENT_SIGNOFF"].includes(details.actionKind) ? "closing" : "playing");
+            firstWebsiteMedia = true;
+            clearConnectionDeadline(); stage(details.checkpoint === "signoff" ? "closing" : "playing");
           }
-          timing.mark(event, { ...details,
-            audioRole: details.actionId === authorization.action.actionId ? "opening" : "interview_turn" });
+          timing.mark(event, { ...details, audioRole: details.audioRole ?? "interview_turn" });
         },
-        onProgress: () => { stage("retrying"); timing.mark("backend_retrying"); },
         onCaption: onEvent, onFailure: error => { stage("failed"); end("application_speech_error", voiceSessionErrorMessage(error)); },
       });
       const playbackReady = new Promise(resolve => { releaseWebsiteOpening = resolve; });
-      websiteOpeningPlayback = websitePlayer.start(authorization, playbackReady);
+      websiteOpeningPlayback = websitePlayer.start(nativeBinding, playbackReady);
       if (earlyWebsiteVad) websitePlayer.handleEvent(earlyWebsiteVad);
     }
     if (stopped || (signal?.aborted && !stopRequested)) throw safeOpeningError("abertura cancelada");

@@ -5,7 +5,7 @@ import { cpSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { productionBuildEnv } from "./production-env.mjs";
+import { productionBuildEnv, validateProductionPublicationEnv } from "./production-env.mjs";
 import { publicSiteConfig, publicSiteConfigScript } from "./public-site-config.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -64,7 +64,8 @@ export function composeSite({ rootDir = root, outputDir = "client", env = {} } =
   return { out, commercialLoginConfigured: Boolean(config.supabaseUrl && config.supabaseKey) };
 }
 
-export function buildSite(env = process.env) {
+export function buildSite(env = process.env, { publication = false } = {}) {
+  if (publication) validateProductionPublicationEnv(env);
   const outputDir = env.LIGOU_SITE_OUTPUT_DIR ?? "client";
   validateOutputDir(outputDir);
   // Validate before invoking either bundler, including the dashboard's public key mapping.
@@ -86,4 +87,8 @@ export function buildSite(env = process.env) {
   return result;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) buildSite();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const args = process.argv.slice(2);
+  if (args.length > 1 || (args.length === 1 && args[0] !== '--production')) throw new Error('usage: build-site.mjs [--production]');
+  buildSite(process.env, { publication: args[0] === '--production' });
+}

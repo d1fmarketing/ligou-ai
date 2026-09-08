@@ -30,11 +30,14 @@ import {
 import { prepareWebsiteInterview, type PreparedWebsiteInterview } from "./onboarding-website-bootstrap.ts";
 import { buildWebsiteOpeningAction, createWebsiteAgendaCoordinator } from "./onboarding-agenda-coordinator.ts";
 import { createInterviewEvidenceStore } from "./onboarding-interview-evidence-store.ts";
-import { synthesizeOnboardingSpeech, speechPayloadIsInternallyValid, type OnboardingSpeechAction, type OnboardingSpeechPayload } from "./onboarding-speech.ts";
+import { speechPayloadIsInternallyValid, type OnboardingSpeechAction, type OnboardingSpeechPayload } from "./onboarding-speech.ts";
 import type { StreamAuthorization } from "./onboarding-stream.ts";
+import { nativeWebsiteBinding, type NativeWebsiteRuntimeConfig } from "./onboarding-native-runtime.ts";
+import { buildNativeOnboardingSession } from "./onboarding-native-session.ts";
 
 export type WebsiteOpeningEnvelope = { version: 3; item_id: string; speech: OnboardingSpeechPayload }
-  | { version: 4; stream: StreamAuthorization };
+  | { version: 4; stream: StreamAuthorization }
+  | { version: 5; native: ReturnType<typeof nativeWebsiteBinding> };
 
 export async function prepareRequiredWebsiteInterview(
   scope: Parameters<typeof prepareWebsiteInterview>[0],
@@ -83,8 +86,8 @@ export { synthesizeOnboardingOpening } from "./onboarding-greeting.ts";
 
 /** Leave five minutes below the provider's 60-minute session ceiling for
  * termination/reconciliation. The existing $7.50 reservation/hard cap is unchanged. */
-export function onboardingSessionMaxMinutes(protocolVersion?: 2 | 3 | 4): number {
-  return protocolVersion === 3 || protocolVersion === 4 ? 55 : 30;
+export function onboardingSessionMaxMinutes(protocolVersion?: 2 | 3 | 4 | 5): number {
+  return protocolVersion === 3 || protocolVersion === 4 || protocolVersion === 5 ? 55 : 30;
 }
 
 const CORS = {
@@ -157,7 +160,7 @@ export interface StartSessionOptions {
   browserRequestId?: string;
   openingModeRequested?: OnboardingOpeningMode;
   requestedCallId?: string;
-  onboardingProtocolVersion?: 2 | 3 | 4;
+  onboardingProtocolVersion?: 2 | 3 | 4 | 5;
 }
 
 type VoiceStartupStage = "tenant_context" | "call_insert" | "budget_reservation" |
@@ -583,9 +586,8 @@ export async function startSession(
   registerCleanup?: (cleanup: DirectSessionCleanup) => void,
   options: StartSessionOptions = {},
 ) {
-  // All new onboarding is streamed. Older MP3 capabilities remain readable
-  // for historical evidence, but cannot create another paid session.
-  if(sessionType==="onboarding" && (options.openingModeRequested!=="realtime_stream_v1" || options.onboardingProtocolVersion!==4))
+  // New sessions use native audio. Earlier contracts remain readable as history.
+  if(sessionType==="onboarding" && (options.openingModeRequested!=="realtime_native_v1" || options.onboardingProtocolVersion!==5))
     throw Object.assign(new Error("client_upgrade_required"),{status:409});
   const traceScope = { requestId: options.browserRequestId, callId: options.requestedCallId };
   const trace = createVoiceStartupTrace(traceScope);
@@ -593,16 +595,16 @@ export async function startSession(
 
   if (
     sessionType === "onboarding" &&
-    options.openingModeRequested !== "realtime_stream_v1"
+    options.openingModeRequested !== "realtime_native_v1"
   ) throw Object.assign(new Error("client_upgrade_required"), { status: 409 });
   if (sessionType === "onboarding" &&
     (!options.requestedCallId || !UUID_PATTERN.test(options.requestedCallId)))
     throw Object.assign(new Error("browser_call_id_required"), { status: 409 });
   const openingMode = options.openingModeRequested ?? "provider_model_v1";
-  const applicationControlled=openingMode==="application_tts_v1" || openingMode==="realtime_stream_v1";
-  const websiteProtocol = sessionType === "onboarding" && options.onboardingProtocolVersion === 4;
+  const applicationControlled=openingMode==="application_tts_v1" || openingMode==="realtime_stream_v1" || openingMode==="realtime_native_v1";
+  const websiteProtocol = sessionType === "onboarding" && options.onboardingProtocolVersion === 5;
   if (options.onboardingProtocolVersion !== undefined &&
-    (sessionType !== "onboarding" || options.onboardingProtocolVersion!==4))
+    (sessionType !== "onboarding" || options.onboardingProtocolVersion!==5))
     throw Object.assign(new Error("client_upgrade_required"), { status: 409 });
   if (!isOnboardingOpeningMode(openingMode) ||
     (applicationControlled && sessionType !== "onboarding"))
@@ -688,7 +690,7 @@ export async function startSession(
   // Provider identity, cancellation and budget settlement stay independent.
   let providerLifecycle: "not_started" | "marking" | "inflight" | "rejected" | "accepted" = "not_started";
   let startupCancelled = false;
-  let websiteInterview: {prepared:PreparedWebsiteInterview;openingAction:OnboardingSpeechAction;openingStream:StreamAuthorization} | undefined;
+  let websiteInterview: NativeWebsiteRuntimeConfig | undefined;
   let preparedWebsite: PreparedWebsiteInterview | null = null;
   const externalCostUsd = 0;
   let openaiCallId = "";
@@ -782,8 +784,8 @@ export async function startSession(
     try {
       if (!options.browserRequestId || !UUID_PATTERN.test(options.browserRequestId)) throw new Error("website_interview_request_identity_required");
       preparedWebsite = await trace.measure("website_context", () => prepareRequiredWebsiteInterview({ ownerId: userId, tenantId: tenant.id, callId: call.id, requestId: options.browserRequestId! }, supa()));
-      const streamRuntime=await import("./onboarding-website-runtime.ts");
-      websiteInterview=await trace.measure("opening_authorization",()=>streamRuntime.prepareWebsiteStreamOpening(preparedWebsite!,tenant.name,{evidence:createInterviewEvidenceStore(supa())}));
+      websiteInterview={native:true,prepared:preparedWebsite,businessName:tenant.name};
+      nativeWebsiteBinding(websiteInterview);
     } catch (error: any) {
       await settleStartupFailure(String(error?.message ?? "website_interview_prepare_failed"), "not_applicable");
       throw Object.assign(error, { status: 503 });
@@ -821,7 +823,8 @@ export async function startSession(
               tools: toolSchemasForSessionType(sessionType),
               voice: sessionType === "onboarding" ? "ash" : config.voice,
               openingMode,
-              ...(websiteProtocol ? { onboardingProtocolVersion: 4 as const } : {}),
+              ...(websiteProtocol ? { onboardingProtocolVersion: 5 as const,
+                nativeWebsite:{stored:preparedWebsite!.stored,businessName:tenant.name} } : {}),
             })));
             providerLifecycle = "inflight";
             const callRes = await fetch("https://api.openai.com/v1/realtime/calls", {
@@ -941,7 +944,7 @@ export async function startSession(
     model: usedModel,
     fell_back: usedModel !== primary,
     opening_mode_applied: openingMode,
-    opening_payload: websiteInterview ? {version:4 as const,stream:websiteInterview.openingStream} : null,
+    opening_payload: websiteInterview ? {version:5 as const,native:nativeWebsiteBinding(websiteInterview)} : null,
   };
 }
 
@@ -951,8 +954,14 @@ export function buildRealtimeSessionConfig(args: {
   tools: unknown[];
   voice: string;
   openingMode: OnboardingOpeningMode;
-  onboardingProtocolVersion?: 2 | 3 | 4;
+  onboardingProtocolVersion?: 2 | 3 | 4 | 5;
+  nativeWebsite?: {stored:PreparedWebsiteInterview['stored'];businessName:string};
 }) {
+  if(args.openingMode==='realtime_native_v1'){
+    if(args.onboardingProtocolVersion!==5 || !args.nativeWebsite)throw Error('native_website_context_required');
+    const session=buildNativeOnboardingSession({...args.nativeWebsite,model:args.model});
+    return {...session,type:'realtime',model:args.model,audio:{...session.audio,output:{voice:args.voice}}};
+  }
   const applicationOwned = args.openingMode === "application_tts_v1" || args.openingMode === "realtime_stream_v1";
   return {
     type: "realtime",

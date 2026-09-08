@@ -15,6 +15,15 @@ export interface SpeechInterruptionProof { callId: string; actionId: string; pro
 export interface EmptyInputProof { receiptId: string; callId: string; actionId: string; providerItemId: string; replayed: boolean }
 export interface InterviewAmendmentProof { receiptId: string; interviewId: string; callId: string; approvalReceiptId: string; providerItemId: string; proposal: Extract<AgendaProposal,{kind:"correction"}>; state: "pending_amendment"; replayed: boolean }
 export interface InterviewSummaryProof { summaryId: string; summaryHash: string; revision: number; digest: string; parts: string[]; receiptId: string }
+export interface NativeCheckpointInput extends InterviewScope {
+  checkpointId: string; kind: 'review'|'signoff'; expectedRevision: number; expectedStoreVersion: number; expectedDigest: string; expectedReceiptId: string;
+  responseId: string; itemId: string; transcript: string; bufferStoppedEventId: string; mediaEvidence: StreamMediaEvidence; approvalReceiptId?: string;
+}
+export interface NativeCheckpointProof {
+  schema: 'onboarding.native.checkpoint.v1'; receiptId: string; checkpointId: string; kind: 'review'|'signoff'; callId: string; interviewId: string;
+  revision: number; digest: string; storeVersion: number; agendaReceiptId: string; responseId: string; itemId: string; transcript: string;
+  bufferStoppedEventId: string; mediaEvidence: StreamMediaEvidence; summaryId?: string; summaryHash?: string; parts?: string[]; approvalReceiptId?: string;
+}
 export function createInterviewEvidenceStore(client: Client) {
   const scope = (s: InterviewScope) => ({ p_owner: s.ownerId, p_call: s.callId, p_request: s.requestId });
   async function rpc(name: string, args: Record<string, unknown>): Promise<any> {
@@ -29,6 +38,32 @@ export function createInterviewEvidenceStore(client: Client) {
     return r;
   }
   return {
+    async recordNativeCheckpoint(input: NativeCheckpointInput): Promise<NativeCheckpointProof> {
+      if (![input.ownerId,input.callId,input.requestId,input.checkpointId,input.expectedReceiptId].every(x=>typeof x==='string'&&STREAM_UUID.test(x))
+        || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision<0
+        || !Number.isSafeInteger(input.expectedStoreVersion) || input.expectedStoreVersion<0
+        || !/^[0-9a-f]{64}$/.test(input.expectedDigest)
+        || !['review','signoff'].includes(input.kind)
+        || ![input.responseId,input.itemId,input.bufferStoppedEventId].every(x=>typeof x==='string'&&x.trim().length>0&&x.length<=400)
+        || typeof input.transcript!=='string' || !input.transcript.trim() || Array.from(input.transcript).length>8192
+        || !streamMediaEvidenceIsValid(input.mediaEvidence)
+        || (input.kind==='review' ? input.approvalReceiptId!==undefined : !STREAM_UUID.test(input.approvalReceiptId??'')))
+        throw new Error('Native checkpoint evidence invalid');
+      const r=await rpc('record_website_interview_native_checkpoint',{...scope(input),p_checkpoint:input.checkpointId,p_kind:input.kind,
+        p_revision:input.expectedRevision,p_store_version:input.expectedStoreVersion,p_digest:input.expectedDigest,p_receipt:input.expectedReceiptId,
+        p_response:input.responseId,p_item:input.itemId,p_transcript:input.transcript,p_buffer_event:input.bufferStoppedEventId,
+        p_media_evidence:input.mediaEvidence,p_approval:input.approvalReceiptId??null}) as NativeCheckpointProof;
+      if(!r || r.schema!=='onboarding.native.checkpoint.v1' || r.checkpointId!==input.checkpointId || r.kind!==input.kind || r.callId!==input.callId
+        || r.revision!==input.expectedRevision || r.digest!==input.expectedDigest || r.storeVersion!==input.expectedStoreVersion+(input.kind==='review'?1:0)
+        || ![r.receiptId,r.interviewId,r.agendaReceiptId].every(x=>typeof x==='string'&&STREAM_UUID.test(x))
+        || r.responseId!==input.responseId || r.itemId!==input.itemId || r.transcript!==input.transcript || r.bufferStoppedEventId!==input.bufferStoppedEventId
+        || !streamMediaEvidenceIsValid(r.mediaEvidence) || Object.keys(input.mediaEvidence).some(k=>r.mediaEvidence[k as keyof StreamMediaEvidence]!==input.mediaEvidence[k as keyof StreamMediaEvidence])
+        || (input.kind==='review' ? r.summaryId!==input.checkpointId || JSON.stringify(r.parts)!==JSON.stringify([input.transcript])
+          || r.summaryHash!==createHash('sha256').update(JSON.stringify([input.checkpointId,input.expectedRevision,input.expectedDigest,[input.transcript]])).digest('hex')
+          : r.approvalReceiptId!==input.approvalReceiptId || r.agendaReceiptId!==input.expectedReceiptId))
+        throw new Error('Native checkpoint proof mismatch');
+      return r;
+    },
     async claimStream(input:InterviewScope&{action:OnboardingSpeechAction;summaryId?:string;partIndex?:number;clarificationTurnId?:string}):Promise<StreamAuthorization>{
       const r=await rpc('claim_website_interview_stream',{...scope(input),p_action:input.action,p_summary:input.summaryId??null,p_part:input.partIndex??null,p_clarification_turn:input.clarificationTurnId??null});
       if(!streamAuthorizationIsValid(r,input.action))throw new Error('stream_authorization_invalid');return r;
@@ -88,6 +123,16 @@ export function createInterviewEvidenceStore(client: Client) {
       const r = await rpc("request_website_interview_amendment", {...scope(input),p_approval:input.approvalReceiptId,p_item:input.providerItemId,p_proposal:input.proposal});
       const targets=(p: typeof input.proposal)=>JSON.stringify([p.kind,(p.affectedItems??[]).map(x=>[x.itemId,x.disposition]),(p.affectedCandidates??[]).map(x=>[x.candidateId,x.disposition])]);
       if (r.callId!==input.callId || r.approvalReceiptId!==input.approvalReceiptId || r.providerItemId!==input.providerItemId || r.state!=="pending_amendment" || !r.receiptId || !r.interviewId || !r.proposal || targets(r.proposal)!==targets(input.proposal)) throw new Error("Invalid amendment proof");
+      return r;
+    },
+    async requestNativeAmendment(input: InterviewScope & { approvalReceiptId: string; providerItemId: string; proposal: Extract<AgendaProposal,{kind:"correction"}>; interpretation: string }): Promise<InterviewAmendmentProof&{provenance:'model_interpretation';interpretation:string}> {
+      if(typeof input.interpretation!=='string'||!input.interpretation.trim()||input.interpretation.length>32768)throw new Error('Native amendment content invalid');
+      input.signal?.throwIfAborted();
+      const r=await rpc('request_website_interview_native_amendment',{...scope(input),p_approval:input.approvalReceiptId,p_item:input.providerItemId,p_proposal:input.proposal,p_interpretation:input.interpretation});
+      const targets=(p:typeof input.proposal)=>JSON.stringify([p.kind,(p.affectedItems??[]).map(x=>[x.itemId,x.disposition]),(p.affectedCandidates??[]).map(x=>[x.candidateId,x.disposition])]);
+      if(r.callId!==input.callId||r.approvalReceiptId!==input.approvalReceiptId||r.providerItemId!==input.providerItemId||r.state!=='pending_amendment'
+        ||!STREAM_UUID.test(r.receiptId??'')||!STREAM_UUID.test(r.interviewId??'')||r.provenance!=='model_interpretation'||r.interpretation!==input.interpretation
+        ||!r.proposal||targets(r.proposal)!==targets(input.proposal))throw new Error('Native amendment proof mismatch');
       return r;
     },
     async recordSpeechPlayed(input: InterviewScope & { actionId: string; assistantItemId: string; assistantText: string; textSha256: string; audioSha256: string }) {

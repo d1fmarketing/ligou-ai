@@ -83,9 +83,10 @@ const WEBSITE_PAYLOAD = {
 
 const STREAM_OPENING={version:4,stream:{schema:"onboarding.stream.v1",dispatchId:"77777777-7777-4777-8777-777777777777",receiptId:"88888888-8888-4888-8888-888888888888",
   action:{actionId:"a".repeat(64),interviewId:"33333333-3333-4333-8333-333333333333",callId:"33333333-3333-4333-8333-333333333333",revision:0,kind:"ASK_NEXT_GAP",sourceDigest:"b".repeat(64),text:PAYLOAD.text}}};
-const streamForCall=(callId:string)=>({...STREAM_OPENING,stream:{...STREAM_OPENING.stream,action:{...STREAM_OPENING.stream.action,callId}}});
-const RESUMED_STREAM={version:4,stream:{...STREAM_OPENING.stream,action:{...STREAM_OPENING.stream.action,text:RESUMED_PAYLOAD.text}}};
-const WEBSITE_STREAM={version:4,stream:{...STREAM_OPENING.stream,action:{...STREAM_OPENING.stream.action,text:WEBSITE_TEXT}}};
+const streamForCall=(callId:string)=>({...NATIVE_OPENING,native:{...NATIVE_OPENING.native,callId}});
+const NATIVE_OPENING={version:5,native:{callId:STREAM_OPENING.stream.action.callId,interviewId:STREAM_OPENING.stream.action.interviewId,revision:95,sourceDigest:"b".repeat(64)}};
+const RESUMED_STREAM={...NATIVE_OPENING,native:{...NATIVE_OPENING.native,revision:95}};
+const WEBSITE_STREAM={...NATIVE_OPENING,native:{...NATIVE_OPENING.native,revision:0}};
 
 let handler: BrowserHandler | undefined;
 let currentClient: ReturnType<typeof edgeClient>;
@@ -108,9 +109,9 @@ function edgeClient(options: {
     answer_sdp: "answer-sdp",
     call_id: "33333333-3333-4333-8333-333333333333",
     error: null,
-    opening_mode_applied: "realtime_stream_v1",
-    opening_payload: STREAM_OPENING,
-    onboarding_protocol_version: 4,
+    opening_mode_applied: "realtime_native_v1",
+    opening_payload: NATIVE_OPENING,
+    onboarding_protocol_version: 5,
   };
   const readyRows = [...(options.readyRows ?? [])];
   const updateResults = [...(options.updateResults ?? [])];
@@ -219,10 +220,10 @@ function invalidApplicationReady(overrides: Record<string, unknown> = {}) {
     call_id: "33333333-3333-4333-8333-333333333333",
     answer_sdp: "invalid-ready-answer-sdp",
     error: null,
-    opening_mode_requested: "realtime_stream_v1",
-    opening_mode_applied: "realtime_stream_v1",
-    opening_payload: {...STREAM_OPENING,stream:{...STREAM_OPENING.stream,receiptId:"invalid"}},
-    onboarding_protocol_version: 4,
+    opening_mode_requested: "realtime_native_v1",
+    opening_mode_applied: "realtime_native_v1",
+    opening_payload: {...NATIVE_OPENING,native:{...NATIVE_OPENING.native,sourceDigest:"invalid"}},
+    onboarding_protocol_version: 5,
     ...overrides,
   };
 }
@@ -231,7 +232,7 @@ function invalidReadyAckScenario(ready: Record<string, unknown>) {
   const cancelRequested = {
     ...ready,
     status: "cancel_requested",
-    error: "invalid_stream_opening_contract",
+    error: "invalid_native_opening_contract",
   };
   const expired = {
     ...cancelRequested,
@@ -256,19 +257,19 @@ beforeEach(() => {
 });
 
 describe("browser-session opening contract", () => {
-  test("protocol4 returns exact persisted stream authorization and preserves protocol identity", async () => {
+  test("protocol5 returns exact persisted native context and preserves protocol identity", async () => {
     const speech = STREAM_OPENING.stream.action;
-    const payload = STREAM_OPENING;
-    currentClient = edgeClient({ readyRow: { status: "ready", answer_sdp: "answer", call_id: speech.callId, opening_mode_applied: "realtime_stream_v1", opening_payload: payload, onboarding_protocol_version: 4 } });
-    const response = await handler!(request({ session_type: "onboarding", opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4 }));
+    const payload = NATIVE_OPENING;
+    currentClient = edgeClient({ readyRow: { status: "ready", answer_sdp: "answer", call_id: speech.callId, opening_mode_applied: "realtime_native_v1", opening_payload: payload, onboarding_protocol_version: 5 } });
+    const response = await handler!(request({ session_type: "onboarding", opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5 }));
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.opening_payload).toEqual(payload);
-    expect(body.onboarding_protocol_version).toBe(4);
+    expect(body.onboarding_protocol_version).toBe(5);
     expect(body.max_minutes).toBe(55);
     expect(body).not.toHaveProperty("opening_text");
     expect(body).not.toHaveProperty("resume_context");
-    expect(currentClient.inserts[0].onboarding_protocol_version).toBe(4);
+    expect(currentClient.inserts[0].onboarding_protocol_version).toBe(5);
   });
 
   test("protocol3 nested contract validates actual hashes and rejects flattening and changed bindings", () => {
@@ -322,31 +323,31 @@ describe("browser-session opening contract", () => {
     }
   });
 
-  test("preserves the resumed stream action and authenticated business identity", async () => {
+  test("preserves the resumed native context and authenticated business identity", async () => {
     currentClient = edgeClient({ readyRow: {
       status: "ready",
       answer_sdp: "resumed-answer-sdp",
       call_id: "33333333-3333-4333-8333-333333333333",
       error: null,
-      opening_mode_applied: "realtime_stream_v1",
+      opening_mode_applied: "realtime_native_v1",
       opening_payload: RESUMED_STREAM,
-      onboarding_protocol_version: 4,
+      onboarding_protocol_version: 5,
     } });
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
     }));
 
     expect(response.status).toBe(200);
     expect(currentClient.inserts[0]).toMatchObject({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
     });
     expect(await response.json()).toMatchObject({
       opening_payload: RESUMED_STREAM,
-      onboarding_protocol_version: 4,
+      onboarding_protocol_version: 5,
       business_name: "D1F Marketing",
     });
   });
@@ -357,14 +358,14 @@ describe("browser-session opening contract", () => {
       answer_sdp: "website-answer-sdp",
       call_id: "33333333-3333-4333-8333-333333333333",
       error: null,
-      opening_mode_applied: "realtime_stream_v1",
+      opening_mode_applied: "realtime_native_v1",
       opening_payload: WEBSITE_STREAM,
-      onboarding_protocol_version: 4,
+      onboarding_protocol_version: 5,
     } });
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
     }));
 
     expect(response.status).toBe(200);
@@ -374,7 +375,7 @@ describe("browser-session opening contract", () => {
     expect(WEBSITE_TEXT).not.toContain("Vamos continuar de onde paramos");
   });
 
-  test("protocol4 rejects a legacy v1 ready row", async () => {
+  test("protocol5 rejects a legacy v1 ready row", async () => {
     const ready = invalidApplicationReady({
       answer_sdp: "legacy-answer-sdp",
       opening_payload: LEGACY_PAYLOAD,
@@ -382,22 +383,22 @@ describe("browser-session opening contract", () => {
     currentClient = invalidReadyAckScenario(ready).client;
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
     }));
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({
-      error: "invalid_stream_opening_contract",
+      error: "invalid_native_opening_contract",
     });
   });
 
-  test("binds a stream opening to the authenticated tenant and ignores browser payload fields", async () => {
+  test("binds a native opening to the authenticated tenant and ignores browser payload fields", async () => {
     expect(createBrowserSessionHandler).toBeFunction();
     currentClient = edgeClient();
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
       opening_mode_applied: "provider_model_v1",
       opening_payload: { ...PAYLOAD, text: "browser spoof" },
       business_name: "Browser Spoof LLC",
@@ -411,17 +412,17 @@ describe("browser-session opening contract", () => {
       session_type: "onboarding",
       model_override: null,
       offer_sdp: "offer-sdp",
-      opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
     }]);
     expect(await response.json()).toEqual({
       sdp: "answer-sdp",
       call_id: "33333333-3333-4333-8333-333333333333",
       max_minutes: 55,
       model: "gpt-realtime-2.1",
-      opening_mode_applied: "realtime_stream_v1",
-      opening_payload: STREAM_OPENING,
-      onboarding_protocol_version: 4,
+      opening_mode_applied: "realtime_native_v1",
+      opening_payload: NATIVE_OPENING,
+      onboarding_protocol_version: 5,
       business_name: "D1F Marketing",
     });
   });
@@ -440,11 +441,11 @@ describe("browser-session opening contract", () => {
       currentClient = invalidReadyAckScenario(readyRow).client;
       const response = await handler!(request({
         session_type: "onboarding",
-        opening_mode_requested: "realtime_stream_v1",
-        onboarding_protocol_version: 4,
+        opening_mode_requested: "realtime_native_v1",
+        onboarding_protocol_version: 5,
       }));
       expect(response.status).toBe(502);
-      expect(await response.json()).toEqual({ error: "invalid_stream_opening_contract" });
+      expect(await response.json()).toEqual({ error: "invalid_native_opening_contract" });
       expect(currentClient.updates).toHaveLength(1);
     }
   });
@@ -456,19 +457,19 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
     }));
 
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({
-      error: "invalid_stream_opening_contract",
+      error: "invalid_native_opening_contract",
     });
     expect(currentClient.updates).toEqual([{
       table: "browser_session_requests",
       patch: {
         status: "cancel_requested",
-        error: "invalid_stream_opening_contract",
+        error: "invalid_native_opening_contract",
       },
       filters: {
         id: "request-1",
@@ -486,7 +487,7 @@ describe("browser-session opening contract", () => {
     const cancelRequested = {
       ...ready,
       status: "cancel_requested",
-      error: "invalid_stream_opening_contract",
+      error: "invalid_native_opening_contract",
     };
     currentClient = edgeClient({
       readyRows: [ready, ...Array(60).fill(cancelRequested)],
@@ -497,8 +498,8 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1",
-      onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1",
+      onboarding_protocol_version: 5,
     }));
 
     expect(response.status).toBe(502);
@@ -539,7 +540,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -558,7 +559,7 @@ describe("browser-session opening contract", () => {
         error: null,
         opening_mode_applied: null,
         opening_payload: null,
-        onboarding_protocol_version: 4,
+        onboarding_protocol_version: 5,
       } });
       const times = [0, 0, 20_001];
       handler = buildHandler({
@@ -568,7 +569,7 @@ describe("browser-session opening contract", () => {
 
       const response = await handler!(request({
         session_type: "onboarding",
-        opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+        opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
       }, abort.signal));
 
       expect(response.status).toBe(499);
@@ -597,8 +598,8 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: "race-answer-sdp",
       error: null,
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
-      opening_mode_applied: "realtime_stream_v1",
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
+      opening_mode_applied: "realtime_native_v1",
       opening_payload: streamForCall(callId),
     };
     const cancelRequested = { ...ready, status: "cancel_requested", error: "request_aborted" };
@@ -621,7 +622,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -679,7 +680,7 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: null,
       error: null,
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
       opening_mode_applied: null,
       opening_payload: null,
     };
@@ -696,7 +697,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -716,7 +717,7 @@ describe("browser-session opening contract", () => {
         call_id: "77777777-7777-4777-8777-777777777777",
         answer_sdp: "malformed-answer",
         error: null,
-        opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+        opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
         opening_mode_applied: "provider_model_v1",
         opening_payload: null,
       }],
@@ -726,7 +727,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
     }, abort.signal));
 
     expect(response.status).toBe(502);
@@ -743,8 +744,8 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: "race-answer-sdp",
       error: null,
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
-      opening_mode_applied: "realtime_stream_v1",
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
+      opening_mode_applied: "realtime_native_v1",
       opening_payload: streamForCall(callId),
     };
     const cancelRequested = { ...ready, status: "cancel_requested", error: "request_aborted" };
@@ -767,7 +768,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
     }, abort.signal));
 
     expect(response.status).toBe(499);
@@ -784,8 +785,8 @@ describe("browser-session opening contract", () => {
       call_id: callId,
       answer_sdp: "race-answer-sdp",
       error: null,
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
-      opening_mode_applied: "realtime_stream_v1",
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
+      opening_mode_applied: "realtime_native_v1",
       opening_payload: streamForCall(callId),
     };
     const cancelRequested = { ...ready, status: "cancel_requested", error: "request_aborted" };
@@ -804,7 +805,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
     }, abort.signal));
 
     expect(response.status).toBe(502);
@@ -826,7 +827,7 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
     }));
 
     expect(response.status).toBe(504);
@@ -858,9 +859,9 @@ describe("browser-session opening contract", () => {
         answer_sdp: "application-answer-sdp",
         call_id: "55555555-5555-4555-8555-555555555555",
         error: null,
-        opening_mode_applied: "realtime_stream_v1",
+        opening_mode_applied: "realtime_native_v1",
         opening_payload: streamForCall("55555555-5555-4555-8555-555555555555"),
-        onboarding_protocol_version: 4,
+        onboarding_protocol_version: 5,
       },
     ] });
     const times = [0, 0, 20_001, 21_000, 22_000];
@@ -868,13 +869,13 @@ describe("browser-session opening contract", () => {
 
     const response = await handler!(request({
       session_type: "onboarding",
-      opening_mode_requested: "realtime_stream_v1", onboarding_protocol_version: 4,
+      opening_mode_requested: "realtime_native_v1", onboarding_protocol_version: 5,
     }));
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       sdp: "application-answer-sdp",
-      opening_mode_applied: "realtime_stream_v1",
+      opening_mode_applied: "realtime_native_v1",
     });
     expect(currentClient.updates).toHaveLength(0);
   });
@@ -955,12 +956,12 @@ test("legacy valid MP3 payloads cannot re-enable new TTS sessions", async () => 
 test("Edge startup timings distinguish nested polling from the elapsed request without private content", async () => {
   let clock=0; const timings:any[]=[];
   const ready={status:"ready",answer_sdp:"answer-sdp",call_id:"33333333-3333-4333-8333-333333333333",error:null,
-    opening_mode_applied:"realtime_stream_v1",opening_payload:STREAM_OPENING,onboarding_protocol_version:4};
+    opening_mode_applied:"realtime_native_v1",opening_payload:NATIVE_OPENING,onboarding_protocol_version: 5};
   currentClient=edgeClient({readyRows:[{...ready,status:"processing",answer_sdp:null,opening_payload:null},ready]});
   const timed=buildHandler({monotonic:()=>clock,now:()=>clock,
     fetch:async()=>{clock+=25;return Response.json({id:"owner-a"});},
     sleep:async(ms:number)=>{clock+=ms;},onTiming:(event:any)=>timings.push(event)});
-  const response=await timed!(request({session_type:"onboarding",opening_mode_requested:"realtime_stream_v1",onboarding_protocol_version:4}));
+  const response=await timed!(request({session_type:"onboarding",opening_mode_requested:"realtime_native_v1",onboarding_protocol_version: 5}));
   expect(response.status).toBe(200);
   expect(response.headers.get("Access-Control-Expose-Headers")).toContain("Server-Timing");
   const header=response.headers.get("Server-Timing");
@@ -973,7 +974,7 @@ test("Edge startup timings distinguish nested polling from the elapsed request w
   expect(timings[0].durations.edge_total).toBe(625);
   for(const secret of ["owner-token","test-secret","offer-sdp","answer-sdp","D1F Marketing",PAYLOAD.audio_base64])
     expect(JSON.stringify(timings)).not.toContain(secret);
-  expect((await response.json()).opening_payload).toEqual(STREAM_OPENING);
+  expect((await response.json()).opening_payload).toEqual(NATIVE_OPENING);
 });
 
 test("failed timing observers cannot change owner authentication or successful startup", async () => {
@@ -982,7 +983,7 @@ test("failed timing observers cannot change owner authentication or successful s
     const timed=buildHandler({monotonic:()=>{throw new Error("broken-clock");},
       onTiming:()=>{throw new Error("broken-observer");},
       fetch:async()=>Response.json(authorized?{id:"owner-a"}:{error:"denied"},{status:authorized?200:401})});
-    const response=await timed!(request({session_type:"onboarding",opening_mode_requested:"realtime_stream_v1",onboarding_protocol_version:4}));
+    const response=await timed!(request({session_type:"onboarding",opening_mode_requested:"realtime_native_v1",onboarding_protocol_version: 5}));
     expect(response.status).toBe(authorized?200:401);
     expect(currentClient.inserts).toHaveLength(authorized?1:0);
   }
@@ -990,18 +991,18 @@ test("failed timing observers cannot change owner authentication or successful s
 
 
 
-test("full streaming admission returns only an authorized action and preserves the existing call budget window",async()=>{
+test("native admission returns only stored source context and preserves the existing call budget window",async()=>{
   currentClient=edgeClient({readyRow:{id:"request-1",status:"ready",session_type:"onboarding",answer_sdp:"answer-sdp",call_id:STREAM_OPENING.stream.action.callId,error:null,
-    opening_mode_requested:"realtime_stream_v1",opening_mode_applied:"realtime_stream_v1",opening_payload:STREAM_OPENING,onboarding_protocol_version:4}});
-  const response=await handler!(request({session_type:"onboarding",opening_mode_requested:"realtime_stream_v1",onboarding_protocol_version:4,speech_contract_version:3}));
+    opening_mode_requested:"realtime_native_v1",opening_mode_applied:"realtime_native_v1",opening_payload:NATIVE_OPENING,onboarding_protocol_version: 5}});
+  const response=await handler!(request({session_type:"onboarding",opening_mode_requested:"realtime_native_v1",onboarding_protocol_version: 5,speech_contract_version:3}));
   expect(response.status).toBe(200);const body=await response.json();
-  expect(body.opening_payload).toEqual(STREAM_OPENING);expect(body.max_minutes).toBe(55);expect(body.onboarding_protocol_version).toBe(4);
+  expect(body.opening_payload).toEqual(NATIVE_OPENING);expect(body.max_minutes).toBe(55);expect(body.onboarding_protocol_version).toBe(5);
   expect(JSON.stringify(body)).not.toContain("audio_base64");expect(JSON.stringify(body)).not.toContain("tts_model");
-  expect(currentClient.inserts[0]).toMatchObject({opening_mode_requested:"realtime_stream_v1",onboarding_protocol_version:4});
+  expect(currentClient.inserts[0]).toMatchObject({opening_mode_requested:"realtime_native_v1",onboarding_protocol_version: 5});
 });
 
 test("new onboarding requests can never select the old MP3 path or an undeclared stream capability",async()=>{
-  for(const [protocol,mode,capability] of [[2,"application_tts_v1",2],[3,"application_tts_v1",2],[4,"application_tts_v1",3],[4,"realtime_stream_v1",2],[4,"realtime_stream_v1",undefined]]){
+  for(const [protocol,mode,capability] of [[2,"application_tts_v1",2],[3,"application_tts_v1",2],[4,"application_tts_v1",3],[4,"realtime_native_v1",2],[4,"realtime_native_v1",undefined]]){
     currentClient=edgeClient();
     const response=await handler!(request({session_type:"onboarding",opening_mode_requested:mode,onboarding_protocol_version:protocol,speech_contract_version:capability}));
     expect(response.status).toBe(409);expect(currentClient.inserts).toHaveLength(0);expect(currentClient.selections).toHaveLength(0);
@@ -1015,4 +1016,81 @@ test("stream descriptors reject missing authority, mismatched identities and emb
     {...STREAM_OPENING.stream,audio_base64:"SUQzBA=="},{...STREAM_OPENING.stream,action:{...STREAM_OPENING.stream.action,callId:"bad"}},
     {...STREAM_OPENING.stream,action:{...STREAM_OPENING.stream.action,revision:-1}}])expect(validate({version:4,stream})).toBe(false);
   expect(validate({...STREAM_OPENING,speech:PAYLOAD})).toBe(false);
+});
+
+function nativeReady(patch:Record<string,unknown>={}) {
+  return {id:"request-1",status:"ready",session_type:"onboarding",call_id:NATIVE_OPENING.native.callId,
+    answer_sdp:"native-answer",error:null,opening_mode_requested:"realtime_native_v1",opening_mode_applied:"realtime_native_v1",
+    opening_payload:NATIVE_OPENING,onboarding_protocol_version:5,...patch};
+}
+const nativeRequest={session_type:"onboarding",opening_mode_requested:"realtime_native_v1",onboarding_protocol_version:5,speech_contract_version:3};
+
+test("protocol5 returns only the stored native context and retains owner identity and session cap",async()=>{
+  currentClient=edgeClient({readyRow:nativeReady()});
+  const response=await handler!(request({...nativeRequest,opening_payload:{native:{callId:"browser-spoof"}},business_name:"Spoof"}));
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({sdp:"native-answer",call_id:NATIVE_OPENING.native.callId,max_minutes:55,model:"gpt-realtime-2.1",
+    opening_mode_applied:"realtime_native_v1",opening_payload:NATIVE_OPENING,onboarding_protocol_version:5,business_name:"D1F Marketing"});
+  expect(currentClient.inserts).toEqual([{table:"browser_session_requests",tenant_id:TENANT.id,user_id:"owner-a",session_type:"onboarding",
+    model_override:null,offer_sdp:"offer-sdp",opening_mode_requested:"realtime_native_v1",onboarding_protocol_version:5}]);
+});
+
+test("native admission rejects mismatched profiles and missing checkpoint capability before tenant/enqueue",async()=>{
+  for(const patch of [{opening_mode_requested:"realtime_stream_v1"},{onboarding_protocol_version:4},{onboarding_protocol_version:"5"},
+    {speech_contract_version:undefined},{speech_contract_version:2},{opening_mode_requested:"application_tts_v1"}]) {
+    currentClient=edgeClient();
+    const response=await handler!(request({...nativeRequest,...patch}));
+    expect(response.status).toBe(409);expect(await response.json()).toEqual({error:"client_upgrade_required"});
+    expect(currentClient.inserts).toHaveLength(0);expect(currentClient.selections).toHaveLength(0);
+  }
+});
+
+test("native descriptor validates exact source context without accepting audio, tools or stream claims",()=>{
+  const validate=(edgeModule as any).isNativeOpeningPayload;expect(validate).toBeFunction();expect(validate(NATIVE_OPENING)).toBe(true);
+  for(const patch of [{callId:"invalid"},{interviewId:null},{revision:-1},{revision:1.1},{revision:Number.MAX_SAFE_INTEGER+1},
+    {sourceDigest:"unknown"},{audio_base64:"SUQzBA=="},{action:STREAM_OPENING.stream.action},{extra:true}])
+    expect(validate({...NATIVE_OPENING,native:{...NATIVE_OPENING.native,...patch}})).toBe(false);
+  for(const payload of [null,STREAM_OPENING,{...NATIVE_OPENING,version:4},{...NATIVE_OPENING,stream:STREAM_OPENING.stream}])expect(validate(payload)).toBe(false);
+});
+
+test("invalid native ready binding uses exact cancellation and waits for an expired acknowledgment",async()=>{
+  for(const payload of [{...NATIVE_OPENING,native:{...NATIVE_OPENING.native,callId:"44444444-4444-4444-8444-444444444444"}},
+    {...NATIVE_OPENING,native:{...NATIVE_OPENING.native,sourceDigest:"bad"}},STREAM_OPENING]) {
+    const ready=nativeReady({opening_payload:payload});const cancel={...ready,status:"cancel_requested",error:"invalid_native_opening_contract"};
+    const expired={...cancel,status:"expired",answer_sdp:null,opening_mode_applied:null,opening_payload:null};
+    currentClient=edgeClient({readyRows:[ready,expired],updateResults:[{data:[cancel],error:null}]});
+    const response=await handler!(request(nativeRequest));
+    expect(response.status).toBe(502);expect(await response.json()).toEqual({error:"invalid_native_opening_contract"});
+    expect(currentClient.updates).toEqual([{table:"browser_session_requests",patch:{status:"cancel_requested",error:"invalid_native_opening_contract"},
+      filters:{id:"request-1",status:"ready",call_id:ready.call_id}}]);
+    expect(currentClient.selections.some(x=>x.table==="calls")).toBe(false);
+  }
+});
+
+test("native abort after accepted ready race remains pending until exact backend cleanup proof",async()=>{
+  const abort=new AbortController();const ready=nativeReady();const cancel={...ready,status:"cancel_requested",error:"request_aborted"};
+  const expired={...cancel,status:"expired",answer_sdp:null,opening_mode_applied:null,opening_payload:null};
+  currentClient=edgeClient({readyRows:[ready,expired],updateResults:[{data:[],error:null},{data:[cancel],error:null}]});
+  handler=buildHandler({sleep:async()=>{abort.abort();}});
+  const response=await handler!(request(nativeRequest,abort.signal));
+  expect(response.status).toBe(499);expect(await response.json()).toEqual({error:"request_aborted"});
+  expect(currentClient.updates.map(x=>x.patch)).toEqual([{status:"expired",error:"request_aborted"},{status:"cancel_requested",error:"request_aborted"}]);
+});
+
+test("native malformed ready cleanup cannot report success without exact terminal acknowledgment",async()=>{
+  const ready=nativeReady({opening_payload:null}),cancel={...ready,status:"cancel_requested"};
+  currentClient=edgeClient({readyRows:[ready,...Array(60).fill(cancel)],updateResults:[{data:[cancel],error:null}]});
+  let sleeps=0;handler=buildHandler({sleep:async()=>{sleeps++;}});
+  const response=await handler!(request(nativeRequest));
+  expect(response.status).toBe(502);expect(await response.json()).toEqual({error:"request_cleanup_failed"});
+  expect(sleeps).toBe(61);expect(currentClient.updates).toHaveLength(1);
+});
+
+
+test("explicit protocol4 clients must upgrade before any new website call is enqueued",async()=>{
+  currentClient=edgeClient({readyRow:{status:"ready",answer_sdp:"historical-stream-answer",call_id:STREAM_OPENING.stream.action.callId,
+    opening_mode_applied:"realtime_stream_v1",opening_payload:STREAM_OPENING,onboarding_protocol_version:4}});
+  const response=await handler!(request({session_type:"onboarding",opening_mode_requested:"realtime_stream_v1",onboarding_protocol_version:4,speech_contract_version:3}));
+  expect(response.status).toBe(409);expect(await response.json()).toEqual({error:"client_upgrade_required"});
+  expect(currentClient.inserts).toHaveLength(0);expect(currentClient.selections).toHaveLength(0);
 });

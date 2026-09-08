@@ -23,7 +23,7 @@ export function VoicePanel({
   onClose,
   initialSessionType = "owner_browser",
   lockedOnboarding = false,
-  onboardingProtocolVersion = 4,
+  onboardingProtocolVersion = 5,
   onTiming,
 }) {
   const [status, setStatus] = useState("idle");
@@ -124,7 +124,7 @@ export function VoicePanel({
     // React may batch two click handlers before repainting. Claim custody in a
     // ref before the first await so one click cannot supersede another start.
     if (startAbortRef.current || sessionRef.current) return;
-    if(endedRef.current && sessionType==="onboarding" && [3,4].includes(onboardingProtocolVersion) && endedCallRef.current && !resumable(outcomeRef.current))return;
+    if(endedRef.current && sessionType==="onboarding" && [3,4,5].includes(onboardingProtocolVersion) && endedCallRef.current && !resumable(outcomeRef.current))return;
     outcomeAbortRef.current?.abort();
     outcomeAbortRef.current = null;
     const startAbort = new AbortController();
@@ -155,7 +155,6 @@ export function VoicePanel({
         model,
         sessionType: startedSessionType,
         onboardingProtocolVersion,
-        speechClient: supabase,
         signal: startAbort.signal,
         startedAt: timing.startedAt,
         attemptId: timing.attemptId,
@@ -209,7 +208,7 @@ export function VoicePanel({
     startTimingRef.current?.mark("stop_requested");
     const session = sessionRef.current;
     if (session?.end) {
-      if (sessionType === "onboarding" && [3,4].includes(onboardingProtocolVersion)) setStatus("stopping");
+      if (sessionType === "onboarding" && [3,4,5].includes(onboardingProtocolVersion)) setStatus("stopping");
       session.end("manual_hangup");
     }
     else handleEnd({ reason: "manual_hangup", callId: null }, sessionType, runId);
@@ -237,7 +236,7 @@ export function VoicePanel({
       open
       title={interviewing ? "Entrevista de onboarding" : "Falar com o Ligou"}
       description={interviewing
-        ? [3,4].includes(onboardingProtocolVersion)
+        ? [3,4,5].includes(onboardingProtocolVersion)
           ? "O Ligou conversa com você em português para confirmar as informações da sua empresa. Ao final, você revisa e aprova a configuração."
           : "O Ligou te entrevista em português e registra cada regra como sugestão. Você aprova o lote na aba Memória."
         : "Converse por voz como se fosse um cliente. Casos abertos durante a chamada aparecem aqui ao vivo."}
@@ -266,7 +265,7 @@ export function VoicePanel({
               </>
             ) : null}
             <button type="button" className="voice-live-button" onClick={begin}
-              disabled={status==="ended" && endedSessionType==="onboarding" && [3,4].includes(onboardingProtocolVersion) && Boolean(endedCallId) && !resumable(onboardingOutcome)}>
+              disabled={status==="ended" && endedSessionType==="onboarding" && [3,4,5].includes(onboardingProtocolVersion) && Boolean(endedCallId) && !resumable(onboardingOutcome)}>
               <IconMicrophone2 aria-hidden="true" /> {status === "ended"
                 ? voiceSessionRestartLabel({ endedSessionType, onboardingOutcome })
                 : status === "failed" ? "Tentar novamente"

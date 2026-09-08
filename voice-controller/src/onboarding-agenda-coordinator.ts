@@ -240,7 +240,7 @@ export function parseWebsiteInterpretation(value: unknown): WebsiteInterpretatio
 }
 
 const boundedInterpretationText = (maxLength = 512) => ({ type: "string", minLength: 1, maxLength, pattern: "\\S" });
-const PROPOSAL_SCHEMA = {
+export const PROPOSAL_SCHEMA = {
   type: "object", additionalProperties: false, required: ["proposal"], properties: {
     proposal: { anyOf: [
       { type: "object", additionalProperties: false, required: ["kind", "itemId"], properties: {

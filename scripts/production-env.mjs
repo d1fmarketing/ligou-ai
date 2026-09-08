@@ -1,3 +1,5 @@
+import { publicSiteConfig } from './public-site-config.mjs';
+
 const PUBLIC_INPUTS = new Map([
   ["LIGOU_PUBLIC_SUPABASE_URL", "VITE_SUPABASE_URL"],
   ["LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "VITE_SUPABASE_PUBLISHABLE_KEY"],
@@ -7,6 +9,19 @@ const PUBLIC_INPUTS = new Map([
 
 function safeValue(value) {
   return typeof value === "string" && value.length <= 4096 && !/[\r\n\0]/.test(value);
+}
+
+/** Publication uses the existing Supabase Edge bootstrap. Offline previews do
+ * not require credentials; call this only at the explicit release boundary. */
+export function validateProductionPublicationEnv(source) {
+  for (const name of PUBLIC_INPUTS.keys()) {
+    if (typeof source[name] !== 'string' || !source[name].trim()) throw new Error(`production_public_env_required:${name}`);
+    if (!safeValue(source[name])) throw new Error('production_public_env_invalid');
+  }
+  const { supabaseUrl } = publicSiteConfig(source);
+  const functionsUrl = `${supabaseUrl}/functions/v1`;
+  if (source.LIGOU_PUBLIC_SUPABASE_FUNCTIONS_URL !== functionsUrl) throw new Error('production_functions_endpoint_invalid');
+  if (source.LIGOU_PUBLIC_SESSION_URL !== `${functionsUrl}/browser-session`) throw new Error('production_voice_endpoint_invalid');
 }
 
 export function productionBuildEnv(source, outputDir = "client") {

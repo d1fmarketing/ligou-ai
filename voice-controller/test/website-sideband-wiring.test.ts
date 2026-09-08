@@ -1,20 +1,15 @@
 import { expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { attachSideband, liveSessions } from "../src/sideband.ts";
 import { makeCapability } from "../src/tools.ts";
 import { _setClient } from "../src/rules.ts";
 import { createOnboardingAgenda, getAgendaAction } from "../src/onboarding-agenda.ts";
 import { onboardingAgendaDigest } from "../src/onboarding-agenda-store.ts";
-import { buildWebsiteOpeningAction } from "../src/onboarding-agenda-coordinator.ts";
 
 const callId = "33333333-3333-4333-8333-333333333333", ownerId="11111111-1111-4111-8111-111111111111", tenantId="22222222-2222-4222-8222-222222222222", requestId="44444444-4444-4444-8444-444444444444";
-const hash = (s:string|Uint8Array)=>createHash("sha256").update(s).digest("hex");
 function fixture(){
   const agenda=createOnboardingAgenda({interviewId:callId,callId,draftId:requestId,draftHash:"a".repeat(64),sourceResultId:requestId,sourceResultHash:"b".repeat(64)},[{id:"area",source:"owner_private_requirement",subject:"area",questionPt:"Quais cidades atende?",coverageRefs:[],relatedItemIds:[],blocking:true}]);
   const stored={agenda,revision:0,storeVersion:0,digest:onboardingAgendaDigest(agenda),receiptId:requestId,nextAction:getAgendaAction(agenda),state:"unfinished" as const,replayed:false};
-  const openingAction=buildWebsiteOpeningAction(stored,"Foghorn Air");
-  const audio=Buffer.from([73,68,51,4,0]);
-  return {prepared:{scope:{ownerId,callId,requestId},stored,projection:{} as any},openingAction,openingPayload:{...openingAction,schema:"onboarding.speech.v1" as const,text_sha256:hash(openingAction.text),audio_sha256:hash(audio),audio_base64:audio.toString("base64"),mime:"audio/mpeg" as const,voice:"ash" as const,tts_model:"tts-1-hd" as const,cost_usd:Number(([...openingAction.text].length*30/1e6).toFixed(8))}};
+  return {native:true as const,businessName:"Foghorn Air",prepared:{scope:{ownerId,callId,requestId},stored,projection:{} as any}};
 }
 class Socket {
   static instances:Socket[]=[];listeners=new Map<string,Function[]>();sent:any[]=[];closed=false;
@@ -26,10 +21,9 @@ class Socket {
   message(event:any){this.emit("message",{data:JSON.stringify(event)});}
 }
 async function flush(){for(let i=0;i<30;i++)await new Promise<void>(resolve=>setImmediate(resolve));}
-function harness(options:{rpc?:(name:string,args:any)=>any;fetchImpl?:typeof fetch;callRow?:()=>Record<string,unknown>;legacy?:boolean;stream?:boolean;terminalWrite?:()=>any}={}){
+function harness(options:{rpc?:(name:string,args:any)=>any;fetchImpl?:typeof fetch;callRow?:()=>Record<string,unknown>;legacy?:boolean;terminalWrite?:()=>any}={}){
   const original=globalThis.WebSocket;Socket.instances=[];globalThis.WebSocket=Socket as any;
   const updates:any[]=[],rpcs:any[]=[];const website:any=fixture();
-  if(options.stream){website.openingStream={schema:'onboarding.stream.v1',action:website.openingAction,dispatchId:requestId,receiptId:ownerId};delete website.openingPayload;}
   _setClient({
     rpc:async(name:string,args:any)=>{rpcs.push({name,args});
       const override=options.rpc?.(name,args);if(override!==undefined)return await override;
@@ -41,22 +35,21 @@ function harness(options:{rpc?:(name:string,args:any)=>any;fetchImpl?:typeof fet
   } as any);
   const cap=makeCapability("foghorn-air",tenantId,callId,30,options.legacy?"customer":"onboarding",{authEpoch:1,policyEpoch:1,simulation:true},ownerId);
   let control:ReturnType<typeof attachSideband>|undefined;
-  return {website,updates,rpcs,attach(){control=attachSideband(cap,"rtc-test","gpt-realtime-2.1",{...(options.legacy?{}:{onboarding:{expectedBusinessName:"Foghorn Air",openingMode:options.stream?'realtime_stream_v1':"application_tts_v1",websiteInterview:website},externalCostUsd:options.stream?0:website.openingPayload.cost_usd}),fetchImpl:options.fetchImpl??(async()=>{throw new Error("provider request forbidden");})} as any);return control;},restore(){control?.cancel();globalThis.WebSocket=original;_setClient(null);liveSessions.delete(callId);}};
+  return {website,updates,rpcs,attach(){control=attachSideband(cap,"rtc-test","gpt-realtime-2.1",{...(options.legacy?{}:{onboarding:{expectedBusinessName:"Foghorn Air",openingMode:"realtime_native_v1",websiteInterview:website},externalCostUsd:0}),fetchImpl:options.fetchImpl??(async()=>{throw new Error("provider request forbidden");})} as any);return control;},restore(){control?.cancel();globalThis.WebSocket=original;_setClient(null);liveSessions.delete(callId);}};
 }
 
-test('protocol4 sideband permits only authorized streamed audio with zero TTS cost',async()=>{
- let h:ReturnType<typeof harness>;
- h=harness({stream:true,rpc:name=>name==='authorize_website_interview_stream'?{data:h.website.openingStream,error:null}:undefined});
- try{
+const readyControl=()=>({type:'conversation.item.done',item:{id:'lnr-'+callId.replaceAll('-','').slice(0,28),type:'message',role:'system',status:'completed',content:[{type:'input_text',text:'ligou.website_native_ready:'+JSON.stringify({callId,interviewId:callId})}]}});
+test('native sideband starts audio once after browser readiness without any speech authorization RPC',async()=>{
+ const h=harness();try{
   const control=h.attach(),sock=Socket.instances[0]!;sock.emit('open');await control.opened;
   expect(control.ledger.externalCostUsd).toBe(0);expect(sock.sent.some(e=>e.type==='response.create')).toBe(false);
-  const authorization=h.website.openingStream;
-  sock.message({type:'conversation.item.done',item:{id:'lsr-'+requestId.replaceAll('-','').slice(0,28),type:'message',role:'system',status:'completed',content:[{type:'input_text',text:'ligou.website_stream_ready:'+JSON.stringify({actionId:authorization.action.actionId,dispatchId:requestId})}]}});await flush();
-  const request=sock.sent.find(e=>e.type==='response.create');expect(request.response).toMatchObject({conversation:'none',tools:[],tool_choice:'none',output_modalities:['audio']});
-  sock.message({type:'response.created',response:{id:'stream-response',metadata:request.response.metadata}});
-  sock.message({type:'response.output_item.added',response_id:'stream-response',output_index:0,item:{id:'stream-item',type:'message',role:'assistant',status:'in_progress',content:[]}});
-  sock.message({type:'response.output_audio.delta',response_id:'stream-response',output_index:0,content_index:0,item_id:'stream-item',delta:'AAAA'});await flush();
-  expect(control.ledger.status).toBe('active');expect(control.ledger.externalCostUsd).toBe(0);
+  expect(sock.sent.find(e=>e.type==='session.update').session).toMatchObject({output_modalities:['audio'],tool_choice:'auto'});
+  sock.message(readyControl());sock.message(readyControl());await flush();
+  const requests=sock.sent.filter(e=>e.type==='response.create');expect(requests).toHaveLength(1);
+  expect(requests[0].response.output_modalities).toEqual(['audio']);expect(requests[0].response.conversation).toBeUndefined();
+  sock.message({type:'response.created',response:{id:'native-response',metadata:requests[0].response.metadata}});
+  sock.message({type:'response.output_audio.delta',response_id:'native-response',item_id:'native-item',delta:'AAAA'});await flush();
+  expect(control.ledger.status).toBe('active');expect(h.rpcs.some(x=>/speech|stream/.test(x.name))).toBe(false);
  }finally{h.restore();}
 });
 
@@ -96,7 +89,6 @@ test('exact website Stop fences pending work immediately and retains sideband th
   },callRow:()=>({status:'ended',provider_termination_state:providerState}),fetchImpl:async()=>{hangups++;return await new Promise(resolve=>{releaseHangup=resolve;});}});
   try {
     const control=h.attach(),sock=Socket.instances[0]!;sock.emit('open');await control.opened;
-    sock.message({type:'conversation.item.done',item:{id:`lgs-${h.website.openingAction.actionId.slice(0,28)}`,type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:h.website.openingPayload.text}]}});await flush();
     sock.message({type:'input_audio_buffer.speech_started',item_id:'pending-owner'});
     sock.message({type:'conversation.item.input_audio_transcription.completed',item_id:'pending-owner',transcript:'Atendemos Concord.'});await flush();
     expect(releaseOwner).toBeDefined();
@@ -170,17 +162,14 @@ test('website Stop controls have no effect on a non-website session',async()=>{
   }finally{h.restore();}
 });
 
-test('controlled Stop leaves an already approved configuration snapshot untouched',async()=>{
-  const h=harness();try{
-    const control=h.attach(),sock=Socket.instances[0]!;sock.emit('open');await control.opened;
-    const state=control.ledger.websiteInterviewRuntime!.state;
-    state.approval={receiptId:requestId,turnId:'approved-owner-turn',summaryId:'approved-summary',summaryHash:'a'.repeat(64)};
-    state.stored.state='closing';
-    const approved=structuredClone({approval:state.approval,stored:state.stored});
-    sock.message(stopControl());await flush();
-    expect({approval:state.approval,stored:state.stored}).toEqual(approved);
-    expect(h.rpcs.some(x=>['approve_website_interview_summary','commit_website_interview_turn','request_website_interview_amendment'].includes(x.name))).toBe(false);
-  }finally{h.restore();}
+test('native Stop cannot fabricate approval or mutate an approved draft',async()=>{
+ const h=harness();try{
+  const control=h.attach(),sock=Socket.instances[0]!;sock.emit('open');await control.opened;
+  const before=structuredClone(control.ledger.websiteInterviewRuntime!.state.stored);
+  sock.message(stopControl());await flush();
+  expect(control.ledger.websiteInterviewRuntime!.state.stored).toEqual(before);
+  expect(h.rpcs.some(x=>['approve_website_interview_summary','commit_website_interview_turn','commit_native_website_interview_turn','request_website_interview_amendment'].includes(x.name))).toBe(false);
+ }finally{h.restore();}
 });
 
 test('controlled website finalization releases its socket after a bounded database hold',async()=>{
@@ -196,53 +185,31 @@ test('controlled website finalization releases its socket after a bounded databa
   }finally{h.restore();globalThis.setTimeout=originalSet;globalThis.clearTimeout=originalClear;}
 });
 
-test("website sideband boot bypasses legacy opening activation and owns every audible transcript",async()=>{
-  const h=harness();try{
-    const control=h.attach(),sock=Socket.instances[0]!;sock.emit("open");await control.opened;
-    expect(control.ledger.applicationOpening).toBeUndefined();
-    expect(sock.sent).toHaveLength(1);
-    expect(sock.sent[0].session).toMatchObject({output_modalities:["text"],tools:[],tool_choice:"none",audio:{input:{turn_detection:{create_response:false,interrupt_response:false}}}});
-    sock.message({type:"response.output_audio_transcript.done",transcript:"Se quiser, posso ajudar com seu site."});
-    sock.message({type:"conversation.item.done",item:{id:`lgs-${h.website.openingAction.actionId.slice(0,28)}`,type:"message",role:"assistant",status:"completed",content:[{type:"output_text",text:h.website.openingPayload.text}]}});
-    await flush();
-    expect(control.ledger.phase).toBe("awaiting_owner");
-    expect(control.ledger.transcript.map(x=>x.text)).toEqual([h.website.openingPayload.text]);
-    expect(sock.sent.filter(x=>x.type==="response.create")).toHaveLength(0);
-    sock.message({type:"input_audio_buffer.speech_started",item_id:"owner-1"});
-    sock.message({type:"conversation.item.input_audio_transcription.completed",item_id:"owner-1",transcript:"Atendemos Concord."});await flush();
-    const interpretation=sock.sent.find(x=>x.type==="response.create");
-    expect(interpretation.response.conversation).toBe("none");
-    expect(interpretation.response.output_modalities).toEqual(["text"]);
-    expect(h.rpcs.filter(x=>x.name==="record_website_interview_owner_turn")).toHaveLength(1);
-  }finally{h.restore();}
+test('native transcripts remain observable without a second text interpretation',async()=>{
+ const h=harness();try{
+  const control=h.attach(),sock=Socket.instances[0]!;sock.emit('open');await control.opened;
+  expect(control.ledger.applicationOpening).toBeUndefined();
+  sock.message({type:'response.output_audio_transcript.done',transcript:'Quais cidades vocês atendem?'});
+  sock.message({type:'input_audio_buffer.speech_started',item_id:'owner-1'});
+  sock.message({type:'conversation.item.input_audio_transcription.completed',item_id:'owner-1',transcript:'Atendemos Concord.'});await flush();
+  expect(control.ledger.transcript.map(x=>x.text)).toEqual(['Quais cidades vocês atendem?','Atendemos Concord.']);
+  expect(h.rpcs.filter(x=>x.name==='record_website_interview_owner_turn')).toHaveLength(1);
+  expect(sock.sent.some(x=>x.type==='response.create'&&x.response.output_modalities?.includes('text'))).toBe(false);
+ }finally{h.restore();}
 });
 
-test("website timeout finalizes without waiting for a subsequent provider message",async()=>{
-  const h=harness();const originalSet=globalThis.setTimeout,originalClear=globalThis.clearTimeout,originalNow=Date.now;
-  const originalMonotonic=Object.getOwnPropertyDescriptor(performance,'now');
-  let now=0;const timers=new Map<any,{callback:Function,ms:number}>();
-  globalThis.setTimeout=((callback:Function,ms:number)=>{const id={};timers.set(id,{callback,ms});return id;}) as any;
-  globalThis.clearTimeout=((id:any)=>timers.delete(id)) as any;
-  Object.defineProperty(performance,'now',{value:()=>now,configurable:true});
-  try{
-    const control=h.attach();Socket.instances[0]!.emit("open");await control.opened;
-    const deadline=[...timers.values()].find(x=>x.ms<=30_000)!;expect(deadline).toBeDefined();
-    Date.now=()=>originalNow()+3_600_000;deadline.callback();await flush();
-    expect(liveSessions.has(callId)).toBe(true);
-    now+=40_000;deadline.callback();await flush();
-    expect(h.updates.some(x=>x.table==="calls" && x.status==="error")).toBe(true);
-    expect(liveSessions.has(callId)).toBe(false);
-    expect(timers.size).toBe(0);
-  }finally{h.restore();Date.now=originalNow;globalThis.setTimeout=originalSet;globalThis.clearTimeout=originalClear;
-    if(originalMonotonic)Object.defineProperty(performance,'now',originalMonotonic);else delete (performance as any).now;}
+test('provider error finalizes without waiting for another provider event',async()=>{
+ const h=harness();try{
+  const control=h.attach(),sock=Socket.instances[0]!;sock.emit('open');await control.opened;
+  sock.message({type:'error',error:{code:'server_error',message:'synthetic provider failure'}});await flush();
+  expect(control.ledger.status).toBe('error');expect(liveSessions.has(callId)).toBe(false);
+ }finally{h.restore();}
 });
 
-test("silent interpretation usage is counted once without inventing terminal usage",async()=>{
+test("native provider usage is counted once without inventing terminal usage",async()=>{
   const h=harness();try{
     const control=h.attach(),sock=Socket.instances[0]!;sock.emit("open");await control.opened;
-    sock.message({type:"conversation.item.done",item:{id:`lgs-${h.website.openingAction.actionId.slice(0,28)}`,type:"message",role:"assistant",status:"completed",content:[{type:"output_text",text:h.website.openingPayload.text}]}});await flush();
-    sock.message({type:"input_audio_buffer.speech_started",item_id:"owner-usage"});
-    sock.message({type:"conversation.item.input_audio_transcription.completed",item_id:"owner-usage",transcript:"Concord"});await flush();
+    sock.message(readyControl());await flush();
     const sent=sock.sent.find(x=>x.type==="response.create");
     const response={id:"silent-response",metadata:sent.response.metadata,status:"failed",output:[],usage:{input_tokens:10,output_tokens:5,total_tokens:15,input_token_details:{text_tokens:10,audio_tokens:0,cached_tokens:0,cached_tokens_details:{text_tokens:0,audio_tokens:0}},output_token_details:{text_tokens:5,audio_tokens:0}}};
     sock.message({type:"response.created",response});sock.message({type:"response.done",response});sock.message({type:"response.done",response});await flush();
@@ -252,34 +219,62 @@ test("silent interpretation usage is counted once without inventing terminal usa
   }finally{h.restore();}
 });
 
-test("website reattach preserves runtime state and never enables legacy auto response",async()=>{
-  const h=harness();try{
-    const control=h.attach(),first=Socket.instances[0]!;first.emit("open");await control.opened;
-    const runtime=control.ledger.websiteInterviewRuntime;
-    first.close();await new Promise(resolve=>setTimeout(resolve,550));
-    const second=Socket.instances[1]!;expect(second).toBeDefined();second.emit("open");await flush();
-    expect(control.ledger.websiteInterviewRuntime).toBe(runtime);
-    expect(second.sent).toHaveLength(2);
-    expect(second.sent[0].session.audio.input.turn_detection).toMatchObject({create_response:false,interrupt_response:false});
-    const retrieve=second.sent[1];expect(retrieve.item_id).toBe(`lgs-${h.website.openingAction.actionId.slice(0,28)}`);
-    second.message({type:'error',error:{event_id:retrieve.event_id,code:'item_not_found'}});await flush();expect(control.ledger.status).toBe('active');
-    second.message({type:'error',error:{event_id:retrieve.event_id,type:'invalid_request_error',param:'item_id',code:'invalid_request_error',message:`Item '${retrieve.item_id}' does not exist.`}});await flush();expect(control.ledger.status).toBe('active');
-    second.message({type:'conversation.item.retrieved',item:{id:retrieve.item_id,type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:h.website.openingPayload.text}]}});await flush();
-    expect(control.ledger.phase).toBe('awaiting_owner');expect(h.rpcs.filter(x=>x.name==='record_website_interview_speech_played')).toHaveLength(1);
-    expect(control.ledger.providerUsageEvidence.continuous).toBe(false);
-  }finally{h.restore();}
+test('native reattach preserves runtime state and does not restart the opening',async()=>{
+ const h=harness();try{
+  const control=h.attach(),first=Socket.instances[0]!;first.emit('open');await control.opened;
+  first.message(readyControl());await flush();
+  const runtime=control.ledger.websiteInterviewRuntime;
+  first.close();await new Promise(resolve=>setTimeout(resolve,550));
+  const second=Socket.instances[1]!;expect(second).toBeDefined();second.emit('open');await flush();
+  expect(control.ledger.websiteInterviewRuntime).toBe(runtime);
+  expect(second.sent.find(x=>x.type==='session.update').session.audio.input.turn_detection).toMatchObject({create_response:true,interrupt_response:true});
+  expect(second.sent.some(x=>x.type==='conversation.item.retrieve'||x.type==='response.create')).toBe(false);
+  expect(control.ledger.providerUsageEvidence.continuous).toBe(false);
+ }finally{h.restore();}
 });
 
-test("website silent usage still trips the existing hard session budget",async()=>{
+test("native usage still trips the existing hard session budget",async()=>{
   const h=harness();try{
     const control=h.attach(),sock=Socket.instances[0]!;sock.emit("open");await control.opened;
-    sock.message({type:"conversation.item.done",item:{id:`lgs-${h.website.openingAction.actionId.slice(0,28)}`,type:"message",role:"assistant",status:"completed",content:[{type:"output_text",text:h.website.openingPayload.text}]}});await flush();
-    sock.message({type:"input_audio_buffer.speech_started",item_id:"owner-budget"});
-    sock.message({type:"conversation.item.input_audio_transcription.completed",item_id:"owner-budget",transcript:"Concord"});await flush();
     control.ledger.budgetEnvelope!.hardLimitUsd=0;
+    sock.message(readyControl());await flush();
     const sent=sock.sent.find(x=>x.type==="response.create");
     sock.message({type:"response.done",response:{id:"cost-response",metadata:sent.response.metadata,status:"failed",output:[],usage:{input_tokens:10,output_tokens:5,total_tokens:15,input_token_details:{text_tokens:10,audio_tokens:0,cached_tokens:0,cached_tokens_details:{text_tokens:0,audio_tokens:0}},output_token_details:{text_tokens:5,audio_tokens:0}}}});await flush();
     expect(control.ledger.status).toBe("killed_budget");
     expect(liveSessions.has(callId)).toBe(false);
   }finally{h.restore();}
+});
+
+test('provider session end fences continuation after an already-admitted native write completes',async()=>{
+ let releaseCommit!:(value:any)=>void,commitArgs:any;
+ const h=harness({rpc:(name,args)=>{
+  if(name==='commit_website_interview_native_turn'){commitArgs=args;return new Promise(resolve=>{releaseCommit=resolve;});}
+ }});
+ try{
+  const control=h.attach(),sock=Socket.instances[0]!;sock.emit('open');await control.opened;
+  sock.message({type:'conversation.item.done',item:{id:'lnr-'+callId.replaceAll('-','').slice(0,28),role:'system',content:[{
+   type:'input_text',text:'ligou.website_native_ready:'+JSON.stringify({callId,interviewId:callId})}]}});await flush();
+  const opening=sock.sent.find(x=>x.type==='response.create');
+  sock.message({type:'response.created',response:{id:'opening',metadata:opening.response.metadata}});
+  sock.message({type:'response.done',response:{id:'opening',status:'completed',output:[]}});await flush();
+  sock.message({type:'input_audio_buffer.speech_started',item_id:'owner_before_end'});
+  sock.message({type:'input_audio_buffer.committed',item_id:'owner_before_end'});
+  sock.message({type:'response.created',response:{id:'answer_response'}});
+  sock.message({type:'response.done',response:{id:'answer_response',status:'completed',output:[{type:'function_call',status:'completed',
+   call_id:'answer_tool',name:'submit_website_interview_proposal',arguments:JSON.stringify({proposal:{kind:'answer',itemId:'area'},
+    interpretation:'Atendemos somente Novato. Fora da cidade exige aprovação do dono.',facts:[]})}]}});await flush();
+  expect(releaseCommit).toBeDefined();
+  sock.message({type:'session.ended',usage:{input_tokens:1,output_tokens:1,total_tokens:2,input_token_details:{text_tokens:1,audio_tokens:0,cached_tokens:0,cached_tokens_details:{text_tokens:0,audio_tokens:0}},output_token_details:{text_tokens:1,audio_tokens:0}}});
+  expect(control.ledger.providerTerminalEvidence?.observed).toBe(true);
+  const sentAtTerminal=sock.sent.length;
+  releaseCommit({data:{agenda:commitArgs.p_agenda,revision:1,storeVersion:1,digest:onboardingAgendaDigest(commitArgs.p_agenda),
+   receiptId:requestId,operationReceiptId:requestId,operationRevision:1,nextAction:getAgendaAction(commitArgs.p_agenda),state:'reviewing',replayed:false},error:null});
+  await flush();
+  const late=sock.sent.slice(sentAtTerminal);
+  expect(control.ledger.providerUsageEvidence.terminal).toBe(true);
+  expect(control.ledger.usage.textIn).toBe(1);
+  expect(h.rpcs.filter(x=>x.name==='commit_website_interview_native_turn')).toHaveLength(1);
+  expect(control.ledger.status).toBe('ended');
+  expect(late.filter(x=>['response.create','session.update','conversation.item.create'].includes(x.type))).toHaveLength(0);
+ }finally{h.restore();}
 });
