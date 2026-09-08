@@ -30,7 +30,7 @@ end $$;
 
 create function public.website_timezone_context_for_draft(p_draft jsonb,p_item text) returns jsonb
 language plpgsql stable security invoker set search_path='' as $$
-declare f jsonb;v jsonb;used jsonb:='[]';zone text;declared bigint;territories integer:=0;origin text;result jsonb;begin
+declare f jsonb;v jsonb;used jsonb:='[]'::jsonb;zone text;declared bigint;territories integer:=0;origin text;result jsonb;begin
  if jsonb_typeof(p_draft->'candidate_facts') is distinct from 'array' then return null;end if;
  select count(*) into declared from jsonb_array_elements(p_draft->'candidate_facts') x
   where x->>'claim_type'='business_hours' and jsonb_typeof(x->'value'->'timezone')='string' and btrim(x->'value'->>'timezone')<>'';
