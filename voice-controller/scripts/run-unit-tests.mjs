@@ -49,6 +49,7 @@ export const unitTestFiles = [
   "test/onboarding-coordinator.test.ts",
   "test/onboarding-agenda.test.ts",
   "test/onboarding-agenda-seed.test.ts",
+  "test/onboarding-timezone-context.test.ts",
   "test/onboarding-agenda-store.test.ts",
   "test/onboarding-interview-evidence-store.test.ts",
   "test/onboarding-agenda-coordinator.test.ts",

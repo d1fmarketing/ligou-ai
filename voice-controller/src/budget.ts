@@ -226,14 +226,17 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
         durableFloorCandidate >= 0
       ? durableFloorCandidate
       : 0;
-    if (durableFloor > reservedCost) {
+    const observedOverrun=durableFloor>reservedCost;
+    if (observedOverrun && (row.outcome!=='killed_budget'||providerState!=='confirmed')) {
       await deferBudgetReconciliation(
         String(row.call_id),
         "unresolved_cost_floor_exceeds_reservation",
       );
       return 0;
     }
-    const estimated = Math.min(
+    // A completed response can cross the admission ceiling before its usage
+    // arrives. Settle only that already recorded floor; never add spending room.
+    const estimated = observedOverrun ? durableFloor : Math.min(
       reservedCost,
       Math.max(durableFloor, durationEstimate),
     );
@@ -246,7 +249,7 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
       p_detail: {
         reconciled: true,
         reservation_id: row.reservation_id,
-        settlement_basis: "reservation_rate_estimate",
+        settlement_basis: observedOverrun ? "observed_usage_floor" : "reservation_rate_estimate",
         provider_usage_state: providerUsageState ?? "unknown",
         provider_termination_state: providerState,
       },

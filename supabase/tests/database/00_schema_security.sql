@@ -114,6 +114,7 @@ select extensions.ok(
       ('commit_website_interview_turn(uuid,uuid,uuid,bigint,bigint,text,text,jsonb,text,jsonb)'),
       ('commit_website_interview_native_turn(uuid,uuid,uuid,bigint,bigint,text,text,text,jsonb,jsonb,jsonb)'),
       ('replay_website_interview_native_turn(uuid,uuid,uuid,text,text,jsonb,jsonb)'),
+      ('recover_website_interview_recorded_turn(uuid,uuid,uuid,bigint,bigint,text,text,jsonb)'),
       ('request_website_interview_native_amendment(uuid,uuid,uuid,uuid,text,jsonb,text)'),
       ('record_website_interview_native_checkpoint(uuid,uuid,uuid,uuid,text,bigint,bigint,text,uuid,text,text,text,text,jsonb,uuid)'),
       ('prepare_website_interview_summary(uuid,uuid,uuid,uuid,bigint,bigint,text,uuid,jsonb)'),

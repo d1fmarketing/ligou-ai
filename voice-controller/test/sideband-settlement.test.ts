@@ -1170,6 +1170,31 @@ describe("sideband budget finalization", () => {
     });
     expect(rpcCalls.filter((call) => call.name === "settle_call_budget")).toHaveLength(0);
     expect(callUpdates.some((row) => row.provider_usage_state === "unknown")).toBe(true);
+    expect(callUpdates.find(row=>row.provider_usage_state==='unknown')?.provider_usage_evidence).toMatchObject({
+      source:'response.done.observed',usage_complete:false,continuous:true,terminal:false,event_count:1,
+      last_response_id:'resp-usage-1',observed_usage_tokens:ended.usage,
+    });
+  });
+
+  test('discontinuous observed usage remains labeled partial and cannot settle as final usage',async()=>{
+    const ended=ledger('error');ended.usage={textIn:40,audioIn:80,textInCached:10,audioInCached:20,textOut:20,audioOut:30};
+    ended.providerUsageEvidence={eventCount:2,lastResponseId:'resp_partial',lastReceivedAt:new Date().toISOString(),continuous:false,terminal:false};
+    await persistLedger(cap,ended,async()=>new Response(null,{status:200}));
+    expect(callUpdates.find(row=>row.provider_usage_state==='unknown')?.provider_usage_evidence).toMatchObject({
+      source:'response.done.observed',usage_complete:false,continuous:false,terminal:false,observed_usage_tokens:ended.usage,
+    });
+    expect(rpcCalls.some(call=>call.name==='settle_call_budget')).toBe(false);
+  });
+
+  test('observed terminal totals survive a prior continuity gap without being relabeled resolved',async()=>{
+    const ended=ledger('error');ended.usage={textIn:40,audioIn:80,textInCached:10,audioInCached:20,textOut:20,audioOut:30};
+    ended.providerUsageEvidence={eventCount:0,lastResponseId:null,lastReceivedAt:new Date().toISOString(),continuous:false,terminal:true};
+    ended.providerTerminalEvidence={observed:true,reason:'provider_session_ended',receivedAt:new Date().toISOString()};
+    await persistLedger(cap,ended,async()=>new Response(null,{status:200}));
+    const row=callUpdates.find(row=>row.provider_usage_state==='unknown');
+    expect(row?.provider_usage_evidence).toMatchObject({source:'session.ended.observed',usage_complete:false,continuous:false,terminal:true,observed_usage_tokens:ended.usage});
+    expect(row?.cost_estimate_usd).toBeGreaterThan(0);expect(row?.usage_tokens).toBeNull();
+    expect(rpcCalls.some(call=>call.name==='settle_call_budget')).toBe(false);
   });
 
   test("continuous sideband plus exact terminal usage resolves settlement", async () => {

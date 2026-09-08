@@ -142,6 +142,48 @@ test('instructions address a Brazilian business owner, source-only website conte
  expect(session.instructions).not.toContain('Leia exatamente');expect(JSON.stringify(context)).not.toContain('server-key-never-export');
  expect(JSON.stringify(session)).not.toContain('never-export');
 });
+test('speech guidance specifies a light stable Paulista accent without mirroring isolated foreign words',()=>{
+ const {instructions}=buildNativeOnboardingSession({stored:snapshot(),businessName:'Foghorn Air',model:'gpt-realtime-2.1'});
+ expect(instructions).toContain('português brasileiro');expect(instructions).toContain('sotaque paulista leve');
+ expect(instructions).toContain('estável');expect(instructions).toContain('sem caricatura');
+ expect(instructions).toContain('nomes estrangeiros');expect(instructions).toContain('não imite');
+});
+test('conversation guidance separates acknowledgments, unresolved contradictions and corrections from a new answer',()=>{
+ const {instructions}=buildNativeOnboardingSession({stored:snapshot(),businessName:'Foghorn Air',model:'gpt-realtime-2.1'});
+ expect(instructions).toContain('confirmação de entendimento ou de gravação, sem conteúdo novo');
+ expect(instructions).toContain('não responde à próxima questão');
+ expect(instructions).toContain('Reconhecer que existe uma contradição não a resolve');
+ expect(instructions).toContain('política correta');
+ expect(instructions).toContain('complemento a um item já respondido usa correction');
+ expect(instructions).toContain('preservando o item de destino original');
+});
+test('fast tool and wait guidance avoids routine preambles and separates waiting from ending',()=>{
+ const {instructions}=buildNativeOnboardingSession({stored:snapshot(),businessName:'Foghorn Air',model:'gpt-realtime-2.1'});
+ expect(instructions).toContain('ferramentas rápidas sem preâmbulo');expect(instructions).toContain('espera perceptível');
+ expect(instructions).toContain('aviso breve e verdadeiro');expect(instructions).toContain('sem narrar depuração');
+ expect(instructions).toContain('pedir tempo para pensar ou conferir');
+ expect(instructions).toContain('aguarde em silêncio');
+ expect(instructions).toContain('sem repetir a pergunta, avançar o assunto ou encerrar');
+ expect(instructions).toContain('pedido de encerramento é diferente');
+ expect(instructions).not.toContain('pedir pausa ou encerramento');
+ expect(instructions).toContain('comprovante do servidor');
+});
+test('fresh context after save, resume, review and closing retains the same speech and turn guidance',()=>{
+ const initial=snapshot(),agenda=applyVerifiedOwnerTurn(initial.agenda,{type:'verified_owner_turn',binding,turnId:'saved-current',
+  text:'Atendemos somente Novato.',proposal:{kind:'answer',itemId:'current'}}).agenda;
+ const saved={...initial,agenda,revision:agenda.revision,storeVersion:agenda.revision,digest:onboardingAgendaDigest(agenda),nextAction:getAgendaAction(agenda)};
+ const reviewing=snapshot(true),phases=[initial,saved,structuredClone(saved),reviewing,{...reviewing,state:'closing' as const}];
+ const sessions=phases.map(stored=>buildNativeOnboardingSession({stored,businessName:'Foghorn Air',model:'gpt-realtime-2.1'}));
+ const parts=sessions.map(session=>session.instructions.split('CONTEXTO SOMENTE LEITURA: '));
+ for(let index=0;index<phases.length;index++){
+  expect(parts[index]).toHaveLength(2);expect(parts[index][0]).toBe(parts[0][0]);
+  const context=JSON.parse(parts[index][1]);
+  expect(context.revision).toBe(phases[index].revision);expect(context.state).toBe(phases[index].state);
+  expect(context.current_item?.id??null).toBe(phases[index].nextAction.itemId??null);
+ }
+ expect(JSON.parse(parts[1][1]).current_item.id).not.toBe('current');
+ expect(JSON.parse(parts[1][1]).interview_evidence.some((entry:any)=>entry.turn_id==='saved-current')).toBe(true);
+});
 test('stale or incoherent stored snapshots cannot advertise native authority',()=>{
  const stored=snapshot();expect(()=>buildNativeOnboardingTools({...stored,digest:'f'.repeat(64)})).toThrow();
  expect(()=>buildNativeOnboardingContext({...stored,state:'reviewing'},'Foghorn Air')).toThrow();

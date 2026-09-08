@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
+import {checkedContextTimezone,isTimezoneQuestion,type WebsiteContextTimezone} from './onboarding-timezone-context.ts';
 
 /** A question queue, not a lifecycle, policy writer, or owner-approval authority. */
 export const ONBOARDING_AGENDA_VERSION = 1 as const;
 export const MAX_AGENDA_ITEMS = 1024;
 export type AgendaSource = "missing_website_information" | "ambiguity" | "contradiction" | "owner_private_requirement";
-export type AgendaStatus = "open" | "awaiting_clarification" | "answered" | "corrected" | "not_applicable" | "deferred_owner_review";
+export type AgendaStatus = "open" | "awaiting_clarification" | "answered" | "corrected" | "not_applicable" | "deferred_owner_review" | "context_resolved";
 export interface AgendaBinding {
   readonly interviewId: string;
   readonly callId: string;
@@ -47,6 +48,7 @@ export interface OnboardingAgenda {
   readonly candidateContext: readonly AgendaCandidateContext[];
   readonly candidateOverrides: readonly AgendaItem[];
   readonly ownerTurns: readonly OwnerTurnEvidence[];
+  readonly contextTimezone?:WebsiteContextTimezone;
 }
 export type AgendaProposal =
   | { readonly kind: "answer"; readonly itemId: string; readonly relatedItemIds?: readonly string[] }
@@ -143,7 +145,7 @@ function candidateItem(context: AgendaCandidateContext): AgendaItem {
 export function getAgendaItems(agenda: OnboardingAgenda): readonly AgendaItem[] {
   return [...agenda.items, ...agenda.candidateOverrides];
 }
-export function createOnboardingAgenda(binding: AgendaBinding, seeds: readonly AgendaSeed[], candidateContext: readonly AgendaCandidateContext[] = []): OnboardingAgenda {
+export function createOnboardingAgenda(binding: AgendaBinding, seeds: readonly AgendaSeed[], candidateContext: readonly AgendaCandidateContext[] = [],contextTimezone?:WebsiteContextTimezone): OnboardingAgenda {
   const bound = checkedBinding(binding);
   list(seeds, "seeds");
   ids(seeds.map(s => s?.id), "seed ids");
@@ -159,8 +161,12 @@ export function createOnboardingAgenda(binding: AgendaBinding, seeds: readonly A
     if (s.relatedItemIds.some(id => id === s.id || !known.has(id))) throw new Error("Unknown or self-related seed id");
     return { id: s.id, source: s.source, subject: s.subject, questionPt: s.questionPt, coverageRefs: s.coverageRefs, relatedItemIds: s.relatedItemIds, blocking: s.blocking, status: "open" as const, answerRevision: 0, clarificationCount: 0, lastQuestionPt: s.questionPt, evidence: [] };
   });
-  return freezeAgenda({ version: ONBOARDING_AGENDA_VERSION, binding: bound, revision: 0, items,
-    candidateContext: candidates, candidateOverrides: [], ownerTurns: [] });
+  const timezone=contextTimezone===undefined?undefined:checkedContextTimezone(contextTimezone);
+  if(timezone&&(!items.some(i=>i.id===timezone.itemId&&isTimezoneQuestion(i.questionPt))
+    ||timezone.sourceClaimIds.some(id=>!candidates.some(c=>c.id==='candidate:'+id))))throw new Error('Context timezone source mismatch');
+  return freezeAgenda({ version: ONBOARDING_AGENDA_VERSION, binding: bound, revision: 0,
+    items:items.map(i=>timezone?.itemId===i.id?{...i,status:'context_resolved' as const}:i),
+    candidateContext: candidates, candidateOverrides: [], ownerTurns: [],...(timezone?{contextTimezone:timezone}:{}) });
 }
 const unresolved = (item: AgendaItem) => item.status === "open" || item.status === "awaiting_clarification";
 function exactRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
@@ -183,7 +189,9 @@ function parseEvidence(value: unknown): OwnerTurnEvidence {
 /** Validate JSONB before use; this checks integrity, not transcript authenticity.
  * The store must separately bind persisted state to its trusted source/receipt. */
 export function parseOnboardingAgenda(value: unknown, expectedBinding: AgendaBinding): OnboardingAgenda {
-  const raw = exactRecord(value, ["version", "binding", "revision", "items", "candidateContext", "candidateOverrides", "ownerTurns"], "agenda");
+  const hasTimezone=Boolean(value&&typeof value==='object'&&Object.hasOwn(value,'contextTimezone'));
+  const raw = exactRecord(value, ["version", "binding", "revision", "items", "candidateContext", "candidateOverrides", "ownerTurns",...(hasTimezone?['contextTimezone']:[])], "agenda");
+  const timezone=hasTimezone?checkedContextTimezone(raw.contextTimezone):undefined;
   if (raw.version !== ONBOARDING_AGENDA_VERSION) throw new Error("Unsupported agenda version");
   exactRecord(raw.binding, bindingKeys, "binding");
   const bound = checkedBinding(raw.binding as AgendaBinding);
@@ -210,7 +218,7 @@ export function parseOnboardingAgenda(value: unknown, expectedBinding: AgendaBin
     id: row.id, source: row.source, subject: row.subject, questionPt: row.questionPt,
     coverageRefs: row.coverageRefs, relatedItemIds: row.relatedItemIds, blocking: row.blocking,
   })) as unknown as readonly AgendaSeed[], raw.candidateContext as readonly AgendaCandidateContext[]);
-  const statuses: readonly unknown[] = ["open", "awaiting_clarification", "answered", "corrected", "not_applicable", "deferred_owner_review"];
+  const statuses: readonly unknown[] = ["open", "awaiting_clarification", "answered", "corrected", "not_applicable", "deferred_owner_review","context_resolved"];
   const parseItem = (row: Record<string, unknown>, seed: AgendaItem): AgendaItem => {
     if (!statuses.includes(row.status)) throw new Error("Invalid agenda item status");
     counter(row.answerRevision, "answerRevision");
@@ -230,9 +238,12 @@ export function parseOnboardingAgenda(value: unknown, expectedBinding: AgendaBin
     if (["answered", "corrected", "not_applicable"].includes(row.status as string) && row.answerRevision < 1) throw new Error("Resolved item lacks answer evidence");
     if (row.status === "deferred_owner_review" && !evidence.length) throw new Error("Deferred item lacks owner evidence");
     if (row.status === "awaiting_clarification" && row.clarificationCount < 1) throw new Error("Clarification status lacks attempt evidence");
+    if(row.status==='context_resolved'&&(!timezone||row.id!==timezone.itemId||!isTimezoneQuestion(seed.questionPt)||row.answerRevision!==0||row.clarificationCount!==0||evidence.length))throw new Error('Invalid context-resolved item');
     return { ...seed, status: row.status as AgendaStatus, answerRevision: row.answerRevision, clarificationCount: row.clarificationCount, evidence };
   };
   const items = rows.map((row, index) => parseItem(row, seedAgenda.items[index]!));
+  if(timezone&&(!items.some(i=>i.id===timezone.itemId&&i.status==='context_resolved')
+    ||timezone.sourceClaimIds.some(id=>!seedAgenda.candidateContext.some(c=>c.id==='candidate:'+id))))throw new Error('Context timezone source mismatch');
   const overrideRows = raw.candidateOverrides as readonly unknown[];
   list(overrideRows, "candidateOverrides", seedAgenda.candidateContext.length);
   let previousCandidateIndex = -1;
@@ -250,7 +261,7 @@ export function parseOnboardingAgenda(value: unknown, expectedBinding: AgendaBin
     return override;
   });
   return freezeAgenda({ version: ONBOARDING_AGENDA_VERSION, binding: bound, revision: raw.revision, items,
-    candidateContext: seedAgenda.candidateContext, candidateOverrides, ownerTurns });
+    candidateContext: seedAgenda.candidateContext, candidateOverrides, ownerTurns,...(timezone?{contextTimezone:timezone}:{}) });
 }
 /** Presentation only: quote the latest resolved territory evidence without
  * inventing locality normalization, operational permission, or a next topic.
@@ -348,7 +359,7 @@ export function applyVerifiedOwnerTurn(agenda: OnboardingAgenda, event: Verified
       for (const id of [current.id, ...related]) {
         const item = allItems.find(i => i.id === id)!;
         // Revising a resolved answer requires the explicit correction event.
-        if (["answered", "corrected", "not_applicable"].includes(item.status)) return reject("resolved_target_requires_correction");
+        if (["answered", "corrected", "not_applicable", "context_resolved"].includes(item.status)) return reject("resolved_target_requires_correction");
         updates.set(id, { status: item.answerRevision ? "corrected" : "answered", answerRevision: item.answerRevision + 1 });
       }
     } else if (proposal.kind === "clarification") {
@@ -365,7 +376,9 @@ export function applyVerifiedOwnerTurn(agenda: OnboardingAgenda, event: Verified
   const evidence:OwnerTurnEvidence = { turnId: event.turnId, text: event.text,
     ...(event.provenance?{provenance:event.provenance}:{}) };
   const updatedItem = (item: AgendaItem): AgendaItem => updates.has(item.id) ? { ...item, ...updates.get(item.id), evidence: [...item.evidence, evidence] } : item;
-  const next = freezeAgenda({ ...agenda, revision: agenda.revision + 1, ownerTurns: [...agenda.ownerTurns, evidence],
+  const {contextTimezone,...base}=agenda;
+  const timezone=contextTimezone&&proposal.kind==='correction'&&proposal.affectedItems?.some(i=>i.itemId===contextTimezone.itemId)?undefined:contextTimezone;
+  const next = freezeAgenda({ ...base,...(timezone?{contextTimezone:timezone}:{}), revision: agenda.revision + 1, ownerTurns: [...agenda.ownerTurns, evidence],
     items: agenda.items.map(updatedItem), candidateOverrides: agenda.candidateContext.filter(context => overrides.has(context.id)).map(context => updatedItem(overrides.get(context.id)!)) });
   return { agenda: next, action: actionFor(next, action), accepted: true, replayed: false };
 }

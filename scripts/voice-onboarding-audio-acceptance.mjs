@@ -246,6 +246,8 @@ export function safeProviderSessionConfig(session) {
   const transcription = session?.audio?.input?.transcription, vad = session?.audio?.input?.turn_detection;
   const languages = transcription?.languages;
   return { model: allowed(session?.model, ['gpt-realtime', 'gpt-realtime-2.1', 'gpt-realtime-2.1-mini']),
+    outputVoice: allowed(session?.audio?.output?.voice, ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar']),
+    instructionsSha256: null,
     reasoningEffort: allowed(session?.reasoning?.effort, ['minimal', 'low', 'medium', 'high', 'xhigh']),
     transcriptionModel: allowed(transcription?.model, ['gpt-live-transcribe', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1']),
     languages: Array.isArray(languages) && languages.length <= 8
@@ -346,7 +348,20 @@ export function installBrowserHarness(settings, verifyOwnerAudioFile, readSessio
           observeStreamEvent(event);
           if (event.type === 'session.updated') {
             // Select fixed configuration fields only; a session can contain secrets.
-            stamp('provider_event', { type: event.type, sessionConfig: readSessionConfig(event.session) });
+            const receivedAt = now(), sessionConfig = readSessionConfig(event.session), instructions = event.session?.instructions;
+            const details = { type: event.type, eventId: cleanId(event.event_id), sessionConfig,
+              browserMs: receivedAt, elapsedMs: state.clickAt === null ? null : receivedAt - state.clickAt };
+            // Hash accepted instructions independently of the application's event
+            // listener. Keep their original receipt time, never their plaintext.
+            void (async () => {
+              try {
+                if (typeof instructions === 'string' && instructions.length <= 1_048_576) {
+                  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(instructions)));
+                  if (hash.length === 32) sessionConfig.instructionsSha256 = [...hash].map(byte => byte.toString(16).padStart(2, '0')).join('');
+                }
+              } catch { /* Unavailable diagnostics must not affect startup or expose errors. */ }
+              stamp('provider_event', details);
+            })();
             return;
           }
           if (['input_audio_buffer.speech_started', 'input_audio_buffer.speech_stopped',

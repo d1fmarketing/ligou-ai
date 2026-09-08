@@ -17,6 +17,8 @@ import {runWebsiteNoProviderResumeCases} from './website-interview-no-provider-r
 import {runWebsiteStreamActualSchemaProbe,runWebsiteStreamSummaryActualSchemaProbe} from './website-interview-stream-actual-schema.mjs';
 import {runWebsiteStreamRuntimeActualSchemaProbe} from './website-interview-stream-runtime-actual-schema.mjs';
 import {runWebsiteNativeInterpretationProbe} from './local-website-native-interpretation.mjs';
+import {runWebsiteTimezoneContextActualSchemaProbe} from './website-context-timezone-cases.mjs';
+import {runWebsiteRecordedRecoveryProbe} from './local-website-recorded-recovery.mjs';
 
 const q=value=>`'${String(value).replaceAll("'","''")}'`;
 const jq=value=>`${q(JSON.stringify(value))}::jsonb`;
@@ -222,6 +224,10 @@ export async function runWebsiteInterviewActualSchemaSuite(input) {
     tests.push(...streamedRuntime.scenarios);
     const nativeInterpretation=await runWebsiteNativeInterpretationProbe({runSql,rpc,owner,other,tenant,priorCall:streamedRuntime.primaryOnly.callId,source,initialAgenda:initial});
     tests.push(...nativeInterpretation.scenarios);
-    return {tests:tests.length,scenarios:tests,agendaItems:114,candidateFacts:21,originalQuestions:16,coverageRefs:136,guidanceParityCases:58,approvalGrammarCases:50,summaryParts:parts.length,streamedRuntime,nativeInterpretation,sourceResultBody:'explicit synthetic marker; original raw result unavailable',providerCalls:0};
+    const timezoneContext=await runWebsiteTimezoneContextActualSchemaProbe({runSql,rpc,owner,other,tenant,priorCall:nativeInterpretation.callId,source,initialAgenda:initial,projection});
+    tests.push(...timezoneContext.scenarios);
+    const recordedRecovery=await runWebsiteRecordedRecoveryProbe({runSql,rpc,owner,other,tenant,priorCall:timezoneContext.callId,source,initialAgenda:initial});
+    tests.push(...recordedRecovery.scenarios);
+    return {tests:tests.length,scenarios:tests,agendaItems:114,candidateFacts:21,originalQuestions:16,coverageRefs:136,guidanceParityCases:58,approvalGrammarCases:50,summaryParts:parts.length,streamedRuntime,nativeInterpretation,timezoneContext,recordedRecovery,sourceResultBody:'explicit synthetic marker; original raw result unavailable',providerCalls:0};
   } finally {await rm(home,{recursive:true,force:true});}
 }

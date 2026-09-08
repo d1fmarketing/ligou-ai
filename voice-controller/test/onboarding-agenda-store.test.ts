@@ -76,3 +76,45 @@ test('empty interpretations and literal-labelled native evidence fail before a w
  const t=applyVerifiedOwnerTurn(agenda,{type:'verified_owner_turn',binding,turnId:`${scope.callId}:native-owner-item`,text:interpretation,proposal});
  await expect(store.commitNativeOwnerTurn({...nativeInput(),agenda:t.agenda})).rejects.toThrow();expect(calls).toBe(0);
 });
+
+const recordedText='No domingo, só emergência. De segunda a sábado, das oito às dezoito.';
+function recoveryFixture(){
+ const initial=createOnboardingAgenda(binding,[
+  {id:'hours',subject:'business_hours',questionPt:'Qual é a regra correta para domingo?',source:'contradiction',coverageRefs:['business_hours'],relatedItemIds:[],blocking:true},
+  {id:'price',subject:'pricing',questionPt:'Qual é o preço?',source:'missing_website_information',coverageRefs:['pricing'],relatedItemIds:[],blocking:true}]);
+ const prior=applyVerifiedOwnerTurn(initial,{type:'verified_owner_turn',binding,turnId:`${scope.callId}:wrong-confirmation`,text:'Deixa eu confirmar.',proposal:{kind:'answer',itemId:'hours'}}).agenda;
+ const correction=applyVerifiedOwnerTurn(prior,{type:'verified_owner_turn',binding,turnId:`${scope.callId}:recorded-hours`,text:recordedText,
+  proposal:{kind:'correction',affectedItems:[{itemId:'hours',disposition:'corrected'}]}});
+ const input={...scope,providerItemId:'recorded-hours',expectedRevision:1,expectedStoreVersion:1,expectedDigest:onboardingAgendaDigest(prior),agenda:correction.agenda};
+ return{prior,input,proof:{agenda:correction.agenda,revision:2,storeVersion:2,digest:onboardingAgendaDigest(correction.agenda),receiptId:scope.requestId,
+  nextAction:correction.action,state:'unfinished',replayed:false,operationReceiptId:scope.requestId,operationRevision:2}};
+}
+test('recorded recovery sends only exact revision and agenda inputs, never a new transcript or facts',async()=>{
+ const {input,proof}=recoveryFixture(),calls:any[]=[];
+ const store=createOnboardingAgendaStore({rpc:async(name,args)=>{calls.push({name,args});return{data:proof,error:null};}});
+ const got=await store.recoverRecordedOwnerTurn(input);
+ expect(got.agenda.ownerTurns.at(-1)).toEqual({turnId:`${scope.callId}:recorded-hours`,text:recordedText});
+ expect(got.operationReceiptId).toBe(scope.requestId);expect(got.operationRevision).toBe(2);
+ expect(calls).toEqual([{name:'recover_website_interview_recorded_turn',args:{p_owner:scope.ownerId,p_call:scope.callId,p_request:scope.requestId,
+  p_revision:1,p_store_version:1,p_digest:input.expectedDigest,p_item:'recorded-hours',p_agenda:input.agenda}}]);
+});
+test('recorded recovery rejects local item, revision and interpreted-provenance substitutions before RPC',async()=>{
+ const {input,prior}=recoveryFixture();let calls=0;const store=createOnboardingAgendaStore({rpc:async()=>{calls++;throw new Error('must not reach RPC');}});
+ const interpreted=applyVerifiedOwnerTurn(prior,{type:'verified_owner_turn',binding,turnId:`${scope.callId}:recorded-hours`,text:recordedText,provenance:'model_interpretation',
+  proposal:{kind:'correction',affectedItems:[{itemId:'hours',disposition:'corrected'}]}}).agenda;
+ for(const changed of [{providerItemId:'another-item'},{expectedRevision:0},{expectedStoreVersion:-1},{expectedDigest:'bad'},{agenda:interpreted}])
+  await expect(store.recoverRecordedOwnerTurn({...input,...changed})).rejects.toThrow('Recorded recovery');
+ expect(calls).toBe(0);
+});
+test('recorded recovery requires its durable operation receipt on replay and preserves cancellation and denial',async()=>{
+ const {input,proof}=recoveryFixture();
+ const replay={...proof,replayed:true,receiptId:scope.ownerId,storeVersion:3};
+ const got=await createOnboardingAgendaStore({rpc:async()=>({data:replay,error:null})}).recoverRecordedOwnerTurn(input);
+ expect(got.replayed).toBe(true);expect(got.operationReceiptId).toBe(scope.requestId);expect(got.receiptId).toBe(scope.ownerId);
+ for(const changed of [{operationReceiptId:null},{operationReceiptId:'bad'},{operationRevision:1},{operationRevision:3}])
+  await expect(createOnboardingAgendaStore({rpc:async()=>({data:{...proof,...changed},error:null})}).recoverRecordedOwnerTurn(input)).rejects.toThrow('Recorded recovery');
+ await expect(createOnboardingAgendaStore({rpc:async()=>({data:null,error:{message:'denied',code:'42501'},status:403})}).recoverRecordedOwnerTurn(input)).rejects.toMatchObject({code:'42501',status:403});
+ const abort=new AbortController();abort.abort();let calls=0;
+ await expect(createOnboardingAgendaStore({rpc:async()=>{calls++;return{data:proof,error:null};}}).recoverRecordedOwnerTurn({...input,signal:abort.signal})).rejects.toThrow();
+ expect(calls).toBe(0);
+});

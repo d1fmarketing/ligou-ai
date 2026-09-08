@@ -30,7 +30,7 @@ export async function prepareWebsiteInterview(
     throw new Error("Website interview source binding mismatch");
   const agenda = createOnboardingAgenda({ interviewId: scope.callId, callId: scope.callId,
     draftId: source.draftId, draftHash: source.draftHash,
-    sourceResultId: source.sourceResultId, sourceResultHash: source.sourceResultHash }, projection.seeds, buildWebsiteCandidateContext(projection));
+    sourceResultId: source.sourceResultId, sourceResultHash: source.sourceResultHash }, projection.seeds, buildWebsiteCandidateContext(projection),projection.contextTimezone);
   const stored = source.resume
     ? await store.attachWebsiteInterview({ ...scope, ...source.resume })
     : await store.initializeWebsiteInterview({ ...scope, preparationId: source.preparationId, agenda });

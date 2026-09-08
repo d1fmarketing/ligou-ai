@@ -236,11 +236,23 @@ test('native reattach preserves runtime state and does not restart the opening',
 test("native usage still trips the existing hard session budget",async()=>{
   const h=harness();try{
     const control=h.attach(),sock=Socket.instances[0]!;sock.emit("open");await control.opened;
-    control.ledger.budgetEnvelope!.hardLimitUsd=0;
     sock.message(readyControl());await flush();
+    // Prior validated responses accumulated just below the unchanged $7.50 cap.
+    control.ledger.usage.textIn=1_870_000;
+    control.ledger.providerUsageEvidence.eventCount=1;
     const sent=sock.sent.find(x=>x.type==="response.create");
-    sock.message({type:"response.done",response:{id:"cost-response",metadata:sent.response.metadata,status:"failed",output:[],usage:{input_tokens:10,output_tokens:5,total_tokens:15,input_token_details:{text_tokens:10,audio_tokens:0,cached_tokens:0,cached_tokens_details:{text_tokens:0,audio_tokens:0}},output_token_details:{text_tokens:5,audio_tokens:0}}}});await flush();
+    const response={id:"cost-response",metadata:sent.response.metadata,status:"completed",output:[],usage:{input_tokens:10000,output_tokens:5,total_tokens:10005,input_token_details:{text_tokens:10000,audio_tokens:0,cached_tokens:0,cached_tokens_details:{text_tokens:0,audio_tokens:0}},output_token_details:{text_tokens:5,audio_tokens:0}}};
+    sock.message({type:'response.created',response});sock.message({type:'response.done',response});await flush();
     expect(control.ledger.status).toBe("killed_budget");
+    expect(control.ledger.budgetEnvelope).toMatchObject({softLimitUsd:6.5,hardLimitUsd:7.5,reservationUsd:7.5});
+    expect(control.ledger.providerUsageEvidence.continuous).toBe(true);
+    expect(control.ledger.providerUsageEvidence.terminal).toBe(false);
+    expect(control.ledger.usage.textIn).toBe(1_880_000);
+    const saved=h.updates.find(x=>x.table==='calls'&&x.status==='killed_budget');
+    expect(saved).toMatchObject({provider_usage_state:'unknown',usage_tokens:null,
+      provider_usage_evidence:{source:'response.done.observed',continuous:true,terminal:false,usage_complete:false,
+        observed_usage_tokens:{textIn:1_880_000,textOut:5},model:'gpt-realtime-2.1'}});
+    expect(h.rpcs.some(x=>x.name==='settle_call_budget')).toBe(false);
     expect(liveSessions.has(callId)).toBe(false);
   }finally{h.restore();}
 });
@@ -277,4 +289,28 @@ test('provider session end fences continuation after an already-admitted native 
   expect(control.ledger.status).toBe('ended');
   expect(late.filter(x=>['response.create','session.update','conversation.item.create'].includes(x.type))).toHaveLength(0);
  }finally{h.restore();}
+});
+
+test.each(['budget_soft_limit_reached','budget_notice_interrupted','budget_notice_unconfirmed'])('native %s retains the budget-stop outcome without fabricating approval',async reason=>{
+ const originalSet=globalThis.setTimeout,originalClear=globalThis.clearTimeout;let expire:(()=>void)|undefined;const noticeTimer={} as any;
+ globalThis.setTimeout=((fn:()=>void,ms:number,...args:any[])=>{if(ms===15000){expire=()=>fn(...args);return noticeTimer;}return originalSet(fn,ms,...args);}) as any;
+ globalThis.clearTimeout=((timer:any)=>{if(timer!==noticeTimer)originalClear(timer);}) as any;
+ const h=harness();try{
+  const control=h.attach(),sock=Socket.instances[0]!;sock.emit('open');await control.opened;sock.message(readyControl());await flush();
+  const opening=sock.sent.find(x=>x.type==='response.create');control.ledger.usage.textIn=1_650_000;
+  const usage={input_tokens:0,output_tokens:0,total_tokens:0,input_token_details:{text_tokens:0,audio_tokens:0,cached_tokens:0,cached_tokens_details:{text_tokens:0,audio_tokens:0}},output_token_details:{text_tokens:0,audio_tokens:0}};
+  sock.message({type:'response.created',response:{id:'budget_trigger',metadata:opening.response.metadata}});
+  sock.message({type:'response.done',response:{id:'budget_trigger',status:'completed',output:[],usage}});await flush();
+  const notice=sock.sent.filter(x=>x.type==='response.create').at(-1);expect(notice.response.metadata.native_budget_pause).toBe('true');
+  if(reason==='budget_notice_unconfirmed'){expect(expire).toBeDefined();expire!();}
+  else{
+   sock.message({type:'response.created',response:{id:'budget_notice',metadata:notice.response.metadata}});
+   if(reason==='budget_notice_interrupted')sock.message({type:'output_audio_buffer.cleared',response_id:'budget_notice'});
+   else{sock.message({type:'response.done',response:{id:'budget_notice',status:'completed',output:[],usage}});
+    sock.message({type:'output_audio_buffer.stopped',response_id:'budget_notice',event_id:'budget_notice_stopped'});}
+  }
+  await flush();expect(control.ledger.status).toBe('killed_budget');
+  expect(h.updates.some(x=>x.table==='calls'&&x.status==='killed_budget')).toBe(true);
+  expect(h.rpcs.some(x=>x.name==='approve_website_interview_summary')).toBe(false);
+ }finally{h.restore();globalThis.setTimeout=originalSet;globalThis.clearTimeout=originalClear;}
 });

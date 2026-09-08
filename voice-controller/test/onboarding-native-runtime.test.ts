@@ -657,3 +657,94 @@ test('ASR failure or a conflicting duplicate preserves interpreted state and doe
   expect(h.commits).toHaveLength(1);expect(JSON.stringify(h.stored())).toBe(before);expect(h.terminations).toHaveLength(0);
  }finally{h.runtime.stop();}
 });
+
+test('tool results carry current progress without duplicating the whole correction catalog and history',async()=>{
+ const h=harness();try{
+  await h.runtime.attach();await ordinaryWithoutAsr(h,'compact_result',{proposal:{kind:'answer',itemId:h.stored().nextAction.itemId},interpretation:territoryInterpretation});
+  const result=JSON.parse(h.sent.find(x=>x.item?.call_id==='tool_compact_result').item.output);
+  expect(result.saved).toBe(true);expect(result.context.current_item.id).toBe(h.stored().nextAction.itemId);
+  expect(result.context.correction_catalog).toBeUndefined();expect(result.context.interview_evidence).toBeUndefined();
+  const session=h.sent.filter(x=>x.type==='session.update').at(-1).session;
+  expect(session.instructions).toContain('correction_catalog');expect(session.instructions).toContain(territoryInterpretation);
+  expect(JSON.stringify(result).length).toBeLessThan(session.instructions.length/3);
+ }finally{h.runtime.stop();}
+});
+
+test('a rejected completion of an answered item keeps its actual state and directs recovery on that item',async()=>{
+ const h=harness();try{
+  await h.runtime.attach();const itemId=h.stored().nextAction.itemId!;
+  await ordinaryWithoutAsr(h,'earlier_partial',{proposal:{kind:'answer',itemId},interpretation:'Foi apontada uma contradição; a política correta ainda não foi informada.'});
+  const current=h.stored().nextAction.itemId,revision=h.stored().revision;
+  const sunday='Domingo somente emergência. Não há reparo comum no mesmo dia aos domingos; reparo comum de segunda a sábado.';
+  await ordinaryWithoutAsr(h,'actual_sunday',{proposal:{kind:'answer',itemId},interpretation:sunday});
+  const rejected=JSON.parse(h.sent.find(x=>x.item?.call_id==='tool_actual_sunday').item.output);
+  expect(rejected).toMatchObject({saved:false,operationApplied:false,sourceItemId:'actual_sunday',recovery:'correct_existing_item'});
+  expect(rejected.targetItems).toEqual([expect.objectContaining({id:itemId,status:'answered'})]);
+  expect(h.stored().revision).toBe(revision);expect(h.stored().nextAction.itemId).toBe(current);
+  await h.emit({type:'response.created',response:{id:'correct_sunday_retry'}});
+  await h.emit({type:'response.done',response:{id:'correct_sunday_retry',status:'completed',output:[{type:'function_call',status:'completed',call_id:'tool_correct_sunday',name:'submit_website_interview_proposal',arguments:JSON.stringify({proposal:{kind:'correction',affectedItems:[{itemId,disposition:'corrected'}]},interpretation:sunday})}]}});
+  expect(h.stored().agenda.items.find(x=>x.id===itemId)?.evidence.at(-1)?.text).toBe(sunday);
+  expect(h.stored().nextAction.itemId).toBe(current);expect(h.stored().revision).toBe(revision+1);expect(h.approvals).toHaveLength(0);
+ }finally{h.runtime.stop();}
+});
+
+test('existing soft budget saves the admitted answer before one native notice and waits for its output buffer',async()=>{
+ const h=harness();let cost=0;h.deps.budgetStatus=()=>({costUsd:cost,softLimitUsd:6.5,hardLimitUsd:7.5});
+ try{
+  await h.runtime.attach();await h.ready();await beginIssued(h,'budget_opening');await h.emit({type:'response.done',response:{id:'budget_opening',status:'completed',output:[]}});
+  cost=6.6;await ordinaryWithoutAsr(h,'budget_answer',{proposal:{kind:'answer',itemId:h.stored().nextAction.itemId},interpretation:territoryInterpretation});
+  expect(h.commits).toHaveLength(1);expect(h.records).toHaveLength(0);expect(h.terminations).toHaveLength(0);
+  const notice=lastRequest(h);expect(notice.response.metadata.native_budget_pause).toBe('true');expect(notice.response.tools).toEqual([]);
+  expect(notice.response.output_modalities).toEqual(['audio']);expect(notice.response.metadata.native_checkpoint).toBeUndefined();
+  await beginIssued(h,'budget_notice');await generation(h,'budget_notice',notice,'Vamos continuar em outra ligação; o progresso salvo permanece disponível.');
+  expect(h.terminations).toHaveLength(0);
+  await h.emit({type:'output_audio_buffer.stopped',response_id:'another_response',event_id:'wrong_stop'});expect(h.terminations).toHaveLength(0);
+  await h.emit({type:'output_audio_buffer.stopped',response_id:'budget_notice',event_id:'budget_notice_stopped'});
+  expect(h.terminations).toEqual([expect.objectContaining({outcome:'unfinished',reason:'budget_soft_limit_reached'})]);
+  await h.emit({type:'output_audio_buffer.stopped',response_id:'budget_notice',event_id:'duplicate_stop'});
+  expect(h.terminations).toHaveLength(1);expect(h.approvals).toHaveLength(0);expect(h.checkpoints).toHaveLength(0);expect(h.stored().revision).toBe(1);
+ }finally{h.runtime.stop();}
+});
+
+test('budget notice timeout is bounded and Stop cancels its pending termination',async()=>{
+ const originalSet=globalThis.setTimeout,originalClear=globalThis.clearTimeout,timers=new Map<object,{fn:()=>void;ms:number}>();
+ globalThis.setTimeout=((fn:()=>void,ms:number)=>{const key={};timers.set(key,{fn,ms});return key;}) as any;
+ globalThis.clearTimeout=((key:object)=>timers.delete(key)) as any;
+ const h=harness();let cost=0;h.deps.budgetStatus=()=>({costUsd:cost,softLimitUsd:6.5,hardLimitUsd:7.5});
+ try{
+  await h.runtime.attach();await h.ready();await beginIssued(h,'budget_wait_open');cost=6.6;
+  await h.emit({type:'response.done',response:{id:'budget_wait_open',status:'completed',output:[]}});
+  const timer=[...timers.values()].find(x=>x.ms===15000);expect(timer).toBeTruthy();expect(h.terminations).toHaveLength(0);
+  timer!.fn();await settleEvidence();expect(h.terminations).toEqual([expect.objectContaining({reason:'budget_notice_unconfirmed',outcome:'unfinished'})]);
+  expect(h.approvals).toHaveLength(0);
+ }finally{h.runtime.stop();globalThis.setTimeout=originalSet;globalThis.clearTimeout=originalClear;}
+ const stopped=harness();stopped.deps.budgetStatus=()=>({costUsd:6.6,softLimitUsd:6.5,hardLimitUsd:7.5});
+ try{await stopped.runtime.attach();await stopped.ready();stopped.runtime.stop();
+  await stopped.emit({type:'output_audio_buffer.stopped',event_id:'late_budget_stop',response_id:'late'});
+  expect(stopped.terminations).toHaveLength(0);expect(stopped.approvals).toHaveLength(0);
+ }finally{stopped.runtime.stop();}
+});
+
+test('budget pause waits for every already-admitted tool result before issuing its single notice',async()=>{
+ const h=harness();let cost=0;h.deps.budgetStatus=()=>({costUsd:cost,softLimitUsd:6.5,hardLimitUsd:7.5});
+ try{
+  await h.runtime.attach();await h.ready();await beginIssued(h,'budget_batch_open');await h.emit({type:'response.done',response:{id:'budget_batch_open',status:'completed',output:[]}});
+  await h.input();await h.emit({type:'response.created',response:{id:'budget_batch'}});cost=6.6;
+  const args=JSON.stringify({proposal:{kind:'answer',itemId:h.stored().nextAction.itemId},interpretation:territoryInterpretation});
+  await h.emit({type:'response.done',response:{id:'budget_batch',status:'completed',output:['batch_one','batch_two'].map(call_id=>({type:'function_call',status:'completed',call_id,name:'submit_website_interview_proposal',arguments:args}))}});
+  const noticeIndex=h.sent.findIndex(x=>x.response?.metadata?.native_budget_pause==='true');
+  expect(h.commits).toHaveLength(1);expect(h.stored().revision).toBe(1);
+  for(const id of ['batch_one','batch_two'])expect(h.sent.findIndex(x=>x.item?.call_id===id)).toBeLessThan(noticeIndex);
+  expect(h.sent.filter(x=>x.response?.metadata?.native_budget_pause==='true')).toHaveLength(1);
+ }finally{h.runtime.stop();}
+});
+
+test('content rejection preserves a bounded validator reason without logging owner content',async()=>{
+ const h=harness({contentFixture:true}),diagnostics:any[]=[];h.deps.onDiagnostic=(event:any)=>diagnostics.push(event);
+ try{
+  await h.runtime.attach();await ordinaryWithoutAsr(h,'invalid_fact',{proposal:{kind:'answer',itemId:'current'},interpretation:'private owner words must not be logged',
+   facts:[{topic:'area',field:'area.out_of_area_policy',disposition:'answered',rule_text:'private policy text',structured:{value:{unexpected:'secret raw value'}}}]});
+  const event=diagnostics.find(x=>x.stage==='native.content_rejected');expect(event).toBeTruthy();expect(event.code).toMatch(/^website_facts_[a-z_]+$/);expect(event.factCount).toBe(1);
+  expect(JSON.stringify(diagnostics)).not.toContain('private');expect(JSON.stringify(diagnostics)).not.toContain('secret');expect(h.commits).toHaveLength(0);
+ }finally{h.runtime.stop();}
+});

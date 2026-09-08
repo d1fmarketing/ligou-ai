@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { MAX_AGENDA_ITEMS, type AgendaSeed, type AgendaSource } from "./onboarding-agenda.ts";
 import { getCompanyDiscoveryUnresolvedItems } from "./company-discovery-prefill.ts";
 import { websiteItemsMayShareAnswer } from "./onboarding-website-applicability.ts";
+import {isTimezoneQuestion,resolveWebsiteContextTimezone,type WebsiteContextTimezone} from './onboarding-timezone-context.ts';
 import {
   canonicalCoverage, coverageKey, evaluateCoverage, isCoverageField, isDiscoveryOwnerQuestionField,
   normalizeCoverageSubject, questionFor, type CoverageRef, type CoverageSnapshot,
@@ -58,6 +59,7 @@ export interface WebsiteAgendaSeedProjection {
   /** Hints describe required evidence, not authority. Even an eligible graph
    * edge requires the unconditional exact-owner-text applicability gate. */
   readonly relationHints: readonly WebsiteAgendaRelationHint[];
+  readonly contextTimezone?:WebsiteContextTimezone;
 }
 
 function canonical(value: unknown): unknown {
@@ -226,6 +228,8 @@ export function buildWebsiteAgendaSeeds(input: { draftReadback: unknown; initial
   });
   if (snapshot.catalogOverflow) coverageObligations.push({ coverageRef: "service.catalog_overflow", field: "service.catalog_overflow", initialState: "owner_review_required", conditional: false, blocking: true, disposition: "ask", seedId: seedForRef.get("service.catalog_overflow")!.id });
   const provenance = { draftId: readback.draft_id, draftVersion: readback.draft_version, draftHash: readback.draft_hash, sourceJobId: readback.draft.source_job_id, sourceAttemptId: readback.draft.source_attempt_id, sourceResultId: readback.draft.source_result_id, sourceResultHash: readback.draft.source_result_hash, tenantId: snapshot.tenantId, callId: snapshot.callId, draftInputDigest: hash(readback), coverageDigest: createHash("sha256").update(canonicalCoverage(snapshot)).digest("hex"), authority: { rules_approved: false, powers_granted: false, operational_mode_changed: false } as const };
-  const result = { version: 1 as const, seeds, provenance, sourceItems, coverageObligations, candidateRecap, relationHints };
+  const timezoneItems=seeds.filter(s=>s.source==='missing_website_information'&&isTimezoneQuestion(s.questionPt));
+  const contextTimezone=timezoneItems.length===1?resolveWebsiteContextTimezone(candidateRecap,timezoneItems[0].id):null;
+  const result = { version: 1 as const, seeds, provenance, sourceItems, coverageObligations, candidateRecap, relationHints,...(contextTimezone?{contextTimezone}:{}) };
   return frozen({ ...result, seedsHash: hash(result) });
 }

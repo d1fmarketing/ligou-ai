@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, webcrypto } from 'node:crypto';
 import * as harness from '../../scripts/voice-onboarding-audio-acceptance.mjs';
 
 test('native launch entry rejects before examining configuration or starting a process',async()=>{
@@ -20,34 +20,82 @@ test('in-app observer source is scoped, repeat-safe JavaScript without carrying 
  const wrongPage={get fetch(){reads++;throw new Error('wrong origin touched');}};
  assert.doesNotThrow(()=>install({origin:'https://unrelated.example'},wrongPage));assert.equal(reads,0);
 });
-test('data-channel session readback records only bounded allowlisted configuration',()=>{
+function sessionConfigObserver(hash=webcrypto.subtle.digest.bind(webcrypto.subtle)) {
  const origin='https://client-nine-taupe-24.vercel.app';
+ let browserMs=100;const hashes=[];
  class Peer extends EventTarget {createDataChannel(){return new EventTarget();}}
  class Media {play(){throw new Error('media must remain untouched');}}
  const window={RTCPeerConnection:Peer,fetch(){throw new Error('network must remain untouched');},addEventListener(){}};
  const document={createElement(){throw new Error('DOM must remain untouched');},addEventListener(){},querySelector(){return null;}};
- new Function('location','window','navigator','document','HTMLMediaElement','HTMLAudioElement','performance',
+ const crypto={subtle:{digest(...args){const result=hash(...args);hashes.push(Promise.resolve(result));return result;}}};
+ new Function('location','window','navigator','document','HTMLMediaElement','HTMLAudioElement','performance','crypto',
   harness.buildBrowserHarnessSource({origin,isolatedTestOnly:true,recordTestAudio:true}))(
-    {origin},window,{mediaDevices:{}},document,Media,Media,{now:()=>100});
+    {origin},window,{mediaDevices:{}},document,Media,Media,{now:()=>browserMs},crypto);
  const channel=new window.RTCPeerConnection().createDataChannel('test-only');
- const observe=session=>{
-  channel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'session.updated',session,
-    transcript:'secret must not become a transcript',client_secret:'event secret',sdp:'event SDP'})}));
-  return window.__voiceAcceptance.drain().events.filter(event=>event.event==='provider_event');
+ return {channel,time(value){browserMs=value;},emit(event){channel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(event)}));},
+  drain:()=>window.__voiceAcceptance.drain().events.filter(event=>event.event==='provider_event'),
+  async settle(){await Promise.allSettled(hashes.splice(0));await Promise.resolve();}};
+}
+test('data-channel session readback records only bounded allowlisted configuration and accepted prompt hash',async()=>{
+ const h=sessionConfigObserver();
+ const observe=async session=>{
+  h.emit({type:'session.updated',event_id:'evt_session_config',session,
+    transcript:'secret must not become a transcript',client_secret:'event secret',sdp:'event SDP'});
+  await h.settle();return h.drain();
  };
  const session={model:'gpt-realtime-2.1',reasoning:{effort:'medium',private:'secret'},client_secret:{value:'session secret'},sdp:'session SDP',instructions:'private prompt',
-  audio:{input:{transcription:{model:'gpt-live-transcribe',languages:['pt','en-US'],prompt:'private ASR prompt'},
+  audio:{output:{voice:'ash',private:'secret'},input:{transcription:{model:'gpt-live-transcribe',languages:['pt','en-US'],prompt:'private ASR prompt'},
     turn_detection:{type:'semantic_vad',eagerness:'low',create_response:false,interrupt_response:false,private:'secret'}}}};
- assert.deepEqual(observe(session),[{event:'provider_event',browserMs:100,elapsedMs:null,type:'session.updated',sessionConfig:{
-  model:'gpt-realtime-2.1',reasoningEffort:'medium',transcriptionModel:'gpt-live-transcribe',languages:['pt','en-US'],
+ assert.deepEqual(await observe(session),[{event:'provider_event',browserMs:100,elapsedMs:null,type:'session.updated',eventId:'evt_session_config',sessionConfig:{
+  model:'gpt-realtime-2.1',outputVoice:'ash',instructionsSha256:createHash('sha256').update(session.instructions).digest('hex'),
+  reasoningEffort:'medium',transcriptionModel:'gpt-live-transcribe',languages:['pt','en-US'],
   vadType:'semantic_vad',vadEagerness:'low',createResponse:false,interruptResponse:false}}]);
- const unknown={model:'secret-unrecognized-model',reasoning:{effort:'secret'},audio:{input:{transcription:{model:'secret',languages:['pt','not a language secret']},
+ const unknown={model:'secret-unrecognized-model',reasoning:{effort:'secret'},audio:{output:{voice:'secret-voice'},input:{transcription:{model:'secret',languages:['pt','not a language secret']},
   turn_detection:{type:'secret',eagerness:'secret',create_response:'false',interrupt_response:1}}}};
- const empty={model:null,reasoningEffort:null,transcriptionModel:null,languages:null,vadType:null,vadEagerness:null,createResponse:null,interruptResponse:null};
- assert.deepEqual(observe(unknown)[0].sessionConfig,empty);
- assert.deepEqual(observe({})[0].sessionConfig,empty,'missing provider defaults must stay unknown');
+ const empty={model:null,outputVoice:null,instructionsSha256:null,reasoningEffort:null,transcriptionModel:null,languages:null,vadType:null,vadEagerness:null,createResponse:null,interruptResponse:null};
+ assert.deepEqual((await observe(unknown))[0].sessionConfig,empty);
+ assert.deepEqual((await observe({}))[0].sessionConfig,empty,'missing provider defaults must stay unknown');
  const excessive=structuredClone(session);excessive.audio.input.transcription.languages=Array(9).fill('pt');
- assert.equal(observe(excessive)[0].sessionConfig.languages,null,'an over-bound list is not truncated into apparent provider truth');
+ assert.equal((await observe(excessive))[0].sessionConfig.languages,null,'an over-bound list is not truncated into apparent provider truth');
+});
+test('accepted prompt hashing never blocks data-channel listeners and keeps the receipt clock',async()=>{
+ let resolveHash,received;const h=sessionConfigObserver((algorithm,bytes)=>{
+  received={algorithm,bytes};return new Promise(resolve=>{resolveHash=resolve;});
+ });
+ let applicationEvents=0;h.channel.addEventListener('message',()=>applicationEvents++);
+ const instructions='  Política em português: café ☕\nSem reduzir espaços.  ';
+ h.emit({type:'session.updated',event_id:'evt_config_held',session:{instructions,audio:{output:{voice:'cedar'}}}});
+ h.time(200);h.emit({type:'response.created',response:{id:'resp_while_hashing'}});
+ assert.equal(applicationEvents,2,'the application receives both events while WebCrypto is still pending');
+ assert.equal(received.algorithm,'SHA-256');assert.equal(new TextDecoder().decode(received.bytes),instructions);
+ assert.deepEqual(h.drain().map(event=>event.type),['response.created']);
+ h.time(300);resolveHash(createHash('sha256').update(instructions).digest());await h.settle();
+ const [event]=h.drain();assert.equal(event.type,'session.updated');assert.equal(event.eventId,'evt_config_held');
+ assert.equal(event.browserMs,100,'hash completion time must not become accepted-session latency');
+ assert.equal(event.sessionConfig.outputVoice,'cedar');
+ assert.equal(event.sessionConfig.instructionsSha256,createHash('sha256').update(instructions).digest('hex'));
+ assert.equal(JSON.stringify(event).includes(instructions),false);
+});
+test('out-of-order prompt hashes retain each accepted session identity, voice and exact text digest',async()=>{
+ const pending=[];const h=sessionConfigObserver((_algorithm,bytes)=>new Promise(resolve=>pending.push({bytes,resolve})));
+ h.emit({type:'session.updated',event_id:'evt_old_config',session:{instructions:'old private prompt',audio:{output:{voice:'ash'}}}});
+ h.time(200);h.emit({type:'session.updated',event_id:'evt_new_config',session:{instructions:'new private prompt',audio:{output:{voice:'marin'}}}});
+ pending[1].resolve(createHash('sha256').update(pending[1].bytes).digest());await Promise.resolve();
+ let event=h.drain()[0];assert.equal(event.eventId,'evt_new_config');assert.equal(event.browserMs,200);
+ assert.equal(event.sessionConfig.outputVoice,'marin');assert.equal(event.sessionConfig.instructionsSha256,createHash('sha256').update('new private prompt').digest('hex'));
+ pending[0].resolve(createHash('sha256').update(pending[0].bytes).digest());await h.settle();
+ event=h.drain()[0];assert.equal(event.eventId,'evt_old_config');assert.equal(event.browserMs,100);
+ assert.equal(event.sessionConfig.outputVoice,'ash');assert.equal(event.sessionConfig.instructionsSha256,createHash('sha256').update('old private prompt').digest('hex'));
+});
+test('failed or over-bound prompt hashing leaves unknown evidence without secrets or truncated hashes',async()=>{
+ for(const hash of [()=>{throw new Error('private crypto detail');},()=>Promise.reject(new Error('private crypto detail'))]){
+  const h=sessionConfigObserver(hash);h.emit({type:'session.updated',session:{instructions:'private prompt',audio:{output:{voice:'ash'}}}});
+  await h.settle();const [event]=h.drain();assert.equal(event.sessionConfig.outputVoice,'ash');assert.equal(event.sessionConfig.instructionsSha256,null);
+  assert.equal(JSON.stringify(event).includes('private'),false);
+ }
+ let hashes=0;const h=sessionConfigObserver(()=>{hashes++;throw new Error('must not hash an over-bound prompt');});
+ h.emit({type:'session.updated',session:{instructions:'x'.repeat(1_048_577),audio:{output:{voice:{id:'private-voice-id'}}}}});
+ await h.settle();assert.equal(hashes,0);const [event]=h.drain();assert.equal(event.sessionConfig.instructionsSha256,null);assert.equal(event.sessionConfig.outputVoice,null);
 });
 
 test('browser speech-read diagnostics retain bounded failure codes without arbitrary error data',()=>{

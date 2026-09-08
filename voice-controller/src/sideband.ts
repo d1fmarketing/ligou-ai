@@ -185,6 +185,10 @@ const MAX_ADAPTER_TOOL_RECEIPTS = 512;
 const MAX_ADAPTER_TOOL_BATCHES = 512;
 const MUTATION_RECONCILIATION_DELAY_MS = 0;
 const CALLER_TRANSCRIPT_CORRELATION_TIMEOUT_MS = 5_000;
+/** Intentional control flow after a validated usage event, not a lost event. */
+class WebsiteHardBudgetReached extends Error {
+  constructor(){super('website_hard_budget_reached');}
+}
 
 export interface SessionLedger {
   callId: string;
@@ -1850,10 +1854,13 @@ function enqueueOnboardingRawEvent(
         ledger.providerUsageEvidence.continuous = false; ledger.agentEnded = true; ledger.status = "error";
       }
     });
-    adapter.queue = task.catch(() => {
-      adapter.interrupted = true; context.ledger.agentEnded = true;
-      if (context.ledger.status === "active") context.ledger.status = "error";
-      context.ledger.providerUsageEvidence.continuous = false;
+    adapter.queue = task.catch((error) => {
+      context.ledger.agentEnded = true;
+      if(!(error instanceof WebsiteHardBudgetReached&&context.ledger.status==='killed_budget')){
+        adapter.interrupted = true;
+        if (context.ledger.status === "active") context.ledger.status = "error";
+        context.ledger.providerUsageEvidence.continuous = false;
+      }
     });
     return adapter.queue;
   }
@@ -3547,11 +3554,15 @@ export function attachSideband(
       const ceiling = ledger.budgetEnvelope?.hardLimitUsd ?? config.sessionCostCeilingUsd;
       if (totalSessionCostUsd(ledger) >= ceiling) {
         ledger.agentEnded = true; ledger.status = "killed_budget";
-        throw new Error("website_hard_budget_reached");
+        throw new WebsiteHardBudgetReached();
       }
     };
     const runtimeDependencies = {
       model: ledger.model,
+      budgetStatus: () => {
+        const envelope=ledger.budgetEnvelope??sessionBudgetEnvelope(cap.sessionType);
+        return{costUsd:totalSessionCostUsd(ledger),softLimitUsd:envelope.softLimitUsd,hardLimitUsd:envelope.hardLimitUsd};
+      },
       agendaStore: createOnboardingAgendaStore(supa()),
       evidenceStore: createInterviewEvidenceStore(supa()),
       enqueue: (task) => {
@@ -3561,9 +3572,13 @@ export function attachSideband(
           await task();
           if (ledger.status !== "active") await finalize("website_runtime_terminal");
         });
-        adapter.queue = queued.catch(async () => {
+        adapter.queue = queued.catch(async (error) => {
           if (ledger.websiteStopReason) return;
-          ledger.agentEnded = true; if (ledger.status === "active") ledger.status = "error"; ledger.providerUsageEvidence.continuous = false;
+          ledger.agentEnded = true;
+          if(!(error instanceof WebsiteHardBudgetReached&&ledger.status==='killed_budget')){
+            if (ledger.status === "active") ledger.status = "error";
+            ledger.providerUsageEvidence.continuous = false;
+          }
           await finalize("website_runtime_failure");
         });
         return adapter.queue;
@@ -3584,7 +3599,11 @@ export function attachSideband(
         enforceWebsiteHardBudget();
       },
       onUsageUnknown: () => { ledger.providerUsageEvidence.continuous = false; },
-      onTerminate: (command) => { ledger.agentEnded = true; if (ledger.status === "active") ledger.status = command.outcome === "complete" || ["owner_requested_pause","owner_requested_amendment"].includes(command.reason) ? "ended" : "error"; },
+      onTerminate: (command) => {
+        ledger.agentEnded = true;
+        if (ledger.status === "active") ledger.status = ['budget_soft_limit_reached','budget_notice_interrupted','budget_notice_unconfirmed'].includes(command.reason)
+          ? 'killed_budget' : command.outcome === "complete" || ["owner_requested_pause","owner_requested_amendment"].includes(command.reason) ? "ended" : "error";
+      },
       onState: (state: {phase:any}) => { ledger.phase = state.phase; },
       onDiagnostic: (event) => { console.info(JSON.stringify({ event: "website_interview", ...event })); },
     };
@@ -4010,6 +4029,7 @@ export async function persistLedger(
     && ledger.providerUsageEvidence.terminal === true;
   const externalCostFloor = Number((ledger.externalCostUsd ?? 0).toFixed(8));
   const observedCostFloor = ledger.providerUsageEvidence.eventCount > 0 ||
+      ledger.providerUsageEvidence.terminal === true ||
       externalCostFloor > 0
     ? Number(totalSessionCostUsd(ledger).toFixed(8))
     : null;
@@ -4046,6 +4066,17 @@ export async function persistLedger(
     last_received_at: ledger.providerUsageEvidence.lastReceivedAt,
     continuous: true,
     terminal: true,
+  } : ledger.providerUsageEvidence.eventCount>0||ledger.providerUsageEvidence.terminal ? {
+    source:ledger.providerUsageEvidence.terminal?'session.ended.observed':'response.done.observed',
+    event_count:ledger.providerUsageEvidence.eventCount,
+    last_response_id:ledger.providerUsageEvidence.lastResponseId,
+    last_received_at:ledger.providerUsageEvidence.lastReceivedAt,
+    continuous:ledger.providerUsageEvidence.continuous,
+    terminal:ledger.providerUsageEvidence.terminal,
+    usage_complete:false,
+    observed_usage_tokens:{...ledger.usage},
+    model:ledger.model,
+    cost_floor_usd:cost,
   } : null;
 
   if (phone) {

@@ -12,11 +12,14 @@ import {buildNativeOnboardingContext,buildNativeOnboardingSession,parseNativeOnb
   NATIVE_ONBOARDING_PROPOSAL_TOOL,NATIVE_ONBOARDING_APPROVAL_TOOL} from './onboarding-native-session.ts';
 
 export interface NativeWebsiteRuntimeConfig {native:true;prepared:PreparedWebsiteInterview;businessName:string}
-export type NativeWebsiteRuntimeDependencies=Omit<WebsiteInterviewRuntimeDependencies,'onState'|'synthesize'|'onCost'> & {onState(state:{phase:string}):void};
+export type NativeWebsiteRuntimeDependencies=Omit<WebsiteInterviewRuntimeDependencies,'onState'|'synthesize'|'onCost'> & {
+  onState(state:{phase:string}):void;
+  budgetStatus?():{costUsd:number;softLimitUsd:number;hardLimitUsd:number};
+};
 type CheckpointKind='review'|'signoff';
 type Turn={snapshot:StoredWebsiteInterview;order:number;committed?:boolean;reviewCheckpointId?:string;transcript?:string;recorded?:boolean;
   recording?:Promise<void>;transcriptConflict?:boolean;responded?:boolean;processed?:boolean};
-type ResponseContext={ownerItemId?:string;snapshot:StoredWebsiteInterview;cancelled?:boolean;done?:boolean;checkpoint?:Checkpoint};
+type ResponseContext={ownerItemId?:string;snapshot:StoredWebsiteInterview;cancelled?:boolean;done?:boolean;checkpoint?:Checkpoint;budgetPause?:boolean};
 type ToolCall={id:string;name:string;arguments:string;responseId:string;context:ResponseContext;timer?:ReturnType<typeof setTimeout>};
 type Checkpoint={id:string;kind:CheckpointKind;snapshot:StoredWebsiteInterview;approvalReceiptId?:string;responseId?:string;itemId?:string;
   transcript?:string;transcriptDone?:{itemId:string;text:string};generationDone?:boolean;bufferStoppedEventId?:string;
@@ -77,6 +80,7 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
   let currentReview:Checkpoint|undefined,currentSignoff:Checkpoint|undefined,approval:Approval|undefined,amendmentReceiptId:string|undefined;
   let termination:Extract<Parameters<typeof deps.onTerminate>[0],{type:'terminate_session'}>|undefined;
   let finalization:Promise<void>|undefined;
+  let budgetPause:{responseId?:string;generationDone?:boolean;bufferStopped?:boolean;interrupted?:boolean;timer?:ReturnType<typeof setTimeout>}|undefined;
   const turns=new Map<string,Turn>(),responses=new Map<string,ResponseContext>(),issued=new Map<string,ResponseContext>(),checkpoints=new Map<string,Checkpoint>();
   const activeResponses=new Set<string>(),usageResponses=new Set<string>(),handledResponses=new Set<string>(),completedTools=new Set<string>(),controlEvents=new Set<string>();
   const pendingTools=new Map<string,ToolCall>();
@@ -100,7 +104,15 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
     if(stopped||termination)return;contextNotice();
     const session=buildNativeOnboardingSession({stored,businessName:input.businessName,model:deps.model??''});
     nativeInstructions=session.instructions;deps.send({type:'session.update',session});
+    diagnostic('native.session_requested',{revision:stored.revision,promptSha256:createHash('sha256').update(nativeInstructions).digest('hex')});
   }
+  function toolContext(){
+    // The current session already carries this catalog and evidence. Repeating
+    // them in every function result grows the conversation on every turn.
+    const {correction_catalog,interview_evidence,review,...progress}=buildNativeOnboardingContext(stored,input.businessName);
+    return progress;
+  }
+  function softBudgetReached(){const budget=deps.budgetStatus?.();return Boolean(budget&&budget.costUsd>=budget.softLimitUsd);}
   function retire(checkpoint:Checkpoint,clear=true){
     checkpoint.retired=true;clearTimeout(checkpoint.timer);clearTimeout(checkpoint.playoutTimer);
     if(currentReview===checkpoint)currentReview=undefined;if(currentSignoff===checkpoint)currentSignoff=undefined;
@@ -137,9 +149,16 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
         :'A aprovação do resumo foi confirmada pelo servidor. Despeça-se brevemente de forma natural para encerrar a conversa.',kind);
   }
   function flushContinuation(){
-    if(!continuation||!browserReady||responsePending||activeResponses.size||activeOwner||stopped||termination)return;
-    const next=continuation;continuation=undefined;
-    const requestId=randomUUID(),context:ResponseContext={ownerItemId:next.ownerItemId,snapshot:stored};
+    if(!continuation||!browserReady||responsePending||activeResponses.size||pendingTools.size||activeOwner||stopped||termination||budgetPause)return;
+    let next=continuation;continuation=undefined;
+    const pause=!approval&&softBudgetReached();
+    if(pause){
+      for(const checkpoint of checkpoints.values())retire(checkpoint,false);
+      next={instructions:'O limite preventivo desta ligação foi atingido. Explique brevemente, com suas próprias palavras, que a ligação será interrompida e que o progresso efetivamente salvo poderá ser retomado pelo painel. Não anuncie conclusão ou aprovação, não faça outra pergunta e não narre detalhes técnicos.'};
+      budgetPause={timer:setTimeout(()=>{void deps.enqueue(async()=>{if(!stopped&&!termination)finish('budget_notice_unconfirmed');});},15000)};
+      publish('budget_pause_speaking');diagnostic('native.budget_pause',deps.budgetStatus?.());
+    }
+    const requestId=randomUUID(),context:ResponseContext={ownerItemId:next.ownerItemId,snapshot:stored,...(pause?{budgetPause:true}:{})};
     if(next.checkpoint){
       const checkpoint:Checkpoint={id:requestId,kind:next.checkpoint,snapshot:stored,...(next.checkpoint==='signoff'?{approvalReceiptId:approval?.receiptId}:{})};
       checkpoint.timer=setTimeout(()=>{void deps.enqueue(async()=>{if(!checkpoint.retired&&!checkpoint.proof&&!stopped&&!termination)finish('native_checkpoint_timeout');});},180_000);
@@ -149,12 +168,14 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
     }
     issued.set(requestId,context);responsePending=true;pendingRequestId=requestId;
     deps.send({type:'response.create',event_id:requestId,response:{output_modalities:['audio'],
-      metadata:{native_request_id:requestId,...(next.checkpoint?{native_checkpoint:next.checkpoint}:{})},
-      ...(next.checkpoint?{tools:[],tool_choice:'none'}:{}),
+      metadata:{native_request_id:requestId,...(next.checkpoint?{native_checkpoint:next.checkpoint}:{}),...(pause?{native_budget_pause:'true'}:{})},
+      ...(next.checkpoint||pause?{tools:[],tool_choice:'none'}:{}),
+      ...(pause?{max_output_tokens:512}:{}),
       ...(next.instructions?{instructions:`${nativeInstructions}\n\n${next.instructions}`}:{})}});
   }
   function finish(reason:string,outcome:'complete'|'unfinished'='unfinished'){
     if(stopped||termination)return;
+    clearTimeout(budgetPause?.timer);
     termination={type:'terminate_session',action:'TERMINATE_SESSION',requestId:randomUUID(),outcome,reason,
       ...(approval?{approvalReceiptId:approval.receiptId}:{})};
     continuation=undefined;publish('terminating');diagnostic('native.terminated',{code:reason});deps.onTerminate(termination);
@@ -180,8 +201,15 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
   }
   function rejected(tool:ToolCall,code:string){
     diagnostic('native.tool_rejected',{code});
-    toolOutput(tool,{saved:false,code,context:buildNativeOnboardingContext(stored,input.businessName),
-      instruction:'A operação não foi salva. Esclareça brevemente a situação ou corrija a proposta usando o contexto atual; não anuncie sucesso.'});
+    let proposal:any;try{proposal=JSON.parse(tool.arguments)?.proposal;}catch{}
+    const ids=new Set([proposal?.itemId,...(Array.isArray(proposal?.affectedItems)?proposal.affectedItems.map((x:any)=>x?.itemId):[]),
+      ...(Array.isArray(proposal?.affectedCandidates)?proposal.affectedCandidates.map((x:any)=>x?.candidateId):[])]);
+    const targetItems=getAgendaItems(stored.agenda).filter(item=>ids.has(item.id)).map(item=>({id:item.id,status:item.status,
+      latestEvidence:item.evidence.at(-1)??null}));
+    const correction=proposal?.kind!=='correction'&&targetItems.some(item=>!['open','awaiting_clarification','deferred_owner_review'].includes(item.status));
+    toolOutput(tool,{saved:false,operationApplied:false,code,sourceItemId:tool.context.ownerItemId??null,targetItems,
+      recovery:correction?'correct_existing_item':'retry_same_response',context:toolContext(),
+      instruction:'Esta tentativa não alterou os dados. As evidências salvas nos alvos continuam válidas. Recupere o conteúdo já recebido sem pedir sua repetição: para complementar ou corrigir um item já respondido, use correction com o ID desse mesmo item. Não transfira a resposta à próxima pergunta. Se faltar uma decisão real, mantenha a pendência e esclareça somente esse ponto. Explique ao dono apenas o efeito e o próximo passo útil, sem narrar ajustes internos.'});
   }
   async function saveProposal(tool:ToolCall,value:unknown){
     const ownerId=tool.context.ownerItemId,turn=ownerId?turns.get(ownerId):undefined;
@@ -193,6 +221,9 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
     if(!parsed){rejected(tool,turn.snapshot.digest!==stored.digest&&!correction?'draft_version_changed':'proposal_not_admitted');return;}
     let content:ReturnType<typeof nativeContent>;
     try{content=nativeContent(parsed,source.agenda);}catch(error){
+      const reason=error instanceof Error?error.message.split(':')[0]:'';
+      const safeReason=/^website_facts_[a-z_]+$/.test(reason)||['proposal_content_missing','proposal_content_invalid'].includes(reason)?reason:'native_content_validation_unknown';
+      diagnostic('native.content_rejected',{code:safeReason,factCount:parsed.facts?.length??0});
       rejected(tool,error instanceof Error&&error.message==='proposal_content_missing'?'proposal_content_missing':'proposal_content_invalid');return;
     }
     const {proposal,interpretation,facts,omittedRelatedItemIds}=content;
@@ -204,7 +235,7 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
       configure();publish('awaiting_owner');
       toolOutput(tool,{saved:true,replayed,savedReceiptId:result.operationReceiptId,savedRevision:result.operationRevision,
         revision:stored.revision,digest:stored.digest,interpretation,provenance:'model_interpretation',omittedRelatedItemIds,
-        context:buildNativeOnboardingContext(stored,input.businessName)},stored.state!=='reviewing');
+        context:toolContext()},stored.state!=='reviewing');
       if(stored.state==='reviewing')requestCheckpoint('review');
     };
     if(prior){
@@ -366,6 +397,7 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
           if(checkpoint.retired||checkpoint.snapshot.digest!==stored.digest||checkpoint.snapshot.storeVersion!==stored.storeVersion){context.cancelled=true;retire(checkpoint);}
           else if(!checkpointMatches(checkpoint,response.metadata)){context.cancelled=true;checkpointFault(checkpoint);}
         }}
+        if(requested?.budgetPause&&budgetPause)budgetPause.responseId=response.id;
       }
       const context=responses.get(response.id);if(context&&!context.done)activeResponses.add(response.id);
     }
@@ -378,6 +410,7 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
     if(event.type==='response.done'){
       activeResponses.delete(event.response?.id);
       if(context){context.done=true;if(event.response?.status!=='completed')context.cancelled=true;}
+      if(context?.budgetPause&&budgetPause){budgetPause.generationDone=event.response?.status==='completed';budgetPause.interrupted=!budgetPause.generationDone;}
       if(checkpoint&&!checkpoint.retired){
         if(context?.cancelled||!checkpointMatches(checkpoint,event.response?.metadata)){checkpointFault(checkpoint);}
         else{
@@ -394,6 +427,7 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
     if(event.type==='output_audio_buffer.started')activeAudio=event.response_id;
     if(event.type==='output_audio_buffer.stopped'){
       if(!event.response_id||event.response_id===activeAudio)activeAudio=undefined;
+      if(context?.budgetPause&&budgetPause&&ID.test(event.event_id??''))budgetPause.bufferStopped=true;
       if(checkpoint&&!checkpoint.retired&&ID.test(event.event_id??'')){
         if(checkpoint.bufferStoppedEventId&&checkpoint.bufferStoppedEventId!==event.event_id)retire(checkpoint);
         else{checkpoint.bufferStoppedEventId=event.event_id;join(checkpoint);boundPlayout(checkpoint);}
@@ -401,6 +435,7 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
     }
     if(event.type==='output_audio_buffer.cleared'){
       if(!event.response_id||event.response_id===activeAudio)activeAudio=undefined;
+      if(context?.budgetPause&&budgetPause)budgetPause.interrupted=true;
       if(checkpoint&&!checkpoint.playedOrder)retire(checkpoint,false);
       else if(!event.response_id)for(const value of checkpoints.values())if(!value.playedOrder)retire(value,false);
     }
@@ -478,6 +513,11 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
       annexTranscript(event.item_id,event.transcript);
     }
     if(event.type==='response.output_audio_transcript.done'&&typeof event.transcript==='string')deps.onTranscript({role:'agent',text:event.transcript,at:new Date().toISOString()});
+    if(budgetPause){
+      if(budgetPause.interrupted)finish('budget_notice_interrupted');
+      else if(budgetPause.generationDone&&budgetPause.bufferStopped)finish('budget_soft_limit_reached');
+      return;
+    }
     if(event.type==='response.done'&&!handledResponses.has(event.response?.id)){
       handledResponses.add(event.response?.id);const context=responses.get(event.response?.id),turn=context?.ownerItemId?turns.get(context.ownerItemId):undefined;
       if(turn)turn.responded=true;
@@ -493,10 +533,12 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
       }
       if(turn?.committed&&![...pendingTools.values()].some(tool=>tool.context.ownerItemId===context?.ownerItemId))turn.processed=true;
     }
+    if(event.type==='response.done'&&!approval&&softBudgetReached()&&!continuation)requestConversation();
     resumeCheckpointAfterTurn();flushContinuation();maybeFinish();
   }
   async function attach(){if(stopped||termination)return;configure();if(browserReady)publish('awaiting_owner');}
   function stop(){if(stopped)return;stopped=true;abort.abort();
+    clearTimeout(budgetPause?.timer);
     for(const tool of pendingTools.values())clearTimeout(tool.timer);pendingTools.clear();
     for(const checkpoint of checkpoints.values()){checkpoint.retired=true;clearTimeout(checkpoint.timer);clearTimeout(checkpoint.playoutTimer);}continuation=undefined;
   }

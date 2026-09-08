@@ -11,6 +11,7 @@ export interface StoredWebsiteInterview {
   nextAction: AgendaAction; state: "unfinished" | "reviewing" | "closing" | "complete"; replayed: boolean;
 }
 export interface StoredNativeOwnerTurn extends StoredWebsiteInterview { operationReceiptId: string; operationRevision: number }
+export interface StoredRecordedOwnerTurn extends StoredWebsiteInterview { operationReceiptId: string; operationRevision: number }
 export interface NativeOwnerTurnInput extends InterviewScope { providerItemId: string; proposal: AgendaProposal; interpretation: string; facts?: readonly Record<string, unknown>[] }
 type RpcResult = { data: unknown; error: { message?: string; code?: string } | null; status?: number };
 type RpcClient = { rpc(name: string, args: Record<string, unknown>): PromiseLike<RpcResult> & { abortSignal?(signal: AbortSignal): PromiseLike<RpcResult> } };
@@ -82,6 +83,20 @@ export function createOnboardingAgendaStore(client: RpcClient) {
     return{...stored,operationReceiptId:raw.operationReceiptId,operationRevision:index+1};
   }
   return {
+    async recoverRecordedOwnerTurn(input:InterviewScope&{providerItemId:string;expectedRevision:number;expectedStoreVersion:number;expectedDigest:string;agenda:OnboardingAgenda}):Promise<StoredRecordedOwnerTurn> {
+      const agenda=checkedAgenda(input.agenda),expectedTurn=agenda.ownerTurns.at(-1);
+      if(!input.providerItemId?.trim() || input.providerItemId.length>400 || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision<0
+        || !Number.isSafeInteger(input.expectedStoreVersion) || input.expectedStoreVersion<0 || !/^[a-f0-9]{64}$/.test(input.expectedDigest)
+        || agenda.revision!==input.expectedRevision+1 || agenda.binding.callId!==input.callId
+        || expectedTurn?.turnId!==`${input.callId}:${input.providerItemId}` || expectedTurn.provenance!==undefined)
+        throw new Error('Recorded recovery binding mismatch');
+      const raw=await rpc('recover_website_interview_recorded_turn',{...scoped(input),p_revision:input.expectedRevision,p_store_version:input.expectedStoreVersion,
+        p_digest:input.expectedDigest,p_item:input.providerItemId,p_agenda:agenda},input.signal) as Record<string,unknown>;
+      const stored=readback(raw,input.callId),index=stored.agenda.ownerTurns.findIndex(turn=>turn.turnId===expectedTurn.turnId),turn=stored.agenda.ownerTurns[index];
+      if(!turn || turn.text!==expectedTurn.text || turn.provenance!==undefined || typeof raw.operationReceiptId!=='string' || !uuid.test(raw.operationReceiptId)
+        || raw.operationRevision!==input.expectedRevision+1 || raw.operationRevision!==index+1)throw new Error('Recorded recovery operation proof mismatch');
+      return{...stored,operationReceiptId:raw.operationReceiptId,operationRevision:index+1};
+    },
     async commitNativeOwnerTurn(input:NativeOwnerTurnInput&{expectedRevision:number;expectedStoreVersion:number;expectedDigest:string;agenda:OnboardingAgenda}):Promise<StoredNativeOwnerTurn> {
       const args=nativeArgs(input),agenda=checkedAgenda(input.agenda);
       const turn=agenda.ownerTurns.at(-1);

@@ -358,21 +358,31 @@ describe("durable budget reconciliation", () => {
     expect(unresolvedSettlements[0].p_estimated_cost).toBe(0.2);
   });
 
-  test("a hard-overrun lower bound above the reservation stays explicit instead of being truncated into settlement", async () => {
+  test("a confirmed hard-budget overrun settles its exact recorded floor as an estimate without raising the reservation", async () => {
     claimRow = {
       reservation_id: "reservation-hard-overrun", tenant_id: "tenant-1",
-      call_id: "call-hard-overrun", actual_cost_usd: 7.75, minutes: 30,
+      call_id: "call-hard-overrun", actual_cost_usd: 8.2209408, minutes: 8,
       outcome: "killed_budget", provider_termination_state: "confirmed",
       provider_termination_mode: "hangup", provider_usage_state: "unknown",
-      openai_call_id: "rtc-hard-overrun", reconcile_attempts: 24,
-      reserved_cost_usd: 7.5, reserved_minutes: 30,
+      openai_call_id: "rtc-hard-overrun", reconcile_attempts: 197,
+      reserved_cost_usd: 7.5, reserved_minutes: 55,
     };
 
-    expect(await reconcileBudgetReservations()).toBe(0);
-    expect(unresolvedSettlements).toHaveLength(0);
-    expect(deferred).toContainEqual(expect.objectContaining({
-      reconcile_last_error: "unresolved_cost_floor_exceeds_reservation",
-    }));
+    expect(await reconcileBudgetReservations()).toBe(1);
+    expect(unresolvedSettlements).toHaveLength(1);
+    expect(unresolvedSettlements[0]).toMatchObject({p_estimated_cost:8.2209408,p_minutes:8,p_outcome:'killed_budget',
+      p_detail:{settlement_basis:'observed_usage_floor',provider_usage_state:'unknown'}});
+    expect(claimRow.reserved_cost_usd).toBe(7.5);expect(settleAttempts).toBe(0);expect(deferred).toHaveLength(0);
+  });
+
+  test('an over-reservation floor cannot use the estimate exception before a confirmed budget stop',async()=>{
+    for(const [outcome,providerState] of [['error','confirmed'],['ended','confirmed'],['killed_budget','external_evidence_required']]){
+      unresolvedSettlements=[];deferred=[];
+      claimRow={...claimRow,outcome,provider_termination_state:providerState,provider_termination_attempt_id:'already-attempted',
+        provider_usage_state:'unknown',actual_cost_usd:8.2209408,reserved_cost_usd:7.5,reserved_minutes:55,minutes:8,reconcile_attempts:197};
+      expect(await reconcileBudgetReservations()).toBe(0);expect(unresolvedSettlements).toHaveLength(0);
+      expect(deferred).toContainEqual(expect.objectContaining({reconcile_last_error:'unresolved_cost_floor_exceeds_reservation'}));
+    }
   });
 
   test("unresolved usage keeps deferring while attempts remain under the bound or termination is unconfirmed", async () => {
