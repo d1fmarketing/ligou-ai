@@ -29,7 +29,7 @@ try{
  const settlement=await migration('20260822063000_exhausted_attempt_unblocks_settlement.sql');
  sql(settlement.slice(settlement.indexOf('create or replace function public.settle_unresolved_call_budget('),settlement.indexOf('create or replace function public.claim_budget_reconciliation(')));
  if(!process.argv.includes('--red'))sql(await migration('20260908185023_observed_budget_overrun_settlement.sql'));
- sql('begin;'+await readFile(new URL('supabase/tests/budget-observed-overrun-cases.sql',root),'utf8')+'rollback;');
+ sql('begin;'+await readFile(new URL('supabase/tests/database/budget-observed-overrun-cases.inc',root),'utf8')+'rollback;');
  console.log(JSON.stringify({status:'passed',database:'isolated PostgreSQL16; actual settlement/reservation functions; fullPG17 gate remains separate',rejectedCases:10,
   exactObservedFloor:8.2209408,originalReservation:7.5,dailyBudget:15,providerUsageState:'unknown',duplicateLedgerEvents:0,futureAdmissionBlocked:true,legacyEstimatePreserved:true,providerCalls:0}));
 }finally{

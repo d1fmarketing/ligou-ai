@@ -765,8 +765,8 @@ export async function runLocalDatabaseGate() {
     ], "database pgTAP assertions", [databaseSecret]);
     const pgTapCount = Number(/Tests=(\d+)/.exec(pgTapOutput)?.[1]);
     assert.equal(pgTapCount, 29);
-    // CLI mounts the supabase/tests tree; the file's \ir ../ include stays
-    // relative to supabase/tests/database and uses the same guarded database.
+    // CLI mounts the requested file's directory. Its same-directory \ir fixture
+    // stays in that volume and uses the same guarded database.
     const budgetOverrunPgTapOutput = await runSupabase([
       "test", "db", "--local", path.join(repoRoot, "supabase/tests/database/01_observed_budget_overrun.sql"),
     ], "observed budget overrun pgTAP assertions", [databaseSecret]);
