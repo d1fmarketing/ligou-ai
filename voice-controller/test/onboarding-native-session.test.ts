@@ -42,23 +42,23 @@ test('native model gets current structurally writable IDs, not semantic-regex fi
  expect(context.current_item.id).toBe('current');expect(context.eligible_related_item_ids).toEqual(['deferred','related']);
  expect(context.related_items.map((item:any)=>item.id)).toEqual(['deferred','related']);
  expect(answer.properties).not.toHaveProperty('itemId');expect(answer.required).not.toContain('itemId');
- expect(answer.properties.relatedItemIds).toMatchObject({maxItems:2,items:{enum:['deferred','related']}});
+ expect(answer.properties).not.toHaveProperty('relatedItemIds');
  expect(context.related_items.every((item:any)=>!Object.hasOwn(item,'relatedItemIds'))).toBe(true);
  expect(context.correction_catalog.items.map((item:any)=>item.id)).toContain('history');
  expect(context.correction_catalog.items.map((item:any)=>item.id)).toContain('outside');
 });
-test('empty writable related sets use maxItems zero without enum empty',()=>{
+test('normal answer has no related targets even when the related set is empty',()=>{
  const original=snapshot(),agenda={...original.agenda,items:original.agenda.items.map(item=>item.id==='current'?{...item,relatedItemIds:[]}:item)};
  const stored={...original,agenda,digest:onboardingAgendaDigest(agenda)},related=variant(stored,'answer').properties.relatedItemIds;
- expect(related.maxItems).toBe(0);expect(related.items).not.toHaveProperty('enum');expect(JSON.stringify(schema(stored))).not.toContain('"enum":[]');
+ expect(related).toBeUndefined();expect(JSON.stringify(schema(stored))).not.toContain('"enum":[]');
 });
 test('per-snapshot schemas and public context cannot mutate shared schema or stored evidence',()=>{
  const stored=snapshot(),before=JSON.stringify(stored),shared=JSON.stringify(PROPOSAL_SCHEMA),first=schema(stored),second=schema(stored);
  expect(first).not.toBe(second);expect(first).not.toBe(PROPOSAL_SCHEMA);
- first.properties.proposal.anyOf.find((entry:any)=>entry.properties.kind.const==='answer').properties.relatedItemIds.items.enum.push('history');
+ first.properties.proposal.anyOf.find((entry:any)=>entry.properties.kind.const==='correction').properties.affectedItems.items.properties.itemId.enum.push('mutated_only');
  const context=buildNativeOnboardingContext(stored,'Foghorn Air');context.current_item.question='changed';context.interview_evidence[0].text='changed';
  expect(JSON.stringify(stored)).toBe(before);expect(JSON.stringify(PROPOSAL_SCHEMA)).toBe(shared);
- expect(second.properties.proposal.anyOf.find((entry:any)=>entry.properties.kind.const==='answer').properties.relatedItemIds.items.enum).toEqual(['deferred','related']);
+ expect(second.properties.proposal.anyOf.find((entry:any)=>entry.properties.kind.const==='correction').properties.affectedItems.items.properties.itemId.enum).not.toContain('mutated_only');
 });
 test('shared proposal parser is reused with structural state/ID admission only',()=>{
  const stored=snapshot(),proposal={proposal:{kind:'answer',itemId:'current',relatedItemIds:['deferred','related']},facts:[]};
@@ -102,6 +102,9 @@ test('observed emergency answer cannot overwrite its explicit future price targe
  expect(observed.proposal.itemId).toBe(futurePriceId);
  expect(parseNativeOnboardingProposal({...observed,proposal:{kind:'answer'}},stored)).toEqual({...observed,proposal:{kind:'answer',itemId:currentId},facts:[]});
  expect(parseNativeOnboardingProposal({...observed,proposal:{kind:'answer',relatedItemIds:[futurePriceId]}},stored)).toBeNull();
+ expect(parseNativeOnboardingProposal({...observed,proposal:{kind:'answer',relatedItemIds:[currentId]}},stored)).toBeNull();
+ expect(parseNativeOnboardingProposal({...observed,proposal:{kind:'answer',relatedItemIds:[currentId,'84da78c50fb82314057d0b4e704a8f838719d77ab09347247da553cf34e0d418']}},stored)).toBeNull();
+ expect(Object.keys(variant(stored,'answer').properties)).toEqual(['kind']);
 });
 test('explicit corrections use separate ordinary-item and website-candidate catalogs',()=>{
  const stored=snapshot(),value={proposal:{kind:'correction',affectedItems:[{itemId:'history',disposition:'reopen'}],affectedCandidates:[{candidateId,disposition:'corrected'}]},facts:[]};
