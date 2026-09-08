@@ -80,9 +80,13 @@ export async function runWebsiteRecordedRecoveryProbe({runSql,rpc,owner,other,te
   await rejectMutation(`update website_interviews set state='closing' where interview_id=${q(call)};`,/recovery_already_approved/);
   await rejectMutation(`update website_interviews set state='complete' where interview_id=${q(call)};`,/recovery_already_approved/);
   await rejectMutation(`update website_interviews set state='reviewing' where interview_id=${q(call)};`,/recovery_not_unfinished/);
-  await rejectMutation(`update website_interviews set current_call_id=${q(priorCall)} where interview_id=${q(call)};`,/not_current/);
-  await rejectMutation(`insert into company_discovery_onboarding_drafts(id,tenant_id,version,source_job_id,source_result_id,decision_ids,draft,draft_hash,created_by)
-   select gen_random_uuid(),tenant_id,version+1,source_job_id,source_result_id,decision_ids,draft,draft_hash,created_by from company_discovery_onboarding_drafts where id=${q(source.draftId)};`,/recovery_source_changed/);
+  // priorCall already belongs to the preceding probe's interview. Rebind to a
+  // separate fixture call so FK/unique constraints stay valid until the RPC.
+  const detachedCall=randomUUID();
+  await rejectMutation(`insert into calls(id,tenant_id,channel,session_type,status,test_memory_generation,started_at,ended_at,provider_termination_state,provider_usage_state)
+   select ${q(detachedCall)},tenant_id,'browser','onboarding','ended',test_memory_generation,started_at-interval '1 second',ended_at,'not_required','not_applicable' from calls where id=${q(call)};
+   update website_interviews set current_call_id=${q(detachedCall)} where interview_id=${q(call)};`,/not_current/);
+  await rejectMutation(`update worker_jobs set selected_attempt_id=null where id=(select source_job_id from company_discovery_onboarding_drafts where id=${q(source.draftId)});`,/recovery_source_changed/);
   tests.push('stale-owner-generation-source-current-call-and-final-state-reject-without-progress');
   await rejectMutation(`insert into calls(id,tenant_id,channel,session_type,status,started_at) values(gen_random_uuid(),${q(tenant)},'browser','onboarding','active',clock_timestamp());`,/recovery_competing_attempt/);
   await rejectMutation(`insert into calls(id,tenant_id,channel,session_type,status,started_at,ended_at,provider_termination_state,provider_usage_state)
@@ -94,7 +98,8 @@ export async function runWebsiteRecordedRecoveryProbe({runSql,rpc,owner,other,te
   tests.push('active-later-call-preparation-and-unbound-request-fences');
   for(const changes of [{p_revision:before.revision-1},{p_store_version:before.storeVersion+1},{p_digest:'f'.repeat(64)}])
    await assert.rejects(()=>rpc('recover_website_interview_recorded_turn',{...args,...changes}),/revision_changed/);
-  const corrupted=structuredClone(next.agenda);corrupted.items.find(item=>item.id===sunday.id).questionPt='Changed immutable source question';
+  const corrupted=structuredClone(next.agenda);Object.assign(corrupted.items.find(item=>item.id===sunday.id),
+   {questionPt:'Changed immutable source question',lastQuestionPt:'Changed immutable source question'});
   await assert.rejects(()=>rpc('recover_website_interview_recorded_turn',{...args,p_agenda:corrupted}),/immutable_seed_changed/);
   await assert.rejects(()=>rpc('recover_website_interview_recorded_turn',{...args,p_agenda:{...next.agenda,unexpected:true}}),/interview_.*invalid/);
   const fabricated=structuredClone(next.agenda);fabricated.ownerTurns.at(-1).text='Invented owner words';
