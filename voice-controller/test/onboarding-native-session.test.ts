@@ -190,17 +190,45 @@ test('stale or incoherent stored snapshots cannot advertise native authority',()
  expect(()=>buildNativeOnboardingContext(stored,'')).toThrow();
 });
 
-test('native proposal offers optional open-answer interpretation without changing the shared legacy schema',()=>{
+test('native tool requires root interpretation and omits legacy facts while retaining parser compatibility',()=>{
  const shared=JSON.stringify(PROPOSAL_SCHEMA),stored=snapshot(),tool=schema(stored);
  expect(tool.properties.interpretation).toMatchObject({type:'string',minLength:1,maxLength:32768,pattern:'\\S'});
- expect(tool.required).toEqual(['proposal']);expect(PROPOSAL_SCHEMA.properties).not.toHaveProperty('interpretation');
+ expect(tool.required).toEqual(['proposal','interpretation']);
+ expect(Object.keys(tool.properties).sort()).toEqual(['interpretation','proposal']);expect(tool.additionalProperties).toBe(false);
+ for(const state of [stored,snapshot(true),{...snapshot(true),state:'closing' as const}]){
+  const advertised=schema(state);expect(advertised.required).toEqual(['proposal','interpretation']);
+  expect(advertised.properties).not.toHaveProperty('facts');
+  for(const option of advertised.properties.proposal.anyOf){
+   expect(option.properties).not.toHaveProperty('interpretation');expect(option.properties).not.toHaveProperty('facts');
+  }
+ }
+ expect(PROPOSAL_SCHEMA.properties).not.toHaveProperty('interpretation');expect(PROPOSAL_SCHEMA.properties).toHaveProperty('facts');
  const value={proposal:{kind:'answer',itemId:'current'},interpretation:'Somente Novato, San Rafael e Petaluma; fora dessas cidades exige aprovação explícita do dono.'};
  expect(parseNativeOnboardingProposal(value,stored)).toEqual({...value,facts:[]});
+ const legacyFacts=[{topic:'area',field:'area.coverage',disposition:'answered',rule_text:value.interpretation,structured:{value:['Novato','San Rafael','Petaluma']}}];
+ expect(parseNativeOnboardingProposal({...value,facts:legacyFacts},stored)).toEqual({...value,facts:legacyFacts});
  expect(JSON.stringify(PROPOSAL_SCHEMA)).toBe(shared);
  for(const interpretation of ['', ' \n ',null,42,'a'.repeat(32769)])expect(parseNativeOnboardingProposal({...value,interpretation},stored)).toBeNull();
  for(const extra of [{provenance:'provider_transcription'},{ownerId:binding.callId},{source_input_item_id:'model_chosen'}]){
   expect(parseNativeOnboardingProposal({...value,...extra},stored)).toBeNull();
  }
+});
+
+test('observed Mini nesting stays invalid; the same interpretation succeeds as a root sibling',()=>{
+ const stored=snapshot();
+ // Captured Mini payload shape/content; only live target IDs are rebound to the
+ // existing test snapshot. Unsupported typed facts are not repaired or inferred.
+ const observed={proposal:{kind:'answer',itemId:'current',relatedItemIds:['related'],
+  interpretation:'O dono informou que a área de atendimento especificada é Novato, San Rafael e Petaluma. Ele disse que em testes já recebeu pedidos de outras cidades, mas não atende. Fora da região, qualquer trabalho só será feito com aprovação explícita do dono. A regra de território e exceções foram definidas por ele, e não foi solicitada revisão automática.',
+  facts:[{topic:'coverage',field:'cidades_atendidas',subject:'area.coverage',disposition:'confirmed',
+   rule_text:'O atendimento público informado deve listar apenas as cidades que a empresa atende. Novato, San Rafael e Petaluma são as cidades definidas pelo dono; pedidos fora dessa área não devem ser atendidos sem aprovação explícita.',
+   structured:{cities:['Novato','San Rafael','Petaluma'],out_of_area:'Não dentro da área definida; exceção: autorização explícita do dono para atendimento fora da região.'}}]}};
+ expect(parseNativeOnboardingProposal(observed,stored)).toBeNull();
+ const {interpretation,facts,...proposal}=observed.proposal;
+ const corrected={proposal,interpretation};
+ expect(parseNativeOnboardingProposal(corrected,stored)).toEqual({...corrected,facts:[]});
+ expect(parseNativeOnboardingProposal({...corrected,proposal:{...proposal,interpretation}},stored)).toBeNull();
+ expect(parseNativeOnboardingProposal({...corrected,proposal:{...proposal,facts}},stored)).toBeNull();
 });
 
 test('native public context labels model interpretation separately from historical provider transcription',()=>{
