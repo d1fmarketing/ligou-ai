@@ -105,6 +105,49 @@ test('native opening waits for the real browser ready signal and emits only one 
   expect(h.records).toHaveLength(0);expect(h.commits).toHaveLength(0);h.runtime.stop();
 });
 
+for(const [label,options] of [['fresh',{}],['resumed',{lastOpen:true}]] as const){
+ test(`Mini ${label} opening cannot call a tool before owner audio; its first owner answer still saves`,async()=>{
+  const h=harness(options);h.deps.model='gpt-realtime-2.1-mini';
+  try{
+   await h.runtime.attach();await h.ready();
+   const session=h.sent.find(x=>x.type==='session.update').session;
+   expect(session.tool_choice).toBe('auto');expect(session.tools.some(x=>x.name==='submit_website_interview_proposal')).toBe(true);
+   const opening=await beginIssued(h,`opening_${label}`);
+   expect(opening.response.output_modalities).toEqual(['audio']);
+   expect(opening.response.tools).toEqual([]);expect(opening.response.tool_choice).toBe('none');
+   expect(h.commits).toHaveLength(0);expect(h.records).toHaveLength(0);
+   await h.emit({type:'response.done',response:{id:`opening_${label}`,status:'completed',metadata:opening.response.metadata,output:[]}});
+   const currentItem=h.stored().nextAction.itemId!,beforeRevision=h.stored().revision;
+   await h.input();await h.proposal('completed',currentItem);
+   expect(h.commits).toHaveLength(1);expect(h.commits[0].providerItemId).toBe('owner_1');expect(h.records).toHaveLength(0);
+   expect(h.stored().revision).toBe(beforeRevision+1);
+   const result=h.sent.find(x=>x.item?.call_id==='tool_call_1');expect(JSON.parse(result.item.output).saved).toBe(true);
+   if(label==='fresh'){
+    const continuation=h.sent.filter(x=>x.type==='response.create').at(-1).response;
+    expect(continuation.tools).toBeUndefined();expect(continuation.tool_choice).toBeUndefined();
+   }
+  }finally{h.runtime.stop();}
+ });
+}
+
+test('owner barge-in during the tool-free opening retains automatic native tools and continuation',async()=>{
+ const h=harness();h.deps.model='gpt-realtime-2.1-mini';
+ try{
+  await h.runtime.attach();await h.ready();const opening=await beginIssued(h,'opening_barged');
+  expect(opening.response.tools).toEqual([]);expect(opening.response.tool_choice).toBe('none');
+  const vad=h.sent.find(x=>x.type==='session.update').session.audio.input.turn_detection;
+  expect(vad).toMatchObject({type:'semantic_vad',eagerness:'medium',create_response:true,interrupt_response:true});
+  await h.input();
+  await h.emit({type:'output_audio_buffer.cleared',response_id:'opening_barged',event_id:'opening_clear'});
+  await h.emit({type:'response.done',response:{id:'opening_barged',status:'cancelled',metadata:opening.response.metadata,output:[]}});
+  await h.proposal();
+  expect(h.commits).toHaveLength(1);expect(h.records).toHaveLength(0);expect(h.terminations).toHaveLength(0);
+  expect(JSON.parse(h.sent.find(x=>x.item?.call_id==='tool_call_1').item.output).saved).toBe(true);
+  const continuation=h.sent.filter(x=>x.type==='response.create').at(-1).response;
+  expect(continuation.tools).toBeUndefined();expect(continuation.tool_choice).toBeUndefined();
+ }finally{h.runtime.stop();}
+});
+
 test('native tool commits, returns its receipt and begins next audio before final ASR; ASR only appends literal evidence',async()=>{
   const h=harness();await h.runtime.attach();await h.ready();
   const opening=await beginIssued(h,'opening');await h.emit({type:'response.done',response:{id:'opening',status:'completed',metadata:opening.response.metadata,output:[]}});

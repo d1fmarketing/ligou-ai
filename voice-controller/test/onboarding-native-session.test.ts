@@ -41,7 +41,7 @@ test('native model gets current structurally writable IDs, not semantic-regex fi
  const stored=snapshot(),context=buildNativeOnboardingContext(stored,'Foghorn Air'),answer=variant(stored,'answer');
  expect(context.current_item.id).toBe('current');expect(context.eligible_related_item_ids).toEqual(['deferred','related']);
  expect(context.related_items.map((item:any)=>item.id)).toEqual(['deferred','related']);
- expect(answer.properties.itemId.const).toBe('current');
+ expect(answer.properties).not.toHaveProperty('itemId');expect(answer.required).not.toContain('itemId');
  expect(answer.properties.relatedItemIds).toMatchObject({maxItems:2,items:{enum:['deferred','related']}});
  expect(context.related_items.every((item:any)=>!Object.hasOwn(item,'relatedItemIds'))).toBe(true);
  expect(context.correction_catalog.items.map((item:any)=>item.id)).toContain('history');
@@ -69,6 +69,40 @@ test('shared proposal parser is reused with structural state/ID admission only',
  expect(parseNativeOnboardingProposal({proposal:{kind:'approval'}},stored)).toBeNull();
  expect(parseNativeOnboardingProposal({...proposal,approve:true},stored)).toBeNull();
 });
+test.each(['answer','clarification','defer','not_applicable'])('normal %s uses the captured current item only when itemId is absent',kind=>{
+ const stored=snapshot(),advertised=variant(stored,kind),input={proposal:{kind},interpretation:'Conteúdo entendido da fala atual.'};
+ const before=JSON.stringify(input),shared=JSON.stringify(PROPOSAL_SCHEMA);
+ expect(advertised.properties).not.toHaveProperty('itemId');expect(advertised.required).not.toContain('itemId');
+ const expected={...input,proposal:{kind,itemId:'current'},facts:[]};
+ expect(parseNativeOnboardingProposal(input,stored)).toEqual(expected);
+ expect(parseNativeOnboardingProposal({...input,proposal:{kind,itemId:'current'}},stored)).toEqual(expected);
+ for(const itemId of ['related','outside','missing',null,undefined,''])
+  expect(parseNativeOnboardingProposal({...input,proposal:{kind,itemId}},stored)).toBeNull();
+ expect(JSON.stringify(input)).toBe(before);expect(JSON.stringify(PROPOSAL_SCHEMA)).toBe(shared);
+});
+test('implicit normal binding stays on the captured turn snapshot after a newer revision advances',()=>{
+ const captured=snapshot(),input={proposal:{kind:'answer'},interpretation:'A decisão pertence à pergunta capturada.'};
+ const agenda=applyVerifiedOwnerTurn(captured.agenda,{type:'verified_owner_turn',binding,turnId:'advance-current',text:'Resposta já salva.',proposal:{kind:'answer',itemId:'current'}}).agenda;
+ const newer={...captured,agenda,revision:agenda.revision,storeVersion:captured.storeVersion+1,digest:onboardingAgendaDigest(agenda),nextAction:getAgendaAction(agenda)};
+ expect(newer.nextAction.itemId).toBe('related');
+ expect(parseNativeOnboardingProposal(input,captured)?.proposal).toEqual({kind:'answer',itemId:'current'});
+ expect(parseNativeOnboardingProposal(input,newer)?.proposal).toEqual({kind:'answer',itemId:'related'});
+ expect(parseNativeOnboardingProposal(input,captured)?.proposal).toEqual({kind:'answer',itemId:'current'});
+ expect(parseNativeOnboardingProposal({...input,proposal:{kind:'answer',itemId:'related'}},captured)).toBeNull();
+});
+test('observed emergency answer cannot overwrite its explicit future price target with the current item',()=>{
+ const currentId='6dd5290b-ed1d-43e7-8f26-1b5f1d17e95e',futurePriceId='d50718fd-0040-419d-8b93-199c5d867387';
+ const agenda=createOnboardingAgenda(binding,[
+  {id:currentId,source:'missing_website_information',subject:'emergency.fees',questionPt:'Há taxas adicionais para atendimentos emergenciais ou fora do horário normal?',coverageRefs:['emergency.fees'],relatedItemIds:[],blocking:true},
+  {id:futurePriceId,source:'owner_private_requirement',subject:'authority.price',questionPt:'Quais preços o Ligou pode informar?',coverageRefs:['authority.price'],relatedItemIds:[],blocking:true},
+ ]);
+ const stored={...snapshot(),agenda,revision:0,storeVersion:0,digest:onboardingAgendaDigest(agenda),nextAction:getAgendaAction(agenda)};
+ const observed={proposal:{kind:'answer',itemId:futurePriceId},interpretation:'O dono disse que pode haver um valor extra para atendimento emergencial ou fora do horário normal. Esse valor precisa ser avaliado e aprovado por ele antes de ser informado ao cliente ou cobrado. A regra é clara: sem aprovação, não se divulga nem se aplica esse custo.'};
+ expect(parseNativeOnboardingProposal(observed,stored)).toBeNull();
+ expect(observed.proposal.itemId).toBe(futurePriceId);
+ expect(parseNativeOnboardingProposal({...observed,proposal:{kind:'answer'}},stored)).toEqual({...observed,proposal:{kind:'answer',itemId:currentId},facts:[]});
+ expect(parseNativeOnboardingProposal({...observed,proposal:{kind:'answer',relatedItemIds:[futurePriceId]}},stored)).toBeNull();
+});
 test('explicit corrections use separate ordinary-item and website-candidate catalogs',()=>{
  const stored=snapshot(),value={proposal:{kind:'correction',affectedItems:[{itemId:'history',disposition:'reopen'}],affectedCandidates:[{candidateId,disposition:'corrected'}]},facts:[]};
  expect(parseNativeOnboardingProposal(value,stored)).toEqual(parseWebsiteInterpretation(value));
@@ -76,6 +110,7 @@ test('explicit corrections use separate ordinary-item and website-candidate cata
  expect(variant(stored,'correction').properties.affectedCandidates.items.properties.candidateId.enum).toEqual([candidateId]);
  expect(parseNativeOnboardingProposal({proposal:{kind:'correction',affectedItems:[{itemId:candidateId,disposition:'reopen'}]}},stored)).toBeNull();
  expect(parseNativeOnboardingProposal({proposal:{kind:'correction',affectedCandidates:[{candidateId:'missing',disposition:'reopen'}]}},stored)).toBeNull();
+ expect(parseNativeOnboardingProposal({proposal:{kind:'correction',affectedItems:[{disposition:'corrected'}]},interpretation:'Corrigir um ponto.'},stored)).toBeNull();
 });
 test('only reviewing exposes an empty approval request, with no model-written recap tool',()=>{
  const active=snapshot(),reviewing=snapshot(true);
@@ -86,6 +121,8 @@ test('only reviewing exposes an empty approval request, with no model-written re
  expect(schema(reviewing).properties.proposal.anyOf.map((entry:any)=>entry.properties.kind.const)).toEqual(['clarification','off_scope','correction']);
  expect(parseNativeOnboardingProposal({proposal:{kind:'answer',itemId:'current'}},reviewing)).toBeNull();
  expect(parseNativeOnboardingProposal({proposal:{kind:'clarification',itemId:null},facts:[]},reviewing)).not.toBeNull();
+ expect(parseNativeOnboardingProposal({proposal:{kind:'clarification'},interpretation:'O dono pede esclarecimento do resumo.'},reviewing)?.proposal).toEqual({kind:'clarification',itemId:null});
+ expect(parseNativeOnboardingProposal({proposal:{kind:'answer'},interpretation:'Resposta sem pergunta atual.'},reviewing)).toBeNull();
 });
 test('closing exposes only explicit corrections through the existing amendment path',()=>{
  const stored={...snapshot(true),state:'closing' as const};

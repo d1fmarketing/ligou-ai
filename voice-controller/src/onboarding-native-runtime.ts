@@ -85,7 +85,7 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
   const activeResponses=new Set<string>(),usageResponses=new Set<string>(),handledResponses=new Set<string>(),completedTools=new Set<string>(),controlEvents=new Set<string>();
   const pendingTools=new Map<string,ToolCall>();
   const checkpointRetries=new Set<string>(),checkpointFaults:Checkpoint[]=[];
-  let continuation:{ownerItemId?:string;instructions?:string;checkpoint?:CheckpointKind}|undefined;
+  let continuation:{ownerItemId?:string;instructions?:string;checkpoint?:CheckpointKind;opening?:boolean}|undefined;
   const diagnostic=(stage:string,detail:Record<string,any>={})=>{try{deps.onDiagnostic?.({callId:scope.callId,requestId:scope.requestId,stage,elapsedMs:now()-startedAt,...detail});}catch{}};
   function publish(next:string){phase=next;deps.onState({phase});}
   function currentSnapshot(value:StoredWebsiteInterview){
@@ -135,8 +135,8 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
     if(checkpointRetries.has(key)){finish('native_checkpoint_unconfirmed');return;}
     checkpointRetries.add(key);requestCheckpoint(checkpoint.kind);
   }
-  function requestConversation(ownerItemId?:string,instructions?:string,checkpoint?:CheckpointKind){
-    if(stopped||termination)return;continuation={ownerItemId,instructions,checkpoint};flushContinuation();
+  function requestConversation(ownerItemId?:string,instructions?:string,checkpoint?:CheckpointKind,opening=false){
+    if(stopped||termination)return;continuation={ownerItemId,instructions,checkpoint,opening};flushContinuation();
   }
   function requestCheckpoint(kind:CheckpointKind){
     if(kind==='signoff'&&!approval)return;
@@ -169,7 +169,7 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
     issued.set(requestId,context);responsePending=true;pendingRequestId=requestId;
     deps.send({type:'response.create',event_id:requestId,response:{output_modalities:['audio'],
       metadata:{native_request_id:requestId,...(next.checkpoint?{native_checkpoint:next.checkpoint}:{}),...(pause?{native_budget_pause:'true'}:{})},
-      ...(next.checkpoint||pause?{tools:[],tool_choice:'none'}:{}),
+      ...(next.checkpoint||pause||next.opening?{tools:[],tool_choice:'none'}:{}),
       ...(pause?{max_output_tokens:512}:{}),
       ...(next.instructions?{instructions:`${nativeInstructions}\n\n${next.instructions}`}:{})}});
   }
@@ -504,7 +504,7 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
         browserReady=true;contextNotice();
         if(!opened){opened=true;
           if(stored.state==='reviewing')requestCheckpoint('review');
-          else requestConversation(undefined,'Abra a entrevista em português, apresentando-se brevemente como Ligou, agente de inteligência artificial da empresa, e faça a pergunta atual indicada no contexto.');
+          else requestConversation(undefined,'Abra a entrevista em português, apresentando-se brevemente como Ligou, agente de inteligência artificial da empresa, e faça a pergunta atual indicada no contexto.',undefined,true);
         }
       }catch{return;}}
     }
