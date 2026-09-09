@@ -10,6 +10,7 @@ import {streamMediaEvidenceIsValid,type StreamMediaEvidence} from './onboarding-
 import type {NativeCheckpointProof} from './onboarding-interview-evidence-store.ts';
 import {buildNativeOnboardingContext,buildNativeOnboardingSession,parseNativeOnboardingProposal,type NativeOnboardingProposal,
   NATIVE_ONBOARDING_PROPOSAL_TOOL,NATIVE_ONBOARDING_APPROVAL_TOOL} from './onboarding-native-session.ts';
+import {projectNativeTraceEvent,safeNativeTraceId,type NativeTraceDirection,type NativeTraceTransportInfo} from './onboarding-native-trace.ts';
 
 export interface NativeWebsiteRuntimeConfig {native:true;prepared:PreparedWebsiteInterview;businessName:string}
 export type NativeWebsiteRuntimeDependencies=Omit<WebsiteInterviewRuntimeDependencies,'onState'|'synthesize'|'onCost'> & {
@@ -87,6 +88,17 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
   const checkpointRetries=new Set<string>(),checkpointFaults:Checkpoint[]=[];
   let continuation:{ownerItemId?:string;instructions?:string;checkpoint?:CheckpointKind;opening?:boolean}|undefined;
   const diagnostic=(stage:string,detail:Record<string,any>={})=>{try{deps.onDiagnostic?.({callId:scope.callId,requestId:scope.requestId,stage,elapsedMs:now()-startedAt,...detail});}catch{}};
+  let traceSeq=0;
+  function trace(stage:string,detail:Record<string,unknown>,observedAt?:number){
+    try{const at=observedAt??now();diagnostic(stage,{...detail,traceSeq:++traceSeq,serverMonoMs:at,elapsedMs:at-startedAt,atUtc:new Date().toISOString(),
+      interviewId:stored.agenda.binding.interviewId,revision:stored.revision,sourceDigest:stored.digest,
+      model:['gpt-realtime','gpt-realtime-2.1','gpt-realtime-2.1-mini'].includes(deps.model??'')?deps.model:null});}catch{}
+  }
+  function traceTransport(direction:NativeTraceDirection,event:unknown,info:NativeTraceTransportInfo={}){
+    try{const observedAt=now(),detail=projectNativeTraceEvent(direction,event);if(!detail)return;
+      trace('native.transport',{...detail,direction,...(Number.isSafeInteger(info.socketAttempt)&&info.socketAttempt!>0?{socketAttempt:info.socketAttempt}:{}),
+        ...(['socket_queued','send_failed'].includes(info.sendOutcome??'')?{sendOutcome:info.sendOutcome}:{})},observedAt);}catch{}
+  }
   function publish(next:string){phase=next;deps.onState({phase});}
   function currentSnapshot(value:StoredWebsiteInterview){
     if(JSON.stringify(value.agenda.binding)!==JSON.stringify(input.prepared.stored.agenda.binding)
@@ -392,6 +404,8 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
         const requestId=response.metadata?.native_request_id,requested=typeof requestId==='string'?issued.get(requestId):undefined;
         const context=requested??{ownerItemId:latestOwner,snapshot:(latestOwner?turns.get(latestOwner)?.snapshot:undefined)??stored};
         responses.set(response.id,context);
+        trace('native.response_bound',{responseId:safeNativeTraceId(response.id),nativeRequestId:requested?requestId:null,origin:requested?'issued':'automatic',
+          ownerItemId:safeNativeTraceId(context.ownerItemId),capturedRevision:context.snapshot.revision,capturedDigest:context.snapshot.digest});
         if(requested){issued.delete(requestId);if(pendingRequestId===requestId){pendingRequestId=undefined;responsePending=false;}if(requested.checkpoint){
           const checkpoint=requested.checkpoint;checkpoint.responseId=response.id;
           if(checkpoint.retired||checkpoint.snapshot.digest!==stored.digest||checkpoint.snapshot.storeVersion!==stored.storeVersion){context.cancelled=true;retire(checkpoint);}
@@ -559,7 +573,7 @@ export function createNativeWebsiteInterviewRuntime(input:NativeWebsiteRuntimeCo
     })().catch(error=>{finalization=undefined;throw error;});
     return finalization;
   }
-  return{native:true as const,streaming:true as const,attach,observeEvent,handleEvent,stop,finalized,
+  return{native:true as const,streaming:true as const,attach,observeEvent,handleEvent,stop,finalized,traceTransport,
     ownsSpeechRetrieveMiss:(_event:any)=>false,
     ownsControlError:(event:any)=>event?.type==='error'&&event.error?.code==='response_cancel_not_active'&&controlEvents.has(event.error.event_id),
     get state(){return{phase,stored};}};

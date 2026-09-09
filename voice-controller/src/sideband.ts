@@ -3584,9 +3584,15 @@ export function attachSideband(
         return adapter.queue;
       },
       send: (event) => {
-        if (!ws || !ownsLiveLedger() || ledger.providerTerminalEvidence?.observed)
-          throw new Error("website_sideband_unavailable");
-        ws.send(JSON.stringify(event));
+        try{
+          if (!ws || !ownsLiveLedger() || ledger.providerTerminalEvidence?.observed)
+            throw new Error("website_sideband_unavailable");
+          ws.send(JSON.stringify(event));
+        }catch(error){
+          try{ledger.websiteInterviewRuntime?.traceTransport('outbound',event,{socketAttempt:attaches,sendOutcome:'send_failed'});}catch{}
+          throw error;
+        }
+        try{ledger.websiteInterviewRuntime?.traceTransport('outbound',event,{socketAttempt:attaches,sendOutcome:'socket_queued'});}catch{}
       },
       onTranscript: (entry) => ledger.transcript.push(entry),
       onUsage: (response: any) => {
@@ -3739,6 +3745,7 @@ export function attachSideband(
       let msg: any;
       try { msg = JSON.parse(String(ev.data)); } catch { return; }
       if (ledger.websiteInterviewRuntime) {
+        try{ledger.websiteInterviewRuntime.traceTransport('inbound',msg,{socketAttempt:attempt});}catch{}
         // Evidence remains observable while finalization fences application work.
         // Capturing here also prevents a queued terminal event being lost to close.
         observeWebsiteTerminalEvidence(ledger, msg);
