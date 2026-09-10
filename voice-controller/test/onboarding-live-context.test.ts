@@ -69,7 +69,9 @@ test('operation identity is application-owned and independent of a fresh delegat
  expect(liveOperationReference({...a,sourceEventIds:['e2','e1']})).toBe(ref);
  expect(liveOperationReference({...a,sourceEventIds:['e3'],kind:'correction'})).not.toBe(ref);
  expect(liveOperationReference({...a,scope:{...scope,tenantId:'other'}})).not.toBe(ref);
- expect(liveOperationReference({...a,interpretation:'Atendimento normal.'})).not.toBe(ref);
+ // The same source/action must collide, so the store can reject changed payload
+ // instead of treating a paraphrased retry as permission for another write.
+ expect(liveOperationReference({...a,interpretation:'Atendimento normal.'})).toBe(ref);
 });
 
 test('invalid timing and legacy transcript events do not fabricate Live evidence',()=>{

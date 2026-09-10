@@ -60,5 +60,5 @@ export function liveOperationReference(input:{scope:LiveScope;kind:string;target
   if(![s.tenantId,s.interviewId,s.callId,s.providerSessionId,input.kind].every(id)||!input.targetIds.length||!input.sourceEventIds.length
     ||!input.targetIds.every(id)||!input.sourceEventIds.every(id)||typeof input.interpretation!=='string'||!input.interpretation.trim())throw Error('live_operation_invalid');
   return'ligou-live-op:'+hash([1,s.tenantId,s.interviewId,s.callId,s.providerSessionId,input.kind,
-    [...new Set(input.targetIds)].sort(),[...new Set(input.sourceEventIds)].sort(),input.interpretation]);
+    [...new Set(input.targetIds)].sort(),[...new Set(input.sourceEventIds)].sort()]);
 }
