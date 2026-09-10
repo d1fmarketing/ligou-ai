@@ -7,6 +7,8 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const syntheticPath = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin";
 
 export const unitTestFiles = [
+  "test/onboarding-live-protocol.test.ts",
+  "test/onboarding-live-context.test.ts",
   "test/sales-provider.test.ts",
   "test/sales-sideband.test.ts",
   "test/sales-socket.test.ts",
