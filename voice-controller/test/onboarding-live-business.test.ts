@@ -79,9 +79,12 @@ describe('Live managed business tools',()=>{
     expect(prompt).toContain('configurar como o Ligou atenderá os clientes');
     expect(prompt).toContain('informações já coletadas do website');
     expect(prompt).toContain('Nenhum nome pessoal');
-    expect(prompt).toContain('Ao iniciar a entrevista');expect(prompt).toContain('antes de escolher a primeira pergunta de negócio');
+    expect(prompt).not.toContain('Ao iniciar a entrevista');expect(prompt).not.toContain('peça ao backend o estado atual');
+    expect(prompt).toContain('Pode consultar a agenda?');expect(prompt).toContain('Qual a regra de domingo?');expect(prompt).not.toContain('Qual o limite privado?');
+    expect(f.business.backendInstructions).toContain('contextoInicial');expect(f.business.backendInstructions).toContain('"Limpeza"');
+    expect(f.business.backendInstructions).not.toContain('"contextRef"');expect(f.business.backendInstructions).not.toContain('"receiptId"');
     for(const trigger of ['preços','condições','horários','regras','corrigir','indefinido','encerrar'])expect(prompt).toContain(trigger);
-    expect(prompt).toContain('Cumprimente e continue escutando durante essa consulta');
+    expect(prompt).toContain('sem consultar o backend');
     expect(prompt).toContain('cumprimento');expect(prompt).toContain('repetir');expect(prompt).toContain('clarificação');
     expect(prompt).not.toMatch(/get_context|save_decision|contextRef|session\.close|response\.create|ASR|aguarde silêncio|frase exata/);
     expect(f.business.tools.map(t=>t.name)).toEqual(['get_context','save_decision','get_operation','end_call']);
@@ -237,6 +240,15 @@ describe('Live managed business tools',()=>{
   });
 });
 
+describe('startup context is a snapshot, never a write path',()=>{
+  test('a startup contextRef cannot save and the backend prompt does not change after reads',async()=>{
+    const f=fixture();const before=f.business.backendInstructions;
+    const denied=await f.business.execute('save_decision',{contextRef:'live-context:startup',targetId:'sunday',kind:'answer',interpretation:'x'},ctx) as any;
+    expect(denied.code).toBe('context_pending');expect(f.counts().commits).toBe(0);
+    await f.context();expect(f.business.backendInstructions).toBe(before);
+  });
+});
+
 describe('compact Live business projection of the real website fixture',()=>{
   const source=JSON.parse(readFileSync(new URL('./fixtures/foghorn-website-first-voice.json',import.meta.url),'utf8'));
   const {tenant_id:_,...draftReadback}=source.draft_row;
@@ -245,6 +257,18 @@ describe('compact Live business projection of the real website fixture',()=>{
     sourceResultId:projection.provenance.sourceResultId,sourceResultHash:projection.provenance.sourceResultHash};
   const agenda=createOnboardingAgenda(b,projection.seeds,buildWebsiteCandidateContext(projection),projection.contextTimezone);
   const stored:any={agenda,revision:0,storeVersion:0,digest:onboardingAgendaDigest(agenda),receiptId:id(8),nextAction:getAgendaAction(agenda),state:'unfinished',replayed:false};
+  test('startup prompts carry the prepared overview within byte budgets: questions to voice, indexes to backend',()=>{
+    const business=createLiveBusinessSession({prepared:{scope:actor,stored,projection} as PreparedWebsiteInterview,businessName:'Account Label',client:{rpc:async()=>({data:null,error:null})} as any,onStop:()=>{}});
+    const overview=projectLiveBusinessContext(stored,projection) as any;
+    expect(Buffer.byteLength(business.voiceInstructions)).toBeLessThanOrEqual(3584);
+    expect(Buffer.byteLength(business.backendInstructions)).toBeLessThanOrEqual(12288);
+    for(const row of overview.catalogue)expect(business.voiceInstructions).toContain(JSON.stringify(row.questionPt));
+    expect(business.voiceInstructions).not.toContain(overview.catalogue[0].targetId);expect(business.voiceInstructions).not.toContain('subjectIndex');
+    expect(business.voiceInstructions).not.toContain('Account Label');
+    for(const key of ['catalogue','serviceIndex','subjectIndex','savedDecisionIds','businessIdentity','resolvedTimezone'])expect(business.backendInstructions).toContain(`"${key}"`);
+    expect(business.backendInstructions).toContain(JSON.stringify(overview.subjectIndex.find((s:any)=>s.label&&/domingo/i.test(s.label)).label));
+    for(const key of ['contextRef','receiptId','pendingOperations','approvalAvailable','onboardingApproved','revision'])expect(business.backendInstructions).not.toContain(`"${key}"`);
+  });
   test('overview provides two suggestions and indexes without all 114 full rows or candidate values',()=>{
     const before=JSON.stringify(stored),result=projectLiveBusinessContext(stored,projection);
     expect(agenda.items.length).toBeGreaterThan(100);expect(projection.candidateRecap).toHaveLength(21);
