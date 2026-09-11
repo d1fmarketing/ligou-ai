@@ -480,6 +480,12 @@ describe("session budget lifecycle", () => {
     for (const value of ["249", "6001", "NaN"])
       expect(() => configModule.parseSidebandOpenTimeoutMs(value))
         .toThrow("sideband_open_timeout_invalid");
+    expect(configModule.parseLiveCloseTimeoutMs(undefined)).toBe(30_000);
+    expect(configModule.parseLiveCloseTimeoutMs("45000")).toBe(45_000);
+    for (const value of ["4999", "60001", "NaN", "1e4"])
+      expect(() => configModule.parseLiveCloseTimeoutMs(value))
+        .toThrow("live_close_timeout_invalid");
+    expect(config.liveCloseTimeoutMs).toBe(30_000);
   });
 
   test("reserves the same validated ceiling used by the live cost kill switch", async () => {

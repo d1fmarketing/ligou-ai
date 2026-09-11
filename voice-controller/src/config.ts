@@ -33,6 +33,20 @@ export function parseSidebandOpenTimeoutMs(raw: string | undefined): number {
   return value;
 }
 
+// Live finalization: finish delegated work, send session.close, wait for
+// session.closed (live-conversations "Usage and graceful close"). Default 30 s:
+// delegated farewell (Astra low ~4.8 s measured) + spoken farewell + provider
+// finalization; the previous literal 8 s was observed insufficient while a
+// delegated response was still in flight. Upper bound keeps Stop bounded.
+export function parseLiveCloseTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return 30_000;
+  if (!/^[0-9]+$/.test(raw)) throw new Error("live_close_timeout_invalid");
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 5_000 || value > 60_000)
+    throw new Error("live_close_timeout_invalid");
+  return value;
+}
+
 export const ONBOARDING_BUDGET_SOFT_LIMIT_USD = 6.5;
 export const ONBOARDING_BUDGET_RESERVATION_USD = 7.5;
 
@@ -59,6 +73,7 @@ export const config = {
   sidebandOpenTimeoutMs: parseSidebandOpenTimeoutMs(
     process.env.SIDEBAND_OPEN_TIMEOUT_MS,
   ),
+  liveCloseTimeoutMs: parseLiveCloseTimeoutMs(process.env.LIVE_CLOSE_TIMEOUT_MS),
   hermesKey: process.env.HERMES_API_KEY ?? "",
   defaultTenantSlug: process.env.LIGOU_TENANT ?? "rocha-plumbing",
   // Male brand voice: RJ listened to cedar/ash/echo/verse/ballad on a real Ligou script and picked ASH.
