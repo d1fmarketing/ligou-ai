@@ -6,7 +6,7 @@ export type LiveResponsesUsage={delegationId:string;responseId:string;model:stri
 export type LiveResponsesError={source:'provider'|'protocol'|'transport'|'tool';code:string|null;
   delegationId?:string;responseId?:string;toolCallId?:string;clientEventId?:string};
 type Options={send:(event:Event)=>void;execute:(name:string,args:Record<string,unknown>,context:LiveResponsesToolContext)=>Promise<unknown>;
-  onUsage?:(value:LiveResponsesUsage)=>void;onError?:(error:LiveResponsesError)=>void};
+  onUsage?:(value:LiveResponsesUsage)=>void;onError?:(error:LiveResponsesError)=>void;onIdle?:()=>void};
 type Round={delegationId:string;responseId:string;delegationOffsetMs:number|null;calls:Set<string>;
   terminal:boolean;failed:boolean;stale:boolean;continued:boolean;usageReported:boolean};
 type Call={round:Round;name:string;arguments:string;submitted:boolean};
@@ -21,10 +21,29 @@ const id=(value:unknown):value is string=>typeof value==='string'&&value.trim().
 export function createLiveResponsesBridge(options:Options){
   const rounds=new Map<string,Round>(),current=new Map<string,Round>(),offsets=new Map<string,number>();
   const calls=new Map<string,Call>(),commands=new Map<string,Round>(),seenEvents=new Set<string>();
-  let stopped=false;
+  // Continuations are session-scoped commands; only a new response observed for
+  // the SAME delegation consumes the pending count. Other delegations never do.
+  const pendingContinuations=new Map<string,number>(),continuationEvents=new Map<string,string>();
+  let stopped=false,wasBusy=false;
+  function busy(){
+    if(stopped)return false;
+    for(const round of current.values()){
+      if(round.failed||round.stale)continue;
+      if(!round.terminal||[...round.calls].some(callId=>!calls.get(callId)?.submitted))return true;
+    }
+    for(const count of pendingContinuations.values())if(count>0)return true;
+    return false;
+  }
+  // Fires once per busy->idle transition (including local failures), so the
+  // host never waits for a provider event that will not come.
+  function syncIdle(){
+    const now=busy();
+    if(wasBusy&&!now)queueMicrotask(()=>{try{options.onIdle?.();}catch{/* Observers cannot control the transport. */}});
+    wasBusy=now;
+  }
   function report(error:LiveResponsesError){try{options.onError?.(error);}catch{/* Observability cannot control voice or repeat operations. */}}
   function fail(round:Round,source:LiveResponsesError['source'],code:string|null,extra:Partial<LiveResponsesError>={}){
-    round.failed=true;report({source,code,delegationId:round.delegationId,responseId:round.responseId,...extra});
+    round.failed=true;report({source,code,delegationId:round.delegationId,responseId:round.responseId,...extra});syncIdle();
   }
   const active=(round:Round)=>!stopped&&!round.failed&&!round.stale;
   function send(round:Round,event:Event){
@@ -42,7 +61,12 @@ export function createLiveResponsesBridge(options:Options){
     const ready=pending.filter(round=>round.calls.size>0);
     if(!ready.length)return;
     for(const round of ready)round.continued=true;
-    send(ready[0],{type:'response.create',event_id:randomUUID()});
+    const event={type:'response.create',event_id:randomUUID()};
+    if(send(ready[0],event)){
+      pendingContinuations.set(ready[0].delegationId,(pendingContinuations.get(ready[0].delegationId)??0)+1);
+      continuationEvents.set(event.event_id,ready[0].delegationId);
+    }
+    syncIdle();
   }
   function submit(round:Round,callId:string,result:unknown){
     if(!active(round))return;
@@ -54,7 +78,7 @@ export function createLiveResponsesBridge(options:Options){
     }
     const call=calls.get(callId)!;
     if(send(round,{type:'response.item.create',event_id:randomUUID(),item:{type:'function_call_output',call_id:callId,output}}))call.submitted=true;
-    continueReady();
+    continueReady();syncIdle();
   }
   function functionDone(round:Round,item:Event){
     if(!active(round)||round.continued)return;
@@ -79,7 +103,8 @@ export function createLiveResponsesBridge(options:Options){
       submit(round,item.call_id,{ok:false,code:'tool_execution_failed',outcome:'unknown',retryable:false});
     });
   }
-  function observe(envelope:Event){
+  function observe(envelope:Event){observeEvent(envelope);syncIdle();}
+  function observeEvent(envelope:Event){
     if(!object(envelope))return;
     if(!['session.closed','session.delegation.created','response.event','error'].includes(envelope.type))return;
     if(envelope.type==='response.event'&&object(envelope.event)
@@ -93,6 +118,8 @@ export function createLiveResponsesBridge(options:Options){
       const error=object(envelope.error)?envelope.error:{};
       const clientEventId=id(error.client_event_id)?error.client_event_id:id(envelope.client_event_id)?envelope.client_event_id:undefined;
       const code=typeof error.code==='string'?error.code:null,round=clientEventId?commands.get(clientEventId):undefined;
+      const continuation=clientEventId?continuationEvents.get(clientEventId):undefined;
+      if(continuation){continuationEvents.delete(clientEventId!);pendingContinuations.set(continuation,Math.max(0,(pendingContinuations.get(continuation)??0)-1));}
       if(round)fail(round,'provider',code,{clientEventId});
       else report({source:'provider',code,...(clientEventId?{clientEventId}:{})});
       return;
@@ -121,6 +148,8 @@ export function createLiveResponsesBridge(options:Options){
       }
       const previous=current.get(delegationId);
       if(previous)previous.stale=true;
+      const pending=pendingContinuations.get(delegationId)??0;
+      if(pending>0)pendingContinuations.set(delegationId,pending-1);
       const round:Round={delegationId,responseId,delegationOffsetMs:offsets.get(delegationId)??null,calls:new Set(),terminal:false,failed:false,stale:false,continued:false,usageReported:false};
       rounds.set(responseId,round);current.set(delegationId,round);return;
     }
@@ -148,5 +177,5 @@ export function createLiveResponsesBridge(options:Options){
     if(event.type==='error'){fail(round,'provider',typeof event.code==='string'?event.code:null);return;}
     if(event.type==='response.output_item.done'&&object(event.item)&&event.item.type==='function_call')functionDone(round,event.item);
   }
-  return{observe,stop(){stopped=true;}};
+  return{observe,busy,stop(){stopped=true;syncIdle();}};
 }

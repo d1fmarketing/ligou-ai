@@ -10,10 +10,10 @@ const completed=(id=responseId,delegation=delegationId)=>envelope({type:'respons
 const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
 const deferred=()=>{let resolve!:(result:unknown)=>void;const promise=new Promise<unknown>(r=>resolve=r);return{promise,resolve};};
 
-function fixture(execute:(name:string,args:Record<string,unknown>,context:any)=>Promise<unknown>=async()=>({saved:true,receiptId:'receipt-1'})){
- const sent:any[]=[],errors:any[]=[],usage:any[]=[];
- const bridge=createLiveResponsesBridge({send:event=>sent.push(event),execute,onError:error=>errors.push(error),onUsage:value=>usage.push(value)});
- return{bridge,sent,errors,usage};
+function fixture(execute:(name:string,args:Record<string,unknown>,context:any)=>Promise<unknown>=async()=>({saved:true,receiptId:'receipt-1'}),send?:(event:any)=>void){
+ const sent:any[]=[],errors:any[]=[],usage:any[]=[];let idle=0;
+ const bridge=createLiveResponsesBridge({send:send??(event=>sent.push(event)),execute,onError:error=>errors.push(error),onUsage:value=>usage.push(value),onIdle:()=>{idle++;}});
+ return{bridge,sent,errors,usage,idle:()=>idle};
 }
 
 describe('managed Live Responses function transport',()=>{
@@ -125,5 +125,44 @@ describe('managed Live Responses function transport',()=>{
   const sent:any[]=[];const bridge=createLiveResponsesBridge({send:event=>sent.push(event),execute:async()=>({saved:true}),onUsage:()=>{throw Error('reporter failed');},onError:()=>{throw Error('reporter failed');}});
   bridge.observe(created());bridge.observe({type:'error',error:{code:null}});bridge.observe(done());bridge.observe(completed());await tick();
   expect(sent.map(e=>e.type)).toEqual(['response.item.create','response.create']);
+ });
+});
+
+describe('managed Live Responses delegated-work tracking',()=>{
+ test('busy() reflects open rounds, unsubmitted results, and the continuation pending for that delegation',async()=>{
+  const work=deferred();const f=fixture(async()=>work.promise);
+  expect(f.bridge.busy()).toBe(false);
+  f.bridge.observe(created());expect(f.bridge.busy()).toBe(true);
+  f.bridge.observe(done());await tick();expect(f.bridge.busy()).toBe(true);
+  f.bridge.observe(completed());await tick();expect(f.bridge.busy()).toBe(true); // result still unsubmitted
+  work.resolve({saved:true});await tick();
+  expect(f.sent.map(e=>e.type)).toEqual(['response.item.create','response.create']);
+  expect(f.bridge.busy()).toBe(true); // continuation sent, its response.created not yet observed
+  f.bridge.observe(created('resp_bye'));expect(f.bridge.busy()).toBe(true);
+  f.bridge.observe(completed('resp_bye'));await tick();expect(f.bridge.busy()).toBe(false);expect(f.idle()).toBe(1);
+ });
+ test('a continuation pending for one delegation is not consumed by another delegation response',async()=>{
+  const f=fixture();f.bridge.observe(created());f.bridge.observe(done());f.bridge.observe(completed());await tick();
+  expect(f.sent.map(e=>e.type)).toEqual(['response.item.create','response.create']);expect(f.bridge.busy()).toBe(true);
+  f.bridge.observe(created('resp_other','delegation_other'));f.bridge.observe(completed('resp_other','delegation_other'));await tick();
+  expect(f.bridge.busy()).toBe(true);expect(f.idle()).toBe(0);
+  f.bridge.observe(created('resp_bye'));f.bridge.observe(completed('resp_bye'));await tick();
+  expect(f.bridge.busy()).toBe(false);expect(f.idle()).toBe(1);
+ });
+ test('a failed result send ends the delegated work and notifies idle exactly once',async()=>{
+  const f=fixture(async()=>({saved:true}),event=>{throw Error('socket details');});
+  f.bridge.observe(created());expect(f.bridge.busy()).toBe(true);f.bridge.observe(done());await tick();
+  expect(f.bridge.busy()).toBe(false);expect(f.idle()).toBe(1);
+  f.bridge.observe(completed());await tick();expect(f.idle()).toBe(1);
+ });
+ test('stop() notifies idle once and idle never fires while work remains',async()=>{
+  const work=deferred();const f=fixture(async()=>work.promise);f.bridge.observe(created());f.bridge.observe(done());await tick();
+  expect(f.idle()).toBe(0);f.bridge.stop();f.bridge.stop();expect(f.bridge.busy()).toBe(false);await tick();expect(f.idle()).toBe(1);
+  work.resolve({saved:true});await tick();expect(f.idle()).toBe(1);
+ });
+ test('two busy cycles notify idle twice',async()=>{
+  const f=fixture();
+  f.bridge.observe(created());f.bridge.observe(completed());await tick();expect(f.idle()).toBe(1);
+  f.bridge.observe(created('resp_second'));f.bridge.observe(completed('resp_second'));await tick();expect(f.idle()).toBe(2);
  });
 });
