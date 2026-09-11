@@ -38,7 +38,8 @@ export function upgradeProbeFetch(url:string,init:RequestInit={},requestImpl?:Up
     request.on('upgrade',(response,socket)=>{socket.destroy();resolve(new Response(null,{status:response.statusCode??101}));});
     request.on('error',reject);
     // Bun emits 'close' but no 'error' after destroy(); settle explicitly.
-    request.on('close',()=>reject(Error('upgrade_probe_closed')));
+    // 'close' can precede the response 'end' handler; let a delivered response win.
+    request.on('close',()=>setTimeout(()=>reject(Error('upgrade_probe_closed')),0));
     const abort=()=>{request.destroy(Error('aborted'));reject(Error('aborted'));};
     if(init.signal){if(init.signal.aborted)abort();else init.signal.addEventListener('abort',abort,{once:true});}
     request.end();
