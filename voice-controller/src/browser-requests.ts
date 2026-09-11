@@ -6,6 +6,7 @@ import { config } from "./config.ts";
 import { supa } from "./rules.ts";
 import type { SessionType } from "./instructions.ts";
 import { liveSessions } from "./sideband.ts";
+import { managedLiveSessions, recoverManagedLiveCancellation } from "./onboarding-live-runtime.ts";
 import { finalizeTerminalBudget } from "./budget.ts";
 import type { FetchLike } from "./provider-termination.ts";
 import { randomUUID } from "node:crypto";
@@ -14,7 +15,7 @@ import type {
   OnboardingOpeningPayload,
 } from "./onboarding-greeting.ts";
 import { createVoiceStartupTrace, type WebsiteOpeningEnvelope } from "./server.ts";
-import { isApplicationOpeningPayload, isStreamOpeningPayload, isNativeOpeningPayload } from "../../supabase/functions/browser-session/core.ts";
+import { isApplicationOpeningPayload, isStreamOpeningPayload, isNativeOpeningPayload, isLiveOpeningPayload } from "../../supabase/functions/browser-session/core.ts";
 
 type StartSession = (
   userId: string,
@@ -31,7 +32,7 @@ type StartSession = (
     browserRequestId?: string;
     openingModeRequested?: OnboardingOpeningMode;
     requestedCallId?: string;
-    onboardingProtocolVersion?: 2 | 3 | 4 | 5;
+    onboardingProtocolVersion?: 2 | 3 | 4 | 5 | 6;
   },
 ) => Promise<{
   sdp: string;
@@ -46,7 +47,7 @@ interface BrowserLiveControl {
   userId: string;
   tenantId: string;
   sessionType: "onboarding";
-  openingModeRequested: "application_tts_v1" | "realtime_stream_v1" | "realtime_native_v1";
+  openingModeRequested: "application_tts_v1" | "realtime_stream_v1" | "realtime_native_v1" | "live_managed_v1";
   onboardingProtocolVersion: number | null;
   cancel(reason: string): Promise<void>;
   startupComplete(): boolean;
@@ -82,7 +83,7 @@ const cancellationWork = new Map<string, Promise<boolean>>();
 function pruneTerminalBrowserControls(): void {
   for (const [requestId, control] of browserLiveControls)
     if (!control.cancelInvoked && control.startupComplete() &&
-      !liveSessions.has(control.callId))
+      !liveSessions.has(control.callId) && !managedLiveSessions.has(control.callId))
       browserLiveControls.delete(requestId);
 }
 
@@ -97,13 +98,14 @@ function registerBrowserLiveControl(
     userId: string;
     tenantId: string;
     sessionType: "onboarding";
-    openingModeRequested: "application_tts_v1" | "realtime_stream_v1" | "realtime_native_v1";
+    openingModeRequested: "application_tts_v1" | "realtime_stream_v1" | "realtime_native_v1" | "live_managed_v1";
     onboardingProtocolVersion: number | null;
   },
 ): boolean {
   if (!requestId.trim() || !cleanup.callId?.trim() || !binding.userId.trim() ||
     !binding.tenantId.trim() ||
-    !(binding.openingModeRequested==="realtime_native_v1" ? binding.onboardingProtocolVersion===5
+    !(binding.openingModeRequested==="live_managed_v1" ? binding.onboardingProtocolVersion===6
+      : binding.openingModeRequested==="realtime_native_v1" ? binding.onboardingProtocolVersion===5
       : binding.openingModeRequested==="realtime_stream_v1" ? binding.onboardingProtocolVersion===4
       : [null, 2, 3].includes(binding.onboardingProtocolVersion))) return false;
   pruneTerminalBrowserControls();
@@ -319,7 +321,9 @@ async function bindProcessingRequestCall(
     candidate?.status === "processing" && candidate?.call_id === callId &&
     candidate?.tenant_id === row.tenant_id &&
     candidate?.session_type === "onboarding" &&
-    candidate?.opening_mode_requested === "realtime_native_v1" && candidate?.onboarding_protocol_version===5;
+    candidate?.opening_mode_requested === row.opening_mode_requested && candidate?.onboarding_protocol_version===row.onboarding_protocol_version
+    && ((row.opening_mode_requested === "realtime_native_v1" && row.onboarding_protocol_version===5)
+      || (row.opening_mode_requested === "live_managed_v1" && row.onboarding_protocol_version===6));
   const fields =
     "id,status,call_id,tenant_id,session_type,opening_mode_requested,onboarding_protocol_version";
   try {
@@ -365,9 +369,10 @@ type CancellationRequestKind = "processing" | "ready";
 function cancellationRequestKind(row: any): CancellationRequestKind | null {
   const stream=row?.opening_mode_requested==="realtime_stream_v1" && row?.onboarding_protocol_version===4;
   const native=row?.opening_mode_requested==="realtime_native_v1" && row?.onboarding_protocol_version===5;
+  const live=row?.opening_mode_requested==="live_managed_v1" && row?.onboarding_protocol_version===6;
   const legacy=row?.opening_mode_requested==="application_tts_v1" && [null,undefined,2,3].includes(row?.onboarding_protocol_version);
   if (row?.session_type !== "onboarding" ||
-    (!stream && !native && !legacy) ||
+    (!stream && !native && !live && !legacy) ||
     typeof row?.call_id !== "string" || !row.call_id.trim()) return null;
   if (row.answer_sdp == null && row.opening_mode_applied == null &&
     row.opening_payload == null) return "processing";
@@ -375,7 +380,7 @@ function cancellationRequestKind(row: any): CancellationRequestKind | null {
   if (typeof row.answer_sdp === "string" && row.answer_sdp.trim() &&
     row.opening_mode_applied === row.opening_mode_requested && payload &&
     typeof payload === "object" && !Array.isArray(payload) &&
-    ([2, 3, 4, 5].includes(row.onboarding_protocol_version)
+    ([2, 3, 4, 5, 6].includes(row.onboarding_protocol_version)
       ? payload.version === row.onboarding_protocol_version
       : payload.version === 1 || payload.version === 2)) return "ready";
   return null;
@@ -420,7 +425,7 @@ async function loadCancellationCall(
     const { data, error } = await supa()
       .from("calls")
       .select(
-        "id,tenant_id,channel,session_type,status,openai_call_id,provider_termination_state,provider_termination_mode,provider_usage_state,cost_estimate_usd,duration_seconds",
+        "id,tenant_id,model,channel,session_type,status,openai_call_id,provider_termination_state,provider_termination_mode,provider_usage_state,cost_estimate_usd,duration_seconds",
       )
       .eq("id", callId)
       .maybeSingle();
@@ -474,6 +479,7 @@ async function ensureDurableCancellation(
   reason: string,
   control: BrowserLiveControl | undefined,
   fetchImpl?: FetchLike,
+  recoverLive: (callId: string, reason: string) => Promise<boolean> = recoverManagedLiveCancellation,
 ): Promise<boolean> {
   const kind = cancellationRequestKind(row);
   if (!kind) return false;
@@ -484,7 +490,20 @@ async function ensureDurableCancellation(
   if (loadedCall.state !== "found") return false;
   let call = loadedCall.call;
   if (!cancellationCallBindingMatches(row, call)) return false;
+  if (row.onboarding_protocol_version === 6 && call.model !== "gpt-live-1") return false;
   if (cancellationCallIsDurablyTerminal(row, call, kind)) return true;
+
+  // Live is finalized by its own lifecycle. Never call the Realtime hangup API
+  // or treat a transport disconnect as confirmation when a Live cleanup is pending.
+  if (row.onboarding_protocol_version === 6) {
+    if (!control) {
+      try { await recoverLive(String(row.call_id), reason); } catch { return false; }
+      loadedCall = await loadCancellationCall(String(row.call_id));
+      return loadedCall.state === "found" && loadedCall.call.model === "gpt-live-1"
+        && cancellationCallIsDurablyTerminal(row, loadedCall.call, kind);
+    }
+    return false;
+  }
 
   if (call.openai_call_id == null) {
     if (kind !== "processing" ||
@@ -627,7 +646,7 @@ async function expireCancelledRequest(
 
 async function handleBrowserCancellation(
   row: any,
-  dependencies: { fetchImpl?: FetchLike } = {},
+  dependencies: { fetchImpl?: FetchLike; recoverLive?: (callId: string, reason: string) => Promise<boolean> } = {},
 ): Promise<boolean> {
   const requestId = typeof row?.id === "string" ? row.id : "";
   const callId = typeof row?.call_id === "string" ? row.call_id : "";
@@ -658,6 +677,7 @@ async function handleBrowserCancellation(
       reason,
       control,
       dependencies.fetchImpl,
+      dependencies.recoverLive,
     )) return false;
     if (!await expireCancelledRequest(durableRow, reason)) return false;
     unregisterBrowserLiveControl(requestId, callId);
@@ -699,14 +719,15 @@ async function handle(
         OnboardingOpeningMode;
     if (
       (row.session_type ?? "owner_browser") === "onboarding" &&
-      (requestedOpeningMode !== "realtime_native_v1" || row.onboarding_protocol_version!==5)
+      (!((requestedOpeningMode === "realtime_native_v1" && row.onboarding_protocol_version===5)
+        || (requestedOpeningMode === "live_managed_v1" && row.onboarding_protocol_version===6)))
     ) throw Object.assign(
       new Error("client_upgrade_required"),
       { status: 409 },
     );
     const needsDurableCancelControl =
       (row.session_type ?? "owner_browser") === "onboarding" &&
-      requestedOpeningMode === "realtime_native_v1";
+      ["realtime_native_v1", "live_managed_v1"].includes(requestedOpeningMode);
     if (needsDurableCancelControl) {
       requestedCallId = (dependencies.callIdFactory ?? randomUUID)();
       traceScope.callId = requestedCallId;
@@ -729,7 +750,7 @@ async function handle(
             userId: String(row.user_id ?? ""),
             tenantId: String(row.tenant_id ?? ""),
             sessionType: "onboarding",
-            openingModeRequested: "realtime_native_v1",
+            openingModeRequested: requestedOpeningMode as BrowserLiveControl["openingModeRequested"],
             onboardingProtocolVersion:
               typeof row.onboarding_protocol_version === "number"
                 ? row.onboarding_protocol_version
@@ -743,7 +764,7 @@ async function handle(
           (row.opening_mode_requested ?? "provider_model_v1") as
             OnboardingOpeningMode,
         ...(requestedCallId ? { requestedCallId } : {}),
-        ...([2, 3, 4, 5].includes(row.onboarding_protocol_version) ? { onboardingProtocolVersion: row.onboarding_protocol_version } : {}),
+        ...([2, 3, 4, 5, 6].includes(row.onboarding_protocol_version) ? { onboardingProtocolVersion: row.onboarding_protocol_version } : {}),
       },
     ));
     if (needsDurableCancelControl &&
@@ -754,7 +775,7 @@ async function handle(
     if (out.opening_mode_applied !== requestedOpeningMode)
       throw new Error("browser_request_opening_mode_mismatch");
     if (
-      requestedOpeningMode === "realtime_native_v1" &&
+      ["realtime_native_v1", "live_managed_v1"].includes(requestedOpeningMode) &&
       !out.opening_payload
     ) throw new Error("browser_request_opening_payload_missing");
     if (
@@ -762,6 +783,9 @@ async function handle(
       out.opening_payload != null
     ) throw new Error("browser_request_provider_opening_payload_forbidden");
     const expectedOpeningPayload = out.opening_payload ?? null;
+    if(row.onboarding_protocol_version===6 && (!isLiveOpeningPayload(expectedOpeningPayload)
+      || (expectedOpeningPayload.live as Record<string,unknown>).callId!==out.call_id))
+      throw new Error("browser_request_live_opening_invalid");
     if(row.onboarding_protocol_version===5 && (!isNativeOpeningPayload(expectedOpeningPayload)
       || (expectedOpeningPayload.native as Record<string,unknown>).callId!==out.call_id))
       throw new Error("browser_request_native_opening_invalid");

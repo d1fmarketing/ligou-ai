@@ -343,12 +343,13 @@ function readyStatus() {
   });
 }
 
-test('prepared stream protocol is chosen from durable setup and historical status remains readable',()=>{
+test('durable setup protocol identity remains readable across Live and historical formats',()=>{
   assert.equal(mapWebsiteSetupStatus(readyStatus()).voiceProtocolVersion,2);
   assert.equal(mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:3}).voiceProtocolVersion,3);
   assert.equal(mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:4}).voiceProtocolVersion,4);
   assert.equal(mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:5}).voiceProtocolVersion,5);
-  assert.throws(()=>mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:6}),/protocol/i);
+  assert.equal(mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:6}).voiceProtocolVersion,6);
+  assert.throws(()=>mapWebsiteSetupStatus({...readyStatus(),voice_protocol_version:7}),/protocol/i);
 });
 
 function publicClaim(claim_type, normalized_value, overrides = {}) {
@@ -567,4 +568,11 @@ test("opposite published Sunday rules remain distinguishable and are never dedup
     assert.match(html, /Atendimento aos domingos · Permitido/);
     assert.match(html, /Atendimento aos domingos · Não permitido/);
   });
+});
+
+test('website status accepts Live6 while preserving historical protocol identity',()=>{
+ for(const version of [2,3,4,5,6]){
+  const setup=mapWebsiteSetupStatus(status('onboarding_in_progress',{voice_protocol_version:version}));
+  assert.equal(setup.voiceProtocolVersion,version);
+ }
 });

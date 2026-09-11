@@ -15,6 +15,7 @@ import {
   voiceSessionErrorMessage,
   watchOnboardingOutcome,
 } from "./session.js";
+import { appendVoiceCaption } from "./website-live.js";
 import { statusLineFor } from "./panel-copy.js";
 
 // Live voice panel: role-play a caller or run the Portuguese onboarding interview.
@@ -23,7 +24,7 @@ export function VoicePanel({
   onClose,
   initialSessionType = "owner_browser",
   lockedOnboarding = false,
-  onboardingProtocolVersion = 5,
+  onboardingProtocolVersion = 6,
   onTiming,
 }) {
   const [status, setStatus] = useState("idle");
@@ -124,7 +125,7 @@ export function VoicePanel({
     // React may batch two click handlers before repainting. Claim custody in a
     // ref before the first await so one click cannot supersede another start.
     if (startAbortRef.current || sessionRef.current) return;
-    if(endedRef.current && sessionType==="onboarding" && [3,4,5].includes(onboardingProtocolVersion) && endedCallRef.current && !resumable(outcomeRef.current))return;
+    if(endedRef.current && sessionType==="onboarding" && [3,4,5,6].includes(onboardingProtocolVersion) && endedCallRef.current && !resumable(outcomeRef.current))return;
     outcomeAbortRef.current?.abort();
     outcomeAbortRef.current = null;
     const startAbort = new AbortController();
@@ -152,7 +153,7 @@ export function VoicePanel({
       timing.mark("auth_completed");
       const session = await startVoiceSession({
         accessToken: token,
-        model,
+        model: startedSessionType === "onboarding" && onboardingProtocolVersion === 6 ? "gpt-live-1" : model,
         sessionType: startedSessionType,
         onboardingProtocolVersion,
         signal: startAbort.signal,
@@ -171,7 +172,7 @@ export function VoicePanel({
         onEvent: (ev) => applyCurrentSessionRun({
           runId,
           currentRunId: sessionRunRef.current,
-          onCurrent: () => setLines((prev) => [...prev.slice(-30), ev]),
+          onCurrent: () => setLines((prev) => appendVoiceCaption(prev, ev)),
         }),
         onEnd: (event) => applyCurrentSessionRun({
           runId,
@@ -208,7 +209,7 @@ export function VoicePanel({
     startTimingRef.current?.mark("stop_requested");
     const session = sessionRef.current;
     if (session?.end) {
-      if (sessionType === "onboarding" && [3,4,5].includes(onboardingProtocolVersion)) setStatus("stopping");
+      if (sessionType === "onboarding" && [3,4,5,6].includes(onboardingProtocolVersion)) setStatus("stopping");
       session.end("manual_hangup");
     }
     else handleEnd({ reason: "manual_hangup", callId: null }, sessionType, runId);
@@ -228,7 +229,7 @@ export function VoicePanel({
     "verifying-playback": ["Confirmando a fala…", "Concluindo a confirmação do áudio."],
     processing: ["Preparando a próxima resposta…", "O Ligou está processando sua resposta."],
     retrying: ["Tentando novamente…", "Houve uma falha técnica. O Ligou está tentando continuar."],
-    ready: [interviewing ? "Sua vez — pode falar" : statusLineFor(sessionType), "Pode falar — o Ligou está ouvindo."],
+    ready: [interviewing ? "Conversa em andamento — pode falar" : statusLineFor(sessionType), "Pode falar — o Ligou está ouvindo."],
   }[status];
 
   return (
@@ -236,7 +237,7 @@ export function VoicePanel({
       open
       title={interviewing ? "Entrevista de onboarding" : "Falar com o Ligou"}
       description={interviewing
-        ? [3,4,5].includes(onboardingProtocolVersion)
+        ? [3,4,5,6].includes(onboardingProtocolVersion)
           ? "O Ligou conversa com você em português para confirmar as informações da sua empresa. Ao final, você revisa e aprova a configuração."
           : "O Ligou te entrevista em português e registra cada regra como sugestão. Você aprova o lote na aba Memória."
         : "Converse por voz como se fosse um cliente. Casos abertos durante a chamada aparecem aqui ao vivo."}
@@ -254,18 +255,18 @@ export function VoicePanel({
                     <option value="onboarding">Entrevista de onboarding (PT)</option>
                   </select>
                 </label>
-                <label>
+                {sessionType !== "onboarding" || onboardingProtocolVersion !== 6 ? <label>
                   Modelo
                   <select value={model} onChange={(e) => setModel(e.target.value)}>
                     <option value="gpt-realtime-2.1">gpt-realtime-2.1 (validação final de qualidade)</option>
                     <option value="gpt-realtime-2.1-mini">gpt-realtime-2.1-mini (padrão dos testes)</option>
                     <option value="gpt-realtime">gpt-realtime (GA)</option>
                   </select>
-                </label>
+                </label> : null}
               </>
             ) : null}
             <button type="button" className="voice-live-button" onClick={begin}
-              disabled={status==="ended" && endedSessionType==="onboarding" && [3,4,5].includes(onboardingProtocolVersion) && Boolean(endedCallId) && !resumable(onboardingOutcome)}>
+              disabled={status==="ended" && endedSessionType==="onboarding" && [3,4,5,6].includes(onboardingProtocolVersion) && Boolean(endedCallId) && !resumable(onboardingOutcome)}>
               <IconMicrophone2 aria-hidden="true" /> {status === "ended"
                 ? voiceSessionRestartLabel({ endedSessionType, onboardingOutcome })
                 : status === "failed" ? "Tentar novamente"
@@ -291,7 +292,7 @@ export function VoicePanel({
                 </p>
               ) : null}
               {lines.map((l, i) => (
-                <p key={i} className={l.kind === "agent" ? "line-agent" : "line-caller"}>
+                <p key={l.id ?? i} className={l.kind === "agent" ? "line-agent" : "line-caller"}>
                   <strong>{l.kind === "agent" ? "Ligou" : "Você"}:</strong> {l.text}
                 </p>
               ))}

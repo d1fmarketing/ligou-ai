@@ -23,6 +23,8 @@ const ALLOWED_RPCS = new Set([
   "terminalize_company_discovery_attempt",
   "commit_company_discovery_result",
   "commit_company_discovery_result_v2",
+  "company_discovery_managed_job",
+  "find_company_discovery_managed_session",
   "select_company_discovery_result",
   "claim_expired_company_discovery_cleanup",
   "record_company_discovery_cleanup",

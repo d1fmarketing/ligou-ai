@@ -1,3 +1,30 @@
+# Active direction: managed OpenAI default — September 10
+
+The user-supplied managed migration goal now replaces the earlier client-delegation/subscription and optional-QA-pilot constraints below. See IMPLEMENTATION-GOAL.md. Responses delegation is the default conversational backend; Agents API must replace real structured analysis from existing collected snapshots. Paid voice/reasoning/agent APIs are authorized within current spending limits; no new credentials/subscriptions/account limits. The aborted cost/retention questions are not approval of their proposed values. Real Agents task allowance and provider-state deletion parameters remain pending; independent implementation continues.
+
+Current candidate: `/Users/d1f/.codex/worktrees/ligou-live1-candidate/Ligou.AI`, branch `codex/ligou-live1-candidate`, committed baseline `f1b02c2` plus coordinated managed migration changes. The Codex adapter/tests/dependency and client context preparer have been removed from the candidate. Live protocol 6 / `live_managed_v1` now connects the browser request to the managed runtime in `server.ts`.
+
+Implemented locally: native Live creation and sideband; managed Responses tool/result/continuation; owner-scoped catalogue, explicit target decisions/corrections/deferral; real fragment provenance and operation receipt reconciliation; early Stop; separate voice/Responses usage and model-aware existing reconciliation. The Live migration is not applied to production. Isolated PostgreSQL verifies target preservation, replay/conflict, wrong-owner/session rejection, more than 512 evidence references, actual role privileges and provider termination independently from usage/approval. Same-offset fragments retain application-observed order instead of sorting opaque provider IDs.
+
+Current diagnostic limitation: the four tools are get_context/save_decision/get_operation/end_call. Final review, explicit approval and normal successful onboarding completion remain C work. No Live candidate deployment or paid voice/Responses/Agents call has run yet. Complete release checks and one real smoke before offering A.
+
+Agents managed workflow, provider lifecycle, output validation and source-preserving SQL tests are implemented. Authenticated entrypoints and consumer selection isolation are being integrated. No real provider task or automatic provider-state deletion has run.
+
+| Current component | Responsibility | Official replacement | Action and retirement condition |
+| --- | --- | --- | --- |
+| Candidate Codex stdio/auth/delegate adapter | Local text reasoning loop | Live Responses delegation | Remove from candidate now; never shipped to production. |
+| Candidate client delegation context builder | Build model input/history | Managed Live conversation context | Remove builder; keep only business evidence/consent references. |
+| Realtime-native voice runtime | Voice conversation + local tool flow | GPT-Live-1 with Responses | Replace normal migrated entry after real browser smoke; preserve immutable rollback release. |
+| DirectModel/OpenClaw analysis executor | Extract structured onboarding facts from collected pages | Agents API, one agent, no environment | Replace analysis route after provider task and consumer-contract verification; never recrawl selectedwebsite. |
+| Supervisor/subscription proxy/quota/lease for migratedanalysis | Keep local executor/auth/model loop alive | Managed Agents session lifecycle | Disconnect from migratedanalysis; retire process only once nootherdependent/pendingwork. |
+| Supabase/Auth/Postgres and business RPCs | Identity, tenant isolation, rules, approvals, job/result records | No equivalent substitution by these APIs | Keep and simplify only genuinelyprotocolboundfields. |
+| Thin controller/sideband and function handlers | Private integration, access checks, external business effects | API still requires application execution | Keep on existingEC2 initially; no secondgenericagentharness. |
+| Browser dashboard | Microphone/playback, owner controls and displayed state | Live WebRTC media/events | Keep UI; updateprotocolselectedcoherently withEdge/controller/schema. |
+| EC2, volumes, backups, Hermes for otherflows | Remaining integrations and protectedexistingdata | Depends onremainingresponsibilities | Keep untildependentsverified; propose shutdown ifunneeded, neverdestroyautomatically. |
+
+CheckpointA is LIGOU_LIVE_MANAGED_READY_FOR_HUMAN_TEST. CheckpointB is LIGOU_AGENTS_MANAGED_WORKFLOW_VERIFIED. FinalmarkerLIGOU_MANAGED_MIGRATION_ACCEPTED requires completevoice/businessacceptance, realAgentsreplacement, and removalofredundantactiveexecution. Previousnotesbelowarehistorical, notcurrentarchitectureconstraints.
+
+---
 # Live candidate status — 2026-09-10
 
 Full objective remains active; this is not a human-ready release. Spec: IMPLEMENTATION-GOAL.md. Plan: ../superpowers/plans/2026-09-10-live1.md.

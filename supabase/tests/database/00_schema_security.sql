@@ -88,7 +88,8 @@ select extensions.ok(
       ('submit_company_discovery(text,text)'),
       ('website_browser_opening_v3_valid(jsonb,uuid)'),
       ('website_browser_opening_v4_valid(jsonb,uuid)'),
-      ('website_browser_opening_v5_valid(jsonb,uuid)')
+      ('website_browser_opening_v5_valid(jsonb,uuid)'),
+      ('website_browser_opening_v6_valid(jsonb,uuid)')
     ) expected(signature)
     order by signature
   ),
@@ -137,6 +138,13 @@ select extensions.ok(
       ('website_browser_opening_v3_valid(jsonb,uuid)'),
       ('website_browser_opening_v4_valid(jsonb,uuid)'),
       ('website_browser_opening_v5_valid(jsonb,uuid)'),
+      ('website_browser_opening_v6_valid(jsonb,uuid)'),
+      ('record_website_live_fragments(uuid,uuid,uuid,text,jsonb)'),
+      ('commit_website_live_decision(uuid,uuid,uuid,text,text,bigint,bigint,text,text,text,text[],text)'),
+      ('read_website_live_operation(uuid,uuid,uuid,text)'),
+      ('record_website_live_termination(uuid,uuid,uuid,text,text,text,jsonb,jsonb)'),
+      ('company_discovery_managed_job(text,uuid,uuid,jsonb)'),
+      ('find_company_discovery_managed_session(text)'),
       ('authorize_booking_intent(uuid,uuid,uuid,uuid,uuid,numeric,integer,integer,jsonb,text)'),
       ('begin_calendar_test_attempt(uuid,text,text,text,text,text)'),
       ('begin_provider_write(uuid,uuid)'),

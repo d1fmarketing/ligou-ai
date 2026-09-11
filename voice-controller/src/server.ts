@@ -34,10 +34,12 @@ import { speechPayloadIsInternallyValid, type OnboardingSpeechAction, type Onboa
 import type { StreamAuthorization } from "./onboarding-stream.ts";
 import { nativeWebsiteBinding, type NativeWebsiteRuntimeConfig } from "./onboarding-native-runtime.ts";
 import { buildNativeOnboardingSession } from "./onboarding-native-session.ts";
+import { managedLiveSessions, startManagedBrowserSession, setManagedLiveDiagnosticObserver } from "./onboarding-live-runtime.ts";
 
 export type WebsiteOpeningEnvelope = { version: 3; item_id: string; speech: OnboardingSpeechPayload }
   | { version: 4; stream: StreamAuthorization }
-  | { version: 5; native: ReturnType<typeof nativeWebsiteBinding> };
+  | { version: 5; native: ReturnType<typeof nativeWebsiteBinding> }
+  | { version: 6; live: { callId: string; interviewId: string; revision: number; sourceDigest: string; sessionId: string } };
 
 export async function prepareRequiredWebsiteInterview(
   scope: Parameters<typeof prepareWebsiteInterview>[0],
@@ -84,10 +86,9 @@ export async function synthesizeClaimedWebsiteOpening(
 
 export { synthesizeOnboardingOpening } from "./onboarding-greeting.ts";
 
-/** Leave five minutes below the provider's 60-minute session ceiling for
- * termination/reconciliation. The existing $7.50 reservation/hard cap is unchanged. */
-export function onboardingSessionMaxMinutes(protocolVersion?: 2 | 3 | 4 | 5): number {
-  return protocolVersion === 3 || protocolVersion === 4 || protocolVersion === 5 ? 55 : 30;
+/** Existing onboarding duration policy; Live's actual expiry is recorded separately. */
+export function onboardingSessionMaxMinutes(protocolVersion?: 2 | 3 | 4 | 5 | 6): number {
+  return protocolVersion === 3 || protocolVersion === 4 || protocolVersion === 5 || protocolVersion === 6 ? 55 : 30;
 }
 
 const CORS = {
@@ -160,7 +161,7 @@ export interface StartSessionOptions {
   browserRequestId?: string;
   openingModeRequested?: OnboardingOpeningMode;
   requestedCallId?: string;
-  onboardingProtocolVersion?: 2 | 3 | 4 | 5;
+  onboardingProtocolVersion?: 2 | 3 | 4 | 5 | 6;
 }
 
 type VoiceStartupStage = "tenant_context" | "call_insert" | "budget_reservation" |
@@ -168,7 +169,7 @@ type VoiceStartupStage = "tenant_context" | "call_insert" | "budget_reservation"
   "opening_authorization" |
   "opening_cost_floor" | "provider_marker" | "provider_create" |
   "provider_identity" | "sideband_open" | "request_claim" | "request_bind" |
-  "session_start" | "request_ready";
+  "session_start" | "request_ready" | "live_startup";
 
 /** Process-local offsets expose overlapping work without subtracting clocks
  * across browser, Edge and controller hosts. Payloads and exceptions stay out. */
@@ -586,7 +587,17 @@ export async function startSession(
   registerCleanup?: (cleanup: DirectSessionCleanup) => void,
   options: StartSessionOptions = {},
 ) {
-  // New sessions use native audio. Earlier contracts remain readable as history.
+  if (options.onboardingProtocolVersion === 6 || options.openingModeRequested === "live_managed_v1" || modelOverride === "gpt-live-1") {
+    if (sessionType !== "onboarding" || options.onboardingProtocolVersion !== 6 || options.openingModeRequested !== "live_managed_v1" ||
+        (modelOverride !== undefined && modelOverride !== "gpt-live-1"))
+      throw Object.assign(new Error("live_protocol_mismatch"), { status: 409 });
+    if (!options.requestedCallId || !UUID_PATTERN.test(options.requestedCallId) || !options.browserRequestId || !UUID_PATTERN.test(options.browserRequestId))
+      throw Object.assign(new Error("browser_live_scope_required"), { status: 409 });
+    return createVoiceStartupTrace({requestId:options.browserRequestId,callId:options.requestedCallId}).measure("live_startup",()=>
+      startManagedBrowserSession({ userId, sdpOffer, tenantId, callId: options.requestedCallId,
+        requestId: options.browserRequestId, registerCleanup }));
+  }
+  // Protocol 5 remains an explicit rollback path. Never fall back across providers.
   if(sessionType==="onboarding" && (options.openingModeRequested!=="realtime_native_v1" || options.onboardingProtocolVersion!==5))
     throw Object.assign(new Error("client_upgrade_required"),{status:409});
   const traceScope = { requestId: options.browserRequestId, callId: options.requestedCallId };
@@ -985,21 +996,51 @@ export function buildRealtimeSessionConfig(args: {
 }
 
 if (import.meta.main) {
+  const timedLiveEvents=new Set(['session.started','session.closed','session.delegation.created','session.close','response.created',
+    'response.output_item.done','response.completed','response.failed','response.incomplete','response.cancelled',
+    'response.item.create','response.create','error']);
+  setManagedLiveDiagnosticObserver(({callId,sessionId,direction,event})=>{
+    const data=event as Record<string,any>;
+    const type=data?.type==='response.event'?data.event?.type:data?.type;
+    if(!timedLiveEvents.has(type))return;
+    const identifier=(value:unknown)=>typeof value==='string'&&/^[a-zA-Z0-9_.:/-]{1,512}$/.test(value)?value:undefined;
+    // Correlation and timings only. Audio, transcripts, arguments and tool
+    // results remain outside general service logs.
+    console.log('live_event',JSON.stringify({callId,sessionId,direction,type,at:new Date().toISOString(),monotonicMs:performance.now(),
+      eventId:identifier(data.event_id),delegationId:identifier(data.delegation_id),
+      responseId:identifier(data.event?.response?.id??data.event?.response_id),
+      functionCallId:identifier(data.event?.item?.call_id??data.item?.call_id),
+      tool:identifier(data.event?.item?.name),errorCode:identifier(data.error?.code)}));
+  });
   const { startWorkerLoop } = await import("./worker.ts");
   startWorkerLoop();
   const { startPhoneListener } = await import("./phone.ts");
   startPhoneListener();
   const { startBrowserRequestListener } = await import("./browser-requests.ts");
   startBrowserRequestListener(startSession);
+  let managedAnalysisHandler:((request:Request)=>Promise<Response>)|undefined;
   Bun.serve({
     port: config.port,
     idleTimeout: 60,
     async fetch(req) {
       const url = new URL(req.url);
+      if(url.pathname==='/managed-analysis'||url.pathname.startsWith('/managed-analysis/')){
+        if(!config.openaiKey)return Response.json({ok:false,code:'managed_analysis_unavailable'},{status:503});
+        if(!managedAnalysisHandler){
+          const {createManagedAnalysisHttpService,ManagedAnalysisHttpError}=await import('../../discovery-supervisor/src/managed/http.ts');
+          managedAnalysisHandler=createManagedAnalysisHttpService({product:supa(),apiKey:config.openaiKey,
+            // Launch parameters remain an explicit B decision; observations and
+            // cancellations reuse existing scoped provider sessions.
+            authorizeLaunch:async()=>{throw new ManagedAnalysisHttpError(503,'managed_analysis_policy_not_configured');}});
+        }
+        return managedAnalysisHandler(req);
+      }
       if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
 
       if (url.pathname === "/health") {
-        return Response.json({ ok: true, live_sessions: liveSessions.size, model: config.model, openai: Boolean(config.openaiKey) }, { headers: CORS });
+        return Response.json({ ok: true, live_sessions: liveSessions.size + managedLiveSessions.size,
+          managed_live_sessions: managedLiveSessions.size, onboarding_model: "gpt-live-1",
+          model: config.model, openai: Boolean(config.openaiKey) }, { headers: CORS });
       }
 
       // Compatibility endpoint: verifies the explicit binding. Provisioning is an operator-only SQL RPC.

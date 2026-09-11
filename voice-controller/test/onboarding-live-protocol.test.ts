@@ -2,7 +2,8 @@ import {describe,expect,test} from 'bun:test';
 import {createLiveWebRtcSession,createLiveLifecycle,liveDurationCostUsd,LiveCreationError} from '../src/onboarding-live-protocol.ts';
 
 const sessionId='live_opaque-session-7';
-const creation={sdp:'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111',voice:'bossa' as const,instructions:'Você é o Ligou. Delegue decisões ao backend.'};
+const creation={sdp:'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111',voice:'bossa' as const,instructions:'Você é o Ligou. Delegue decisões ao backend.',
+ responses:{instructions:'Use somente as ferramentas autorizadas do Ligou.',tools:[{type:'function' as const,name:'save_answer',parameters:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},strict:true}]}};
 const started={type:'session.started',event_id:'event-started',session:{id:sessionId,model:'gpt-live-1'}};
 const closed=(reason='close_requested',seconds=24)=>({type:'session.closed',event_id:'event-closed',session:{id:sessionId,model:'gpt-live-1'},reason,usage:{seconds}});
 
@@ -15,20 +16,50 @@ describe('Live WebRTC server boundary',()=>{
   }});
   expect(request.url).toBe('https://api.openai.com/v1/live/sessions');
   expect(request.body.transport).toEqual({type:'webrtc',sdp:creation.sdp});
-  expect(request.body.session).toMatchObject({model:'gpt-live-1',delegation:{type:'client'},audio:{output:{voice:'bossa'}},store:false});
+  expect(request.body.session).toMatchObject({model:'gpt-live-1',delegation:{type:'responses',responses:{model:'gpt-5.6-terra',instructions:creation.responses.instructions,
+   tools:creation.responses.tools,reasoning:{effort:'low'},service_tier:'default',tool_choice:'auto',parallel_tool_calls:false}},audio:{output:{voice:'bossa'}},store:false});
   expect(request.body.session.client.data_channel.allowed_client_events).toEqual(['session.close','session.input_audio.mute','session.input_audio.unmute']);
-  expect(request.body.session.client.data_channel.allowed_server_events).not.toContain('session.delegation.created');
+  expect(request.body.session.client.data_channel.allowed_server_events).toEqual([
+   {type:'session.started'},{type:'session.closed'},{type:'session.usage.updated'},{type:'session.input_transcript.delta'},{type:'session.output_transcript.delta'},{type:'error'},{type:'info'},
+  ]);
+  expect(request.body.session.client.data_channel.allowed_client_events).not.toContain('response.item.create');
+  expect(request.body.session.client.data_channel.allowed_client_events).not.toContain('response.create');
   expect(request.body.session).not.toHaveProperty('tools');
   expect(request.body.session.audio).not.toHaveProperty('format');
-  expect(result).toEqual({sessionId,sdp:'v=0\r\nanswer'});
+  expect(result).toEqual({sessionId,sdp:'v=0\r\nanswer',expiresAt:null});
   expect(JSON.stringify(result)).not.toContain('fixture-key');
  });
  test('preserves history roles and rejects unsafe startup configuration before calling provider',async()=>{
   let calls=0;const deps={apiKey:'fixture',fetch:async()=>{calls++;return new Response();}};
-  for(const value of [{...creation,voice:'unknown'},{...creation,history:[{role:'system',text:'wrong role'}]},{...creation,sdp:''}]){
+  for(const value of [{...creation,voice:'unknown'},{...creation,history:[{role:'system',text:'wrong role'}]},{...creation,sdp:''},
+   {...creation,responses:undefined},{...creation,responses:{...creation.responses,instructions:''}},
+   {...creation,responses:{...creation.responses,tools:[{type:'mcp',name:'unapproved'}]}},
+   {...creation,responses:{...creation.responses,tools:[...creation.responses.tools,...creation.responses.tools]}}]){
    await expect(createLiveWebRtcSession(value as any,deps)).rejects.toThrow();
   }
   expect(calls).toBe(0);
+ });
+ test('retains a known provider session ID when the successful response has no usable SDP',async()=>{
+  try{await createLiveWebRtcSession(creation,{apiKey:'fixture',fetch:async()=>Response.json({session:{id:sessionId}},{status:201})});throw Error('must fail');}
+  catch(error){expect(error).toBeInstanceOf(LiveCreationError);expect(error).toMatchObject({outcome:'unknown',status:201,sessionId});}
+ });
+ test('an abort after creation preserves the session handle for caller-owned cleanup',async()=>{
+  const controller=new AbortController();
+  const response={ok:true,status:201,json:async()=>{controller.abort();return{session:{id:sessionId},transport:{type:'webrtc',sdp:'answer'}};}} as Response;
+  try{await createLiveWebRtcSession(creation,{apiKey:'fixture',signal:controller.signal,fetch:async()=>response});throw Error('must fail');}
+  catch(error){expect(error).toBeInstanceOf(LiveCreationError);expect(error).toMatchObject({outcome:'unknown',sessionId});}
+ });
+ test('retains only the actual provider expiry from the successful response',async()=>{
+  const result=await createLiveWebRtcSession(creation,{apiKey:'fixture',fetch:async()=>Response.json({session:{id:sessionId,expires_at:1_800_000_000},transport:{type:'webrtc',sdp:'answer'}},{status:201})});
+  expect(result.expiresAt).toBe(1_800_000_000);
+ });
+ test('sets one explicitly selected backend without exposing backend instructions in startup history',async()=>{
+  let body:any;
+  await createLiveWebRtcSession({...creation,responses:{...creation.responses,model:'gpt-6-astra',reasoning:{effort:'medium'}}},{apiKey:'fixture',fetch:async(_url,init)=>{
+   body=JSON.parse(String(init?.body));return Response.json({session:{id:sessionId},transport:{type:'webrtc',sdp:'answer'}},{status:201});
+  }});
+  expect(body.session.delegation.responses).toMatchObject({model:'gpt-6-astra',reasoning:{effort:'medium'}});
+  expect(body.session.input).toEqual([]);
  });
  test('does not retry an ambiguous creation and never reports it as definitive rejection',async()=>{
   let calls=0;
@@ -45,6 +76,19 @@ describe('Live WebRTC server boundary',()=>{
 });
 
 describe('Live session lifecycle, independently of business approval',()=>{
+ test('verified sideband attachment establishes local readiness without a synthetic session.started event',()=>{
+  const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>sent.push(e)});
+  live.readyFromAttachment();live.readyFromAttachment();
+  expect(live.status()).toMatchObject({phase:'running',greetingAccepted:false,finalized:false,seconds:0});
+  expect(sent).toEqual([]);live.greet('Apresente-se em português.');
+  expect(sent.map(e=>e.type)).toEqual(['session.instructions.append']);
+ });
+ test('a late sideband attachment cannot revive a closing or closed lifecycle',async()=>{
+  const live=createLiveLifecycle({sessionId,send:()=>{},closeTimeoutMs:5});
+  const closing=live.close();live.readyFromAttachment();expect(live.status().phase).toBe('closing');
+  await closing;live.readyFromAttachment();expect(live.status().phase).toBe('closed');
+  expect(()=>live.greet('Apresente-se.')).toThrow('live_not_started');
+ });
  test('Realtime events do not establish Live readiness or usage',()=>{
   const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>sent.push(e)});
   live.observe({type:'session.created',session:{id:sessionId}});

@@ -504,3 +504,58 @@ describe("durable budget reconciliation", () => {
     expect(await reapAbandonedCalls()).toBe(0);
   });
 });
+
+describe("managed Live reconciliation dispatch", () => {
+  test("provider termination uses only stored Live recovery and releases the existing lease on confirmation", async () => {
+    terminationClaim={call_id:"live-call",model:"gpt-live-1",openai_call_id:"live-provider",provider_termination_reason:"owner_requested_stop"};
+    const recovered:any[]=[],urls:string[]=[];
+    const result=await reconcileProviderTerminations(async url=>{urls.push(String(url));return new Response(null,{status:200});},{
+      recoverLive:async(callId,reason)=>{recovered.push({callId,reason});return true;},
+    });
+    expect(result).toBe(1);expect(recovered).toEqual([{callId:"live-call",reason:"owner_requested_stop"}]);expect(urls).toEqual([]);
+    expect(providerRpcCalls.some(row=>row.name==="begin_provider_termination_attempt")).toBe(false);
+    expect(callUpdates).toContainEqual({provider_termination_reconcile_lease_until:null,provider_termination_reconcile_worker:null});
+  });
+  test("unconfirmed or failed Live recovery remains discoverable without any Realtime request", async () => {
+    for(const throws of [false,true]){
+      terminationClaim={call_id:"live-call",model:"gpt-live-1",openai_call_id:"live-provider"};let requests=0;
+      expect(await reconcileProviderTerminations(async()=>{requests++;return new Response(null,{status:200});},{
+        recoverLive:async()=>{if(throws)throw Error("observer disconnected");return false;},
+      })).toBe(0);
+      expect(requests).toBe(0);expect(callUpdates.at(-1).provider_termination_last_error).toBe("live_termination_unconfirmed");
+    }
+  });
+  test("Live budget recovery never settles from a snapshot taken before provider reconciliation", async () => {
+    for(const state of ["active","pending","unknown"]){
+      claimRow={...claimRow,model:"gpt-live-1",provider_termination_state:state,provider_usage_state:"unknown",actual_cost_usd:0.3};
+      let requests=0,recovered=0;
+      const result=await reconcileBudgetReservations(async()=>{requests++;return new Response(null,{status:200});},{
+        recoverLive:async()=>{recovered++;claimRow={...claimRow,provider_termination_state:"confirmed",provider_usage_state:"resolved",actual_cost_usd:0.4};return true;},
+      });
+      expect(result).toBe(0);expect(requests).toBe(0);expect(recovered).toBe(1);expect(settleAttempts).toBe(0);
+      expect(unresolvedSettlements).toHaveLength(0);expect(deferred.at(-1).reconcile_last_error).toBe("live_termination_reconciled_refresh_required");
+    }
+    settleAttempts=1;
+    expect(await reconcileBudgetReservations()).toBe(1);
+    expect(providerRpcCalls.filter(row=>row.name==='settle_call_budget').at(-1)?.args?.p_actual_cost).toBe(0.4);
+  });
+  test("Live partial-cost settlement keeps observed breakdown after the existing retry window, never a ceiling-derived rate", async () => {
+    claimRow={...claimRow,model:"gpt-live-1",channel:"browser",session_type:"onboarding",provider_termination_state:"confirmed",
+      provider_usage_state:"unknown",outcome:"ended",minutes:3,reconcile_attempts:20,reserved_cost_usd:7.5,reserved_minutes:10,
+      actual_cost_usd:0.17,provider_usage_details:{voiceSeconds:180,voiceCostUsd:0.15,backendCostUsd:0.02,responses:[{responseId:"response_a"}]}};
+    expect(await reconcileBudgetReservations()).toBe(1);
+    expect(unresolvedSettlements).toHaveLength(1);
+    expect(unresolvedSettlements[0]).toMatchObject({p_estimated_cost:0.17,p_detail:{settlement_basis:"observed_usage_floor",costComplete:false,
+      provider_usage_state:"unknown",voiceSeconds:180,voiceCostUsd:0.15,backendCostUsd:0.02,responses:[{responseId:"response_a"}]}});
+    expect(settleAttempts).toBe(0);
+  });
+  test("Live unknown usage cannot become a zero bill or bypass scope and confirmed-provider requirements", async () => {
+    const base={...claimRow,model:"gpt-live-1",channel:"browser",session_type:"onboarding",provider_termination_state:"confirmed",
+      provider_usage_state:"unknown",outcome:"ended",minutes:3,reconcile_attempts:20,reserved_cost_usd:7.5,reserved_minutes:10,actual_cost_usd:0.17};
+    for(const change of [{actual_cost_usd:0},{actual_cost_usd:null},{actual_cost_usd:-1},{actual_cost_usd:NaN},
+      {channel:"sip"},{session_type:"customer"},{provider_termination_state:"external_evidence_required"},{reconcile_attempts:19}]){
+      claimRow={...base,...change};
+      expect(await reconcileBudgetReservations()).toBe(0);expect(unresolvedSettlements).toHaveLength(0);expect(settleAttempts).toBe(0);
+    }
+  });
+});

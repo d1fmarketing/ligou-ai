@@ -5,11 +5,15 @@ import {randomUUID} from 'node:crypto';
 export type LiveVoice='bossa'|'tempo';
 type HistoryMessage={role:'developer'|'user'|'assistant';text:string};
 type LiveEvent=Record<string,any>;
-type CreationInput={sdp:string;voice:LiveVoice;instructions:string;history?:HistoryMessage[]};
+// The deliberately small supported subset of Live's ResponsesDelegationConfig.
+export type LiveFunctionTool={type:'function';name:string;description?:string|null;parameters?:Record<string,unknown>|null;strict?:boolean|null};
+export type LiveResponsesConfig={model?:string;instructions:string;tools:LiveFunctionTool[];
+  reasoning?:{effort:'none'|'minimal'|'low'|'medium'|'high'|'xhigh'}};
+export type CreationInput={sdp:string;voice:LiveVoice;instructions:string;history?:HistoryMessage[];responses:LiveResponsesConfig};
 type ProviderFetch=(url:string,init?:RequestInit)=>Promise<Response>;
 
 export class LiveCreationError extends Error {
-  constructor(readonly outcome:'rejected'|'unknown',readonly status:number|null=null){
+  constructor(readonly outcome:'rejected'|'unknown',readonly status:number|null=null,readonly sessionId:string|null=null){
     super(outcome==='rejected'?'live_creation_rejected':'live_creation_outcome_unknown');
   }
 }
@@ -19,12 +23,19 @@ export async function createLiveWebRtcSession(input:CreationInput,deps:{apiKey:s
     ||Buffer.byteLength(input.sdp)>65536||typeof input.instructions!=='string'||!input.instructions.trim())throw Error('live_startup_invalid');
   const history=input.history??[];
   if(history.length>128||history.some(m=>!['developer','user','assistant'].includes(m.role)||typeof m.text!=='string'||!m.text.trim()))throw Error('live_history_invalid');
+  const responses=input.responses,model=responses?.model??'gpt-5.6-terra',effort=responses?.reasoning?.effort??'low';
+  if(!responses||typeof responses.instructions!=='string'||!responses.instructions.trim()||typeof model!=='string'||!model.trim()
+    ||!['none','minimal','low','medium','high','xhigh'].includes(effort)||!Array.isArray(responses.tools)
+    ||responses.tools.some(t=>!t||t.type!=='function'||typeof t.name!=='string'||!t.name.trim())
+    ||new Set(responses.tools.map(t=>t.name)).size!==responses.tools.length)throw Error('live_responses_config_invalid');
   deps.signal?.throwIfAborted();
-  const body={session:{model:'gpt-live-1',instructions:input.instructions,delegation:{type:'client'},audio:{output:{voice:input.voice}},store:false,
+  const body={session:{model:'gpt-live-1',instructions:input.instructions,delegation:{type:'responses',responses:{
+    model,instructions:responses.instructions,tools:responses.tools,reasoning:{effort},service_tier:'default',tool_choice:'auto',parallel_tool_calls:false,
+  }},audio:{output:{voice:input.voice}},store:false,
     input:history.map(m=>({type:'message',role:m.role,content:[{type:m.role==='assistant'?'output_text':'input_text',text:m.text}]})),
     client:{data_channel:{
       allowed_client_events:['session.close','session.input_audio.mute','session.input_audio.unmute'],
-      allowed_server_events:['session.started','session.closed','session.usage.updated','session.input_transcript.delta','session.output_transcript.delta','error','info'],
+      allowed_server_events:['session.started','session.closed','session.usage.updated','session.input_transcript.delta','session.output_transcript.delta','error','info'].map(type=>({type})),
     }}},transport:{type:'webrtc',sdp:input.sdp}};
   let response:Response;
   try{response=await(deps.fetch??fetch)('https://api.openai.com/v1/live/sessions',{
@@ -34,9 +45,13 @@ export async function createLiveWebRtcSession(input:CreationInput,deps:{apiKey:s
   if(!response.ok)throw new LiveCreationError(response.status>=500||response.status===408?'unknown':'rejected',response.status);
   let value:any;
   try{value=await response.json();}catch{throw new LiveCreationError('unknown',response.status);}
-  if(typeof value?.session?.id!=='string'||!value.session.id.trim()||value.transport?.type!=='webrtc'
-    ||typeof value.transport.sdp!=='string'||!value.transport.sdp.trim())throw new LiveCreationError('unknown',response.status);
-  return{sessionId:value.session.id as string,sdp:value.transport.sdp as string};
+  // A malformed SDP or a late cancellation cannot erase a known session handle:
+  // the owner needs it to close/reconcile an already-created provider session.
+  const sessionId=typeof value?.session?.id==='string'&&value.session.id.trim()?value.session.id:null;
+  if(deps.signal?.aborted||!sessionId||value.transport?.type!=='webrtc'
+    ||typeof value.transport.sdp!=='string'||!value.transport.sdp.trim())throw new LiveCreationError('unknown',response.status,sessionId);
+  const expiresAt=typeof value.session.expires_at==='number'&&Number.isFinite(value.session.expires_at)?value.session.expires_at:null;
+  return{sessionId,sdp:value.transport.sdp as string,expiresAt};
 }
 
 export function liveDurationCostUsd(seconds:number,options:{created?:boolean}={}){
@@ -59,7 +74,7 @@ export function createLiveLifecycle(deps:{sessionId:string;send:(event:LiveEvent
     resolveClose?.(value);
     if(!cleaned){cleaned=true;try{deps.cleanup?.();}catch{/* Cleanup failure cannot erase provider finalization. */}}
   }
-  function append(type:'session.instructions.append'|'session.thinking.append'|'session.commentary.append',delegationId:string|null,content:string,event_id=randomUUID()){
+  function append(type:'session.instructions.append'|'session.thinking.append'|'session.commentary.append',delegationId:string|null,content:string,event_id:string=randomUUID()){
     if(phase!=='running')throw Error('live_not_running');
     if(typeof content!=='string'||!content.trim()||(delegationId!==null&&(typeof delegationId!=='string'||!delegationId)))throw Error('live_append_invalid');
     deps.send({type,event_id,delegation_id:delegationId,content});return event_id;
@@ -91,6 +106,9 @@ export function createLiveLifecycle(deps:{sessionId:string;send:(event:LiveEvent
   }
   return{
     observe,close,
+    // A verified sideband 101 attaches to an already-running Live session.
+    // The transport owner calls this after open; no provider event is fabricated.
+    readyFromAttachment(){if(phase==='connecting')phase='running';},
     greet(instructions:string){
       if(phase!=='running')throw Error('live_not_started');
       if(greetingEventId)return greetingEventId;

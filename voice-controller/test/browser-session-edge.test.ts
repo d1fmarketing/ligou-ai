@@ -1094,3 +1094,45 @@ test("explicit protocol4 clients must upgrade before any new website call is enq
   expect(response.status).toBe(409);expect(await response.json()).toEqual({error:"client_upgrade_required"});
   expect(currentClient.inserts).toHaveLength(0);expect(currentClient.selections).toHaveLength(0);
 });
+
+describe("managed Live admission", () => {
+  const callId = NATIVE_OPENING.native.callId;
+  const payload = { version: 6, live: { ...NATIVE_OPENING.native, sessionId: "live_session_1" } };
+  const ready = { id: "request-1", session_type: "onboarding", status: "ready", answer_sdp: "answer", call_id: callId,
+    opening_mode_requested: "live_managed_v1", opening_mode_applied: "live_managed_v1", opening_payload: payload, onboarding_protocol_version: 6 };
+  test("protocol6 returns persisted Live binding without the legacy speech contract", async () => {
+    currentClient = edgeClient({ readyRow: ready, model: "gpt-live-1" });
+    const response = await handler!(request({ session_type: "onboarding", opening_mode_requested: "live_managed_v1",
+      onboarding_protocol_version: 6, speech_contract_version: undefined }));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.opening_payload).toEqual(payload);expect(body.model).toBe("gpt-live-1");expect(body.max_minutes).toBe(55);
+    expect(body).not.toHaveProperty("opening_text");expect(body).not.toHaveProperty("resume_context");
+    expect(currentClient.inserts[0]).toMatchObject({tenant_id:TENANT.id,user_id:"owner-a",model_override:"gpt-live-1",onboarding_protocol_version:6,opening_mode_requested:"live_managed_v1"});
+  });
+  test("Live cannot silently select a Realtime model or a commercial session", async () => {
+    for (const body of [
+      {session_type:"onboarding",onboarding_protocol_version:6,opening_mode_requested:"live_managed_v1",model:"gpt-realtime-2.1-mini"},
+      {session_type:"owner_browser",model:"gpt-live-1"}, {session_type:"customer",model:"gpt-live-1"},
+      {session_type:"onboarding",onboarding_protocol_version:5,opening_mode_requested:"realtime_native_v1",model:"gpt-live-1"},
+    ]) {
+      const response=await handler!(request(body));expect(response.status).toBe(400);expect(currentClient.inserts.length).toBe(0);
+    }
+  });
+  test("Live and Realtime envelopes cannot be interchanged", () => {
+    const validate = (edgeModule as any).isLiveOpeningPayload;
+    expect(validate(payload)).toBe(true);expect(validate(NATIVE_OPENING)).toBe(false);
+    for (const change of [{sessionId:""},{sessionId:"x".repeat(513)},{revision:-1},{sourceDigest:"bad"},{approved:true},{audio_base64:"abc"}]) {
+      expect(validate({...payload,live:{...payload.live,...change}})).toBe(false);
+    }
+  });
+  test("invalid Live ready binding cancels by exact request before exposing SDP", async () => {
+    const invalid={...ready,opening_payload:{...payload,live:{...payload.live,callId:"44444444-4444-4444-8444-444444444444"}}};
+    const cancelled={...invalid,status:"cancel_requested",error:"invalid_live_opening_contract"};
+    const expired={...cancelled,status:"expired",answer_sdp:null,opening_mode_applied:null,opening_payload:null};
+    currentClient=edgeClient({readyRows:[invalid,expired],updateResults:[{data:[cancelled],error:null}]});
+    const response=await handler!(request({session_type:"onboarding",onboarding_protocol_version:6,opening_mode_requested:"live_managed_v1"}));
+    expect(response.status).toBe(502);expect(await response.json()).toEqual({error:"invalid_live_opening_contract"});
+    expect(currentClient.updates[0].patch).toEqual({status:"cancel_requested",error:"invalid_live_opening_contract"});
+  });
+});

@@ -1754,3 +1754,16 @@ test("onboarding recovery errors give owner-safe instructions instead of SQL ide
   assert.equal(sessionModule.voiceSessionErrorMessage(new Error("interview_prior_not_settled")), sessionModule.voiceSessionErrorMessage(new Error("interview_resume_source_not_settled")));
   assert.equal(sessionModule.voiceSessionErrorMessage(new Error("Microfone indisponível")), "Microfone indisponível");
 });
+
+test('Live caption fragments preserve whitespace, overlap, late intervals and event deduplication',async()=>{
+ const {appendVoiceCaption,liveTranscriptCaption}=await import('../src/voice/website-live.js');
+ const caption=(kind,id,text,start,end)=>liveTranscriptCaption({type:`session.${kind}_transcript.delta`,event_id:id,delta:text,start_ms:start,end_ms:end});
+ let lines=[];lines=appendVoiceCaption(lines,caption('output','out1','Oi, ',0,500));
+ lines=appendVoiceCaption(lines,caption('input','in1','Sim, ',200,400));
+ lines=appendVoiceCaption(lines,caption('output','out2','RJ.',450,800));
+ lines=appendVoiceCaption(lines,caption('input','in2','mas preciso corrigir.',390,900));
+ assert.deepEqual(lines.map(l=>l.text),['Oi, RJ.','Sim, mas preciso corrigir.']);
+ assert.deepEqual(lines.map(l=>l.id),['out1','in1']);assert.equal(lines[1].fragments.length,2);
+ assert.equal(appendVoiceCaption(lines,caption('input','in2','mas preciso corrigir.',390,900)),lines);
+ assert.equal(liveTranscriptCaption({type:'conversation.item.input_audio_transcription.completed',transcript:'not Live'}),null);
+});

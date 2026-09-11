@@ -1038,6 +1038,71 @@ describe("durable browser cancel_requested handshake", () => {
     };
   }
 
+  test("managed Live queue preserves protocol, scope and active cancellation custody", async () => {
+    const { managedLiveSessions } = await import("../src/onboarding-live-runtime.ts");
+    const b = boundary({ protocolVersion: 6 });
+    b.row.opening_mode_requested = "live_managed_v1";b.call.model = "gpt-live-1";
+    _setClient(b.client as any);
+    const callId = String(b.call.id), reasons: string[] = [];
+    const payload = { version: 6, live: { callId, interviewId: callId, revision: 0, sourceDigest: "b".repeat(64), sessionId: "live_session_1" } };
+    const observed: any[] = [];
+    try {
+      await _handleBrowserRequest({ ...b.row, offer_sdp: "offer-live", model_override: "gpt-live-1" }, async (...args: any[]) => {
+        observed.push(args.slice(0, 5), args[6]);
+        managedLiveSessions.add(callId);
+        args[5]({ callId, startupComplete: true, cancel: async (reason: string) => {
+          reasons.push(reason);b.call.status = "ended";b.call.provider_termination_state = "confirmed";
+          managedLiveSessions.delete(callId);
+        } });
+        return { sdp: "answer", call_id: callId, opening_mode_applied: "live_managed_v1", opening_payload: payload } as any;
+      }, { callIdFactory: () => callId });
+      expect(b.row.status).toBe("ready");expect(b.row.opening_payload).toEqual(payload);
+      expect(observed[0]).toEqual(["owner-a", "onboarding", "offer-live", "gpt-live-1", V02_TENANT.id]);
+      expect(observed[1]).toMatchObject({ onboardingProtocolVersion: 6, openingModeRequested: "live_managed_v1", requestedCallId: callId });
+      (browserRequestsModule as any)._pruneBrowserLiveControlsForTests();
+      expect((browserRequestsModule as any)._browserLiveControlCount()).toBe(1);
+      Object.assign(b.row, { status: "cancel_requested", error: "request_aborted" });
+      expect(await (browserRequestsModule as any)._handleBrowserCancellation(structuredClone(b.row))).toBe(true);
+      expect(b.row.status).toBe("expired");expect(reasons).toEqual(["request_aborted"]);
+    } finally { managedLiveSessions.delete(callId); }
+  });
+
+  test("managed Live cleanup without a local control never invokes Realtime provider termination", async () => {
+    const b = boundary({ protocolVersion: 6 });
+    Object.assign(b.row, { status: "cancel_requested", call_id: b.call.id, opening_mode_requested: "live_managed_v1",
+      opening_mode_applied: "live_managed_v1", answer_sdp: "answer", error: "request_aborted",
+      opening_payload: { version: 6, live: { callId: b.call.id, interviewId: b.call.id, revision: 0, sourceDigest: "b".repeat(64), sessionId: "live_session_1" } } });
+    b.call.model="gpt-live-1";
+    _setClient(b.client as any);let requests = 0, recoveries = 0;
+    const result = await (browserRequestsModule as any)._handleBrowserCancellation(structuredClone(b.row), {
+      fetchImpl: async () => { requests++;return new Response(null, { status: 200 }); },
+      recoverLive: async () => { recoveries++;return false; },
+    });
+    expect(recoveries).toBe(1);expect(result).toBe(false);expect(requests).toBe(0);expect(b.row.status).toBe("cancel_requested");
+    expect(b.call.status).toBe("active");
+  });
+
+  test("Live cancellation recovery requires stored model and terminal readback, not a boolean alone", async () => {
+    const b = boundary({ protocolVersion: 6 });
+    Object.assign(b.row, { status: "cancel_requested", call_id: b.call.id, opening_mode_requested: "live_managed_v1",
+      opening_mode_applied: "live_managed_v1", answer_sdp: "answer", error: "request_aborted",
+      opening_payload: { version: 6, live: { callId: b.call.id, interviewId: b.call.id, revision: 0, sourceDigest: "b".repeat(64), sessionId: "live_session_1" } } });
+    _setClient(b.client as any);let recoveries = 0;
+    const deps = { recoverLive: async () => { recoveries++;return true; } };
+    expect(await (browserRequestsModule as any)._handleBrowserCancellation(structuredClone(b.row), deps)).toBe(false);
+    expect(recoveries).toBe(0);
+    b.call.model = "gpt-live-1";
+    expect(await (browserRequestsModule as any)._handleBrowserCancellation(structuredClone(b.row), deps)).toBe(false);
+    expect(recoveries).toBe(1);expect(b.row.status).toBe("cancel_requested");
+    expect(await (browserRequestsModule as any)._handleBrowserCancellation(structuredClone(b.row), {
+      recoverLive: async (callId: string, reason: string) => {
+        expect(callId).toBe(b.call.id);expect(reason).toBe("request_aborted");
+        b.call.status="ended";b.call.provider_termination_state="confirmed";return true;
+      },
+    })).toBe(true);
+    expect(b.row.status).toBe("expired");
+  });
+
   test("malformed native descriptor cancellation reaches controller cleanup and expires exactly once", async () => {
     const poll = (browserRequestsModule as any)._pollBrowserCancellations;
     const reset = (browserRequestsModule as any)

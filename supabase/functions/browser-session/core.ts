@@ -12,6 +12,7 @@ export const BROWSER_SESSION_CORS = {
 const APPLICATION_MODE = "application_tts_v1";
 const STREAM_MODE = "realtime_stream_v1";
 const NATIVE_MODE = "realtime_native_v1";
+const LIVE_MODE = "live_managed_v1";
 const PROVIDER_MODE = "provider_model_v1";
 const APPLICATION_STARTUP_DEADLINE_MS = 35_000;
 const PROVIDER_STARTUP_DEADLINE_MS = 20_000;
@@ -59,10 +60,10 @@ function validWebsiteOpening(payload: Record<string, unknown>): boolean {
     createHash("sha256").update(audio).digest("hex") === speech.audio_sha256;
 }
 
-type OpeningMode = typeof APPLICATION_MODE | typeof STREAM_MODE | typeof NATIVE_MODE | typeof PROVIDER_MODE;
-const controlledOpening=(mode:unknown)=>mode===APPLICATION_MODE || mode===STREAM_MODE || mode===NATIVE_MODE;
-const protocolOpeningMode=(version:number)=>version===5?NATIVE_MODE:version===4?STREAM_MODE:APPLICATION_MODE;
-const invalidOpeningContract=(mode:OpeningMode)=>mode===NATIVE_MODE?"invalid_native_opening_contract":mode===STREAM_MODE?"invalid_stream_opening_contract":"invalid_application_opening_contract";
+type OpeningMode = typeof APPLICATION_MODE | typeof STREAM_MODE | typeof NATIVE_MODE | typeof LIVE_MODE | typeof PROVIDER_MODE;
+const controlledOpening=(mode:unknown)=>mode===APPLICATION_MODE || mode===STREAM_MODE || mode===NATIVE_MODE || mode===LIVE_MODE;
+const protocolOpeningMode=(version:number)=>version===6?LIVE_MODE:version===5?NATIVE_MODE:version===4?STREAM_MODE:APPLICATION_MODE;
+const invalidOpeningContract=(mode:OpeningMode)=>mode===LIVE_MODE?"invalid_live_opening_contract":mode===NATIVE_MODE?"invalid_native_opening_contract":mode===STREAM_MODE?"invalid_stream_opening_contract":"invalid_application_opening_contract";
 
 export function isStreamOpeningPayload(value:unknown):value is Record<string,unknown> {
   if(!value || typeof value!=="object" || Array.isArray(value) || !exactKeys(value as Record<string,unknown>,["version","stream"]))return false;
@@ -93,6 +94,19 @@ export function isNativeOpeningPayload(value:unknown):value is Record<string,unk
     && typeof native.interviewId==="string" && uuid.test(native.interviewId)
     && Number.isSafeInteger(native.revision) && Number(native.revision)>=0
     && typeof native.sourceDigest==="string" && /^[0-9a-f]{64}$/.test(native.sourceDigest);
+}
+
+export function isLiveOpeningPayload(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const payload = value as Record<string, unknown>;
+  if (!exactKeys(payload, ["version", "live"]) || payload.version !== 6 || !payload.live || typeof payload.live !== "object" || Array.isArray(payload.live)) return false;
+  const live = payload.live as Record<string, unknown>;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  return exactKeys(live, ["callId", "interviewId", "revision", "sourceDigest", "sessionId"])
+    && [live.callId, live.interviewId].every(id => typeof id === "string" && uuid.test(id))
+    && Number.isSafeInteger(live.revision) && Number(live.revision) >= 0
+    && typeof live.sourceDigest === "string" && /^[0-9a-f]{64}$/.test(live.sourceDigest)
+    && typeof live.sessionId === "string" && Boolean(live.sessionId.trim()) && live.sessionId.length <= 512;
 }
 
 interface BrowserSessionDependencies {
@@ -274,6 +288,11 @@ function validReadyOpening(
     if(protocolVersion!==4 || row.onboarding_protocol_version!==4 || row.opening_mode_applied!==STREAM_MODE
       || !isStreamOpeningPayload(row.opening_payload))return false;
     return ((row.opening_payload.stream as Record<string,unknown>).action as Record<string,unknown>).callId===row.call_id;
+  }
+  if(requested===LIVE_MODE){
+    if(protocolVersion!==6 || row.onboarding_protocol_version!==6 || row.opening_mode_applied!==LIVE_MODE
+      || !isLiveOpeningPayload(row.opening_payload))return false;
+    return (row.opening_payload.live as Record<string,unknown>).callId===row.call_id;
   }
   if(requested===NATIVE_MODE){
     if(protocolVersion!==5 || row.onboarding_protocol_version!==5 || row.opening_mode_applied!==NATIVE_MODE
@@ -610,16 +629,25 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
       ? body.onboarding_protocol_version
       : null;
     const openingModeRequested: OpeningMode = sessionType === "onboarding"
-      ? NATIVE_MODE
+      ? protocolOpeningMode(Number(protocolVersion))
       : PROVIDER_MODE;
-    if (sessionType === "onboarding" && (protocolVersion !== 5
+    if (sessionType === "onboarding" && (![5, 6].includes(Number(protocolVersion)) || typeof protocolVersion !== "number"
       || body.opening_mode_requested !== openingModeRequested)) {
       return json({ error: "client_upgrade_required" }, 409);
     }
-    // New calls use native audio and retain client playback evidence capability.
-    // Historical payload validation must never re-enable an older speech path.
-    if (sessionType === "onboarding" && body.speech_contract_version !== 3) {
+    // The Realtime rollback retains its own contract; Live has no scripted playback contract.
+    if (sessionType === "onboarding" && protocolVersion === 5 && body.speech_contract_version !== 3) {
       return json({ error: "client_upgrade_required" }, 409);
+    }
+
+    if (protocolVersion === 6 && body.model != null && body.model !== "gpt-live-1") {
+      return json({ error: "live_model_mismatch" }, 400);
+    }
+    if (protocolVersion === 5 && body.model === "gpt-live-1") {
+      return json({ error: "live_protocol_required" }, 400);
+    }
+    if (sessionType !== "onboarding" && body.model === "gpt-live-1") {
+      return json({ error: "live_onboarding_only" }, 400);
     }
 
     const defaultTenant = dependencies.env("LIGOU_TENANT") ?? "rocha-plumbing";
@@ -639,7 +667,7 @@ export function createBrowserSessionHandler(dependencies: BrowserSessionDependen
       tenant_id: tenant.id,
       user_id: user.id,
       session_type: sessionType,
-      model_override: body.model ?? null,
+      model_override: protocolVersion === 6 ? "gpt-live-1" : body.model ?? null,
       offer_sdp: String(body.sdp),
       opening_mode_requested: openingModeRequested,
       ...(sessionType === "onboarding"

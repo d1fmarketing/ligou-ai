@@ -1,5 +1,6 @@
 // Browser side of a voice session: microphone + WebRTC only.
 // All authority (tools, budget, deadline, transcript of record) lives in the voice-controller.
+import { validateWebsiteLive, liveTranscriptCaption } from "./website-live.js";
 import { observeRemoteStreamMedia } from "./website-stream.js";
 import { createWebsiteNativePlayer, validateWebsiteNative } from "./website-native.js";
 const CONTROLLER_URL = import.meta.env.VITE_CONTROLLER_URL || "http://127.0.0.1:8790";
@@ -302,7 +303,7 @@ export async function resolveOnboardingOutcome({
   knownRevision,
   onboardingProtocolVersion = 2,
 }) {
-  if ([3, 4, 5].includes(onboardingProtocolVersion)) return resolveWebsiteInterviewOutcome({
+  if ([3, 4, 5, 6].includes(onboardingProtocolVersion)) return resolveWebsiteInterviewOutcome({
     client,reason,callId,timeoutMs,pollIntervalMs,isCancelled,signal,now,sleep,knownRevision,protocolVersion:onboardingProtocolVersion,
   });
   if (MANUAL_END_REASONS.has(reason)
@@ -481,7 +482,7 @@ export function onboardingOutcomeCopy(outcome) {
     : "Pedido de correção salvo. A versão anterior continua aprovada. Confirmando o encerramento antes de retomar.";
   if(outcome.status==="approved")return "Sua configuração foi aprovada e está salva. A conversa terminou antes da confirmação final de encerramento.";
   if (outcome?.status === "complete") {
-    if([3,4].includes(outcome.protocolVersion))return `Entrevista concluída e salva · revisão ${outcome.revision}. Os pontos pendentes continuam sujeitos à revisão; nenhum poder foi concedido automaticamente.`;
+    if([3,4,5,6].includes(outcome.protocolVersion))return `Entrevista concluída e salva · revisão ${outcome.revision}. Os pontos pendentes continuam sujeitos à revisão; nenhum poder foi concedido automaticamente.`;
     return `Entrevista concluída. Cobertura confirmada por voz · revisão ${outcome.revision}. Regras ainda aguardando aprovação na Memória.`;
   }
   if (outcome?.status === "finalizing") {
@@ -492,9 +493,9 @@ export function onboardingOutcomeCopy(outcome) {
     return `Finalizando… A pausa e a possibilidade de continuar ainda estão sendo confirmadas${revision}.`;
   }
   if (outcome?.status === "resumable") {
-    if([3,4].includes(outcome.protocolVersion) && outcome.resumeState==="reviewing")
+    if([3,4,5,6].includes(outcome.protocolVersion) && outcome.resumeState==="reviewing")
       return "A configuração continua incompleta. Você pode retomar a revisão do resumo.";
-    if([3,4].includes(outcome.protocolVersion))return "A configuração continua incompleta. Você pode retomar da pergunta salva.";
+    if([3,4,5,6].includes(outcome.protocolVersion))return "A configuração continua incompleta. Você pode retomar da pergunta salva.";
     return `Entrevista pausada com segurança · revisão ${outcome.revision}. Você pode continuar da pergunta salva.`;
   }
   return "Entrevista interrompida. A conclusão não foi confirmada. Revise na Memória as sugestões que já foram registradas.";
@@ -519,7 +520,8 @@ export function endedVoiceSessionCopy({ endedSessionType, onboardingOutcome }) {
 }
 
 const NATIVE_OPENING_MODE = "realtime_native_v1";
-const ONBOARDING_PROTOCOL_VERSION = 5;
+const ONBOARDING_PROTOCOL_VERSION = 6;
+const LIVE_OPENING_MODE = "live_managed_v1";
 const DEFAULT_OPENING_TIMEOUT_MS = 15_000;
 function safeOpeningError(detail) {
   return new Error(`Abertura segura indisponível — sessão encerrada (${detail}).`);
@@ -613,7 +615,13 @@ export async function startVoiceSession({
   };
   if (signal?.aborted) throw voiceAbortError(signal);
   const onboarding = sessionType === "onboarding";
-  const websiteInterview = onboarding && onboardingProtocolVersion === 5;
+  const managedLive = onboarding && onboardingProtocolVersion === 6;
+  const nativeWebsiteInterview = onboarding && onboardingProtocolVersion === 5;
+  const websiteInterview = managedLive || nativeWebsiteInterview;
+  if (managedLive && model != null && model !== "gpt-live-1") {
+    stage("failed");
+    throw Object.assign(new Error("Modelo incompatível com a entrevista Live."), { code: "live_model_mismatch" });
+  }
   if (onboarding && !websiteInterview) {
     stage("failed");
     throw Object.assign(new Error(CLIENT_UPGRADE_MESSAGE_PT), { code: CLIENT_UPGRADE_REQUIRED });
@@ -656,6 +664,14 @@ export async function startVoiceSession({
   let resolveStop;
   const stopCompleted = new Promise((resolve) => { resolveStop = resolve; });
   let callId = null;
+  let liveBinding = null;
+  let liveStarted = false;
+  let liveFinalized = false;
+  let liveUsageSeconds = 0;
+  let liveFinalUsageConfirmed = false;
+  let releaseLiveStarted;
+  const liveStartedEvent = new Promise(resolve => { releaseLiveStarted = resolve; });
+  const liveCaptionIds = new Set();
   let openingActivated = !onboarding;
   let websitePlayer = null;
   let websiteOpeningPlayback = null;
@@ -722,15 +738,25 @@ export async function startVoiceSession({
     endedOnce = true;
     reason = requestedStopReason ?? reason;
     message = requestedStopMessage ?? message;
-    timing.mark("session_ended", { reason });
+    if (managedLive && !liveFinalized) {
+      timing.mark("live_finalization_incomplete", { reason, seconds: liveUsageSeconds });
+      message ??= "A chamada foi interrompida. A confirmação de encerramento ainda será reconciliada; seu progresso salvo permanece.";
+    }
+    timing.mark("session_ended", { reason, ...(managedLive ? { providerFinalized: liveFinalized, seconds: liveUsageSeconds, finalUsageConfirmed: liveFinalUsageConfirmed } : {}) });
     stop();
-    onEnd?.({ reason, callId, ...(message ? { message } : {}) });
+    onEnd?.({ reason, callId, ...(managedLive ? { providerFinalized: liveFinalized, finalUsageConfirmed: liveFinalUsageConfirmed, seconds: liveUsageSeconds } : {}), ...(message ? { message } : {}) });
     resolveStop();
   }
   function sendStopIfOpen() {
     if (!stopRequested || stopSent || stopped || channel?.readyState !== "open") return;
+    if (managedLive && !liveStarted) return;
     stopSent = true;
     try {
+      if (managedLive) {
+        channel.send(JSON.stringify({ type: "session.close", event_id: globalThis.crypto.randomUUID() }));
+        timing.mark("stop_control_sent", { transport: LIVE_OPENING_MODE });
+        return;
+      }
       channel.send(JSON.stringify({ type: "conversation.item.create", item: {
         id: `lgt-${callId.replaceAll("-", "").slice(0, 28)}`, type: "message", role: "system", status: "completed",
         content: [{ type: "input_text", text: `ligou.website_stop:${callId}${stopTechnical ? ":technical_failure" : ""}` }],
@@ -750,12 +776,18 @@ export async function startVoiceSession({
   function end(reason = "user", message) {
     if (endedOnce) return;
     const technical = ["application_speech_error", "startup_failed"].includes(reason);
-    if (websiteInterview && (MANUAL_END_REASONS.has(reason) || (technical && remoteDescriptionApplied && channel?.readyState === "open"))
+    if (websiteInterview && (MANUAL_END_REASONS.has(reason) || (managedLive && reason === "deadline") || (technical && remoteDescriptionApplied && channel?.readyState === "open"))
       && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(callId ?? "")
       && channel?.readyState !== "closed" && !["failed", "closed"].includes(pc?.connectionState)) {
       if (stopRequested) return;
       stopRequested = true; requestedStopReason = reason; requestedStopMessage = message; stopTechnical = technical;
-      silenceMedia(); clearConnectionDeadline();
+      if (managedLive) {
+        // Stop input/output immediately, but keep negotiated media and event
+        // receivers alive until session.closed (or bounded incomplete cleanup).
+        setSpeechCustody(false);
+        if (remoteAudio) remoteAudio.muted = true;
+      } else silenceMedia();
+      clearConnectionDeadline();
       if (deadline) clearTimeout(deadline);
       deadline = null;
       stage("stopping");
@@ -786,13 +818,13 @@ export async function startVoiceSession({
     pc = new RTCPeerConnection();
     remoteAudio = document.createElement("audio");
     remoteAudio.autoplay = true;
-    remoteAudio.muted = onboarding;
+    remoteAudio.muted = nativeWebsiteInterview;
     let remotePlaybackResolve;
     let remotePlaybackReject;
     const remotePlayback = new Promise((resolve, reject) => { remotePlaybackResolve = resolve; remotePlaybackReject = reject; });
     remotePlayback.catch(() => {});
     remoteAudio.onplaying = () => {
-      if (stopped || onboarding || remoteAudio.muted || !remoteAudio.srcObject) return;
+      if (stopped || nativeWebsiteInterview || remoteAudio.muted || !remoteAudio.srcObject) return;
       timing.mark("speech_playing", { audioRole: "provider", evidence: "html_media_playing" });
       remotePlaybackResolve();
     };
@@ -801,13 +833,13 @@ export async function startVoiceSession({
       remoteAudio.srcObject = event.streams[0];
       remoteTrackResolve();
       timing.mark("remote_audio_track");
-      if (!onboarding) {
+      if (!nativeWebsiteInterview) {
         Promise.resolve().then(() => { if (!stopped) return remoteAudio.play(); })
           .catch(() => remotePlaybackReject(safeOpeningError("reprodução da abertura bloqueada")));
       }
     };
     for (const track of media.getTracks()) {
-      if (onboarding) track.enabled = false;
+      if (nativeWebsiteInterview) track.enabled = false;
       pc.addTrack(track, media);
     }
 
@@ -822,9 +854,40 @@ export async function startVoiceSession({
     channel.onopen = () => { channelOpened(); sendStopIfOpen(); };
     if (channel.readyState === "open") channelOpened();
     channel.onmessage = (msg) => {
-      if (stopRequested || stopped) return;
+      if (stopped) return;
       try {
         const ev = JSON.parse(msg.data);
+        if (managedLive) {
+          if (ev.type === "session.started" && ev.session?.id === liveBinding?.sessionId
+            && ev.session?.model === "gpt-live-1" && ev.session?.delegation?.type === "responses") {
+            if (!liveStarted) {
+              liveStarted = true;
+              timing.mark("live_session_started", { sessionId: liveBinding.sessionId, transport: LIVE_OPENING_MODE });
+              releaseLiveStarted();
+            }
+            sendStopIfOpen();
+          } else if (ev.type === "session.usage.updated" && Number.isFinite(ev.usage?.seconds) && ev.usage.seconds >= 0) {
+            liveUsageSeconds = Math.max(liveUsageSeconds, ev.usage.seconds);
+            timing.mark("live_usage", { seconds: liveUsageSeconds });
+          } else if (ev.type === "session.closed" && ev.session?.id === liveBinding?.sessionId) {
+            liveFinalized = true;
+            liveFinalUsageConfirmed = Number.isFinite(ev.usage?.seconds) && ev.usage.seconds >= liveUsageSeconds;
+            if (liveFinalUsageConfirmed) liveUsageSeconds = ev.usage.seconds;
+            timing.mark("live_session_closed", { sessionId: liveBinding.sessionId, reason: ev.reason, seconds: liveUsageSeconds, finalUsageConfirmed: liveFinalUsageConfirmed });
+            finishEnd(ev.reason === "expired" ? "deadline" : "remote_hangup");
+          } else if (ev.type === "error") {
+            timing.mark("live_error", { code: typeof ev.error?.code === "string" ? ev.error.code : null });
+          } else if (!stopRequested) {
+            const caption = liveTranscriptCaption(ev);
+            if (caption && !liveCaptionIds.has(caption.eventId)) {
+              liveCaptionIds.add(caption.eventId);
+              timing.mark(caption.kind === "caller" ? "live_input_transcript" : "live_output_transcript", { eventId: caption.eventId, startMs: caption.startMs, endMs: caption.endMs });
+              notifyVoiceObserver(onEvent, caption);
+            }
+          }
+          return;
+        }
+        if (stopRequested) return;
         if (ev.type === "input_audio_buffer.speech_started") timing.mark("transport_owner_speech_started");
         if (ev.type === "input_audio_buffer.speech_stopped") timing.mark("transport_owner_speech_ended");
         if (ev.type === "conversation.item.input_audio_transcription.completed") timing.mark("transport_owner_transcript_final");
@@ -859,11 +922,11 @@ export async function startVoiceSession({
     const offer = await abortableVoiceOperation(pc.createOffer(), setupAbort.signal);
     await abortableVoiceOperation(pc.setLocalDescription(offer), setupAbort.signal);
     timing.mark("offer_ready");
-    const requestBody = { sdp: offer.sdp, session_type: sessionType, model };
+    const requestBody = { sdp: offer.sdp, session_type: sessionType, model: managedLive ? "gpt-live-1" : model };
     if (onboarding) {
-      requestBody.opening_mode_requested = NATIVE_OPENING_MODE;
+      requestBody.opening_mode_requested = managedLive ? LIVE_OPENING_MODE : NATIVE_OPENING_MODE;
       requestBody.onboarding_protocol_version = onboardingProtocolVersion;
-      requestBody.speech_contract_version = 3;
+      if (!managedLive) requestBody.speech_contract_version = 3;
     }
     timing.mark("bootstrap_started");
     const res = await abortableVoiceOperation(fetch(SESSION_URL, {
@@ -880,6 +943,13 @@ export async function startVoiceSession({
     const { sdp, call_id, max_minutes } = response;
     remoteAnswerSdp = sdp;
     callId = call_id;
+    if (managedLive) {
+      if (response.onboarding_protocol_version !== 6 || response.opening_mode_applied !== LIVE_OPENING_MODE
+        || response.model !== "gpt-live-1" || !exactKeys(response.opening_payload, ["version", "live"])
+        || response.opening_payload.version !== 6 || response.opening_text !== undefined || response.resume_context !== undefined)
+        throw new Error("live_opening_contract_invalid");
+      liveBinding = validateWebsiteLive(response.opening_payload.live, callId);
+    }
     timing.mark("bootstrap_response", /^[0-9a-f-]{36}$/i.test(callId ?? "") ? { callId } : {});
     if(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(callId??""))
       notifyVoiceObserver(onCallCreated,{callId,end,maxMinutes:max_minutes});
@@ -891,10 +961,10 @@ export async function startVoiceSession({
       await stopCompleted;
       throw voiceAbortError(signal);
     }
-    if (websiteInterview) {
+    if (nativeWebsiteInterview) {
       const envelope = response.opening_payload;
-      if (response.onboarding_protocol_version !== ONBOARDING_PROTOCOL_VERSION || response.opening_mode_applied !== NATIVE_OPENING_MODE
-        || !exactKeys(envelope, ["version", "native"]) || envelope.version !== ONBOARDING_PROTOCOL_VERSION
+      if (response.onboarding_protocol_version !== 5 || response.opening_mode_applied !== NATIVE_OPENING_MODE
+        || !exactKeys(envelope, ["version", "native"]) || envelope.version !== 5
         || response.opening_text !== undefined || response.resume_context !== undefined
         || typeof response.business_name !== "string" || !response.business_name.trim()
         || response.business_name.length > 256) throw safeOpeningError("contrato da entrevista divergente");
@@ -944,7 +1014,17 @@ export async function startVoiceSession({
       websitePlayer?.stop(); sendStopIfOpen(); await stopCompleted;
       throw voiceAbortError(signal);
     }
-    if (websiteInterview) {
+    if (managedLive) {
+      await waitForDataChannelOpen(channel, boundedOpeningTimeout, setupAbort.signal);
+      await abortableVoiceOperation(liveStartedEvent, setupAbort.signal);
+      // session.started establishes session readiness, not audible speech or
+      // a completed business operation. Media keeps flowing independently.
+      await abortableVoiceOperation(remoteTrackReady, setupAbort.signal);
+      await abortableVoiceOperation(remotePlayback, setupAbort.signal);
+      if (stopRequested) { sendStopIfOpen(); await stopCompleted; throw voiceAbortError(signal); }
+      openingActivated = true;
+      ready();
+    } else if (nativeWebsiteInterview) {
       await waitForDataChannelOpen(channel,boundedOpeningTimeout,setupAbort.signal);
       if (stopRequested) { sendStopIfOpen(); await stopCompleted; throw voiceAbortError(signal); }
       releaseWebsiteOpening();
@@ -975,6 +1055,8 @@ export async function startVoiceSession({
 }
 
 export function voiceSessionErrorMessage(error) {
+  if (error?.message === "live_opening_contract_invalid") return "Não foi possível confirmar a nova sessão de voz. Tente novamente.";
+  if (error?.message === "live_model_mismatch") return "Esta entrevista precisa iniciar com o modelo de voz configurado. Reabra o painel e tente novamente.";
   if (["NotAllowedError", "PermissionDeniedError", "SecurityError"].includes(error?.name)) {
     return "Permita o uso do microfone nas configurações deste site e tente novamente.";
   }

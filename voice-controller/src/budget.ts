@@ -176,7 +176,20 @@ export async function reapAbandonedCalls(): Promise<number> {
   return Number(data) || 0;
 }
 
-export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promise<number> {
+interface ManagedReconciliationDependencies {
+  recoverLive?: (callId: string, reason: string) => Promise<boolean>;
+}
+
+async function recoverLiveTermination(callId: string, reason: string, dependencies: ManagedReconciliationDependencies): Promise<boolean> {
+  try {
+    // Runtime uses budget settlement; load recovery only when a durable Live
+    // claim needs it instead of creating a module initialization dependency.
+    const recover = dependencies.recoverLive ?? (await import("./onboarding-live-runtime.ts")).recoverManagedLiveCancellation;
+    return await recover(callId, reason);
+  } catch { return false; }
+}
+
+export async function reconcileBudgetReservations(fetchImpl?: FetchLike, dependencies: ManagedReconciliationDependencies = {}): Promise<number> {
   const { data: claim, error } = await supa().rpc("claim_budget_reconciliation", {
     p_worker: `budget-${process.pid}`,
   });
@@ -190,6 +203,17 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
     && row.provider_termination_reason.trim().length > 0
     ? row.provider_termination_reason
     : "durable_budget_reconciliation";
+  if (row.model === "gpt-live-1" && needsTermination) {
+    const confirmed = await recoverLiveTermination(String(row.call_id), storedTerminationReason, dependencies);
+    // Recovery may have persisted usage and settled the reservation itself.
+    // Do not settle from this pre-recovery snapshot; the next claim reads truth.
+    await deferBudgetReconciliation(String(row.call_id), confirmed ? "live_termination_reconciled_refresh_required" : "live_termination_unconfirmed");
+    return 0;
+  }
+  if (row.model === "gpt-live-1" && !["confirmed", "not_required"].includes(providerState)) {
+    await deferBudgetReconciliation(String(row.call_id), "live_termination_unconfirmed");
+    return 0;
+  }
   const provider = needsTermination
     ? {
         openaiCallId: row.openai_call_id ? String(row.openai_call_id) : null,
@@ -207,7 +231,35 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
   // forbids another either way.
   const terminationExhausted = row.provider_termination_attempt_id != null
     && providerState !== "confirmed" && providerState !== "not_required";
-  if (!usageResolved && (!needsTermination || terminationExhausted)
+  if (row.model === "gpt-live-1" && !usageResolved
+    && Number(row.reconcile_attempts ?? 0) >= UNRESOLVED_SETTLEMENT_MIN_ATTEMPTS) {
+    const floor = Number(row.actual_cost_usd), reservedCost = Number(row.reserved_cost_usd);
+    if (providerState !== "confirmed" || row.channel !== "browser" || row.session_type !== "onboarding"
+      || !Number.isFinite(floor) || floor <= 0 || !Number.isFinite(reservedCost) || reservedCost < 0
+      || (floor > reservedCost && row.outcome !== "killed_budget")) {
+      await deferBudgetReconciliation(String(row.call_id), "live_observed_cost_floor_unconfirmed");
+      return 0;
+    }
+    // Live pricing is duration plus delegated backend usage, not the reservation
+    // ceiling divided by minutes. Retain the known floor without claiming a bill.
+    const breakdown = row.provider_usage_details && typeof row.provider_usage_details === "object" && !Array.isArray(row.provider_usage_details)
+      ? row.provider_usage_details : {};
+    const { error: settleError } = await supa().rpc("settle_unresolved_call_budget", {
+      p_tenant: String(row.tenant_id), p_call: String(row.call_id), p_estimated_cost: floor,
+      p_minutes: Number(row.minutes ?? 0), p_outcome: String(row.outcome),
+      p_detail: { ...breakdown, reconciled: true, reservation_id: row.reservation_id,
+        settlement_basis: "observed_usage_floor", provider_usage_state: "unknown",
+        provider_termination_state: providerState, costComplete: false },
+    });
+    if (settleError) {
+      await deferBudgetReconciliation(String(row.call_id), settleError.message ?? "unresolved_settlement_failed");
+      return 0;
+    }
+    await reconcileWebsiteInterviewTerminals();
+    return 1;
+  }
+
+  if (row.model !== "gpt-live-1" && !usageResolved && (!needsTermination || terminationExhausted)
     && Number(row.reconcile_attempts ?? 0) >= UNRESOLVED_SETTLEMENT_MIN_ATTEMPTS) {
     // A call whose media never carried usage events leaves provider usage unknown
     // forever. Holding the full reservation would silently consume the tenant's
@@ -277,13 +329,15 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike): Promis
   return settled ? 1 : 0;
 }
 
-export async function reconcileProviderTerminations(fetchImpl?: FetchLike): Promise<number> {
+export async function reconcileProviderTerminations(fetchImpl?: FetchLike, dependencies: ManagedReconciliationDependencies = {}): Promise<number> {
   const { data: claim, error } = await supa().rpc("claim_provider_termination_reconciliation", {
     p_worker: `provider-termination-${process.pid}`,
   });
   if (error || !claim) return 0;
   const row = claim as any;
-  const termination = await terminateProviderCall({
+  const termination = row.model === "gpt-live-1"
+    ? { confirmed: await recoverLiveTermination(String(row.call_id), String(row.provider_termination_reason ?? "durable_provider_termination_reconciliation"), dependencies), error: "live_termination_unconfirmed" }
+    : await terminateProviderCall({
     callId: String(row.call_id),
     openaiCallId: row.openai_call_id ? String(row.openai_call_id) : null,
     mode: row.provider_termination_mode === "reject" ? "reject" : "hangup",

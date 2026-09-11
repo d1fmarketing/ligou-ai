@@ -16,21 +16,21 @@ const nativeResponse={...response,onboarding_protocol_version:5,opening_mode_app
 const metadata={ligou_transport:'realtime_stream_v1',ligou_call_id:callId,ligou_action_id:descriptor.action.actionId,ligou_source_digest:descriptor.action.sourceDigest,ligou_dispatch_id:descriptor.dispatchId};
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 async function until(predicate){for(let i=0;i<100;i++){if(predicate())return;await tick();}assert.fail('expected stream browser state');}
-function browser({payload=response,blockAudio=false,holdChannel=false}={}){
+function browser({payload=response,blockAudio=false,holdChannel=false,autoStart=true}={}){
  const keys=['navigator','document','RTCPeerConnection','AudioContext','fetch'];
  const original=new Map(keys.map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
  const state={requests:[],audios:[],mic:{enabled:true,stopped:false,stop(){this.stopped=true;}},peers:[],sent:[],permission:0,amplitude:.2};
  const define=(key,value)=>Object.defineProperty(globalThis,key,{value,configurable:true});
  const stream=()=>({getTracks:()=>[{stop(){}}],getAudioTracks:()=>[{}],clone:()=>stream()});
  class Audio extends EventTarget {muted=true;volume=1;paused=true;srcObject=null;playCalls=0;
-  play(){this.playCalls++;if(blockAudio)return Promise.reject(new Error('autoplay'));this.paused=false;this.dispatchEvent(new Event('playing'));return Promise.resolve();}pause(){this.paused=true;}}
+  play(){this.playCalls++;if(blockAudio)return Promise.reject(new Error('autoplay'));this.paused=false;this.dispatchEvent(new Event('playing'));this.onplaying?.();return Promise.resolve();}pause(){this.paused=true;}}
  class Peer {connectionState='new';closeCalls=0;
-  constructor(){state.peers.push(this);}addTrack(){}createOffer(){return Promise.resolve({type:'offer',sdp:'offer'});}setLocalDescription(){return Promise.resolve();}
+  constructor(){state.peers.push(this);}addTrack(){}createOffer(){state.beforeOffer={events:typeof state.channel.onmessage==='function',close:typeof state.channel.onclose==='function',microphoneEnabled:state.mic.enabled};return Promise.resolve({type:'offer',sdp:'offer'});}setLocalDescription(){return Promise.resolve();}
   createDataChannel(){const channel=new EventTarget();channel.readyState=holdChannel?'connecting':'open';channel.sent=state.sent;
    channel.emit=e=>channel.onmessage?.({data:JSON.stringify(e)});channel.open=()=>{channel.readyState='open';channel.dispatchEvent(new Event('open'));channel.onopen?.();};
    channel.close=()=>{channel.readyState='closed';channel.onclose?.();};
    channel.send=body=>state.sent.push(JSON.parse(body));state.channel=channel;return channel;}
-  setRemoteDescription(){this.ontrack?.({streams:[stream()]});state.channel.emit(payload.onboarding_protocol_version===5?nativeVad:vad);return Promise.resolve();}
+  setRemoteDescription(){this.ontrack?.({streams:[stream()]});if(autoStart)state.channel.emit(payload.onboarding_protocol_version===6?{type:'session.started',session:{id:payload.opening_payload.live.sessionId,model:'gpt-live-1',delegation:{type:'responses'}}}:payload.onboarding_protocol_version===5?nativeVad:vad);return Promise.resolve();}
   close(){this.closeCalls++;this.connectionState='closed';}}
  define('navigator',{mediaDevices:{getUserMedia:async()=>{state.permission++;return{getTracks:()=>[state.mic]};}}});
  define('document',{createElement:()=>{const audio=new Audio();state.audios.push(audio);return audio;}});
@@ -78,9 +78,9 @@ test('protocol4 outcome uses website receipts and preserves approval separately 
  const result=await resolveOnboardingOutcome({onboardingProtocolVersion:4,client:{rpc:()=>Promise.resolve({error:null,data:{callId,currentCallId:callId,interviewId:callId,revision:3,state:'closing',approvalReceiptId:'33333333-3333-4333-8333-333333333333',terminal:{outcome:'unfinished'},budgetStatus:'settled',providerTerminationState:'confirmed'}})},callId,reason:'manual_hangup'});
  assert.deepEqual(result,{status:'approved',revision:3,protocolVersion:4,approvalReceiptId:'33333333-3333-4333-8333-333333333333'});
 });
-test('default onboarding uses native protocol5 and actual remote samples before startup resolves, while preserving Stop',async()=>{
+test('explicit rollback onboarding uses native protocol5 and actual remote samples before startup resolves, while preserving Stop',async()=>{
  const b=browser({payload:nativeResponse}),timings=[],captions=[];let current,settled=false;
- const starting=startVoiceSession({sessionType:'onboarding',accessToken:'test',
+ const starting=startVoiceSession({sessionType:'onboarding',onboardingProtocolVersion:5,accessToken:'test',
   onTiming:e=>timings.push(e),onEvent:e=>captions.push(e),stopTimeoutMs:20}).then(value=>{settled=true;return value;});starting.catch(()=>{});
  try{
   await until(()=>b.sent.some(e=>e.item?.content?.[0]?.text?.startsWith('ligou.website_native_ready:')));
@@ -122,4 +122,77 @@ test('native protocol5 resolves eligible reviewing resume through the website re
  const reads=[];const result=await resolveOnboardingOutcome({onboardingProtocolVersion:5,callId,reason:'manual_hangup',client:{rpc(name,args){reads.push({name,args});return Promise.resolve({error:null,data:{callId,currentCallId:callId,interviewId:callId,revision:95,state:'reviewing',completed:false,resumeEligible:true,digest:'b'.repeat(64),callStatus:'ended',providerTerminationState:'confirmed',budgetStatus:'settled',terminal:{outcome:'unfinished'}}});}}});
  assert.deepEqual(reads,[{name:'get_website_interview_status',args:{p_call:callId}}]);
  assert.equal(result.status,'resumable');assert.equal(result.resumeState,'reviewing');assert.equal(result.protocolVersion,5);
+});
+
+const liveResponse={...response,model:'gpt-live-1',onboarding_protocol_version:6,opening_mode_applied:'live_managed_v1',
+ opening_payload:{version:6,live:{callId,interviewId:callId,revision:0,sourceDigest:'b'.repeat(64),sessionId:'live_session_1'}}};
+const liveClosed=(seconds=12)=>({type:'session.closed',session:{id:'live_session_1'},reason:'close_requested',usage:{seconds}});
+test('default Live starts full duplex without Realtime commands or waiting for a transcript',async()=>{
+ const b=browser({payload:liveResponse}),timings=[],captions=[],ends=[];let current;
+ try{
+  current=await startVoiceSession({sessionType:'onboarding',accessToken:'test',onTiming:e=>timings.push(e),onEvent:e=>captions.push(e),onEnd:e=>ends.push(e)});
+  assert.deepEqual(b.requests,[{sdp:'offer',session_type:'onboarding',model:'gpt-live-1',opening_mode_requested:'live_managed_v1',onboarding_protocol_version:6}]);
+  assert.equal(b.mic.enabled,true);assert.equal(b.audios[0].muted,false);assert.equal(b.sent.length,0);
+  assert.deepEqual(b.beforeOffer,{events:true,close:true,microphoneEnabled:true});
+  b.channel.emit({type:'session.output_transcript.delta',event_id:'out1',delta:'Oi, ',start_ms:0,end_ms:700});
+  b.channel.emit({type:'session.input_transcript.delta',event_id:'in1',delta:'Quero corrigir.',start_ms:400,end_ms:950});
+  assert.equal(b.mic.enabled,true);assert.equal(captions.length,2);assert.equal(captions[0].text,'Oi, ');
+  b.channel.emit({type:'session.usage.updated',usage:{seconds:10}});b.channel.emit({type:'session.usage.updated',usage:{seconds:9}});
+  current.end('manual_hangup');current.end('manual_hangup');
+  assert.equal(b.mic.enabled,false);assert.equal(b.mic.stopped,false);assert.equal(b.audios[0].muted,true);
+  assert.equal(b.peers[0].closeCalls,0);assert.deepEqual(b.sent.map(e=>e.type),['session.close']);assert.equal(ends.length,0);
+  b.channel.emit(liveClosed(12));assert.equal(ends.length,1);assert.equal(ends[0].providerFinalized,true);assert.equal(ends[0].seconds,12);
+  assert.equal(ends[0].finalUsageConfirmed,true);assert.equal(b.mic.stopped,true);assert.equal(b.peers[0].closeCalls,1);
+  b.channel.close();assert.equal(ends.length,1);assert.equal(timings.some(e=>e.event==='live_finalization_incomplete'),false);
+ }finally{b.channel?.close();b.restore();}
+});
+test('Live Stop during known-call startup waits for session.started before sending close and never unmutes',async()=>{
+ const b=browser({payload:liveResponse}),ends=[];
+ try{
+  await assert.rejects(startVoiceSession({sessionType:'onboarding',accessToken:'test',stopTimeoutMs:25,
+   onCallCreated:session=>session.end('manual_hangup'),onEnd:e=>ends.push(e)}));
+  assert.deepEqual(b.sent.map(e=>e.type),['session.close']);assert.equal(b.audios[0].muted,true);assert.equal(b.mic.enabled,false);
+  assert.equal(b.mic.stopped,true);assert.equal(ends[0].providerFinalized,false);
+ }finally{b.restore();}
+});
+test('Live Stop failure releases devices with incomplete finalization instead of claiming success',async()=>{
+ const b=browser({payload:liveResponse}),ends=[];let current;
+ try{
+  current=await startVoiceSession({sessionType:'onboarding',accessToken:'test',stopTimeoutMs:10,onEnd:e=>ends.push(e)});
+  current.end('manual_hangup');await new Promise(resolve=>setTimeout(resolve,25));
+  assert.equal(b.mic.stopped,true);assert.equal(b.peers[0].closeCalls,1);assert.equal(ends[0].providerFinalized,false);
+  assert.match(ends[0].message,/reconciliada/);
+ }finally{b.restore();}
+});
+test('Live transport loss without final event is incomplete; a nonfatal provider error does not stop audio',async()=>{
+ const b=browser({payload:liveResponse}),ends=[];let current;
+ try{
+  current=await startVoiceSession({sessionType:'onboarding',accessToken:'test',onEnd:e=>ends.push(e)});
+  b.channel.emit({type:'error',error:{code:'moderation_interruption'}});assert.equal(b.mic.enabled,true);assert.equal(ends.length,0);
+  b.channel.close();assert.equal(ends.length,1);assert.equal(ends[0].providerFinalized,false);assert.equal(b.mic.stopped,true);
+ }finally{b.restore();}
+});
+test('Live cannot silently use a Realtime model or accept a mismatched provider session',async()=>{
+ const b=browser({payload:liveResponse,autoStart:false});
+ try{
+  await assert.rejects(startVoiceSession({sessionType:'onboarding',accessToken:'test',model:'gpt-realtime-2.1-mini'}),e=>e.code==='live_model_mismatch');
+  assert.equal(b.permission,0);assert.equal(b.requests.length,0);
+  const started=startVoiceSession({sessionType:'onboarding',accessToken:'test',connectionTimeoutMs:30,stopTimeoutMs:5});started.catch(()=>{});
+  await until(()=>b.channel&&b.audios[0].srcObject);
+  b.channel.emit({type:'session.started',session:{id:'foreign',model:'gpt-live-1',delegation:{type:'responses'}}});
+  await assert.rejects(started);assert.equal(b.mic.stopped,true);assert.equal(b.sent.length,0);
+ }finally{b.restore();}
+});
+test('Live native autoplay failure releases the session and never switches to recorded audio',async()=>{
+ const b=browser({payload:liveResponse,blockAudio:true});
+ try{
+  await assert.rejects(startVoiceSession({sessionType:'onboarding',accessToken:'test',stopTimeoutMs:5}));
+  assert.deepEqual(b.sent.map(e=>e.type),['session.close']);assert.equal(b.mic.stopped,true);assert.equal(b.audios.length,1);assert.equal(b.audios[0].src,undefined);
+ }finally{b.restore();}
+});
+test('Live outcome uses durable website status; transport finalization alone cannot approve',async()=>{
+ const result=await resolveOnboardingOutcome({onboardingProtocolVersion:6,callId,reason:'remote_hangup',
+  client:{rpc:()=>Promise.resolve({error:null,data:{callId,currentCallId:callId,interviewId:callId,revision:3,state:'unfinished',completed:false,
+   resumeEligible:true,digest:'b'.repeat(64),callStatus:'ended',providerTerminationState:'confirmed',budgetStatus:'settled',terminal:{outcome:'unfinished'}}})}});
+ assert.equal(result.status,'resumable');assert.equal(result.protocolVersion,6);
 });
