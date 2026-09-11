@@ -40,7 +40,7 @@ function fixture(options:any={}){
   prepare:async()=>{order.push('prepare');return{scope:{ownerId:ids.userId,callId:ids.callId,requestId:ids.requestId},stored:{agenda:{binding:{interviewId:ids.callId}},revision:7,digest:'a'.repeat(64)}};},
   createSession:async(input:any,dependencies:any)=>{creationCalls++;order.push('create');expect(input.responses).toMatchObject({model:'gpt-5.6-terra',reasoning:{effort:'low'}});return options.create?options.create(input,dependencies):{sessionId,sdp:'provider-answer',expiresAt};},
   businessFactory:()=>business,
-  connect:(url:string,key:string)=>{order.push('connect');expect(url).toBe(`wss://api.openai.com/v1/live/sessions/${sessionId}/attach?graceful_close=true`);expect(key).toBe('synthetic-openai-key');const socket=new FakeSocket();sockets.push(socket);queueMicrotask(()=>options.socketFailure?socket.emit('error'):socket.open());return socket;},
+  connect:(url:string,key:string)=>{order.push('connect');expect(url).toBe(`wss://api.openai.com/v1/live/sessions/${sessionId}/attach?graceful_close=true`);expect(key).toBe('synthetic-openai-key');const socket=new FakeSocket();sockets.push(socket);queueMicrotask(()=>{if(options.socketFailure){socket.emit('error');return;}socket.open();if(!options.deferStarted)socket.receive({type:'session.started',event_id:'event_started',session:{id:sessionId,model:'gpt-live-1',expires_at:expiresAt}});});return socket;},
   finalize:async(args:any)=>{settlements.push(args);if(options.holdSettlement)return new Promise(()=>{});return true;}};
  const args={...ids,sdpOffer:'v=0\r\naudio-offer',registerCleanup:(value:any)=>{order.push('register');cleanup=value;options.onRegister?.(value);}};
  const f={args,deps,order,calls,terminations,settlements,events,executions,sockets,rows,business,get cleanup(){return cleanup;},get creationCalls(){return creationCalls;}};fixtures.push(f);return f;
@@ -48,6 +48,21 @@ function fixture(options:any={}){
 afterEach(async()=>{for(const f of fixtures.splice(0))await f.cleanup?.cancel('test_cleanup').catch(()=>{});setManagedLiveDiagnosticObserver(null);});
 
 describe('managed browser Live runtime',()=>{
+ test('SDP returns before session.started; matching start and instruction ACK independently trigger the greeting',async()=>{
+  const f=fixture({deferStarted:true});const result=await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];
+  expect(result.sdp).toBe('provider-answer');expect(f.cleanup.startupComplete).toBe(true);expect(socket.sent).toEqual([]);
+  socket.receive({type:'session.started',session:{id:'another-session',model:'gpt-live-1'}});expect(socket.sent).toEqual([]);
+  socket.receive({type:'session.started',session:{id:sessionId,model:'gpt-realtime-2.1'}});expect(socket.sent).toEqual([]);
+  const started={type:'session.started',event_id:'actual_started',session:{id:sessionId,model:'gpt-live-1'}};socket.receive(started);socket.receive(started);
+  expect(socket.sent.map(e=>e.type)).toEqual(['session.instructions.append']);
+  const ack={type:'session.instructions.appended',client_event_id:socket.sent[0].event_id,start_ms:0,end_ms:100};socket.receive(ack);socket.receive(ack);
+  expect(socket.sent.map(e=>e.type)).toEqual(['session.instructions.append','session.commentary.append']);expect(f.executions).toEqual([]);
+ });
+ test('Stop before the real start event never resurrects the greeting',async()=>{
+  const f=fixture({deferStarted:true});await startManagedBrowserSession(f.args,f.deps);const stopping=f.cleanup.cancel('owner_requested_stop');
+  f.sockets[0].receive({type:'session.started',session:{id:sessionId,model:'gpt-live-1'}});await stopping;
+  expect(f.sockets[0].sent.map(e=>e.type)).toEqual(['session.close']);
+ });
  test('registers cleanup first, prepares existing source, creates once, attaches and returns protocol6',async()=>{
   const f=fixture();const result=await startManagedBrowserSession(f.args,f.deps);
   expect(f.order.slice(0,6)).toEqual(['register','resolve','insert','reserve','prepare','create']);expect(f.creationCalls).toBe(1);

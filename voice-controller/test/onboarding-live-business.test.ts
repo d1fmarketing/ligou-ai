@@ -1,5 +1,8 @@
 import {describe,expect,test} from 'bun:test';
-import {createLiveBusinessSession} from '../src/onboarding-live-business';
+import {readFileSync} from 'node:fs';
+import {createLiveBusinessSession,projectLiveBusinessContext} from '../src/onboarding-live-business';
+import {buildWebsiteAgendaSeeds} from '../src/onboarding-agenda-seed';
+import {buildWebsiteCandidateContext} from '../src/onboarding-website-summary';
 import {createLiveInterviewStore} from '../src/onboarding-live-store';
 import {createOnboardingAgenda,getAgendaAction} from '../src/onboarding-agenda';
 import {onboardingAgendaDigest} from '../src/onboarding-agenda-store';
@@ -127,9 +130,12 @@ describe('Live managed business tools',()=>{
   test('correction uses returned fresh revision and preserves the named catalog service',async()=>{
     const f=fixture();f.business.observe(fragment());const first=await f.save((await f.context()).contextRef);
     f.business.observe(fragment('price','A limpeza custa cento e oitenta, não cento e quarenta e nove.',700,950));
-    const c=await f.context();expect(c.websiteCandidates).toEqual([{targetId:`candidate:${id(7)}`,subject:'service',value:{service_type:'Limpeza',public_price:{amount:'149.00',currency:'USD'}}}]);
+    const c=await f.business.execute('get_context',{subject:null,targetIds:[`candidate:${id(7)}`]},ctx);expect(c.websiteCandidates).toEqual([{targetId:`candidate:${id(7)}`,subject:'service',value:{service_type:'Limpeza',public_price:{amount:'149.00',currency:'USD'}}}]);
     const result=await f.save(c.contextRef,`candidate:${id(7)}`,'correction','Limpeza: preço público USD 180.00.');
     expect(result.saved).toBe(true);expect(result.revision).toBe(2);expect(first.revision).toBe(1);expect(f.stored().agenda.candidateOverrides[0].status).toBe('corrected');
+    const detail=await f.business.execute('get_context',{subject:null,targetIds:[`candidate:${id(7)}`]},ctx);
+    expect((detail.catalogue as any[])[0]).toMatchObject({interpretation:'Limpeza: preço público USD 180.00.',provenance:'model_interpretation',status:'corrected'});
+    expect((detail.websiteCandidates as any[])[0].value.public_price.amount).toBe('149.00');
   });
   test('stale revision cannot overwrite a newer decision',async()=>{
     const f=fixture();f.business.observe(fragment());const c=await f.context();await f.save(c.contextRef);
@@ -199,5 +205,56 @@ describe('Live managed business tools',()=>{
     const f=fixture();f.business.observe(fragment());expect(()=>f.business.observe({...fragment(),delta:'Conflicting text'})).not.toThrow();
     expect((await f.save((await f.context()).contextRef)).code).toBe('context_pending');
     expect((await f.business.execute('end_call',{},ctx)).stopRequested).toBe(true);
+  });
+  test('strict get_context schema advertises nullable subject and exact IDs while legacy empty calls still work',async()=>{
+    const f=fixture(),tool=f.business.tools.find(t=>t.name==='get_context')!;
+    expect(tool.parameters.required).toEqual(['subject','targetIds']);
+    expect(await f.business.execute('get_context',{subject:null,targetIds:[]},ctx)).toMatchObject({ok:true,view:'overview',receiptId:id(8)});
+    expect((await f.context()).view).toBe('overview');
+    const overview=await f.context(),detail=await f.business.execute('get_context',{subject:'business_hours',targetIds:[]},ctx);
+    expect(detail.contextRef).toBe(overview.contextRef);expect(detail.revision).toBe(overview.revision);
+    expect((await f.business.execute('get_context',{subject:'calendar',targetIds:['sunday']},ctx)).code).toBe('invalid_tool_arguments');
+  });
+  test('unknown subject or foreign target does not fall back to exposing the whole context',async()=>{
+    const f=fixture();
+    for(const selection of [{subject:'other-company',targetIds:[]},{subject:null,targetIds:[id(999)]}]){
+      const result=await f.business.execute('get_context',selection,ctx);
+      expect(result).toMatchObject({ok:false,code:'context_selector_not_found'});expect(result).not.toHaveProperty('catalogue');expect(result).not.toHaveProperty('contextRef');
+    }
+  });
+});
+
+describe('compact Live business projection of the real website fixture',()=>{
+  const source=JSON.parse(readFileSync(new URL('./fixtures/foghorn-website-first-voice.json',import.meta.url),'utf8'));
+  const {tenant_id:_,...draftReadback}=source.draft_row;
+  const projection=buildWebsiteAgendaSeeds({draftReadback,initialCoverage:source.initial_coverage.snapshot});
+  const b={...binding,callId:projection.provenance.callId,draftId:projection.provenance.draftId,draftHash:projection.provenance.draftHash,
+    sourceResultId:projection.provenance.sourceResultId,sourceResultHash:projection.provenance.sourceResultHash};
+  const agenda=createOnboardingAgenda(b,projection.seeds,buildWebsiteCandidateContext(projection),projection.contextTimezone);
+  const stored:any={agenda,revision:0,storeVersion:0,digest:onboardingAgendaDigest(agenda),receiptId:id(8),nextAction:getAgendaAction(agenda),state:'unfinished',replayed:false};
+  test('overview provides two suggestions and indexes without all 114 full rows or candidate values',()=>{
+    const before=JSON.stringify(stored),result=projectLiveBusinessContext(stored,projection);
+    expect(agenda.items.length).toBeGreaterThan(100);expect(projection.candidateRecap).toHaveLength(21);
+    expect(result).toMatchObject({ok:true,view:'overview'});expect(result.catalogue).toHaveLength(2);
+    expect(result).not.toHaveProperty('websiteCandidates');expect((result as any).serviceIndex).toHaveLength(10);
+    expect((result as any).subjectIndex.filter((s:any)=>s.subject.startsWith('discovery.owner_question.')).every((s:any)=>s.label?.length>0)).toBe(true);
+    expect(JSON.stringify(stored)).toBe(before);expect(stored.agenda.contextTimezone).toEqual(projection.contextTimezone);
+  });
+  test('repair diagnostic exact lookup includes its price and excludes same-day repair pricing',()=>{
+    const result=projectLiveBusinessContext(stored,projection,{subject:'repair_diagnostic',targetIds:[]});
+    expect(result.ok).toBe(true);expect(result.catalogue!.length).toBeGreaterThan(0);
+    expect(result.catalogue!.every(r=>r.subject==='repair_diagnostic')).toBe(true);
+    const candidates=(result as any).websiteCandidates;
+    expect(candidates.length).toBeGreaterThan(0);expect(candidates.every((c:any)=>c.value.service_type==='repair_diagnostic')).toBe(true);
+    expect(JSON.stringify(candidates)).not.toContain('same_day_repair');
+  });
+  test('Sunday remains discoverable by its actual opaque subject label and target ID',()=>{
+    const overview=projectLiveBusinessContext(stored,projection) as any;
+    const sunday=overview.subjectIndex.find((s:any)=>s.label&&/domingo/i.test(s.label));
+    expect(sunday).toBeDefined();
+    const bySubject=projectLiveBusinessContext(stored,projection,{subject:sunday.subject,targetIds:[]});
+    const item=bySubject.catalogue!.find(r=>/domingo/i.test(r.questionPt));expect(item).toBeDefined();
+    const byId=projectLiveBusinessContext(stored,projection,{subject:null,targetIds:[item!.targetId]});
+    expect(byId.catalogue).toEqual([item!]);expect(byId).not.toHaveProperty('serviceIndex');
   });
 });

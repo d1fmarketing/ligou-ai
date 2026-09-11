@@ -137,6 +137,10 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
     observeUsage(ledger,event);
     if(sessionId){const observed=finalEvent(event,sessionId);if(observed)final=observed;}
     lifecycle?.observe(event);
+    if(!stopReason&&!cleaning&&event.type==='session.started'&&event.session?.id===sessionId&&event.session?.model===MODEL){
+      try{lifecycle?.greet('Cumprimente o dono em português brasileiro, explique brevemente a entrevista e avance usando o contexto atual.');}
+      catch{console.error('live_greeting_request_failed',args.callId);}
+    }
     try{business?.observe(event);}catch{console.error('live_business_observe_failed',args.callId);}
     bridge?.observe(event);
     if(event.type==='session.usage.updated'||event.type==='response.event'&&['response.completed','response.failed','response.incomplete'].includes(event.event?.type))persistUsage();
@@ -178,7 +182,6 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
     const attached=attach(knownSessionId,apiKey,deps,observe,()=>{if(!cleaning)backgroundStop('live_sideband_disconnected');},data=>diagnostic(args.callId,sessionId,'inbound',{type:'transport.raw',data}));socket=attached.socket;
     await attached.ready;lifecycle.readyFromAttachment();checkCancelled();
     deadline=setTimeout(()=>backgroundStop('session_deadline'),MAX_MINUTES*60_000);
-    lifecycle.greet('Cumprimente o dono em português brasileiro, explique brevemente a entrevista e avance usando o contexto atual.');
     control.startupComplete=true;
     answer={sdp:created.sdp,call_id:args.callId,max_minutes:MAX_MINUTES,model:MODEL,fell_back:false,opening_mode_applied:'live_managed_v1',
       opening_payload:{version:6,live:{callId:args.callId,interviewId:prepared.stored.agenda.binding.interviewId,revision:prepared.stored.revision,sourceDigest:prepared.stored.digest,sessionId:knownSessionId}}};

@@ -998,19 +998,26 @@ export function buildRealtimeSessionConfig(args: {
 if (import.meta.main) {
   const timedLiveEvents=new Set(['session.started','session.closed','session.delegation.created','session.close','response.created',
     'response.output_item.done','response.completed','response.failed','response.incomplete','response.cancelled',
-    'response.item.create','response.create','error']);
+    'response.item.create','response.create','session.instructions.append','session.instructions.appended',
+    'session.commentary.append','session.commentary.appended','error']);
   setManagedLiveDiagnosticObserver(({callId,sessionId,direction,event})=>{
     const data=event as Record<string,any>;
     const type=data?.type==='response.event'?data.event?.type:data?.type;
     if(!timedLiveEvents.has(type))return;
     const identifier=(value:unknown)=>typeof value==='string'&&/^[a-zA-Z0-9_.:/-]{1,512}$/.test(value)?value:undefined;
+    const providerMessage=type==='error'&&typeof data.error?.message==='string'
+      ? data.error.message.replaceAll(config.openaiKey||'\u0000','[redacted]').replace(/\bsk-[a-zA-Z0-9_-]+/g,'[redacted]')
+        .replace(/Bearer\s+\S+/gi,'Bearer [redacted]').slice(0,1024):undefined;
     // Correlation and timings only. Audio, transcripts, arguments and tool
     // results remain outside general service logs.
     console.log('live_event',JSON.stringify({callId,sessionId,direction,type,at:new Date().toISOString(),monotonicMs:performance.now(),
-      eventId:identifier(data.event_id),delegationId:identifier(data.delegation_id),
+      eventId:identifier(data.event_id),clientEventId:identifier(data.client_event_id),delegationId:identifier(data.delegation_id),
       responseId:identifier(data.event?.response?.id??data.event?.response_id),
       functionCallId:identifier(data.event?.item?.call_id??data.item?.call_id),
-      tool:identifier(data.event?.item?.name),errorCode:identifier(data.error?.code)}));
+      tool:identifier(data.event?.item?.name),
+      outputBytes:direction==='outbound'&&typeof data.item?.output==='string'?Buffer.byteLength(data.item.output):undefined,
+      errorCode:identifier(data.error?.code),errorType:identifier(data.error?.type),errorParam:identifier(data.error?.param),
+      errorClientEventId:identifier(data.error?.client_event_id),errorMessage:providerMessage}));
   });
   const { startWorkerLoop } = await import("./worker.ts");
   startWorkerLoop();

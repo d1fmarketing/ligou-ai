@@ -76,12 +76,41 @@ describe('Live WebRTC server boundary',()=>{
 });
 
 describe('Live session lifecycle, independently of business approval',()=>{
- test('verified sideband attachment establishes local readiness without a synthetic session.started event',()=>{
+ test('verified sideband attachment permits lifecycle control but greeting needs actual session.started',()=>{
   const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>sent.push(e)});
   live.readyFromAttachment();live.readyFromAttachment();
   expect(live.status()).toMatchObject({phase:'running',greetingAccepted:false,finalized:false,seconds:0});
-  expect(sent).toEqual([]);live.greet('Apresente-se em português.');
+  expect(sent).toEqual([]);expect(()=>live.greet('Apresente-se em português.')).toThrow('live_not_started');
+  live.observe(started);live.greet('Apresente-se em português.');
   expect(sent.map(e=>e.type)).toEqual(['session.instructions.append']);
+ });
+ test('one matching greeting acknowledgment requests one short commentary nudge',()=>{
+  const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>sent.push(e)});live.observe(started);
+  const requestId=live.greet('Apresente-se naturalmente em português.');
+  live.observe({type:'session.instructions.appended',client_event_id:'other-command'});expect(sent).toHaveLength(1);
+  live.observe({type:'session.instructions.appended',client_event_id:requestId});
+  live.observe({type:'session.instructions.appended',client_event_id:requestId});live.greet('Outra tentativa.');
+  expect(sent.map(e=>e.type)).toEqual(['session.instructions.append','session.commentary.append']);
+  expect(sent[1]).toMatchObject({delegation_id:null,content:'Comece a conversa agora seguindo as instruções fornecidas.'});
+  expect(live.status()).toMatchObject({greetingAccepted:true,sessionStarted:true});expect(live.status()).not.toHaveProperty('greetingHeard');
+ });
+ test('a rejected greeting instruction does not trigger commentary after a contradictory late ack',()=>{
+  const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>sent.push(e)});live.observe(started);const requestId=live.greet('Apresente-se.');
+  live.observe({type:'error',error:{code:'invalid_request',client_event_id:requestId}});
+  live.observe({type:'session.instructions.appended',client_event_id:requestId});
+  expect(sent.map(e=>e.type)).toEqual(['session.instructions.append']);expect(live.status()).toMatchObject({phase:'running',greetingAccepted:false,greetingError:'invalid_request'});
+ });
+ test('Stop before the greeting acknowledgment prevents the commentary nudge',async()=>{
+  const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>sent.push(e),closeTimeoutMs:5});live.observe(started);const requestId=live.greet('Apresente-se.');
+  const stopping=live.close();live.observe({type:'session.instructions.appended',client_event_id:requestId});live.observe(closed());await stopping;
+  expect(sent.map(e=>e.type)).toEqual(['session.instructions.append','session.close']);
+ });
+ test('a failed commentary send is observable and is not replayed on duplicate greeting acknowledgment',()=>{
+  const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>{sent.push(e);if(e.type==='session.commentary.append')throw Error('connection unavailable');}});
+  live.observe(started);const requestId=live.greet('Apresente-se.');
+  expect(()=>live.observe({type:'session.instructions.appended',client_event_id:requestId})).not.toThrow();
+  live.observe({type:'session.instructions.appended',client_event_id:requestId});
+  expect(sent).toHaveLength(2);expect(live.status().greetingError).toBe('transport_unavailable');
  });
  test('a late sideband attachment cannot revive a closing or closed lifecycle',async()=>{
   const live=createLiveLifecycle({sessionId,send:()=>{},closeTimeoutMs:5});
