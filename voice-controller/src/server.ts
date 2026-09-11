@@ -1008,13 +1008,20 @@ if (import.meta.main) {
     const providerMessage=type==='error'&&typeof data.error?.message==='string'
       ? data.error.message.replaceAll(config.openaiKey||'\u0000','[redacted]').replace(/\bsk-[a-zA-Z0-9_-]+/g,'[redacted]')
         .replace(/Bearer\s+\S+/gi,'Bearer [redacted]').slice(0,1024):undefined;
+    let toolOutcome:Record<string,unknown>|undefined;
+    if(direction==='outbound'&&typeof data.item?.output==='string')try{
+      const result=JSON.parse(data.item.output);
+      if(result&&typeof result==='object')toolOutcome={ok:typeof result.ok==='boolean'?result.ok:undefined,
+        saved:typeof result.saved==='boolean'?result.saved:undefined,code:identifier(result.code),operationRef:identifier(result.operationRef),
+        operationReceiptId:identifier(result.operationReceiptId),operationRevision:Number.isSafeInteger(result.operationRevision)?result.operationRevision:undefined};
+    }catch{/* Non-JSON tool output still has its byte count and provider correlation. */}
     // Correlation and timings only. Audio, transcripts, arguments and tool
     // results remain outside general service logs.
     console.log('live_event',JSON.stringify({callId,sessionId,direction,type,at:new Date().toISOString(),monotonicMs:performance.now(),
       eventId:identifier(data.event_id),clientEventId:identifier(data.client_event_id),delegationId:identifier(data.delegation_id),
       responseId:identifier(data.event?.response?.id??data.event?.response_id),
       functionCallId:identifier(data.event?.item?.call_id??data.item?.call_id),
-      tool:identifier(data.event?.item?.name),
+      tool:identifier(data.event?.item?.name),toolOutcome,
       outputBytes:direction==='outbound'&&typeof data.item?.output==='string'?Buffer.byteLength(data.item.output):undefined,
       errorCode:identifier(data.error?.code),errorType:identifier(data.error?.type),errorParam:identifier(data.error?.param),
       errorClientEventId:identifier(data.error?.client_event_id),errorMessage:providerMessage}));

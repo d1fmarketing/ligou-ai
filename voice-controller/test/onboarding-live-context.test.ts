@@ -1,4 +1,5 @@
 import {expect,test} from 'bun:test';
+import {createHash} from 'node:crypto';
 import {createLiveEvidence,liveOperationReference} from '../src/onboarding-live-context.ts';
 const scope={tenantId:'tenant-a',interviewId:'interview-a',callId:'call-a',providerSessionId:'live-a'};
 const input=(event_id:string,delta:string,start_ms:number,end_ms:number)=>({type:'session.input_transcript.delta',event_id,delta,start_ms,end_ms});
@@ -31,4 +32,17 @@ test('business operation identity is independent of delegation ID and paraphrase
  expect(liveOperationReference({...value,sourceEventIds:['e2','e1'],interpretation:'changed payload'})).toBe(ref);
  expect(liveOperationReference({...value,sourceEventIds:['e3'],kind:'correction'})).not.toBe(ref);
  expect(liveOperationReference({...value,scope:{...scope,tenantId:'other'}})).not.toBe(ref);
+});
+test('opaque mixed-case provider IDs retain existing JavaScript ASCII operation identities',()=>{
+ const ids=['event_EMprtp89IJG3fQjJgW3Kj','event_EMprtP9ibMmap8NZdtgPz'];
+ const input={scope,kind:'answer',targetIds:['sunday'],sourceEventIds:ids,interpretation:'No automated discount.'};
+ const previous='ligou-live-op:'+createHash('sha256').update(JSON.stringify([1,scope.tenantId,scope.interviewId,scope.callId,scope.providerSessionId,'answer',['sunday'],[...ids].sort()])).digest('hex');
+ expect(liveOperationReference(input)).toBe(previous);
+ expect(liveOperationReference({...input,sourceEventIds:[...ids].reverse()})).toBe(previous);
+});
+test('opaque Unicode identities use UTF8 byte order instead of default UTF16 ordering',()=>{
+ const ids=['event_😀','event_\uE000'];
+ expect([...ids].sort()).toEqual(['event_😀','event_\uE000']);
+ const canonical='ligou-live-op:'+createHash('sha256').update(JSON.stringify([1,scope.tenantId,scope.interviewId,scope.callId,scope.providerSessionId,'answer',['sunday'],['event_\uE000','event_😀']])).digest('hex');
+ expect(liveOperationReference({scope,kind:'answer',targetIds:['sunday'],sourceEventIds:ids,interpretation:'Unicode identity test.'})).toBe(canonical);
 });

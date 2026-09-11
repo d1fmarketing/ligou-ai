@@ -1,3 +1,13 @@
+# Latest continuation — operation identity correction
+
+Current deployed controller52f4ca417f53acfbf75948d0562d9a3444a63bc5 / artifact92f8cd1ee71ad3d3f4479111393919a43bae704ba4af1593b4f0500e884f78d2, schema96, Edge21. Third actual smoke1f9e6f76-6550-4e5b-80ab-afcb095656be / live_u2_EMpr9WrlcJnxG0A7xE7QP: native audio first signal6.4339s; get_context7,488bytes accepted even before response.completed, explicit continuation worked. save_decision rejected (167-byte error result), but voice falsely said “Registrei”. Zero operations/revision9 unchanged. Stop0.7019s,192seconds, all confirmed/settled,$0.1855078. Three-call observed total$0.49877764. NOT human-ready.
+
+A concrete cross-language operation identity defect was reproduced with actual fragmentIDs: productionen_US.UTF-8 sorts mixed case differently fromJS; localpreviousfixtures usedC. New CLI migration20260911072902_website_live_operation_byte_order.sql usesCOLLATE C; applicationusesmatchingUTF8byteorder. Existingapplied96migrationsunchanged. en_US fixture oldSQLfails live_operation_identity_invalid, newSQLpasses actualmixedcase+Unicode+allpriorcases. RootaddedexactSQLrejection metadata/tooloutcome logs and clarified saved=true/newoperationreceipt vsreadcontextreceipt; readonlycombinedselectors no longerrejected whenbothvalid. These changesawait commit/apply/controllerrelease. No morepaidcallsuntilnewreleaseverified.
+
+NextONEfocused smoke: pendingnegotiationpolicyWAV → actualDBreceipt → explicitwebsiteRepairdiagnostic89→99correctionWAV → continuation/Stop. Read-onlySQLwatcher cannotifybrowser immediatelyuponprovenreceipt, reducingpaididle. Browsercurrentdocumentissynthetic andended; reloadforfreshattempt. Sameimmutablelocalfrontend/serverandpublishedpreview below. Preserve allmedia andsourcehistory. Fullapproval/AgentsB remainseparate.
+
+---
+
 # Current operational checkpoint — September 11
 
 The managed goal remains active. **NOT ready for human test.** Two actual paid Live smokes failed business behavior; both were stopped and fully settled. Current deployed controller is `96203709e212603b5722476668d519835f4c98ed`, artifact `a99e5ec9024f771965f0328609901ca399b91c4db5b4bb4bd667980063729cba`. Its managed Live path is independent of unavailable legacy Hermes/Codex auth; that legacy status is still reported, and no legacy/private agent was disabled. Edge browser-session v21 ACTIVE, schema96 through `20260911051921`. **Both new migrations are now applied: never edit them further; future database changes require a new migration.**

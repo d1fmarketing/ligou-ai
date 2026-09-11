@@ -1,10 +1,14 @@
 import {createHash} from 'node:crypto';
+import {Buffer} from 'node:buffer';
 
 export type LiveScope={tenantId:string;interviewId:string;callId:string;providerSessionId:string};
 export type LiveFragment={eventId:string;speaker:'owner'|'assistant';text:string;startMs:number;endMs:number;arrival:number};
 const id=(value:unknown):value is string=>typeof value==='string'&&value.length>0&&value.length<=512;
 const time=(value:unknown):value is number=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
 const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
+// Match PostgreSQL COLLATE "C" in UTF8, including code points outside the BMP.
+// This is identity ordering only; transcript words retain their temporal order.
+const opaqueIdOrder=(a:string,b:string)=>Buffer.compare(Buffer.from(a,'utf8'),Buffer.from(b,'utf8'));
 
 /** Evidence for business operations/consent only. Managed Responses owns the
  * conversational context. This collector never schedules work or controls audio. */
@@ -33,5 +37,5 @@ export function liveOperationReference(input:{scope:LiveScope;kind:string;target
   if(![s.tenantId,s.interviewId,s.callId,s.providerSessionId,input.kind].every(id)||!input.targetIds.length||!input.sourceEventIds.length
     ||!input.targetIds.every(id)||!input.sourceEventIds.every(id)||typeof input.interpretation!=='string'||!input.interpretation.trim())throw Error('live_operation_invalid');
   return'ligou-live-op:'+hash([1,s.tenantId,s.interviewId,s.callId,s.providerSessionId,input.kind,
-    [...new Set(input.targetIds)].sort(),[...new Set(input.sourceEventIds)].sort()]);
+    [...new Set(input.targetIds)].sort(opaqueIdOrder),[...new Set(input.sourceEventIds)].sort(opaqueIdOrder)]);
 }

@@ -213,7 +213,10 @@ describe('Live managed business tools',()=>{
     expect((await f.context()).view).toBe('overview');
     const overview=await f.context(),detail=await f.business.execute('get_context',{subject:'business_hours',targetIds:[]},ctx);
     expect(detail.contextRef).toBe(overview.contextRef);expect(detail.revision).toBe(overview.revision);
-    expect((await f.business.execute('get_context',{subject:'calendar',targetIds:['sunday']},ctx)).code).toBe('invalid_tool_arguments');
+    const combined=await f.business.execute('get_context',{subject:'calendar',targetIds:['sunday']},ctx);
+    expect(combined.ok).toBe(true);
+    expect((combined.catalogue as Array<{targetId:string}>).map(item=>item.targetId)).toEqual(['permissions','sunday']);
+    expect(f.counts().commits).toBe(0);
   });
   test('unknown subject or foreign target does not fall back to exposing the whole context',async()=>{
     const f=fixture();

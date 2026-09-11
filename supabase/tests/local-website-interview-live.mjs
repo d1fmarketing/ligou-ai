@@ -25,7 +25,7 @@ const initial={version:1,binding:{interviewId:call,callId:call,draftId:draft,dra
   ownerTurns:[],candidateContext:[],candidateOverrides:[]};
 let started=false;
 try {
-  run('initdb',['-D',`${temp}/data`,'-A','trust','-U','interview_test','--no-locale','--encoding=UTF8']);
+  run('initdb',['-D',`${temp}/data`,'-A','trust','-U','interview_test','--locale=en_US.UTF-8','--encoding=UTF8']);
   run('pg_ctl',['-D',`${temp}/data`,'-l',`${temp}/postgres.log`,'-o',`-k ${temp} -h '' -p 55441`,'-w','start']);started=true;
   sql(`create role anon;create role authenticated;create role service_role;
     create schema auth;create schema extensions;create extension pgcrypto with schema extensions;
@@ -85,6 +85,7 @@ try {
   sql(await file('20260908161827_website_interview_native_interpretation.sql'));
   sql(await file('20260908185401_website_interview_context_timezone.sql'));
   if(!process.argv.includes('--red')) sql(await file('20260910204742_website_interview_live_protocol.sql'));
+  if(!process.argv.includes('--red')&&!process.argv.includes('--operation-order-red'))sql(await file('20260911072902_website_live_operation_byte_order.sql'));
   sql(`insert into auth.users values('${owner}'),('${other}');
     insert into tenants(id,owner_user_id,status,operational_mode,test_memory_generation) values('${tenant}','${owner}','onboarding','simulation_only',2);
     insert into worker_jobs values('${job}','${tenant}','${attempt}','awaiting_review');
@@ -97,6 +98,22 @@ try {
     insert into budget_reservations(tenant_id,call_id,status,budget_day,reserved_cost_usd,reserved_minutes) values('${tenant}','${call}','active',current_date,1,55);
     select public.initialize_website_interview('${owner}','${call}','${request}','${prep}','${JSON.stringify(initial)}'::jsonb);`);
   assert.equal(sql('select count(*) from website_interviews;'),'1');
+
+  const collation=sql('select datcollate from pg_database where datname=current_database();');
+  assert.equal(collation,'en_US.UTF-8');console.log(`database_collation=${collation}`);
+  const actualIds=['event_EMprtp89IJG3fQjJgW3Kj','event_EMprtP9ibMmap8NZdtgPz'];
+  const localeOrder=JSON.parse(sql(`select to_jsonb(array_agg(x order by x)) from unnest(array['${actualIds.join("','")}'])x;`));
+  console.log(`locale_order=${JSON.stringify(localeOrder)}; utf8_order=${JSON.stringify([...actualIds].sort())}`);
+  const referenceInput={scope:{tenantId:tenant,interviewId:call,callId:call,providerSessionId:'live-fixture'},targetIds:['exception'],interpretation:'Identity parity fixture.'};
+  const helper=spawnSync('/opt/homebrew/Cellar/bun/1.2.13/bin/bun',['-e',
+    `import {liveOperationReference} from ${JSON.stringify(new URL('voice-controller/src/onboarding-live-context.ts',root).pathname)};
+     console.log(JSON.stringify({mixed:liveOperationReference(${JSON.stringify({...referenceInput,kind:'answer',sourceEventIds:actualIds})}),
+       unicode:liveOperationReference(${JSON.stringify({...referenceInput,kind:'correction',sourceEventIds:['event_😀','event_\uE000']})})}));`
+  ],{env:{PATH:'/usr/bin:/bin',LANG:'C'},encoding:'utf8'});
+  if(helper.status!==0)throw Error(helper.stderr||helper.stdout);
+  const references=JSON.parse(helper.stdout);
+  const orderCases=await readFile(new URL('supabase/tests/website-interview-live-operation-order-cases.sql',root),'utf8');
+  console.log(sql(orderCases.replaceAll('__APP_MIXED_REFERENCE__',references.mixed).replaceAll('__APP_UNICODE_REFERENCE__',references.unicode)));
 
   const cases=await readFile(new URL('supabase/tests/website-interview-live-cases.sql',root),'utf8');
   console.log(sql(cases));
