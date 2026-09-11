@@ -14,7 +14,7 @@ const staleOutput = path.join(root, "dist", outputDir);
 mkdirSync(staleOutput, { recursive: true });
 writeFileSync(path.join(staleOutput, "stale-containment-proof.txt"), "VITE_TEST_AUTOLOGIN\n");
 
-execFileSync("bun", ["run", "site:build"], { cwd: root, env, stdio: "inherit" });
+execFileSync("bun", ["run", "site:build", "--preview"], { cwd: root, env, stdio: "inherit" });
 execFileSync(
   "node",
   ["--test", "tests/security-containment.test.mjs", "tests/secret-scanner.test.mjs"],

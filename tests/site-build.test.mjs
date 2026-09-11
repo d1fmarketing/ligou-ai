@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { buildSite, composeSite } from "../scripts/build-site.mjs";
+import { assertPublicationBuildEnv, buildSite, composeSite } from "../scripts/build-site.mjs";
 import { publicSiteConfig } from "../scripts/public-site-config.mjs";
 import * as productionEnv from "../scripts/production-env.mjs";
 import { handleSalesSession } from "../src/server/vercel-sales-session.mjs";
@@ -46,6 +46,16 @@ test('explicit publication build rejects incomplete configuration before invokin
   assert.throws(run, reason => String(reason.stderr).includes('production_public_env_required') && !String(reason.stderr).includes('spawnSync npm'));
 });
 
+test('bare CLI build validates publication env by default; --preview is the only opt-out', () => {
+  const cli = (args, env) => () => execFileSync(process.execPath, [path.join(root, 'scripts/build-site.mjs'), ...args], { cwd: os.tmpdir(), env, encoding: 'utf8', stdio: 'pipe' });
+  assert.throws(cli([], { PATH: '/nonexistent' }), reason => String(reason.stderr).includes('production_public_env_required') && !String(reason.stderr).includes('spawnSync npm'));
+  assert.throws(cli(['--preview'], { PATH: '/nonexistent' }), reason => String(reason.stderr).includes('spawnSync npm') && !String(reason.stderr).includes('production_public_env_required'));
+  assert.throws(cli(['--production', '--preview'], { PATH: '/nonexistent' }), reason => String(reason.stderr).includes('usage: build-site.mjs'));
+  assert.throws(() => buildSite({ PATH: '/nonexistent' }), /production_public_env_required/);
+  assert.throws(() => assertPublicationBuildEnv({ VITE_SUPABASE_URL: publicUrl }), /production_build_env_incomplete:VITE_SESSION_URL/);
+  assert.doesNotThrow(() => assertPublicationBuildEnv(productionEnv.productionBuildEnv(publicationEnv)));
+});
+
 test("public config admits only public keys and rejects invalid input before a build can start", () => {
   assert.deepEqual(publicSiteConfig(), {});
   for (const key of [publicKey, jwt("anon")]) {
@@ -53,7 +63,7 @@ test("public config admits only public keys and rejects invalid input before a b
     assert.deepEqual(publicSiteConfig({ LIGOU_PUBLIC_SUPABASE_URL: publicUrl, LIGOU_PUBLIC_SUPABASE_KEY: key }), { supabaseUrl: publicUrl, supabaseKey: key });
   }
   for (const key of ["sb_secret_private_fixture", jwt("service_role"), jwt("authenticated"), "not-a-key", "sb_publishable_", "sb_publishable_x\nsecret"]) {
-    assert.throws(() => buildSite({ LIGOU_PUBLIC_SUPABASE_URL: publicUrl, LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY: key }), /public_supabase_key_invalid/);
+    assert.throws(() => buildSite({ LIGOU_PUBLIC_SUPABASE_URL: publicUrl, LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY: key }, { publication: false }), /public_supabase_key_invalid/);
   }
   for (const url of ["https://attacker.example", "http://fixture.supabase.co", "https://user:pass@fixture.supabase.co", "https://fixture.supabase.co/?secret=x"]) {
     assert.throws(() => publicSiteConfig({ LIGOU_PUBLIC_SUPABASE_URL: url, LIGOU_PUBLIC_SUPABASE_KEY: publicKey }), /public_supabase_url_invalid/);

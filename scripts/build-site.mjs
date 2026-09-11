@@ -64,13 +64,23 @@ export function composeSite({ rootDir = root, outputDir = "client", env = {} } =
   return { out, commercialLoginConfigured: Boolean(config.supabaseUrl && config.supabaseKey) };
 }
 
-export function buildSite(env = process.env, { publication = false } = {}) {
+// Publication is the default: a bundle built without the public voice endpoint
+// silently embeds the loopback controller URL (observed in production on
+// 2026-09-01 and again as a latent gap on 2026-09-11). Previews opt out explicitly.
+export function assertPublicationBuildEnv(buildEnv) {
+  for (const name of ["VITE_SUPABASE_URL", "VITE_SESSION_URL"]) {
+    if (typeof buildEnv[name] !== "string" || !buildEnv[name].trim()) throw new Error(`production_build_env_incomplete:${name}`);
+  }
+}
+
+export function buildSite(env = process.env, { publication = true } = {}) {
   if (publication) validateProductionPublicationEnv(env);
   const outputDir = env.LIGOU_SITE_OUTPUT_DIR ?? "client";
   validateOutputDir(outputDir);
   // Validate before invoking either bundler, including the dashboard's public key mapping.
   const config = publicSiteConfig(env);
   const buildEnv = productionBuildEnv({ ...env, LIGOU_PUBLIC_SUPABASE_PUBLISHABLE_KEY: config.supabaseKey || "" }, outputDir);
+  if (publication) assertPublicationBuildEnv(buildEnv);
   execFileSync("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], {
     cwd: path.join(root, "src/commercial"), stdio: "inherit", env: buildEnv,
   });
@@ -89,6 +99,8 @@ export function buildSite(env = process.env, { publication = false } = {}) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  if (args.length > 1 || (args.length === 1 && args[0] !== '--production')) throw new Error('usage: build-site.mjs [--production]');
-  buildSite(process.env, { publication: args[0] === '--production' });
+  if (args.length > 1 || (args.length === 1 && !['--production', '--preview'].includes(args[0]))) throw new Error('usage: build-site.mjs [--production|--preview]');
+  const preview = args[0] === '--preview';
+  if (preview) console.log("Preview build: publication env validation skipped (--preview); the bundle may embed the loopback voice endpoint and must not be deployed.");
+  buildSite(process.env, { publication: !preview });
 }
