@@ -1054,7 +1054,12 @@ export async function startVoiceSession({
   }
 }
 
-export function voiceSessionErrorMessage(error) {
+const NOT_SETTLED_CODES = new Set(["interview_resume_source_not_settled", "interview_prior_not_settled"]);
+export function isPriorInterviewNotSettled(error) {
+  return NOT_SETTLED_CODES.has(error?.code) || NOT_SETTLED_CODES.has(error?.message);
+}
+
+export function voiceSessionErrorMessage(error, { notSettledAttempts = 1 } = {}) {
   if (error?.message === "live_opening_contract_invalid") return "Não foi possível confirmar a nova sessão de voz. Tente novamente.";
   if (error?.message === "live_model_mismatch") return "Esta entrevista precisa iniciar com o modelo de voz configurado. Reabra o painel e tente novamente.";
   if (["NotAllowedError", "PermissionDeniedError", "SecurityError"].includes(error?.name)) {
@@ -1074,7 +1079,12 @@ export function voiceSessionErrorMessage(error) {
     return "Houve uma falha técnica no áudio. Tente iniciar novamente.";
   }
   const message = typeof error?.message === "string" ? error.message : "Não foi possível iniciar a chamada. Tente novamente.";
-  if (["interview_resume_source_not_settled", "interview_prior_not_settled"].includes(message)) {
+  if (isPriorInterviewNotSettled(error)) {
+    // The server side only clears this when the previous provider session is
+    // confirmed closed or expired; after a second failure say so plainly.
+    if (notSettledAttempts >= 2) {
+      return "A entrevista anterior não foi encerrada de forma confirmada. Isso pode levar até o vencimento da sessão anterior no provedor para se resolver sozinho. Você pode tentar de novo mais tarde; se persistir, avise o suporte com o horário desta tentativa. Suas respostas estão preservadas.";
+    }
     return "A entrevista anterior ainda está sendo encerrada. Aguarde um momento e tente novamente. Se continuar, fale com o suporte; suas respostas estão preservadas.";
   }
   return message;

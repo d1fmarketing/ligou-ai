@@ -8,6 +8,7 @@ import {
   createVoiceSessionTiming,
   endedVoiceSessionCopy,
   handleClientUpgradeRequired,
+  isPriorInterviewNotSettled,
   markVoiceSessionAccepted,
   settleStartedSession,
   startVoiceSession,
@@ -37,6 +38,9 @@ export function VoicePanel({
     lockedOnboarding ? "onboarding" : initialSessionType,
   );
   const [onboardingOutcome, setOnboardingOutcome] = useState(null);
+  // Consecutive "prior interview not settled" failures: only the copy changes;
+  // the button is never disabled for this, and success resets the count.
+  const notSettledAttemptsRef = useRef(0);
   const [endedSessionType, setEndedSessionType] = useState(null);
   const [endedCallId,setEndedCallId]=useState(null);
   const sessionRef = useRef(null);
@@ -188,6 +192,7 @@ export function VoicePanel({
         ended: endedRef.current,
         onAccepted: (acceptedSession) => {
           markVoiceSessionAccepted();
+          notSettledAttemptsRef.current = 0;
           sessionRef.current = acceptedSession;
         },
       });
@@ -195,7 +200,8 @@ export function VoicePanel({
       if (sessionRunRef.current !== runId || cancelledRef.current || endedRef.current) return;
       const upgrade = handleClientUpgradeRequired(e);
       if (upgrade.reloaded) return;
-      setError(upgrade.handled ? upgrade.message : voiceSessionErrorMessage(e));
+      notSettledAttemptsRef.current = isPriorInterviewNotSettled(e) ? notSettledAttemptsRef.current + 1 : 0;
+      setError(upgrade.handled ? upgrade.message : voiceSessionErrorMessage(e, { notSettledAttempts: notSettledAttemptsRef.current }));
       timing.mark("panel_failed");
       setStatus("failed");
     } finally {

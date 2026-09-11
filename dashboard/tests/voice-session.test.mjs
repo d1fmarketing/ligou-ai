@@ -1755,6 +1755,22 @@ test("onboarding recovery errors give owner-safe instructions instead of SQL ide
   assert.equal(sessionModule.voiceSessionErrorMessage(new Error("Microfone indisponível")), "Microfone indisponível");
 });
 
+test("a prior interview that is not settled is told the truth after the second failure, without a blocked button", () => {
+  const error = Object.assign(new Error("interview_resume_source_not_settled"), { code: "interview_resume_source_not_settled", status: 502 });
+  assert.equal(sessionModule.isPriorInterviewNotSettled(error), true);
+  assert.equal(sessionModule.isPriorInterviewNotSettled(new Error("interview_prior_not_settled")), true);
+  assert.equal(sessionModule.isPriorInterviewNotSettled(new Error("fetch_failed")), false);
+  assert.equal(sessionModule.isPriorInterviewNotSettled(null), false);
+  assert.equal(sessionModule.voiceSessionErrorMessage(error, { notSettledAttempts: 1 }), sessionModule.voiceSessionErrorMessage(new Error("interview_prior_not_settled")));
+  const final = sessionModule.voiceSessionErrorMessage(error, { notSettledAttempts: 2 });
+  assert.match(final, /não foi encerrada de forma confirmada/);
+  assert.match(final, /vencimento da sessão anterior/);
+  assert.match(final, /suporte/);
+  assert.doesNotMatch(final, /Aguarde um momento e tente novamente/);
+  assert.equal(sessionModule.voiceSessionErrorMessage(error, { notSettledAttempts: 3 }), final);
+  assert.equal(sessionModule.voiceSessionErrorMessage(new Error("Microfone indisponível"), { notSettledAttempts: 5 }), "Microfone indisponível");
+});
+
 test('Live caption fragments preserve whitespace, overlap, late intervals and event deduplication',async()=>{
  const {appendVoiceCaption,liveTranscriptCaption}=await import('../src/voice/website-live.js');
  const caption=(kind,id,text,start,end)=>liveTranscriptCaption({type:`session.${kind}_transcript.delta`,event_id:id,delta:text,start_ms:start,end_ms:end});

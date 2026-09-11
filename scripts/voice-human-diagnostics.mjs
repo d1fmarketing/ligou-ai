@@ -46,13 +46,16 @@ export function projectHumanDiagnosticEvent(event,direction,redact=redactHumanDi
     'conversation.item.created','conversation.item.done','conversation.item.create','conversation.item.truncate','conversation.item.truncated',
     'conversation.item.input_audio_transcription.completed','conversation.item.input_audio_transcription.failed',
     'response.output_audio_transcript.delta','response.output_audio_transcript.done','response.output_item.added','response.output_item.done',
-    'response.function_call_arguments.delta','response.function_call_arguments.done','error']);
+    'response.function_call_arguments.delta','response.function_call_arguments.done','error',
+    // GPT-Live data-channel events (live-conversations): deltas keep only counts and timeline intervals.
+    'session.started','session.closed','session.usage.updated','session.input_transcript.delta','session.output_transcript.delta','info',
+    'session.close','session.input_audio.mute','session.input_audio.unmute']);
   if(!selected.has(event.type))return null;
   return (async()=>{
   const pick=(value,keys)=>Object.fromEntries(keys.filter(key=>Object.hasOwn(value??{},key)).map(key=>[key,value[key]]));
   const hash=async text=>{if(typeof text!=='string')return null;const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text));return [...new Uint8Array(bytes)].map(n=>n.toString(16).padStart(2,'0')).join('');};
   const parse=async value=>{if(typeof value!=='string')return value;try{return JSON.parse(value);}catch{return {unparsed:true,chars:value.length,sha256:await hash(value)};}};
-  const data={direction,...pick(event,['type','event_id','response_id','item_id','previous_item_id','call_id','content_index','output_index','audio_start_ms','audio_end_ms','transcript','delta'])};
+  const data={direction,...pick(event,['type','event_id','response_id','item_id','previous_item_id','call_id','content_index','output_index','audio_start_ms','audio_end_ms','transcript','delta','start_ms','end_ms','reason','usage'])};
   // Partial text/JSON can split a credential across events. Keep timing/identity;
   // the completed events below retain redacted business content.
   if(event.type.endsWith('.delta')){delete data.delta;data.deltaChars=typeof event.delta==='string'?event.delta.length:0;}
@@ -60,7 +63,7 @@ export function projectHumanDiagnosticEvent(event,direction,redact=redactHumanDi
   if(Object.hasOwn(event,'arguments'))data.arguments=await parse(event.arguments);
   if(event.session){
     const session=event.session,output=session.audio?.output,input=session.audio?.input;
-    data.configuration={...pick(session,['type','model','output_modalities','tool_choice','max_output_tokens']),
+    data.configuration={...pick(session,['id','type','model','output_modalities','tool_choice','max_output_tokens','expires_at']),
       voice:output?.voice??null,transcription:pick(input?.transcription,['model','language','languages']),
       turnDetection:pick(input?.turn_detection,['type','eagerness','threshold','prefix_padding_ms','silence_duration_ms','create_response','interrupt_response']),
       tools:Array.isArray(session.tools)?session.tools.map(tool=>pick(tool,['type','name'])):[],

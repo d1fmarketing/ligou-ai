@@ -201,3 +201,17 @@ test('malformed function arguments and outputs retain only parse metadata and ha
  }
  assert(!JSON.stringify(projections).includes('opaque-canary-no-prefix'));
 });
+
+test('Live data-channel events keep timeline intervals and identity while transcript text becomes a count',async()=>{
+ const secret='sk-live-canary-123456789',text='Oi, aqui é o Ligou '+secret;
+ const delta=await projectHumanDiagnosticEvent({type:'session.output_transcript.delta',event_id:'out_1',delta:text,start_ms:1200,end_ms:2400},'provider');
+ assert.equal(delta.deltaChars,text.length);assert.equal(delta.start_ms,1200);assert.equal(delta.end_ms,2400);assert.equal(Object.hasOwn(delta,'delta'),false);
+ const started=await projectHumanDiagnosticEvent({type:'session.started',event_id:'evt_1',session:{id:'live_abc',model:'gpt-live-1',expires_at:1800000000,instructions:'private '+secret}},'provider');
+ assert.equal(started.configuration.model,'gpt-live-1');assert.equal(started.configuration.id,'live_abc');assert.equal(started.configuration.expires_at,1800000000);assert(!JSON.stringify(started).includes(secret));
+ const closed=await projectHumanDiagnosticEvent({type:'session.closed',event_id:'evt_9',reason:'close_requested',usage:{seconds:42},session:{id:'live_abc'}},'provider');
+ assert.equal(closed.reason,'close_requested');assert.equal(closed.usage.seconds,42);
+ assert.equal((await projectHumanDiagnosticEvent({type:'session.close',event_id:'c1'},'client')).type,'session.close');
+ assert.notEqual(await projectHumanDiagnosticEvent({type:'info',event_id:'i1'},'provider'),null);
+ assert.notEqual(await projectHumanDiagnosticEvent({type:'session.usage.updated',usage:{seconds:7}},'provider'),null);
+ assert.equal(projectHumanDiagnosticEvent({type:'session.input_audio.delta',delta:secret},'provider'),null);
+});
