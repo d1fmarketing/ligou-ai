@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { finalizeTerminalBudget, reapAbandonedCalls, reconcileBudgetReservations, reconcileProviderTerminations } from "../src/budget.ts";
+import { finalizeTerminalBudget, liveReconcileDelayMs, reapAbandonedCalls, reconcileBudgetReservations, reconcileProviderTerminations } from "../src/budget.ts";
 import { requestProviderTermination, terminateProviderCall } from "../src/provider-termination.ts";
 import { _setClient } from "../src/rules.ts";
 
@@ -16,6 +16,12 @@ let providerTerminationReadbackOpenaiCallId: string | null = null;
 let unresolvedSettlements: any[] = [];
 let reapCalls: any[] = [];
 let reapResult: any = 0;
+let liveExpiryReceipts: any[] = [];
+let liveSettlements: any[] = [];
+let liveExpiryResult: any = true;
+let liveExpiryError: any = null;
+let liveSettleError: any = null;
+let liveCallReread: any = null;
 
 function client() {
   return {
@@ -56,6 +62,14 @@ function client() {
         unresolvedSettlements.push(args ?? {});
         return Promise.resolve({ data: "reservation-1", error: null });
       }
+      if (name === "reconcile_live_session_expiry") {
+        liveExpiryReceipts.push(args ?? {});
+        return Promise.resolve({ data: liveExpiryError ? null : liveExpiryResult, error: liveExpiryError });
+      }
+      if (name === "settle_unresolved_live_call_budget") {
+        liveSettlements.push(args ?? {});
+        return Promise.resolve({ data: liveSettleError ? null : "reservation-1", error: liveSettleError });
+      }
       if (name === "settle_call_budget") {
         settleAttempts += 1;
         return Promise.resolve(settleAttempts === 1
@@ -78,7 +92,9 @@ function client() {
             selectedCallId = String(value);
           return api;
         },
-        maybeSingle: async () => table === "calls"
+        maybeSingle: async () => table === "calls" && liveCallReread
+          ? { data: { id: selectedCallId, ...liveCallReread }, error: null }
+          : table === "calls"
           ? {
               data: providerTerminationReadbackState
                 ? {
@@ -112,6 +128,12 @@ beforeEach(() => {
   unresolvedSettlements = [];
   reapCalls = [];
   reapResult = 0;
+  liveExpiryReceipts = [];
+  liveSettlements = [];
+  liveExpiryResult = true;
+  liveExpiryError = null;
+  liveSettleError = null;
+  liveCallReread = null;
   claimRow = {
     reservation_id: "reservation-1", tenant_id: "tenant-1", call_id: "call-1",
     actual_cost_usd: 0, minutes: 0, outcome: "startup_error",
@@ -557,5 +579,101 @@ describe("managed Live reconciliation dispatch", () => {
       claimRow={...base,...change};
       expect(await reconcileBudgetReservations()).toBe(0);expect(unresolvedSettlements).toHaveLength(0);expect(settleAttempts).toBe(0);
     }
+  });
+});
+
+describe("Live expiry reconciliation converges without inventing finalization", () => {
+  const probeNotFound = async () => ({ outcome: "not_found" as const, status: 404, code: "session_id_not_found", type: "invalid_request_error", checkedAt: new Date().toISOString() });
+  const liveRow = () => ({ ...claimRow, model: "gpt-live-1", channel: "browser", session_type: "onboarding", provider_termination_state: "unknown",
+    provider_usage_state: "unknown", outcome: "ended", minutes: 92 / 60, reconcile_attempts: 1403, reserved_cost_usd: 7.5, reserved_minutes: 55,
+    actual_cost_usd: 0.14330983, openai_call_id: "live_u1_fixture", provider_usage_details: { expiresAt: 1_700_000_000, voiceSeconds: 92 } });
+  const reread = (extra: Record<string, unknown> = {}) => ({ status: "ended", ended_at: "2026-09-11T16:59:16Z", openai_call_id: "live_u1_fixture",
+    provider_termination_state: "unknown", provider_usage_state: "unknown", cost_estimate_usd: 0.14330983, duration_seconds: 92,
+    provider_usage_details: { expiresAt: 1_700_000_000, voiceSeconds: 92 }, ...extra });
+  test("backoff doubles from five seconds and caps at five minutes", () => {
+    expect(liveReconcileDelayMs(1)).toBe(5_000); expect(liveReconcileDelayMs(2)).toBe(10_000); expect(liveReconcileDelayMs(3)).toBe(20_000);
+    expect(liveReconcileDelayMs(7)).toBe(300_000); expect(liveReconcileDelayMs(1403)).toBe(300_000);
+    expect(liveReconcileDelayMs(undefined)).toBe(5_000); expect(liveReconcileDelayMs(NaN)).toBe(5_000); expect(liveReconcileDelayMs(0)).toBe(5_000);
+  });
+  test("a gone provider session past its expires_at records expiry evidence and settles the re-read floor through the locked wrapper", async () => {
+    claimRow = liveRow(); liveCallReread = reread({ cost_estimate_usd: 0.2 });
+    let requests = 0;
+    expect(await reconcileBudgetReservations(async () => { requests++; return new Response(null, { status: 200 }); }, { recoverLive: async () => false, probeLive: probeNotFound })).toBe(1);
+    expect(requests).toBe(0); expect(settleAttempts).toBe(0); expect(unresolvedSettlements).toHaveLength(0);
+    expect(liveExpiryReceipts).toHaveLength(1);
+    expect(liveExpiryReceipts[0]).toMatchObject({ p_call: "call-1", p_provider_session_id: "live_u1_fixture", p_http_status: 404, p_error_code: "session_id_not_found", p_error_type: "invalid_request_error", p_evidence_reference: "live_attach_probe:live_u1_fixture" });
+    expect(liveSettlements).toHaveLength(1);
+    expect(liveSettlements[0]).toMatchObject({ p_tenant: "tenant-1", p_call: "call-1", p_estimated_cost: 0.2, p_minutes: 92 / 60, p_outcome: "ended",
+      p_detail: { reconciled: true, reservation_id: "reservation-1", provider_usage_state: "unknown", provider_termination_state: "unknown", costComplete: false, cost_source: "calls.cost_estimate_usd@reread", expiry_policy: "live_expires_at_and_attach_404_v1", expiresAt: 1_700_000_000 } });
+    expect(liveSettlements[0].p_detail).not.toHaveProperty("settlement_basis");
+    expect(deferred).toHaveLength(0);
+  });
+  test("a provider-active row after a controller crash follows the same expiry path", async () => {
+    claimRow = { ...liveRow(), provider_termination_state: "active" }; liveCallReread = reread({ provider_termination_state: "active" });
+    expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: probeNotFound })).toBe(1);
+    expect(liveSettlements[0].p_detail.provider_termination_state).toBe("active");
+  });
+  test("a cost that changed under the lock defers five seconds and repeats", async () => {
+    claimRow = liveRow(); liveCallReread = reread(); liveSettleError = { message: "live_settlement_cost_changed" };
+    const before = Date.now();
+    expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: probeNotFound })).toBe(0);
+    expect(liveSettlements).toHaveLength(1); expect(deferred.at(-1).reconcile_last_error).toBe("live_settlement_cost_changed");
+    expect(Date.parse(deferred.at(-1).reconcile_after) - before).toBeGreaterThanOrEqual(4_500); expect(Date.parse(deferred.at(-1).reconcile_after) - before).toBeLessThan(10_000);
+  });
+  test("a re-read that already confirmed or left the terminal state defers without probing or settling", async () => {
+    let probes = 0;
+    for (const change of [{ provider_termination_state: "confirmed" }, { provider_termination_state: "not_required" }, { status: "active" }]) {
+      claimRow = liveRow(); liveCallReread = reread(change);
+      expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: async () => { probes++; return probeNotFound(); } })).toBe(0);
+      expect(deferred.at(-1).reconcile_last_error).toBe("live_state_changed_refresh_required");
+    }
+    expect(probes).toBe(0); expect(liveExpiryReceipts).toHaveLength(0); expect(liveSettlements).toHaveLength(0);
+  });
+  test("probes that do not prove absence never record evidence and back off to the cap", async () => {
+    for (const probe of [{ outcome: "exists", status: 101, code: null, type: null }, { outcome: "unknown", status: 500, code: "server_error", type: "server_error" }, { outcome: "unknown", status: 404, code: "other", type: "invalid_request_error" }]) {
+      claimRow = liveRow(); liveCallReread = reread(); const before = Date.now();
+      expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: async () => ({ ...probe, checkedAt: new Date().toISOString() }) as any })).toBe(0);
+      expect(deferred.at(-1).reconcile_last_error).toBe(`live_probe_${probe.outcome}`);
+      expect(Date.parse(deferred.at(-1).reconcile_after) - before).toBeGreaterThanOrEqual(295_000);
+    }
+    expect(liveExpiryReceipts).toHaveLength(0); expect(liveSettlements).toHaveLength(0);
+  });
+  test("expiry waits for the persisted expires_at and refuses to guess when it is missing", async () => {
+    let probes = 0; const probe = async () => { probes++; return probeNotFound(); };
+    claimRow = liveRow(); liveCallReread = reread({ provider_usage_details: { expiresAt: Math.floor(Date.now() / 1000) + 600, voiceSeconds: 92 } });
+    expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: probe })).toBe(0);
+    expect(deferred.at(-1).reconcile_last_error).toBe("live_expiry_not_elapsed");
+    claimRow = liveRow(); liveCallReread = reread({ provider_usage_details: { voiceSeconds: 92 } });
+    expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: probe })).toBe(0);
+    expect(deferred.at(-1).reconcile_last_error).toBe("live_expiry_evidence_missing");
+    expect(probes).toBe(0); expect(liveExpiryReceipts).toHaveLength(0);
+  });
+  test("the first failures back off from five seconds", async () => {
+    claimRow = { ...liveRow(), reconcile_attempts: 1 }; liveCallReread = reread(); const before = Date.now();
+    expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: async () => ({ outcome: "unknown", status: null, code: null, type: null, checkedAt: new Date().toISOString() }) })).toBe(0);
+    expect(Date.parse(deferred.at(-1).reconcile_after) - before).toBeGreaterThanOrEqual(4_500); expect(Date.parse(deferred.at(-1).reconcile_after) - before).toBeLessThan(10_000);
+  });
+  test("a recorded receipt below the documented attempt floor does not settle yet", async () => {
+    claimRow = { ...liveRow(), reconcile_attempts: 3 }; liveCallReread = reread();
+    expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: probeNotFound })).toBe(0);
+    expect(liveExpiryReceipts).toHaveLength(1); expect(liveSettlements).toHaveLength(0); expect(deferred.at(-1).reconcile_last_error).toBe("live_expiry_settlement_awaiting_attempts");
+  });
+  test("a rejected expiry receipt is deferred with its reason and nothing settles", async () => {
+    claimRow = liveRow(); liveCallReread = reread(); liveExpiryError = { message: "live_expiry_not_elapsed" };
+    expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: probeNotFound })).toBe(0);
+    expect(liveSettlements).toHaveLength(0); expect(deferred.at(-1).reconcile_last_error).toBe("live_expiry_not_elapsed");
+  });
+  test("an overrun with unconfirmed termination and out-of-scope rows never settle from expiry", async () => {
+    claimRow = { ...liveRow(), outcome: "killed_budget" }; liveCallReread = reread({ cost_estimate_usd: 9 });
+    expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: probeNotFound })).toBe(0);
+    expect(deferred.at(-1).reconcile_last_error).toBe("live_overrun_requires_confirmed_termination"); expect(liveSettlements).toHaveLength(0);
+    for (const change of [{ channel: "sip" }, { session_type: "customer" }]) {
+      claimRow = { ...liveRow(), ...change }; liveCallReread = reread();
+      expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: probeNotFound })).toBe(0);
+      expect(liveSettlements).toHaveLength(0);
+    }
+    claimRow = liveRow(); liveCallReread = reread({ cost_estimate_usd: 0 });
+    expect(await reconcileBudgetReservations(undefined, { recoverLive: async () => false, probeLive: probeNotFound })).toBe(0);
+    expect(liveSettlements).toHaveLength(0);
   });
 });

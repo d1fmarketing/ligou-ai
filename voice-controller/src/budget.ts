@@ -1,6 +1,15 @@
 import { config } from "./config.ts";
 import { supa } from "./rules.ts";
 import { terminateProviderCall, type FetchLike, type ProviderTerminationMode } from "./provider-termination.ts";
+import { probeLiveSession, type LiveSessionProbe } from "./onboarding-live-probe.ts";
+
+/** Live reconciliation backoff: 5 s doubling to a 5-minute cap. The unbounded
+ * 5-second loop was observed at 1,403 attempts on one call (2026-09-11). */
+export function liveReconcileDelayMs(attempts: unknown): number {
+  const n = Number(attempts);
+  if (!Number.isFinite(n) || n < 1) return 5_000;
+  return Math.min(5_000 * 2 ** (Math.min(n, 30) - 1), 300_000);
+}
 
 export type BudgetOutcome = "ended" | "startup_error" | "killed_deadline" | "killed_budget" | "error";
 
@@ -38,11 +47,11 @@ export async function settleCallBudget(args: {
   return String(data);
 }
 
-async function deferBudgetReconciliation(callId: string, error: unknown) {
+async function deferBudgetReconciliation(callId: string, error: unknown, delayMs = 5_000) {
   const detail = (error as any)?.detail ?? (error as any)?.message ?? String(error);
   const { error: deferError } = await supa().from("budget_reservations").update({
     reconcile_last_error: String(detail).slice(0, 400),
-    reconcile_after: new Date(Date.now() + 5_000).toISOString(),
+    reconcile_after: new Date(Date.now() + delayMs).toISOString(),
     reconcile_lease_until: null,
   }).eq("call_id", callId).eq("status", "active");
   if (deferError) {
@@ -178,6 +187,7 @@ export async function reapAbandonedCalls(): Promise<number> {
 
 interface ManagedReconciliationDependencies {
   recoverLive?: (callId: string, reason: string) => Promise<boolean>;
+  probeLive?: (sessionId: string) => Promise<LiveSessionProbe>;
 }
 
 async function recoverLiveTermination(callId: string, reason: string, dependencies: ManagedReconciliationDependencies): Promise<boolean> {
@@ -187,6 +197,57 @@ async function recoverLiveTermination(callId: string, reason: string, dependenci
     const recover = dependencies.recoverLive ?? (await import("./onboarding-live-runtime.ts")).recoverManagedLiveCancellation;
     return await recover(callId, reason);
   } catch { return false; }
+}
+
+const TERMINAL_CALL_STATUSES = new Set(["ended", "error", "killed_budget", "killed_deadline"]);
+const isObject = (value: unknown): value is Record<string, any> => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** A Live session that no longer exists at the provider (404 session_id_not_found)
+ * and whose persisted expires_at has passed cannot produce session.closed any
+ * more. Record that evidence through the Live-aware receipt RPC and settle the
+ * reservation from the RE-READ observed floor through the locked wrapper. The
+ * termination state stays unknown/active: nothing here invents finalization. */
+async function reconcileLiveExpiry(row: any, dependencies: ManagedReconciliationDependencies): Promise<{ settled: boolean; reason: string; delayMs?: number }> {
+  const callId = String(row.call_id);
+  const reread = await supa().from("calls")
+    .select("id,status,ended_at,openai_call_id,provider_termination_state,provider_usage_state,cost_estimate_usd,duration_seconds,provider_usage_details")
+    .eq("id", callId).maybeSingle();
+  const call = reread?.data;
+  if (!call || reread.error) return { settled: false, reason: "live_reread_unavailable" };
+  const state = String(call.provider_termination_state ?? "unknown");
+  if (["confirmed", "not_required"].includes(state) || !TERMINAL_CALL_STATUSES.has(String(call.status)))
+    return { settled: false, reason: "live_state_changed_refresh_required", delayMs: 5_000 };
+  if (!["unknown", "active"].includes(state)) return { settled: false, reason: "live_state_unsupported" };
+  const sessionId = typeof call.openai_call_id === "string" && call.openai_call_id.trim() ? call.openai_call_id : null;
+  if (!sessionId) return { settled: false, reason: "live_session_id_missing" };
+  const details = isObject(call.provider_usage_details) ? call.provider_usage_details : {};
+  const expiresAt = Number(details.expiresAt);
+  if (!Number.isFinite(expiresAt)) return { settled: false, reason: "live_expiry_evidence_missing" };
+  if (Date.now() / 1000 < expiresAt) return { settled: false, reason: "live_expiry_not_elapsed" };
+  const probe = await (dependencies.probeLive ?? ((id: string) => probeLiveSession(id, { apiKey: config.openaiKey })))(sessionId);
+  if (probe.outcome !== "not_found") return { settled: false, reason: `live_probe_${probe.outcome}` };
+  const receipt = await supa().rpc("reconcile_live_session_expiry", {
+    p_call: callId, p_provider_session_id: sessionId, p_checked_at: probe.checkedAt, p_http_status: 404,
+    p_error_code: "session_id_not_found", p_error_type: "invalid_request_error", p_evidence_reference: `live_attach_probe:${sessionId}`,
+  });
+  if (receipt.error || receipt.data !== true) return { settled: false, reason: receipt.error?.message ?? "live_expiry_receipt_unrecorded" };
+  if (Number(row.reconcile_attempts ?? 0) < UNRESOLVED_SETTLEMENT_MIN_ATTEMPTS) return { settled: false, reason: "live_expiry_settlement_awaiting_attempts" };
+  const floor = Number(call.cost_estimate_usd), reserved = Number(row.reserved_cost_usd);
+  if (row.channel !== "browser" || row.session_type !== "onboarding" || !Number.isFinite(floor) || floor <= 0 || !Number.isFinite(reserved) || reserved < 0)
+    return { settled: false, reason: "live_observed_cost_floor_unconfirmed" };
+  // The shared settlement RPC only admits an overrun with confirmed termination.
+  if (floor > reserved) return { settled: false, reason: "live_overrun_requires_confirmed_termination" };
+  const minutes = Math.ceil(Number(call.duration_seconds ?? 0)) / 60;
+  const settle = await supa().rpc("settle_unresolved_live_call_budget", {
+    p_tenant: String(row.tenant_id), p_call: callId, p_estimated_cost: floor, p_minutes: minutes, p_outcome: String(row.outcome),
+    p_detail: { ...details, reconciled: true, reservation_id: row.reservation_id, provider_usage_state: "unknown", provider_termination_state: state,
+      costComplete: false, cost_source: "calls.cost_estimate_usd@reread", expiry_policy: "live_expires_at_and_attach_404_v1" },
+  });
+  if (settle.error) {
+    const message = settle.error.message ?? "live_unresolved_settlement_failed";
+    return { settled: false, reason: message, delayMs: message === "live_settlement_cost_changed" ? 5_000 : undefined };
+  }
+  return { settled: true, reason: "live_expiry_settled" };
 }
 
 export async function reconcileBudgetReservations(fetchImpl?: FetchLike, dependencies: ManagedReconciliationDependencies = {}): Promise<number> {
@@ -207,11 +268,14 @@ export async function reconcileBudgetReservations(fetchImpl?: FetchLike, depende
     const confirmed = await recoverLiveTermination(String(row.call_id), storedTerminationReason, dependencies);
     // Recovery may have persisted usage and settled the reservation itself.
     // Do not settle from this pre-recovery snapshot; the next claim reads truth.
-    await deferBudgetReconciliation(String(row.call_id), confirmed ? "live_termination_reconciled_refresh_required" : "live_termination_unconfirmed");
+    if (confirmed) { await deferBudgetReconciliation(String(row.call_id), "live_termination_reconciled_refresh_required"); return 0; }
+    const expiry = await reconcileLiveExpiry(row, dependencies);
+    if (expiry.settled) { await reconcileWebsiteInterviewTerminals(); return 1; }
+    await deferBudgetReconciliation(String(row.call_id), expiry.reason, expiry.delayMs ?? liveReconcileDelayMs(row.reconcile_attempts));
     return 0;
   }
   if (row.model === "gpt-live-1" && !["confirmed", "not_required"].includes(providerState)) {
-    await deferBudgetReconciliation(String(row.call_id), "live_termination_unconfirmed");
+    await deferBudgetReconciliation(String(row.call_id), "live_termination_unconfirmed", liveReconcileDelayMs(row.reconcile_attempts));
     return 0;
   }
   const provider = needsTermination
