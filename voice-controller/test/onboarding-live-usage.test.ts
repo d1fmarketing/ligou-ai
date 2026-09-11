@@ -6,6 +6,15 @@ const response = (responseId = 'resp-one') => ({ responseId, model: 'gpt-5.6-ter
 const ledger = () => createLiveUsageLedger({ created: true, backendModel: 'gpt-5.6-terra' });
 
 describe('Live voice and managed backend usage', () => {
+  test('Astra uses its own standard rates and preserves cumulative settlement', () => {
+    expect(managedTextUsageCost('gpt-6-astra',usage()).costUsd).toBe(0.0169);
+    expect(managedTextRates('gpt-6-astra',272000)).toMatchObject({inputUsdPerMillion:10,cacheWriteUsdPerMillion:12.5,outputUsdPerMillion:50});
+    expect(managedTextRates('gpt-6-astra',272001)).toMatchObject({inputUsdPerMillion:20,cachedInputUsdPerMillion:2,cacheWriteUsdPerMillion:25,outputUsdPerMillion:75});
+    const astra=createLiveUsageLedger({created:true,backendModel:'gpt-6-astra'});
+    astra.observeVoice(60,true);const result={...response(),model:'gpt-6-astra'};
+    astra.observeResponse(result);astra.observeResponse(result);
+    expect(astra.snapshot()).toMatchObject({backendCostUsd:0.0169,totalObservedCostUsd:0.0669,usageResolved:true});
+  });
   test('initialization minimum applies only to an actually created session', () => {
     const pending = createLiveUsageLedger({ created: false, backendModel: 'gpt-5.6-terra' });
     expect(pending.snapshot().voiceCostUsd).toBe(0); pending.markCreated();

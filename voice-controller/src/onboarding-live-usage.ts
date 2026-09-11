@@ -1,6 +1,7 @@
 /** Public Standard API price card, checked 2026-09-11 UTC.
  * https://developers.openai.com/api/docs/pricing
  * https://developers.openai.com/api/docs/models/gpt-5.6-terra
+ * https://developers.openai.com/api/docs/models/gpt-6-astra
  * https://developers.openai.com/api/docs/guides/prompt-caching#monitor-cache-performance
  * https://developers.openai.com/api/docs/guides/voice-latency-cost?api=live
  * Rate-based estimates from reported usage; never provider invoice amounts.
@@ -21,8 +22,11 @@ const money = (value: number) => Math.round(value * 1e8) / 1e8;
 
 /** inputTokens is the input of ONE model request, not an aggregate Agents turn. */
 export function managedTextRates(model: string | null | undefined, inputTokens: number, serviceTier = 'default'): ManagedTextRates | null {
-  if (model !== 'gpt-5.6-terra' || !integer(inputTokens) || serviceTier !== 'default') return null;
+  if ((model !== 'gpt-5.6-terra' && model !== 'gpt-6-astra') || !integer(inputTokens) || serviceTier !== 'default') return null;
   const long = inputTokens > 272_000;
+  if (model === 'gpt-6-astra') return Object.freeze({ model, context: long ? 'long' : 'short', serviceTier: 'default',
+    inputUsdPerMillion: long ? 20 : 10, cachedInputUsdPerMillion: long ? 2 : 1,
+    cacheWriteUsdPerMillion: long ? 25 : 12.5, outputUsdPerMillion: long ? 75 : 50 });
   return Object.freeze({ model, context: long ? 'long' : 'short', serviceTier: 'default',
     inputUsdPerMillion: long ? 4 : 2, cachedInputUsdPerMillion: long ? 0.4 : 0.2,
     cacheWriteUsdPerMillion: long ? 5 : 2.5, outputUsdPerMillion: long ? 18 : 12 });

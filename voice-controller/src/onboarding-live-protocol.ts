@@ -23,7 +23,7 @@ export async function createLiveWebRtcSession(input:CreationInput,deps:{apiKey:s
     ||Buffer.byteLength(input.sdp)>65536||typeof input.instructions!=='string'||!input.instructions.trim())throw Error('live_startup_invalid');
   const history=input.history??[];
   if(history.length>128||history.some(m=>!['developer','user','assistant'].includes(m.role)||typeof m.text!=='string'||!m.text.trim()))throw Error('live_history_invalid');
-  const responses=input.responses,model=responses?.model??'gpt-5.6-terra',effort=responses?.reasoning?.effort??'low';
+  const responses=input.responses,model=responses?.model??'gpt-6-astra',effort=responses?.reasoning?.effort??'low';
   if(!responses||typeof responses.instructions!=='string'||!responses.instructions.trim()||typeof model!=='string'||!model.trim()
     ||!['none','minimal','low','medium','high','xhigh'].includes(effort)||!Array.isArray(responses.tools)
     ||responses.tools.some(t=>!t||t.type!=='function'||typeof t.name!=='string'||!t.name.trim())

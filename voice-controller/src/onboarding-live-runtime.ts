@@ -20,7 +20,7 @@ type Dependencies={client?:Client;apiKey?:string;resolveTenant?:typeof resolveSe
   finalize?:typeof finalizeTerminalBudget;openTimeoutMs?:number;closeTimeoutMs?:number;cleanupTimeoutMs?:number};
 type FinalEvent={eventId:string;sessionId:string;reason:string;seconds:number|null;expiresAt?:number}|null;
 type CreationState='not_started'|'rejected'|'unknown'|'created';
-const MODEL='gpt-live-1',BACKEND='gpt-5.6-terra',MAX_MINUTES=55;
+const MODEL='gpt-live-1',BACKEND='gpt-6-astra',MAX_MINUTES=55;
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const managedLiveSessions=new Set<string>();
 const controls=new Map<string,ManagedLiveCleanup>();
@@ -223,8 +223,9 @@ export async function recoverManagedLiveCancellation(callId:string,reason:string
   const requestResult=await boundedReceipt(signal=>withSignal(client.from('browser_session_requests').select('id,user_id,tenant_id,onboarding_protocol_version,opening_mode_requested').eq('call_id',callId).maybeSingle(),signal),deps.cleanupTimeoutMs) as any;
   const request=requestResult?.data;
   if(!requestResult||requestResult.error||request?.tenant_id!==call.tenant_id||request?.onboarding_protocol_version!==6||request?.opening_mode_requested!=='live_managed_v1')return false;
-  const sessionId=call.openai_call_id,ledger=createLiveUsageLedger({created:true,backendModel:BACKEND});
   const prior=call.provider_usage_details;
+  const sessionId=call.openai_call_id,ledger=createLiveUsageLedger({created:true,
+    backendModel:typeof prior?.requestedBackendModel==='string'?prior.requestedBackendModel:BACKEND});
   if(typeof prior?.voiceSeconds==='number')ledger.observeVoice(prior.voiceSeconds);
   if(prior?.invalidObservations>0)ledger.observeVoice(NaN);
   for(const response of Array.isArray(prior?.responses)?prior.responses:[]){

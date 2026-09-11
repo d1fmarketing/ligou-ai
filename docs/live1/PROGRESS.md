@@ -1,3 +1,19 @@
+# Ajuste solicitado por RJ: GPT-6 Astra low
+
+O backend conversacional deve usar `gpt-6-astra` com `reasoning.effort=low`, substituindo Terra nas novas chamadas. Voz continua GPT-Live-1/bossa/Responses. Tarifas Astra adicionadas sem perder contabilização histórica Terra. GET do modelo com a credencial existente retornou200; testes locais de configuração/uso passaram. Nenhuma nova chamada paga foi iniciada. Métricas e smoke do checkpoint abaixo foram obtidos com Terra, não Astra. Publicação do ajuste pelo processo imutável; conferir receipt em output/live1-20260910/controller-release.log.
+
+---
+
+# CHECKPOINT A — pronto para diagnóstico humano
+
+**LIGOU_LIVE_MANAGED_READY_FOR_HUMAN_TEST**. Pare a execução e aguarde RJ. Controller8344172/c046be74, schema97, Edge21, frontend8f51898; aba EdgeQA897138905 pré-autenticada em http://127.0.0.1:52797/dashboard/setup/website, microfone real pass-through instalado/ocioso, simulador removido. Nenhuma chamada ativa/reserva QA pendente. Servidor local PID27381 permanece disponível. Nova chamada só quando RJ clicar Começar entrevista.
+
+Smoke real88477147-1abe-47fb-ba80-154d3be90b03 passou: política de negociação rev10/reciboca3fd734..., correção RepairdiagnosticUS$99 creditados no reparo rev11/reciboe5ee003d..., outrosdados/fontes preservados, zeroaprovações, continuidade útil e Stop0,712s. Uso211s/custoUS$0,23695903 conciliado; soma4smokesUS$0,73573667. Primeira fala~7,52s/perguntaútil~19,80s por alinhamento conservador. Latência/qualidadehumana ainda emavaliação; reprodução das respostas úteis semalinhamentocompleto, legendas não substituemáudio.
+
+Relatório completo e parâmetros do próximo teste: output/live1-20260910/HUMAN-CHECKPOINT.md. Captura humana ainda não começou: apósfeedbackcoletar da mesmaaba comdriver.collect semreinstalarsimulador. GoalcontinuaA→B→C: Agentsreal+consumidor+retiradalegadopendentes, aprovação/revisão/compleçãonormaldevozpendentes. **As97migraçõesjáestãoaplicadas; nuncareeditá-las.** Não iniciarmaisexecuçãoautomáticaaguardandohumano.
+
+---
+
 # Latest continuation — operation identity correction
 
 Current deployed controller52f4ca417f53acfbf75948d0562d9a3444a63bc5 / artifact92f8cd1ee71ad3d3f4479111393919a43bae704ba4af1593b4f0500e884f78d2, schema96, Edge21. Third actual smoke1f9e6f76-6550-4e5b-80ab-afcb095656be / live_u2_EMpr9WrlcJnxG0A7xE7QP: native audio first signal6.4339s; get_context7,488bytes accepted even before response.completed, explicit continuation worked. save_decision rejected (167-byte error result), but voice falsely said “Registrei”. Zero operations/revision9 unchanged. Stop0.7019s,192seconds, all confirmed/settled,$0.1855078. Three-call observed total$0.49877764. NOT human-ready.

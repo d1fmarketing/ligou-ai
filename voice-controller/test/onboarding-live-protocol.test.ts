@@ -16,7 +16,7 @@ describe('Live WebRTC server boundary',()=>{
   }});
   expect(request.url).toBe('https://api.openai.com/v1/live/sessions');
   expect(request.body.transport).toEqual({type:'webrtc',sdp:creation.sdp});
-  expect(request.body.session).toMatchObject({model:'gpt-live-1',delegation:{type:'responses',responses:{model:'gpt-5.6-terra',instructions:creation.responses.instructions,
+  expect(request.body.session).toMatchObject({model:'gpt-live-1',delegation:{type:'responses',responses:{model:'gpt-6-astra',instructions:creation.responses.instructions,
    tools:creation.responses.tools,reasoning:{effort:'low'},service_tier:'default',tool_choice:'auto',parallel_tool_calls:false}},audio:{output:{voice:'bossa'}},store:false});
   expect(request.body.session.client.data_channel.allowed_client_events).toEqual(['session.close','session.input_audio.mute','session.input_audio.unmute']);
   expect(request.body.session.client.data_channel.allowed_server_events).toEqual([
