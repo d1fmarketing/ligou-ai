@@ -47,7 +47,9 @@ try {
       test_memory_generation bigint,onboarding_protocol_version int,opening_mode_requested text,status text,
       offer_sdp text,error text,answer_sdp text,opening_mode_applied text,opening_payload jsonb);
     create table public.budget_reservations(id uuid primary key default gen_random_uuid(),tenant_id uuid,call_id uuid unique,status text,
-      budget_day date,reserved_cost_usd numeric,reserved_minutes numeric,outcome text,final_cost_usd numeric,final_minutes numeric,settled_at timestamptz);
+      budget_day date,reserved_cost_usd numeric,reserved_minutes numeric,outcome text,final_cost_usd numeric,final_minutes numeric,settled_at timestamptz,reconcile_attempts int default 0);
+    create table public.usage_ledger(id uuid primary key default gen_random_uuid(),tenant_id uuid,call_id uuid,kind text,cost_usd numeric,minutes numeric,detail jsonb,budget_reservation_id uuid);
+    create unique index budget_event_once on public.usage_ledger(budget_reservation_id,kind) where budget_reservation_id is not null;
     create table public.worker_jobs(id uuid primary key,tenant_id uuid,selected_attempt_id uuid,status text);
     create table public.worker_results(id uuid primary key,tenant_id uuid,job_id uuid,attempt_id uuid,result_hash text,validation_state text,result_schema text);
     create table public.company_discovery_onboarding_drafts(id uuid primary key,tenant_id uuid,source_job_id uuid,source_result_id uuid,created_by uuid,draft_hash text,draft jsonb,version bigint);
@@ -86,6 +88,15 @@ try {
   sql(await file('20260908185401_website_interview_context_timezone.sql'));
   if(!process.argv.includes('--red')) sql(await file('20260910204742_website_interview_live_protocol.sql'));
   if(!process.argv.includes('--red')&&!process.argv.includes('--operation-order-red'))sql(await file('20260911072902_website_live_operation_byte_order.sql'));
+  {
+    // Real unresolved-settlement RPC (shared budget function), so the Live expiry
+    // cases exercise the actual settlement path instead of a manual status write.
+    const settlement=await file('20260908185023_observed_budget_overrun_settlement.sql');
+    const start=settlement.indexOf('create or replace function public.settle_unresolved_call_budget(');
+    const grant='grant execute on function public.settle_unresolved_call_budget(uuid,uuid,numeric,numeric,text,jsonb)\n  to service_role;';
+    const end=settlement.indexOf(grant,start);assert(start>0&&end>start);sql(settlement.slice(start,end+grant.length));
+  }
+  if(!process.argv.includes('--red')&&!process.argv.includes('--expiry-red'))sql(await file('20260911230000_website_live_close_anchor_and_expiry.sql'));
   sql(`insert into auth.users values('${owner}'),('${other}');
     insert into tenants(id,owner_user_id,status,operational_mode,test_memory_generation) values('${tenant}','${owner}','onboarding','simulation_only',2);
     insert into worker_jobs values('${job}','${tenant}','${attempt}','awaiting_review');
@@ -118,6 +129,7 @@ try {
   const cases=await readFile(new URL('supabase/tests/website-interview-live-cases.sql',root),'utf8');
   console.log(sql(cases));
   console.log(sql(await readFile(new URL('supabase/tests/website-interview-live-extra-cases.sql',root),'utf8')));
+  console.log(sql(await readFile(new URL('supabase/tests/website-interview-live-expiry-cases.sql',root),'utf8')));
 } finally {
   if(started)run('pg_ctl',['-D',`${temp}/data`,'-m','fast','-w','stop']);
   await rm(temp,{recursive:true,force:true});

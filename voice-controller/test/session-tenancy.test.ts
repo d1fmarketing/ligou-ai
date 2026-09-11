@@ -1103,6 +1103,33 @@ describe("durable browser cancel_requested handshake", () => {
     expect(b.row.status).toBe("expired");
   });
 
+  test("Live cancellation accepts expiry evidence for unknown or provider-active terminal calls without inventing confirmation", async () => {
+    for (const state of ["unknown", "active"]) {
+      const b = boundary({ protocolVersion: 6 });
+      Object.assign(b.row, { status: "cancel_requested", call_id: b.call.id, opening_mode_requested: "live_managed_v1",
+        opening_mode_applied: "live_managed_v1", answer_sdp: "answer", error: "request_aborted",
+        opening_payload: { version: 6, live: { callId: b.call.id, interviewId: b.call.id, revision: 0, sourceDigest: "b".repeat(64), sessionId: "live_session_1" } } });
+      Object.assign(b.call, { model: "gpt-live-1", status: "ended", provider_termination_state: state });
+      let receipts: any[] = [];
+      const base = b.client as any;
+      const client = { from(table: string) {
+        if (table !== "browser_interview_expiry_receipts") return base.from(table);
+        const api: any = { select() { return api; }, eq() { return api; }, maybeSingle: async () => ({ data: receipts[0] ?? null, error: null }) };
+        return api;
+      } };
+      _setClient(client as any);
+      let recoveries = 0;
+      const deps = { recoverLive: async () => { recoveries++; return false; } };
+      expect(await (browserRequestsModule as any)._handleBrowserCancellation(structuredClone(b.row), deps)).toBe(false);
+      expect(b.row.status).toBe("cancel_requested");
+      receipts = [{ call_id: b.call.id, policy: "live_expires_at_and_attach_404_v1" }];
+      expect(await (browserRequestsModule as any)._handleBrowserCancellation(structuredClone(b.row), deps)).toBe(true);
+      expect(b.row.status).toBe("expired");expect(b.row.error).toBe("request_aborted");
+      // Evidence suffices: no second attach attempt against a session that is gone.
+      expect(b.call.provider_termination_state).toBe(state);expect(recoveries).toBe(1);
+    }
+  });
+
   test("malformed native descriptor cancellation reaches controller cleanup and expires exactly once", async () => {
     const poll = (browserRequestsModule as any)._pollBrowserCancellations;
     const reset = (browserRequestsModule as any)

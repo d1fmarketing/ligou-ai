@@ -459,16 +459,37 @@ function acceptedProviderUsageIsSafelyResolved(call: any): boolean {
   return Number.isFinite(cost) && cost >= 0;
 }
 
-function cancellationCallIsDurablyTerminal(
+/** A Live session that vanished at the provider after its expires_at leaves a
+ * policy-tagged expiry receipt (reconcile_live_session_expiry). That receipt is
+ * the same evidence the resume gate accepts, so a cancel_requested request can
+ * be expired on its strength while provider termination stays unknown/active. */
+async function hasLiveExpiryReceipt(callId: string): Promise<boolean> {
+  try {
+    const { data, error } = await supa()
+      .from("browser_interview_expiry_receipts")
+      .select("call_id,policy")
+      .eq("call_id", callId)
+      .eq("policy", "live_expires_at_and_attach_404_v1")
+      .maybeSingle();
+    return !error && data?.call_id === callId && data?.policy === "live_expires_at_and_attach_404_v1";
+  } catch {
+    return false;
+  }
+}
+
+async function cancellationCallIsDurablyTerminal(
   row: any,
   call: any,
   kind: CancellationRequestKind,
-): boolean {
+): Promise<boolean> {
   if (!cancellationCallBindingMatches(row, call) ||
     !TERMINAL_CALL_STATUSES.has(String(call.status))) return false;
   if (call.provider_termination_state === "confirmed")
     return typeof call.openai_call_id === "string" &&
       call.openai_call_id.trim().length > 0;
+  if (call.model === "gpt-live-1" && ["unknown", "active"].includes(String(call.provider_termination_state))
+    && typeof call.openai_call_id === "string" && call.openai_call_id.trim().length > 0)
+    return await hasLiveExpiryReceipt(String(call.id));
   return kind === "processing" && call.openai_call_id == null &&
     call.provider_termination_state === "not_required" &&
     noProviderUsageIsSafelyResolved(call);
@@ -491,7 +512,7 @@ async function ensureDurableCancellation(
   let call = loadedCall.call;
   if (!cancellationCallBindingMatches(row, call)) return false;
   if (row.onboarding_protocol_version === 6 && call.model !== "gpt-live-1") return false;
-  if (cancellationCallIsDurablyTerminal(row, call, kind)) return true;
+  if (await cancellationCallIsDurablyTerminal(row, call, kind)) return true;
 
   // Live is finalized by its own lifecycle. Never call the Realtime hangup API
   // or treat a transport disconnect as confirmation when a Live cleanup is pending.
@@ -500,7 +521,7 @@ async function ensureDurableCancellation(
       try { await recoverLive(String(row.call_id), reason); } catch { return false; }
       loadedCall = await loadCancellationCall(String(row.call_id));
       return loadedCall.state === "found" && loadedCall.call.model === "gpt-live-1"
-        && cancellationCallIsDurablyTerminal(row, loadedCall.call, kind);
+        && await cancellationCallIsDurablyTerminal(row, loadedCall.call, kind);
     }
     return false;
   }
@@ -542,7 +563,7 @@ async function ensureDurableCancellation(
     loadedCall = await loadCancellationCall(String(row.call_id));
     if (loadedCall.state !== "found") return false;
     call = loadedCall.call;
-    return cancellationCallIsDurablyTerminal(row, call, kind);
+    return await cancellationCallIsDurablyTerminal(row, call, kind);
   }
 
   if (!TERMINAL_CALL_STATUSES.has(String(call.status))) {
@@ -597,7 +618,7 @@ async function ensureDurableCancellation(
   loadedCall = await loadCancellationCall(String(row.call_id));
   if (loadedCall.state !== "found") return false;
   call = loadedCall.call;
-  return cancellationCallIsDurablyTerminal(row, call, kind);
+  return await cancellationCallIsDurablyTerminal(row, call, kind);
 }
 
 function exactExpiredCancellationMatches(row: any, callId: string): boolean {

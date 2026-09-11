@@ -87,10 +87,19 @@ do $$declare c uuid:='9b000000-0000-4000-8000-000000000004';r uuid:='9b000000-00
  proof:=public.record_website_live_termination(o,c,r,'live-fixture','owner_requested_stop','ended','{"creationState":"created","voiceSeconds":10,"totalObservedCostUsd":0.03,"usageResolved":false}',null);
  if proof->>'providerFinalized'<>'false' or proof->>'usageResolved'<>'false' then raise exception 'socket_close_claimed_final';end if;
  if (select ended_at is null or provider_termination_state<>'unknown' or provider_usage_state<>'unknown' from calls where id=c) then raise exception 'incomplete_stop_missing';end if;
+ -- A close that was requested but never confirmed leaves a durable attempt anchor
+ -- (Live never calls the Realtime hangup POST) while the state stays unknown.
+ if (select provider_termination_attempt_id is null or provider_termination_request_id is distinct from provider_termination_attempt_id::text
+   or provider_termination_attempted_at is null or provider_termination_mode<>'hangup' or duration_seconds<>10 from calls where id=c) then raise exception 'close_anchor_missing';end if;
+ snapshot:=snapshot||jsonb_build_object('anchor',(select provider_termination_attempt_id::text from calls where id=c));
+ proof:=public.record_website_live_termination(o,c,r,'live-fixture','late_cleanup','error','{"creationState":"created","voiceSeconds":4,"totalObservedCostUsd":0.01,"usageResolved":false}',null);
+ if (select duration_seconds<>10 or cost_estimate_usd<>0.03 or provider_termination_attempt_id::text<>(snapshot->>'anchor') from calls where id=c) then raise exception 'second_unknown_cleanup_downgraded_duration_or_anchor';end if;
  -- A genuine closed event confirms termination even without final billing.
  proof:=public.record_website_live_termination(o,c,r,'live-fixture','owner_requested_stop','ended','{"creationState":"created","voiceSeconds":10,"totalObservedCostUsd":0.03,"usageResolved":false}',
  '{"eventId":"closed-actual-fixture","sessionId":"live-fixture","reason":"close_requested","seconds":null}');
  if proof->>'providerFinalized'<>'true' or proof->>'usageResolved'<>'false' then raise exception 'closed_missing_usage_blocked';end if;
+ if (select provider_termination_attempt_id::text<>(snapshot->>'anchor') or provider_terminated_at is null from calls where id=c) then raise exception 'confirmation_replaced_anchor';end if;
+ snapshot:=snapshot-'anchor';
  proof:=public.record_website_live_termination(o,c,r,'live-fixture','late_cleanup','error','{"creationState":"created","voiceSeconds":0,"totalObservedCostUsd":0,"usageResolved":false}',null);
  if proof->>'replayed'<>'true' or (select provider_termination_state<>'confirmed' or provider_usage_state<>'unknown' or cost_estimate_usd<>0.03 or status<>'ended' from calls where id=c) then raise exception 'late_cleanup_downgraded_proof';end if;
  if (select agenda from website_interviews where interview_id=c) is distinct from snapshot then raise exception 'stop_modified_business_data';end if;

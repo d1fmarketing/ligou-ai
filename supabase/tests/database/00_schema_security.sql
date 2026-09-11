@@ -143,6 +143,8 @@ select extensions.ok(
       ('commit_website_live_decision(uuid,uuid,uuid,text,text,bigint,bigint,text,text,text,text[],text)'),
       ('read_website_live_operation(uuid,uuid,uuid,text)'),
       ('record_website_live_termination(uuid,uuid,uuid,text,text,text,jsonb,jsonb)'),
+      ('reconcile_live_session_expiry(uuid,text,timestamp with time zone,integer,text,text,text)'),
+      ('settle_unresolved_live_call_budget(uuid,uuid,numeric,numeric,text,jsonb)'),
       ('company_discovery_managed_job(text,uuid,uuid,jsonb)'),
       ('find_company_discovery_managed_session(text)'),
       ('authorize_booking_intent(uuid,uuid,uuid,uuid,uuid,numeric,integer,integer,jsonb,text)'),
