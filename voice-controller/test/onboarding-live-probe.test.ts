@@ -2,7 +2,7 @@ import {describe,expect,test} from 'bun:test';
 import http from 'node:http';
 import {probeLiveSession,upgradeProbeFetch} from '../src/onboarding-live-probe.ts';
 
-const key='sk-synthetic-probe-key-0123456789';
+const key='synthetic-probe-key-0123456789';
 const response=(status:number,body:unknown)=>new Response(typeof body==='string'?body:JSON.stringify(body),{status,headers:{'content-type':'application/json'}});
 function fakeFetch(handler:(url:string,init:any)=>Promise<Response>|Response){
   const calls:any[]=[];
