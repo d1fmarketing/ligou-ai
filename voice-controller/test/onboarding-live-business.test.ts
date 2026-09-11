@@ -85,6 +85,8 @@ describe('Live managed business tools',()=>{
     expect(prompt).toContain('cumprimento');expect(prompt).toContain('repetir');expect(prompt).toContain('clarificação');
     expect(prompt).not.toMatch(/get_context|save_decision|contextRef|session\.close|response\.create|ASR|aguarde silêncio|frase exata/);
     expect(f.business.tools.map(t=>t.name)).toEqual(['get_context','save_decision','get_operation','end_call']);
+    expect(f.business.backendInstructions).toContain('despedida breve');
+    expect(f.business.backendInstructions).toContain('stopRequested=true');
   });
   test('website identity takes precedence over the account label without asserting legal confirmation',async()=>{
     const f=fixture(),name='Foghorn "Air", Inc.';

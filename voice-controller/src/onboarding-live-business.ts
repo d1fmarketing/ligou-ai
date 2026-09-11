@@ -163,6 +163,7 @@ export function createLiveBusinessSession(options:{prepared:PreparedWebsiteInter
     'context_pending significa apenas que a evidência ainda não chegou. Continue a conversa naturalmente e confira get_context antes de tentar gravar novamente; não espere silêncio nem use ASR final do Realtime.',
     'Ao confirmar uma gravação, prossiga para a próxima informação realmente pendente. Uma ferramenta não autoriza regras ou poderes. Esta candidata ainda não oferece aprovação final: não declare onboarding concluído.',
     'Se o dono pedir para parar ou encerrar agora, chame end_call imediatamente. Isso preserva progresso incompleto e não exige revisão ou aprovação.',
+    'Quando end_call retornar stopRequested=true, responda apenas com uma despedida breve; a ligação será encerrada logo depois e nenhuma outra ferramenta deve ser chamada.',
   ].join(' ');
   return{
     voiceInstructions,backendInstructions,tools:LIVE_BUSINESS_TOOLS,
