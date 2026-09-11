@@ -1,3 +1,11 @@
+# Feedback humano: voz e identidade
+
+Tentativa e8168454-9dde-472e-83ed-8b314c456928, tenantD1F6e915234..., 2026-09-11 16:57:44UTC, usou Astra e chamou o dono de Thiago sem nome fornecido. Código fornecia nome da conta D1fMarketing; fonte selecionada contém business_name FoghornAir,Inc. Correções: Tempo masculinaPTBR, estilo grave solicitado sem garantia de timbre; identidade da fonte como candidato a confirmar, nunca nome da conta; nome pessoal somente se informado. Nenhum dado de empresa/conta reescrito. Testes51PASS; nova publicação pendente neste registro.
+
+End_call foi invocado16:59:07.951UTC e session.close enviado1msdepois, mas semsession.closed; statuslocalended/provedor e uso unknown. Uma tentativa de recuperação pelo helper existente retornoufalse, semnova sessão. Não anunciar encerramento confirmado nem novo teste pronto. JSON enviado pelo usuário tinhaevents0/captures[], insuficiente como prova de gravação humana. Fonte deste diagnóstico: logsservidor e fragmentosLive persistidos. CheckpointA permanece diagnóstico, aprovaçãohumana falhou.
+
+---
+
 # Ajuste solicitado por RJ: GPT-6 Astra low
 
 O backend conversacional deve usar `gpt-6-astra` com `reasoning.effort=low`, substituindo Terra nas novas chamadas. Voz continua GPT-Live-1/bossa/Responses. Tarifas Astra adicionadas sem perder contabilização histórica Terra. GET do modelo com a credencial existente retornou200; testes locais de configuração/uso passaram. Nenhuma nova chamada paga foi iniciada. Métricas e smoke do checkpoint abaixo foram obtidos com Terra, não Astra. Publicação do ajuste pelo processo imutável; conferir receipt em output/live1-20260910/controller-release.log.

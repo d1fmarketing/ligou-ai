@@ -168,7 +168,7 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
     if(marker.error||marker.data?.id!==args.callId)throw Error('live_provider_marker_failed');checkCancelled();
     creationState='unknown';
     let created:Awaited<ReturnType<typeof createLiveWebRtcSession>>;
-    try{created=await(deps.createSession??createLiveWebRtcSession)({sdp:args.sdpOffer,voice:'bossa',instructions:business.voiceInstructions,
+    try{created=await(deps.createSession??createLiveWebRtcSession)({sdp:args.sdpOffer,voice:'tempo',instructions:business.voiceInstructions,
       responses:{model:BACKEND,instructions:business.backendInstructions,tools:business.tools,reasoning:{effort:'low'}}},{apiKey,signal:controller.signal});}
     catch(error){if(error instanceof LiveCreationError){if(error.outcome==='rejected')creationState='rejected';if(error.sessionId){sessionId=error.sessionId;creationState='created';ledger.markCreated();}}throw error;}
     const knownSessionId:string=created.sessionId;sessionId=knownSessionId;creationState='created';ledger.markCreated();
