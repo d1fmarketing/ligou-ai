@@ -19,6 +19,7 @@ PORT="${PORT:-8790}"
 CONTROLLER_STATE=unavailable
 SUPABASE_STATE=unavailable
 HERMES_STATE=unavailable
+HERMES_REQUIRED=true
 
 if [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] \
   && [[ "$TENANT_ID" =~ ^[a-f0-9-]{36}$ ]] && [[ "$PORT" =~ ^[0-9]{2,5}$ ]]; then
@@ -33,6 +34,12 @@ if [[ "$TENANT" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] \
     if printf '%s' "$CONTROLLER_RAW" | "${LIGOU_NODE_BIN:-node}" -e '
 let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{try{const v=JSON.parse(raw);process.exit(v&&!Array.isArray(v)&&typeof v==="object"&&v.ok===true&&v.openai===true?0:1)}catch{process.exit(1)}});'; then
       CONTROLLER_STATE=ready
+      # Managed Live uses paid Responses delegation, not Hermes/Codex OAuth.
+      # Derive this from the running controller, never an operator bypass flag.
+      if printf '%s' "$CONTROLLER_RAW" | "${LIGOU_NODE_BIN:-node}" -e '
+let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{try{process.exit(JSON.parse(raw).onboarding_model==="gpt-live-1"?0:1)}catch{process.exit(1)}});'; then
+        HERMES_REQUIRED=false
+      fi
       break
     fi
     [ $((SECONDS - CONTROLLER_WAIT_START)) -lt "$CONTROLLER_DEADLINE" ] || break
@@ -58,10 +65,16 @@ let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{try{const v=JSON.par
   fi
 fi
 
-if [ "$CONTROLLER_STATE" = ready ] && [ "$SUPABASE_STATE" = ready ] && [ "$HERMES_STATE" = ready ]; then
-  printf '%s\n' '{"ok":true,"controller":"ready","supabase":"ready","hermes":"ready"}'
-  exit 0
+HEALTH_OK=false
+if [ "$CONTROLLER_STATE" = ready ] && [ "$SUPABASE_STATE" = ready ] \
+  && { [ "$HERMES_STATE" = ready ] || [ "$HERMES_REQUIRED" = false ]; }; then
+  HEALTH_OK=true
 fi
-printf '{"ok":false,"controller":"%s","supabase":"%s","hermes":"%s"}\n' \
-  "$CONTROLLER_STATE" "$SUPABASE_STATE" "$HERMES_STATE"
-exit 1
+if [ "$HERMES_REQUIRED" = false ]; then
+  printf '{"ok":%s,"controller":"%s","supabase":"%s","hermes":"%s","hermes_required":false}\n' \
+    "$HEALTH_OK" "$CONTROLLER_STATE" "$SUPABASE_STATE" "$HERMES_STATE"
+else
+  printf '{"ok":%s,"controller":"%s","supabase":"%s","hermes":"%s"}\n' \
+    "$HEALTH_OK" "$CONTROLLER_STATE" "$SUPABASE_STATE" "$HERMES_STATE"
+fi
+[ "$HEALTH_OK" = true ]

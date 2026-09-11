@@ -222,7 +222,7 @@ if ! restart_release_services || ! release_services_active; then
   exit 1
 fi
 
-if ! LIGOU_ENV_FILE="${LIGOU_ENV_FILE:-${DEPLOY_ROOT}/env}" "$FINAL/infra/release-health.sh" >/dev/null; then
+if ! RELEASE_HEALTH_RESULT="$(LIGOU_ENV_FILE="${LIGOU_ENV_FILE:-${DEPLOY_ROOT}/env}" "$FINAL/infra/release-health.sh")"; then
   if rollback_recovered; then
     write_result "$RELEASE_ID" rolled_back failed unknown unknown
     echo "release_health_failed_rollback_applied" >&2
@@ -244,5 +244,9 @@ if ! release_identity_matches "$FINAL" || ! current_points_to "$FINAL"; then
   exit 1
 fi
 
-write_result "$RELEASE_ID" activated ready ready ready
+# Record only sanitized observed states. A managed voice release can be healthy
+# while the separately reported legacy Hermes dependency is unavailable.
+read -r HEALTH_CONTROLLER HEALTH_SUPABASE HEALTH_HERMES < <(printf '%s' "$RELEASE_HEALTH_RESULT" | "$NODE_BIN" -e '
+let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{let value={};try{value=JSON.parse(raw)||{}}catch{};process.stdout.write(["controller","supabase","hermes"].map(key=>["ready","unavailable","unknown"].includes(value[key])?value[key]:"unknown").join(" ")+"\n")});')
+write_result "$RELEASE_ID" activated "$HEALTH_CONTROLLER" "$HEALTH_SUPABASE" "$HEALTH_HERMES"
 printf '{"ok":true,"release_id":"%s","status":"activated"}\n' "$RELEASE_ID"

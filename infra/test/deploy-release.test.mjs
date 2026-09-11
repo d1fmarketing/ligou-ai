@@ -880,6 +880,59 @@ test("release health performs controller, safe Supabase read, and token-free Her
   }
 });
 
+async function managedHealthFixture({controller={ok:true,openai:true,onboarding_model:'gpt-live-1'},database=true}={}) {
+  const fixture=await mkdtemp(path.join(os.tmpdir(),'ligou-managed-release-health-'));
+  const bin=path.join(fixture,'bin'),envFile=path.join(fixture,'env');await mkdir(bin);
+  const db=database?{ok:true,tenant_id:'11111111-1111-4111-8111-111111111111',tenant_slug:'test-tenant',status:'active'}:{ok:false};
+  await writeFile(path.join(bin,'curl'),`#!/bin/sh\ncase "$*" in\n *'127.0.0.1:8790/health'*) printf '%s\\n' '${JSON.stringify(controller)}' ;;\n *'/rest/v1/rpc/release_health_state'*) printf '%s\\n' '${JSON.stringify(db)}' ;;\n *) printf '%s\\n' '{"ok":true}' ;;\nesac\n`);
+  await writeFile(path.join(bin,'docker'),`#!/bin/sh\ncase "$*" in\n *'inspect --format {{json .}}'*) printf '%s\\n' '{"Name":"/ligou-cell-11111111-1111-4111-8111-111111111111","Config":{"Image":"${IMAGE}"},"Image":"sha256:${'a'.repeat(64)}","State":{"Running":true}}' ;;\n *'image inspect --format {{json .RepoDigests}}'*) printf '%s\\n' '["${IMAGE}"]' ;;\n *'auth status openai-codex'*) printf '%s\\n' '{"provider":"openai-codex","authenticated":false}' ;;\nesac\n`);
+  for(const command of ['curl','docker'])await chmod(path.join(bin,command),0o755);
+  await writeFile(envFile,["SUPABASE_URL='https://unit.invalid'","SUPABASE_SECRET_KEY='synthetic-service-secret'","TENANT_SLUG='test-tenant'",
+    "TENANT_ID='11111111-1111-4111-8111-111111111111'","PORT='8790'",`HERMES_IMAGE='${IMAGE}'`].join('\n'));
+  return {fixture,bin,envFile,env:{PATH:`${bin}:/usr/bin:/bin`,LIGOU_ENV_FILE:envFile,LIGOU_NODE_BIN:process.execPath,LIGOU_CONTROLLER_HEALTH_DEADLINE_S:'0',
+    LIGOU_TENANT_STATE_ROOT:path.join(fixture,'tenants'),LIGOU_TENANT_REGISTRY:path.join(fixture,'tenant-registry.json')}};
+}
+
+test('managed Live release health reports unavailable legacy auth without blocking independent managed voice',async()=>{
+  const f=await managedHealthFixture();try{
+    const result=run('bash',[healthTool],{env:f.env});assert.equal(result.status,0,result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout),{ok:true,controller:'ready',supabase:'ready',hermes:'unavailable',hermes_required:false});
+    assert.doesNotMatch(result.stdout+result.stderr,/synthetic-service-secret|authenticated|unit[.]invalid|test-tenant/);
+  }finally{await rm(f.fixture,{recursive:true,force:true});}
+});
+
+test('legacy release health still requires Hermes authentication',async()=>{
+  const f=await managedHealthFixture({controller:{ok:true,openai:true}});try{
+    const result=run('bash',[healthTool],{env:f.env});assert.notEqual(result.status,0);
+    assert.deepEqual(JSON.parse(result.stdout),{ok:false,controller:'ready',supabase:'ready',hermes:'unavailable'});
+  }finally{await rm(f.fixture,{recursive:true,force:true});}
+});
+
+test('managed Live release still fails for unavailable controller, voice credential or database',async()=>{
+  for(const settings of [{controller:{ok:false,openai:true,onboarding_model:'gpt-live-1'}},{controller:{ok:true,openai:false,onboarding_model:'gpt-live-1'}},{database:false}]){
+    const f=await managedHealthFixture(settings);try{
+      const result=run('bash',[healthTool],{env:f.env});assert.notEqual(result.status,0);const health=JSON.parse(result.stdout);
+      assert.equal(health.ok,false);assert.equal(settings.database===false?health.supabase:health.controller,'unavailable');
+    }finally{await rm(f.fixture,{recursive:true,force:true});}
+  }
+});
+
+test('managed activation records the actual unavailable Hermes check instead of inventing readiness',async()=>{
+  const f=await managedHealthFixture();try{
+    const commit='f'.repeat(40),deployRoot=path.join(f.fixture,'host');
+    const release=await runnableArtifact(f.fixture,commit,{healthScript:await readFile(healthTool,'utf8')});
+    await prepareOldRelease(deployRoot);
+    await writeFile(path.join(f.bin,'systemctl'),'#!/bin/sh\nexit 0\n');
+    await writeFile(path.join(f.bin,'bun'),'#!/bin/sh\nif [ "$1" = --version ]; then echo 1.2.13; fi\nexit 0\n');
+    for(const command of ['systemctl','bun'])await chmod(path.join(f.bin,command),0o755);
+    const result=run('bash',[hostDeploy,'--artifact',release.artifact,'--manifest',release.manifest,'--commit',commit],{env:{...f.env,
+      LIGOU_DEPLOY_ROOT:deployRoot,LIGOU_BUN_BIN:path.join(f.bin,'bun'),LIGOU_DEPLOY_TEST_HARNESS:'1',LIGOU_RELEASE_MANIFEST_KEY:RELEASE_KEY,HERMES_IMAGE:IMAGE}});
+    assert.equal(result.status,0,result.stderr);const records=(await readFile(path.join(deployRoot,'deploy-results.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+    assert.equal(records.at(-1).status,'activated');assert.deepEqual(records.at(-1).checks,{controller:'ready',supabase:'ready',hermes:'unavailable'});
+    assert.doesNotMatch(JSON.stringify(records),/synthetic-service-secret|unit[.]invalid|test-tenant/);
+  }finally{await rm(f.fixture,{recursive:true,force:true});}
+});
+
 test("release health waits out controller startup before declaring failure", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "ligou-release-health-wait-"));
   try {
