@@ -1,6 +1,12 @@
 begin;
 set local lock_timeout='5s';
 
+-- Acquire the calls DDL lock before browser requests, matching the controller's
+-- calls -> browser request lookup and avoiding the observed lock-order cycle.
+-- Structured duration/model usage is not a Realtime audio-token estimate.
+alter table public.calls add column provider_usage_details jsonb
+ check(provider_usage_details is null or (jsonb_typeof(provider_usage_details)='object' and octet_length(provider_usage_details::text)<=262144));
+
 -- Live IDs and timeline fragments are not Realtime input-item IDs. Keep the
 -- historical tables intact and attach explicit evidence to the same interview.
 create function public.website_browser_opening_v6_valid(p_payload jsonb,p_call uuid) returns boolean
@@ -193,10 +199,6 @@ declare i public.website_interviews;old public.website_interview_live_operations
 end $$;
 revoke all on function public.commit_website_live_decision(uuid,uuid,uuid,text,text,bigint,bigint,text,text,text,text[],text) from public,anon,authenticated;
 grant execute on function public.commit_website_live_decision(uuid,uuid,uuid,text,text,bigint,bigint,text,text,text,text[],text) to service_role;
-
--- Structured duration/model usage is not a Realtime audio-token estimate.
-alter table public.calls add column provider_usage_details jsonb
- check(provider_usage_details is null or (jsonb_typeof(provider_usage_details)='object' and octet_length(provider_usage_details::text)<=262144));
 
 create function public.read_website_live_operation(p_owner uuid,p_call uuid,p_request uuid,p_operation text) returns jsonb
 language plpgsql security definer set search_path='' as $$
