@@ -12,14 +12,24 @@ class FakeSocket{
  emit(type:string,event:any={}){for(const handler of this.listeners.get(type)??[])handler(event);}
  open(){this.readyState=1;this.emit('open');}
  receive(event:any){this.emit('message',{data:JSON.stringify(event)});}
- send(text:string){const event=JSON.parse(text);this.sent.push(event);if(event.type==='session.close'&&this.autoClose)queueMicrotask(()=>this.receive({type:'session.closed',event_id:'evt_closed',session:{id:sessionId,model:'gpt-live-1',expires_at:expiresAt},reason:'close_requested',usage:{seconds:this.finalSeconds}}));}
+ failTypes=new Set<string>();
+ send(text:string){const event=JSON.parse(text);if(this.failTypes.has(event.type))throw Error('socket details');this.sent.push(event);if(event.type==='session.close'&&this.autoClose)queueMicrotask(()=>this.receive({type:'session.closed',event_id:'evt_closed',session:{id:sessionId,model:'gpt-live-1',expires_at:expiresAt},reason:'close_requested',usage:{seconds:this.finalSeconds}}));}
  close(){if(this.readyState===3)return;this.readyState=3;this.emit('close');}
 }
 const fixtures:any[]=[];
+async function until(condition:()=>boolean,ticks=200){for(let i=0;i<ticks;i++){if(condition())return;await tick();}throw Error('condition not reached');}
+const endCall=(socket:FakeSocket)=>{socket.receive({type:'response.event',delegation_id:'delegation-end',event:{type:'response.created',response:{id:'resp-end',status:'in_progress',model:'gpt-6-astra'}}});
+ socket.receive({type:'response.event',delegation_id:'delegation-end',event:{type:'response.output_item.done',item:{type:'function_call',call_id:'tool-end',name:'end_call',arguments:'{}',status:'completed'}}});};
+const completeEnd=(socket:FakeSocket)=>socket.receive({type:'response.event',delegation_id:'delegation-end',event:{type:'response.completed',response:{id:'resp-end',status:'completed',model:'gpt-6-astra',usage:{input_tokens:10,output_tokens:2,total_tokens:12,input_tokens_details:{cached_tokens:0,cache_write_tokens:0}}}}});
+const byeCreated=(socket:FakeSocket)=>socket.receive({type:'response.event',delegation_id:'delegation-end',event:{type:'response.created',response:{id:'resp-bye',status:'in_progress',model:'gpt-6-astra'}}});
+const byeCompleted=(socket:FakeSocket)=>socket.receive({type:'response.event',delegation_id:'delegation-end',event:{type:'response.completed',response:{id:'resp-bye',status:'completed',model:'gpt-6-astra',usage:{input_tokens:10,output_tokens:5,total_tokens:15,input_tokens_details:{cached_tokens:0,cache_write_tokens:0}}}}});
+const lateClosed={type:'session.closed',event_id:'evt_provider_late',session:{id:sessionId,model:'gpt-live-1',expires_at:expiresAt},reason:'close_requested',usage:{seconds:20}};
 function fixture(options:any={}){
  const order:string[]=[],calls:any[]=[],terminations:any[]=[],settlements:any[]=[],events:any[]=[],executions:any[]=[],sockets:FakeSocket[]=[];
- const rows=new Map<string,any>();let cleanup:any,creationCalls=0;const business={voiceInstructions:'Converse naturalmente.',backendInstructions:'Use operações autorizadas.',tools:[],
-  bindSession:(id:string)=>order.push(`bind:${id}`),observe:(event:any)=>events.push(event),execute:async(name:string,args:any,context:any)=>{executions.push({name,args,context});return options.execute?options.execute(name,args,context):{saved:true};}};
+ const rows=new Map<string,any>();let cleanup:any,creationCalls=0;const business:any={voiceInstructions:'Converse naturalmente.',backendInstructions:'Use operações autorizadas.',tools:[],onStop:undefined,
+  bindSession:(id:string)=>order.push(`bind:${id}`),observe:(event:any)=>events.push(event),execute:async(name:string,args:any,context:any)=>{executions.push({name,args,context});
+   if(name==='end_call'){void business.onStop('owner_requested_stop');return{ok:true,stopRequested:true,onboardingCompleted:false};}
+   return options.execute?options.execute(name,args,context):{saved:true};}};
  const client={from(table:string){let operation='select',payload:any,filters:any[]=[];const builder:any={
   insert(value:any){operation='insert';payload=value;return builder;},update(value:any){operation='update';payload=value;return builder;},select(){return builder;},eq(k:string,v:any){filters.push([k,v]);return builder;},
   single(){return run();},maybeSingle(){return run();},then(yes:any,no:any){return run().then(yes,no);}};
@@ -33,15 +43,19 @@ function fixture(options:any={}){
    if(table==='browser_session_requests')return{data:{id:ids.requestId,user_id:ids.userId,tenant_id:ids.tenantId,onboarding_protocol_version:6,opening_mode_requested:'live_managed_v1'},error:null};
    return{data:null,error:null};
   }return builder;
- },async rpc(name:string,args:any){expect(name).toBe('record_website_live_termination');terminations.push(args);if(options.holdTermination)return new Promise(()=>{});const row=rows.get(args.p_call);if(row)Object.assign(row,{status:args.p_outcome==='startup_error'?'error':args.p_outcome,ended_at:new Date().toISOString(),provider_termination_state:args.p_final_event?'confirmed':['not_started','rejected'].includes(args.p_usage.creationState)?'not_required':'unknown',provider_usage_details:args.p_usage});return{data:{recorded:true},error:null};}};
+ },async rpc(name:string,args:any){expect(name).toBe('record_website_live_termination');const index=terminations.length;terminations.push(args);if(options.holdTermination)return new Promise(()=>{});
+  if(options.beforeTerminationResolve)await options.beforeTerminationResolve(args,index);
+  const row=rows.get(args.p_call);const finalized=Boolean(args.p_final_event)&&!options.neverFinalize;
+  if(row)Object.assign(row,{status:args.p_outcome==='startup_error'?'error':args.p_outcome,ended_at:new Date().toISOString(),provider_termination_state:finalized?'confirmed':['not_started','rejected'].includes(args.p_usage.creationState)?'not_required':'unknown',provider_usage_details:args.p_usage});
+  return{data:{recorded:true,providerFinalized:finalized},error:null};}};
  const deps:any={client,apiKey:'synthetic-openai-key',openTimeoutMs:10,closeTimeoutMs:5,cleanupTimeoutMs:5,
   resolveTenant:async()=>{order.push('resolve');if(options.tenantWait)await options.tenantWait;return{tenant:{id:ids.tenantId,name:'Fixture Company'},rules:[]};},
   reserve:async()=>{order.push('reserve');if(options.reserveWait)await options.reserveWait;return'reservation-id';},
   prepare:async()=>{order.push('prepare');return{scope:{ownerId:ids.userId,callId:ids.callId,requestId:ids.requestId},stored:{agenda:{binding:{interviewId:ids.callId}},revision:7,digest:'a'.repeat(64)}};},
   createSession:async(input:any,dependencies:any)=>{creationCalls++;order.push('create');expect(input.voice).toBe('tempo');expect(input.responses).toMatchObject({model:'gpt-6-astra',reasoning:{effort:'low'}});return options.create?options.create(input,dependencies):{sessionId,sdp:'provider-answer',expiresAt};},
-  businessFactory:()=>business,
+  businessFactory:(factoryOptions:any)=>{business.onStop=factoryOptions.onStop;return business;},
   connect:(url:string,key:string)=>{order.push('connect');expect(url).toBe(`wss://api.openai.com/v1/live/sessions/${sessionId}/attach?graceful_close=true`);expect(key).toBe('synthetic-openai-key');const socket=new FakeSocket();sockets.push(socket);queueMicrotask(()=>{if(options.socketFailure){socket.emit('error');return;}socket.open();if(!options.deferStarted)socket.receive({type:'session.started',event_id:'event_started',session:{id:sessionId,model:'gpt-live-1',expires_at:expiresAt}});});return socket;},
-  finalize:async(args:any)=>{settlements.push(args);if(options.holdSettlement)return new Promise(()=>{});return true;}};
+  finalize:async(args:any)=>{const index=settlements.length;settlements.push(args);if(options.holdSettlement)return new Promise(()=>{});if(options.finalizeHook)await options.finalizeHook(args,index);return true;}};
  const args={...ids,sdpOffer:'v=0\r\naudio-offer',registerCleanup:(value:any)=>{order.push('register');cleanup=value;options.onRegister?.(value);}};
  const f={args,deps,order,calls,terminations,settlements,events,executions,sockets,rows,business,get cleanup(){return cleanup;},get creationCalls(){return creationCalls;}};fixtures.push(f);return f;
 }
@@ -170,5 +184,78 @@ describe('managed browser Live runtime',()=>{
  test('non-object sideband JSON cannot throw into the session event loop or disable Stop',async()=>{
   const f=fixture();await startManagedBrowserSession(f.args,f.deps);for(const value of [null,[],false,'unexpected'])expect(()=>f.sockets[0].receive(value)).not.toThrow();
   await f.cleanup.cancel('owner_requested_stop');expect(f.terminations[0].p_final_event).not.toBe(null);
+ });
+});
+
+describe('managed browser Live graceful end_call and late finalization',()=>{
+ test('end_call submits its result, waits for the delegated farewell to complete, then closes and confirms',async()=>{
+  const f=fixture();await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];
+  endCall(socket);await tick();await tick();
+  expect(f.executions.map(e=>e.name)).toEqual(['end_call']);
+  expect(socket.sent.map(e=>e.type)).toEqual(['session.instructions.append','response.item.create']);
+  expect(JSON.parse(socket.sent[1].item.output)).toMatchObject({ok:true,stopRequested:true});
+  completeEnd(socket);await tick();expect(socket.sent.map(e=>e.type)).toEqual(['session.instructions.append','response.item.create','response.create']);
+  byeCreated(socket);await tick();expect(socket.sent.at(-1).type).toBe('response.create');
+  byeCompleted(socket);await until(()=>f.terminations.length===1);
+  expect(socket.sent.at(-1).type).toBe('session.close');expect(socket.sent.filter(e=>e.type==='session.close')).toHaveLength(1);
+  expect(f.terminations[0].p_final_event).toMatchObject({eventId:'evt_closed'});expect(f.terminations[0].p_usage.close).toMatchObject({delegatedWork:'completed',outcome:'closed',lateFinalPersisted:false});
+  expect(f.rows.get(ids.callId).provider_termination_state).toBe('confirmed');expect(f.settlements.at(-1).usageResolved).toBe(true);
+ });
+ test('the delegated-work cap bounds the wait for the farewell',async()=>{
+  const f=fixture();f.deps.farewellMaxMs=20;await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];
+  endCall(socket);await tick();await tick();completeEnd(socket);await tick();byeCreated(socket);
+  await until(()=>f.terminations.length===1);
+  expect(socket.sent.at(-1).type).toBe('session.close');expect(f.terminations[0].p_usage.close).toMatchObject({delegatedWork:'capped'});
+ });
+ test('a browser cancel during the farewell wait is immediate and closes once',async()=>{
+  const f=fixture();f.deps.farewellMaxMs=5_000;await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];
+  endCall(socket);await tick();await tick();completeEnd(socket);await tick();
+  await f.cleanup.cancel('owner_requested_stop');
+  expect(socket.sent.filter(e=>e.type==='session.close')).toHaveLength(1);expect(f.terminations).toHaveLength(1);
+ });
+ test('a close timeout records unknown termination with no hangup request',async()=>{
+  const f=fixture();let fetches=0;f.deps.fetch=async()=>{fetches++;throw Error('never');};await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];socket.autoClose=false;
+  endCall(socket);await tick();await tick();completeEnd(socket);await tick();byeCreated(socket);byeCompleted(socket);
+  await until(()=>f.terminations.length===1);
+  expect(f.terminations[0].p_final_event).toBe(null);expect(f.terminations[0].p_usage.close).toMatchObject({outcome:'finalization_timeout',delegatedWork:'completed'});
+  expect(fetches).toBe(0);expect(f.rows.get(ids.callId).provider_termination_state).toBe('unknown');expect(f.settlements.at(-1).usageResolved).toBe(false);
+ });
+ test('session.closed arriving during the termination write is persisted before the socket closes',async()=>{
+  const f=fixture({beforeTerminationResolve:(_args:any,index:number)=>{if(index===0)f.sockets[0].receive(lateClosed);}});
+  await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];socket.autoClose=false;
+  await f.cleanup.cancel('owner_requested_stop');
+  expect(f.terminations).toHaveLength(2);expect(f.terminations[0].p_final_event).toBe(null);expect(f.terminations[1].p_final_event).toMatchObject({eventId:'evt_provider_late'});
+  expect(f.terminations[1].p_usage.close.lateFinalPersisted).toBe(true);expect(f.rows.get(ids.callId).provider_termination_state).toBe('confirmed');
+  expect(f.settlements.at(-1).usageResolved).toBe(true);
+ });
+ test('session.closed arriving during settlement is persisted before the socket closes',async()=>{
+  const states:number[]=[];
+  const f=fixture({finalizeHook:(_args:any,index:number)=>{if(index===0)f.sockets[0].receive(lateClosed);},beforeTerminationResolve:(_args:any,index:number)=>{if(index===1)states.push(f.sockets[0].readyState);}});
+  await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];socket.autoClose=false;
+  await f.cleanup.cancel('owner_requested_stop');
+  expect(f.terminations).toHaveLength(2);expect(f.terminations[1].p_final_event).toMatchObject({eventId:'evt_provider_late'});expect(states).toEqual([1]);
+  expect(f.settlements).toHaveLength(2);expect(f.settlements[1].usageResolved).toBe(true);expect(f.rows.get(ids.callId).provider_termination_state).toBe('confirmed');
+ });
+ test('internal stops never enter the graceful path even with delegated work pending',async()=>{
+  const f=fixture();f.deps.farewellMaxMs=5_000;await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];
+  socket.receive({type:'response.event',delegation_id:'delegation-real',event:{type:'response.created',response:{id:'resp-real',status:'in_progress',model:'gpt-6-astra'}}});
+  await f.cleanup.cancel('test_cleanup');
+  expect(socket.sent.at(-1).type).toBe('session.close');expect(f.terminations[0].p_usage.close).toMatchObject({delegatedWork:'not_awaited',outcome:'closed'});
+ });
+ test('an owner stop before startup completes falls back to cancellation',async()=>{
+  const creation=deferred();const f=fixture({create:()=>creation.promise});const start=startManagedBrowserSession(f.args,f.deps);await tick();
+  const stopping=f.business.onStop('owner_requested_stop');creation.resolve({sessionId,sdp:'late-answer',expiresAt});
+  await expect(start).rejects.toThrow('browser_request_cancelled');await stopping;
+  expect(f.terminations).toHaveLength(1);expect(f.sockets[0].sent.map(e=>e.type)).toEqual(['session.close']);
+ });
+ test('a failed local result send ends the wait without the cap',async()=>{
+  const f=fixture();f.deps.farewellMaxMs=5_000;await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];socket.failTypes.add('response.item.create');
+  endCall(socket);await until(()=>f.terminations.length===1,50);
+  expect(socket.sent.at(-1).type).toBe('session.close');expect(f.terminations[0].p_usage.close.delegatedWork).toBe('completed');
+ });
+ test('the late-final persistence loop is bounded',async()=>{
+  const f=fixture({neverFinalize:true,beforeTerminationResolve:()=>{f.sockets[0].receive({...lateClosed,event_id:`evt_${f.terminations.length}`});}});
+  await startManagedBrowserSession(f.args,f.deps);f.sockets[0].autoClose=false;
+  await f.cleanup.cancel('owner_requested_stop');expect(f.terminations).toHaveLength(3);
  });
 });

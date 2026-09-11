@@ -17,7 +17,14 @@ type Business={voiceInstructions:string;backendInstructions:string;tools:LiveFun
 type BusinessFactory=(options:{prepared:PreparedWebsiteInterview;businessName:string;client:Client;onStop:(reason?:string)=>Promise<void>})=>Business;
 type Dependencies={client?:Client;apiKey?:string;resolveTenant?:typeof resolveSessionTenant;reserve?:typeof reserveCallBudget;prepare?:typeof prepareWebsiteInterview;
   createSession?:typeof createLiveWebRtcSession;businessFactory?:BusinessFactory;connect?:(url:string,apiKey:string)=>Socket;
-  finalize?:typeof finalizeTerminalBudget;openTimeoutMs?:number;closeTimeoutMs?:number;cleanupTimeoutMs?:number};
+  finalize?:typeof finalizeTerminalBudget;openTimeoutMs?:number;closeTimeoutMs?:number;cleanupTimeoutMs?:number;farewellMaxMs?:number};
+/** Close bookkeeping persisted in provider_usage_details.close. delegatedWork
+ * says whether the owner-requested stop waited for the delegated farewell round
+ * (official order: finish delegated work, then session.close). It never claims
+ * that audio was heard: only session.closed proves provider finalization. */
+type CloseState={requestedAt:string|null;delegatedWork:'pending'|'completed'|'capped'|'not_awaited';sentAt:string|null;
+  outcome:'closed'|'finalization_timeout'|'transport_unavailable'|'not_sent';timeoutMs:number;lateFinalPersisted:boolean};
+const FAREWELL_MAX_MS=20_000;
 type FinalEvent={eventId:string;sessionId:string;reason:string;seconds:number|null;expiresAt?:number}|null;
 type CreationState='not_started'|'rejected'|'unknown'|'created';
 const MODEL='gpt-live-1',BACKEND='gpt-6-astra',MAX_MINUTES=55;
@@ -85,7 +92,10 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
   let socket:Socket|undefined,deadline:ReturnType<typeof setTimeout>|undefined,softNotified=false,cleaning=false;
   let usageWrites:Promise<void>=Promise.resolve(),finishWork:Promise<void>|undefined;
   let resolveStartup!:()=>void;const startupSettled=new Promise<void>(resolve=>{resolveStartup=resolve;});
-  const usage=()=>({...ledger.snapshot(),creationState,expiresAt});
+  let resolveFinished!:()=>void;const finished=new Promise<void>(resolve=>{resolveFinished=resolve;});
+  let closing:{reason:string;cap?:ReturnType<typeof setTimeout>}|null=null,closeState:CloseState|null=null;
+  const closeTimeoutMs=deps.closeTimeoutMs??config.liveCloseTimeoutMs;
+  const usage=()=>({...ledger.snapshot(),creationState,expiresAt,close:closeState});
   function persistUsage(){
     if(!tenantId||!callWriteStarted||cleaning)return;
     const snapshot=usage();
@@ -103,25 +113,58 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
     finishWork=(async()=>{
       try{
         bridge?.stop();clearTimeout(deadline);
-        if(lifecycle&&!final)await lifecycle.close();
+        if(lifecycle&&!final){
+          closeState??={requestedAt:null,delegatedWork:'not_awaited',sentAt:null,outcome:'not_sent',timeoutMs:closeTimeoutMs,lateFinalPersisted:false};
+          closeState.sentAt=new Date().toISOString();
+          const closed=await lifecycle.close();
+          closeState.outcome=closed.finalized?'closed':closed.reason==='transport_unavailable'?'transport_unavailable':'finalization_timeout';
+        }
         if(!callWriteStarted||!tenantId)return;
         // The final RPC carries the current in-memory snapshot. A delayed
         // periodic write is restricted to status=active and cannot overwrite it.
-        const snapshot=usage();
-        const result=await boundedReceipt(signal=>withSignal(client.rpc('record_website_live_termination',{p_owner:args.userId,p_call:args.callId,p_request:args.requestId,p_session:sessionId,
-          p_reason:stopReason??final?.reason??'connection_lost',p_outcome:outcome(),p_usage:snapshot,p_final_event:final}),signal),deps.cleanupTimeoutMs);
-        if(!result||result.error||!result.data)throw Error('live_termination_receipt_unproven');
-        if(reservationAttempted)await boundedReceipt(()=>(deps.finalize??finalizeTerminalBudget)({tenantId:tenantId!,callId:args.callId,actualCostUsd:snapshot.totalObservedCostUsd,
-          minutes:snapshot.voiceSeconds/60,outcome:outcome(),detail:{protocol:'live',...snapshot},
-          usageResolved:creationState==='not_started'||creationState==='rejected'||Boolean(final&&snapshot.usageResolved)}),deps.cleanupTimeoutMs);
-      }finally{try{socket?.close();}finally{managedLiveSessions.delete(args.callId);controls.delete(args.callId);}}
+        // A session.closed that arrives while the receipt or the settlement is
+        // in flight is persisted by another round before the socket closes.
+        let persistedFinal:FinalEvent=null;
+        for(let round=0;round<3;round++){
+          const snapshotFinal=final,snapshot=usage();
+          const result=await boundedReceipt(signal=>withSignal(client.rpc('record_website_live_termination',{p_owner:args.userId,p_call:args.callId,p_request:args.requestId,p_session:sessionId,
+            p_reason:stopReason??snapshotFinal?.reason??'connection_lost',p_outcome:outcome(),p_usage:snapshot,p_final_event:snapshotFinal}),signal),deps.cleanupTimeoutMs);
+          if(!result||result.error||!result.data)throw Error('live_termination_receipt_unproven');
+          if(snapshotFinal&&(result.data as any).providerFinalized===true)persistedFinal=snapshotFinal;
+          if(reservationAttempted)await boundedReceipt(()=>(deps.finalize??finalizeTerminalBudget)({tenantId:tenantId!,callId:args.callId,actualCostUsd:snapshot.totalObservedCostUsd,
+            minutes:snapshot.voiceSeconds/60,outcome:outcome(),detail:{protocol:'live',...snapshot},
+            usageResolved:creationState==='not_started'||creationState==='rejected'||Boolean(persistedFinal&&snapshot.usageResolved)}),deps.cleanupTimeoutMs);
+          if(!final||persistedFinal)break;
+          if(closeState)closeState.lateFinalPersisted=true;
+        }
+      }finally{try{socket?.close();}finally{managedLiveSessions.delete(args.callId);controls.delete(args.callId);resolveFinished();}}
     })();return finishWork;
   }
   const control:ManagedLiveCleanup={callId:args.callId,startupComplete:false,cancel(reason){
+    if(closing){clearTimeout(closing.cap);closing=null;}
     stopReason??=reason;bridge?.stop();controller.abort();return startupSettled.then(()=>finish());
   }};
   const stop=(reason='owner_requested_stop')=>control.cancel(reason);
   const backgroundStop=(reason:string)=>{void stop(reason).catch(()=>console.error('live_termination_persist_failed',args.callId));};
+  // Owner-requested stop through end_call: let the delegated farewell round
+  // finish (bounded), then finalize through the same cancel path as everything
+  // else. Timers and idle notifications call cancel directly: never re-entrant.
+  function finishGraceful(reason:string,delegatedWork:'completed'|'capped'){
+    if(closeState)closeState.delegatedWork=delegatedWork;
+    backgroundStop(reason);
+  }
+  function checkDelegatedWork(){
+    if(!closing||stopReason||cleaning)return;
+    if(!bridge?.busy())finishGraceful(closing.reason,'completed');
+  }
+  function gracefulStop(reason='owner_requested_stop'){
+    if(stopReason||cleaning||closing)return finished;
+    if(!control.startupComplete||!bridge)return control.cancel(reason);
+    closeState={requestedAt:new Date().toISOString(),delegatedWork:'pending',sentAt:null,outcome:'not_sent',timeoutMs:closeTimeoutMs,lateFinalPersisted:false};
+    closing={reason,cap:setTimeout(()=>finishGraceful(reason,'capped'),deps.farewellMaxMs??FAREWELL_MAX_MS)};
+    queueMicrotask(checkDelegatedWork);
+    return finished;
+  }
   controls.set(args.callId,control);managedLiveSessions.add(args.callId);
   try{args.registerCleanup?.(control);}catch(error){controls.delete(args.callId);managedLiveSessions.delete(args.callId);throw error;}
   const checkCancelled=()=>{if(stopReason)throw Object.assign(Error('browser_request_cancelled'),{status:499,startupCancelled:true});};
@@ -143,6 +186,7 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
     }
     try{business?.observe(event);}catch{console.error('live_business_observe_failed',args.callId);}
     bridge?.observe(event);
+    if(closing)checkDelegatedWork();
     if(event.type==='session.usage.updated'||event.type==='response.event'&&['response.completed','response.failed','response.incomplete'].includes(event.event?.type))persistUsage();
     if(event.type==='session.closed'){backgroundStop(stopReason??'provider_session_closed');return;}
     const cost=ledger.snapshot().totalObservedCostUsd;
@@ -162,7 +206,7 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
     const prepared=await(deps.prepare??prepareWebsiteInterview)({ownerId:args.userId,tenantId,callId:args.callId,requestId:args.requestId,signal:controller.signal},client);
     if(!prepared)throw Error('website_interview_prepared_source_required');checkCancelled();
     const factory=deps.businessFactory??(await import('./onboarding-live-business.ts')).createLiveBusinessSession;
-    business=factory({prepared,businessName:resolved.tenant.name,client,onStop:stop});
+    business=factory({prepared,businessName:resolved.tenant.name,client,onStop:gracefulStop});
     const marker=await client.from('calls').update({provider_termination_state:'unknown',provider_usage_state:'unknown',provider_usage_details:{...usage(),creationState:'unknown'}})
       .eq('id',args.callId).eq('tenant_id',tenantId).eq('status','active').select('id').maybeSingle();
     if(marker.error||marker.data?.id!==args.callId)throw Error('live_provider_marker_failed');checkCancelled();
@@ -177,8 +221,8 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
       .eq('id',args.callId).eq('tenant_id',tenantId).eq('status','active').select('id,openai_call_id').maybeSingle();
     if(identity.error||identity.data?.id!==args.callId||identity.data?.openai_call_id!==sessionId)throw Error('live_provider_identity_failed');
     business.bindSession?.(knownSessionId);
-    lifecycle=createLiveLifecycle({sessionId:knownSessionId,send,closeTimeoutMs:deps.closeTimeoutMs});
-    bridge=createLiveResponsesBridge({send,execute:business.execute,onError:error=>console.error('live_responses_error',JSON.stringify({callId:args.callId,...error}))});
+    lifecycle=createLiveLifecycle({sessionId:knownSessionId,send,closeTimeoutMs});
+    bridge=createLiveResponsesBridge({send,execute:business.execute,onIdle:checkDelegatedWork,onError:error=>console.error('live_responses_error',JSON.stringify({callId:args.callId,...error}))});
     const attached=attach(knownSessionId,apiKey,deps,observe,()=>{if(!cleaning)backgroundStop('live_sideband_disconnected');},data=>diagnostic(args.callId,sessionId,'inbound',{type:'transport.raw',data}));socket=attached.socket;
     await attached.ready;lifecycle.readyFromAttachment();checkCancelled();
     deadline=setTimeout(()=>backgroundStop('session_deadline'),MAX_MINUTES*60_000);
@@ -193,7 +237,7 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
         const identity=await client.from('calls').update({openai_call_id:sessionId,provider_termination_state:'active',provider_usage_state:'unknown',provider_usage_details:usage()})
           .eq('id',args.callId).eq('tenant_id',tenantId).eq('status','active');
         if(identity.error)console.error('live_cleanup_identity_unproven',args.callId);
-        lifecycle=createLiveLifecycle({sessionId,send,closeTimeoutMs:deps.closeTimeoutMs});
+        lifecycle=createLiveLifecycle({sessionId,send,closeTimeoutMs});
         const attached=attach(sessionId,apiKey,deps,observe,()=>{});socket=attached.socket;await attached.ready;lifecycle.readyFromAttachment();
       }catch{/* Unknown provider finalization remains unknown in the receipt. */}
     }
@@ -236,7 +280,7 @@ export async function recoverManagedLiveCancellation(callId:string,reason:string
       total_tokens:usage.totalTokens,input_tokens_details:{cached_tokens:usage.cachedInputTokens,cache_write_tokens:usage.cacheWriteTokens}}:undefined});
   }
   let final:FinalEvent=null,socket:Socket|undefined;
-  const lifecycle=createLiveLifecycle({sessionId,closeTimeoutMs:deps.closeTimeoutMs,send:event=>{
+  const lifecycle=createLiveLifecycle({sessionId,closeTimeoutMs:deps.closeTimeoutMs??config.liveCloseTimeoutMs,send:event=>{
     if(socket?.readyState!==1)throw Error('live_transport_unavailable');socket.send(JSON.stringify(event));
   }});
   try{
