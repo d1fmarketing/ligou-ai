@@ -151,7 +151,7 @@ declare
   m public.company_discovery_managed_runs; j public.worker_jobs; a public.worker_attempts;
   src public.worker_results; source_job public.worker_jobs;
   new_job uuid:=gen_random_uuid(); new_attempt uuid:=gen_random_uuid(); token uuid:=gen_random_uuid();
-  claim_won boolean:=false; obs jsonb; result jsonb; receipt jsonb; requested_deadline timestamptz;
+  claim_won boolean:=false; obs jsonb; result jsonb; requested_deadline timestamptz;
 begin
   if p_action='prepare' then
     select * into src from public.worker_results where id=p_job_id and tenant_id=p_tenant_id;
@@ -225,7 +225,7 @@ begin
     if m.state='completed' and a.result_id is null then
       if result is null or result='null'::jsonb or obs->>'provider_status'<>'completed' or m.turn_id is null
         or j.status<>'running' or a.status<>'running' or j.fence_generation<>a.fence_generation then raise exception 'managed_analysis_commit_not_authorized'; end if;
-      receipt:=public.commit_company_discovery_result_v2(m.attempt_id,a.fence_generation,m.launch_token::text,result,
+      perform public.commit_company_discovery_result_v2(m.attempt_id,a.fence_generation,m.launch_token::text,result,
         encode(extensions.digest(convert_to(result::text,'utf8'),'sha256'),'hex'));
     elsif m.state in ('failed','cancelled') and a.result_id is null then
       update public.worker_attempts set status=m.state,terminal_at=coalesce(terminal_at,clock_timestamp()),terminal_reason=coalesce(obs->>'error_code',m.state) where id=m.attempt_id;

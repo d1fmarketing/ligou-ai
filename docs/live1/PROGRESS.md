@@ -10,6 +10,13 @@ Current diagnostic limitation: the four tools are get_context/save_decision/get_
 
 Agents managed workflow, provider lifecycle, output validation and source-preserving SQL tests are implemented. Authenticated entrypoints and consumer selection isolation are being integrated. No real provider task or automatic provider-state deletion has run.
 
+
+Verification before release: complete configured controller run 1,852 passing tests, zero failures (includes seven runner tests and its nested sentinel); latest changed Live modules separately 96/96 pass. Dashboard 292 pass plus two existing rendered-browser skips; Edge frozen Deno check passes for all seven functions. Release/runner tests 32 pass. Secret scan covers 915 tracked files, clean. Bun bundles the composed server successfully.
+
+The full PG17 run reached the final audit after application/concurrency/isolation/startup/no-op checks passed. It found one unused Agents SQL receipt variable; replacing that unused assignment with PERFORM was qualified by the same isolated PG17 schema/security/lint setup (96 migrations, 29 schema assertions, one budget assertion, no new lint warning, INFO-only advisors, complete local cleanup). The complete command itself did not exit green because of that warning; its functional evidence and the subsequent focused qualification are separate artifacts. Earlier runs failed on corrected grants and a concurrent test-file addition. Do not mislabel any failed run as passed.
+
+Frontend 8f51898 candidate was built and published: staged production 23ufw419t is protected and rejects development OIDC by environment; same bytes are now preview rk0ms6ozb. No protection rules changed. Existing QA account session was renewed through the existing Supabase admin credential, with no email or new user. GET model access for Live and Terra both returned 200; this is not paid media proof. At this entry, schema/Edge/controller deployment and real smoke are still pending.
+
 | Current component | Responsibility | Official replacement | Action and retirement condition |
 | --- | --- | --- | --- |
 | Candidate Codex stdio/auth/delegate adapter | Local text reasoning loop | Live Responses delegation | Remove from candidate now; never shipped to production. |
