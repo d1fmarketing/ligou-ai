@@ -1,4 +1,6 @@
 import {randomBytes} from 'node:crypto';
+import http from 'node:http';
+import https from 'node:https';
 
 /** Read-only existence check for a Live session. It performs the documented
  * sideband attach handshake (wss://api.openai.com/v1/live/sessions/{id}/attach)
@@ -8,8 +10,40 @@ import {randomBytes} from 'node:crypto';
  * confirms anything, and never throws. */
 export type LiveSessionProbe={outcome:'not_found'|'exists'|'unknown';status:number|null;code:string|null;type:string|null;checkedAt:string};
 type ProviderFetch=(url:string,init?:RequestInit)=>Promise<Response>;
-const MAX_BODY_BYTES=65_536,DEFAULT_TIMEOUT_MS=5_000;
+// Measured 2026-09-11: the provider answers the upgrade probe for a gone session
+// with 404 after ~5.4 s. The default must exceed that with margin.
+const MAX_BODY_BYTES=65_536,DEFAULT_TIMEOUT_MS=15_000;
 const object=(value:unknown):value is Record<string,unknown>=>value!==null&&typeof value==='object'&&!Array.isArray(value);
+
+/** Bun's fetch aborts immediately when Upgrade/Connection headers are combined
+ * with an AbortSignal (observed on 1.2.6 and 1.2.13). node:http(s) sends the
+ * handshake headers verbatim and the provider answers a regular 404 for a gone
+ * session; the abort signal destroys the request. Bodies are bounded so a
+ * misbehaving peer cannot grow memory. `requestImpl` is a test seam only. */
+export type UpgradeRequestImpl=(options:http.RequestOptions,callback:(response:http.IncomingMessage)=>void)=>http.ClientRequest;
+export function upgradeProbeFetch(url:string,init:RequestInit={},requestImpl?:UpgradeRequestImpl):Promise<Response>{
+  return new Promise((resolve,reject)=>{
+    const target=new URL(url),transport=target.protocol==='http:'?http:https;
+    const headers=Object.fromEntries(Object.entries(init.headers as Record<string,string>??{}).filter(([,value])=>typeof value==='string'));
+    // Called through the module object: Bun's https.request misbehaves unbound.
+    // No `port` key unless the URL carries one: Bun's node:https misroutes `port: undefined`.
+    const options={host:target.hostname,...(target.port?{port:Number(target.port)}:{}),path:target.pathname+target.search,method:init.method??'GET',headers};
+    const onResponse=(response:http.IncomingMessage)=>{
+      const chunks:Buffer[]=[];let size=0;
+      response.on('data',(chunk:Buffer)=>{size+=chunk.length;if(size<=MAX_BODY_BYTES+1)chunks.push(chunk);});
+      response.on('end',()=>{const body=Buffer.concat(chunks).subarray(0,MAX_BODY_BYTES+1).toString('utf8');resolve(new Response(body,{status:response.statusCode??0}));});
+      response.on('error',reject);
+    };
+    const request=requestImpl?requestImpl(options,onResponse):transport.request(options,onResponse);
+    request.on('upgrade',(response,socket)=>{socket.destroy();resolve(new Response(null,{status:response.statusCode??101}));});
+    request.on('error',reject);
+    // Bun emits 'close' but no 'error' after destroy(); settle explicitly.
+    request.on('close',()=>reject(Error('upgrade_probe_closed')));
+    const abort=()=>{request.destroy(Error('aborted'));reject(Error('aborted'));};
+    if(init.signal){if(init.signal.aborted)abort();else init.signal.addEventListener('abort',abort,{once:true});}
+    request.end();
+  });
+}
 
 function errorShape(body:unknown):{code:string|null;type:string|null}{
   if(!object(body))return{code:null,type:null};
@@ -24,7 +58,7 @@ export async function probeLiveSession(sessionId:string,deps:{apiKey:string;fetc
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),deps.timeoutMs??DEFAULT_TIMEOUT_MS);
   try{
-    const response=await(deps.fetch??fetch)(`https://api.openai.com/v1/live/sessions/${encodeURIComponent(sessionId)}/attach`,{
+    const response=await(deps.fetch??upgradeProbeFetch)(`https://api.openai.com/v1/live/sessions/${encodeURIComponent(sessionId)}/attach`,{
       method:'GET',signal:controller.signal,
       headers:{Authorization:`Bearer ${deps.apiKey}`,Upgrade:'websocket',Connection:'Upgrade','Sec-WebSocket-Version':'13','Sec-WebSocket-Key':randomBytes(16).toString('base64')},
     });

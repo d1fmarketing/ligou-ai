@@ -1,5 +1,6 @@
 import {describe,expect,test} from 'bun:test';
-import {probeLiveSession} from '../src/onboarding-live-probe.ts';
+import http from 'node:http';
+import {probeLiveSession,upgradeProbeFetch} from '../src/onboarding-live-probe.ts';
 
 const key='sk-synthetic-probe-key-0123456789';
 const response=(status:number,body:unknown)=>new Response(typeof body==='string'?body:JSON.stringify(body),{status,headers:{'content-type':'application/json'}});
@@ -46,5 +47,32 @@ describe('read-only Live session existence probe',()=>{
     expect((await probeLiveSession('',{apiKey:key,fetch:f.fetchImpl})).outcome).toBe('unknown');
     expect((await probeLiveSession('live_u1_x',{apiKey:'',fetch:f.fetchImpl})).outcome).toBe('unknown');
     expect(f.calls).toHaveLength(0);
+  });
+});
+
+describe('node:http(s) upgrade probe transport',()=>{
+  function fakeRequest(behaviour:{status?:number;body?:string;hang?:boolean}){
+    const seen:any={options:null,ended:false,destroyed:null as any};
+    const requestImpl:any=(options:any,callback:(response:any)=>void)=>{
+      seen.options=options;const listeners=new Map<string,Function[]>();
+      const request:any={on(type:string,fn:Function){listeners.set(type,[...(listeners.get(type)??[]),fn]);return request;},
+        end(){seen.ended=true;if(behaviour.hang)return;queueMicrotask(()=>{const rl=new Map<string,Function[]>();const response:any={statusCode:behaviour.status??404,on(type:string,fn:Function){rl.set(type,[...(rl.get(type)??[]),fn]);return response;}};
+          callback(response);for(const fn of rl.get('data')??[])fn(Buffer.from(behaviour.body??''));for(const fn of rl.get('end')??[])fn();});},
+        destroy(error:Error){seen.destroyed=error;for(const fn of listeners.get('close')??[])fn();}}; // Bun: destroy emits close, never error
+      return request;
+    };
+    return{requestImpl,seen};
+  }
+  test('sends the handshake headers verbatim and returns the provider status and body',async()=>{
+    const body=JSON.stringify({error:{code:'session_id_not_found',type:'invalid_request_error'}});const f=fakeRequest({status:404,body});
+    const response=await upgradeProbeFetch('https://api.openai.com/v1/live/sessions/live_x/attach',{method:'GET',headers:{Authorization:`Bearer ${key}`,Upgrade:'websocket',Connection:'Upgrade','Sec-WebSocket-Version':'13','Sec-WebSocket-Key':'dGhlIHNhbXBsZSBub25jZQ=='}},f.requestImpl);
+    expect(response.status).toBe(404);expect(JSON.parse(await response.text())).toMatchObject({error:{code:'session_id_not_found'}});
+    expect(f.seen.options).toMatchObject({host:'api.openai.com',path:'/v1/live/sessions/live_x/attach',method:'GET',headers:{Upgrade:'websocket',Connection:'Upgrade','Sec-WebSocket-Version':'13',Authorization:`Bearer ${key}`}});
+    expect(f.seen.ended).toBe(true);expect(f.seen.destroyed).toBe(null);
+  });
+  test('an abort signal destroys a hanging request and the promise rejects',async()=>{
+    const f=fakeRequest({hang:true});const controller=new AbortController();setTimeout(()=>controller.abort(),10);
+    await expect(upgradeProbeFetch('https://api.openai.com/attach',{signal:controller.signal},f.requestImpl)).rejects.toThrow(/aborted|upgrade_probe_closed/);
+    expect(f.seen.destroyed).toBeInstanceOf(Error);
   });
 });
