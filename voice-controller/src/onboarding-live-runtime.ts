@@ -28,6 +28,12 @@ const FAREWELL_MAX_MS=20_000;
 type FinalEvent={eventId:string;sessionId:string;reason:string;seconds:number|null;expiresAt?:number}|null;
 type CreationState='not_started'|'rejected'|'unknown'|'created';
 const MODEL='gpt-live-1',BACKEND='gpt-6-astra',MAX_MINUTES=55;
+// Official "Greet before the caller speaks" (live-conversations): one
+// session.instructions.append with the greeting, the language and an explicit
+// instruction to greet immediately without waiting, then pause and listen.
+// The ACK is context acceptance, not playback. Measured against the previous
+// two-command opening in smoke S2; reverted if it brings no gain.
+export const LIVE_GREETING_PT='Cumprimente o dono agora, em português brasileiro, sem esperar que ele fale primeiro. Apresente-se como o Ligou, diga em uma frase que vai confirmar as informações da empresa encontradas no website e pergunte se o nome encontrado está correto. Depois pause e escute o dono.';
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const managedLiveSessions=new Set<string>();
 const controls=new Map<string,ManagedLiveCleanup>();
@@ -181,7 +187,7 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
     if(sessionId){const observed=finalEvent(event,sessionId);if(observed)final=observed;}
     lifecycle?.observe(event);
     if(!stopReason&&!cleaning&&event.type==='session.started'&&event.session?.id===sessionId&&event.session?.model===MODEL){
-      try{lifecycle?.greet('Cumprimente o dono em português brasileiro, explique brevemente a entrevista e avance usando o contexto atual.');}
+      try{lifecycle?.greet(LIVE_GREETING_PT);}
       catch{console.error('live_greeting_request_failed',args.callId);}
     }
     try{business?.observe(event);}catch{console.error('live_business_observe_failed',args.callId);}

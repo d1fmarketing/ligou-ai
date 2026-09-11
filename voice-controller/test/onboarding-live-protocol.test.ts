@@ -84,33 +84,26 @@ describe('Live session lifecycle, independently of business approval',()=>{
   live.observe(started);live.greet('Apresente-se em português.');
   expect(sent.map(e=>e.type)).toEqual(['session.instructions.append']);
  });
- test('one matching greeting acknowledgment requests one short commentary nudge',()=>{
+ test('one matching greeting acknowledgment marks acceptance and sends no second command',()=>{
   const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>sent.push(e)});live.observe(started);
   const requestId=live.greet('Apresente-se naturalmente em português.');
   live.observe({type:'session.instructions.appended',client_event_id:'other-command'});expect(sent).toHaveLength(1);
   live.observe({type:'session.instructions.appended',client_event_id:requestId});
   live.observe({type:'session.instructions.appended',client_event_id:requestId});live.greet('Outra tentativa.');
-  expect(sent.map(e=>e.type)).toEqual(['session.instructions.append','session.commentary.append']);
-  expect(sent[1]).toMatchObject({delegation_id:null,content:'Comece a conversa agora seguindo as instruções fornecidas.'});
+  expect(sent.map(e=>e.type)).toEqual(['session.instructions.append']);
+  expect(sent[0]).toMatchObject({delegation_id:null,content:'Apresente-se naturalmente em português.'});
   expect(live.status()).toMatchObject({greetingAccepted:true,sessionStarted:true});expect(live.status()).not.toHaveProperty('greetingHeard');
  });
- test('a rejected greeting instruction does not trigger commentary after a contradictory late ack',()=>{
+ test('a rejected greeting instruction is not accepted by a contradictory late ack',()=>{
   const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>sent.push(e)});live.observe(started);const requestId=live.greet('Apresente-se.');
   live.observe({type:'error',error:{code:'invalid_request',client_event_id:requestId}});
   live.observe({type:'session.instructions.appended',client_event_id:requestId});
   expect(sent.map(e=>e.type)).toEqual(['session.instructions.append']);expect(live.status()).toMatchObject({phase:'running',greetingAccepted:false,greetingError:'invalid_request'});
  });
- test('Stop before the greeting acknowledgment prevents the commentary nudge',async()=>{
+ test('Stop before the greeting acknowledgment sends nothing besides session.close',async()=>{
   const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>sent.push(e),closeTimeoutMs:5});live.observe(started);const requestId=live.greet('Apresente-se.');
   const stopping=live.close();live.observe({type:'session.instructions.appended',client_event_id:requestId});live.observe(closed());await stopping;
   expect(sent.map(e=>e.type)).toEqual(['session.instructions.append','session.close']);
- });
- test('a failed commentary send is observable and is not replayed on duplicate greeting acknowledgment',()=>{
-  const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>{sent.push(e);if(e.type==='session.commentary.append')throw Error('connection unavailable');}});
-  live.observe(started);const requestId=live.greet('Apresente-se.');
-  expect(()=>live.observe({type:'session.instructions.appended',client_event_id:requestId})).not.toThrow();
-  live.observe({type:'session.instructions.appended',client_event_id:requestId});
-  expect(sent).toHaveLength(2);expect(live.status().greetingError).toBe('transport_unavailable');
  });
  test('a late sideband attachment cannot revive a closing or closed lifecycle',async()=>{
   const live=createLiveLifecycle({sessionId,send:()=>{},closeTimeoutMs:5});
@@ -129,7 +122,7 @@ describe('Live session lifecycle, independently of business approval',()=>{
  test('greeting starts only after readiness; input is never muted and append ack is not playback',()=>{
   const sent:any[]=[];const live=createLiveLifecycle({sessionId,send:e=>sent.push(e)});
   live.observe(started);live.greet('Apresente-se em português e pergunte o assunto atual.');
-  expect(sent).toHaveLength(1);expect(sent[0]).toMatchObject({type:'session.instructions.append',delegation_id:null});
+  expect(sent).toHaveLength(1);expect(sent[0]).toMatchObject({type:'session.instructions.append',delegation_id:null,content:'Apresente-se em português e pergunte o assunto atual.'});
   live.observe({type:'session.instructions.appended',client_event_id:sent[0].event_id,start_ms:1,end_ms:100});
   expect(live.status()).toMatchObject({phase:'running',finalized:false});
   expect(sent.map(x=>x.type)).not.toContain('session.input_audio.mute');

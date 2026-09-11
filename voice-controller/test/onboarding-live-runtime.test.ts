@@ -1,6 +1,6 @@
 import {afterEach,describe,expect,test} from 'bun:test';
 process.env.SUPABASE_URL??='http://127.0.0.1:1';process.env.SUPABASE_SECRET_KEY??='synthetic-service';process.env.SUPABASE_PUBLISHABLE_KEY??='synthetic-public';
-const {startManagedBrowserSession,recoverManagedLiveCancellation,managedLiveSessions,setManagedLiveDiagnosticObserver}=await import('../src/onboarding-live-runtime.ts');
+const {startManagedBrowserSession,recoverManagedLiveCancellation,managedLiveSessions,setManagedLiveDiagnosticObserver,LIVE_GREETING_PT}=await import('../src/onboarding-live-runtime.ts');
 const {LiveCreationError}=await import('../src/onboarding-live-protocol.ts');
 const ids={userId:'10000000-0000-4000-8000-000000000001',tenantId:'10000000-0000-4000-8000-000000000002',callId:'10000000-0000-4000-8000-000000000003',requestId:'10000000-0000-4000-8000-000000000004'};
 const sessionId='live_genuine_fixture',expiresAt=1_900_000_000;
@@ -62,15 +62,17 @@ function fixture(options:any={}){
 afterEach(async()=>{for(const f of fixtures.splice(0))await f.cleanup?.cancel('test_cleanup').catch(()=>{});setManagedLiveDiagnosticObserver(null);});
 
 describe('managed browser Live runtime',()=>{
- test('SDP returns before session.started; matching start and instruction ACK independently trigger the greeting',async()=>{
+ test('SDP returns before session.started; the greeting is one instructions append and its ACK sends nothing more',async()=>{
   const f=fixture({deferStarted:true});const result=await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];
   expect(result.sdp).toBe('provider-answer');expect(f.cleanup.startupComplete).toBe(true);expect(socket.sent).toEqual([]);
   socket.receive({type:'session.started',session:{id:'another-session',model:'gpt-live-1'}});expect(socket.sent).toEqual([]);
   socket.receive({type:'session.started',session:{id:sessionId,model:'gpt-realtime-2.1'}});expect(socket.sent).toEqual([]);
   const started={type:'session.started',event_id:'actual_started',session:{id:sessionId,model:'gpt-live-1'}};socket.receive(started);socket.receive(started);
   expect(socket.sent.map(e=>e.type)).toEqual(['session.instructions.append']);
+  expect(socket.sent[0]).toMatchObject({type:'session.instructions.append',delegation_id:null,content:LIVE_GREETING_PT});
+  expect(LIVE_GREETING_PT).toMatch(/português/);expect(LIVE_GREETING_PT).toMatch(/sem esperar/);expect(LIVE_GREETING_PT).toMatch(/escute/);
   const ack={type:'session.instructions.appended',client_event_id:socket.sent[0].event_id,start_ms:0,end_ms:100};socket.receive(ack);socket.receive(ack);
-  expect(socket.sent.map(e=>e.type)).toEqual(['session.instructions.append','session.commentary.append']);expect(f.executions).toEqual([]);
+  expect(socket.sent.map(e=>e.type)).toEqual(['session.instructions.append']);expect(f.executions).toEqual([]);
  });
  test('Stop before the real start event never resurrects the greeting',async()=>{
   const f=fixture({deferStarted:true});await startManagedBrowserSession(f.args,f.deps);const stopping=f.cleanup.cancel('owner_requested_stop');

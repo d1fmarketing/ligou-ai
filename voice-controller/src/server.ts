@@ -1000,10 +1000,19 @@ if (import.meta.main) {
     'response.output_item.done','response.completed','response.failed','response.incomplete','response.cancelled',
     'response.item.create','response.create','session.instructions.append','session.instructions.appended',
     'session.commentary.append','session.commentary.appended','error']);
+  // First inbound transcript delta per call and direction: greeting and first
+  // owner speech timing on the same monotonic clock. Text never logged.
+  const firstTranscript=new Map<string,Set<string>>();
   setManagedLiveDiagnosticObserver(({callId,sessionId,direction,event})=>{
     const data=event as Record<string,any>;
     const type=data?.type==='response.event'?data.event?.type:data?.type;
-    if(!timedLiveEvents.has(type))return;
+    const transcript=direction==='inbound'&&(type==='session.output_transcript.delta'||type==='session.input_transcript.delta');
+    if(transcript){
+      const logged=firstTranscript.get(callId)??new Set<string>();
+      if(logged.has(type))return;
+      logged.add(type);firstTranscript.set(callId,logged);
+    }else if(!timedLiveEvents.has(type))return;
+    if(type==='session.closed')firstTranscript.delete(callId);
     const identifier=(value:unknown)=>typeof value==='string'&&/^[a-zA-Z0-9_.:/-]{1,512}$/.test(value)?value:undefined;
     const providerMessage=type==='error'&&typeof data.error?.message==='string'
       ? data.error.message.replaceAll(config.openaiKey||'\u0000','[redacted]').replace(/\bsk-[a-zA-Z0-9_-]+/g,'[redacted]')
@@ -1024,7 +1033,10 @@ if (import.meta.main) {
       tool:identifier(data.event?.item?.name),toolOutcome,
       outputBytes:direction==='outbound'&&typeof data.item?.output==='string'?Buffer.byteLength(data.item.output):undefined,
       errorCode:identifier(data.error?.code),errorType:identifier(data.error?.type),errorParam:identifier(data.error?.param),
-      errorClientEventId:identifier(data.error?.client_event_id),errorMessage:providerMessage}));
+      errorClientEventId:identifier(data.error?.client_event_id),errorMessage:providerMessage,
+      first:transcript||undefined,startMs:transcript&&Number.isFinite(data.start_ms)?data.start_ms:undefined,
+      endMs:transcript&&Number.isFinite(data.end_ms)?data.end_ms:undefined,
+      deltaChars:transcript&&typeof data.delta==='string'?data.delta.length:undefined}));
   });
   const { startWorkerLoop } = await import("./worker.ts");
   startWorkerLoop();
