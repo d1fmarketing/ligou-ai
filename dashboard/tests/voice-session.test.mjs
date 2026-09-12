@@ -1700,7 +1700,7 @@ test('completion, approval and amendment outcomes retain precedence over reviewi
 });
 
 test("onboarding result copy distinguishes interrupted, finalizing, and durable completion", () => {
-  assert.equal(onboardingOutcomeCopy(null), "Verificando conclusão…");
+  assert.equal(onboardingOutcomeCopy(null), "Finalizando… registrando o que foi conversado.");
   assert.equal(
     onboardingOutcomeCopy({ status: "interrupted" }),
     "Entrevista interrompida. A conclusão não foi confirmada. Revise na Memória as sugestões que já foram registradas.",
@@ -1745,7 +1745,7 @@ test("ended copy follows the ended run type rather than the next-run selector", 
     endedSessionType: "onboarding",
     selectedSessionType: "owner_browser",
     onboardingOutcome: null,
-  }), "Verificando conclusão…");
+  }), "Finalizando… registrando o que foi conversado.");
 });
 
 

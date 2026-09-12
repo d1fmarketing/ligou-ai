@@ -476,7 +476,8 @@ export async function watchOnboardingOutcome({
 }
 
 export function onboardingOutcomeCopy(outcome) {
-  if (!outcome) return "Verificando conclusão…";
+  // While the controller records the decisions from the transcript (post-call recorder, ≤ 45 s) the call is still active in the database.
+  if (!outcome) return "Finalizando… registrando o que foi conversado.";
   if(outcome.status==="amendment_pending")return outcome.canResume
     ? "Pedido de correção salvo. A versão anterior continua aprovada. Continue para revisar os pontos alterados."
     : "Pedido de correção salvo. A versão anterior continua aprovada. Confirmando o encerramento antes de retomar.";
