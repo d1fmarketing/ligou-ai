@@ -24,7 +24,7 @@ const completeEnd=(socket:FakeSocket)=>socket.receive({type:'response.event',del
 const byeCreated=(socket:FakeSocket)=>socket.receive({type:'response.event',delegation_id:'delegation-end',event:{type:'response.created',response:{id:'resp-bye',status:'in_progress',model:'gpt-6-astra'}}});
 const byeCompleted=(socket:FakeSocket)=>socket.receive({type:'response.event',delegation_id:'delegation-end',event:{type:'response.completed',response:{id:'resp-bye',status:'completed',model:'gpt-6-astra',usage:{input_tokens:10,output_tokens:5,total_tokens:15,input_tokens_details:{cached_tokens:0,cache_write_tokens:0}}}}});
 const lateClosed={type:'session.closed',event_id:'evt_provider_late',session:{id:sessionId,model:'gpt-live-1',expires_at:expiresAt},reason:'close_requested',usage:{seconds:20}};
-function fixture(options:any={}){
+function fixture(options:any={}){let readIndex=0;
  const order:string[]=[],calls:any[]=[],terminations:any[]=[],settlements:any[]=[],events:any[]=[],executions:any[]=[],sockets:FakeSocket[]=[];
  const rows=new Map<string,any>();let cleanup:any,creationCalls=0;const business:any={voiceInstructions:'Converse naturalmente.',backendInstructions:'Use operações autorizadas.',tools:[],onStop:undefined,
   bindSession:(id:string)=>order.push(`bind:${id}`),observe:(event:any)=>events.push(event),execute:async(name:string,args:any,context:any)=>{executions.push({name,args,context});
@@ -38,6 +38,7 @@ function fixture(options:any={}){
     if(operation==='insert'){order.push('insert');rows.set(payload.id,{...payload});calls.push(payload);return{data:{id:payload.id},error:null};}
     const row=rows.get(filters.find(([k])=>k==='id')?.[1]??ids.callId);
     if(operation==='update'){if(payload.openai_call_id)order.push('identity');if(options.holdUsage&&payload.cost_estimate_usd!==undefined)return new Promise(()=>{});if(options.dropMarker&&payload.provider_termination_state==='unknown')return{data:null,error:null};if(row&&filters.every(([k,v])=>row[k]===v)){Object.assign(row,payload);return{data:row,error:null};}return{data:null,error:null};}
+    if(options.readHook)await options.readHook(readIndex++);
     return{data:row,error:null};
    }
    if(table==='browser_session_requests')return{data:{id:ids.requestId,user_id:ids.userId,tenant_id:ids.tenantId,onboarding_protocol_version:6,opening_mode_requested:'live_managed_v1'},error:null};
@@ -165,6 +166,13 @@ describe('managed browser Live runtime',()=>{
   f.rows.set(ids.callId,{id:ids.callId,tenant_id:ids.tenantId,model:'gpt-live-1',channel:'browser',session_type:'onboarding',openai_call_id:sessionId,provider_termination_state:'unknown',provider_usage_details:{voiceSeconds:12,expiresAt,responses:[]}});
   expect(await recoverManagedLiveCancellation(ids.callId,'owner_requested_stop',f.deps)).toBe(true);
   expect(f.terminations).toHaveLength(2);expect(f.settlements).toHaveLength(2);expect(f.settlements[1].usageResolved).toBe(true);expect(f.rows.get(ids.callId).provider_termination_state).toBe('confirmed');
+ });
+ test('recovery persists a session.closed that arrives during its final readback',async()=>{
+  const f=fixture({socketAutoClose:false,readHook:(index:number)=>{if(index===1)f.sockets[0].receive(lateClosed);}});
+  f.rows.set(ids.callId,{id:ids.callId,tenant_id:ids.tenantId,model:'gpt-live-1',channel:'browser',session_type:'onboarding',openai_call_id:sessionId,provider_termination_state:'unknown',provider_usage_details:{voiceSeconds:12,expiresAt,responses:[]}});
+  expect(await recoverManagedLiveCancellation(ids.callId,'owner_requested_stop',f.deps)).toBe(true);
+  expect(f.terminations).toHaveLength(2);expect(f.terminations[0].p_final_event).toBe(null);expect(f.terminations[1].p_final_event).toMatchObject({eventId:'evt_provider_late'});
+  expect(f.settlements).toHaveLength(2);expect(f.settlements[1].usageResolved).toBe(true);expect(f.rows.get(ids.callId).provider_termination_state).toBe('confirmed');expect(f.sockets[0].readyState).toBe(3);
  });
  test('recovery never handles a stored Realtime call or a missing provider handle',async()=>{
   const f=fixture();for(const [model,openai_call_id]of [['gpt-realtime-2.1','rtc_id'],['gpt-live-1',null]]){

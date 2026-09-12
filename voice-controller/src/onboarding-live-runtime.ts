@@ -295,16 +295,19 @@ export async function recoverManagedLiveCancellation(callId:string,reason:string
     // Same late-final protection as the normal finish(): a session.closed that
     // arrives during the receipt or the settlement is persisted by another
     // round before the socket closes (bounded).
-    let persistedFinal:FinalEvent=null;
-    for(let round=0;round<3;round++){
+    let persistedFinal:FinalEvent=null,readback:any=null;
+    for(let round=0;round<4;round++){
       const snapshotFinal=final;
       const usage={...ledger.snapshot(),creationState:'created',expiresAt:typeof prior?.expiresAt==='number'?prior.expiresAt:null};
       const result=await boundedReceipt(signal=>withSignal(client.rpc('record_website_live_termination',{p_owner:request.user_id,p_call:callId,p_request:request.id,p_session:sessionId,p_reason:reason,p_outcome:'ended',p_usage:usage,p_final_event:snapshotFinal}),signal),deps.cleanupTimeoutMs);
       if(!result||result.error||!result.data)return false;
       if(snapshotFinal&&(result.data as any).providerFinalized===true)persistedFinal=snapshotFinal;
       await boundedReceipt(()=>(deps.finalize??finalizeTerminalBudget)({tenantId:call.tenant_id,callId,actualCostUsd:usage.totalObservedCostUsd,minutes:usage.voiceSeconds/60,outcome:'ended',detail:usage,usageResolved:Boolean(persistedFinal&&usage.usageResolved)}),deps.cleanupTimeoutMs);
+      // The readback stays inside the guarded window: a session.closed that
+      // arrives while it runs is persisted by the next round, before the socket closes.
+      readback=await readCall();
       if(!final||persistedFinal)break;
     }
-    const readback=await readCall();return Boolean(persistedFinal&&readback&&!readback.error&&isFinal(readback.data));
+    return Boolean(persistedFinal&&readback&&!readback.error&&isFinal(readback.data));
   }catch{return false;}finally{socket?.close();}
 }
