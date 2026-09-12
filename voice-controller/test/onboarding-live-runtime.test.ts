@@ -54,7 +54,7 @@ function fixture(options:any={}){
   prepare:async()=>{order.push('prepare');return{scope:{ownerId:ids.userId,callId:ids.callId,requestId:ids.requestId},stored:{agenda:{binding:{interviewId:ids.callId}},revision:7,digest:'a'.repeat(64)}};},
   createSession:async(input:any,dependencies:any)=>{creationCalls++;order.push('create');expect(input.voice).toBe('tempo');expect(input.responses).toMatchObject({model:'gpt-6-astra',reasoning:{effort:'low'}});return options.create?options.create(input,dependencies):{sessionId,sdp:'provider-answer',expiresAt};},
   businessFactory:(factoryOptions:any)=>{business.onStop=factoryOptions.onStop;return business;},
-  connect:(url:string,key:string)=>{order.push('connect');expect(url).toBe(`wss://api.openai.com/v1/live/sessions/${sessionId}/attach?graceful_close=true`);expect(key).toBe('synthetic-openai-key');const socket=new FakeSocket();sockets.push(socket);queueMicrotask(()=>{if(options.socketFailure){socket.emit('error');return;}socket.open();if(!options.deferStarted)socket.receive({type:'session.started',event_id:'event_started',session:{id:sessionId,model:'gpt-live-1',expires_at:expiresAt}});});return socket;},
+  connect:(url:string,key:string)=>{order.push('connect');expect(url).toBe(`wss://api.openai.com/v1/live/sessions/${sessionId}/attach?graceful_close=true`);expect(key).toBe('synthetic-openai-key');const socket=new FakeSocket();if(options.socketAutoClose===false)socket.autoClose=false;sockets.push(socket);queueMicrotask(()=>{if(options.socketFailure){socket.emit('error');return;}socket.open();if(!options.deferStarted)socket.receive({type:'session.started',event_id:'event_started',session:{id:sessionId,model:'gpt-live-1',expires_at:expiresAt}});});return socket;},
   finalize:async(args:any)=>{const index=settlements.length;settlements.push(args);if(options.holdSettlement)return new Promise(()=>{});if(options.finalizeHook)await options.finalizeHook(args,index);return true;}};
  const args={...ids,sdpOffer:'v=0\r\naudio-offer',registerCleanup:(value:any)=>{order.push('register');cleanup=value;options.onRegister?.(value);}};
  const f={args,deps,order,calls,terminations,settlements,events,executions,sockets,rows,business,get cleanup(){return cleanup;},get creationCalls(){return creationCalls;}};fixtures.push(f);return f;
@@ -151,6 +151,19 @@ describe('managed browser Live runtime',()=>{
   const f=fixture();f.rows.set(ids.callId,{id:ids.callId,tenant_id:ids.tenantId,model:'gpt-live-1',channel:'browser',session_type:'onboarding',openai_call_id:sessionId,provider_termination_state:'unknown',provider_usage_details:{voiceSeconds:12,expiresAt,responses:[]}});
   expect(await recoverManagedLiveCancellation(ids.callId,'owner_requested_stop',f.deps)).toBe(true);expect(f.creationCalls).toBe(0);
   expect(f.sockets[0].sent.map(e=>e.type)).toEqual(['session.close']);expect(f.terminations[0].p_final_event.eventId).toBe('evt_closed');
+ });
+ test('recovery persists a session.closed that arrives during its termination write',async()=>{
+  const f=fixture({socketAutoClose:false,beforeTerminationResolve:(_args:any,index:number)=>{if(index===0)f.sockets[0].receive(lateClosed);}});
+  f.rows.set(ids.callId,{id:ids.callId,tenant_id:ids.tenantId,model:'gpt-live-1',channel:'browser',session_type:'onboarding',openai_call_id:sessionId,provider_termination_state:'unknown',provider_usage_details:{voiceSeconds:12,expiresAt,responses:[]}});
+  expect(await recoverManagedLiveCancellation(ids.callId,'owner_requested_stop',f.deps)).toBe(true);
+  expect(f.terminations).toHaveLength(2);expect(f.terminations[0].p_final_event).toBe(null);expect(f.terminations[1].p_final_event).toMatchObject({eventId:'evt_provider_late'});
+  expect(f.rows.get(ids.callId).provider_termination_state).toBe('confirmed');expect(f.settlements.at(-1).usageResolved).toBe(true);expect(f.sockets[0].readyState).toBe(3);
+ });
+ test('recovery persists a session.closed that arrives during its settlement',async()=>{
+  const f=fixture({socketAutoClose:false,finalizeHook:(_args:any,index:number)=>{if(index===0)f.sockets[0].receive(lateClosed);}});
+  f.rows.set(ids.callId,{id:ids.callId,tenant_id:ids.tenantId,model:'gpt-live-1',channel:'browser',session_type:'onboarding',openai_call_id:sessionId,provider_termination_state:'unknown',provider_usage_details:{voiceSeconds:12,expiresAt,responses:[]}});
+  expect(await recoverManagedLiveCancellation(ids.callId,'owner_requested_stop',f.deps)).toBe(true);
+  expect(f.terminations).toHaveLength(2);expect(f.settlements).toHaveLength(2);expect(f.settlements[1].usageResolved).toBe(true);expect(f.rows.get(ids.callId).provider_termination_state).toBe('confirmed');
  });
  test('recovery never handles a stored Realtime call or a missing provider handle',async()=>{
   const f=fixture();for(const [model,openai_call_id]of [['gpt-realtime-2.1','rtc_id'],['gpt-live-1',null]]){

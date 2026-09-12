@@ -165,6 +165,9 @@ create function public.settle_unresolved_live_call_budget(p_tenant uuid,p_call u
 returns uuid language plpgsql security definer set search_path='' as $$
 declare c public.calls;begin
  if auth.role() is distinct from 'service_role' then raise exception 'service_role_required' using errcode='42501';end if;
+ -- Same lock order as reconcile_live_session_expiry and settle_unresolved_call_budget: tenant first.
+ perform 1 from public.tenants t where t.id=p_tenant for update;
+ if not found then raise exception 'tenant_not_found' using errcode='P0002';end if;
  select * into c from public.calls where id=p_call and tenant_id=p_tenant for update;
  if c.id is null or c.model is distinct from 'gpt-live-1' then raise exception 'live_settlement_scope_invalid';end if;
  if not exists(select 1 from public.browser_interview_expiry_receipts e where e.call_id=p_call and e.policy='live_expires_at_and_attach_404_v1') then raise exception 'live_settlement_receipt_missing';end if;

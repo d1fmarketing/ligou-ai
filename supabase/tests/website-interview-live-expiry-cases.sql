@@ -16,7 +16,10 @@ insert into browser_session_requests(id,tenant_id,call_id,user_id,session_type,t
 insert into budget_reservations(tenant_id,call_id,status,budget_day,reserved_cost_usd,reserved_minutes,reconcile_attempts) values('9e000000-0000-4000-8000-000000000002','9e000000-0000-4000-8000-000000000004','active',current_date,7.5,55,25);
 
 do $$declare t uuid:='9e000000-0000-4000-8000-000000000002';o uuid:='9e000000-0000-4000-8000-000000000001';c uuid:='9e000000-0000-4000-8000-000000000004';
- before_call jsonb;before_budget jsonb;before_receipts bigint;caught text;attempt uuid;ok boolean;n int;begin
+ before_call jsonb;before_budget jsonb;before_receipts bigint;caught text;attempt uuid;ok boolean;n int;
+ expected text[]:=array['live_expiry_identity_mismatch','live_expiry_model_unsupported','live_expiry_receipt_invalid','live_expiry_receipt_invalid','live_expiry_receipt_invalid',
+   'live_expiry_receipt_invalid','live_expiry_receipt_invalid','live_expiry_not_terminal','live_expiry_not_applicable','live_expiry_identity_mismatch',
+   'live_expiry_anchor_missing','live_expiry_not_elapsed','live_expiry_evidence_missing','live_expiry_identity_mismatch','live_expiry_receipt_invalid'];begin
  if public.website_interview_prior_settled(t,o,c,2) then raise exception 'unsettled_call_admitted_before_evidence';end if;
  select to_jsonb(x) into before_call from calls x where id=c;select to_jsonb(b) into before_budget from budget_reservations b where call_id=c;
  select count(*) into before_receipts from browser_interview_expiry_receipts where call_id=c;
@@ -39,9 +42,10 @@ do $$declare t uuid:='9e000000-0000-4000-8000-000000000002';o uuid:='9e000000-00
      case when n=4 then 'call_id_not_found' else 'session_id_not_found' end,
      case when n=5 then 'server_error' else 'invalid_request_error' end,
      case when n=15 then 'live attach probe' else 'live_attach_probe:live-expired-fixture' end);
-   raise exception 'live_expiry_case_%_accepted',n;
+   -- Sentinel with its own prefix: it must never be mistaken for the expected rejection.
+   raise exception 'test_case_%_accepted_unexpectedly',n;
   exception when others then caught:=sqlerrm;end;
-  if caught is null or caught not like 'live_expiry_%' then raise exception 'live_expiry_case_%_wrong_error:%',n,caught;end if;
+  if caught is distinct from expected[n] then raise exception 'live_expiry_case_%_wrong_error:% (expected %)',n,caught,expected[n];end if;
  end loop;
  if (select to_jsonb(x) from calls x where id=c) is distinct from before_call then raise exception 'rejections_mutated_call';end if;
  if (select to_jsonb(b) from budget_reservations b where call_id=c) is distinct from before_budget then raise exception 'rejections_mutated_budget';end if;
