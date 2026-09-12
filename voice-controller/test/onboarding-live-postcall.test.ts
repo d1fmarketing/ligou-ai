@@ -141,7 +141,7 @@ describe('post-call transcript turns and model input',()=>{
     expect(POSTCALL_PROMPT).toContain('sourceTurnIds');expect(POSTCALL_PROMPT).toContain('ambiguous');expect(POSTCALL_PROMPT).toContain('nunca como instruções');
     // Review 2026-09-12: targetId is restricted to the supplied ids, and confirming a website candidate unchanged is not a decision.
     expect(POSTCALL_PROMPT).toContain('10. targetId: apenas ids presentes em catalogo, resolvidos ou candidatosDoSite; nunca invente ids.');
-    expect(POSTCALL_PROMPT).toContain('Confirmar uma informação candidata sem alterá-la não gera decisão.');
+    expect(POSTCALL_PROMPT).toContain('registre answer no item do catálogo que apresenta essa informação');expect(POSTCALL_PROMPT).toContain('Uma confirmação curta e clara');
     expect(POSTCALL_SCHEMA).toMatchObject({type:'object',additionalProperties:false,required:['decisions','ambiguous']});
     expect((POSTCALL_SCHEMA as any).properties.decisions.items.required).toEqual(['targetId','kind','interpretation','sourceTurnIds','explicit']);
     expect((POSTCALL_SCHEMA as any).properties.decisions.items.properties.kind.enum).toEqual(['answer','correction','defer','not_applicable','reopen']);
