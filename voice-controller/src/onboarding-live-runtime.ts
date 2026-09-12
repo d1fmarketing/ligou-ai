@@ -6,6 +6,7 @@ import {prepareWebsiteInterview,type PreparedWebsiteInterview} from './onboardin
 import {createLiveLifecycle,createLiveWebRtcSession,LiveCreationError,type LiveFunctionTool} from './onboarding-live-protocol.ts';
 import {createLiveResponsesBridge,type LiveResponsesToolContext} from './onboarding-live-responses.ts';
 import {createLiveUsageLedger} from './onboarding-live-usage.ts';
+import {runPostcallRecording,failedPostcallState,type PostcallContext,type PostcallState} from './onboarding-live-postcall.ts';
 
 type Event=Record<string,any>;
 type Client={from:(table:string)=>any;rpc:(name:string,args:Record<string,unknown>)=>PromiseLike<{data:any;error:any}>};
@@ -13,11 +14,14 @@ type Socket={readyState:number;send:(text:string)=>void;close:()=>void;addEventL
 export type ManagedLiveCleanup={callId:string;startupComplete:boolean;cancel:(reason:string)=>Promise<void>};
 export type ManagedLiveStart={userId:string;sdpOffer:string;tenantId?:string;callId:string;requestId:string;registerCleanup?:(control:ManagedLiveCleanup)=>void};
 type Business={voiceInstructions:string;backendInstructions:string;tools:LiveFunctionTool[];observe:(event:Event)=>void;
-  execute:(name:string,args:Record<string,unknown>,context:LiveResponsesToolContext)=>Promise<unknown>;bindSession?:(sessionId:string)=>void};
+  execute:(name:string,args:Record<string,unknown>,context:LiveResponsesToolContext)=>Promise<unknown>;bindSession?:(sessionId:string)=>void;
+  /** Post-call recorder input (transcript, store, plan). Absent: nothing is recorded after the call. */
+  postcallContext?:()=>PostcallContext};
 type BusinessFactory=(options:{prepared:PreparedWebsiteInterview;businessName:string;client:Client;onStop:(reason?:string)=>Promise<void>})=>Business;
 type Dependencies={client?:Client;apiKey?:string;resolveTenant?:typeof resolveSessionTenant;reserve?:typeof reserveCallBudget;prepare?:typeof prepareWebsiteInterview;
-  createSession?:typeof createLiveWebRtcSession;businessFactory?:BusinessFactory;connect?:(url:string,apiKey:string)=>Socket;
-  finalize?:typeof finalizeTerminalBudget;openTimeoutMs?:number;closeTimeoutMs?:number;cleanupTimeoutMs?:number;farewellMaxMs?:number;closeDrainQuietMs?:number;closeDrainCapMs?:number};
+  createSession?:typeof createLiveWebRtcSession;businessFactory?:BusinessFactory;connect?:(url:string,apiKey:string)=>Socket;fetch?:typeof fetch;
+  finalize?:typeof finalizeTerminalBudget;openTimeoutMs?:number;closeTimeoutMs?:number;cleanupTimeoutMs?:number;farewellMaxMs?:number;closeDrainQuietMs?:number;closeDrainCapMs?:number;
+  postcallTimeoutMs?:number;postcallModelTimeoutMs?:number};
 /** Close bookkeeping persisted in provider_usage_details.close. delegatedWork
  * says whether the owner-requested stop waited for the delegated farewell round
  * (official order: finish delegated work, then session.close). It never claims
@@ -106,7 +110,10 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
   let closing:{reason:string;cap?:ReturnType<typeof setTimeout>}|null=null,closeState:CloseState|null=null;
   let lastOutputDeltaAt=0,drainTimer:ReturnType<typeof setTimeout>|undefined;
   const closeTimeoutMs=deps.closeTimeoutMs??config.liveCloseTimeoutMs;
-  const usage=()=>({...ledger.snapshot(),creationState,expiresAt,close:closeState});
+  // Post-call recorder marker (design §3.2): rides in provider_usage_details
+  // through the same usage snapshot; null until the recorder has run.
+  let postcall:PostcallState|null=null;
+  const usage=()=>({...ledger.snapshot(),creationState,expiresAt,close:closeState,postcall});
   function persistUsage(){
     if(!tenantId||!callWriteStarted||cleaning)return;
     const snapshot=usage();
@@ -131,6 +138,30 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
           closeState.outcome=closed.finalized?'closed':closed.reason==='transport_unavailable'?'transport_unavailable':'finalization_timeout';
         }
         if(!callWriteStarted||!tenantId)return;
+        // Post-call recorder (design §3.1): after session.close and before the
+        // termination receipt, while the call row is still active so the live
+        // actor accepts the commits. One bounded attempt; a failure or timeout
+        // is recorded in the marker and never holds the receipt.
+        if(business?.postcallContext&&creationState==='created'&&control.startupComplete&&apiKey){
+          const postcallStopReason=stopReason??final?.reason??'connection_lost';
+          // A budget-killed call already sits at the reservation: a priced
+          // recorder response would make the resolved settlement exceed it
+          // (settle_call_budget: settlement_exceeds_reservation) and the
+          // reconciler would retry forever. The transcript stays in
+          // website_interview_live_fragments for a manual re-run.
+          if(stopReason==='budget_limit')postcall=failedPostcallState(postcallStopReason,'budget_exhausted');
+          else{
+            const bound=new AbortController(),timer=setTimeout(()=>bound.abort(),deps.postcallTimeoutMs??config.livePostcallTimeoutMs);
+            try{
+              const {usageRaw,...state}=await runPostcallRecording(business.postcallContext(),{apiKey,fetch:deps.fetch,signal:bound.signal,
+                modelTimeoutMs:deps.postcallModelTimeoutMs??config.livePostcallModelTimeoutMs,stopReason:postcallStopReason});
+              postcall=state;
+              // Priced usage only (the recorder already priced it): an unknown price stays in the marker instead of poisoning usageResolved/settlement.
+              if(state.responseId&&usageRaw&&state.usage?.priced)ledger.observeResponse({responseId:state.responseId,model:state.model,status:'completed',usage:usageRaw});
+            }catch(error){postcall=failedPostcallState(postcallStopReason,'unexpected',String(error));}
+            finally{clearTimeout(timer);}
+          }
+        }
         // The final RPC carries the current in-memory snapshot. A delayed
         // periodic write is restricted to status=active and cannot overwrite it.
         // A session.closed that arrives while the receipt or the settlement is

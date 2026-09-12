@@ -13,6 +13,7 @@ export const unitTestFiles = [
   "test/onboarding-live-runtime.test.ts",
   "test/onboarding-live-usage.test.ts",
   "test/onboarding-live-business.test.ts",
+  "test/onboarding-live-postcall.test.ts",
   "test/onboarding-live-routing.test.ts",
   "test/onboarding-live-probe.test.ts",
   "test/sales-provider.test.ts",

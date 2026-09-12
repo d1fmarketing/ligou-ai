@@ -62,6 +62,39 @@ export function parseLiveCloseDrainMs(raw: string | undefined): number {
   return value;
 }
 
+// Post-call recorder (owner decision 2026-09-12: no "vou registrar" pauses
+// mid-call). After session.closed and before record_website_live_termination
+// the runtime makes ONE gpt-6-astra Responses call over the persisted
+// transcript (~5-20 s) and then one commit RPC per accepted decision through
+// the existing live decision path (spontaneous answers can map one transcript
+// onto many catalogue items, so the only bound on the commits is this
+// timeout). It must finish while the call row is still active, because
+// website_interview_live_actor only accepts writes for an active call; the
+// dashboard shows "Finalizando…" meanwhile. Default 45 s bounds the whole
+// pass; a timeout keeps the operations committed so far and lists the rest in
+// the marker as skipped in_flight | not_attempted (transcript stays in
+// website_interview_live_fragments).
+export function parseLivePostcallTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return 45_000;
+  if (!/^[0-9]+$/.test(raw)) throw new Error("live_postcall_timeout_invalid");
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 5_000 || value > 120_000)
+    throw new Error("live_postcall_timeout_invalid");
+  return value;
+}
+
+// The model call alone inside the pass above: one attempt, no retry (an
+// identical retry would double the cost without new evidence). Default 30 s
+// leaves the remaining budget for the commit RPCs.
+export function parseLivePostcallModelTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return 30_000;
+  if (!/^[0-9]+$/.test(raw)) throw new Error("live_postcall_model_timeout_invalid");
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 5_000 || value > 90_000)
+    throw new Error("live_postcall_model_timeout_invalid");
+  return value;
+}
+
 export const ONBOARDING_BUDGET_SOFT_LIMIT_USD = 6.5;
 export const ONBOARDING_BUDGET_RESERVATION_USD = 7.5;
 
@@ -90,6 +123,8 @@ export const config = {
   ),
   liveCloseTimeoutMs: parseLiveCloseTimeoutMs(process.env.LIVE_CLOSE_TIMEOUT_MS),
   liveCloseDrainQuietMs: parseLiveCloseDrainMs(process.env.LIVE_CLOSE_DRAIN_QUIET_MS),
+  livePostcallTimeoutMs: parseLivePostcallTimeoutMs(process.env.LIVE_POSTCALL_TIMEOUT_MS),
+  livePostcallModelTimeoutMs: parseLivePostcallModelTimeoutMs(process.env.LIVE_POSTCALL_MODEL_TIMEOUT_MS),
   hermesKey: process.env.HERMES_API_KEY ?? "",
   defaultTenantSlug: process.env.LIGOU_TENANT ?? "rocha-plumbing",
   // Male brand voice: RJ listened to cedar/ash/echo/verse/ballad on a real Ligou script and picked ASH.

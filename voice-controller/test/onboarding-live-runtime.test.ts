@@ -2,6 +2,9 @@ import {afterEach,describe,expect,test} from 'bun:test';
 process.env.SUPABASE_URL??='http://127.0.0.1:1';process.env.SUPABASE_SECRET_KEY??='synthetic-service';process.env.SUPABASE_PUBLISHABLE_KEY??='synthetic-public';
 const {startManagedBrowserSession,recoverManagedLiveCancellation,managedLiveSessions,setManagedLiveDiagnosticObserver,LIVE_GREETING_PT}=await import('../src/onboarding-live-runtime.ts');
 const {LiveCreationError}=await import('../src/onboarding-live-protocol.ts');
+const configModule=await import('../src/config.ts');
+const {createOnboardingAgenda,getAgendaAction}=await import('../src/onboarding-agenda.ts');
+const {onboardingAgendaDigest}=await import('../src/onboarding-agenda-store.ts');
 const ids={userId:'10000000-0000-4000-8000-000000000001',tenantId:'10000000-0000-4000-8000-000000000002',callId:'10000000-0000-4000-8000-000000000003',requestId:'10000000-0000-4000-8000-000000000004'};
 const sessionId='live_genuine_fixture',expiresAt=1_900_000_000;
 const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
@@ -305,5 +308,103 @@ describe('managed browser Live graceful end_call and late finalization',()=>{
   const f=fixture({neverFinalize:true,beforeTerminationResolve:()=>{f.sockets[0].receive({...lateClosed,event_id:`evt_${f.terminations.length}`});}});
   await startManagedBrowserSession(f.args,f.deps);f.sockets[0].autoClose=false;
   await f.cleanup.cancel('owner_requested_stop');expect(f.terminations).toHaveLength(3);
+ });
+});
+
+// Post-call recorder (design §6.7): a real agenda behind an in-memory store,
+// one owner turn answering a non-authority item, and a Responses-shaped fetch.
+const PRICED={input_tokens:800,output_tokens:120,total_tokens:920,input_tokens_details:{cached_tokens:0,cache_write_tokens:0}};
+function postcallFixture(options:{usage?:any;hang?:boolean}={}){
+ const binding={interviewId:ids.callId,callId:ids.callId,draftId:'20000000-0000-4000-8000-000000000001',draftHash:'a'.repeat(64),sourceResultId:'20000000-0000-4000-8000-000000000002',sourceResultHash:'b'.repeat(64)};
+ const agenda=createOnboardingAgenda(binding,[
+  {id:'sunday',source:'contradiction',subject:'business_hours',questionPt:'Qual a regra de domingo?',coverageRefs:['hours'],relatedItemIds:[],blocking:true},
+  {id:'weekday',source:'missing_website_information',subject:'business_hours',questionPt:'Qual o horário de semana?',coverageRefs:['hours'],relatedItemIds:[],blocking:false}],[]);
+ let stored:any={agenda,revision:0,storeVersion:0,digest:onboardingAgendaDigest(agenda),receiptId:'20000000-0000-4000-8000-000000000003',nextAction:getAgendaAction(agenda),state:'unfinished',replayed:false};
+ const commits:any[]=[],fetches:any[]=[];const probe={snapshot:()=>({} as Record<string,unknown>)};
+ const store={read:async()=>stored,readOperation:async()=>null,commit:async(_snapshot:any,decision:any)=>{
+  commits.push(decision);const next=structuredClone(stored.agenda);const target=[...next.items,...next.candidateOverrides].find((i:any)=>i.id===decision.targetId);
+  const evidence={turnId:`${ids.callId}:op`,text:decision.interpretation,provenance:'model_interpretation'};target.evidence.push(evidence);next.ownerTurns.push(evidence);next.revision++;target.answerRevision++;target.status='answered';
+  stored={...stored,agenda:next,revision:next.revision,storeVersion:stored.storeVersion+1,digest:onboardingAgendaDigest(next)};
+  return{...stored,operationRef:'ligou-live-op:'+'f'.repeat(64),operationReceiptId:'20000000-0000-4000-8000-000000000004',operationRevision:stored.revision};}};
+ const fragments=[{eventId:'l-1',speaker:'assistant',text:'Qual a regra de domingo?',startMs:0,endMs:900,arrival:0},{eventId:'o-1',speaker:'owner',text:'No domingo, só emergência.',startMs:1000,endMs:1600,arrival:1}];
+ const fetch=async(url:string,init:any)=>{fetches.push({url,body:JSON.parse(init.body),...probe.snapshot()});if(options.hang)return new Promise(()=>{});
+  return{ok:true,status:200,json:async()=>({id:'resp_postcall',status:'completed',model:'gpt-6-astra',usage:options.usage??PRICED,
+   output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({decisions:[{targetId:'sunday',kind:'answer',interpretation:'No domingo, somente emergências.',sourceTurnIds:['d1'],explicit:false}],ambiguous:[]})}]}]})};};
+ const context={scope:{ownerId:ids.userId,callId:ids.callId,requestId:ids.requestId,tenantId:ids.tenantId,interviewId:ids.callId,providerSessionId:sessionId},store,stored,projection:{candidateRecap:[]},fragments,evidenceFault:false,
+  plan:{listed:1,clarificationTotal:1,clarificationPending:0,continuation:false},flush:async()=>{}};
+ return{context,fetch,fetches,commits,probe,stored:()=>stored};
+}
+const endCallToFarewell=async(socket:FakeSocket)=>{endCall(socket);await tick();await tick();completeEnd(socket);await tick();byeCreated(socket);byeCompleted(socket);};
+
+describe('managed browser Live post-call recorder',()=>{
+ test('the recorder runs after session.close and before the termination receipt; its marker and priced usage ride in p_usage',async()=>{
+  const p=postcallFixture();const f=fixture();f.business.postcallContext=()=>p.context;f.deps.fetch=p.fetch;
+  p.probe.snapshot=()=>({closeSent:f.sockets[0].sent.some(e=>e.type==='session.close'),closedSeen:f.events.some(e=>e.type==='session.closed'),terminations:f.terminations.length});
+  await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];
+  await endCallToFarewell(socket);await until(()=>f.terminations.length===1);
+  expect(p.fetches).toHaveLength(1);expect(p.fetches[0]).toMatchObject({url:'https://api.openai.com/v1/responses',closeSent:true,closedSeen:true,terminations:0});
+  expect(p.fetches[0].body).toMatchObject({model:'gpt-6-astra',reasoning:{effort:'low'},store:false});
+  expect(socket.sent.map(e=>e.type)).toEqual(['session.instructions.append','response.item.create','response.create','session.close']);
+  const usage=f.terminations[0].p_usage;
+  expect(usage.postcall).toMatchObject({version:1,outcome:'done',reason:null,model:'gpt-6-astra',responseId:'resp_postcall',stopReason:'owner_requested_stop',
+   fragments:{owner:1,assistant:1,persisted:true},plan:{listed:1,clarificationTotal:1,clarificationPending:0,continuation:false},usage:{inputTokens:800,outputTokens:120,priced:true},pendingAfter:0});
+  expect(usage.postcall.operations).toHaveLength(p.commits.length);expect(usage.postcall.operations[0]).toMatchObject({kind:'answer',targetId:'sunday',revision:1});
+  expect(usage.postcall).not.toHaveProperty('usageRaw');
+  expect(usage.responses.map((r:any)=>r.responseId)).toContain('resp_postcall');expect(usage.backendUsageResolved).toBe(true);
+  expect(usage.close).toMatchObject({delegatedWork:'completed',outcome:'closed'});expect(p.stored().agenda.items[0].status).toBe('answered');
+  expect(f.settlements.at(-1).usageResolved).toBe(true);expect(f.settlements.at(-1).detail.postcall.outcome).toBe('done');
+  expect(f.settlements.at(-1).actualCostUsd).toBeGreaterThan(f.terminations[0].p_usage.voiceCostUsd);
+ });
+ test('unpriced recorder usage stays in the marker and never feeds the ledger',async()=>{
+  const p=postcallFixture({usage:{input_tokens:800,output_tokens:120,total_tokens:920,input_tokens_details:{cached_tokens:0}}});
+  const f=fixture();f.business.postcallContext=()=>p.context;f.deps.fetch=p.fetch;
+  await startManagedBrowserSession(f.args,f.deps);await endCallToFarewell(f.sockets[0]);await until(()=>f.terminations.length===1);
+  const usage=f.terminations[0].p_usage;
+  expect(usage.postcall).toMatchObject({outcome:'done',usage:{inputTokens:800,outputTokens:120,costUsd:null,priced:false}});
+  expect(usage.responses.map((r:any)=>r.responseId)).not.toContain('resp_postcall');expect(usage.backendUsageResolved).toBe(true);expect(f.settlements.at(-1).usageResolved).toBe(true);
+ });
+ test('a browser Stop converges on the same recorder before the receipt',async()=>{
+  const p=postcallFixture();const f=fixture();f.business.postcallContext=()=>p.context;f.deps.fetch=p.fetch;
+  await startManagedBrowserSession(f.args,f.deps);await f.cleanup.cancel('owner_requested_stop');
+  expect(p.fetches).toHaveLength(1);expect(f.terminations).toHaveLength(1);expect(f.terminations[0].p_usage.postcall).toMatchObject({outcome:'done',stopReason:'owner_requested_stop'});
+  expect(f.terminations[0].p_usage.postcall.operations).toHaveLength(1);
+ });
+ test('a hanging recorder is bounded by postcallTimeoutMs and the termination is still recorded',async()=>{
+  const p=postcallFixture({hang:true});const f=fixture();f.business.postcallContext=()=>p.context;f.deps.fetch=p.fetch;f.deps.postcallTimeoutMs=30;f.deps.postcallModelTimeoutMs=5_000;
+  await startManagedBrowserSession(f.args,f.deps);await endCallToFarewell(f.sockets[0]);await until(()=>f.terminations.length===1,400);
+  expect(f.terminations[0].p_usage.postcall).toMatchObject({outcome:'timeout',operations:[]});expect(p.commits).toHaveLength(0);
+  expect(f.rows.get(ids.callId).provider_termination_state).toBe('confirmed');expect(managedLiveSessions.has(ids.callId)).toBe(false);
+ });
+ test('a business without the post-call hook records postcall:null and makes no model call',async()=>{
+  let fetches=0;const f=fixture();f.deps.fetch=async()=>{fetches++;throw Error('never');};
+  await startManagedBrowserSession(f.args,f.deps);await endCallToFarewell(f.sockets[0]);await until(()=>f.terminations.length===1);
+  expect(f.terminations[0].p_usage.postcall).toBe(null);expect(fetches).toBe(0);
+ });
+ test('a budget-killed call never pays for the recorder: the marker says budget_exhausted and settlement stays inside the reservation',async()=>{
+  // Review 2026-09-12: a priced recorder response after a budget_limit stop would push totalObservedCostUsd past the
+  // reservation with usageResolved=true, and settle_call_budget raises settlement_exceeds_reservation forever.
+  const p=postcallFixture();const f=fixture();f.business.postcallContext=()=>p.context;f.deps.fetch=p.fetch;
+  await startManagedBrowserSession(f.args,f.deps);
+  f.sockets[0].receive({type:'response.event',delegation_id:'delegation-real',event:{type:'response.created',response:{id:'resp-budget',status:'in_progress',model:'gpt-5.6-terra'}}});
+  f.sockets[0].receive({type:'response.event',delegation_id:'delegation-real',event:{type:'response.completed',response:{id:'resp-budget',status:'completed',model:'gpt-5.6-terra',usage:{input_tokens:0,output_tokens:700000,total_tokens:700000,input_tokens_details:{cached_tokens:0,cache_write_tokens:0}}}}});
+  await until(()=>f.terminations.length===1);
+  expect(f.terminations[0]).toMatchObject({p_reason:'budget_limit',p_outcome:'killed_budget'});expect(p.fetches).toHaveLength(0);expect(p.commits).toHaveLength(0);
+  expect(f.terminations[0].p_usage.postcall).toMatchObject({version:1,outcome:'failed',reason:'budget_exhausted',stopReason:'budget_limit',operations:[],responseId:null,usage:null});
+  expect(f.terminations[0].p_usage.responses.map((r:any)=>r.responseId)).not.toContain('resp_postcall');
+ });
+ test('the recorder never runs for a call whose startup failed',async()=>{
+  const p=postcallFixture();const f=fixture({socketFailure:true});f.business.postcallContext=()=>p.context;f.deps.fetch=p.fetch;
+  await expect(startManagedBrowserSession(f.args,f.deps)).rejects.toThrow('live_sideband_open_failed');
+  expect(p.fetches).toHaveLength(0);expect(f.terminations[0].p_usage.postcall).toBe(null);
+ });
+ test('post-call config parsers: defaults, digits only, bounded ranges, enabled by default',()=>{
+  expect(configModule.parseLivePostcallTimeoutMs(undefined)).toBe(45_000);expect(configModule.parseLivePostcallTimeoutMs('')).toBe(45_000);
+  expect(configModule.parseLivePostcallTimeoutMs('5000')).toBe(5_000);expect(configModule.parseLivePostcallTimeoutMs('120000')).toBe(120_000);
+  for(const v of ['4999','120001','abc','1e4','-1','45000.5'])expect(()=>configModule.parseLivePostcallTimeoutMs(v)).toThrow('live_postcall_timeout_invalid');
+  expect(configModule.parseLivePostcallModelTimeoutMs(undefined)).toBe(30_000);expect(configModule.parseLivePostcallModelTimeoutMs('90000')).toBe(90_000);
+  for(const v of ['4999','90001','NaN','3e4'])expect(()=>configModule.parseLivePostcallModelTimeoutMs(v)).toThrow('live_postcall_model_timeout_invalid');
+  expect(configModule.config.livePostcallTimeoutMs).toBe(45_000);expect(configModule.config.livePostcallModelTimeoutMs).toBe(30_000);
+  // Review 2026-09-12: no kill switch. With the mid-call tools gone, a disabled recorder would silently drop every owner answer.
+  expect(configModule.config).not.toHaveProperty('livePostcallEnabled');
  });
 });

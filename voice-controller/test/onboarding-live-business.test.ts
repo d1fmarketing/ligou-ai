@@ -1,10 +1,11 @@
 import {describe,expect,test} from 'bun:test';
 import {readFileSync} from 'node:fs';
-import {createLiveBusinessSession,projectLiveBusinessContext} from '../src/onboarding-live-business';
+import {createLiveBusinessSession,projectLiveBusinessContext,LIVE_BUSINESS_TOOLS} from '../src/onboarding-live-business';
+import {selectLiveQuestions,rankLiveQuestions,LIVE_QUESTION_CAP,LIVE_QUESTION_BYTES} from '../src/onboarding-live-questions';
 import {buildWebsiteAgendaSeeds} from '../src/onboarding-agenda-seed';
 import {buildWebsiteCandidateContext} from '../src/onboarding-website-summary';
 import {createLiveInterviewStore} from '../src/onboarding-live-store';
-import {createOnboardingAgenda,getAgendaAction} from '../src/onboarding-agenda';
+import {createOnboardingAgenda,getAgendaAction,getAgendaItems} from '../src/onboarding-agenda';
 import {onboardingAgendaDigest} from '../src/onboarding-agenda-store';
 import type {PreparedWebsiteInterview} from '../src/onboarding-website-bootstrap';
 const id=(n:number)=>`9f000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
@@ -73,25 +74,33 @@ function fixture(options:{recordFails?:boolean;commitLost?:boolean;commitUnknown
 }
 
 describe('Live managed business tools',()=>{
-  test('voice prompt defines owner setup and concrete documented delegation triggers',()=>{
-    const f=fixture(),prompt=f.business.voiceInstructions;
+  test('voice prompt defines owner setup, ranked clarification points and end_call-only delegation',()=>{
+    const f=fixture(),prompt=f.business.voiceInstructions,backend=f.business.backendInstructions;
     for(const label of ['Backend tools:','Delegate to the backend when:','Do not delegate to the backend when:'])expect(prompt.split(label)).toHaveLength(2);
     expect(prompt).toContain('configurar como o Ligou atenderá os clientes');
     expect(prompt).toContain('informações já coletadas do website');
     expect(prompt).toContain('Nenhum nome pessoal');
     expect(prompt).not.toContain('Ao iniciar a entrevista');expect(prompt).not.toContain('peça ao backend o estado atual');
-    expect(prompt).toContain('Pode consultar a agenda?');expect(prompt).toContain('Qual a regra de domingo?');expect(prompt).not.toContain('Qual o limite privado?');
-    expect(f.business.backendInstructions).toContain('contextoInicial');expect(f.business.backendInstructions).toContain('"Limpeza"');
-    expect(f.business.backendInstructions).not.toContain('"contextRef"');expect(f.business.backendInstructions).not.toContain('"receiptId"');
-    for(const trigger of ['preços','condições','horários','regras','corrigir','indefinido','encerrar'])expect(prompt).toContain(trigger);
+    // Ranked clarification points (design §4): the contradiction first, then the owner-private items in seed order; all three fit.
+    const positions=['Qual a regra de domingo?','Pode consultar a agenda?','Qual o limite privado?'].map(q=>prompt.indexOf(JSON.stringify(q)));
+    expect(positions.every(p=>p>=0)).toBe(true);expect(positions).toEqual([...positions].sort((a,b)=>a-b));
+    expect(backend).not.toContain('contextoInicial');expect(backend).not.toContain('save_decision');expect(backend).not.toContain('get_context');expect(backend).toContain('end_call');
+    expect(backend).not.toContain('"contextRef"');expect(backend).not.toContain('"receiptId"');
+    for(const trigger of ['corrigir','indefinido','encerrar','condições','regras'])expect(prompt).toContain(trigger);
     expect(prompt).toContain('sem consultar o backend');
     expect(prompt).toContain('cumprimento');expect(prompt).toContain('repetir');expect(prompt).toContain('clarificação');
-    expect(prompt).not.toMatch(/get_context|save_decision|contextRef|session\.close|response\.create|ASR|aguarde silêncio|frase exata/);
-    expect(f.business.tools.map(t=>t.name)).toEqual(['get_context','save_decision','get_operation','end_call']);
-    expect(f.business.backendInstructions).toContain('despedida breve');expect(f.business.backendInstructions).toContain('cinco palavras');
-    expect(f.business.backendInstructions).toContain('stopRequested=true');
-    // D-19 (smoke A, 2026-09-12): "Pode ser, por favor" was saved as an authority decision; the backend must demand an explicit answer first.
-    expect(f.business.backendInstructions).toContain('inequívoca');expect(f.business.backendInstructions).toContain('"pode ser"');expect(f.business.backendInstructions).toContain('authority.*');
+    // Review 2026-09-12: the no-recording sentence names the backend, so identity confirmation and owner clarifications stay allowed.
+    expect(prompt).toContain('não peça ao backend para registrar ou confirmar nada durante a conversa');expect(prompt).not.toContain('confirmação a ninguém');
+    expect(prompt).toContain('Não faça perguntas fora da lista');
+    // The closing is an example in the model's own words ("sem seguir frases fixas" stays), never a quoted script.
+    expect(prompt).toContain('com suas palavras e em uma única fala, algo como:');expect(prompt).toContain('sem seguir frases fixas');
+    // Owner questions about the Ligou itself are answered by the voice; the backend never ends a call on a stray delegation.
+    expect(prompt).toContain('sobre o próprio Ligou');expect(backend).toContain('Em qualquer outro caso, responda em uma frase curta e não chame end_call');
+    // Owner decisions (2026-09-12): no "vou registrar" pauses mid-call, and the internal ten-question ceiling is never announced as a limit, count or rule.
+    expect(prompt).not.toMatch(/get_context|save_decision|contextRef|session\.close|response\.create|ASR|aguarde silêncio|frase exata|vou registrar|vou anotar|transcri[çc]|depois da conversa|limite de perguntas|dez perguntas|\b10 perguntas|número de perguntas|máximo de perguntas|regra interna|só posso (fazer|perguntar)/i);
+    expect(prompt).toContain('por hoje é isso');expect(prompt).not.toContain('volto a falar');
+    expect(f.business.tools.map(t=>t.name)).toEqual(['end_call']);
+    expect(backend).toContain('despedida breve');expect(backend).toContain('cinco palavras');expect(backend).toContain('stopRequested=true');
   });
   test('website identity takes precedence over the account label without asserting legal confirmation',async()=>{
     const f=fixture(),name='Foghorn "Air", Inc.';
@@ -203,9 +212,9 @@ describe('Live managed business tools',()=>{
     await f.business.execute('end_call',{},ctx);expect(f.counts().stops).toBe(1);
   });
   test('does not advertise unimplemented approval or claim final completion',async()=>{
-    const f=fixture();expect(f.business.tools.map(t=>t.name)).toEqual(['get_context','save_decision','get_operation','end_call']);
+    const f=fixture();expect(f.business.tools.map(t=>t.name)).toEqual(['end_call']);
     expect((await f.context()).approvalAvailable).toBe(false);expect(f.business.backendInstructions).toContain('não declare onboarding concluído');
-    expect(f.business.voiceInstructions).not.toContain('MP3');expect(f.business.backendInstructions).toContain('fuso já resolvido');
+    expect(f.business.voiceInstructions).not.toContain('MP3');
   });
   test('rejects corrupt readback and cross-call binding before reporting durable success',async()=>{
     const f=fixture({readCorrupt:true});await expect(f.context()).rejects.toThrow('proof_invalid');
@@ -222,7 +231,7 @@ describe('Live managed business tools',()=>{
     expect((await f.business.execute('end_call',{},ctx)).stopRequested).toBe(true);
   });
   test('strict get_context schema advertises nullable subject and exact IDs while legacy empty calls still work',async()=>{
-    const f=fixture(),tool=f.business.tools.find(t=>t.name==='get_context')!;
+    const f=fixture(),tool=LIVE_BUSINESS_TOOLS.find(t=>t.name==='get_context')!;
     expect(tool.parameters.required).toEqual(['subject','targetIds']);
     expect(await f.business.execute('get_context',{subject:null,targetIds:[]},ctx)).toMatchObject({ok:true,view:'overview',receiptId:id(8)});
     expect((await f.context()).view).toBe('overview');
@@ -251,6 +260,120 @@ describe('startup context is a snapshot, never a write path',()=>{
   });
 });
 
+describe('live question selection: internal ceiling, never announced',()=>{
+  const seed=(id:string,source:string,subject:string,questionPt:string,coverageRefs:string[]=[subject])=>({id,source,subject,questionPt,coverageRefs,relatedItemIds:[],blocking:true}) as any;
+  const storedFor=(seeds:any[])=>{const agenda=createOnboardingAgenda(binding,seeds);return{agenda,revision:0,storeVersion:0,digest:onboardingAgendaDigest(agenda),receiptId:id(8),nextAction:getAgendaAction(agenda),state:'unfinished',replayed:false} as any;};
+  const noClaims:any={provenance:{tenantId:id(6)},candidateRecap:[]};
+  const sessionFor=(stored:any,projection:any=noClaims)=>createLiveBusinessSession({prepared:{scope:actor,stored,projection} as PreparedWebsiteInterview,businessName:'Empresa teste',client:{rpc:async()=>({data:null,error:null})} as any,onStop:()=>{}});
+  test('3-item fixture: contradiction first, then owner-private items in seed order; nothing left pending',()=>{
+    const f=fixture(),plan=selectLiveQuestions(f.prepared.stored,f.prepared.projection);
+    expect(plan.questions.map(q=>q.targetId)).toEqual(['sunday','permissions','floor']);
+    expect(plan.questions.map(q=>q.tier)).toEqual([1,2,2]);
+    expect(plan).toMatchObject({clarificationTotal:3,clarificationPending:0,continuation:false,tiers:{1:1,2:2,3:0,4:0}});
+    expect(rankLiveQuestions(f.prepared.stored,f.prepared.projection).map(q=>q.seedIndex)).toEqual([1,0,2]);
+  });
+  test('tier-4 catalogue items never fill the list: the ceiling is not a target',()=>{
+    const seeds=[seed('c1','contradiction','hours','Contradição de horário?'),seed('p1','owner_private_requirement','authority.book','Pode confirmar agendamentos?',['authority.book']),
+      seed('q1','missing_website_information','discovery.owner_question.abc','Pergunta nascida do site?',['discovery.owner_question.abc']),
+      seed('pm','missing_website_information','repair','Preço fixo ou estimativa?',['service:repair:service.price_mode']),
+      ...Array.from({length:70},(_,i)=>seed(`t4-${i}`,'missing_website_information',`policy.${i}`,`Pergunta de rotina ${i}?`))];
+    const projection:any={provenance:{tenantId:id(6)},candidateRecap:[{claim_id:id(7),claim_type:'service',value:{service_type:'repair'}},{claim_id:id(8),claim_type:'service',value:{service_type:'repair'}}]};
+    const plan=selectLiveQuestions(storedFor(seeds),projection);
+    expect(plan.questions.map(q=>q.targetId)).toEqual(['c1','p1','pm','q1']);
+    expect(plan).toMatchObject({clarificationTotal:4,clarificationPending:0,continuation:false,tiers:{1:1,2:1,3:2,4:70}});
+    const prompt=sessionFor(storedFor(seeds),projection).voiceInstructions;
+    expect(prompt).not.toContain('Pergunta de rotina');expect(prompt).toContain('por hoje é isso');expect(prompt).not.toContain('volto a falar');
+  });
+  // Review 2026-09-12: "emphasised" is relative to the other services (at least two service claims, or strictly
+  // above the median service); one claim per service (the usual draft shape) emphasises nothing.
+  const claims=(...types:string[]):any=>({candidateRecap:types.map((service_type,i)=>({claim_id:id(30+i),claim_type:'service',value:{service_type}}))});
+  test('price questions only count as clarification when the website emphasises that service relative to the others',()=>{
+    const seeds=[seed('pm','missing_website_information','repair','Preço fixo ou estimativa?',['service:repair:service.price_mode']),
+      seed('pl','missing_website_information','limpeza','Preço da limpeza?',['service:limpeza:service.price_target'])];
+    expect(selectLiveQuestions(storedFor(seeds),noClaims).questions).toEqual([]);
+    expect(selectLiveQuestions(storedFor(seeds),claims('repair')).questions).toEqual([]);
+    expect(selectLiveQuestions(storedFor(seeds),claims('repair','limpeza')).questions).toEqual([]);
+    expect(selectLiveQuestions(storedFor(seeds),claims('repair','repair')).questions.map(q=>[q.targetId,q.tier])).toEqual([['pm',3]]);
+    expect(selectLiveQuestions(storedFor(seeds),claims('repair','repair','limpeza')).questions.map(q=>[q.targetId,q.tier])).toEqual([['pm',3]]);
+  });
+  test('authority items are tier 2; per-service negotiation and escalation are tier 3 only for an emphasised service, else tier 4',()=>{
+    const seeds=[seed('n1','owner_private_requirement','repair','Negociável?',['service:repair:service.negotiation']),seed('a1','owner_private_requirement','authority.book','Pode confirmar?',['authority.book']),
+      seed('e1','owner_private_requirement','limpeza','Escalar?',['service:limpeza:service.escalation']),seed('f1','owner_private_requirement','emergency.fee_authority','Quem confirma taxa?',['emergency.fee_authority'])];
+    const plan=selectLiveQuestions(storedFor(seeds),claims('limpeza','limpeza','repair'));
+    expect(plan.questions.map(q=>[q.targetId,q.tier])).toEqual([['a1',2],['f1',2],['e1',3]]);
+    expect(plan.tiers).toEqual({1:0,2:2,3:1,4:1});
+    // Ten services with one claim each: the twenty negotiation/escalation clones never become clarification points.
+    const clones=Array.from({length:10},(_,i)=>[seed(`n${i}`,'owner_private_requirement',`s${i}`,`Negociável ${i}?`,[`service:s${i}:service.negotiation`]),seed(`x${i}`,'owner_private_requirement',`s${i}`,`Escalar ${i}?`,[`service:s${i}:service.escalation`])]).flat();
+    const march=selectLiveQuestions(storedFor([...clones,seed('a1','owner_private_requirement','authority.book','Pode confirmar?',['authority.book'])]),claims(...Array.from({length:10},(_,i)=>`s${i}`)));
+    expect(march.questions.map(q=>q.targetId)).toEqual(['a1']);expect(march).toMatchObject({clarificationTotal:1,continuation:false,tiers:{2:1,4:20}});
+  });
+  test('a question too long for the byte budget is skipped, not the whole tail of the list; an all-oversized list closes normally',()=>{
+    const huge=seed('c0','contradiction','topic.0','Contradição enorme '+'x'.repeat(1500)+'?');
+    const plan=selectLiveQuestions(storedFor([huge,seed('c1','contradiction','topic.1','Curta um?'),seed('c2','contradiction','topic.2','Curta dois?')]),noClaims);
+    expect(plan.questions.map(q=>q.targetId)).toEqual(['c1','c2']);expect(plan).toMatchObject({clarificationTotal:3,clarificationPending:1,continuation:true});
+    expect(plan.byteLength).toBeLessThanOrEqual(LIVE_QUESTION_BYTES);
+    const prompt=sessionFor(storedFor([huge,seed('c1','contradiction','topic.1','Curta um?')])).voiceInstructions;
+    expect(prompt).toContain('"Curta um?"');expect(prompt).not.toContain('Contradição enorme');expect(prompt).toContain('Por hoje já temos bastante coisa');
+    const empty=selectLiveQuestions(storedFor([huge]),noClaims);
+    expect(empty).toMatchObject({questions:[],clarificationTotal:1,clarificationPending:1,continuation:true});
+    const emptyPrompt=sessionFor(storedFor([huge])).voiceInstructions;
+    expect(emptyPrompt).toContain('Não há pontos a esclarecer nesta conversa');expect(emptyPrompt).toContain('por hoje é isso');expect(emptyPrompt).not.toContain('volto a falar');
+  });
+  test('twelve contradictions: ten listed, two stay pending for another day, closing excuse names no limit',()=>{
+    const seeds=Array.from({length:12},(_,i)=>seed(`c${i}`,'contradiction',`topic.${i}`,`Contradição número ${i}?`));
+    const plan=selectLiveQuestions(storedFor(seeds),noClaims);
+    expect(plan.questions).toHaveLength(LIVE_QUESTION_CAP);expect(plan.questions.map(q=>q.targetId)).toEqual(seeds.slice(0,10).map(s=>s.id));
+    expect(plan).toMatchObject({clarificationTotal:12,clarificationPending:2,continuation:true});
+    const prompt=sessionFor(storedFor(seeds)).voiceInstructions;
+    expect(prompt).toContain('Por hoje já temos bastante coisa');expect(prompt).not.toContain('por hoje é isso');expect(prompt).not.toContain('Contradição número 10?');
+    expect(prompt).not.toMatch(/limite de perguntas|dez perguntas|\b10 perguntas|número de perguntas|máximo de perguntas|regra interna|só posso (fazer|perguntar)/i);
+  });
+  test('long questions are trimmed from the end of the list to respect the byte budget',()=>{
+    const seeds=Array.from({length:6},(_,i)=>seed(`c${i}`,'contradiction',`topic.${i}`,`Pergunta ${i} `+'x'.repeat(380)+'?'));
+    const plan=selectLiveQuestions(storedFor(seeds),noClaims);
+    expect(plan.byteLength).toBeLessThanOrEqual(LIVE_QUESTION_BYTES);expect(plan.questions.map(q=>q.targetId)).toEqual(['c0','c1','c2']);
+    expect(plan).toMatchObject({clarificationTotal:6,clarificationPending:3,continuation:true});
+    expect(selectLiveQuestions(storedFor(seeds),noClaims,10,100_000).questions).toHaveLength(6);
+  });
+  test('no clarification points: empty list, normal closing, no invented question',()=>{
+    const seeds=Array.from({length:5},(_,i)=>seed(`t${i}`,'missing_website_information',`policy.${i}`,`Rotina ${i}?`));
+    expect(selectLiveQuestions(storedFor(seeds),noClaims)).toMatchObject({questions:[],clarificationTotal:0,clarificationPending:0,continuation:false,tiers:{4:5}});
+    const prompt=sessionFor(storedFor(seeds)).voiceInstructions;
+    expect(prompt).toContain('Não há pontos a esclarecer nesta conversa');expect(prompt).not.toContain('Rotina 0?');expect(prompt).toContain('por hoje é isso');
+    expect(prompt).not.toContain('Pontos a esclarecer nesta conversa, em ordem de prioridade');
+  });
+  test('resolved items leave the ranking so a follow-up call lists only what is still open',async()=>{
+    const f=fixture();f.business.observe(fragment());await f.save((await f.context()).contextRef);
+    expect(selectLiveQuestions(f.stored(),f.prepared.projection).questions.map(q=>q.targetId)).toEqual(['permissions','floor']);
+  });
+});
+
+describe('post-call hook',()=>{
+  test('postcallContext throws before bind and exposes transcript fragments, plan and a flush that persists them',async()=>{
+    const f=fixture({recordFails:true});
+    const unbound=createLiveBusinessSession({prepared:f.prepared,businessName:'Empresa teste',client:f.client,onStop:()=>{}});
+    expect(()=>unbound.postcallContext()).toThrow('live_business_session_unbound');
+    f.business.observe(fragment('owner-one','No domingo, só emergência.',100,500));
+    f.business.observe({...fragment('assistant-one','Certo.',600,900),type:'session.output_transcript.delta'});
+    await Promise.resolve();expect(f.records.size).toBe(0);
+    const context=f.business.postcallContext();
+    expect(context.fragments.map(x=>[x.eventId,x.speaker,x.text])).toEqual([['owner-one','owner','No domingo, só emergência.'],['assistant-one','assistant','Certo.']]);
+    expect(context.plan).toEqual({listed:3,clarificationTotal:3,clarificationPending:0,continuation:false});
+    expect(context.scope).toMatchObject({callId:actor.callId,providerSessionId:scope.providerSessionId,tenantId:id(6),interviewId:id(1)});
+    expect(context.stored.revision).toBe(0);expect(context.evidenceFault).toBe(false);expect((await context.store.read()).revision).toBe(0);
+    f.options.recordFails=false;f.business.observe(fragment('owner-two','E sábado fechado.',1000,1400));
+    await context.flush();
+    for(const eventId of ['owner-one','assistant-one','owner-two'])expect(f.records.get(eventId)).toMatchObject({eventId});
+    expect(f.records.get('assistant-one').speaker).toBe('assistant');
+  });
+  test('postcallContext keeps working after session.closed and after an owner-requested stop',async()=>{
+    const f=fixture();f.business.observe(fragment());
+    await f.business.execute('end_call',{},ctx);f.business.observe({type:'session.closed'});
+    expect((await f.business.execute('get_context',{},ctx)).code).toBe('session_stopped');
+    const context=f.business.postcallContext();expect(context.fragments).toHaveLength(1);await context.flush();
+  });
+});
+
 describe('compact Live business projection of the real website fixture',()=>{
   const source=JSON.parse(readFileSync(new URL('./fixtures/foghorn-website-first-voice.json',import.meta.url),'utf8'));
   const {tenant_id:_,...draftReadback}=source.draft_row;
@@ -259,17 +382,33 @@ describe('compact Live business projection of the real website fixture',()=>{
     sourceResultId:projection.provenance.sourceResultId,sourceResultHash:projection.provenance.sourceResultHash};
   const agenda=createOnboardingAgenda(b,projection.seeds,buildWebsiteCandidateContext(projection),projection.contextTimezone);
   const stored:any={agenda,revision:0,storeVersion:0,digest:onboardingAgendaDigest(agenda),receiptId:id(8),nextAction:getAgendaAction(agenda),state:'unfinished',replayed:false};
-  test('startup prompts carry the prepared overview within byte budgets: questions to voice, indexes to backend',()=>{
+  test('startup prompts carry the ranked clarification points within byte budgets; the backend only ends calls',()=>{
     const business=createLiveBusinessSession({prepared:{scope:actor,stored,projection} as PreparedWebsiteInterview,businessName:'Account Label',client:{rpc:async()=>({data:null,error:null})} as any,onStop:()=>{}});
-    const overview=projectLiveBusinessContext(stored,projection) as any;
-    expect(Buffer.byteLength(business.voiceInstructions)).toBeLessThanOrEqual(3584);
-    expect(Buffer.byteLength(business.backendInstructions)).toBeLessThanOrEqual(12288);
-    for(const row of overview.catalogue)expect(business.voiceInstructions).toContain(JSON.stringify(row.questionPt));
-    expect(business.voiceInstructions).not.toContain(overview.catalogue[0].targetId);expect(business.voiceInstructions).not.toContain('subjectIndex');
+    const plan=selectLiveQuestions(stored,projection),items=getAgendaItems(agenda),byRef=(ref:string)=>items.find(i=>i.coverageRefs.includes(ref))!.id;
+    const contradictions=items.filter(i=>i.source==='contradiction').map(i=>i.id);expect(contradictions).toHaveLength(2);
+    // Design §4 (measured on this fixture): 6 tier-1 points in seed order, then the authority.* items of tier 2.
+    expect(plan.questions.map(q=>q.targetId)).toEqual([byRef('area.coverage'),...contradictions,byRef('service:comfort_plan_maintenance:service.price_mode'),
+      byRef('service:repair_diagnostic:service.price_mode'),byRef('schedule.business_hours'),byRef('authority.quote_price'),byRef('authority.negotiate_floor'),byRef('authority.read_calendar'),byRef('authority.book')]);
+    expect(plan.questions.map(q=>q.tier)).toEqual([1,1,1,1,1,1,2,2,2,2]);
+    // Review 2026-09-12: every Foghorn service carries exactly one service claim, so nothing is emphasised relative to the
+    // others: tier 2 is the 8 authority.* items + emergency.fee_authority, tier 3 the 5 owner questions born from the
+    // analysis, and the 20 per-service negotiation/escalation clones + 10 price items stay in tier 4 (two calls, not five).
+    expect(plan).toMatchObject({continuation:true,clarificationTotal:20,tiers:{1:6,2:9,3:5,4:93}});expect(plan.clarificationPending).toBe(plan.clarificationTotal-LIVE_QUESTION_CAP);
+    expect(items.filter(i=>i.source==='owner_private_requirement'&&i.coverageRefs.some(r=>/:service\.(negotiation|escalation)$/.test(r)))).toHaveLength(20);
+    expect(business.voiceInstructions).not.toContain('Este preço é negociável?');expect(business.voiceInstructions).not.toContain('exige aprovação do dono');
+    expect(plan.byteLength).toBeLessThanOrEqual(LIVE_QUESTION_BYTES);
+    // 3936 B measured on Foghorn @1f06991 + this change (design §3.5); 4038 B after the 2026-09-12 review fixes (backend-named
+    // no-recording sentence, closing "algo como", Ligou-questions bullet). The pin keeps ~58 B of slack on this fixed fixture.
+    expect(Buffer.byteLength(business.voiceInstructions)).toBeLessThanOrEqual(4096);
+    expect(Buffer.byteLength(business.backendInstructions)).toBeLessThanOrEqual(1024);
+    for(const q of plan.questions)expect(business.voiceInstructions).toContain(JSON.stringify(q.questionPt));
+    expect(business.voiceInstructions).not.toContain(plan.questions[0].targetId);expect(business.voiceInstructions).not.toContain('subjectIndex');
     expect(business.voiceInstructions).not.toContain('Account Label');
-    for(const key of ['catalogue','serviceIndex','subjectIndex','savedDecisionIds','businessIdentity','resolvedTimezone'])expect(business.backendInstructions).toContain(`"${key}"`);
-    expect(business.backendInstructions).toContain(JSON.stringify(overview.subjectIndex.find((s:any)=>s.label&&/domingo/i.test(s.label)).label));
-    for(const key of ['contextRef','receiptId','pendingOperations','approvalAvailable','onboardingApproved','revision'])expect(business.backendInstructions).not.toContain(`"${key}"`);
+    expect(business.voiceInstructions).toContain('Por hoje já temos bastante coisa');
+    // Tier-3/4 items beyond the ceiling are not listed; the catalogue is not marched in seed order.
+    expect(business.voiceInstructions).not.toContain('Qual é a política de funcionamento em feriados?');
+    expect(business.voiceInstructions).not.toContain('Qual é a duração típica deste serviço?');
+    for(const key of ['contextRef','receiptId','pendingOperations','approvalAvailable','onboardingApproved','revision','catalogue','serviceIndex','subjectIndex','savedDecisionIds','businessIdentity'])expect(business.backendInstructions).not.toContain(`"${key}"`);
   });
   test('overview provides two suggestions and indexes without all 114 full rows or candidate values',()=>{
     const before=JSON.stringify(stored),result=projectLiveBusinessContext(stored,projection);
