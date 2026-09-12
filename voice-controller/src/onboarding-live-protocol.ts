@@ -65,7 +65,7 @@ export function createLiveLifecycle(deps:{sessionId:string;send:(event:LiveEvent
   let phase:'connecting'|'running'|'closing'|'closed'='connecting',seconds=0,finalized=false,finalUsageConfirmed=false,cleaned=false;
   let closePromise:Promise<LiveFinalization>|undefined,resolveClose:((r:LiveFinalization)=>void)|undefined;
   let timer:ReturnType<typeof setTimeout>|undefined,result:LiveFinalization|undefined;
-  let greetingEventId:string|undefined,greetingAccepted=false,sessionStarted=false,greetingError:string|null=null;
+  let greetingEventId:string|undefined,greetingCommentaryId:string|undefined,greetingAccepted=false,sessionStarted=false,greetingError:string|null=null;
   const duration=(value:unknown)=>{if(typeof value==='number'&&Number.isFinite(value)&&value>=0)seconds=Math.max(seconds,value);};
   function finish(value:LiveFinalization){
     if(result)return;
@@ -87,12 +87,18 @@ export function createLiveLifecycle(deps:{sessionId:string;send:(event:LiveEvent
       if(phase==='connecting')phase='running';
     }else if(event.type==='session.usage.updated')duration(event.usage?.seconds);
     else if(event.type==='session.instructions.appended'&&greetingEventId&&event.client_event_id===greetingEventId&&!greetingError){
-      // Official "Greet before the caller speaks": one instructions append whose
-      // acknowledgment is context acceptance, never proof of heard playback.
       greetingAccepted=true;
+      // Official greeting flow: after the matching instructions acknowledgment,
+      // one short commentary prompts speech under the existing app instructions.
+      // This is context acceptance, never proof of heard or completed playback.
+      if(phase==='running'&&!greetingCommentaryId){
+        greetingCommentaryId=randomUUID();
+        try{append('session.commentary.append',null,'Comece a conversa agora seguindo as instruções fornecidas.',greetingCommentaryId);}
+        catch{greetingError='transport_unavailable';}
+      }
     }else if(event.type==='error'){
       const rejected=event.error?.client_event_id??event.client_event_id;
-      if(greetingEventId&&rejected===greetingEventId)
+      if(greetingEventId&&rejected===greetingEventId||greetingCommentaryId&&rejected===greetingCommentaryId)
         greetingError=typeof event.error?.code==='string'?event.error.code:'greeting_command_rejected';
     }
     else if(event.type==='session.closed'){
@@ -118,11 +124,11 @@ export function createLiveLifecycle(deps:{sessionId:string;send:(event:LiveEvent
     // A verified sideband 101 attaches to an already-running Live session.
     // This permits lifecycle controls; greeting still uses actual session.started.
     readyFromAttachment(){if(phase==='connecting')phase='running';},
-    greet(content:string){
+    greet(instructions:string){
       if(phase!=='running'||!sessionStarted)throw Error('live_not_started');
       if(greetingEventId)return greetingEventId;
       greetingEventId=randomUUID();
-      try{append('session.instructions.append',null,content,greetingEventId);}
+      try{append('session.instructions.append',null,`${instructions}\nComece agora, sem esperar a primeira fala, e depois escute o dono.`,greetingEventId);}
       catch(error){greetingError='transport_unavailable';throw error;}
       return greetingEventId;
     },

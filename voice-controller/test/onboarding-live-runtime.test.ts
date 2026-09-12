@@ -62,17 +62,18 @@ function fixture(options:any={}){
 afterEach(async()=>{for(const f of fixtures.splice(0))await f.cleanup?.cancel('test_cleanup').catch(()=>{});setManagedLiveDiagnosticObserver(null);});
 
 describe('managed browser Live runtime',()=>{
- test('SDP returns before session.started; the greeting is one instructions append and its ACK sends nothing more',async()=>{
+ test('SDP returns before session.started; the greeting is one instructions append whose ACK triggers the commentary kick',async()=>{
   const f=fixture({deferStarted:true});const result=await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];
   expect(result.sdp).toBe('provider-answer');expect(f.cleanup.startupComplete).toBe(true);expect(socket.sent).toEqual([]);
   socket.receive({type:'session.started',session:{id:'another-session',model:'gpt-live-1'}});expect(socket.sent).toEqual([]);
   socket.receive({type:'session.started',session:{id:sessionId,model:'gpt-realtime-2.1'}});expect(socket.sent).toEqual([]);
   const started={type:'session.started',event_id:'actual_started',session:{id:sessionId,model:'gpt-live-1'}};socket.receive(started);socket.receive(started);
   expect(socket.sent.map(e=>e.type)).toEqual(['session.instructions.append']);
-  expect(socket.sent[0]).toMatchObject({type:'session.instructions.append',delegation_id:null,content:LIVE_GREETING_PT});
+  expect(socket.sent[0]).toMatchObject({type:'session.instructions.append',delegation_id:null});expect(socket.sent[0].content).toContain(LIVE_GREETING_PT);
   expect(LIVE_GREETING_PT).toMatch(/português/);expect(LIVE_GREETING_PT).toMatch(/sem esperar/);expect(LIVE_GREETING_PT).toMatch(/escute/);
+  // Smoke A (2026-09-12, call 6c83b5f0): instructions alone left the model silent for 113 s; the ACK-triggered commentary is the kick that produces speech.
   const ack={type:'session.instructions.appended',client_event_id:socket.sent[0].event_id,start_ms:0,end_ms:100};socket.receive(ack);socket.receive(ack);
-  expect(socket.sent.map(e=>e.type)).toEqual(['session.instructions.append']);expect(f.executions).toEqual([]);
+  expect(socket.sent.map(e=>e.type)).toEqual(['session.instructions.append','session.commentary.append']);expect(socket.sent[1]).toMatchObject({delegation_id:null});expect(f.executions).toEqual([]);
  });
  test('Stop before the real start event never resurrects the greeting',async()=>{
   const f=fixture({deferStarted:true});await startManagedBrowserSession(f.args,f.deps);const stopping=f.cleanup.cancel('owner_requested_stop');
