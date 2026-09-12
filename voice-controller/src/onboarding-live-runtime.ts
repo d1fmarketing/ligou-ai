@@ -41,7 +41,7 @@ const MODEL='gpt-live-1',BACKEND='gpt-6-astra',MAX_MINUTES=55;
 // instruction to greet immediately without waiting, then pause and listen.
 // The ACK is context acceptance, not playback. Measured against the previous
 // two-command opening in smoke S2; reverted if it brings no gain.
-export const LIVE_GREETING_PT='Cumprimente o dono agora, em português brasileiro, sem esperar que ele fale primeiro. Apresente-se como o Ligou, diga em uma frase que vai confirmar as informações da empresa encontradas no website e pergunte se o nome encontrado está correto. Depois pause e escute o dono.';
+export const LIVE_GREETING_PT='Cumprimente o dono agora, em português brasileiro, sem esperar que ele fale primeiro, em no máximo duas frases curtas: diga que você é o Ligou e pergunte se o nome da empresa encontrado no website está correto, dizendo esse nome. Não explique o que vai fazer nem descreva a conversa. Depois pause e escute o dono.';
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const managedLiveSessions=new Set<string>();
 const controls=new Map<string,ManagedLiveCleanup>();
