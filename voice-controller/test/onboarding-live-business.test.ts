@@ -88,7 +88,7 @@ describe('Live managed business tools',()=>{
     expect(prompt).toContain('cumprimento');expect(prompt).toContain('repetir');expect(prompt).toContain('clarificação');
     expect(prompt).not.toMatch(/get_context|save_decision|contextRef|session\.close|response\.create|ASR|aguarde silêncio|frase exata/);
     expect(f.business.tools.map(t=>t.name)).toEqual(['get_context','save_decision','get_operation','end_call']);
-    expect(f.business.backendInstructions).toContain('despedida breve');
+    expect(f.business.backendInstructions).toContain('despedida breve');expect(f.business.backendInstructions).toContain('cinco palavras');
     expect(f.business.backendInstructions).toContain('stopRequested=true');
     // D-19 (smoke A, 2026-09-12): "Pode ser, por favor" was saved as an authority decision; the backend must demand an explicit answer first.
     expect(f.business.backendInstructions).toContain('inequívoca');expect(f.business.backendInstructions).toContain('"pode ser"');expect(f.business.backendInstructions).toContain('authority.*');

@@ -47,6 +47,21 @@ export function parseLiveCloseTimeoutMs(raw: string | undefined): number {
   return value;
 }
 
+// Speech drain before session.close after an owner-requested stop: the
+// provider has no output-audio-done event for WebRTC (live-conversations
+// "Keep transcript timing separate from audio playback"), so the runtime waits
+// until session.output_transcript.delta has been quiet for this long (default
+// 2.5 s: covers playback latency; 0 disables) before sending session.close.
+// The human test of 2026-09-12 (call d2732329) heard the last words cut when
+// session.close followed the farewell response.completed in the same millisecond.
+export function parseLiveCloseDrainMs(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return 2_500;
+  if (!/^[0-9]+$/.test(raw)) throw new Error("live_close_drain_invalid");
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value > 10_000) throw new Error("live_close_drain_invalid");
+  return value;
+}
+
 export const ONBOARDING_BUDGET_SOFT_LIMIT_USD = 6.5;
 export const ONBOARDING_BUDGET_RESERVATION_USD = 7.5;
 
@@ -74,6 +89,7 @@ export const config = {
     process.env.SIDEBAND_OPEN_TIMEOUT_MS,
   ),
   liveCloseTimeoutMs: parseLiveCloseTimeoutMs(process.env.LIVE_CLOSE_TIMEOUT_MS),
+  liveCloseDrainQuietMs: parseLiveCloseDrainMs(process.env.LIVE_CLOSE_DRAIN_QUIET_MS),
   hermesKey: process.env.HERMES_API_KEY ?? "",
   defaultTenantSlug: process.env.LIGOU_TENANT ?? "rocha-plumbing",
   // Male brand voice: RJ listened to cedar/ash/echo/verse/ballad on a real Ligou script and picked ASH.

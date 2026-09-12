@@ -49,7 +49,7 @@ function fixture(options:any={}){let readIndex=0;
   const row=rows.get(args.p_call);const finalized=Boolean(args.p_final_event)&&!options.neverFinalize;
   if(row)Object.assign(row,{status:args.p_outcome==='startup_error'?'error':args.p_outcome,ended_at:new Date().toISOString(),provider_termination_state:finalized?'confirmed':['not_started','rejected'].includes(args.p_usage.creationState)?'not_required':'unknown',provider_usage_details:args.p_usage});
   return{data:{recorded:true,providerFinalized:finalized},error:null};}};
- const deps:any={client,apiKey:'synthetic-openai-key',openTimeoutMs:10,closeTimeoutMs:5,cleanupTimeoutMs:5,
+ const deps:any={client,apiKey:'synthetic-openai-key',openTimeoutMs:10,closeTimeoutMs:5,cleanupTimeoutMs:5,closeDrainQuietMs:20,closeDrainCapMs:150,
   resolveTenant:async()=>{order.push('resolve');if(options.tenantWait)await options.tenantWait;return{tenant:{id:ids.tenantId,name:'Fixture Company'},rules:[]};},
   reserve:async()=>{order.push('reserve');if(options.reserveWait)await options.reserveWait;return'reservation-id';},
   prepare:async()=>{order.push('prepare');return{scope:{ownerId:ids.userId,callId:ids.callId,requestId:ids.requestId},stored:{agenda:{binding:{interviewId:ids.callId}},revision:7,digest:'a'.repeat(64)}};},
@@ -224,6 +224,30 @@ describe('managed browser Live graceful end_call and late finalization',()=>{
   expect(socket.sent.at(-1).type).toBe('session.close');expect(socket.sent.filter(e=>e.type==='session.close')).toHaveLength(1);
   expect(f.terminations[0].p_final_event).toMatchObject({eventId:'evt_closed'});expect(f.terminations[0].p_usage.close).toMatchObject({delegatedWork:'completed',outcome:'closed',lateFinalPersisted:false});
   expect(f.rows.get(ids.callId).provider_termination_state).toBe('confirmed');expect(f.settlements.at(-1).usageResolved).toBe(true);
+ });
+ test('the spoken farewell is drained: output transcript deltas defer session.close until quiet',async()=>{
+  const f=fixture();await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];
+  endCall(socket);await tick();await tick();completeEnd(socket);await tick();byeCreated(socket);byeCompleted(socket);
+  const delta=(i:number)=>({type:'session.output_transcript.delta',event_id:`evt_bye_${i}`,delta:'Até ',start_ms:i*100,end_ms:i*100+100});
+  for(let i=0;i<10;i++){socket.receive(delta(i));await new Promise(r=>setTimeout(r,5));expect(socket.sent.some(e=>e.type==='session.close')).toBe(false);}
+  await until(()=>f.terminations.length===1);
+  expect(socket.sent.filter(e=>e.type==='session.close')).toHaveLength(1);
+  expect(f.terminations[0].p_usage.close).toMatchObject({delegatedWork:'completed',outcome:'closed',drain:{quietMs:20,capMs:150,endedBy:'quiet'}});
+  expect(f.terminations[0].p_usage.close.drain.lastOutputDeltaAt).not.toBe(null);
+ });
+ test('the drain cap bounds a farewell whose transcript never goes quiet',async()=>{
+  const f=fixture();await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];
+  endCall(socket);await tick();await tick();completeEnd(socket);await tick();byeCreated(socket);byeCompleted(socket);
+  let i=0;const feeder=setInterval(()=>{if(socket.readyState===1)socket.receive({type:'session.output_transcript.delta',event_id:`evt_loop_${i}`,delta:'x',start_ms:i*100,end_ms:i++*100+100});},5);
+  try{await until(()=>f.terminations.length===1,2000);}finally{clearInterval(feeder);}
+  expect(socket.sent.filter(e=>e.type==='session.close')).toHaveLength(1);expect(f.terminations[0].p_usage.close.drain).toMatchObject({endedBy:'cap'});
+ });
+ test('a browser cancel during the drain is immediate and closes once',async()=>{
+  const f=fixture();f.deps.closeDrainQuietMs=5_000;f.deps.closeDrainCapMs=10_000;await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];
+  endCall(socket);await tick();await tick();completeEnd(socket);await tick();byeCreated(socket);byeCompleted(socket);await tick();
+  expect(socket.sent.some(e=>e.type==='session.close')).toBe(false);
+  await f.cleanup.cancel('owner_requested_stop');
+  expect(socket.sent.filter(e=>e.type==='session.close')).toHaveLength(1);expect(f.terminations).toHaveLength(1);expect(f.terminations[0].p_usage.close.drain).toMatchObject({endedBy:'cancel'});
  });
  test('the delegated-work cap bounds the wait for the farewell',async()=>{
   const f=fixture();f.deps.farewellMaxMs=20;await startManagedBrowserSession(f.args,f.deps);const socket=f.sockets[0];

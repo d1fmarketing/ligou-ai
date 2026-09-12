@@ -481,6 +481,8 @@ describe("session budget lifecycle", () => {
       expect(() => configModule.parseSidebandOpenTimeoutMs(value))
         .toThrow("sideband_open_timeout_invalid");
     expect(configModule.parseLiveCloseTimeoutMs(undefined)).toBe(30_000);
+    expect(configModule.parseLiveCloseDrainMs(undefined)).toBe(2_500);expect(configModule.parseLiveCloseDrainMs('0')).toBe(0);expect(configModule.parseLiveCloseDrainMs('4000')).toBe(4_000);
+    for(const v of ['10001','-1','abc','1e3'])expect(()=>configModule.parseLiveCloseDrainMs(v)).toThrow('live_close_drain_invalid');
     expect(configModule.parseLiveCloseTimeoutMs("45000")).toBe(45_000);
     for (const value of ["4999", "60001", "NaN", "1e4"])
       expect(() => configModule.parseLiveCloseTimeoutMs(value))

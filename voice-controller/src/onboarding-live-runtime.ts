@@ -17,14 +17,18 @@ type Business={voiceInstructions:string;backendInstructions:string;tools:LiveFun
 type BusinessFactory=(options:{prepared:PreparedWebsiteInterview;businessName:string;client:Client;onStop:(reason?:string)=>Promise<void>})=>Business;
 type Dependencies={client?:Client;apiKey?:string;resolveTenant?:typeof resolveSessionTenant;reserve?:typeof reserveCallBudget;prepare?:typeof prepareWebsiteInterview;
   createSession?:typeof createLiveWebRtcSession;businessFactory?:BusinessFactory;connect?:(url:string,apiKey:string)=>Socket;
-  finalize?:typeof finalizeTerminalBudget;openTimeoutMs?:number;closeTimeoutMs?:number;cleanupTimeoutMs?:number;farewellMaxMs?:number};
+  finalize?:typeof finalizeTerminalBudget;openTimeoutMs?:number;closeTimeoutMs?:number;cleanupTimeoutMs?:number;farewellMaxMs?:number;closeDrainQuietMs?:number;closeDrainCapMs?:number};
 /** Close bookkeeping persisted in provider_usage_details.close. delegatedWork
  * says whether the owner-requested stop waited for the delegated farewell round
  * (official order: finish delegated work, then session.close). It never claims
  * that audio was heard: only session.closed proves provider finalization. */
 type CloseState={requestedAt:string|null;delegatedWork:'pending'|'completed'|'capped'|'not_awaited';sentAt:string|null;
-  outcome:'closed'|'finalization_timeout'|'transport_unavailable'|'not_sent';timeoutMs:number;lateFinalPersisted:boolean};
-const FAREWELL_MAX_MS=20_000;
+  outcome:'closed'|'finalization_timeout'|'transport_unavailable'|'not_sent';timeoutMs:number;lateFinalPersisted:boolean;
+  // Speech drain: after the delegated farewell completes, session.close waits
+  // until output transcript deltas have been quiet for quietMs (bounded by
+  // capMs). An estimate of playback, never proof that audio was heard.
+  drain:{startedAt:string;quietMs:number;capMs:number;endedBy:'quiet'|'cap'|'cancel'|null;lastOutputDeltaAt:string|null}|null};
+const FAREWELL_MAX_MS=20_000,DRAIN_CAP_MS=10_000;
 type FinalEvent={eventId:string;sessionId:string;reason:string;seconds:number|null;expiresAt?:number}|null;
 type CreationState='not_started'|'rejected'|'unknown'|'created';
 const MODEL='gpt-live-1',BACKEND='gpt-6-astra',MAX_MINUTES=55;
@@ -100,6 +104,7 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
   let resolveStartup!:()=>void;const startupSettled=new Promise<void>(resolve=>{resolveStartup=resolve;});
   let resolveFinished!:()=>void;const finished=new Promise<void>(resolve=>{resolveFinished=resolve;});
   let closing:{reason:string;cap?:ReturnType<typeof setTimeout>}|null=null,closeState:CloseState|null=null;
+  let lastOutputDeltaAt=0,drainTimer:ReturnType<typeof setTimeout>|undefined;
   const closeTimeoutMs=deps.closeTimeoutMs??config.liveCloseTimeoutMs;
   const usage=()=>({...ledger.snapshot(),creationState,expiresAt,close:closeState});
   function persistUsage(){
@@ -148,6 +153,7 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
   }
   const control:ManagedLiveCleanup={callId:args.callId,startupComplete:false,cancel(reason){
     if(closing){clearTimeout(closing.cap);closing=null;}
+    if(drainTimer){clearTimeout(drainTimer);drainTimer=undefined;if(closeState?.drain&&!closeState.drain.endedBy)closeState.drain.endedBy='cancel';}
     stopReason??=reason;bridge?.stop();controller.abort();return startupSettled.then(()=>finish());
   }};
   const stop=(reason='owner_requested_stop')=>control.cancel(reason);
@@ -156,8 +162,24 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
   // finish (bounded), then finalize through the same cancel path as everything
   // else. Timers and idle notifications call cancel directly: never re-entrant.
   function finishGraceful(reason:string,delegatedWork:'completed'|'capped'){
+    if(closeState?.drain)return; // already draining the spoken farewell
     if(closeState)closeState.delegatedWork=delegatedWork;
-    backgroundStop(reason);
+    const quietMs=deps.closeDrainQuietMs??config.liveCloseDrainQuietMs;
+    if(delegatedWork!=='completed'||quietMs<=0){backgroundStop(reason);return;}
+    // The provider exposes no playback-complete signal for WebRTC. Wait until
+    // the output transcript has been quiet for quietMs (the model streams
+    // deltas while it speaks), bounded by capMs, then close.
+    const capMs=deps.closeDrainCapMs??DRAIN_CAP_MS,startedAt=Date.now();
+    if(closeState)closeState.drain={startedAt:new Date(startedAt).toISOString(),quietMs,capMs,endedBy:null,lastOutputDeltaAt:null};
+    const tickDrain=()=>{drainTimer=undefined;if(stopReason||cleaning)return;
+      const now=Date.now(),since=now-Math.max(lastOutputDeltaAt,startedAt),elapsed=now-startedAt;
+      if(since>=quietMs||elapsed>=capMs){
+        if(closeState?.drain){closeState.drain.endedBy=since>=quietMs?'quiet':'cap';closeState.drain.lastOutputDeltaAt=lastOutputDeltaAt?new Date(lastOutputDeltaAt).toISOString():null;}
+        backgroundStop(reason);return;
+      }
+      drainTimer=setTimeout(tickDrain,Math.max(1,Math.min(quietMs-since,capMs-elapsed)));
+    };
+    tickDrain();
   }
   function checkDelegatedWork(){
     if(!closing||stopReason||cleaning)return;
@@ -166,7 +188,7 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
   function gracefulStop(reason='owner_requested_stop'){
     if(stopReason||cleaning||closing)return finished;
     if(!control.startupComplete||!bridge)return control.cancel(reason);
-    closeState={requestedAt:new Date().toISOString(),delegatedWork:'pending',sentAt:null,outcome:'not_sent',timeoutMs:closeTimeoutMs,lateFinalPersisted:false};
+    closeState={requestedAt:new Date().toISOString(),delegatedWork:'pending',sentAt:null,outcome:'not_sent',timeoutMs:closeTimeoutMs,lateFinalPersisted:false,drain:null};
     closing={reason,cap:setTimeout(()=>finishGraceful(reason,'capped'),deps.farewellMaxMs??FAREWELL_MAX_MS)};
     queueMicrotask(checkDelegatedWork);
     return finished;
@@ -184,6 +206,7 @@ export async function startManagedBrowserSession(args:ManagedLiveStart,deps:Depe
     if(['session.started','session.closed'].includes(event.type)&&event.session?.id===sessionId
       &&typeof event.session.expires_at==='number'&&Number.isFinite(event.session.expires_at))expiresAt=event.session.expires_at;
     observeUsage(ledger,event);
+    if(event.type==='session.output_transcript.delta')lastOutputDeltaAt=Date.now();
     if(sessionId){const observed=finalEvent(event,sessionId);if(observed)final=observed;}
     lifecycle?.observe(event);
     if(!stopReason&&!cleaning&&event.type==='session.started'&&event.session?.id===sessionId&&event.session?.model===MODEL){
